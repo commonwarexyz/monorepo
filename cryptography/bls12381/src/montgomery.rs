@@ -381,60 +381,108 @@ pub(crate) const fn invert<const N: usize, const L: usize>(
     from_limbs(&normalize(d, f[L - 1], &modulus))
 }
 
-
-#[cfg(test)]
-mod tests {
+/// Fuzz plan checking the signed limb conversions and the safegcd inversion.
+#[cfg(any(test, feature = "fuzz"))]
+pub mod fuzz {
     use super::*;
     use crate::core::field::fp::{MODULUS, WORDS, reference};
-    use commonware_invariants::minifuzz;
+    use arbitrary::{Arbitrary, Unstructured};
 
     /// Limbs that hold the modulus of the base field with two spare bits.
     const LIMBS: usize = 7;
 
+    /// `MODULUS^(-1) mod 2^62`.
     const INVERSE: u64 = inverse_mod_limb(MODULUS[0]);
 
-    #[test]
-    fn inverse_mod_limb_inverts_the_modulus() {
-        assert_eq!(INVERSE.wrapping_mul(MODULUS[0]) & LIMB_MASK, 1);
+    /// A limb conversion or inversion check on the base field modulus.
+    #[derive(Clone, Copy, Debug, Arbitrary)]
+    pub enum Plan {
+        /// Check that an integer below `2^382` survives conversion to signed limbs and back.
+        LimbsRoundTrip,
+        /// Check that inversion returns the canonical inverse of a nonzero element, and zero
+        /// for zero.
+        Inversions,
     }
 
-    #[test]
-    fn limbs_round_trip() {
-        minifuzz::test(|u| {
-            let words: [u64; WORDS] = u.arbitrary()?;
-            let mut words = words;
-            words[WORDS - 1] >>= 2;
-            assert_eq!(from_limbs::<WORDS, LIMBS>(&to_limbs::<WORDS, LIMBS>(&words)), words);
-            Ok(())
-        });
-    }
-
-    #[test]
-    fn inversions_match_exponentiation() {
-        let check = |a: reference::Element| {
-            let inverse = invert::<WORDS, LIMBS>(&a, &MODULUS, INVERSE);
-            assert_eq!(inverse, reference::invert(a));
-            if a != reference::ZERO {
-                assert_eq!(reference::mul(inverse, a), reference::ONE);
+    impl Plan {
+        /// Runs the operation using the remaining input.
+        pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+            match self {
+                Self::LimbsRoundTrip => limbs_round_trip(u),
+                Self::Inversions => inversions(u),
             }
-        };
-        check(reference::ZERO);
-        check(reference::ONE);
-        check(reference::neg(reference::ONE));
-        let mut two = reference::ONE;
-        two[0] = 2;
-        check(two);
-        let mut top = [0; WORDS];
-        top[WORDS - 1] = 1 << 63 >> 1;
-        check(reference::reduce(&reference::to_bytes(top)));
-        minifuzz::test(|u| {
-            check(reference::canonical(u)?);
+        }
+    }
+
+    /// Converts a drawn integer below `2^382` to limbs and back.
+    fn limbs_round_trip(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+        let mut words = [0; WORDS];
+        for (word, bytes) in words.iter_mut().zip(u.bytes(8 * WORDS)?.as_chunks::<8>().0) {
+            *word = u64::from_le_bytes(*bytes);
+        }
+        words[WORDS - 1] >>= 2;
+        assert_eq!(
+            from_limbs::<WORDS, LIMBS>(&to_limbs::<WORDS, LIMBS>(&words)),
+            words,
+            "{words:x?}"
+        );
+        Ok(())
+    }
+
+    /// Inverts a drawn element, biased toward small, sparse, and extreme values, and checks the
+    /// result by definition.
+    fn inversions(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+        let a = match u.int_in_range(0..=9)? {
+            5 => reference::ZERO,
+            6 => reference::ONE,
+            7 => reference::neg(reference::ONE),
+            8 => {
+                // 2^382 mod p.
+                let mut top = [0; WORDS];
+                top[WORDS - 1] = 1 << 62;
+                reference::reduce(&reference::to_bytes(top))
+            }
             // Small and sparse values exercise long runs of even division steps.
-            let mut sparse = [0; WORDS];
-            sparse[usize::from(u.arbitrary::<u8>()?) % WORDS] = 1 << (u.arbitrary::<u8>()? % 64);
-            check(sparse);
-            Ok(())
-        });
+            9 => {
+                let k = u.int_in_range(0..=380)?;
+                let mut sparse = [0; WORDS];
+                sparse[k / 64] = 1 << (k % 64);
+                sparse
+            }
+            _ => reference::canonical(&mut Unstructured::new(u.bytes(8 * WORDS)?))?,
+        };
+        let inverse = invert::<WORDS, LIMBS>(&a, &MODULUS, INVERSE);
+        if a == reference::ZERO {
+            assert_eq!(inverse, reference::ZERO);
+        } else {
+            assert!(is_below(&inverse, &MODULUS), "{inverse:x?} not canonical");
+            assert_eq!(
+                reference::mul(inverse, a),
+                reference::ONE,
+                "inverse of {a:x?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use commonware_invariants::minifuzz;
+
+        #[test]
+        fn minifuzz_limbs_round_trip() {
+            minifuzz::test(|u| Plan::LimbsRoundTrip.run(u));
+        }
+
+        #[test]
+        fn minifuzz_inversions() {
+            minifuzz::test(|u| Plan::Inversions.run(u));
+        }
+
+        #[test]
+        fn inverse_mod_limb_inverts_the_modulus() {
+            assert_eq!(INVERSE.wrapping_mul(MODULUS[0]) & LIMB_MASK, 1);
+        }
     }
 }
-

@@ -262,7 +262,11 @@ impl<S: Simd, F: Field<S>> Points<S> for Point<F> {
         let b3xz = xz.mul_small::<12>(simd).ready::<12>(simd);
         let sum = yy.add(simd, b3zz).ready::<2>(simd);
         let difference = yy.sub::<{ 12 * REDUCED }>(simd, b3zz).ready::<4>(simd);
-        let x = F::product_sub::<PRODUCT_BIAS>(simd, xy.product(simd, difference), yz.product(simd, b3xz));
+        let x = F::product_sub::<PRODUCT_BIAS>(
+            simd,
+            xy.product(simd, difference),
+            yz.product(simd, b3xz),
+        );
         let y = F::accumulate(simd, b3xz.product(simd, xx3), difference.product(simd, sum));
         let z = F::accumulate(simd, sum.product(simd, yz), xx3.product(simd, xy));
         Self {
@@ -306,222 +310,83 @@ impl<S: Simd, F: Field<S>> Points<S> for Point<F> {
     }
 }
 
-#[cfg(test)]
-mod tests {
+/// Reference arithmetic and coordinate bound hooks for the [curve formula checks](crate::core::curve::fuzz).
+#[cfg(any(test, feature = "fuzz"))]
+pub(crate) mod fuzz {
     use super::*;
-    use crate::core::field::fp::{
-        rns::Rns,
-        reference::{self, Element},
-        unsat28::Unsat28,
-        unsat49::Unsat49,
+    use crate::core::{
+        curve::fuzz::Curve,
+        field::fp::reference::{self, Element},
     };
-    use commonware_simd::{
-        Operation, X86V4C, check_consistent,
-        emulated::{EmulatedNeon, EmulatedScalar, EmulatedX86V4C},
-        test_dispatch,
-    };
-    use std::{vec, vec::Vec};
+    use arbitrary::Unstructured;
 
-    /// Number of points summed into each lane.
-    const ROUNDS: usize = 12;
+    /// G1 over the reference base field.
+    pub(crate) struct G1;
 
-    /// The standard G1 generator in affine coordinates.
-    const GENERATOR: (Element, Element) = (
-        [
-            0xfb3a_f00a_db22_c6bb,
-            0x6c55_e83f_f97a_1aef,
-            0xa14e_3a3f_171b_ac58,
-            0xc368_8c4f_9774_b905,
-            0x2695_638c_4fa9_ac0f,
-            0x17f1_d3a7_3197_d794,
-        ],
-        [
-            0x0caa_2329_46c5_e7e1,
-            0xd03c_c744_a288_8ae4,
-            0x00db_18cb_2c04_b3ed,
-            0xfcf5_e095_d5d0_0af6,
-            0xa09e_30ed_741d_8ae4,
-            0x08b3_f481_e3aa_a0f1,
-        ],
-    );
+    impl Curve for G1 {
+        const NAME: &'static str = "G1";
 
-    /// An affine point, or `None` for the identity.
-    type Affine = Option<(Element, Element)>;
+        type Element = Element;
+        type Encoded = [u8; BYTES];
 
-    /// Returns `p + q` with the affine chord-and-tangent formulas.
-    fn affine_add(p: Affine, q: Affine) -> Affine {
-        let (Some((x1, y1)), Some((x2, y2))) = (p, q) else {
-            return p.or(q);
-        };
-        let slope = if x1 == x2 {
-            if reference::add(y1, y2) == reference::ZERO {
-                return None;
-            }
-            let numerator = reference::mul([3, 0, 0, 0, 0, 0], reference::mul(x1, x1));
-            reference::mul(numerator, reference::invert(reference::add(y1, y1)))
-        } else {
-            reference::mul(
-                reference::sub(y2, y1),
-                reference::invert(reference::sub(x2, x1)),
-            )
-        };
-        let x3 = reference::sub(reference::sub(reference::mul(slope, slope), x1), x2);
-        let y3 = reference::sub(reference::mul(slope, reference::sub(x1, x3)), y1);
-        Some((x3, y3))
-    }
+        const ZERO: Element = reference::ZERO;
+        const ONE: Element = reference::ONE;
+        const B: Element = [4, 0, 0, 0, 0, 0];
+        const GENERATOR: Coordinates = GENERATOR;
+        const IDENTITY: Coordinates = IDENTITY;
 
-    /// Returns projective coordinates as bytes, scaling affine points by `z`.
-    fn coordinates(point: Affine, z: Element) -> Coordinates {
-        match point {
-            Some((x, y)) => {
-                [reference::mul(x, z), reference::mul(y, z), z].map(reference::to_bytes)
-            }
-            None => [reference::ZERO, z, reference::ZERO].map(reference::to_bytes),
-        }
-    }
+        type Point<S: Simd, F: Field<S>> = Point<F>;
 
-    /// Returns the affine point of projective coordinates.
-    fn affine(coordinates: &Coordinates) -> Affine {
-        let [x, y, z] = coordinates.map(|bytes| reference::reduce(&bytes));
-        if z == reference::ZERO {
-            return None;
-        }
-        let inverse = reference::invert(z);
-        Some((reference::mul(x, inverse), reference::mul(y, inverse)))
-    }
-
-    /// For each lane, sums `ROUNDS` points and doubles the sum, returning both.
-    fn sum_and_double<S: Simd, F: Field<S>>(simd: S, points: &[Coordinates]) -> Vec<Coordinates> {
-        let lanes = points.len() / ROUNDS;
-        let mut output = vec![IDENTITY; 2 * lanes];
-        for start in (0..lanes).step_by(F::LANES) {
-            let mut sum = Point::<F>::load(simd, &[], &IDENTITY);
-            for round in 0..ROUNDS {
-                let addend = &points[round * lanes + start..(round + 1) * lanes];
-                sum = sum.add(simd, Point::load(simd, addend, &IDENTITY));
-                // Chain some sums through doublings and round-trip others through bytes or raw
-                // coordinates.
-                match round % 3 {
-                    0 => sum = sum.add(simd, sum).add(simd, sum.double(simd).double(simd)),
-                    1 => {
-                        let mut stored = [IDENTITY; MAX_LANES];
-                        sum.store(simd, &mut stored);
-                        sum = Point::load(simd, &stored, &IDENTITY);
-                    }
-                    // Negate through -s + 2s, and round-trip through raw coordinates.
-                    _ => {
-                        sum = sum.negate(simd).add(simd, sum.double(simd));
-                        let mut raw = [[F::Raw::default(); 3]; MAX_LANES];
-                        sum.store_raw(simd, &mut raw);
-                        let lanes: Vec<_> = raw.iter().collect();
-                        sum = Point::load_raw(simd, &lanes);
-                    }
-                }
-            }
-            sum.store(simd, &mut output[start..lanes]);
-            sum.double(simd).store(simd, &mut output[lanes + start..]);
-        }
-        output
-    }
-
-    #[test]
-    fn sums_and_doublings_match_reference() {
-        /// Runs [`sum_and_double`] in every representation, returning the positional ones' outputs.
-        struct Evaluate<'a>(&'a [Coordinates]);
-
-        impl<S: Simd> Operation<S> for Evaluate<'_> {
-            type Output = [Vec<Coordinates>; 2];
-
-            fn portable(self, simd: S) -> [Vec<Coordinates>; 2] {
-                simd.execute(
-                    #[inline(always)]
-                    |simd: S| {
-                        [
-                            sum_and_double::<S, Unsat49<S>>(simd, self.0),
-                            sum_and_double::<S, Unsat28<S>>(simd, self.0),
-                        ]
-                    },
-                )
-            }
-
-            // Residues require x86v4c and must match the other representations.
-            fn x86_v4c(self, simd: S) -> [Vec<Coordinates>; 2]
-            where
-                S: X86V4C,
-            {
-                let points = self.0;
-                let outputs = self.portable(simd);
-                let residues = simd.execute(
-                    #[inline(always)]
-                    |simd: S| sum_and_double::<S, Rns<S>>(simd, points),
-                );
-                assert!(residues == outputs[0], "residues differ");
-                outputs
-            }
+        fn add(a: Element, b: Element) -> Element {
+            reference::add(a, b)
         }
 
-        let (x, y) = GENERATOR;
-        let four = [4, 0, 0, 0, 0, 0];
-        assert_eq!(
-            reference::mul(y, y),
-            reference::add(reference::mul(x, reference::mul(x, x)), four),
-            "the generator is on the curve"
-        );
-        // Multiples of the generator, with repeats, negations, and identities to exercise
-        // doubling, cancellation, and the identity cases, in varied projective scalings.
-        let mut points = Vec::new();
-        let mut inputs = Vec::new();
-        let mut point = Some(GENERATOR);
-        for i in 0..ROUNDS * MAX_LANES {
-            let addend = match i % 7 {
-                3 => None,
-                5 => point.map(|(x, y)| (x, reference::neg(y))),
-                _ => point,
+        fn sub(a: Element, b: Element) -> Element {
+            reference::sub(a, b)
+        }
+
+        fn mul(a: Element, b: Element) -> Element {
+            reference::mul(a, b)
+        }
+
+        fn invert(a: Element) -> Element {
+            reference::invert(a)
+        }
+
+        fn encode(a: Element) -> [u8; BYTES] {
+            reference::to_bytes(a)
+        }
+
+        fn decode(bytes: &[u8; BYTES]) -> Element {
+            reference::reduce(bytes)
+        }
+
+        fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Element> {
+            reference::canonical(u)
+        }
+
+        /// Scales loaded coordinates, with integer bound `2`, by `36`, to integer bound `72`,
+        /// in two steps that keep positional limb bounds within the value limits.
+        fn widen<S: Simd, F: Field<S>>(simd: S, point: Point<F>) -> Point<F> {
+            let widen = |value: F| {
+                value
+                    .mul_small::<6>(simd)
+                    .carry(simd)
+                    .mul_small::<{ BOUND / 12 }>(simd)
+                    .carry(simd)
             };
-            points.push(addend);
-            let z = [i as u64 + 1, 0, 0, 0, 0, 0];
-            inputs.push(coordinates(
-                addend,
-                if i % 2 == 0 { reference::ONE } else { z },
-            ));
-            if i % 5 != 0 {
-                point = affine_add(point, Some(GENERATOR));
+            Point {
+                x: widen(point.x),
+                y: widen(point.y),
+                z: widen(point.z),
             }
         }
-        let mut expected = Vec::new();
-        for lane in 0..MAX_LANES {
-            let mut sum = None;
-            for round in 0..ROUNDS {
-                sum = affine_add(sum, points[round * MAX_LANES + lane]);
-                if round % 3 == 0 {
-                    // sum + sum + 4 sum.
-                    let double = affine_add(sum, sum);
-                    sum = affine_add(double, affine_add(double, double));
-                }
+
+        fn check_bound<S: Simd, F: Field<S>>(simd: S, point: Point<F>) -> Point<F> {
+            for value in [point.x, point.y, point.z] {
+                value.neg::<{ BOUND + 1 }>(simd);
             }
-            expected.push(sum);
+            point
         }
-        let check = |outputs: [Vec<Coordinates>; 2]| {
-            for (representation, output) in outputs.iter().enumerate() {
-                for lane in 0..MAX_LANES {
-                    assert_eq!(
-                        affine(&output[lane]),
-                        expected[lane],
-                        "sum {representation} {lane}"
-                    );
-                    assert_eq!(
-                        affine(&output[MAX_LANES + lane]),
-                        affine_add(expected[lane], expected[lane]),
-                        "double {representation} {lane}"
-                    );
-                }
-            }
-        };
-        check(test_dispatch(Evaluate(&inputs)));
-        check_consistent(|| Evaluate(&inputs));
-        // Run every representation and vector width even on hosts without native SIMD.
-        check(Evaluate(&inputs).portable(EmulatedScalar));
-        check(Evaluate(&inputs).portable(EmulatedNeon));
-        check(EmulatedX86V4C.execute(Evaluate(&inputs)));
     }
 }

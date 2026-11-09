@@ -43,8 +43,13 @@ path = "src/group/benches/bench.rs"
 
 [features]
 default = [ "std" ]
-arbitrary = [ "commonware-math/arbitrary", "dep:arbitrary", "std" ]
-fuzz = [ "arbitrary", "arbitrary/derive", "dep:arbitrary", "std" ]
+fuzz = [
+	"arbitrary/derive",
+	"commonware-math/arbitrary",
+	"commonware-parallel/test-utils",
+	"dep:arbitrary",
+	"std",
+]
 std = [
 	"commonware-formatting/std",
 	"commonware-macros/std",
