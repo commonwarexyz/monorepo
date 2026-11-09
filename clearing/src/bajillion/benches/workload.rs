@@ -137,7 +137,7 @@ where
         committee,
     )
     .expect("benchmark epoch context")
-    .bind::<Sha256, _, _>(
+    .bind::<Sha256, _, _, _>(
         replica,
         &deposits,
         &withdrawals,
@@ -155,7 +155,7 @@ where
     )
     .expect("bound benchmark context");
     let terminals = terminals(case, keys, &context, strategy);
-    let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+    let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
         replica,
         &context,
         &keys.operator,

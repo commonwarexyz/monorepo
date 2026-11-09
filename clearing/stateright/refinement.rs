@@ -579,7 +579,7 @@ impl RefinementDriver {
         };
         let (vote, close, successor) = deterministic::Runner::default().start(|runtime| async {
             let state = cache.reopen(runtime, "refinement-close").await;
-            let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+            let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
                 &state,
                 &registered.context,
                 &self.fixture.operator,
@@ -590,7 +590,7 @@ impl RefinementDriver {
             )
             .await
             .unwrap();
-            let (vote, sealed) = seal::<Sha256, _, _, _, _, PaymentBatchVerifier, _>(
+            let (vote, sealed) = seal::<Sha256, _, _, _, _, _, PaymentBatchVerifier, _>(
                 &self.fixture.signer,
                 &state,
                 &registered.context,
@@ -615,7 +615,7 @@ impl RefinementDriver {
             )
             .unwrap();
             let accepted = Accepted::prepared(&sealed);
-            let (_, close) = Box::pin(sealed.apply::<_, Sha256>(state)).await.unwrap();
+            let (_, close) = Box::pin(sealed.apply::<_, Sha256, _>(state)).await.unwrap();
             let successor = cache.extended(accepted, successor_liability);
             (vote, close, successor)
         });

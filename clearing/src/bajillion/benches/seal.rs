@@ -32,7 +32,7 @@ fn bench_seal(c: &mut Criterion) {
                         for _ in 0..iterations {
                             let wire = fixture.prepared.encoded().clone();
                             let start = Instant::now();
-                            let (vote, prepared) = seal::<Sha256, _, _, _, _, BatchVerifier, _>(
+                            let (vote, prepared) = seal::<Sha256, _, _, _, _, _, BatchVerifier, _>(
                                 &signer,
                                 &fixture.state,
                                 &fixture.context,

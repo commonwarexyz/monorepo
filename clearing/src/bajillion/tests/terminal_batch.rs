@@ -185,7 +185,7 @@ fn empty_and_deposit_only_batches_require_the_exact_registered_context() {
                     committee,
                 )
                 .unwrap()
-                .bind::<Sha256, _, _>(
+                .bind::<Sha256, _, _, _>(
                     &fixture.state,
                     &deposits,
                     &withdrawals,
@@ -207,7 +207,7 @@ fn empty_and_deposit_only_batches_require_the_exact_registered_context() {
                     Vec::new(),
                 )
                 .unwrap();
-                validate_close_with_strategy::<Sha256, _, _, _, _, AckBatchVerifier, _>(
+                validate_close_with_strategy::<Sha256, _, _, _, _, _, AckBatchVerifier, _>(
                     &fixture.state,
                     &context,
                     &deposits,
@@ -224,12 +224,27 @@ fn empty_and_deposit_only_batches_require_the_exact_registered_context() {
                             .unwrap();
                     assert!(
                         matches!(
-                        validate_close_with_strategy::<Sha256, _, _, _, _, AckBatchVerifier, _>(
-                            &fixture.state, &context, &deposits, &withdrawals, replay,
-                            &mut TestRng::new(13), &Sequential,
-                        ).await,
-                        Err(CloseError::Ack(AckError::InvalidOperatorSignature))
-                    ),
+                            validate_close_with_strategy::<
+                                Sha256,
+                                _,
+                                _,
+                                _,
+                                _,
+                                _,
+                                AckBatchVerifier,
+                                _,
+                            >(
+                                &fixture.state,
+                                &context,
+                                &deposits,
+                                &withdrawals,
+                                replay,
+                                &mut TestRng::new(13),
+                                &Sequential,
+                            )
+                            .await,
+                            Err(CloseError::Ack(AckError::InvalidOperatorSignature))
+                        ),
                         "context mutation {changed}, deposit {deposit}"
                     );
                 } else {
@@ -263,7 +278,7 @@ fn certified_batch_acceptance_preserves_independent_private_receipt_challenges()
             committee.commitment::<Sha256>(),
         )
         .unwrap()
-        .bind::<Sha256, _, _>(
+        .bind::<Sha256, _, _, _>(
             &fixture.state,
             &fixture.deposits,
             &fixture.withdrawals,
@@ -328,7 +343,7 @@ fn certified_batch_acceptance_preserves_independent_private_receipt_challenges()
         let mut votes = Vec::new();
         let mut prepared = None;
         for scheme in schemes.iter().take(committee.quorum()) {
-            let (vote, candidate) = seal::<Sha256, _, _, _, _, AckBatchVerifier, _>(
+            let (vote, candidate) = seal::<Sha256, _, _, _, _, _, AckBatchVerifier, _>(
                 scheme,
                 &fixture.state,
                 &context,

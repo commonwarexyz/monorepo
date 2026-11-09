@@ -134,7 +134,7 @@ fn validated_closes_retain_balance_and_activity_proofs_after_restart() {
             let roots = first.close().roots;
             let withdrawal_total = first.close().withdrawal_total;
             let header = first.close().header;
-            let (state, close) = Box::pin(first.apply::<_, Sha256>(fixture.state))
+            let (state, close) = Box::pin(first.apply::<_, Sha256, _>(fixture.state))
                 .await
                 .unwrap();
             let context = EpochContext::new::<Sha256>(
@@ -147,7 +147,7 @@ fn validated_closes_retain_balance_and_activity_proofs_after_restart() {
                 *fixture.context.committee(),
             )
             .unwrap()
-            .bind::<Sha256, _, _>(
+            .bind::<Sha256, _, _, _>(
                 &state,
                 &fixture.deposits,
                 &fixture.withdrawals,
@@ -193,7 +193,7 @@ fn validated_closes_retain_balance_and_activity_proofs_after_restart() {
                     }
                 })
                 .collect();
-            let second = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+            let second = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
                 &state,
                 &context,
                 &fixture.operator,
@@ -205,23 +205,24 @@ fn validated_closes_retain_balance_and_activity_proofs_after_restart() {
             .await
             .unwrap();
             let dealing = posted::decode(second.encoded().clone(), &context).unwrap();
-            let second = validate_close_with_strategy::<Sha256, _, _, _, _, AckBatchVerifier, _>(
-                &state,
-                &context,
-                &fixture.deposits,
-                &fixture.withdrawals,
-                dealing,
-                &mut TestRng::new(100),
-                &Sequential,
-            )
-            .await
-            .unwrap();
+            let second =
+                validate_close_with_strategy::<Sha256, _, _, _, _, _, AckBatchVerifier, _>(
+                    &state,
+                    &context,
+                    &fixture.deposits,
+                    &fixture.withdrawals,
+                    dealing,
+                    &mut TestRng::new(100),
+                    &Sequential,
+                )
+                .await
+                .unwrap();
             assert!(second.close().rows.iter().all(|row| {
                 row.outgoing.as_ref().is_some_and(|send| {
                     send.body().cumulative_debit() == 1 && send.body().seq() == 0
                 })
             }));
-            let (state, _) = Box::pin(second.apply::<_, Sha256>(state)).await.unwrap();
+            let (state, _) = Box::pin(second.apply::<_, Sha256, _>(state)).await.unwrap();
             let state = Box::pin(state.sync()).await.unwrap();
             assert_eq!(first_head.root(), close.roots.successor);
             let heads = [genesis, first_head, *state.state().head()];

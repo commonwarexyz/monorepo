@@ -530,7 +530,7 @@ async fn fuzz_challenge(case: ChallengeCase, runtime: deterministic::Context) {
     let committed_ack =
         VectorAck::sign_by_authorities(body.clone(), empty_root(), &payer, &operator);
     let authorization = SendAuthorization::sign(body.clone(), empty_root(), &payer);
-    let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+    let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
         &cache,
         &context,
         &operator,
@@ -545,7 +545,7 @@ async fn fuzz_challenge(case: ChallengeCase, runtime: deterministic::Context) {
     .await
     .unwrap();
     let dealing = posted::decode(prepared.encoded().clone(), &context).unwrap();
-    let prepared = validate_close_with_strategy::<Sha256, _, _, _, _, PaymentBatchVerifier, _>(
+    let prepared = validate_close_with_strategy::<Sha256, _, _, _, _, _, PaymentBatchVerifier, _>(
         &cache,
         &context,
         &deposits,
@@ -904,17 +904,19 @@ async fn validate_bytes(
 ) -> bool {
     let before = *state.state().head();
     let accepted = match posted::decode(encoded, context) {
-        Ok(dealing) => validate_close_with_strategy::<Sha256, _, _, _, _, PaymentBatchVerifier, _>(
-            state,
-            context,
-            deposits,
-            withdrawals,
-            dealing,
-            &mut test_rng(),
-            &Sequential,
-        )
-        .await
-        .is_ok(),
+        Ok(dealing) => {
+            validate_close_with_strategy::<Sha256, _, _, _, _, _, PaymentBatchVerifier, _>(
+                state,
+                context,
+                deposits,
+                withdrawals,
+                dealing,
+                &mut test_rng(),
+                &Sequential,
+            )
+            .await
+            .is_ok()
+        }
         Err(_) => false,
     };
     assert_eq!(*state.state().head(), before);
@@ -992,7 +994,7 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
             .payer()
             .cmp(b.authorization.body().payer())
     });
-    let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+    let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
         &state,
         &context,
         &operator,
@@ -1013,7 +1015,7 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
         empty_root(),
         absent.sign(VECTOR_SEND_SIGNATURE_NAMESPACE, &message),
     );
-    let bad = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+    let bad = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
         &state,
         &context,
         &operator,
@@ -1037,7 +1039,7 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
     let mut duplicate_terminal = terminals.clone();
     duplicate_terminal.insert(0, terminals[0].clone());
     assert!(
-        prepare_close_with_strategy::<Sha256, _, _, _, _>(
+        prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
             &state,
             &context,
             &operator,
@@ -1127,7 +1129,7 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
         },
     );
     assert!(!validate_bytes(&state, &wrong, &deposits, &withdrawals, encoded.clone()).await);
-    let wrong_operator = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+    let wrong_operator = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
         &state,
         &context,
         &absent,
@@ -1355,7 +1357,7 @@ async fn fuzz_transition(case: TransitionCase, runtime: deterministic::Context) 
             vector.root::<Sha256, Digest>().unwrap(),
         );
         let authorization = SendAuthorization::sign(body, predecessor, &recipient);
-        let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+        let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
             &state,
             &successor,
             &operator,
@@ -1432,7 +1434,7 @@ async fn fuzz_admission(case: AdmissionCase, runtime: deterministic::Context) {
             payouts: 0,
         },
     );
-    let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+    let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
         &state,
         &context,
         &operator,
@@ -1447,7 +1449,7 @@ async fn fuzz_admission(case: AdmissionCase, runtime: deterministic::Context) {
     let mut votes = Vec::new();
     for private in validators {
         let scheme = bls12381::Scheme::signer(committee.clone(), private).unwrap();
-        let (vote, validated) = seal::<Sha256, _, _, _, _, PaymentBatchVerifier, _>(
+        let (vote, validated) = seal::<Sha256, _, _, _, _, _, PaymentBatchVerifier, _>(
             &scheme,
             &state,
             &context,
@@ -1465,7 +1467,7 @@ async fn fuzz_admission(case: AdmissionCase, runtime: deterministic::Context) {
         let mut bytes = prepared.encoded().to_vec();
         bytes[0] ^= 1;
         assert!(
-            seal::<Sha256, _, _, _, _, PaymentBatchVerifier, _>(
+            seal::<Sha256, _, _, _, _, _, PaymentBatchVerifier, _>(
                 &scheme,
                 &state,
                 &context,

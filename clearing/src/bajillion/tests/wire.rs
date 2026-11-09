@@ -79,7 +79,7 @@ fn validators_derive_the_commitment_from_their_registered_predecessor() {
             .context
             .epoch_context()
             .clone()
-            .bind::<Sha256, _, _>(
+            .bind::<Sha256, _, _, _>(
                 &state,
                 &fixture.deposits,
                 &fixture.withdrawals,
@@ -94,7 +94,7 @@ fn validators_derive_the_commitment_from_their_registered_predecessor() {
             )
             .unwrap();
         let original = state.state().root();
-        let candidate = validate_close_with_strategy::<Sha256, _, _, _, _, AckBatchVerifier, _>(
+        let candidate = validate_close_with_strategy::<Sha256, _, _, _, _, _, AckBatchVerifier, _>(
             &state,
             &context,
             &fixture.deposits,
@@ -353,7 +353,7 @@ fn keyed_dealing_binds_resource_limits_before_allocating_rows_or_edges() {
                 *fixture.context.committee(),
             )
             .unwrap()
-            .bind::<Sha256, _, _>(
+            .bind::<Sha256, _, _, _>(
                 &fixture.state,
                 &fixture.deposits,
                 &fixture.withdrawals,
@@ -386,17 +386,18 @@ fn keyed_dealing_strategies_preserve_alignment_and_authenticated_state() {
             let fixture = fixture(runtime, 129, senders, recipients, degree).await;
             let wire = fixture.prepared.encoded();
             let dealing = decode_with_each_strategy(wire.clone(), &fixture.context).unwrap();
-            let prepared = validate_close_with_strategy::<Sha256, _, _, _, _, AckBatchVerifier, _>(
-                &fixture.state,
-                &fixture.context,
-                &fixture.deposits,
-                &fixture.withdrawals,
-                dealing,
-                &mut TestRng::new(5),
-                &Sequential,
-            )
-            .await
-            .unwrap();
+            let prepared =
+                validate_close_with_strategy::<Sha256, _, _, _, _, _, AckBatchVerifier, _>(
+                    &fixture.state,
+                    &fixture.context,
+                    &fixture.deposits,
+                    &fixture.withdrawals,
+                    dealing,
+                    &mut TestRng::new(5),
+                    &Sequential,
+                )
+                .await
+                .unwrap();
             assert_eq!(prepared.close().header, fixture.prepared.close().header);
             assert_eq!(prepared.close().roots, fixture.prepared.close().roots);
             assert_eq!(
@@ -462,7 +463,7 @@ fn headers_bind_every_root_amount_and_registered_context() {
             *fixture.context.committee(),
         )
         .unwrap()
-        .bind::<Sha256, _, _>(
+        .bind::<Sha256, _, _, _>(
             &fixture.state,
             &fixture.deposits,
             &fixture.withdrawals,
@@ -519,7 +520,7 @@ fn malformed_terminal_material_is_rejected_before_state_preparation() {
                 _ => unreachable!(),
             }
             assert!(
-                prepare_close_with_strategy::<Sha256, _, _, _, _>(
+                prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
                     &fixture.state,
                     &fixture.context,
                     &fixture.operator,
@@ -553,7 +554,7 @@ fn complete_proof_service_matches_direct_activity_and_entry_openings() {
             .map(|(key, _)| key.clone())
             .collect::<Vec<_>>();
         accounts.extend((100..120).map(|seed| SigningKey::from_seed(seed).public_key()));
-        let (replica, close) = Box::pin(fixture.prepared.apply::<_, Sha256>(fixture.state))
+        let (replica, close) = Box::pin(fixture.prepared.apply::<_, Sha256, _>(fixture.state))
             .await
             .unwrap();
         let epoch = Epoch::at(replica.logs(), EPOCH, range).await.unwrap();
@@ -612,7 +613,7 @@ fn decoded_context_cannot_change_limits_or_deadlines_behind_the_signed_anchor() 
             ));
             let dealing = posted::decode(fixture.prepared.encoded().clone(), &context).unwrap();
             assert!(
-                validate_close_with_strategy::<Sha256, _, _, _, _, AckBatchVerifier, _>(
+                validate_close_with_strategy::<Sha256, _, _, _, _, _, AckBatchVerifier, _>(
                     &fixture.state,
                     &context,
                     &fixture.deposits,

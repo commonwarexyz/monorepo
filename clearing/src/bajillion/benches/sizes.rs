@@ -199,7 +199,7 @@ async fn omitted_payer_sizes(
         ..
     } = fixture;
     drop(prepared);
-    let omitted = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+    let omitted = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
         &state,
         &context,
         &operator,
@@ -210,7 +210,7 @@ async fn omitted_payer_sizes(
     )
     .await
     .expect("omitted-payer close prepares");
-    let (replica, close) = Box::pin(omitted.apply::<_, Sha256>(state))
+    let (replica, close) = Box::pin(omitted.apply::<_, Sha256, _>(state))
         .await
         .expect("omitted-payer close applies");
     let range = close
@@ -513,13 +513,13 @@ fn calculator_parity() {
                     terminal_for_entries(&fixture.accounts[payer], &fixture.context,
                         &fixture.operator, 1, entries).0
                 }).collect();
-                let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+                let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
                     &fixture.state, &fixture.context, &fixture.operator, &fixture.deposits, &fixture.withdrawals,
                     terminals, strategy(),
                 ).await.expect("calculator close prepares");
                 let decoded = posted::decode(prepared.encoded().clone(), &fixture.context)
                     .expect("calculator dealing decodes");
-                let validated = validate_close_with_strategy::<Sha256, _, _, _, _, PaymentBatchVerifier, _>(
+                let validated = validate_close_with_strategy::<Sha256, _, _, _, _, _, PaymentBatchVerifier, _>(
                     &fixture.state, &fixture.context, &fixture.deposits,
                     &fixture.withdrawals, decoded, &mut TestRng::new(0), strategy(),
                 ).await.expect("calculator close validates");

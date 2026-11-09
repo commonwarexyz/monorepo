@@ -40,6 +40,7 @@ fn bench_validate_close(c: &mut Criterion) {
                                 _,
                                 _,
                                 _,
+                                _,
                                 BatchVerifier,
                                 _,
                             >(

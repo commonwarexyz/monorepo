@@ -327,7 +327,7 @@ fn boundary_only_close_uses_byte_order_for_withdrawal_positions() {
             Sha256::hash(&[b"committee"]),
         )
         .unwrap()
-        .bind::<Sha256, _, _>(
+        .bind::<Sha256, _, _, _>(
             &state,
             &deposits,
             &withdrawals,
@@ -341,7 +341,7 @@ fn boundary_only_close_uses_byte_order_for_withdrawal_positions() {
             },
         )
         .unwrap();
-        let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+        let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
             &state,
             &context,
             &ReverseSigner(keys[0].1.clone()),
@@ -426,7 +426,7 @@ fn boundary_only_close_uses_byte_order_for_withdrawal_positions() {
         assert_eq!(deposits.amount_for(&keys[2].0), 7);
         assert_eq!(deposits.amount_for(&keys[1].0), 10);
         assert_eq!(deposits.amount_for(&keys[3].0), 20);
-        let checked = validate_close_with_strategy::<Sha256, _, _, _, _, ReverseBatch, _>(
+        let checked = validate_close_with_strategy::<Sha256, _, _, _, _, _, ReverseBatch, _>(
             &state,
             &context,
             &deposits,
@@ -437,7 +437,9 @@ fn boundary_only_close_uses_byte_order_for_withdrawal_positions() {
         )
         .await
         .unwrap();
-        let (state, close) = Box::pin(checked.apply::<_, Sha256>(state)).await.unwrap();
+        let (state, close) = Box::pin(checked.apply::<_, Sha256, _>(state))
+            .await
+            .unwrap();
         for (position, index) in [1, 3, 5].into_iter().enumerate() {
             let position = context.predecessor_logs().payouts.operations + position as u64;
             let output = state.logs().payout_at(position).await.unwrap();
@@ -536,7 +538,7 @@ fn full_dealing_with_reverse_ord_keys_authenticates_and_serves_every_entry() {
             committee.commitment::<Sha256>(),
         )
         .unwrap()
-        .bind::<Sha256, _, _>(
+        .bind::<Sha256, _, _, _>(
             &state,
             &deposits,
             &withdrawals,
@@ -583,7 +585,7 @@ fn full_dealing_with_reverse_ord_keys_authenticates_and_serves_every_entry() {
                 vector,
             });
         }
-        let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+        let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
             &state,
             &context,
             &ReverseSigner(keys[0].1.clone()),
@@ -594,7 +596,7 @@ fn full_dealing_with_reverse_ord_keys_authenticates_and_serves_every_entry() {
         )
         .await
         .unwrap();
-        let (vote, checked) = admission::seal::<Sha256, _, _, _, _, ReverseBatch, _>(
+        let (vote, checked) = admission::seal::<Sha256, _, _, _, _, _, ReverseBatch, _>(
             &scheme,
             &state,
             &context,
@@ -610,7 +612,9 @@ fn full_dealing_with_reverse_ord_keys_authenticates_and_serves_every_entry() {
         let certificate = scheme.assemble([vote]).unwrap();
         assert!(scheme.verify(&checked.close().header, &certificate));
         let range = checked.close().roots.activity_range(&context).unwrap();
-        let (state, retained) = Box::pin(checked.apply::<_, Sha256>(state)).await.unwrap();
+        let (state, retained) = Box::pin(checked.apply::<_, Sha256, _>(state))
+            .await
+            .unwrap();
         let epoch = Epoch::at(state.logs(), EPOCH, range).await.unwrap();
         for (index, (key, _)) in keys.iter().enumerate() {
             assert_eq!(

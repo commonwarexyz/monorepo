@@ -106,7 +106,7 @@ async fn input(runtime: deterministic::Context, workload: Workload) -> Input {
             &deposits,
             &empty_withdrawals,
         );
-        let batch = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+        let batch = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
             &state,
             &context,
             &operator,
@@ -161,7 +161,7 @@ async fn input(runtime: deterministic::Context, workload: Workload) -> Input {
         &withdrawals,
     );
     let material = terminals(&keys, workload.rows, &context, &operator);
-    let expected = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+    let expected = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
         &state,
         &context,
         &operator,
@@ -279,17 +279,18 @@ async fn measure(
             let decoded = posted::decode(bytes, &context).unwrap();
             let decode = receive.elapsed();
             let start = Instant::now();
-            let validated = validate_close_with_strategy::<Sha256, _, _, _, _, BatchVerifier, _>(
-                &state,
-                &context,
-                &deposits,
-                &withdrawals,
-                decoded,
-                &mut rng,
-                fixtures::strategy(),
-            )
-            .await
-            .unwrap();
+            let validated =
+                validate_close_with_strategy::<Sha256, _, _, _, _, _, BatchVerifier, _>(
+                    &state,
+                    &context,
+                    &deposits,
+                    &withdrawals,
+                    decoded,
+                    &mut rng,
+                    fixtures::strategy(),
+                )
+                .await
+                .unwrap();
             let validate = start.elapsed();
             let start = Instant::now();
             let (advanced, close) = Box::pin(validated.apply(state)).await.unwrap();

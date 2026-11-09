@@ -141,7 +141,7 @@ pub fn close_context(
         committee,
     )
     .unwrap()
-    .bind::<Sha256, _, _>(
+    .bind::<Sha256, _, _, _>(
         state,
         deposits,
         withdrawals,

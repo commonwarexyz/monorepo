@@ -1389,7 +1389,7 @@ impl Harness {
         registration
             .epoch
             .clone()
-            .bind::<Sha256, _, _>(
+            .bind::<Sha256, _, _, _>(
                 self.state.as_ref().unwrap(),
                 &registration.deposits,
                 &registration.withdrawals,
@@ -1426,7 +1426,7 @@ impl Harness {
             return prepared;
         }
         let cache = &self.replica;
-        let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+        let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
             self.state.as_ref().unwrap(),
             &context,
             &self.operator,
@@ -1561,7 +1561,7 @@ impl Harness {
                 .cmp(right.authorization.body().payer())
         });
         assert!(
-            prepare_close_with_strategy::<Sha256, _, _, _, _>(
+            prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
                 self.state.as_ref().unwrap(),
                 &context,
                 &self.operator,
@@ -1575,7 +1575,7 @@ impl Harness {
             "an absent recipient cannot spend its same-epoch credit"
         );
 
-        let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+        let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
             self.state.as_ref().unwrap(),
             &context,
             &self.operator,
@@ -1687,7 +1687,7 @@ impl Harness {
         prepared: &Prepared,
     ) -> (Certificate, PreparedClose<VerifyingKey, Digest>) {
         let before = *self.state.as_ref().unwrap().state().head();
-        let (vote, candidate) = seal::<Sha256, _, _, _, _, PaymentBatchVerifier, _>(
+        let (vote, candidate) = seal::<Sha256, _, _, _, _, _, PaymentBatchVerifier, _>(
             &self.validator,
             self.state.as_ref().unwrap(),
             &prepared.context,

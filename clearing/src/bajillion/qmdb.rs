@@ -27,7 +27,7 @@ use commonware_storage::{
             proof::OpsRootWitness,
         },
     },
-    translator::EightCap,
+    translator::{EightCap, Translator},
 };
 use commonware_utils::sequence::FixedBytes;
 use core::num::NonZeroU64;
@@ -50,8 +50,8 @@ pub type Absence<D> = ordered::proof::constant::ExclusionProof<
     D,
     32,
 >;
-/// Native Current Ordered balance database.
-pub type StateDb<E, H, S> = Db<mmb::Family, E, AccountKey, Balance, H, EightCap, 32, S>;
+/// Native Current Ordered balance database, indexed with translator `T`.
+pub type StateDb<E, H, S, T = EightCap> = Db<mmb::Family, E, AccountKey, Balance, H, T, 32, S>;
 /// Native balance operation served to the QMDB sync engine.
 pub type StateOperation = qmdb::any::ordered::fixed::Operation<mmb::Family, AccountKey, Balance>;
 type Batch<D, S> =
@@ -264,9 +264,13 @@ impl<D: Digest> Read for StateTarget<D> {
 }
 
 /// Physical configuration for the account database.
-pub type Config<S> = FixedConfig<EightCap, S>;
+///
+/// The translator shapes only the in-memory index; roots and stored operations do not depend on it.
+pub type Config<S, T = EightCap> = FixedConfig<T, S>;
 
-pub(super) fn physical_partitions<S: Strategy>(config: &Config<S>) -> Vec<String> {
+pub(super) fn physical_partitions<S: Strategy, T: Translator>(
+    config: &Config<S, T>,
+) -> Vec<String> {
     let mut partitions = Vec::with_capacity(8);
     for journal in [
         &config.merkle_config.journal_partition,
@@ -323,21 +327,26 @@ impl<D: Digest, S: Strategy> PreparedState<D, S> {
 /// at the application's authenticated shared checkpoint before catching up the canonical suffix.
 /// Historical proofs use retained native operations. Pruning is explicitly gated by the shared
 /// checkpoint and the application's protection policy.
-pub struct State<E: Context + Spawner, H: Hasher, S: Strategy = Sequential> {
-    db: StateDb<E, H, S>,
+pub struct State<
+    E: Context + Spawner,
+    H: Hasher,
+    S: Strategy = Sequential,
+    T: Translator = EightCap,
+> {
+    db: StateDb<E, H, S, T>,
     #[cfg(test)]
     pause_historical: std::sync::atomic::AtomicBool,
     head: StateHead<H::Digest>,
 }
 
-impl<E: Context + Spawner, H: Hasher, S: Strategy> State<E, H, S> {
+impl<E: Context + Spawner, H: Hasher, S: Strategy, T: Translator> State<E, H, S, T> {
     /// Initialize a fresh database from account-sorted positive genesis balances.
     ///
     /// Existing application state must be opened with [`Self::open`]. Applications that persist
     /// genesis before applying it can prepare that first batch against the open bootstrap head.
     pub async fn init(
         context: E,
-        config: Config<S>,
+        config: Config<S, T>,
         genesis: Vec<(AccountKey, Balance)>,
     ) -> Result<Self, Error> {
         let state = Self::open(context, config, None).await?;
@@ -364,7 +373,7 @@ impl<E: Context + Spawner, H: Hasher, S: Strategy> State<E, H, S> {
     /// batch is applied.
     pub async fn open(
         context: E,
-        config: Config<S>,
+        config: Config<S, T>,
         target: Option<StateHead<H::Digest>>,
     ) -> Result<Self, Error> {
         let mut partitions = physical_partitions(&config);
@@ -401,12 +410,15 @@ impl<E: Context + Spawner, H: Hasher, S: Strategy> State<E, H, S> {
         &self.head
     }
     /// Return the native source used by peer-sync adapters.
-    pub const fn source(&self) -> &StateDb<E, H, S> {
+    pub const fn source(&self) -> &StateDb<E, H, S, T> {
         &self.db
     }
 
     /// Assemble a native peer-sync result after checking its canonical recovered head.
-    pub fn from_db(db: StateDb<E, H, S>, expected: &StateHead<H::Digest>) -> Result<Self, Error> {
+    pub fn from_db(
+        db: StateDb<E, H, S, T>,
+        expected: &StateHead<H::Digest>,
+    ) -> Result<Self, Error> {
         let head = Self::derive_head(&db)?;
         if &head != expected {
             return Err(Error::History);
@@ -540,7 +552,7 @@ impl<E: Context + Spawner, H: Hasher, S: Strategy> State<E, H, S> {
         Ok(())
     }
 
-    fn derive_head(db: &StateDb<E, H, S>) -> Result<StateHead<H::Digest>, Error> {
+    fn derive_head(db: &StateDb<E, H, S, T>) -> Result<StateHead<H::Digest>, Error> {
         Ok(StateHead {
             root: StateRoot::new(db.root()),
             live_accounts: u64::try_from(db.active_keys()).map_err(|_| Error::Arithmetic)?,

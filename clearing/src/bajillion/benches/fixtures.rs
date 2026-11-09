@@ -382,7 +382,7 @@ pub(crate) fn epoch_context(
         committee,
     )
     .expect("epoch context")
-    .bind::<Sha256, _, _>(
+    .bind::<Sha256, _, _, _>(
         state,
         deposits,
         withdrawals,
@@ -511,7 +511,7 @@ pub(crate) async fn active_close_fixture_with_committee(
         &withdrawals,
     );
     let (terminals, acks) = terminal_material(profile, &accounts, &context, &operator);
-    let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+    let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
         &state,
         &context,
         &operator,
@@ -525,7 +525,7 @@ pub(crate) async fn active_close_fixture_with_committee(
     let decoded =
         commonware_clearing::bajillion::posted::decode(prepared.encoded().clone(), &context)
             .expect("fixture decodes");
-    let validated = validate_close_with_strategy::<Sha256, _, _, _, _, PaymentBatchVerifier, _>(
+    let validated = validate_close_with_strategy::<Sha256, _, _, _, _, _, PaymentBatchVerifier, _>(
         &state,
         &context,
         &deposits,
@@ -620,7 +620,7 @@ pub(crate) async fn proven_challenges(
         acks,
         ..
     } = fixture;
-    let (replica, close) = Box::pin(prepared.apply::<_, Sha256>(state))
+    let (replica, close) = Box::pin(prepared.apply::<_, Sha256, _>(state))
         .await
         .expect("benchmark close applies");
     let range = close

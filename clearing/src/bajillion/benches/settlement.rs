@@ -284,7 +284,7 @@ async fn admission_fixture(
         validators.committee().commitment::<Sha256>(),
     )
     .expect("benchmark epoch is valid")
-    .bind::<Sha256, _, _>(
+    .bind::<Sha256, _, _, _>(
         &state,
         &deposits,
         &withdrawals,
@@ -301,7 +301,7 @@ async fn admission_fixture(
         },
     )
     .expect("benchmark close context is valid");
-    let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _>(
+    let prepared = prepare_close_with_strategy::<Sha256, _, _, _, _, _>(
         &state,
         &context,
         &SigningKey::from_seed(OPERATOR_SEED),
@@ -314,7 +314,7 @@ async fn admission_fixture(
     .expect("benchmark close is valid");
     let dealing =
         posted::decode(prepared.encoded().clone(), &context).expect("benchmark dealing decodes");
-    let validated = validate_close_with_strategy::<Sha256, _, _, _, _, PaymentBatchVerifier, _>(
+    let validated = validate_close_with_strategy::<Sha256, _, _, _, _, _, PaymentBatchVerifier, _>(
         &state,
         &context,
         &deposits,
