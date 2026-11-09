@@ -847,7 +847,7 @@ pub(crate) mod tests {
     use crate::core::field::{
         fp::{
             rns::Rns,
-            tests::{self as reference, Element},
+            reference::{self, Element},
             unsat28::Unsat28,
             unsat49::Unsat49,
         },

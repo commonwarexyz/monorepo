@@ -29,6 +29,7 @@ use crate::core::{
         fp::{BYTES, MINUS_ONE, ONE, encode},
     },
 };
+use commonware_formatting::hex;
 use commonware_simd::Simd;
 
 /// Projective coordinates `[X, Y, Z]` as big-endian integers.
@@ -43,6 +44,21 @@ pub const IDENTITY: Coordinates = {
     identity[1][BYTES - 1] = 1;
     identity
 };
+
+/// The generator in projective coordinates, with `Z = 1`.
+pub const GENERATOR: Coordinates = [
+    hex!(
+        "17f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb"
+    ),
+    hex!(
+        "08b3f481e3aaa0f1a09e30ed741d8ae4fcf5e095d5d00af600db18cb2c04b3edd03cc744a2888ae40caa232946c5e7e1"
+    ),
+    {
+        let mut one = [0; BYTES];
+        one[BYTES - 1] = 1;
+        one
+    },
+];
 
 /// Largest integer bound of a reduced value in residues, in units of `p`.
 ///
@@ -295,7 +311,7 @@ mod tests {
     use super::*;
     use crate::core::field::fp::{
         rns::Rns,
-        tests::{self as reference, Element},
+        reference::{self, Element},
         unsat28::Unsat28,
         unsat49::Unsat49,
     };
