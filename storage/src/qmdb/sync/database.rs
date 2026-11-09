@@ -208,6 +208,7 @@ mod tests {
             metadata_partition: "local-pins-metadata".into(),
             cache: Default::default(),
             replay_buffer: NZUsize!(1024),
+            replay_concurrency: NZUsize!(2),
             strategy: Sequential,
         }
     }

@@ -122,6 +122,7 @@ fn merkle_cfg(suffix: &str, ctx: &impl Strategizer) -> MerkleConfig<Rayon> {
     MerkleConfig {
         metadata_partition: format!("metadata-{suffix}"),
         replay_buffer: REPLAY_BUFFER_SIZE,
+        replay_concurrency: THREADS,
         strategy: ctx.strategy(THREADS),
         cache: Default::default(),
     }

@@ -98,6 +98,7 @@ pub(super) fn qmdb_config(
         merkle: MerkleConfig {
             metadata_partition: format!("{prefix}-qmdb-a-mmr-metadata"),
             replay_buffer: IO_BUFFER_SIZE,
+            replay_concurrency: NZUsize!(2),
             strategy: Sequential,
             cache: Default::default(),
         },

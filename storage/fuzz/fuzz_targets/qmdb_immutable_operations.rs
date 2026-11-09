@@ -100,6 +100,7 @@ fn db_config(suffix: &str) -> Config<TwoCap, VConfig<((), (RangeCfg<usize>, ()))
         merkle: MerkleConfig {
             metadata_partition: format!("metadata-{suffix}"),
             replay_buffer: NZUsize!(1024),
+            replay_concurrency: NZUsize!(2),
             strategy: Sequential,
             cache: commonware_storage_fuzz::low_resident_height(),
         },

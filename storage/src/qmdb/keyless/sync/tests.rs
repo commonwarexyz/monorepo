@@ -663,6 +663,7 @@ pub(crate) mod harnesses {
             merkle: MerkleConfig {
                 metadata_partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
+                replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
                 cache: crate::journal::authenticated::low_resident_height(),
             },
@@ -856,6 +857,7 @@ pub(crate) mod harnesses {
             merkle: MerkleConfig {
                 metadata_partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
+                replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
                 cache: crate::journal::authenticated::low_resident_height(),
             },

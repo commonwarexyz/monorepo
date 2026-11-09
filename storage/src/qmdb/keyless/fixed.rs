@@ -65,6 +65,7 @@ mod tests {
             merkle: crate::journal::authenticated::Config {
                 metadata_partition: format!("fixed-metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
+                replay_concurrency: NZUsize!(2),
                 strategy,
                 cache: crate::journal::authenticated::low_resident_height(),
             },
@@ -1368,6 +1369,7 @@ mod tests {
                 merkle: crate::journal::authenticated::Config {
                     metadata_partition: "rebranch-merkle-metadata".into(),
                     replay_buffer: NZUsize!(1024),
+                    replay_concurrency: NZUsize!(2),
                     strategy: Sequential,
                     cache: Default::default(),
                 },

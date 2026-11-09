@@ -148,6 +148,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
             merkle: MerkleConfig {
                 metadata_partition: format!("fuzz-current-{suffix}-merkle-metadata"),
                 replay_buffer: NZUsize!(WRITE_BUFFER_SIZE),
+                replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
                 cache: commonware_storage_fuzz::low_resident_height(),
             },

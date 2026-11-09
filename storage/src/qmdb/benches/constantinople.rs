@@ -437,6 +437,7 @@ fn main() {
         let merkle_config = MerkleConfig {
             metadata_partition: "constantinople-merkle-metadata".into(),
             replay_buffer: REPLAY_BUFFER,
+            replay_concurrency: threads,
             strategy: ctx.strategy(threads),
             cache: Default::default(),
         };

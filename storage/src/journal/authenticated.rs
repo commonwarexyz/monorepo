@@ -1710,6 +1710,7 @@ mod tests {
         MerkleConfig {
             metadata_partition: format!("mmr-metadata-{suffix}"),
             replay_buffer: NZUsize!(1024),
+            replay_concurrency: NZUsize!(2),
             strategy,
             cache: Default::default(),
         }

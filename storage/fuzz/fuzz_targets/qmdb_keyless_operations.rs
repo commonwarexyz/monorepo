@@ -199,6 +199,7 @@ fn test_config<S: Strategy>(test_name: &str, strategy: S) -> Config<CodecConfig,
         merkle: MerkleConfig {
             metadata_partition: format!("{test_name}-meta"),
             replay_buffer: NZUsize!(1024),
+            replay_concurrency: NZUsize!(2),
             strategy,
             cache: commonware_storage_fuzz::low_resident_height(),
         },

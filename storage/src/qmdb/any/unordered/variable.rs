@@ -125,6 +125,7 @@ pub(crate) mod test {
             merkle: crate::journal::authenticated::Config {
                 metadata_partition: format!("metadata-{seed}"),
                 replay_buffer: NZUsize!(1024),
+                replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
                 cache: Default::default(),
             },

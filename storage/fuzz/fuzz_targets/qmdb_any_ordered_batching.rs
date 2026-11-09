@@ -99,6 +99,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                 merkle: MerkleConfig {
                     metadata_partition: format!("test-qmdb-merkle-metadata-{suffix}"),
                     replay_buffer: NZUsize!(1024),
+                    replay_concurrency: NZUsize!(2),
                     strategy: Sequential,
                     cache: Default::default(),
                 },

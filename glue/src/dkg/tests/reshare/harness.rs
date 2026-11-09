@@ -1201,6 +1201,7 @@ impl EngineDefinition for ReshareEngine {
             merkle: MerkleConfig {
                 metadata_partition: format!("{partition_prefix}-qmdb-mmr-metadata"),
                 replay_buffer: IO_BUFFER_SIZE,
+                replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
                 cache: Default::default(),
             },

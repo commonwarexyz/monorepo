@@ -300,6 +300,7 @@ fn merkle_cfg(ctx: &impl Strategizer) -> MerkleConfig<Rayon> {
     MerkleConfig {
         metadata_partition: format!("metadata-{PARTITION}"),
         replay_buffer: REPLAY_BUFFER_SIZE,
+        replay_concurrency: THREADS,
         strategy: ctx.strategy(THREADS),
         cache: Default::default(),
     }

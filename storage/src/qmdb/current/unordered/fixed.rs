@@ -613,6 +613,7 @@ pub mod test {
                 merkle: MerkleConfig {
                     metadata_partition: "rebranch-merkle-metadata".into(),
                     replay_buffer: NZUsize!(4096),
+                    replay_concurrency: NZUsize!(2),
                     strategy: Sequential,
                     cache: Default::default(),
                 },

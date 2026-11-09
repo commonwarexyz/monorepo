@@ -2159,6 +2159,7 @@ mod tests {
             MerkleConfig {
                 metadata_partition: format!("initial-target-{suffix}-merkle-metadata"),
                 replay_buffer: NZUsize!(1024),
+                replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
                 cache: Default::default(),
             }

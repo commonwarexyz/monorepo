@@ -302,6 +302,7 @@ fn config<E: Strategizer>(ctx: &E, args: &Args) -> AnyConfig<EightCap, Rayon> {
         merkle: authenticated::Config {
             metadata_partition: "cold-merkle-meta".into(),
             replay_buffer: REPLAY_BUFFER,
+            replay_concurrency: NZUsize!(args.threads),
             strategy: ctx.strategy(NZUsize!(args.threads)),
             cache: Default::default(),
         },

@@ -751,6 +751,7 @@ fn any_config(suffix: &str) -> any::Config<TwoCap, FixedJournalConfig, Sequentia
             metadata_partition: format!("transfers-metadata-{suffix}"),
             cache: Default::default(),
             replay_buffer: NZUsize!(1024),
+            replay_concurrency: NZUsize!(2),
             strategy: Sequential,
         },
         log: FixedJournalConfig {

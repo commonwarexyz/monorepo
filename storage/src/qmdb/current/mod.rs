@@ -882,6 +882,7 @@ pub mod tests {
             merkle: MerkleConfig {
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
                 replay_buffer: NZUsize!(1024),
+                replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
                 cache: crate::journal::authenticated::low_resident_height(),
             },
@@ -918,6 +919,7 @@ pub mod tests {
             merkle: MerkleConfig {
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
                 replay_buffer: NZUsize!(1024),
+                replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
                 cache: crate::journal::authenticated::low_resident_height(),
             },
@@ -2082,6 +2084,7 @@ pub mod tests {
                 merkle: MerkleConfig {
                     metadata_partition: "forged-exclusion-metadata".to_string(),
                     replay_buffer: NZUsize!(1024),
+                    replay_concurrency: NZUsize!(2),
                     strategy: Sequential,
                     cache: Default::default(),
                 },

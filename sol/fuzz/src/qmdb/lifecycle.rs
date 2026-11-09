@@ -68,6 +68,7 @@ fn config() -> Config<OneCap, Sequential> {
         merkle: MerkleConfig {
             metadata_partition: "lifecycle-merkle-metadata".into(),
             replay_buffer: NZUsize!(1024),
+            replay_concurrency: NZUsize!(2),
             strategy: Sequential,
             cache: Default::default(),
         },

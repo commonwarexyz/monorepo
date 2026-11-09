@@ -42,9 +42,6 @@ const REPLAY_BATCH_BYTES: usize = 8 * 1024 * 1024;
 /// Regions filled concurrently by one request.
 const CONCURRENT_FILLS: usize = 8;
 
-/// Chunks a replay reads and hashes concurrently.
-const CONCURRENT_CHUNKS: usize = 8;
-
 /// Born nodes of one resident height at or past the boundary, in ordinal order.
 struct Level<D> {
     /// Ordinal of the first node.
@@ -454,6 +451,7 @@ pub(crate) struct Tree<F: Family, D: Digest, S: Strategy> {
     regions: Regions,
     strategy: S,
     replay_buffer: NonZeroUsize,
+    replay_concurrency: NonZeroUsize,
 }
 
 impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
@@ -484,6 +482,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
             },
             strategy: config.strategy.clone(),
             replay_buffer: config.replay_buffer,
+            replay_concurrency: config.replay_concurrency,
         };
         tree.update_metrics();
         Ok(tree)
@@ -654,8 +653,8 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
 
     /// Like [Self::replay], but the chunks of a [Self::chunk_plan] with subtrees of `2^height`
     /// leaves are read and hashed on tasks of their own spawned from `context`, with
-    /// [CONCURRENT_CHUNKS] at once, and appended in order. Appending a whole subtree hashes only
-    /// the nodes above its root.
+    /// [Config::replay_concurrency] at once, and appended in order. Appending a whole subtree
+    /// hashes only the nodes above its root.
     ///
     /// Each task holds a clone of `released` until it drops its clone of `journal`, so once every
     /// clone of `released` is dropped, no task still holds the journal, even after the replay is
@@ -701,8 +700,9 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         };
 
         // Hash chunks ahead of appending them, and append them in order.
-        let mut pending = VecDeque::with_capacity(CONCURRENT_CHUNKS);
-        for _ in 0..CONCURRENT_CHUNKS {
+        let concurrency = self.replay_concurrency.get();
+        let mut pending = VecDeque::with_capacity(concurrency);
+        for _ in 0..concurrency {
             spawn_next(&mut pending);
         }
         while let Some(task) = pending.pop_front() {
@@ -1191,6 +1191,7 @@ mod tests {
             metadata_partition: String::new(),
             cache: CacheConfig { resident_height },
             replay_buffer: NonZeroUsize::MIN,
+            replay_concurrency: NonZeroUsize::new(2).unwrap(),
             strategy: Sequential,
         }
     }
@@ -1314,12 +1315,13 @@ mod tests {
 
     /// Replaying in aligned subtrees builds the same tree as replaying in batches: subtrees of
     /// several heights, opened at boundaries on and off subtree edges, replayed to ends before, on,
-    /// and past them. Every node at or past the boundary matches an oracle.
+    /// and past them with one or several subtrees in flight. Every node at or past the boundary
+    /// matches an oracle.
     async fn subtrees_match_batches<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new(Bagging::ForwardFold);
         let total = 200;
         let expected = oracle::<F>(&Operations::new(total), &hasher);
-        for subtree in [1, 2, 4] {
+        for (subtree, concurrency) in [1, 2, 4].into_iter().flat_map(|s| [(s, 1), (s, 3)]) {
             for resident in [0, 2, 5] {
                 for boundary in [0, 1, 5, 16, 17, 45] {
                     for end in [boundary, boundary + 1, 16, 31, 64, 100, 129, total] {
@@ -1327,17 +1329,22 @@ mod tests {
                             continue;
                         }
                         let case = format!(
-                            "subtree {subtree}, resident {resident}, boundary {boundary}, end {end}"
+                            "subtree {subtree}, concurrency {concurrency}, resident {resident}, \
+                             boundary {boundary}, end {end}"
                         );
                         let pins: Vec<_> = F::nodes_to_pin(Location::new(boundary))
                             .map(|p| expected.get_node(p).unwrap())
                             .collect();
                         let ops = Arc::new(Operations::range(boundary..total));
+                        let config = Config {
+                            replay_concurrency: NonZeroUsize::new(concurrency).unwrap(),
+                            ..config(resident)
+                        };
                         let open = || {
                             Tree::new(
                                 Location::new(boundary),
                                 pins.clone(),
-                                &config(resident),
+                                &config,
                                 Metrics::new(&context),
                             )
                             .unwrap()

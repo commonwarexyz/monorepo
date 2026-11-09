@@ -1893,6 +1893,7 @@ mod tests {
             merkle: MerkleConfig {
                 metadata_partition: format!("{prefix}_mmr_metadata"),
                 replay_buffer: IO_BUFFER_SIZE,
+                replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
                 cache: Default::default(),
             },
