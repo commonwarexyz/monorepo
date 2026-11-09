@@ -2,11 +2,12 @@
 //!
 //! # Overview
 //!
-//! The coding marshal couples the consensus pipeline with erasure-coded block broadcast.
-//! Blocks are produced by an application, encoded into [`types::Shard`]s, fanned out to peers, and
-//! later reconstructed when a notarization or finalization proves that the data is needed.
-//! Compared to [`super::standard`], this variant makes more efficient usage of the network's bandwidth
-//! by spreading the load of block dissemination across all participants.
+//! The coding marshal couples the consensus pipeline with erasure-coded block broadcast. Blocks
+//! are produced by an application, erasure coded one segment at a time
+//! ([`commonware_coding::Segmentable`]), fanned out to peers one chunk at a time, and later
+//! reconstructed when a notarization or finalization proves that the data is needed. Compared to
+//! [`super::standard`], this variant makes more efficient usage of the network's bandwidth by
+//! spreading the load of block dissemination across all participants.
 //!
 //! # Components
 //!
@@ -26,10 +27,14 @@
 //!
 //! # Data Flow
 //!
-//! 1. The application produces a block through [`Marshaled`], which encodes the payload and
-//!    obtains a [`crate::types::coding::Commitment`] describing the shard layout.
-//! 2. The block is broadcast via [`shards::Engine`]; each participant receives exactly one shard
-//!    and reshares it to everyone else once it verifies the fragment.
+//! 1. The application produces a block through [`Marshaled`]. It codes the block's
+//!    [`types::CodedLayout`] and obtains a [`crate::types::coding::Commitment`] over its segment
+//!    roots. An application may push the block's body to a [`crate::BodySink`] while it builds,
+//!    so the body's segments are coded and sent before the block is sealed.
+//! 2. The block is broadcast via [`shards::Engine`]. Each participant receives its chunk of every
+//!    segment, then the roots that bind the segments to the commitment. Once consensus names the
+//!    commitment, each participant relays its chunks to everyone else as they verify against
+//!    their segment roots.
 //! 3. The actor ingests notarizations/finalizations from `simplex`, pulls reconstructed blocks
 //!    from the shard engine or backfills them through [`crate::marshal::resolver`], and durably
 //!    persists the ordered data.
@@ -74,6 +79,8 @@ pub use variant::Coding;
 mod marshaled;
 pub use marshaled::{Marshaled, MarshaledConfig};
 
+mod stream;
+
 #[cfg(test)]
 mod tests {
     use crate::{
@@ -84,8 +91,8 @@ mod tests {
             coding::{
                 Coding, Marshaled, MarshaledConfig, shards,
                 types::{
-                    CodedBlock, Shard, StoredCodedBlock, coding_config_for_participants,
-                    hash_context,
+                    CodedBlock, ShardMessage, StoredCodedBlock, StreamChunk, StreamRoots,
+                    coding_config_for_participants, hash_context,
                 },
             },
             config::{Config, Start},
@@ -95,9 +102,9 @@ mod tests {
                 block::encode_block,
                 harness::{
                     self, BLOCKS_PER_EPOCH, CodingB, CodingCtx, CodingHarness, D, EmptyProvider, K,
-                    LINK, NAMESPACE, NUM_VALIDATORS, QUORUM, S, TEST_QUOTA, TestHarness,
-                    UNRELIABLE_LINK, V, default_leader, genesis_commitment, make_coding_block,
-                    setup_network_links, setup_network_with_participants,
+                    LINK, NAMESPACE, NUM_VALIDATORS, QUORUM, S, TEST_QUOTA, TestCoding,
+                    TestHarness, UNRELIABLE_LINK, V, default_leader, genesis_commitment,
+                    make_coding_block, setup_network_links, setup_network_with_participants,
                 },
                 store::{Op, Recording},
                 verifying::{GatedVerifyingApp, MockVerifyingApp},
@@ -114,14 +121,14 @@ mod tests {
     use bytes::Bytes;
     use commonware_actor::{Feedback, mailbox};
     use commonware_codec::{DecodeExt as _, Encode, FixedSize};
-    use commonware_coding::{Config as CodingConfig, ReedSolomon, Scheme as _};
+    use commonware_coding::{Config as CodingConfig, Scheme as _, Segmentable as _};
     use commonware_cryptography::{
         Committable, Digested, Digestible, Hasher,
         certificate::{ConstantProvider, Membership, Scheme as _, Verifier as _, mocks::Fixture},
         sha256::Sha256,
     };
     use commonware_macros::{select, test_group, test_traced};
-    use commonware_p2p::{Recipients, Sender as _};
+    use commonware_p2p::{Recipients, Sender};
     use commonware_parallel::Sequential;
     use commonware_resolver::{Delivery, Fetch, Outcome, Resolution, Resolver, TargetedResolver};
     use commonware_runtime::{
@@ -136,12 +143,11 @@ mod tests {
         vec::NonEmptyVec,
     };
     use futures::StreamExt;
-    use std::{sync::Arc, time::Duration};
+    use std::{iter::zip, sync::Arc, time::Duration};
 
-    type TestCodingVariant = Coding<CodingB, ReedSolomon<Sha256>, Sha256, K>;
-    type TestCodedBlock = CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>;
-    type TestCommitment = Commitment<CodingB, ReedSolomon<Sha256>, Sha256>;
-    type TestShard = Shard<CodingB, ReedSolomon<Sha256>, Sha256>;
+    type TestCodingVariant = Coding<CodingB, TestCoding, Sha256, K>;
+    type TestCodedBlock = CodedBlock<CodingB, TestCoding, Sha256>;
+    type TestCommitment = Commitment<CodingB, TestCoding, Sha256>;
     type CodingSendRecord = (Round, Arc<TestCodedBlock>, Recipients<K>);
 
     // Smallest valid coding config used to build trusted genesis commitments.
@@ -250,6 +256,7 @@ mod tests {
             _context: (deterministic::Context, CodingCtx),
             _ancestry: impl Ancestry<CodingB>,
             _input: (),
+            _body: crate::BodySink,
         ) -> Option<Digested<CodingB>> {
             None
         }
@@ -431,7 +438,7 @@ mod tests {
     type FinalizedBlocks = immutable::Archive<
         deterministic::Context,
         D,
-        StoredCodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>,
+        StoredCodedBlock<CodingB, TestCoding, Sha256>,
     >;
 
     /// Builds a marshal actor configuration for tests.
@@ -573,7 +580,7 @@ mod tests {
         context: deterministic::Context,
         participants: Vec<K>,
         provider: ConstantProvider<S, Epoch>,
-    ) -> shards::Mailbox<CodingB, ReedSolomon<Sha256>, Sha256, K> {
+    ) -> shards::Mailbox<CodingB, TestCoding, Sha256, K> {
         let me = participants[0].clone();
         let oracle = setup_network_with_participants(
             context.child("network"),
@@ -634,10 +641,10 @@ mod tests {
         (candidate_ctx, coded_candidate)
     }
 
-    /// Rebinds the shards of [`missing_candidate`] to a commitment that claims another digest.
-    /// The shards verify against the commitment's coding root, but the decoded block fails
-    /// validation.
-    fn undecodable(me: K) -> (TestCommitment, Vec<TestShard>) {
+    /// Returns a commitment that claims another digest for the shards of [`missing_candidate`],
+    /// and the candidate. The shards verify against the commitment's coding root, but the decoded
+    /// block fails validation.
+    fn undecodable(me: K) -> (TestCommitment, TestCodedBlock) {
         let (_, candidate) = missing_candidate(me);
         let real = candidate.commitment();
         let commitment = TestCommitment::from((
@@ -646,14 +653,77 @@ mod tests {
             real.context(),
             real.config(),
         ));
-        let shards = (0..NUM_VALIDATORS as u16)
-            .map(|index| {
-                let mut shard = candidate.shard(index).expect("missing shard");
-                shard.commitment = commitment;
-                shard
+        (commitment, candidate)
+    }
+
+    /// Encodes the chunks of shard `index` of `block` as streamed in `round`, in segment order.
+    fn stream_chunks(block: &TestCodedBlock, round: Round, index: u16) -> Vec<Bytes> {
+        let (roots, chunks) = TestCoding::split(&block.shards(&Sequential)[usize::from(index)]);
+        zip(roots, chunks)
+            .enumerate()
+            .map(|(segment, (root, chunk))| {
+                ShardMessage::<CodingB, TestCoding, Sha256>::from(StreamChunk {
+                    config: block.config(),
+                    round,
+                    index,
+                    segment: segment as u16,
+                    root,
+                    chunk,
+                })
+                .encode()
             })
-            .collect();
-        (commitment, shards)
+            .collect()
+    }
+
+    /// Encodes the roots that bind the chunks of `block` streamed in `round` to `commitment`.
+    fn stream_roots(block: &TestCodedBlock, round: Round, commitment: TestCommitment) -> Bytes {
+        let (roots, _) = TestCoding::split(&block.shards(&Sequential)[0]);
+        ShardMessage::<CodingB, TestCoding, Sha256>::from(StreamRoots {
+            commitment,
+            round,
+            roots,
+        })
+        .encode()
+    }
+
+    /// Sends this node's assigned shard of `block`, streamed in `round` by its leader, then the
+    /// roots that bind it to the block's commitment.
+    fn send_assigned(
+        leader: &mut impl Sender<PublicKey = K>,
+        me: &K,
+        block: &TestCodedBlock,
+        round: Round,
+    ) {
+        for message in stream_chunks(block, round, 0)
+            .into_iter()
+            .chain([stream_roots(block, round, block.commitment())])
+        {
+            leader.send(Recipients::One(me.clone()), message, true);
+        }
+    }
+
+    /// Delivers enough of `candidate`'s chunks for this node to decode it under `commitment`. The
+    /// round's leader (`senders[0]`, participant 1) streams this node's chunks and the roots, and
+    /// participant 2 (`senders[1]`) relays its own.
+    fn send_undecodable(
+        senders: &mut [impl Sender<PublicKey = K>],
+        me: &K,
+        candidate: &TestCodedBlock,
+        round: Round,
+        commitment: TestCommitment,
+    ) {
+        // The leader streams this node's chunks and the roots that claim `commitment`.
+        let leader = stream_chunks(candidate, round, 0)
+            .into_iter()
+            .chain([stream_roots(candidate, round, commitment)]);
+        for message in leader {
+            senders[0].send(Recipients::One(me.clone()), message, true);
+        }
+
+        // Participant 2's own chunks complete the minimum with this node's.
+        for message in stream_chunks(candidate, round, 2) {
+            senders[1].send(Recipients::One(me.clone()), message, true);
+        }
     }
 
     /// Builds `length` coded blocks above genesis, each proposed at the view
@@ -1916,11 +1986,12 @@ mod tests {
             );
 
             let assigned = shards.subscribe_assigned_shard_verified(boundary_commitment);
-            let assigned_shard = coded_boundary
-                .shard(0)
-                .expect("missing assigned shard")
-                .encode();
-            reproposer_sender.send(Recipients::One(me.clone()), assigned_shard, true);
+            send_assigned(
+                &mut reproposer_sender,
+                &me,
+                &coded_boundary,
+                reproposal_round,
+            );
             select! {
                 result = assigned => result.expect("assigned shard sender dropped"),
                 _ = context.sleep(Duration::from_secs(5)) => {
@@ -2123,11 +2194,7 @@ mod tests {
 
             // The re-proposer delivers this node's assigned shard. Without reconstruction
             // state it stays buffered, so assigned shard verification cannot complete.
-            let assigned_shard = coded_block
-                .shard(0)
-                .expect("missing assigned shard")
-                .encode();
-            reproposer_sender.send(Recipients::One(me.clone()), assigned_shard, true);
+            send_assigned(&mut reproposer_sender, &me, &coded_block, reproposal_round);
 
             select! {
                 _ = assigned => {
@@ -2256,11 +2323,12 @@ mod tests {
             // The recreated reconstruction state must accept this node's assigned
             // shard from the re-proposer (not the original leader).
             let assigned = shards.subscribe_assigned_shard_verified(boundary_commitment);
-            let assigned_shard = coded_boundary
-                .shard(0)
-                .expect("missing assigned shard")
-                .encode();
-            reproposer_sender.send(Recipients::One(me.clone()), assigned_shard, true);
+            send_assigned(
+                &mut reproposer_sender,
+                &me,
+                &coded_boundary,
+                reproposal_round,
+            );
             select! {
                 result = assigned => result.expect("assigned shard sender dropped"),
                 _ = context.sleep(Duration::from_secs(5)) => {
@@ -2469,7 +2537,7 @@ mod tests {
                 parent: (View::new(1), parent_commitment),
             };
             let block_a = make_coding_block(context_a, parent.digest(), Height::new(2), 200);
-            let coded_block_a: CodedBlock<_, ReedSolomon<Sha256>, Sha256> =
+            let coded_block_a: CodedBlock<_, TestCoding, Sha256> =
                 encode_block(block_a.clone(), coding_config);
             let commitment_a = coded_block_a.commitment();
 
@@ -2648,7 +2716,7 @@ mod tests {
             let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
             // Re-proposal payload with valid coding config, but no decodable block.
-            let (missing_payload, missing_shards) = undecodable(me.clone());
+            let (missing_payload, candidate) = undecodable(me.clone());
             let round = Round::new(Epoch::zero(), View::new(1));
             let reproposal_context = CodingCtx {
                 round,
@@ -2662,10 +2730,8 @@ mod tests {
             // Once the certification gate task's subscription reaches the shard engine, a
             // failed reconstruction of the payload closes it.
             marshal.get_processed().await;
-            shards.notarized(missing_payload, round);
-            for (sender, shard) in senders.iter_mut().zip(&missing_shards[1..]) {
-                sender.send(Recipients::One(me.clone()), shard.encode(), true);
-            }
+            shards.discovered(missing_payload, participants[1].clone(), round);
+            send_undecodable(&mut senders, &me, &candidate, round, missing_payload);
 
             select! {
                 result = verify_rx => {
@@ -2736,7 +2802,7 @@ mod tests {
             let shards = setup.extra;
 
             // The commitment's shards verify, but the block they decode fails validation.
-            let (missing_commitment, missing_shards) = undecodable(me.clone());
+            let (missing_commitment, candidate) = undecodable(me.clone());
             let round = Round::new(Epoch::zero(), View::new(1));
 
             // Subscribe through the core actor. This internally subscribes to the
@@ -2749,10 +2815,8 @@ mod tests {
             // Once the underlying buffer subscription reaches the shard engine, a failed
             // reconstruction of the commitment closes it.
             marshal.get_processed().await;
-            shards.notarized(missing_commitment, round);
-            for (sender, shard) in senders.iter_mut().zip(&missing_shards[1..]) {
-                sender.send(Recipients::One(me.clone()), shard.encode(), true);
-            }
+            shards.discovered(missing_commitment, participants[1].clone(), round);
+            send_undecodable(&mut senders, &me, &candidate, round, missing_commitment);
 
             // The core actor closes the subscription.
             select! {
@@ -3338,14 +3402,13 @@ mod tests {
         })
     }
 
-    /// A Byzantine leader can deliver assigned shards to only f+1 honest
-    /// validators and form a notarization with its own vote, leaving no peer
-    /// able to serve a full-block fetch. A validator that never saw the
-    /// proposal then holds only buffered sender-indexed gossip shards, and
-    /// draining them requires the reconstruction interest that `certify`
+    /// A Byzantine leader can deliver assigned chunks and roots to only f+1 honest validators
+    /// and form a notarization with its own vote, leaving no peer able to serve a full-block
+    /// fetch. A validator that never saw the proposal then holds only the chunks and roots those
+    /// validators relay, and binding them requires the reconstruction interest that `certify`
     /// registers with the shard engine (`shards.notarized`).
     #[test_traced("WARN")]
-    fn test_certify_reconstructs_from_buffered_gossip_shards() {
+    fn test_certify_reconstructs_from_relayed_chunks() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture {
@@ -3429,29 +3492,35 @@ mod tests {
             let coded_child: TestCodedBlock = encode_block(child.clone(), coding_config);
             let child_commitment = coded_child.commitment();
 
-            // Deliver each peer's sender-indexed gossip shard. Without leader
-            // discovery or reconstruction interest, the shard engine only
+            // Each peer relays its own chunks, and a peer other than the leader relays the
+            // roots. Without leader discovery or reconstruction interest, the shard engine only
             // buffers them.
             for (i, sender) in peer_senders.iter_mut().enumerate() {
                 let index = u16::try_from(i + 1).expect("peer index fits in u16");
-                let shard = coded_child.shard(index).expect("missing shard").encode();
-                sender.send(Recipients::One(me.clone()), shard, true);
+                for message in stream_chunks(&coded_child, child_round, index) {
+                    sender.send(Recipients::One(me.clone()), message, true);
+                }
             }
+            peer_senders[1].send(
+                Recipients::One(me.clone()),
+                stream_roots(&coded_child, child_round, child_commitment),
+                true,
+            );
             context.sleep(Duration::from_millis(250)).await;
 
-            // Certify must register reconstruction interest with the shard
-            // engine, drain the buffered shards, and verify the reconstructed
-            // block through its embedded context.
+            // Certify must register reconstruction interest with the shard engine, drain the
+            // buffered chunks and roots, and verify the reconstructed block through its embedded
+            // context.
             let certify_rx = marshaled.certify(child_round, child_commitment).await;
             select! {
                 result = certify_rx => {
                     assert!(
                         result.expect("certify result missing"),
-                        "certify must reconstruct the candidate from buffered gossip shards"
+                        "certify must reconstruct the candidate from relayed chunks"
                     );
                 },
                 _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("certify did not reconstruct from buffered gossip shards");
+                    panic!("certify must reconstruct from relayed chunks");
                 },
             }
         })
@@ -3780,11 +3849,11 @@ mod tests {
             };
             let block1 = make_coding_block(block1_ctx, genesis.digest(), Height::new(1), 100);
 
-            let coded_block_a: CodedBlock<_, ReedSolomon<Sha256>, Sha256> =
+            let coded_block_a: CodedBlock<_, TestCoding, Sha256> =
                 encode_block(block1.clone(), coding_config_a);
             let commitment_a = coded_block_a.commitment();
 
-            let coded_block_b: CodedBlock<_, ReedSolomon<Sha256>, Sha256> =
+            let coded_block_b: CodedBlock<_, TestCoding, Sha256> =
                 encode_block(block1.clone(), coding_config_b);
             let commitment_b = coded_block_b.commitment();
 
@@ -4687,7 +4756,7 @@ mod tests {
                 // A leader can obtain notarize votes with valid assigned shards even
                 // though their root encodes different bytes from the named block.
                 for (index, shard) in other.shards(&Sequential).iter().enumerate() {
-                    ReedSolomon::<Sha256>::check(
+                    TestCoding::check(
                         &config,
                         &commitment.root(),
                         index as u16,
@@ -5093,11 +5162,9 @@ mod tests {
                 100,
             );
             let block_digest = block_to_propose.digest();
-            let expected_commitment = encode_block::<_, ReedSolomon<Sha256>, Sha256>(
-                block_to_propose.clone(),
-                coding_config,
-            )
-            .commitment();
+            let expected_commitment =
+                encode_block::<_, TestCoding, Sha256>(block_to_propose.clone(), coding_config)
+                    .commitment();
 
             let mock_app: MockVerifyingApp<CodingB, S> =
                 MockVerifyingApp::new().with_propose_result(block_to_propose);
@@ -5216,11 +5283,9 @@ mod tests {
                 100,
             );
             let block_digest = block_to_propose.digest();
-            let expected_commitment = encode_block::<_, ReedSolomon<Sha256>, Sha256>(
-                block_to_propose.clone(),
-                coding_config,
-            )
-            .commitment();
+            let expected_commitment =
+                encode_block::<_, TestCoding, Sha256>(block_to_propose.clone(), coding_config)
+                    .commitment();
 
             let mock_app: MockVerifyingApp<CodingB, S> =
                 MockVerifyingApp::new().with_propose_result(block_to_propose);
@@ -5314,7 +5379,7 @@ mod tests {
                 let block = make_coding_block(ctx.clone(), genesis.digest(), Height::new(1), data);
                 let digest = block.digest();
                 let commitment =
-                    encode_block::<_, ReedSolomon<Sha256>, Sha256>(block.clone(), coding_config)
+                    encode_block::<_, TestCoding, Sha256>(block.clone(), coding_config)
                         .commitment();
                 let mock_app: MockVerifyingApp<CodingB, S> =
                     MockVerifyingApp::new().with_propose_result(block);
@@ -5512,8 +5577,7 @@ mod tests {
             };
             let child = make_coding_block(ctx.clone(), parent.digest(), Height::new(2), 7);
             let child_commitment =
-                encode_block::<_, ReedSolomon<Sha256>, Sha256>(child.clone(), coding_config)
-                    .commitment();
+                encode_block::<_, TestCoding, Sha256>(child.clone(), coding_config).commitment();
             let cfg = MarshaledConfig {
                 application: MockVerifyingApp::<CodingB, S>::new()
                     .with_handoff(Handoff::Stage(()))
@@ -5609,10 +5673,8 @@ mod tests {
                 };
                 let parent_block = make_coding_block(parent_ctx, genesis.digest(), height, view);
                 let parent_digest = parent_block.digest();
-                let parent = encode_block::<_, ReedSolomon<Sha256>, Sha256>(
-                    parent_block.clone(),
-                    coding_config,
-                );
+                let parent =
+                    encode_block::<_, TestCoding, Sha256>(parent_block.clone(), coding_config);
                 let parent_commitment = parent.commitment();
                 assert!(setup.mailbox.verified(parent_round, parent).await);
 
@@ -5623,7 +5685,7 @@ mod tests {
                 };
                 let child = make_coding_block(ctx.clone(), parent_digest, Height::new(2), 7);
                 let child_commitment =
-                    encode_block::<_, ReedSolomon<Sha256>, Sha256>(child.clone(), coding_config)
+                    encode_block::<_, TestCoding, Sha256>(child.clone(), coding_config)
                         .commitment();
                 let cfg = MarshaledConfig {
                     application: MockVerifyingApp::<CodingB, S>::new()
@@ -5693,10 +5755,8 @@ mod tests {
             let boundary_block =
                 make_coding_block(boundary_ctx, genesis.digest(), boundary_height, 1);
             let boundary_digest = boundary_block.digest();
-            let boundary = encode_block::<_, ReedSolomon<Sha256>, Sha256>(
-                boundary_block.clone(),
-                coding_config,
-            );
+            let boundary =
+                encode_block::<_, TestCoding, Sha256>(boundary_block.clone(), coding_config);
             let boundary_commitment = boundary.commitment();
             assert!(setup.mailbox.verified(boundary_round, boundary).await);
 
@@ -5708,8 +5768,7 @@ mod tests {
             };
             let child = make_coding_block(ctx.clone(), boundary_digest, boundary_height.next(), 2);
             let child_commitment =
-                encode_block::<_, ReedSolomon<Sha256>, Sha256>(child.clone(), coding_config)
-                    .commitment();
+                encode_block::<_, TestCoding, Sha256>(child.clone(), coding_config).commitment();
             let cfg = MarshaledConfig {
                 application: MockVerifyingApp::<CodingB, S>::new()
                     .with_handoff(Handoff::Stage(()))
@@ -5796,7 +5855,7 @@ mod tests {
             };
             let stale = make_coding_block(stale_ctx, genesis.digest(), Height::new(1), 100);
             let stale_digest = stale.digest();
-            let coded_stale: CodedBlock<_, ReedSolomon<Sha256>, Sha256> =
+            let coded_stale: CodedBlock<_, TestCoding, Sha256> =
                 encode_block(stale.clone(), coding_config);
             let stale_commitment = coded_stale.commitment();
             let (ack, persisted) = oneshot::channel();
@@ -5832,8 +5891,7 @@ mod tests {
             let fresh = make_coding_block(ctx.clone(), genesis.digest(), Height::new(1), 200);
             let fresh_digest = fresh.digest();
             let fresh_commitment =
-                encode_block::<_, ReedSolomon<Sha256>, Sha256>(fresh.clone(), coding_config)
-                    .commitment();
+                encode_block::<_, TestCoding, Sha256>(fresh.clone(), coding_config).commitment();
             let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new()
                 .with_handoff(Handoff::Vote(()))
                 .with_propose_result(fresh);
@@ -5964,7 +6022,7 @@ mod tests {
             };
             let boundary_block =
                 make_coding_block(boundary_ctx, genesis.digest(), boundary_height, 1900);
-            let coded_boundary: CodedBlock<_, ReedSolomon<Sha256>, Sha256> =
+            let coded_boundary: CodedBlock<_, TestCoding, Sha256> =
                 encode_block(boundary_block.clone(), coding_config);
             let boundary_commitment = coded_boundary.commitment();
             let round = Round::new(Epoch::zero(), View::new(boundary_height.get() + 1));

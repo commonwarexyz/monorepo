@@ -558,12 +558,12 @@ mod tests {
     use crate::dkg::tests::mocks;
     use bytes::{BufMut, Bytes};
     use commonware_codec::{EncodeSize, Error as CodecError, Read, Write};
-    use commonware_coding::ReedSolomon;
+    use commonware_coding::Segmented;
     use commonware_consensus::{
         Block as ConsensusBlock, CertifiableBlock, Heightable,
         marshal::coding::{
             Coding,
-            types::{CodedBlock, coding_config_for_participants},
+            types::{CodedBlock, CodedLayout, coding_config_for_participants},
         },
         simplex::{
             scheme::bls12381_threshold::vrf::Scheme as ThresholdScheme,
@@ -582,12 +582,15 @@ mod tests {
 
     const THRESHOLD_NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_PROBE_DISCOVERY_TEST";
 
-    type TestCommitment = Commitment<CodingBlock, ReedSolomon<Sha256>, Sha256>;
+    type Coder = Segmented<Sha256, 1024>;
+    type TestCommitment = Commitment<CodingBlock, Coder, Sha256>;
     type CodingContext =
         commonware_consensus::simplex::types::Context<TestCommitment, mocks::TestPublicKey>;
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct CodingBlock(mocks::MockBlock<mocks::TestDigest, CodingContext>);
+
+    impl CodedLayout for CodingBlock {}
 
     impl CodingBlock {
         fn new<H: Hasher<Digest = mocks::TestDigest>>(
@@ -650,7 +653,7 @@ mod tests {
         }
     }
 
-    type TestCodingVariant = Coding<CodingBlock, ReedSolomon<Sha256>, Sha256, mocks::TestPublicKey>;
+    type TestCodingVariant = Coding<CodingBlock, Coder, Sha256, mocks::TestPublicKey>;
     type TestThresholdScheme = ThresholdScheme<mocks::TestPublicKey, MinPk>;
 
     fn finalization<S, D>(proposal: Proposal<D>, schemes: &[S]) -> Finalization<S, D>
@@ -714,7 +717,7 @@ mod tests {
     async fn coding_block(
         leader: mocks::TestPublicKey,
         participants: u16,
-    ) -> Arc<CodedBlock<CodingBlock, ReedSolomon<Sha256>, Sha256>> {
+    ) -> Arc<CodedBlock<CodingBlock, Coder, Sha256>> {
         let parent = Sha256::hash(&[b"parent"]);
         let context = CodingContext {
             round: Round::new(Epoch::zero(), View::new(1)),

@@ -26,7 +26,11 @@ pub fn ready<B: crate::Block>(block: B) -> Digested<B> {
 }
 
 /// Encodes a block with its digest and coding configuration using the sequential strategy.
-pub fn encode_block<B: crate::CertifiableBlock, C: Scheme, H: Hasher>(
+pub fn encode_block<
+    B: crate::CertifiableBlock + crate::marshal::coding::types::CodedLayout,
+    C: Scheme,
+    H: Hasher,
+>(
     block: B,
     config: CodingConfig,
 ) -> CodedBlock<B, C, H> {
@@ -193,6 +197,8 @@ impl<H: Hasher> crate::CertifiableBlock for EmptyBlock<H> {
         self.parent
     }
 }
+
+impl<H: Hasher> crate::marshal::coding::types::CodedLayout for EmptyBlock<H> {}
 
 impl<H: Hasher> crate::BoundedBlock for EmptyBlock<H> {
     fn max_encode_size(_: &Self::Cfg) -> usize {

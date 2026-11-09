@@ -22,8 +22,10 @@ pub struct ShardMetrics<P: PublicKey> {
     pub reconstructed_blocks_cache_count: Gauge,
     /// Number of active reconstruction states.
     pub reconstruction_states_count: Gauge,
-    /// Number of shards received per peer.
+    /// Number of shard chunks received per peer.
     pub shards_received: CounterFamily<Peer<P>>,
+    /// Total number of verified chunks of the local shard relayed to peers.
+    pub chunks_forwarded: Counter,
     /// Total number of blocks successfully reconstructed.
     pub blocks_reconstructed_total: Counter,
     /// Total number of block reconstruction failures.
@@ -46,8 +48,14 @@ impl<P: PublicKey> ShardMetrics<P> {
             "reconstruction_states_count",
             "Number of active reconstruction states",
         );
-        let shards_received =
-            context.family("shards_received", "Number of shards received per peer");
+        let shards_received = context.family(
+            "shards_received",
+            "Number of shard chunks received per peer",
+        );
+        let chunks_forwarded = context.counter(
+            "chunks_forwarded",
+            "Total number of verified chunks of the local shard relayed to peers",
+        );
         let blocks_reconstructed_total = context.counter(
             "blocks_reconstructed_total",
             "Total number of blocks successfully reconstructed",
@@ -62,6 +70,7 @@ impl<P: PublicKey> ShardMetrics<P> {
             reconstructed_blocks_cache_count,
             reconstruction_states_count,
             shards_received,
+            chunks_forwarded,
             blocks_reconstructed_total,
             reconstruction_failures_total,
         }

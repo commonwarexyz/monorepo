@@ -8,7 +8,7 @@
 //! [`Handoff::Wait`], and a propose answers the digest and declines by closing the receiver.
 
 use crate::{
-    Application, Handoff,
+    Application, BodySink, Handoff,
     marshal::{ancestry::Ancestry, application::gates::Gates},
     simplex::types::Context,
 };
@@ -26,10 +26,10 @@ pub(crate) enum Resolved<D, S, A, M = ()> {
     /// The marshal cannot build on this parent.
     Skip,
     /// The parent is fetched and the application may build on its ancestry. The timer
-    /// measures the application's build from this point. The metadata (the coding
-    /// configuration, or unit for standard blocks) is passed to the sealing callback with
-    /// the built block.
-    Build(A, Timer, M),
+    /// measures the application's build from this point. The metadata (the coding body
+    /// stream, or unit for standard blocks) is passed to the sealing callback with the built
+    /// block, and the sink is handed to the application to receive the block's body.
+    Build(A, Timer, M, BodySink),
 }
 
 /// Answers a prepare request for `consensus_context` from a task spawned from `context` and
@@ -79,7 +79,7 @@ where
                 },
                 resolved = checks => resolved,
             };
-            let (ancestry, timer, metadata) = match resolved {
+            let (ancestry, timer, metadata, body) = match resolved {
                 // The boundary block is re-proposed as is and carries no application decision,
                 // so the answer withholds the vote until the parent certifies. Staging it under
                 // this round lets the relay broadcast and certification find it here.
@@ -102,7 +102,9 @@ where
                     tx.send_lossy(Handoff::Wait);
                     return;
                 }
-                Resolved::Build(ancestry, timer, metadata) => (ancestry, timer, metadata),
+                Resolved::Build(ancestry, timer, metadata, body) => {
+                    (ancestry, timer, metadata, body)
+                }
             };
 
             let build = application
@@ -110,6 +112,7 @@ where
                     (runtime_context.child("app_prepare"), consensus_context),
                     ancestry,
                     (),
+                    body,
                 )
                 .instrument(build_span());
             let prepared = select! {
@@ -198,7 +201,7 @@ where
                 },
                 resolved = checks => resolved,
             };
-            let (ancestor_stream, build_timer, metadata) = match resolved {
+            let (ancestor_stream, build_timer, metadata, body) = match resolved {
                 // The boundary block is re-proposed as is. Staging it under this round lets the
                 // relay broadcast and certification find it here.
                 Resolved::Reuse(digest, block) => {
@@ -217,8 +220,8 @@ where
                 }
                 // Closing the receiver skips the view, which the voter nullifies by timeout.
                 Resolved::Skip => return,
-                Resolved::Build(ancestor_stream, build_timer, metadata) => {
-                    (ancestor_stream, build_timer, metadata)
+                Resolved::Build(ancestor_stream, build_timer, metadata, body) => {
+                    (ancestor_stream, build_timer, metadata, body)
                 }
             };
 
@@ -228,6 +231,7 @@ where
                     (runtime_context.child("app_propose"), consensus_context),
                     ancestor_stream,
                     (),
+                    body,
                 )
                 .instrument(build_span());
 

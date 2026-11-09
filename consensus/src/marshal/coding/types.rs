@@ -3,10 +3,14 @@
 use crate::{
     Block, CertifiableBlock, Heightable,
     marshal::core::ExpectedCommitment,
-    types::{Height, coding::Commitment},
+    types::{Height, Round, coding::Commitment},
 };
-use commonware_codec::{BufsMut, EncodeSize, FixedSize, Read, ReadExt, Write};
-use commonware_coding::{Config as CodingConfig, Scheme};
+use bytes::{Buf, BufMut, Bytes};
+use commonware_codec::{
+    BufsMut, Codec, EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, RangeCfg, Read,
+    ReadExt, Write,
+};
+use commonware_coding::{Config as CodingConfig, Scheme, Segmentable};
 use commonware_cryptography::{Committable, Digested, Digestible, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::{Faults, N3f1, NZU16};
@@ -14,6 +18,97 @@ use std::{
     future::Future,
     sync::{Arc, OnceLock},
 };
+
+/// The byte layout erasure coded for a block.
+///
+/// The canonical [`Codec`] encoding is authoritative for storage, backfill and digests. The
+/// coded layout orders the same information so that the body, the bytes that are final before
+/// the block is sealed, comes first and can be coded while the rest of the block is still being
+/// computed. The coded payload is
+///
+/// ```text
+/// write_body || write_tail || body_len (u32 little endian) || coding config
+/// ```
+///
+/// so a decoder reads the config and the body length from the end. A block that keeps the
+/// defaults codes as its canonical encoding with an empty body.
+///
+/// The body and tail together must be exactly as long as the canonical encoding, so the coded
+/// payload is bounded by the block's encoded size and the body's length follows from the tail's.
+///
+/// ```text
+/// canonical encoding    [ header ][ count ][ tx ][ tx ] ... [ tx ]
+/// (storage, digest)        ^ carries commitments to the executed state, known only after it exists
+///
+/// coded layout          [ tx ][ tx ] ... [ tx ][ header ][ count ][ body_len ][ config ]
+/// (what is coded)        \______ body ______/\______ tail ______/\__ trailer __/
+///                        final before the      final when the block
+///                        block is sealed       is sealed
+/// ```
+pub trait CodedLayout: Codec + Sized {
+    /// Writes the bytes that are final before the block is sealed (for example its
+    /// transactions).
+    fn write_body(&self, _buf: &mut impl BufMut) {}
+
+    /// Writes everything the body does not carry.
+    fn write_tail(&self, buf: &mut impl BufMut) {
+        self.write(buf);
+    }
+
+    /// Reads a block from its body and tail.
+    ///
+    /// It must be the strict inverse of [`Self::write_body`] and [`Self::write_tail`], so every
+    /// block has exactly one accepted `(body, tail)` pair.
+    fn read_coded(body: Bytes, tail: Bytes, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        if !body.is_empty() {
+            return Err(CodecError::Invalid("CodedLayout", "unexpected body"));
+        }
+        Self::decode_cfg(tail, cfg)
+    }
+}
+
+/// The size of the trailer that follows a block's coded layout: its body length and the coding
+/// config.
+const CODED_TRAILER: usize = u32::SIZE + CodingConfig::SIZE;
+
+/// Writes the trailer that ends a coded payload whose body is `body_len` bytes.
+pub(crate) fn write_coded_trailer(body_len: usize, config: CodingConfig, buf: &mut impl BufMut) {
+    let body_len = u32::try_from(body_len).expect("a block body must fit in a u32 length");
+    buf.put_slice(&body_len.to_le_bytes());
+    config.write(buf);
+}
+
+/// Returns the coded payload of `block` under `config` and the length of its body.
+pub(crate) fn coded_payload<B: CodedLayout>(block: &B, config: CodingConfig) -> (Vec<u8>, usize) {
+    let mut buf = Vec::with_capacity(block.encode_size() + CODED_TRAILER);
+    block.write_body(&mut buf);
+    let body_len = buf.len();
+    block.write_tail(&mut buf);
+    write_coded_trailer(body_len, config, &mut buf);
+    (buf, body_len)
+}
+
+/// Reads a block and the coding config from a coded payload.
+pub(crate) fn read_coded_payload<B: CodedLayout>(
+    payload: Vec<u8>,
+    cfg: &B::Cfg,
+) -> Result<(B, CodingConfig), CodecError> {
+    let Some(layout_len) = payload.len().checked_sub(CODED_TRAILER) else {
+        return Err(CodecError::EndOfBuffer);
+    };
+    let mut payload = Bytes::from(payload);
+    let mut trailer = payload.split_off(layout_len);
+    let body_len = trailer.get_u32_le() as usize;
+    let config = CodingConfig::read(&mut trailer)?;
+    if body_len > layout_len {
+        return Err(CodecError::Invalid(
+            "CodedLayout",
+            "body length exceeds payload",
+        ));
+    }
+    let tail = payload.split_off(body_len);
+    Ok((B::read_coded(payload, tail, cfg)?, config))
+}
 
 /// A broadcastable shard of erasure coded data, including the coding commitment and
 /// the configuration used to code the data.
@@ -149,6 +244,326 @@ where
     }
 }
 
+/// One segment's chunk of a shard.
+///
+/// A proposer sends each chunk as soon as its segment is coded. That can be before the block is
+/// sealed and its commitment exists.
+///
+/// The leader sends each recipient its chunk, and a participant relays the chunk of its own index
+/// unchanged. A recipient checks the chunk against `root`, and [`StreamRoots`] binds every root
+/// to the commitment.
+pub struct StreamChunk<C: Segmentable> {
+    /// The coding config the chunk was coded with.
+    pub(crate) config: CodingConfig,
+    /// The round in which the block is proposed.
+    pub(crate) round: Round,
+    /// The index of the shard this chunk belongs to.
+    pub(crate) index: u16,
+    /// The segment this chunk codes.
+    pub(crate) segment: u16,
+    /// The root of the segment.
+    pub(crate) root: C::Commitment,
+    /// The chunk of shard `index` for `segment`.
+    pub(crate) chunk: C::Chunk,
+}
+
+impl<C: Segmentable> Clone for StreamChunk<C> {
+    fn clone(&self) -> Self {
+        Self {
+            config: self.config,
+            round: self.round,
+            index: self.index,
+            segment: self.segment,
+            root: self.root,
+            chunk: self.chunk.clone(),
+        }
+    }
+}
+
+impl<C: Segmentable> PartialEq for StreamChunk<C> {
+    fn eq(&self, other: &Self) -> bool {
+        self.config == other.config
+            && self.round == other.round
+            && self.index == other.index
+            && self.segment == other.segment
+            && self.root == other.root
+            && self.chunk == other.chunk
+    }
+}
+
+impl<C: Segmentable> Eq for StreamChunk<C> {}
+
+/// The segment roots of a block whose chunks were streamed. The leader sends them once the block
+/// is sealed, and each participant that binds them relays them. They must hash to the
+/// commitment's coding root.
+pub struct StreamRoots<B: Digestible, C: Segmentable, H: Hasher> {
+    /// The coding commitment.
+    pub(crate) commitment: Commitment<B, C, H>,
+    /// The round in which the block is proposed.
+    pub(crate) round: Round,
+    /// The root of every segment, in segment order.
+    pub(crate) roots: Vec<C::Commitment>,
+}
+
+impl<B: Digestible, C: Segmentable, H: Hasher> Clone for StreamRoots<B, C, H> {
+    fn clone(&self) -> Self {
+        Self {
+            commitment: self.commitment,
+            round: self.round,
+            roots: self.roots.clone(),
+        }
+    }
+}
+
+impl<B: Digestible, C: Segmentable, H: Hasher> PartialEq for StreamRoots<B, C, H> {
+    fn eq(&self, other: &Self) -> bool {
+        self.commitment == other.commitment
+            && self.round == other.round
+            && self.roots == other.roots
+    }
+}
+
+impl<B: Digestible, C: Segmentable, H: Hasher> Eq for StreamRoots<B, C, H> {}
+
+/// A message of the shards engine.
+///
+/// Every message starts with a one byte tag that selects the variant:
+///
+/// ```text
+/// Stream: 0 || coding config || round || index || segment || root || chunk
+/// Roots:  1 || commitment || round || roots
+/// ```
+///
+/// Each variant claims a coding config in the field after the tag. A stream message's config is
+/// that field, and a roots message's commitment ends with its config, so a receiver can classify
+/// a message with [`Self::claimed_config`] before decoding the rest.
+pub enum ShardMessage<B: Digestible, C: Segmentable, H: Hasher> {
+    /// One segment's chunk of a shard.
+    Stream(StreamChunk<C>),
+    /// The segment roots of a block whose chunks were streamed.
+    Roots(StreamRoots<B, C, H>),
+}
+
+impl<B: Digestible, C: Segmentable, H: Hasher> ShardMessage<B, C, H> {
+    const STREAM: u8 = 0;
+    const ROOTS: u8 = 1;
+
+    /// Returns the largest encoded size of a message whose chunk encodes to at most `chunk`
+    /// bytes, for a block of at most `segments` segments.
+    pub fn max_encode_size(chunk: usize, segments: u16) -> usize {
+        let stream = CodingConfig::SIZE
+            + Round::MAX_ENCODE_SIZE
+            + 2 * u16::SIZE
+            + C::Commitment::SIZE
+            + chunk;
+        let roots = Commitment::<B, C, H>::SIZE
+            + Round::MAX_ENCODE_SIZE
+            + usize::from(segments).encode_size()
+            + usize::from(segments) * C::Commitment::SIZE;
+        u8::SIZE + stream.max(roots)
+    }
+
+    /// Returns the coding config the encoded message `bytes` claims, reading only its tag and
+    /// the config or commitment that follows.
+    pub fn claimed_config(bytes: &[u8]) -> Result<CodingConfig, CodecError> {
+        let mut buf = commonware_codec::Copying(bytes);
+        match u8::read(&mut buf)? {
+            Self::STREAM => CodingConfig::read(&mut buf),
+            Self::ROOTS => Ok(Commitment::<B, C, H>::read(&mut buf)?.config()),
+            tag => Err(CodecError::InvalidEnum(tag)),
+        }
+    }
+
+    /// Returns the round the message belongs to.
+    pub const fn round(&self) -> Round {
+        match self {
+            Self::Stream(chunk) => chunk.round,
+            Self::Roots(roots) => roots.round,
+        }
+    }
+
+    /// Writes every field but the variable-width chunk data.
+    fn write_header(&self, buf: &mut impl BufMut) {
+        match self {
+            Self::Stream(chunk) => {
+                Self::STREAM.write(buf);
+                chunk.config.write(buf);
+                chunk.round.write(buf);
+                chunk.index.write(buf);
+                chunk.segment.write(buf);
+                chunk.root.write(buf);
+            }
+            Self::Roots(roots) => {
+                Self::ROOTS.write(buf);
+                roots.commitment.write(buf);
+                roots.round.write(buf);
+                roots.roots.write(buf);
+            }
+        }
+    }
+
+    /// Returns the encoded size of every field but the chunk data.
+    fn header_size(&self) -> usize {
+        u8::SIZE
+            + match self {
+                Self::Stream(chunk) => {
+                    CodingConfig::SIZE
+                        + chunk.round.encode_size()
+                        + chunk.index.encode_size()
+                        + chunk.segment.encode_size()
+                        + chunk.root.encode_size()
+                }
+                Self::Roots(roots) => {
+                    Commitment::<B, C, H>::SIZE
+                        + roots.round.encode_size()
+                        + roots.roots.encode_size()
+                }
+            }
+    }
+}
+
+impl<B: Digestible, C: Segmentable, H: Hasher> From<StreamChunk<C>> for ShardMessage<B, C, H> {
+    fn from(chunk: StreamChunk<C>) -> Self {
+        Self::Stream(chunk)
+    }
+}
+
+impl<B: Digestible, C: Segmentable, H: Hasher> From<StreamRoots<B, C, H>>
+    for ShardMessage<B, C, H>
+{
+    fn from(roots: StreamRoots<B, C, H>) -> Self {
+        Self::Roots(roots)
+    }
+}
+
+impl<B: Digestible, C: Segmentable, H: Hasher> Clone for ShardMessage<B, C, H> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Stream(chunk) => Self::Stream(chunk.clone()),
+            Self::Roots(roots) => Self::Roots(roots.clone()),
+        }
+    }
+}
+
+impl<B: Digestible, C: Segmentable, H: Hasher> Write for ShardMessage<B, C, H> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.write_header(buf);
+        if let Self::Stream(chunk) = self {
+            chunk.chunk.write(buf);
+        }
+    }
+
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        self.write_header(buf);
+        if let Self::Stream(chunk) = self {
+            chunk.chunk.write_bufs(buf);
+        }
+    }
+}
+
+impl<B: Digestible, C: Segmentable, H: Hasher> EncodeSize for ShardMessage<B, C, H> {
+    fn encode_size(&self) -> usize {
+        self.header_size()
+            + match self {
+                Self::Stream(chunk) => chunk.chunk.encode_size(),
+                Self::Roots(_) => 0,
+            }
+    }
+
+    fn encode_inline_size(&self) -> usize {
+        self.header_size()
+            + match self {
+                Self::Stream(chunk) => chunk.chunk.encode_inline_size(),
+                Self::Roots(_) => 0,
+            }
+    }
+}
+
+impl<B: Digestible, C: Segmentable, H: Hasher> Read for ShardMessage<B, C, H> {
+    /// An upper bound on the encoded size of an application block.
+    type Cfg = usize;
+
+    fn read_cfg(
+        buf: &mut impl commonware_codec::Buf,
+        max_block_size: &Self::Cfg,
+    ) -> Result<Self, CodecError> {
+        // The claimed config is untrusted until roots bound to a named commitment cover the chunk,
+        // so chunk data may reach the scheme's widest for a payload at this bound. A payload at
+        // the bound also has the most segments.
+        let maximum = max_block_size.saturating_add(CODED_TRAILER);
+        match u8::read(buf)? {
+            Self::STREAM => {
+                let config = CodingConfig::read(buf)?;
+                let round = Round::read(buf)?;
+                let index = u16::read(buf)?;
+                let segment = u16::read(buf)?;
+                let root = C::Commitment::read(buf)?;
+                let chunk = C::Chunk::read_cfg(buf, &(config, maximum))?;
+                Ok(Self::Stream(StreamChunk {
+                    config,
+                    round,
+                    index,
+                    segment,
+                    root,
+                    chunk,
+                }))
+            }
+            Self::ROOTS => {
+                let segments = usize::from(C::segments(maximum));
+                let commitment = Commitment::<B, C, H>::read(buf)?;
+                let round = Round::read(buf)?;
+                let roots =
+                    Vec::<C::Commitment>::read_cfg(buf, &(RangeCfg::new(1..=segments), ()))?;
+                Ok(Self::Roots(StreamRoots {
+                    commitment,
+                    round,
+                    roots,
+                }))
+            }
+            tag => Err(CodecError::InvalidEnum(tag)),
+        }
+    }
+}
+
+impl<B: Digestible, C: Segmentable, H: Hasher> PartialEq for ShardMessage<B, C, H> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Stream(a), Self::Stream(b)) => a == b,
+            (Self::Roots(a), Self::Roots(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl<B: Digestible, C: Segmentable, H: Hasher> Eq for ShardMessage<B, C, H> {}
+
+#[cfg(feature = "arbitrary")]
+impl<B: Digestible, C: Segmentable, H: Hasher> arbitrary::Arbitrary<'_> for ShardMessage<B, C, H>
+where
+    Commitment<B, C, H>: for<'a> arbitrary::Arbitrary<'a>,
+    C::Commitment: for<'a> arbitrary::Arbitrary<'a>,
+    C::Chunk: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        if u.arbitrary()? {
+            Ok(Self::Stream(StreamChunk {
+                config: u.arbitrary()?,
+                round: u.arbitrary()?,
+                index: u.arbitrary()?,
+                segment: u.arbitrary()?,
+                root: u.arbitrary()?,
+                chunk: u.arbitrary()?,
+            }))
+        } else {
+            Ok(Self::Roots(StreamRoots {
+                commitment: u.arbitrary()?,
+                round: u.arbitrary()?,
+                roots: u.arbitrary()?,
+            }))
+        }
+    }
+}
+
 /// An envelope type for an erasure coded [`Block`].
 ///
 /// The consensus commitment is fixed when the block is built, decoded, or restored, so reading
@@ -174,18 +589,10 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
         application + CodingConfig::SIZE
     }
 
-    /// Erasure codes the block.
-    #[allow(clippy::type_complexity)]
-    fn encode_shards(
-        inner: &B,
-        config: CodingConfig,
-        strategy: &impl Strategy,
-    ) -> Result<(C::Commitment, Vec<C::Shard>), C::Error> {
-        let mut buf = Vec::with_capacity(inner.encode_size() + config.encode_size());
-        inner.write(&mut buf);
-        config.write(&mut buf);
-
-        C::encode(&config, buf.as_slice(), strategy)
+    /// Returns the largest coded payload of a block whose application block encodes to at most
+    /// `application` bytes.
+    pub const fn max_coded_size(application: usize) -> usize {
+        application + CODED_TRAILER
     }
 
     /// Creates a [`CodedBlock`] from a [`Block`] and its precomputed [`Commitment`].
@@ -210,27 +617,6 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
     /// Returns the coding configuration for the data committed.
     pub fn config(&self) -> CodingConfig {
         self.commitment.config()
-    }
-
-    /// Returns a reference to the shards in this coded block.
-    ///
-    /// If the shards have not yet been generated, they will be created via [`Scheme::encode`].
-    pub fn shards(&self, strategy: &impl Strategy) -> &[C::Shard] {
-        self.shards.get_or_init(|| {
-            let (root, shards) = Self::encode_shards(&self.inner, self.config(), strategy)
-                .expect("must encode block successfully");
-
-            // A mismatch means a commitment trusted at construction does not
-            // encode this block, which is a contract violation or a consensus
-            // safety failure. Never serve shards under a different root.
-            assert_eq!(
-                root,
-                self.commitment.root(),
-                "coded block constructed with trusted commitment does not match commitment"
-            );
-
-            shards.into()
-        })
     }
 
     /// Returns a [`Shard`] at the given index, if the index is valid.
@@ -258,7 +644,57 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
     }
 }
 
-impl<B: CertifiableBlock, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
+impl<B: CertifiableBlock + CodedLayout, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
+    /// Erasure codes the block's coded layout.
+    #[allow(clippy::type_complexity)]
+    fn encode_shards(
+        inner: &B,
+        config: CodingConfig,
+        strategy: &impl Strategy,
+    ) -> Result<(C::Commitment, Vec<C::Shard>), C::Error> {
+        let (payload, _) = coded_payload(inner, config);
+        C::encode(&config, payload.as_slice(), strategy)
+    }
+
+    /// Returns a reference to the shards in this coded block.
+    ///
+    /// If the shards have not yet been generated, they will be created via [`Scheme::encode`].
+    pub fn shards(&self, strategy: &impl Strategy) -> &[C::Shard] {
+        self.shards.get_or_init(|| {
+            let (root, shards) = Self::encode_shards(&self.inner, self.config(), strategy)
+                .expect("must encode block successfully");
+
+            // A mismatch means a commitment trusted at construction does not
+            // encode this block, which is a contract violation or a consensus
+            // safety failure. Never serve shards under a different root.
+            assert_eq!(
+                root,
+                self.commitment.root(),
+                "coded block constructed with trusted commitment does not match commitment"
+            );
+
+            shards.into()
+        })
+    }
+
+    /// Builds a [`CodedBlock`] from shards already coded under `root` and `config`, for example
+    /// segment by segment while the block was built.
+    ///
+    /// `shards` and `root` must be the coding of the block's coded layout under `config`, as
+    /// [`Self::encode`] would produce them.
+    pub fn from_shards(
+        inner: Digested<B>,
+        config: CodingConfig,
+        root: C::Commitment,
+        shards: Vec<C::Shard>,
+    ) -> Self {
+        Self {
+            commitment: Self::commit(&inner, root, config),
+            inner: inner.into(),
+            shards: OnceLock::from(Arc::<[C::Shard]>::from(shards)),
+        }
+    }
+
     /// Builds the consensus commitment of `inner` from its coding `root` and `config`.
     fn commit(
         inner: &Digested<B>,
@@ -614,7 +1050,6 @@ pub fn coding_config_for_participants(n_participants: u16) -> CodingConfig {
 mod test {
     use super::*;
     use crate::marshal::mocks::block::{EmptyBlock, encode_block};
-    use bytes::Buf as _;
     use commonware_codec::{Decode, Encode, Error, Input};
     use commonware_coding::ReedSolomon;
     use commonware_cryptography::{Digest, Sha256, sha256::Digest as Sha256Digest};
@@ -701,6 +1136,94 @@ mod test {
         }));
         assert!(decode.is_ok(), "decode must not panic on truncated input");
         assert!(decode.unwrap().is_err());
+    }
+
+    /// Every message variant starts with its tag, claims its coding config in the field after it,
+    /// round-trips, and fits the bound for its chunk width and segment count. A roots message
+    /// carrying more roots than a payload at the bound has segments is rejected.
+    #[test]
+    fn test_shard_message_codec_roundtrip() {
+        // A chunk and the roots of a two-segment payload, one message of each variant.
+        type SC = commonware_coding::Segmented<H, 64>;
+        const CONFIG: CodingConfig = CodingConfig {
+            minimum_shards: NZU16!(2),
+            extra_shards: NZU16!(2),
+        };
+        let data = [7u8; 100];
+        let (root, shards) = SC::encode(&CONFIG, data.as_slice(), &Sequential).unwrap();
+        let (roots, chunks) = SC::split(&shards[1]);
+        let commitment = Commitment::from((Sha256Digest::EMPTY, root, Sha256Digest::EMPTY, CONFIG));
+        let round = Round::new(crate::types::Epoch::new(3), crate::types::View::new(7));
+        let stream = StreamChunk::<SC> {
+            config: CONFIG,
+            round,
+            index: 1,
+            segment: 1,
+            root: roots[1],
+            chunk: chunks[1].clone(),
+        };
+        let sealed = StreamRoots {
+            commitment,
+            round,
+            roots,
+        };
+
+        // Each message starts with its tag, fits the bound, claims the config, and round-trips.
+        let bound = ShardMessage::<TestBlock, SC, H>::max_encode_size(
+            SC::max_chunk_size(&CONFIG, data.len()),
+            SC::segments(data.len()),
+        );
+        for (tag, message) in [(0, stream.into()), (1, sealed.clone().into())] {
+            let message: ShardMessage<TestBlock, SC, H> = message;
+            let encoded = message.encode();
+            assert_eq!(encoded[0], tag);
+            assert!(encoded.len() <= bound);
+            assert_eq!(
+                ShardMessage::<TestBlock, SC, H>::claimed_config(encoded.as_ref()).unwrap(),
+                CONFIG
+            );
+            let decoded =
+                ShardMessage::<TestBlock, SC, H>::decode_cfg(encoded, &MAX_BLOCK_SIZE).unwrap();
+            assert!(decoded == message);
+        }
+
+        // A message with no tag or an unknown tag claims no config.
+        assert!(ShardMessage::<TestBlock, SC, H>::claimed_config(&[]).is_err());
+        assert!(ShardMessage::<TestBlock, SC, H>::claimed_config(&[2]).is_err());
+
+        // A payload at a 64 byte block bound spans two segments, so a third root is rejected.
+        let mut wide = sealed;
+        wide.roots.push(root);
+        let encoded = ShardMessage::Roots(wide).encode();
+        assert!(ShardMessage::<TestBlock, SC, H>::decode_cfg(encoded, &64).is_err());
+    }
+
+    /// The coded layout of a block that keeps the defaults is its canonical encoding with an
+    /// empty body, and the payload decodes back to the block and config. A trailer naming a body
+    /// longer than the payload is rejected.
+    #[test]
+    fn test_coded_payload_roundtrip() {
+        // A block that keeps the defaults codes as its canonical encoding, a zero body length,
+        // and the config.
+        let block = TestBlock::new(Sha256Digest::EMPTY, Height::new(3), 9);
+        let config = coding_config_for_participants(4);
+        let (payload, body_len) = coded_payload(&block, config);
+        assert_eq!(body_len, 0);
+        let mut expected = block.encode().to_vec();
+        expected.extend_from_slice(&0u32.to_le_bytes());
+        expected.extend_from_slice(&config.encode());
+        assert_eq!(payload, expected);
+
+        // The payload decodes back to the block and its config.
+        let (decoded, decoded_config) = read_coded_payload::<TestBlock>(payload, &()).unwrap();
+        assert!(decoded == block);
+        assert_eq!(decoded_config, config);
+
+        // A trailer naming a body longer than the payload is rejected.
+        let (mut payload, _) = coded_payload(&block, config);
+        let at = payload.len() - CODED_TRAILER;
+        payload[at..at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(read_coded_payload::<TestBlock>(payload, &()).is_err());
     }
 
     #[test]
@@ -1002,9 +1525,11 @@ mod test {
     mod conformance {
         use super::*;
         use commonware_codec::conformance::CodecConformance;
+        use commonware_coding::Segmented;
 
         commonware_conformance::conformance_tests! {
             CodecConformance<Shard<TestBlock, ReedSolomon<Sha256>, Sha256>>,
+            CodecConformance<ShardMessage<TestBlock, Segmented<Sha256, 64>, Sha256>>,
         }
     }
 }

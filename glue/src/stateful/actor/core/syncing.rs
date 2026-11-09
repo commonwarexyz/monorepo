@@ -412,7 +412,7 @@ mod tests {
     };
     use commonware_actor::{Feedback, mailbox as actor_mailbox};
     use commonware_consensus::{
-        Application as _, CertifiableBlock as _, Heightable, Reporter as _,
+        Application as _, BodySink, CertifiableBlock as _, Heightable, Reporter as _,
         marshal::{
             self, Update, ancestry,
             core::{Mailbox as MarshalMailbox, Processed},
@@ -1172,6 +1172,7 @@ mod tests {
                             (context.child("queue_fence"), proposal.context()),
                             ancestry::from_iter([]),
                             (),
+                            BodySink::noop(),
                         )
                         .await
                         .is_none()
@@ -1260,6 +1261,7 @@ mod tests {
                             (queue_context.child("queue_fence"), proposal.context()),
                             ancestry::from_iter([]),
                             (),
+                            BodySink::noop(),
                         )
                         .await
                         .is_none()

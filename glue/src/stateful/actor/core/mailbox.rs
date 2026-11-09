@@ -6,8 +6,8 @@ use commonware_actor::{
     mailbox::{Overflow, Policy, Sender},
 };
 use commonware_consensus::{
-    Application as ConsensusApplication, Block, CertifiableBlock, Epochable, Handoff, Reporter,
-    Viewable,
+    Application as ConsensusApplication, Block, BodySink, CertifiableBlock, Epochable, Handoff,
+    Reporter, Viewable,
     marshal::{
         Update,
         ancestry::{Ancestry, BoxedAncestry},
@@ -287,6 +287,7 @@ where
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         upstream: Self::Input,
+        _body: BodySink,
     ) -> Handoff<Digested<Self::Block>> {
         let (response, receiver) = oneshot::channel();
         let span = info_span!(
@@ -309,6 +310,7 @@ where
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         upstream: Self::Input,
+        _body: BodySink,
     ) -> Option<Digested<Self::Block>> {
         let (response, receiver) = oneshot::channel();
         let span = info_span!(

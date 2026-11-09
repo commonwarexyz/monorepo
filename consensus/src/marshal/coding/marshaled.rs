@@ -99,7 +99,8 @@ use crate::{
         },
         coding::{
             Coding, shards,
-            types::{CodedBlock, coding_config_for_participants, hash_context},
+            stream::BodyStream,
+            types::{CodedBlock, CodedLayout, coding_config_for_participants, hash_context},
             validation::{ProposalError, validate_block, validate_proposal},
         },
         core,
@@ -112,8 +113,7 @@ use crate::{
     types::{Epoch, Epocher, Round, View, coding::Commitment},
 };
 use commonware_actor::Feedback;
-use commonware_codec::Codec;
-use commonware_coding::{Config as CodingConfig, Scheme as CodingScheme};
+use commonware_coding::Segmentable;
 use commonware_cryptography::{
     Committable, Digested, Digestible, Hasher,
     certificate::{Provider, Scheme as _, Verifier},
@@ -135,18 +135,19 @@ use futures::future::Either;
 use std::{future::Future, sync::Arc};
 use tracing::{Instrument as _, debug, info_span, warn};
 
-/// The outcome of the coding proposal checks. A build carries the coding configuration of the
-/// epoch's participants to the sealing step.
+/// The outcome of the coding proposal checks. A build carries to the sealing step the
+/// [`BodyStream`] that codes the block's body under the coding configuration of the epoch's
+/// participants.
 type CodingResolved<B, C, H, A> =
-    Resolved<Commitment<B, C, H>, Arc<CodedBlock<B, C, H>>, A, CodingConfig>;
+    Resolved<Commitment<B, C, H>, Arc<CodedBlock<B, C, H>>, A, BodyStream<C>>;
 
 /// Configuration for initializing [`Marshaled`].
 #[allow(clippy::type_complexity)]
 pub struct MarshaledConfig<A, B, C, H, Z, S, ES>
 where
     B: CertifiableBlock<Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>>
-        + Codec,
-    C: CodingScheme,
+        + CodedLayout,
+    C: Segmentable,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<B, C, H>>>,
     S: Strategy,
@@ -176,8 +177,8 @@ pub struct Marshaled<E, A, B, C, H, Z, S, ES>
 where
     A: Application<E>,
     B: CertifiableBlock<Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>>
-        + Codec,
-    C: CodingScheme,
+        + CodedLayout,
+    C: Segmentable,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<B, C, H>>>,
     S: Strategy,
@@ -203,8 +204,8 @@ impl<E, A, B, C, H, Z, S, ES> Clone for Marshaled<E, A, B, C, H, Z, S, ES>
 where
     A: Application<E>,
     B: CertifiableBlock<Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>>
-        + Codec,
-    C: CodingScheme,
+        + CodedLayout,
+    C: Segmentable,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<B, C, H>>>,
     S: Strategy,
@@ -239,8 +240,8 @@ where
             Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
             Input = (),
         >,
-    B: CertifiableBlock<Context = <A as Application<E>>::Context> + Codec,
-    C: CodingScheme,
+    B: CertifiableBlock<Context = <A as Application<E>>::Context> + CodedLayout,
+    C: Segmentable,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<B, C, H>>>,
     S: Strategy,
@@ -681,6 +682,8 @@ where
         let proposal_parent_fetch_duration = self.proposal_parent_fetch_duration.clone();
         let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
         let build_duration = self.build_duration.clone();
+        let shards = self.shards.clone();
+        let strategy = self.strategy.clone();
         async move {
             let Some(scheme) = scheme_provider.scheme(consensus_context.epoch()) else {
                 debug!(round = %consensus_context.round, "no scheme for epoch, skipping proposal");
@@ -743,10 +746,18 @@ where
                 [parent.inner_digested()],
                 ancestor_fetch_duration,
             );
+            let (body, stream) = BodyStream::start(
+                &*context,
+                strategy,
+                shards,
+                consensus_context.round,
+                coding_config,
+            );
             Resolved::Build(
                 ancestor_stream,
                 build_duration.timer(&*context),
-                coding_config,
+                stream,
+                body,
             )
         }
     }
@@ -762,8 +773,8 @@ where
             Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
             Input = (),
         >,
-    B: CertifiableBlock<Context = <A as Application<E>>::Context> + Codec,
-    C: CodingScheme,
+    B: CertifiableBlock<Context = <A as Application<E>>::Context> + CodedLayout,
+    C: Segmentable,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<B, C, H>>>,
     S: Strategy,
@@ -792,6 +803,7 @@ where
         consensus_context: Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
     ) -> oneshot::Receiver<Self::Digest> {
         let strategy = self.strategy.clone();
+        let shards = self.shards.clone();
         let erasure_encode_duration = self.erasure_encode_duration.clone();
         let clock = self.context.clone();
         let (parent_view, parent_commitment) = consensus_context.parent;
@@ -821,9 +833,9 @@ where
                     parent = %parent_commitment
                 )
             },
-            move |block: Digested<B>, coding_config| async move {
+            move |block: Digested<B>, stream: BodyStream<C>| async move {
                 let erasure_timer = erasure_encode_duration.timer(&*clock);
-                let coded = CodedBlock::encode(block, coding_config, &strategy).await;
+                let coded = stream.seal(block, &strategy, &shards, round).await;
                 erasure_timer.observe(&*clock);
                 (coded.commitment(), Arc::new(coded))
             },
@@ -1064,8 +1076,8 @@ where
             Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
             Input = (),
         >,
-    B: CertifiableBlock<Context = <A as Application<E>>::Context> + Codec,
-    C: CodingScheme,
+    B: CertifiableBlock<Context = <A as Application<E>>::Context> + CodedLayout,
+    C: Segmentable,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<B, C, H>>>,
     S: Strategy,
@@ -1085,6 +1097,7 @@ where
         consensus_context: Context<Self::Digest, <Z::Scheme as Verifier>::PublicKey>,
     ) -> oneshot::Receiver<Handoff<Self::Digest>> {
         let strategy = self.strategy.clone();
+        let shards = self.shards.clone();
         let erasure_encode_duration = self.erasure_encode_duration.clone();
         let clock = self.context.clone();
         let (parent_view, parent_commitment) = consensus_context.parent;
@@ -1109,9 +1122,9 @@ where
                     parent = %parent_commitment
                 )
             },
-            move |block: Digested<B>, coding_config| async move {
+            move |block: Digested<B>, stream: BodyStream<C>| async move {
                 let erasure_timer = erasure_encode_duration.timer(&*clock);
-                let coded = CodedBlock::encode(block, coding_config, &strategy).await;
+                let coded = stream.seal(block, &strategy, &shards, round).await;
                 erasure_timer.observe(&*clock);
                 (coded.commitment(), Arc::new(coded))
             },
@@ -1141,8 +1154,8 @@ where
             Block = B,
             Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
         >,
-    B: CertifiableBlock<Context = <A as Application<E>>::Context> + Codec,
-    C: CodingScheme,
+    B: CertifiableBlock<Context = <A as Application<E>>::Context> + CodedLayout,
+    C: Segmentable,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<B, C, H>>>,
     S: Strategy,
@@ -1177,8 +1190,8 @@ where
             Block = B,
             Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
         >,
-    B: CertifiableBlock<Context = <A as Application<E>>::Context> + Codec,
-    C: CodingScheme,
+    B: CertifiableBlock<Context = <A as Application<E>>::Context> + CodedLayout,
+    C: Segmentable,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<B, C, H>>>,
     S: Strategy,
@@ -1204,27 +1217,26 @@ mod tests {
             application::gates::Gates,
             coding::types::CodedBlock,
             mocks::{
-                harness::{CodingB, P, S},
+                harness::{CodingB, P, S, TestCoding},
                 verifying::MockVerifyingApp,
             },
         },
         types::{FixedEpocher, coding::Commitment},
     };
-    use commonware_coding::ReedSolomon;
     use commonware_cryptography::sha256::Sha256;
     use commonware_parallel::Sequential;
     use commonware_runtime::deterministic;
     use std::sync::Arc;
 
-    type TestCommitment = Commitment<CodingB, ReedSolomon<Sha256>, Sha256>;
-    type TestCodedBlock = CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>;
+    type TestCommitment = Commitment<CodingB, TestCoding, Sha256>;
+    type TestCodedBlock = CodedBlock<CodingB, TestCoding, Sha256>;
 
     impl
         Marshaled<
             deterministic::Context,
             MockVerifyingApp<CodingB, S>,
             CodingB,
-            ReedSolomon<Sha256>,
+            TestCoding,
             Sha256,
             P,
             Sequential,

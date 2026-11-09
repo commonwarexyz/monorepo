@@ -44,11 +44,14 @@ mod tests {
         marshal::{
             coding::{
                 Coding,
-                types::{Shard, coding_config_for_participants},
+                types::{
+                    CodedBlock, ShardMessage, StreamChunk, coded_payload,
+                    coding_config_for_participants,
+                },
             },
             mocks::{
                 block::encode_block,
-                harness::{CodingB, CodingCtx, default_leader, make_coding_block},
+                harness::{CodingB, CodingCtx, TestCoding, default_leader, make_coding_block},
             },
             standard::Standard,
         },
@@ -58,8 +61,8 @@ mod tests {
         },
         types::{Epoch, Height, Round, View, coding::Commitment},
     };
-    use commonware_codec::{Decode, Encode, EncodeSize, FixedSize, MaxEncodeSize};
-    use commonware_coding::{Config as CodingConfig, ReedSolomon, Scheme as _};
+    use commonware_codec::{Decode, Encode, EncodeSize, MaxEncodeSize};
+    use commonware_coding::{Scheme as _, Segmentable as _};
     use commonware_cryptography::{
         Committable, Sha256 as Sha256Hasher,
         bls12381::primitives::variant::{MinPk, MinSig},
@@ -71,17 +74,15 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_resolver::p2p::{MAX_RESPONSE_OVERHEAD, REQUEST_OVERHEAD};
     use commonware_utils::{Widen, non_empty, ordered::Quorum, test_rng};
-    use std::sync::Arc;
+    use std::{iter::zip, sync::Arc};
 
     /// Signing namespace for the certificates these tests assemble.
     const NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_MARSHAL_LIMITS";
 
-    type RS = ReedSolomon<Sha256Hasher>;
-
     /// Both variants over the coding harness block. Its context names its parent by commitment, so
     /// it is an application block of either variant.
     type StandardVariant = Standard<CodingB>;
-    type CodingVariant = Coding<CodingB, RS, Sha256Hasher, PublicKey>;
+    type CodingVariant = Coding<CodingB, TestCoding, Sha256Hasher, PublicKey>;
 
     /// Checks backfill bounds and encodings for application blocks of at most `application` bytes.
     fn check_encoding<V: Variant, S: Scheme<V::Commitment>>(
@@ -282,36 +283,48 @@ mod tests {
     }
 
     /// Codes `data` bytes for every committee of 4 to `participants` members and returns the
-    /// encoded size of the widest shard at any index, with the smallest committee size that
-    /// produces it.
-    fn widest_shard(participants: u16, data: usize) -> (usize, u16) {
+    /// encoded size of the widest chunk message at any index and segment, with the smallest
+    /// committee size that produces it.
+    fn widest_message(participants: u16, data: usize) -> (usize, u16) {
         let data = vec![0xAB; data];
+        let round = Round::new(Epoch::new(u64::MAX), View::new(u64::MAX));
         let mut widest = (0, 0);
         for n in 4..=participants {
             let config = coding_config_for_participants(n);
-            let (root, shards) = RS::encode(&config, data.as_slice(), &Sequential).unwrap();
-            let commitment = Commitment::<CodingB, RS, Sha256Hasher>::from((
-                Sha256::random(test_rng()),
-                root,
-                Sha256::random(test_rng()),
-                config,
-            ));
-            for (index, shard) in shards.into_iter().enumerate() {
-                let index = u16::try_from(index).unwrap();
-                let size = Shard::new(commitment, index, shard).encode().len();
-                if size > widest.0 {
-                    widest = (size, n);
+            let (_, shards) = TestCoding::encode(&config, data.as_slice(), &Sequential).unwrap();
+            for (index, shard) in shards.iter().enumerate() {
+                let (roots, chunks) = TestCoding::split(shard);
+                for (segment, (root, chunk)) in zip(roots, chunks).enumerate() {
+                    let message =
+                        ShardMessage::<CodingB, TestCoding, Sha256Hasher>::from(StreamChunk {
+                            config,
+                            round,
+                            index: u16::try_from(index).unwrap(),
+                            segment: u16::try_from(segment).unwrap(),
+                            root,
+                            chunk,
+                        });
+                    let size = message.encode().len();
+                    if size > widest.0 {
+                        widest = (size, n);
+                    }
                 }
             }
         }
         widest
     }
 
-    /// Checks that `widest_shard` measures the shards a real coded block produces.
+    /// Returns the coded payload size of an application block of `application` bytes.
+    fn coded(application: usize) -> usize {
+        CodedBlock::<CodingB, TestCoding, Sha256Hasher>::max_coded_size(application)
+    }
+
+    /// Checks that a real coded block's payload is as long as `max_coded_size` reports, the length
+    /// `widest_message` codes.
     #[test]
     fn coded_block_shards_match_encoded_data() {
         // The block's parent, context, and payload are arbitrary.
-        let parent = Commitment::<CodingB, RS, Sha256Hasher>::from((
+        let parent = Commitment::<CodingB, TestCoding, Sha256Hasher>::from((
             Sha256::random(test_rng()),
             Sha256::random(test_rng()),
             Sha256::random(test_rng()),
@@ -327,27 +340,23 @@ mod tests {
             // A coded block encodes as the application block followed by its coding configuration,
             // so its size is what `max_backfill_block_size` reports.
             let config = coding_config_for_participants(n);
-            let coded = encode_block::<CodingB, RS, Sha256Hasher>(block.clone(), config);
-            let data = coded.encode();
+            let coded = encode_block::<CodingB, TestCoding, Sha256Hasher>(block.clone(), config);
             assert_eq!(
-                data.len(),
-                Coding::<CodingB, RS, Sha256Hasher, PublicKey>::max_backfill_block_size(
+                coded.encode().len(),
+                CodingVariant::max_backfill_block_size(block.encode_size())
+            );
+
+            // The coded payload is as long as `max_coded_size` reports, and the same root proves
+            // the coder saw exactly that payload.
+            let (payload, _) = coded_payload(&block, config);
+            assert_eq!(
+                payload.len(),
+                CodedBlock::<CodingB, TestCoding, Sha256Hasher>::max_coded_size(
                     block.encode_size()
                 )
             );
-
-            // The same root proves the coder saw exactly the coded block's encoding, and each real
-            // shard encodes to the size of the shard `widest_shard` builds from that data.
-            let (root, shards) = RS::encode(&config, data.as_ref(), &Sequential).unwrap();
+            let (root, _) = TestCoding::encode(&config, payload.as_slice(), &Sequential).unwrap();
             assert_eq!(root, coded.commitment().root());
-            for (index, shard) in shards.into_iter().enumerate() {
-                let index = u16::try_from(index).unwrap();
-                let real = coded.shard(index).expect("shard must be encoded");
-                assert_eq!(
-                    real.encode().len(),
-                    Shard::new(coded.commitment(), index, shard).encode().len()
-                );
-            }
         }
     }
 
@@ -356,9 +365,9 @@ mod tests {
         // Committees of 4 to 6 members split a block into 2 data shards, and 5 or 6 members need
         // one more proof sibling than 4, so a large block is first widest at 5. A small block is
         // widest where the proof is deepest, and among 4 to 33 members only 33 needs 6 siblings.
-        for (participants, block, n, expected) in [(16, 64 * 1024, 5, 32986), (33, 100, 33, 320)] {
+        for (participants, block, n, expected) in [(16, 64 * 1024, 5, 32947), (33, 100, 33, 281)] {
             let buffer = CodingVariant::max_buffer_payload_size(u32::from(participants), block);
-            let widest = widest_shard(participants, block + CodingConfig::SIZE);
+            let widest = widest_message(participants, coded(block));
             assert!(widest.0 <= buffer);
             assert_eq!(buffer, expected);
             assert_eq!(widest.1, n);
@@ -369,16 +378,13 @@ mod tests {
     fn coding_covers_shards() {
         type S = bls12381_threshold::standard::Scheme<PublicKey, MinSig>;
 
-        // With a small certificate and block, the widest shard exceeds the backfill bound, so the
-        // buffer bound sets the payload bound.
-        for (participants, block, expected) in [(33, 100, 320), (100, 100, 348)] {
-            let n = u32::from(participants);
-            let (widest, _) = widest_shard(participants, block + CodingConfig::SIZE);
-            assert!(widest > max_backfill_size::<CodingVariant, S>(n, block));
-            let buffer = CodingVariant::max_buffer_payload_size(n, block);
-            assert!(widest <= buffer);
-            assert_eq!(buffer, expected);
-        }
+        // With a small certificate and block, the widest chunk message of a large committee exceeds
+        // the backfill bound, so the buffer bound sets the payload bound.
+        let (widest, _) = widest_message(100, coded(100));
+        assert!(widest > max_backfill_size::<CodingVariant, S>(100, 100));
+        let buffer = CodingVariant::max_buffer_payload_size(100, 100);
+        assert!(widest <= buffer);
+        assert_eq!(buffer, 307);
 
         // The payload bound for the blocks the codec decodes is the larger of the two bounds.
         let application = CodingB::max_encode_size(&());

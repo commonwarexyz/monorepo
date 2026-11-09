@@ -16,7 +16,7 @@
 //! - Tracks subscriptions for shard arrival and block reconstruction, notifying waiters when
 //!   data becomes available.
 
-mod mailbox;
+pub(crate) mod mailbox;
 pub use mailbox::Mailbox;
 
 mod metrics;

@@ -22,9 +22,13 @@ hash = "51b04637257c54cecdc4e5ded4568efccafbc08f20be3fe0951369cab43ba2b6"
 n_cases = 65536
 hash = "ec3dc188f84f7b163c59e15d21ec9a7c5c2ea1f3f12c3098de52ee57a9c2b70e"
 
+["commonware_consensus::marshal::coding::types::test::conformance::CodecConformance<ShardMessage<TestBlock,Segmented<Sha256,64>,Sha256\n>>"]
+n_cases = 65536
+hash = "e45daa556370aa43a5c9b4803cc7726f1b7020108998dfec560ccc5582322c47"
+
 ["commonware_consensus::marshal::conformance::CodingStorageConformance"]
 n_cases = 32
-hash = "b6fb315bdc400d4ccf1f352eb30e99b8c65521399a9ea493fc82c6072f08ee22"
+hash = "41b4748bd61f499e7ababcf98a2fb44afe5918fe82dbd93b47e88d8005c97fa9"
 
 ["commonware_consensus::marshal::conformance::StandardStorageConformance"]
 n_cases = 32

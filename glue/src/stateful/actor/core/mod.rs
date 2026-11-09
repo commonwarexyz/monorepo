@@ -305,7 +305,7 @@ mod tests {
         },
     };
     use commonware_consensus::{
-        Application as _, CertifiableBlock as _, Handoff, Reporter as _,
+        Application as _, BodySink, CertifiableBlock as _, Handoff, Reporter as _,
         marshal::{Update, ancestry},
         simplex::mocks::scheme as scheme_mocks,
     };
@@ -445,6 +445,7 @@ mod tests {
                         (context.child("wait"), child.context()),
                         ancestry::from_iter([digested(genesis)]),
                         (),
+                        BodySink::noop(),
                     )
                     .await
                     .map(|_| ()),
@@ -470,6 +471,7 @@ mod tests {
                         (context.child("build"), child.context()),
                         ancestry::from_iter([digested(genesis)]),
                         (),
+                        BodySink::noop(),
                     )
                     .await;
                 assert_eq!(
@@ -527,6 +529,7 @@ mod tests {
                     (context.child("proposal"), TestBlock::new(1, 1).context()),
                     ancestry::from_iter([]),
                     (),
+                    BodySink::noop(),
                 ) => {
                     assert!(result.is_none());
                 },
