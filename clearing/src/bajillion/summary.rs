@@ -2,7 +2,9 @@
 
 use super::{Amount, Epoch, Namespace, Payout, matrix};
 use bytes::{BufMut, Bytes};
-use commonware_codec::{Buf, Encode, Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{
+    Buf, Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write, varint::UInt,
+};
 use commonware_cryptography::{
     Digest, Digestible, Hasher, PublicKey,
     certificate::{self, Verifier},
@@ -51,13 +53,15 @@ impl<D: Digest> Processed<D> {
 
 impl<D: Digest> Write for Processed<D> {
     fn write(&self, buf: &mut impl BufMut) {
-        self.count.write(buf);
+        UInt(self.count).write(buf);
         self.hash.write(buf);
     }
 }
 
-impl<D: Digest> FixedSize for Processed<D> {
-    const SIZE: usize = u64::SIZE + D::SIZE;
+impl<D: Digest> EncodeSize for Processed<D> {
+    fn encode_size(&self) -> usize {
+        UInt(self.count).encode_size() + self.hash.encode_size()
+    }
 }
 
 impl<D: Digest> Read for Processed<D> {
@@ -65,7 +69,7 @@ impl<D: Digest> Read for Processed<D> {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         Ok(Self {
-            count: u64::read(buf)?,
+            count: UInt::read(buf)?.into(),
             hash: D::read(buf)?,
         })
     }
@@ -258,40 +262,32 @@ impl<H: Hasher> Write for Summary<H> {
         self.parent.write(buf);
         self.matrix.write(buf);
         self.balances.write(buf);
-        self.payouts.size.as_u64().write(buf);
-        self.payouts.root.write(buf);
+        self.payouts.write(buf);
         self.deposits.write(buf);
         self.forced_withdrawals.write(buf);
     }
 }
 
-impl<H: Hasher> FixedSize for Summary<H> {
-    const SIZE: usize =
-        Epoch::SIZE + u64::SIZE + 4 * H::Digest::SIZE + 2 * Processed::<H::Digest>::SIZE;
+impl<H: Hasher> EncodeSize for Summary<H> {
+    fn encode_size(&self) -> usize {
+        Epoch::SIZE
+            + 3 * H::Digest::SIZE
+            + self.payouts.encode_size()
+            + self.deposits.encode_size()
+            + self.forced_withdrawals.encode_size()
+    }
 }
 
 impl<H: Hasher> Read for Summary<H> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let epoch = Epoch::read(buf)?;
-        let parent = H::Digest::read(buf)?;
-        let matrix = H::Digest::read(buf)?;
-        let balances = H::Digest::read(buf)?;
-        let size = Location::new(u64::read(buf)?);
-        if !size.is_valid() {
-            return Err(CodecError::Invalid(
-                "clearing::bajillion::Summary",
-                "payouts size exceeds the log's capacity",
-            ));
-        }
-        let root = H::Digest::read(buf)?;
         Ok(Self {
-            epoch,
-            parent,
-            matrix,
-            balances,
-            payouts: Commitment { size, root },
+            epoch: Epoch::read(buf)?,
+            parent: H::Digest::read(buf)?,
+            matrix: H::Digest::read(buf)?,
+            balances: H::Digest::read(buf)?,
+            payouts: Commitment::read(buf)?,
             deposits: Processed::read(buf)?,
             forced_withdrawals: Processed::read(buf)?,
         })
@@ -309,10 +305,7 @@ where
             parent: u.arbitrary()?,
             matrix: u.arbitrary()?,
             balances: u.arbitrary()?,
-            payouts: Commitment {
-                size: u.arbitrary()?,
-                root: u.arbitrary()?,
-            },
+            payouts: u.arbitrary()?,
             deposits: u.arbitrary()?,
             forced_withdrawals: u.arbitrary()?,
         })
@@ -338,12 +331,13 @@ mod tests {
         Deposit, ForcedWithdrawal, Matrix,
         tests::{NAMESPACE, account, certify, chain, scheme},
     };
-    use commonware_codec::{Copying, DecodeExt as _};
+    use commonware_codec::DecodeExt as _;
     use commonware_cryptography::{
         Digest as _, Sha256,
         ed25519::{self, PublicKey},
         sha256::Digest,
     };
+    use commonware_storage::merkle::Family as _;
     use commonware_utils::test_rng;
 
     /// Returns the summary before the first close, on top of balances with a fixed root.
@@ -440,12 +434,16 @@ mod tests {
         }
 
         // A payouts size the log cannot reach does not decode.
-        let mut encoded = genesis.encode().to_vec();
-        let size = Epoch::SIZE + 3 * Digest::SIZE;
-        encoded[size..size + u64::SIZE].copy_from_slice(&u64::MAX.to_be_bytes());
+        let beyond = Summary {
+            payouts: Commitment {
+                size: Location::new(*mmr::Family::MAX_LEAVES + 1),
+                ..genesis.payouts
+            },
+            ..genesis
+        };
         assert!(matches!(
-            Summary::<Sha256>::decode(Copying(&encoded)),
-            Err(CodecError::Invalid("clearing::bajillion::Summary", _))
+            Summary::<Sha256>::decode(beyond.encode()),
+            Err(CodecError::Invalid("Location", _))
         ));
     }
 

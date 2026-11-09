@@ -178,6 +178,14 @@ hash = "f5456580eb69727a23bfb0281e33f467acc0c91273efebd334d3e82c9770ae76"
 n_cases = 65536
 hash = "a3fbb5f749fa5b73a684e9f0bebd8973c456e5ee43a0a3db75a99aa550dee302"
 
+["commonware_storage::qmdb::chain::tests::conformance::CodecConformance<Commitment<mmb::Family,sha256::Digest>>"]
+n_cases = 65536
+hash = "04a06a37eb98bc1825f43e3693a7f0cce216059925ef30988c9b5327209df721"
+
+["commonware_storage::qmdb::chain::tests::conformance::CodecConformance<Commitment<mmr::Family,sha256::Digest>>"]
+n_cases = 65536
+hash = "06423a3067fb689cf1928fc3df534af07f075fd4e310e05be2c11a7f5779047c"
+
 ["commonware_storage::qmdb::compact::witness::tests::conformance::CodecConformance<Witness<mmb::Family,sha256::Digest>>"]
 n_cases = 65536
 hash = "d09b142a034a3787bf74b6d56de5b4626d254c9f690e9cf53f7d1d4ad40bc067"

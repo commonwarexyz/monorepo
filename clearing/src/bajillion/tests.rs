@@ -351,7 +351,7 @@ fn test_ledger_vector() {
         );
         assert_eq!(
             hex(genesis.digest().as_ref()),
-            "44b050ae27384265b1e8c2750395dfe42ea3309302d55c7d31877dc9debbfd2c"
+            "dc78896a8eab075c7672d704b58798ff2687447dc6132852a86f007847bf5af0"
         );
 
         // The deposit queue's running hash after bob's deposit, chained from genesis.

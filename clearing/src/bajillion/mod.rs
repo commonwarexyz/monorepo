@@ -638,10 +638,11 @@
 //! in the crate pins their results for one deployment, so an implementation checks itself against
 //! the crate before it holds funds.
 //!
-//! 1. **Integers.** Fixed-width integers (every epoch, count, and built-in amount) encode
-//!    big-endian. Lengths encode as the varints of [commonware_codec::varint], the canonical
-//!    unsigned LEB128 of protocol buffers, in at most five bytes because the codec bounds every
-//!    length to `u32`. Public keys and digests encode as their raw bytes.
+//! 1. **Integers.** Epochs and built-in amounts encode big-endian at their full width. Lengths,
+//!    counts, and the payout log's size encode as the varints of [commonware_codec::varint], the
+//!    canonical unsigned LEB128 of protocol buffers. A length is bounded to `u32` and takes at
+//!    most five bytes, the size is bounded to 2^62 and takes at most nine, and a count takes at
+//!    most ten. Public keys and digests encode as their raw bytes.
 //!
 //! 2. **Trees.** Payment maps and the matrix commit with the binary Merkle tree of
 //!    [commonware_storage::bmt] over the digests of their entries. Entries are strictly increasing
@@ -721,7 +722,7 @@
 //!    +-------+--------+--------+----------+-------------+--------------+--------------------+
 //!    | epoch | parent | matrix | balances |   payouts   |   deposits   | forced withdrawals |
 //!    |       |        |        |          | size | root | count | hash |  count   |  hash   |
-//!    |   8   |   D    |   D    |    D     |  8   |  D   |   8   |  D   |    8     |    D    |
+//!    |   8   |   D    |   D    |    D     | 1-9  |  D   | 1-10  |  D   |   1-10   |    D    |
 //!    +-------+--------+--------+----------+------+------+-------+------+----------+---------+
 //!
 //!    running hash after request i of a queue, from hash(0) in the parent summary
