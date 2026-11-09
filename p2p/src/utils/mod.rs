@@ -12,6 +12,7 @@ use commonware_utils::{
 
 pub mod codec;
 pub mod limited;
+commonware_macros::stability_mod!(ALPHA, pub mod lossy);
 #[cfg(any(test, feature = "mocks"))]
 pub mod mocks;
 pub mod mux;
