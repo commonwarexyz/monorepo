@@ -35,7 +35,7 @@ use commonware_codec::{
     ReadExt as _, Write,
 };
 use commonware_consensus::{
-    Block as ConsensusBlock, BoundedBlock, CertifiableBlock, Heightable, Reporters,
+    Block as ConsensusBlock, BodySink, BoundedBlock, CertifiableBlock, Heightable, Reporters,
     marshal::{
         self,
         ancestry::Ancestry,
@@ -508,6 +508,7 @@ impl<E: Spawner + Metrics + Clock + Storage> Application<E> for App {
         ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
+        _body: BodySink,
     ) -> Option<Proposed<Self, E>> {
         let parent = ancestry.peek()?.clone();
         let height = Height::new(parent.height().get() + 1);

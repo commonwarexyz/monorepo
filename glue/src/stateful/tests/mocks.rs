@@ -4,7 +4,7 @@ use crate::stateful::{
 };
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
-    Block as ConsensusBlock, CertifiableBlock, Handoff, Heightable,
+    Block as ConsensusBlock, BodySink, CertifiableBlock, Handoff, Heightable,
     marshal::{ancestry::Ancestry, standard::Standard},
     simplex::{mocks::scheme as scheme_mocks, types::Context as SimplexContext},
     types::{Epoch, Height, View},
@@ -386,12 +386,13 @@ impl<E: Send + Sync> Application<E> for TestApp {
         ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
+        body: BodySink,
     ) -> Handoff<Proposed<Self, E>> {
         let decision = self.handoff;
         if decision.is_wait() {
             return Handoff::Wait;
         }
-        self.propose(context, ancestry, batches, input)
+        self.propose(context, ancestry, batches, input, body)
             .await
             .map_or(Handoff::Wait, |proposed| decision.map(|()| proposed))
     }
@@ -402,6 +403,7 @@ impl<E: Send + Sync> Application<E> for TestApp {
         _ancestry: impl Ancestry<Self::Block>,
         _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: Input<Self::Input, Self::Provider>,
+        _body: BodySink,
     ) -> Option<Proposed<Self, E>> {
         self.proposal.clone().map(|block| Proposed {
             block,
