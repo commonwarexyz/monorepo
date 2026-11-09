@@ -19,6 +19,7 @@ std = [
 	"bytes/std",
 	"commonware-macros/std",
 	"rand_chacha?/std",
+	"ruint?/std",
 	"thiserror/std",
 ]
 arbitrary = [

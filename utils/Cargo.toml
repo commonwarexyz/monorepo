@@ -89,6 +89,7 @@ std = [
 	"rand/std",
 	"rand/std_rng",
 	"rand/sys_rng",
+	"ruint?/std",
 	"thiserror/std",
 	"tokio",
 	"tracing",
