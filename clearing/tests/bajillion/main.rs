@@ -36,7 +36,7 @@ use commonware_storage::{
     qmdb::{current::unordered::fixed, keyless},
     translator::EightCap,
 };
-use commonware_utils::{NZU16, NZU64, NZUsize, non_empty, test_rng};
+use commonware_utils::{NZU16, NZU64, NZUsize, Widen, non_empty, test_rng};
 use roles::{
     ledger::Ledger,
     operator::Operator,
@@ -136,7 +136,7 @@ fn close_epoch(
 /// Funds users by closing the operator's epoch with a deposit of each `(index, amount)`.
 fn fund(operator: &mut TestOperator, balances: &[(u64, u64)]) -> TestClose {
     let queue = deposits(operator.epoch(), balances);
-    close_epoch(operator, &queue, queue.deposits.len() as u64, 0)
+    close_epoch(operator, &queue, Widen::widen(queue.deposits.len()), 0)
 }
 
 /// Closes the operator's epoch without processing any queued request.
@@ -461,8 +461,8 @@ where
             .operator
             .close(
                 &queue,
-                queue.deposits.len() as u64,
-                queue.forced_withdrawals.len() as u64,
+                Widen::widen(queue.deposits.len()),
+                Widen::widen(queue.forced_withdrawals.len()),
             )
             .unwrap();
         let proposals = self.verify(&close).await;

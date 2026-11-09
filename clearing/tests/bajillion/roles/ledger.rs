@@ -6,6 +6,7 @@ use commonware_clearing::bajillion::{
     PayoutProof, Queue, Summary, SummaryError,
 };
 use commonware_cryptography::{Digest, Digestible, Hasher, PublicKey, certificate::Verifier};
+use commonware_utils::Widen;
 use core::hash::Hash;
 use rand_core::CryptoRng;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -271,9 +272,9 @@ where
             certificate,
             epoch,
             &persisted.parent,
-            persisted.required_deposits as u64..=persisted.deposits.len() as u64,
-            persisted.required_forced_withdrawals as u64
-                ..=persisted.forced_withdrawals.len() as u64,
+            Widen::widen(persisted.required_deposits)..=Widen::widen(persisted.deposits.len()),
+            Widen::widen(persisted.required_forced_withdrawals)
+                ..=Widen::widen(persisted.forced_withdrawals.len()),
         )?;
 
         // The counts lie within the queues, and the certificate vouches that the payouts size

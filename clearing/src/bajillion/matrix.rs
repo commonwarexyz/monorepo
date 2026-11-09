@@ -5,6 +5,7 @@ use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_storage::bmt::{Builder, Tree};
+use commonware_utils::Widen;
 use core::fmt::{self, Debug, Formatter};
 use std::sync::{Arc, OnceLock};
 
@@ -151,7 +152,7 @@ impl<P: PublicKey, H: Hasher, A: Amount> Matrix<P, H, A> {
         let row = Lookup::new(&self.inner.rows, &self.inner.tree, sender);
         let entry = match &row {
             Lookup::Member { position, .. } => {
-                let position = *position as usize;
+                let position: usize = Widen::widen(*position);
                 let payments = &self.inner.payments[position];
                 let tree = self.inner.trees[position].get_or_init(|| payments.tree::<H>());
                 Some(payments.lookup(tree, receiver))

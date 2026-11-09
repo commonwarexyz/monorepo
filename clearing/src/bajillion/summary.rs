@@ -12,6 +12,7 @@ use commonware_storage::{
     merkle::mmr,
     qmdb::{keyless, value::FixedEncoding},
 };
+use commonware_utils::Widen;
 use core::{
     fmt::{self, Debug, Formatter},
     ops::RangeInclusive,
@@ -42,7 +43,7 @@ impl<D: Digest> Processed<D> {
             H::hash(&[hash.as_ref(), &encoded])
         });
         Self {
-            count: requests.len() as u64,
+            count: Widen::widen(requests.len()),
             hash,
         }
     }

@@ -5,6 +5,7 @@ use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, Write};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_storage::bmt::{Builder, Tree};
+use commonware_utils::Widen;
 use core::cmp::Ordering;
 use thiserror::Error;
 
@@ -63,7 +64,8 @@ impl<P: PublicKey, A: Amount> Amounts<P, A> {
 
     /// Wraps `entries` already in account order.
     pub(crate) fn from_sorted(entries: Vec<(P, A)>) -> Result<Self, AmountsError> {
-        if entries.len() > u32::MAX as usize {
+        let widest: usize = Widen::widen(u32::MAX);
+        if entries.len() > widest {
             return Err(AmountsError::TooManyEntries);
         }
         if entries.iter().any(|(_, amount)| *amount == A::ZERO) {

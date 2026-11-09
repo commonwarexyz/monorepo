@@ -51,19 +51,26 @@ impl<K: Ord + Clone, V: Clone, D: Digest> Lookup<K, V, D> {
     /// Opens `key` in `entries`. The entries must be strictly increasing by key and committed by
     /// `tree`.
     pub(crate) fn new(entries: &[(K, V)], tree: &Tree<D>, key: &K) -> Self {
-        let open = |start: usize, end: usize| {
-            tree.range_proof(start as u32, end as u32)
+        let narrow = |index: usize| {
+            u32::try_from(index).expect("the tree must commit at most u32::MAX entries")
+        };
+        let open = |start: u32, end: u32| {
+            tree.range_proof(start, end)
                 .expect("entries must be committed by the tree")
         };
         match entries.binary_search_by(|(candidate, _)| candidate.cmp(key)) {
-            Ok(position) => Self::Member {
-                position: position as u32,
-                value: entries[position].1.clone(),
-                proof: open(position, position),
-            },
-            Err(position) => {
-                let lower = position.checked_sub(1).map(|index| entries[index].clone());
-                let upper = entries.get(position).cloned();
+            Ok(index) => {
+                let position = narrow(index);
+                Self::Member {
+                    position,
+                    value: entries[index].1.clone(),
+                    proof: open(position, position),
+                }
+            }
+            Err(index) => {
+                let position = narrow(index);
+                let lower = index.checked_sub(1).map(|index| entries[index].clone());
+                let upper = entries.get(index).cloned();
                 let proof = match (&lower, &upper) {
                     (None, None) => Proof::default(),
                     (Some(_), Some(_)) => open(position - 1, position),
@@ -71,7 +78,7 @@ impl<K: Ord + Clone, V: Clone, D: Digest> Lookup<K, V, D> {
                     (None, Some(_)) => open(position, position),
                 };
                 Self::NonMember {
-                    position: position as u32,
+                    position,
                     lower,
                     upper,
                     proof,

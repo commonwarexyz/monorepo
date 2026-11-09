@@ -639,7 +639,7 @@ mod tests {
         qmdb::{self, current::unordered::fixed},
         translator::{EightCap, OneCap},
     };
-    use commonware_utils::{NZU64, NZUsize, Probability};
+    use commonware_utils::{NZU64, NZUsize, Probability, Widen};
 
     /// Returns the checkpoint `proposal`'s close leaves once it posts.
     fn checkpoint(proposal: &TestProposal) -> TestCheckpoint {
@@ -669,8 +669,8 @@ mod tests {
                     epoch,
                     Vec::new(),
                     Vec::new(),
-                    deposits.len() as u64,
-                    forced.len() as u64,
+                    Widen::widen(deposits.len()),
+                    Widen::widen(forced.len()),
                 );
                 (close, queue(epoch, &deposits, &forced))
             })

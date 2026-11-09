@@ -639,7 +639,7 @@ fn test_withdrawn_ranges_stay_compact() {
                     deployment.ledger.withdraw(account(index), 3).unwrap();
                 }
                 let queue = deployment.ledger.queue();
-                let count = queue.forced_withdrawals.len() as u64;
+                let count = Widen::widen(queue.forced_withdrawals.len());
                 let close = close_epoch(&mut deployment.operator, &queue, 0, count);
                 let proposals = deployment.verify(&close).await;
                 let summary = deployment.post(&mut context, proposals).await;
@@ -680,10 +680,8 @@ fn test_withdrawn_ranges_stay_compact() {
             }
             assert_eq!(deployment.ledger.ranges(), vec![(0, size)], "{order}");
             let funded: u64 = funded.iter().map(|(_, amount)| amount).sum();
-            assert_eq!(
-                deployment.ledger.custody(),
-                funded - 3 * proofs.len() as u64
-            );
+            let payouts: u64 = Widen::widen(proofs.len());
+            assert_eq!(deployment.ledger.custody(), funded - 3 * payouts);
         });
     }
 }

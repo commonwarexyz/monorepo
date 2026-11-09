@@ -502,7 +502,9 @@ impl<P: PublicKey, O: PublicKey, D: Digest, A: Amount> Receipt<P, O, D, A> {
         receivers
             .into_iter()
             .map(|receiver| {
-                let position = payments.position(&receiver)? as u32;
+                let position = payments.position(&receiver)?;
+                let position = u32::try_from(position)
+                    .expect("a payment map must hold at most u32::MAX entries");
                 Some(Self {
                     state: state.clone(),
                     signature: signature.clone(),

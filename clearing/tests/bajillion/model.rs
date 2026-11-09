@@ -310,7 +310,7 @@ struct World {
 impl fmt::Debug for World {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let balances: Vec<_> = (0..self.senders.len())
-            .map(|index| self.operator.balance(&account(index as u64)))
+            .map(|index| self.operator.balance(&account(Widen::widen(index))))
             .collect();
         f.debug_struct("World")
             .field("ledger epoch", &self.ledger.epoch())
@@ -803,11 +803,11 @@ impl Workload {
     fn soft_withdraw(&self, world: &mut World, user: usize, epoch: Epoch) {
         world.budget.soft -= 1;
         let withdrawal = Withdrawal::sign(
-            &super::user(user as u64),
+            &super::user(Widen::widen(user)),
             &namespace(),
             epoch,
             self.amount,
-            world.budget.soft as u64,
+            Widen::widen(world.budget.soft),
         );
         let open = epoch == world.operator.epoch();
         match world.operator.withdraw(withdrawal) {
@@ -835,7 +835,7 @@ impl Workload {
         let outcome = world.receivers[receiver].receive(receipt);
         let predicted = if world.halted {
             matches!(outcome, Err(Receiving::Halted))
-        } else if epoch <= world.posted.len() as Epoch {
+        } else if epoch <= world.last_posted() {
             matches!(outcome, Err(Receiving::Closed))
         } else if amount <= held {
             matches!(outcome, Err(Receiving::NotIncreasing))
@@ -872,6 +872,11 @@ impl World {
             self.violation = Some(step);
         }
     }
+
+    /// Returns the epoch of the last post, or zero before the first.
+    fn last_posted(&self) -> Epoch {
+        Widen::widen(self.posted.len())
+    }
 }
 
 impl Model for Workload {
@@ -906,23 +911,27 @@ impl Model for Workload {
                 deposited.push((user, *amount));
             }
         }
-        let users = self.accounts.len() as u64;
+        let users = self.accounts.len();
         vec![World {
             ledger,
             operator: operator(),
-            senders: (0..users).map(sender).collect(),
-            receivers: (0..users).map(|index| receiver(index, 1)).collect(),
+            senders: (0..users)
+                .map(|index| sender(Widen::widen(index)))
+                .collect(),
+            receivers: (0..users)
+                .map(|index| receiver(Widen::widen(index), 1))
+                .collect(),
             posted: Vec::new(),
             candidate: None,
             requests: Vec::new(),
             replies: Vec::new(),
             challenges: Vec::new(),
             sent: Vec::new(),
-            pending: vec![None; users as usize],
+            pending: vec![None; users],
             admitted: BTreeSet::new(),
             countersigned: BTreeSet::new(),
             held: BTreeMap::new(),
-            resolved: vec![0; users as usize],
+            resolved: vec![0; users],
             omitted: BTreeSet::new(),
             deposited,
             halted: false,
@@ -990,12 +999,14 @@ impl Model for Workload {
             }
             if world.candidate.is_none()
                 && world.operator.epoch() == world.ledger.epoch()
-                && (world.posted.len() as Epoch) < self.epochs
+                && world.last_posted() < self.epochs
             {
                 let queue = world.ledger.queue();
-                for deposits in queue.required_deposits as u64..=queue.deposits.len() as u64 {
-                    for forced in queue.required_forced_withdrawals as u64
-                        ..=queue.forced_withdrawals.len() as u64
+                for deposits in
+                    Widen::widen(queue.required_deposits)..=Widen::widen(queue.deposits.len())
+                {
+                    for forced in Widen::widen(queue.required_forced_withdrawals)
+                        ..=Widen::widen(queue.forced_withdrawals.len())
                     {
                         actions.push(Action::Close {
                             deposits,
@@ -1037,7 +1048,7 @@ impl Model for Workload {
                 actions.push(Action::Lose { index });
             }
         }
-        let last = world.posted.len() as Epoch;
+        let last = world.last_posted();
         for user in 0..users {
             if world.resolved[user] < last {
                 actions.push(Action::Resolve { user });
@@ -1089,7 +1100,7 @@ impl Model for Workload {
                 epoch,
             } => {
                 world.budget.sends -= 1;
-                let batch = amounts(&[(receiver as u64, self.payment)]);
+                let batch = amounts(&[(Widen::widen(receiver), self.payment)]);
 
                 // The sender signs unless it holds a countersigned state of a later epoch (S1).
                 let later = world
@@ -1259,8 +1270,8 @@ impl Model for Workload {
                 omit,
             } => {
                 let queue = world.ledger.queue();
-                if deposits < queue.deposits.len() as u64
-                    || forced < queue.forced_withdrawals.len() as u64
+                if deposits < Widen::widen(queue.deposits.len())
+                    || forced < Widen::widen(queue.forced_withdrawals.len())
                 {
                     self.witness("a close defers a queued request");
                 }
@@ -1350,7 +1361,7 @@ impl Model for Workload {
                 }
                 let epoch = summary.epoch;
                 world.posted.push(Posted { processed, summary });
-                if world.posted.len() as Epoch == self.epochs {
+                if world.last_posted() == self.epochs {
                     self.witness("every epoch posts");
                 }
 
