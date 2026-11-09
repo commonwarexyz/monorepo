@@ -1402,8 +1402,8 @@ where
         if !self.boundary_recorded {
             return self.bounds().start;
         }
-        self.journal
-            .prune_target(*self.prune_boundary(min_position))
+        // The retained start never falls below the boundary, which may sit mid-blob after a sync.
+        *self.prune_boundary(min_position)
     }
 
     async fn start_sync(self) -> Result<(Self, Handle<()>), JournalError> {
@@ -3352,6 +3352,11 @@ mod tests {
         assert!(anchor_locations(&journal).is_empty());
         let journal = journal.persist_boundary().await.unwrap();
         assert!(anchor_locations(&journal).is_empty());
+
+        // The boundary sits mid-blob, so a prune before it leaves the start there.
+        assert_eq!(journal.prune_target(15), 20);
+        let (journal, pruned) = journal.prune(Location::new(15)).await.unwrap();
+        assert_eq!(pruned, Location::new(20));
         let journal = journal.anchor(Location::new(45)).await.unwrap();
         assert_eq!(anchor_locations(&journal), [42]);
         journal.destroy().await.unwrap();
