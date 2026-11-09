@@ -56,9 +56,7 @@ impl ::core::fmt::Debug for Hex<'_> {
 mod tests {
     use super::{
         MSM_BATCH, Scalar,
-        kernel::{
-            Group, Kernel, MAX_LANES, Msm, Multiply, MultiplyEach, Plan, Points, Sum, dispatch,
-        },
+        kernel::{Group, Kernel, MAX_LANES, Msm, Multiply, MultiplyEach, Plan, Points, Sum},
     };
     use crate::core::field::{
         arithmetic::Field,
@@ -170,7 +168,7 @@ mod tests {
         let bound = 1u128.checked_shl(G::COMPONENT_BITS - 1);
         for scalar in scalars {
             let element = generator * &scalar;
-            assert_eq!(dispatch(Endomorphism(element)), element * &eigenvalue);
+            assert_eq!(Endomorphism(element).dispatch(), element * &eigenvalue);
             check_kernel_representations(Endomorphism(element));
 
             let components = G::components(&scalar);
@@ -186,7 +184,7 @@ mod tests {
             }
             assert_eq!(sum, scalar);
         }
-        assert_eq!(dispatch(Endomorphism(G::zero())), G::zero());
+        assert_eq!(Endomorphism(G::zero()).dispatch(), G::zero());
     }
 
     /// Returns `count` elements of a multi-scalar multiplication with their discrete logarithms:
@@ -287,7 +285,7 @@ mod tests {
                 scalars: &scalars[..n],
                 plan: Some(plan),
             };
-            assert_eq!(dispatch(msm), expected, "{plan:?}");
+            assert_eq!(msm.dispatch(), expected, "{plan:?}");
         }
 
         // Batches split across threads.
