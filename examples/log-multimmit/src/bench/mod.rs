@@ -12,6 +12,8 @@
 //!
 //! # Latency
 //!
+//! `application_proposal_signing_latency` measures batch submission to the moment the producer
+//! signs the block's header, right before the block is disseminated.
 //! `application_proposal_certification_latency` measures batch submission to the first durable
 //! local DA certificate covering the block, at its producer. With benchmark events, every node
 //! also logs when its durable certificate first covers every eighth height of every chain, so
@@ -45,6 +47,12 @@
 //! eviction, or missing local ancestry, so report pending and evicted samples (the
 //! `application_proposal_*` counters) when computing completion rates and percentiles, and
 //! compare log counts against those counters to detect lost log lines.
+//!
+//! # Faults
+//!
+//! A benchmark [`Config`] can inject [`Faults`]: random loss of received messages, and leaders
+//! that censor chosen producer chains. Crash faults need no configuration: the driver simply does
+//! not start the crashed nodes.
 
 mod latency;
 mod workload;
@@ -59,9 +67,33 @@ pub use workload::{EmptyBody, Schedule, ScheduleError, Workload};
 /// each generated `node-<key>.yaml` before starting a repetition. Benchmarks run headless and
 /// cannot be combined with `--offered-bytes-per-second`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     /// Seed for the committee's key material, so each repetition signs with fresh keys.
     pub committee_seed: u64,
     /// Input arrivals shared by every producer.
     pub schedule: Schedule,
+    /// Faults injected into the repetition. None by default.
+    #[serde(default)]
+    pub faults: Faults,
+}
+
+/// Faults a benchmark injects.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Faults {
+    /// Probability that a node drops each message it receives on any protocol channel.
+    ///
+    /// Each node samples drops independently, after transport delivery, so the transport never
+    /// repairs a loss. Messages the network exchanges internally are unaffected.
+    #[serde(default)]
+    pub loss: f64,
+    /// Participants that censor the [`Self::victims`] whenever they lead: each victim chain is
+    /// proposed at the parent tip, with no newer certificate and no blocks. Censors otherwise
+    /// follow the protocol, and vote normally.
+    #[serde(default)]
+    pub censors: Vec<u64>,
+    /// Producers whose chains the [`Self::censors`] censor.
+    #[serde(default)]
+    pub victims: Vec<u64>,
 }

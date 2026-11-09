@@ -105,6 +105,8 @@ enum Sample {
     Certified,
     /// The producer formed a receipt for the block on its payment chain.
     Receipt,
+    /// The producer signed the block's header for publication.
+    Signed,
     /// Consensus finalized the block for the first time.
     FirstFinality {
         class: Class,
@@ -122,6 +124,7 @@ impl Sample {
             Self::Placement { .. } => "placement",
             Self::Certified => "certified",
             Self::Receipt => "receipt",
+            Self::Signed => "signed",
             Self::FirstFinality { .. } => "first_finalization",
         }
     }
@@ -134,6 +137,7 @@ impl Sample {
             Self::Placement { .. } => "placed",
             Self::Certified => "certified",
             Self::Receipt => "receipt",
+            Self::Signed => "signed",
             Self::FirstFinality { class, .. } => class.label(),
         }
     }
@@ -155,6 +159,9 @@ struct ProposalStart {
     /// Whether the producer formed a receipt for the block. Like certification, it is measured
     /// while the block is tracked.
     receipted: bool,
+    /// Whether the producer signed the block's header. Like certification, it is measured while
+    /// the block is tracked.
+    signed: bool,
 }
 
 impl ProposalStart {
@@ -185,6 +192,7 @@ pub struct ProposalLatency {
 /// Latency metrics, and the quorum that enables benchmark events.
 struct LatencyMetrics {
     benchmark_quorum: Option<usize>,
+    signing: Histogram,
     certification: Histogram,
     receipt: Histogram,
     finality: Histogram,
@@ -239,6 +247,11 @@ impl LatencyMetrics {
             extension_late: context.counter(
                 "proposal_first_finality_extension_late",
                 "first finality above proposed height with more than quorum votes",
+            ),
+            signing: context.histogram(
+                "proposal_signing_latency",
+                "time from batch submission to this producer signing the block's header",
+                WAN_LATENCY,
             ),
             certification: context.histogram(
                 "proposal_certification_latency",
@@ -317,7 +330,8 @@ impl LatencyMetrics {
             | Sample::Evicted
             | Sample::Ordered
             | Sample::Certified
-            | Sample::Receipt => (None, None),
+            | Sample::Receipt
+            | Sample::Signed => (None, None),
         };
         info!(
             target: BENCHMARK_TARGET,
@@ -336,6 +350,7 @@ impl LatencyMetrics {
             placed = start.placed,
             certified = start.certified,
             receipted = start.receipted,
+            signed = start.signed,
             view = view.map(View::get),
             votes = votes.map(|votes| votes as u64),
             quorum = self.benchmark_quorum.map(|quorum| quorum as u64),
@@ -444,6 +459,7 @@ impl ProposalLatency {
             ordered: false,
             certified: false,
             receipted: false,
+            signed: false,
         };
         self.metrics.sample(&start, Sample::Start, started_at);
         self.started.push_back(start);
@@ -619,6 +635,23 @@ impl ProposalLatency {
             metrics.certification.observe_between(start.started_at, now);
             metrics.sample(start, Sample::Certified, now);
         }
+    }
+
+    /// Records that this producer signed the header of `block`.
+    ///
+    /// Signing covers only its own block, so only that block, while tracked, records its signing
+    /// latency, once: a retried publication signs the same block again.
+    pub fn sign(&mut self, block: Reference, now: SystemTime) {
+        let Some(start) = self
+            .started
+            .iter_mut()
+            .find(|start| start.block == block && !start.signed)
+        else {
+            return;
+        };
+        start.signed = true;
+        self.metrics.signing.observe_between(start.started_at, now);
+        self.metrics.sample(start, Sample::Signed, now);
     }
 
     /// Records that this producer formed the receipt of `block` on its payment chain.
@@ -1325,10 +1358,44 @@ mod tests {
             assert_eq!(receipted(&latency), [blocks[1]]);
             // An untracked block's receipt is ignored.
             latency.receipt(reference(1, 9), now);
-            assert!(context.encode().contains(
-                "proposal_receipt_latency_count 1
-"
-            ));
+            assert!(
+                context
+                    .encode()
+                    .contains("proposal_receipt_latency_count 1\n")
+            );
+        });
+    }
+
+    #[test]
+    fn signing_records_only_its_own_tracked_block_once() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut latency = ProposalLatency::new(&context, NZUsize!(8), None);
+            let now = context.current();
+            let blocks = chain(3);
+            for block in &blocks {
+                latency.start(*block, parent(*block), now, None, now);
+            }
+            let signed = |latency: &ProposalLatency| {
+                latency
+                    .started
+                    .iter()
+                    .filter(|start| start.signed)
+                    .map(|start| start.block)
+                    .collect::<Vec<_>>()
+            };
+
+            // Signing covers its own block and none of its ancestors, and a retried publication
+            // that signs the block again changes nothing.
+            latency.sign(blocks[2], now);
+            latency.sign(blocks[2], now);
+            assert_eq!(signed(&latency), [blocks[2]]);
+            // An untracked block's signature is ignored.
+            latency.sign(reference(1, 9), now);
+            assert!(
+                context
+                    .encode()
+                    .contains("proposal_signing_latency_count 1\n")
+            );
         });
     }
 

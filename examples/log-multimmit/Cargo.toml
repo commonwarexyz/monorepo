@@ -17,6 +17,9 @@ workspace = true
 # Run payment chains: chains with zero pipeline depth and extension bound place only certified
 # blocks, go first in the order, and their producers form n - f receipts from aggregate DA votes.
 payments = []
+# Skip storage durability barriers (fsync, O_DSYNC) for experiments that measure the protocol
+# without disk flush latency. A crash can lose or corrupt acknowledged writes: never deploy it.
+unsafe-disable-sync = ["commonware-runtime/unsafe-disable-sync"]
 
 [dependencies]
 bytes.workspace = true

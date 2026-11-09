@@ -14,22 +14,24 @@ use commonware_consensus::{
     multimmit::{self, Engine, Planes, marshal::Limits},
     types::Participant,
 };
-use commonware_cryptography::{ChaCha20Poly1305, Sha256, Signer as _};
+use commonware_cryptography::{ChaCha20Poly1305, Hasher as _, Sha256, Signer as _};
 use commonware_p2p::{
     Manager as _,
     authenticated::{self, discovery},
+    utils::lossy::LossyReceiver,
 };
 use commonware_parallel::{Rayon, rayon::ThreadPoolBuilder};
 use commonware_runtime::{
     Quota, Supervisor as _,
     buffer::paged::{self, CacheRef},
+    telemetry::metrics::MetricsExt as _,
     tokio,
 };
 use commonware_stream::{
     cups::{self, Cups},
     sake::{self, Sake},
 };
-use commonware_utils::{NZU32, NZUsize, ordered::Set};
+use commonware_utils::{NZU32, NZUsize, TestRng, ordered::Set};
 use std::{
     net::SocketAddr,
     num::{NonZeroU16, NonZeroU32, NonZeroUsize},
@@ -39,6 +41,9 @@ use tracing::info;
 
 /// Network namespace for this example's authenticated traffic.
 const P2P_NAMESPACE: &[u8] = b"_COMMONWARE_LOG_MULTIMMIT_P2P";
+
+/// Namespace that separates the random streams of injected message loss.
+const LOSS_NAMESPACE: &[u8] = b"_COMMONWARE_LOG_MULTIMMIT_LOSS";
 
 /// Channel carrying data-availability shares and certificates.
 const DATA_CHANNEL: u64 = 0;
@@ -100,6 +105,18 @@ fn max_message_size(max_block_size: usize) -> u32 {
     .expect("resolver response and transport envelope must fit in the network codec")
 }
 
+/// Returns the seed of the loss stream of `channel` at node `key` in the committee of `seed`, so
+/// every node and channel samples drops independently and a repetition can be replayed.
+fn loss_seed(seed: u64, key: u64, channel: u64) -> u64 {
+    let digest = Sha256::hash(&[
+        LOSS_NAMESPACE,
+        &seed.to_be_bytes(),
+        &key.to_be_bytes(),
+        &channel.to_be_bytes(),
+    ]);
+    u64::from_be_bytes(digest.as_ref()[..8].try_into().expect("digest has 8 bytes"))
+}
+
 /// How the node reports progress once consensus is running.
 enum Mode {
     Headless,
@@ -112,6 +129,12 @@ pub async fn run(context: tokio::Context, config: RunConfig) {
     let key = config.identity.key;
     let port = config.identity.port;
     let committee = committee::derive(&config);
+    let loss = config.loss();
+    let proposal_policy = config.proposal_policy();
+    let committee_seed = config
+        .benchmark
+        .as_ref()
+        .map_or(0, |benchmark| benchmark.committee_seed);
     let producer_chain = committee
         .config
         .producer_chain(Participant::from_usize(index));
@@ -148,6 +171,12 @@ pub async fn run(context: tokio::Context, config: RunConfig) {
     };
     let identity = committee.identities[index].clone();
     info!(target: LOG_TARGET, key = ?identity, port, "loaded signer");
+    info!(
+        target: LOG_TARGET,
+        loss = loss.as_f64(),
+        ?proposal_policy,
+        "injected faults"
+    );
 
     // Start the network with one channel per protocol plane.
     let validators = Set::try_from(committee.identities.clone()).expect("participants are unique");
@@ -193,12 +222,26 @@ pub async fn run(context: tokio::Context, config: RunConfig) {
     let (mut network, mut oracle) = discovery::Network::new(context.child("network"), p2p);
     oracle.track(0, validators);
     let quota = Quota::per_second(CHANNEL_RATE);
-    let data = network.register(DATA_CHANNEL, quota);
-    let consensus = network.register(CONSENSUS_CHANNEL, quota);
-    let certificates = network.register(CERTIFICATE_CHANNEL, quota);
-    let engine_resolver = network.register(ENGINE_RESOLVER_CHANNEL, quota);
-    let marshal_resolver = network.register(MARSHAL_RESOLVER_CHANNEL, quota);
-    let marshal_broadcast = network.register(MARSHAL_BROADCAST_CHANNEL, quota);
+    // Every channel drops received messages with the benchmark's loss rate, which is zero
+    // without one, so the protocol sees a uniform receiver type either way.
+    let dropped = context.counter(
+        "network_injected_loss_dropped",
+        "received messages dropped by injected loss",
+    );
+    let mut register = |channel| {
+        let (sender, receiver) = network.register(channel, quota);
+        let rng = TestRng::new(loss_seed(committee_seed, key, channel));
+        (
+            sender,
+            LossyReceiver::new(receiver, loss, rng, dropped.clone()),
+        )
+    };
+    let data = register(DATA_CHANNEL);
+    let consensus = register(CONSENSUS_CHANNEL);
+    let certificates = register(CERTIFICATE_CHANNEL);
+    let engine_resolver = register(ENGINE_RESOLVER_CHANNEL);
+    let marshal_resolver = register(MARSHAL_RESOLVER_CHANNEL);
+    let marshal_broadcast = register(MARSHAL_BROADCAST_CHANNEL);
     let network_handle = network.start();
 
     // Start marshal, which disseminates, stores, and orders complete blocks.
@@ -262,7 +305,7 @@ pub async fn run(context: tokio::Context, config: RunConfig) {
             scheme: committee.signers[index].clone(),
             genesis: committee.config.genesis().clone(),
             tuning: multimmit::config::Tuning {
-                proposal_policy: config.tuning.proposal_policy.into(),
+                proposal_policy,
                 ..committee::tuning()
             },
             automaton: application_mailbox.clone(),
@@ -308,6 +351,20 @@ pub async fn run(context: tokio::Context, config: RunConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loss_streams_differ_across_repetitions_nodes_and_channels() {
+        let seeds = [
+            loss_seed(1, 0, DATA_CHANNEL),
+            loss_seed(2, 0, DATA_CHANNEL),
+            loss_seed(1, 1, DATA_CHANNEL),
+            loss_seed(1, 0, CONSENSUS_CHANNEL),
+        ];
+        for (index, seed) in seeds.iter().enumerate() {
+            assert!(!seeds[..index].contains(seed));
+        }
+        assert_eq!(seeds[0], loss_seed(1, 0, DATA_CHANNEL));
+    }
 
     #[test]
     fn network_messages_fit_backfill_responses() {

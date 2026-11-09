@@ -63,6 +63,11 @@ pub(super) enum Message {
         block: BlockRef<Sha256Digest>,
         at: SystemTime,
     },
+    /// This producer signed the header of `block` for publication at `at`.
+    Signed {
+        block: BlockRef<Sha256Digest>,
+        at: SystemTime,
+    },
 }
 
 impl Message {
@@ -75,7 +80,8 @@ impl Message {
             | Self::Placed { .. }
             | Self::Ordered { .. }
             | Self::Certified { .. }
-            | Self::Receipt { .. } => false,
+            | Self::Receipt { .. }
+            | Self::Signed { .. } => false,
         }
     }
 }
@@ -230,8 +236,11 @@ impl<C: Clock> Reporter for Mailbox<C> {
                 block: receipt.header().block_ref::<Sha256>(),
                 at: self.clock.current(),
             },
+            Activity::TransactionProposed { block } => Message::Signed {
+                block,
+                at: self.clock.current(),
+            },
             Activity::ProtocolAccepted { .. }
-            | Activity::TransactionProposed { .. }
             | Activity::HistoryAccepted { .. }
             | Activity::Proven { .. } => return Feedback::Ok,
         };

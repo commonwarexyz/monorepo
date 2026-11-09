@@ -5,7 +5,11 @@ use crate::{
     deploy::NodeConfig,
 };
 use clap::Args;
-use commonware_consensus::multimmit::types::{CodecConfigError, PathLimits};
+use commonware_consensus::multimmit::{
+    self,
+    config::Victims,
+    types::{ChainId, CodecConfigError, PathLimits},
+};
 use commonware_deployer::aws::{Hosts, METRICS_PORT, TRACES_PORT};
 use commonware_utils::{NZUsize, Probability, probability};
 use serde::{Deserialize, Serialize};
@@ -109,6 +113,24 @@ pub enum ConfigError {
     /// The benchmark schedule cannot be replayed.
     #[error("invalid benchmark schedule: {0}")]
     Schedule(#[from] ScheduleError),
+    /// The benchmark loss rate is not a probability.
+    #[error("loss rate {0} is not a probability")]
+    Loss(f64),
+    /// Censors were configured without victims, or victims without censors.
+    #[error("censorship requires both censors and victims")]
+    IncompleteCensorship,
+    /// A censor is not a participant.
+    #[error("censor {0} is not a participant")]
+    UnknownCensor(u64),
+    /// A victim is not a producer.
+    #[error("victim {0} is not a producer")]
+    UnknownVictim(u64),
+    /// A victim produces a chain the censoring policy cannot name.
+    #[error("victim {0} produces chain {1}, but only chains below 128 can be censored")]
+    VictimChain(u64, usize),
+    /// A censor runs a proposal policy other than the endorsed one, which censorship extends.
+    #[error("censors must run the endorsed proposal policy")]
+    CensorPolicy,
 }
 
 /// A malformed `key@port` or `key@host:port` argument.
@@ -595,8 +617,85 @@ impl RunConfig {
             }
             self.tuning.require_body()?;
             benchmark.schedule.validate()?;
+            self.validate_faults(&benchmark.faults)?;
         }
         Ok(())
+    }
+
+    /// Checks the faults a benchmark injects against the committee.
+    fn validate_faults(&self, faults: &bench::Faults) -> Result<(), ConfigError> {
+        if Probability::from_f64(faults.loss).is_none() {
+            return Err(ConfigError::Loss(faults.loss));
+        }
+        if faults.censors.is_empty() != faults.victims.is_empty() {
+            return Err(ConfigError::IncompleteCensorship);
+        }
+        if let Some(censor) = faults
+            .censors
+            .iter()
+            .find(|censor| !self.network.participants.contains(censor))
+        {
+            return Err(ConfigError::UnknownCensor(*censor));
+        }
+        for victim in &faults.victims {
+            let chain = self
+                .network
+                .producers
+                .iter()
+                .position(|producer| producer == victim)
+                .ok_or(ConfigError::UnknownVictim(*victim))?;
+            if chain >= Victims::CAPACITY {
+                return Err(ConfigError::VictimChain(*victim, chain));
+            }
+        }
+        if faults.censors.contains(&self.identity.key)
+            && !matches!(self.tuning.proposal_policy, ProposalPolicy::Endorsed)
+        {
+            return Err(ConfigError::CensorPolicy);
+        }
+        Ok(())
+    }
+
+    /// Returns the probability that this node drops each message it receives.
+    ///
+    /// # Panics
+    ///
+    /// Panics unless [`Self::validate`] succeeded.
+    pub fn loss(&self) -> Probability {
+        self.benchmark
+            .as_ref()
+            .map_or(probability!(0, 1), |benchmark| {
+                Probability::from_f64(benchmark.faults.loss).expect("validated loss rate")
+            })
+    }
+
+    /// Returns the proposal policy this node runs: the configured one, or censorship of the
+    /// benchmark's victims when this node is one of its censors.
+    ///
+    /// # Panics
+    ///
+    /// Panics unless [`Self::validate`] succeeded.
+    pub fn proposal_policy(&self) -> multimmit::config::ProposalPolicy {
+        let Some(faults) = self
+            .benchmark
+            .as_ref()
+            .map(|benchmark| &benchmark.faults)
+            .filter(|faults| faults.censors.contains(&self.identity.key))
+        else {
+            return self.tuning.proposal_policy.into();
+        };
+        let chains = faults.victims.iter().map(|victim| {
+            let chain = self
+                .network
+                .producers
+                .iter()
+                .position(|producer| producer == victim)
+                .expect("validated victim is a producer");
+            ChainId::new(u32::try_from(chain).expect("validated victim chain fits u32"))
+        });
+        multimmit::config::ProposalPolicy::Censor(
+            Victims::new(chains).expect("validated victim chains are below the capacity"),
+        )
     }
 
     /// Returns this node's position in the committee.
@@ -803,6 +902,7 @@ mod tests {
         let benchmark = |phases: &str| bench::Config {
             committee_seed: 1,
             schedule: serde_yaml::from_str(&format!("start_unix_ms: 0\nphases: {phases}")).unwrap(),
+            faults: bench::Faults::default(),
         };
         let phase = "[{duration_ms: 1000, bytes_per_second: 1000}]";
         let mut config = parse(["--headless"]).unwrap();
@@ -830,6 +930,132 @@ mod tests {
     }
 
     #[test]
+    fn faults_default_to_none_and_parse_from_the_benchmark() {
+        let schedule = "start_unix_ms: 0\nphases: [{duration_ms: 1000, bytes_per_second: 1000}]";
+        let benchmark: bench::Config = serde_yaml::from_str(&format!(
+            "committee_seed: 1\nschedule:\n  {}",
+            schedule.replace('\n', "\n  ")
+        ))
+        .unwrap();
+        assert_eq!(benchmark.faults, bench::Faults::default());
+        let benchmark: bench::Config = serde_yaml::from_str(&format!(
+            "committee_seed: 1\nschedule:\n  {}\nfaults: {{loss: 0.001, censors: [0], victims: [1, 2]}}",
+            schedule.replace('\n', "\n  ")
+        ))
+        .unwrap();
+        assert_eq!(
+            benchmark.faults,
+            bench::Faults {
+                loss: 0.001,
+                censors: vec![0],
+                victims: vec![1, 2],
+            }
+        );
+        // Misspelled faults must not silently disable injection.
+        assert!(serde_yaml::from_str::<bench::Faults>("{lose: 0.001}").is_err());
+        assert!(
+            serde_yaml::from_str::<bench::Config>(&format!(
+                "committee_seed: 1\nschedule:\n  {}\nfault: {{loss: 0.001}}",
+                schedule.replace('\n', "\n  ")
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn validation_checks_faults() {
+        let configure = |extra: &[&str], faults: bench::Faults| {
+            let mut config = parse(["--headless"].iter().chain(extra).copied()).unwrap();
+            config.benchmark = Some(bench::Config {
+                committee_seed: 1,
+                schedule: serde_yaml::from_str(
+                    "start_unix_ms: 0\nphases: [{duration_ms: 1000, bytes_per_second: 1000}]",
+                )
+                .unwrap(),
+                faults,
+            });
+            config
+        };
+
+        // Without faults, nothing is lost and the configured policy runs.
+        let config = configure(&[], bench::Faults::default());
+        assert!(config.validate().is_ok());
+        assert!(config.loss().is_zero());
+        assert_eq!(
+            config.proposal_policy(),
+            multimmit::config::ProposalPolicy::Endorsed
+        );
+
+        let lossy = configure(
+            &[],
+            bench::Faults {
+                loss: 0.001,
+                ..Default::default()
+            },
+        );
+        assert!(lossy.validate().is_ok());
+        assert_eq!(lossy.loss().as_f64(), 0.001);
+        for loss in [-0.1, 1.5, f64::NAN] {
+            let config = configure(
+                &[],
+                bench::Faults {
+                    loss,
+                    ..Default::default()
+                },
+            );
+            assert!(matches!(config.validate(), Err(ConfigError::Loss(_))));
+        }
+
+        // A censor censors its victims' chains, which are their positions among the producers.
+        let censorship = |censors: Vec<u64>, victims: Vec<u64>| bench::Faults {
+            censors,
+            victims,
+            ..Default::default()
+        };
+        let censor = configure(&["--producers", "2,1"], censorship(vec![0, 1], vec![1]));
+        assert!(censor.validate().is_ok());
+        assert_eq!(
+            censor.proposal_policy(),
+            multimmit::config::ProposalPolicy::Censor(Victims::new([ChainId::new(1)]).unwrap())
+        );
+        // A node that is not a censor runs the configured policy.
+        let bystander = configure(&["--producers", "2,1"], censorship(vec![1], vec![1]));
+        assert!(bystander.validate().is_ok());
+        assert_eq!(
+            bystander.proposal_policy(),
+            multimmit::config::ProposalPolicy::Endorsed
+        );
+
+        for (extra, faults, expected) in [
+            (&[][..], censorship(vec![0], vec![]), "incomplete"),
+            (&[][..], censorship(vec![], vec![1]), "incomplete"),
+            (&[][..], censorship(vec![3], vec![1]), "censor"),
+            (
+                &["--producers", "1"][..],
+                censorship(vec![0], vec![2]),
+                "victim",
+            ),
+            (
+                &["--proposal-policy", "certified"][..],
+                censorship(vec![0], vec![1]),
+                "policy",
+            ),
+        ] {
+            let result = configure(extra, faults).validate();
+            assert!(
+                matches!(
+                    (&result, expected),
+                    (Err(ConfigError::IncompleteCensorship), "incomplete")
+                        | (Err(ConfigError::UnknownCensor(3)), "censor")
+                        | (Err(ConfigError::UnknownVictim(2)), "victim")
+                        | (Err(ConfigError::CensorPolicy), "policy")
+                ),
+                "{expected}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
     fn validation_requires_bodies_for_input_pacing() {
         assert!(parse(["--body-size", "0"]).unwrap().validate().is_ok());
         assert!(matches!(
@@ -845,6 +1071,7 @@ mod tests {
                 "start_unix_ms: 0\nphases: [{duration_ms: 1000, bytes_per_second: 1000}]",
             )
             .unwrap(),
+            faults: bench::Faults::default(),
         });
         assert!(matches!(
             config.validate(),

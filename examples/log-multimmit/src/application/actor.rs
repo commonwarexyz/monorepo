@@ -218,6 +218,7 @@ impl<E: Clock + Spawner + Metrics> Actor<E> {
             Message::Ordered { block, at } => self.latency.order(block, at),
             Message::Certified { block, at } => self.latency.certify(block, at),
             Message::Receipt { block, at } => self.latency.receipt(block, at),
+            Message::Signed { block, at } => self.latency.sign(block, at),
         }
     }
 
@@ -860,7 +861,7 @@ mod tests {
     }
 
     #[test]
-    fn reporter_forwards_only_finality() {
+    fn reporter_forwards_signing_and_finality() {
         deterministic::Runner::default().start(|context| async move {
             let harness = Harness::new(&context, saturated()).await;
             let (sender, mut receiver) = mailbox::new(context.child("inspected"), NZUsize!(8));
@@ -878,13 +879,17 @@ mod tests {
                 }),
                 Feedback::Ok
             );
+            assert!(receiver.try_recv().is_err());
             let proposed =
                 BlockRef::new(ChainId::new(0), Height::new(5), Sha256::hash(&[b"block"]));
             assert_eq!(
                 mailbox.report(Activity::TransactionProposed { block: proposed }),
                 Feedback::Ok
             );
-            assert!(receiver.try_recv().is_err());
+            assert!(matches!(
+                receiver.try_recv(),
+                Ok(Message::Signed { block, .. }) if block == proposed
+            ));
 
             let fact = finality_fact(
                 Round::new(harness.committee.config.epoch(), View::new(3)),
@@ -908,6 +913,33 @@ mod tests {
                 receiver.try_recv(),
                 Ok(Message::Finalized { fact: received, .. }) if received == fact
             ));
+        });
+    }
+
+    #[test]
+    fn signing_reaches_the_latency_tracker() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(&context, saturated()).await;
+            let block = harness.propose().await;
+            assert_eq!(
+                metric(&context, "application_proposal_signing_latency_count"),
+                0
+            );
+
+            // A retried publication signs the block again, which records nothing new.
+            for _ in 0..2 {
+                assert_eq!(
+                    harness
+                        .mailbox
+                        .report(Activity::TransactionProposed { block }),
+                    Feedback::Ok
+                );
+            }
+            context.sleep(Duration::from_millis(10)).await;
+            assert_eq!(
+                metric(&context, "application_proposal_signing_latency_count"),
+                1
+            );
         });
     }
 
