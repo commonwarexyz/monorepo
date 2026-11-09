@@ -112,33 +112,35 @@ exceed the shared `f` budget.
 
 ### Threats
 
-Something bad that can happen at a primitive's public boundary, written as the
-outcome followed by why it is bad. The attack vectors below list the paths that
-lead to these outcomes.
+Each threat is written as "X, because Y", which reads as "X is a threat,
+because Y". X is something bad that can happen at a primitive's public
+boundary. Y is why it is bad: the consequence for the protocol, its operators,
+or its users, never the cause of X. The attack vectors below list the paths
+that lead to X.
 
 #### Consensus
 
 1. Two conflicting blocks are finalized, because the application commits
    irreversible state on two incompatible histories and the protocol has no way
    to undo it.
-2. Consensus halts indefinitely, because no blocks are finalized, user
-   transactions never settle, and recovery requires manual operator
-   intervention.
-3. An honest validator is slashed based on vote evidence exported by consensus,
-   because the validator loses staked funds for misbehavior it did not commit
-   and is removed from the committee, which also shrinks the honest majority
-   the protocol depends on.
-4. A Byzantine validator's equivocation goes unpunished, because it keeps its
-   stake and committee seat, can repeat the attack at no cost, and the economic
-   deterrent the fault budget `f` implicitly relies on disappears.
-5. A validator node crashes while processing a peer message, because the node
-   leaves the committee until an operator restarts it, counts toward `f` while
-   down, and a repeatable crash lets one attacker take the network below quorum
-   one node at a time.
-6. A validator's memory or CPU is exhausted by peer traffic, because the node
-   falls behind the current view or is killed by the OS, stops contributing
-   votes, and misses leader slots and rewards while the attacker pays only
-   bandwidth.
+2. Consensus halts indefinitely, because user transactions never settle and
+   recovery requires manual operator intervention.
+3. An honest validator is reported as faulty in the vote evidence exported by
+   consensus, because the slashing system takes its stake for misbehavior it
+   did not commit and removes it from the committee, which also shrinks the
+   honest majority the protocol depends on.
+4. A Byzantine validator's equivocation is not reported in the evidence
+   exported by consensus, because it keeps its stake and committee seat, can
+   repeat the attack at no cost, and the economic deterrent the fault budget
+   `f` implicitly relies on disappears.
+5. An honest validator crashes while processing a peer message, because the
+   same message can crash every honest validator that receives it, so more than
+   `f` validators are down at once and consensus halts until operators restart
+   them.
+6. An honest validator's memory or CPU is exhausted by peer traffic, because
+   the attacker can do the same to more than `f` honest validators for the
+   price of bandwidth, so they fall behind the current view and consensus
+   stalls.
 7. An honest validator is blocked by its peers, because its votes no longer
    reach the nodes that blocked it, they stop counting toward quorum there, and
    it is treated as faulty with no way to clear the block except peer restarts.
@@ -158,14 +160,14 @@ lead to these outcomes.
 #### Broadcast
 
 1. An honest proposer's block is not available to a validator through the
-   broadcast buffer in time for it to vote, because the validator must either
-   backfill the block from another peer or let the view time out, the honest
-   proposer loses its slot through no fault of its own, and the peers whose
-   traffic caused the delay paid only bandwidth.
-2. An honest validator is blocked by every peer after one of its broadcast
-   messages fails to decode there, because the block disconnects it for the
-   network's block duration, its blocks and votes on every channel stop reaching
-   anyone, and it counts toward `f` for hours although it behaved honestly.
+   broadcast buffer in time for it to vote or certify, because the validator
+   needs the block to notarize it in inline and deferred mode and to certify it
+   in deferred mode, so without it the validator cannot vote, the view times
+   out, and the honest proposer's turn is wasted.
+2. An honest validator broadcasting a valid block is blocked by the peers that
+   cannot decode it, because those peers disconnect it on every channel and
+   refuse to reconnect for hours, so its votes do not reach them, its turns as
+   leader are wasted, and it counts toward `f` although it did nothing wrong.
 
 #### Codec
 
@@ -178,14 +180,14 @@ lead to these outcomes.
    downstream that relies on the type instead of its own check panics or
    computes a wrong result on the first message carrying it.
 3. A short message makes the decoder reserve memory many times its own size
-   before any element is read, because the node is killed by the OS or starves
-   its other actors, it leaves the committee until an operator restarts it, and
-   the attacker pays only the bandwidth of the small message.
+   before any element is read, because the same message can exhaust the memory
+   of every honest validator that receives it, so more than `f` validators are
+   killed by the OS at once and the attacker pays only the bandwidth of the
+   small message.
 4. A decoder panics on peer-supplied bytes instead of returning an error,
-   because the panic unwinds the peer actor or consensus actor that called it,
-   the node drops off the network until restarted while still counting toward
-   `f`, and one crafted message sent to each validator in turn takes the
-   committee below quorum.
+   because the panic takes down the actor that called it, the same bytes can be
+   sent to every honest validator, and with more than `f` validators down
+   consensus halts until operators restart them.
 5. Validators running adjacent releases can no longer decode each other's
    messages or their own stored records, because every frame from an upgraded
    peer fails to decode and drops the connection, the network partitions along
@@ -291,9 +293,9 @@ lead to these outcomes.
    different blocks under the same commitment, so one executes a block the
    other never sees and the application state forks.
 2. A node allocates working space sized by attacker-chosen shard counts or
-   shard widths, because the process is killed by the OS or stalls for seconds
-   on a single message, so one small frame takes a validator offline for the
-   price of a few bytes.
+   shard widths, because one small frame sent to every honest validator gets
+   more than `f` of them killed by the OS or stalled at once, for the price of
+   a few bytes each.
 3. Two different sets of elements produce the same LtHash checksum, because a
    state-equality or update-propagation check passes for tampered data, so a
    node accepts a wrong state as matching its peers.
@@ -305,8 +307,9 @@ lead to these outcomes.
    `f` fewer real signers than the fault model requires, so a Byzantine
    minority finalizes blocks on its own.
 2. A node allocates a signer bitmap or signature list sized by an attacker's
-   claimed participant count, because the node is killed or stalls while
-   decoding one network message, so a single peer takes a validator offline.
+   claimed participant count, because one network message sent to every honest
+   validator gets more than `f` of them killed or stalled at once, and
+   consensus halts until operators restart them.
 3. An attestation that is invalid on its own is retained as verified after a
    certificate assembled with it passed, because the Byzantine signer is never
    recorded as invalid, so a node that blocks or reports misbehaving peers from
@@ -360,10 +363,10 @@ lead to these outcomes.
    validation at every peer, the honest leader is treated as faulty and its view
    is nullified, and a committee whose members run different strategies or
    builds never agrees on any block.
-6. A validator crashes while checking or reconstructing a block from peer
-   shards, because the node leaves the committee until an operator restarts it,
-   counts toward `f` while down, and a leader or relayer who can repeat the
-   trigger removes validators one at a time.
+6. An honest validator crashes while checking or reconstructing a block from
+   peer shards, because a leader or relayer can send the same shards to every
+   honest validator, so more than `f` validators are down at once and consensus
+   halts until operators restart them.
 
 #### P2P
 
@@ -451,10 +454,9 @@ lead to these outcomes.
    enough shares let the observer reconstruct the threshold key and forge the
    committee's signatures, and recorded traffic becomes readable retroactively.
 4. A receiver allocates or waits for more bytes than the bound for the
-   connection's current stage, because an unauthenticated internet host or a
-   single Byzantine peer exhausts the node's memory with one connection, the
-   node is killed or stalls, and it drops out of the committee while the
-   attacker holds no key.
+   connection's current stage, because an unauthenticated internet host can
+   open such a connection to every validator, so more than `f` of them run out
+   of memory or stall at once while the attacker holds no key.
 5. A listener's handshake capacity and signing CPU are spent on connections that
    never authenticate, because honest validators' dials are rejected by the
    concurrency limiter and their votes never reach this node, while the
@@ -510,11 +512,10 @@ lead to these outcomes.
    because an application that reads such a key while executing a block
    produces different state on different nodes, and the divergence appears as a
    root mismatch several blocks later with no record of which read caused it.
-10. A validator crashes or exhausts memory while answering a peer's state sync
-    request or decoding a peer's response, because the node leaves the committee
-    until restarted, counts toward `f` while down, and an attacker who can
-    repeat it needs only a handful of cheap messages to take the network below
-    quorum one node at a time.
+10. An honest validator crashes or exhausts memory while answering a peer's
+    state sync request or decoding a peer's response, because the same cheap
+    messages can be sent to every honest validator, so more than `f` validators
+    are down at once and the network stops finalizing blocks.
 
 ##### qmdb/store
 
@@ -581,9 +582,10 @@ lead to these outcomes.
    because light clients and bridges reject genuine state, state sync stalls
    while the honest source is marked invalid, and new validators cannot join.
 8. A node's memory or CPU is exhausted while decoding or verifying a
-   peer-supplied proof, because the syncing or serving validator is killed by
-   the OS or falls behind the chain, leaves the committee while the attacker
-   spends only bandwidth, and every sync response is a fresh opportunity.
+   peer-supplied proof, because the same proof can be sent to every validator
+   that serves or runs state sync, so more than `f` validators are killed by
+   the OS or fall behind the chain at once while the attacker spends only
+   bandwidth.
 
 ##### bmt
 
@@ -601,9 +603,9 @@ lead to these outcomes.
    invalid shards and drops a shard it needed, and when enough receivers do this
    the block cannot be reconstructed and the honest leader's slot is lost.
 4. A node panics or exhausts memory while verifying a peer-supplied shard
-   proof, because every shard delivery is a chance to trigger it, the node drops
-   out of the committee until restarted, and one attacker can repeat it against
-   each validator in turn.
+   proof, because every shard delivery is a chance to trigger it and the same
+   proof can be sent to every honest validator, so more than `f` validators are
+   down at once and consensus halts until they are restarted.
 
 ##### bitmap
 
@@ -866,9 +868,9 @@ lead to these outcomes.
 ##### network and I/O
 
 1. The runtime allocates a receive buffer of the full requested length before a
-   single byte arrives, because one unauthenticated connection can make the
-   node allocate gigabytes and be killed by the OS while the attacker sends
-   only a few bytes.
+   single byte arrives, because one unauthenticated host can make every
+   validator it connects to allocate gigabytes, so more than `f` validators are
+   killed by the OS at once while the attacker sends only a few bytes.
 2. Every I/O request on an io_uring worker stalls behind receives that occupy
    all of the ring's in-flight slots, because journal syncs and sends to honest
    peers on that worker wait up to the receive timeout, the node misses its view
