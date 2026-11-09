@@ -30,7 +30,6 @@ use crate::{
 use bytes::BufMut;
 use commonware_broadcast::buffered;
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, Write};
-use commonware_coding::ReedSolomon;
 use commonware_cryptography::{
     Committable, Digest as DigestTrait, Digested, Digestible, Hasher, Signer,
     bls12381::primitives::variant::MinPk,
@@ -82,7 +81,10 @@ pub type S = bls12381_threshold_vrf::Scheme<K, V>;
 pub type P = ConstantProvider<S, Epoch>;
 
 // Coding variant type aliases (uses Commitment in context)
-type TestCommitment = Commitment<CodingB, ReedSolomon<Sha256>, Sha256>;
+/// The coding scheme of the coding test blocks. Its segments are larger than any test block, so
+/// each block codes as one segment.
+pub type TestCoding = commonware_coding::Segmented<Sha256, { 1 << 20 }>;
+type TestCommitment = Commitment<CodingB, TestCoding, Sha256>;
 pub type CodingCtx = Context<TestCommitment, K>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -144,6 +146,42 @@ impl CertifiableBlock for CodingB {
 
     fn context(&self) -> Self::Context {
         self.0.context()
+    }
+}
+
+/// The context and parent are final before the rest of the block, so they form its body.
+impl crate::marshal::coding::types::CodedLayout for CodingB {
+    fn write_body(&self, buf: &mut impl BufMut) {
+        self.0.context.write(buf);
+        self.0.parent.write(buf);
+    }
+
+    fn write_tail(&self, buf: &mut impl BufMut) {
+        let mut canonical = Vec::with_capacity(self.encode_size());
+        self.0.write(&mut canonical);
+        let body = self.0.context.encode_size() + self.0.parent.encode_size();
+        buf.put_slice(&canonical[body..]);
+    }
+
+    fn read_coded(
+        body: bytes::Bytes,
+        tail: bytes::Bytes,
+        cfg: &Self::Cfg,
+    ) -> Result<Self, CodecError> {
+        let mut canonical = Vec::with_capacity(body.len() + tail.len());
+        canonical.extend_from_slice(&body);
+        canonical.extend_from_slice(&tail);
+        let block =
+            <Self as commonware_codec::Decode>::decode_cfg(bytes::Bytes::from(canonical), cfg)?;
+        let mut expected = Vec::with_capacity(body.len());
+        block.write_body(&mut expected);
+        if expected != body.as_ref() {
+            return Err(CodecError::Invalid(
+                "CodingB",
+                "body does not end at the parent",
+            ));
+        }
+        Ok(block)
     }
 }
 
@@ -2642,8 +2680,8 @@ impl TestHarness for DeferredHarness {
 /// Coding variant test harness.
 pub struct CodingHarness;
 
-type CodingVariant = Coding<CodingB, ReedSolomon<Sha256>, Sha256, K>;
-type ShardsMailbox = shards::Mailbox<CodingB, ReedSolomon<Sha256>, Sha256, K>;
+type CodingVariant = Coding<CodingB, TestCoding, Sha256, K>;
+type ShardsMailbox = shards::Mailbox<CodingB, TestCoding, Sha256, K>;
 
 /// Genesis blocks use a special coding config that doesn't actually encode.
 pub const GENESIS_CODING_CONFIG: commonware_coding::Config = commonware_coding::Config {
@@ -2679,7 +2717,7 @@ pub fn make_coding_block(context: CodingCtx, parent: D, height: Height, timestam
 impl TestHarness for CodingHarness {
     type ApplicationBlock = CodingB;
     type Variant = CodingVariant;
-    type TestBlock = CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>;
+    type TestBlock = CodedBlock<CodingB, TestCoding, Sha256>;
     type ValidatorExtra = ShardsMailbox;
     type Commitment = TestCommitment;
 
@@ -2830,6 +2868,7 @@ impl TestHarness for CodingHarness {
             peer_buffer_size: NZUsize!(64),
             records: RECORDS,
             peer_provider: oracle.manager(),
+            leader: Arc::new(|_| None),
         };
         let (shard_engine, shard_mailbox) =
             shards::Engine::new(context.child("shards"), shard_config);
@@ -2860,7 +2899,7 @@ impl TestHarness for CodingHarness {
         height: Height,
         timestamp: u64,
         num_participants: u16,
-    ) -> CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256> {
+    ) -> CodedBlock<CodingB, TestCoding, Sha256> {
         let parent_view = height
             .previous()
             .map(|h| View::new(h.get()))
@@ -2891,22 +2930,22 @@ impl TestHarness for CodingHarness {
         CodedBlock::precomputed(Digested::precomputed(inner, digest), commitment)
     }
 
-    fn commitment(block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>) -> TestCommitment {
+    fn commitment(block: &CodedBlock<CodingB, TestCoding, Sha256>) -> TestCommitment {
         block.commitment()
     }
 
-    fn digest(block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>) -> D {
+    fn digest(block: &CodedBlock<CodingB, TestCoding, Sha256>) -> D {
         block.digest()
     }
 
-    fn height(block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>) -> Height {
+    fn height(block: &CodedBlock<CodingB, TestCoding, Sha256>) -> Height {
         block.height()
     }
 
     async fn verify(
         handle: &mut ValidatorHandle<Self>,
         round: Round,
-        block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>,
+        block: &CodedBlock<CodingB, TestCoding, Sha256>,
         _all_handles: &mut [ValidatorHandle<Self>],
     ) {
         assert!(handle.mailbox.verified(round, block.clone()).await);
@@ -2915,7 +2954,7 @@ impl TestHarness for CodingHarness {
     async fn certify(
         handle: &mut ValidatorHandle<Self>,
         round: Round,
-        block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>,
+        block: &CodedBlock<CodingB, TestCoding, Sha256>,
     ) -> bool {
         handle.mailbox.certified(round, block.clone()).await
     }
@@ -3018,6 +3057,7 @@ impl TestHarness for CodingHarness {
             peer_buffer_size: NZUsize!(64),
             records: RECORDS,
             peer_provider: oracle.manager(),
+            leader: Arc::new(|_| None),
         };
         let (shard_engine, shard_mailbox) =
             shards::Engine::new(context.child("shards"), shard_config);
@@ -3081,7 +3121,7 @@ impl TestHarness for CodingHarness {
     async fn verify_for_prune(
         handle: &mut ValidatorHandle<Self>,
         round: Round,
-        block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>,
+        block: &CodedBlock<CodingB, TestCoding, Sha256>,
     ) {
         assert!(handle.mailbox.verified(round, block.clone()).await);
     }

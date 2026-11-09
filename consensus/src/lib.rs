@@ -424,7 +424,52 @@ stability_scope!(ALPHA {
 });
 stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     use crate::marshal::ancestry::Ancestry;
+    use bytes::Bytes;
     use commonware_cryptography::certificate::Scheme;
+    use commonware_utils::channel::{fallible::FallibleExt as _, mpsc};
+
+    /// Receives a block's coded-layout body bytes while the block is being built.
+    ///
+    /// An application that knows part of its block before the block is sealed (for example its
+    /// transactions, ahead of the state root) pushes those bytes here, in the order
+    /// [`CodedLayout::write_body`](crate::marshal::coding::types::CodedLayout::write_body) emits
+    /// them, so a coding marshal can erasure code and disseminate them while the build continues.
+    /// The concatenation of all pushed bytes must equal the returned block's body. A coding
+    /// marshal checks only its length: on a length mismatch it discards the streamed work and
+    /// codes the block whole, while bytes of the right length that differ from the body commit
+    /// the proposal to a payload that is not the block, which no peer can reconstruct.
+    ///
+    /// Pushing is optional and never blocks. A sink handed to a marshal that does not stream (or
+    /// whose receiving side has gone away) drops the bytes.
+    #[derive(Clone, Debug)]
+    pub struct BodySink(Option<mpsc::UnboundedSender<Bytes>>);
+
+    impl BodySink {
+        /// Returns a sink that drops every push.
+        pub const fn noop() -> Self {
+            Self(None)
+        }
+
+        /// Returns a sink and the receiver of the bytes pushed to it, so a marshal (or a test)
+        /// can observe the body as the application produces it.
+        pub fn channel() -> (Self, mpsc::UnboundedReceiver<Bytes>) {
+            let (sender, receiver) = mpsc::unbounded_channel();
+            (Self(Some(sender)), receiver)
+        }
+
+        /// Returns whether pushed bytes are delivered to a receiver, so an application can skip
+        /// producing them for a sink that drops them.
+        pub const fn is_active(&self) -> bool {
+            self.0.is_some()
+        }
+
+        /// Appends `bytes` to the block's body.
+        pub fn push(&self, bytes: Bytes) {
+            if let Some(sender) = &self.0 {
+                sender.send_lossy(bytes);
+            }
+        }
+    }
 
     /// Application is a minimal interface for standard implementations that operate over a stream
     /// of epoched blocks.
@@ -493,6 +538,7 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
             _context: (E, Self::Context),
             _ancestry: impl Ancestry<Self::Block>,
             _input: Self::Input,
+            _body: BodySink,
         ) -> impl Future<Output = Handoff<Digested<Self::Block>>> + Send {
             async { Handoff::Wait }
         }
@@ -500,7 +546,8 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// Build a new block on top of the provided parent ancestry. If the build job fails,
         /// or the proposer's slot should be skipped, the implementor should return [None].
         ///
-        /// `input` is the per-proposal input for this build.
+        /// `input` is the per-proposal input for this build. `body` accepts the block's body
+        /// bytes as they become final (see [`BodySink`]), and ignoring it is always correct.
         ///
         /// This future may be cancelled before it completes. Implementations must be
         /// cancellation-safe.
@@ -509,6 +556,7 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
             context: (E, Self::Context),
             ancestry: impl Ancestry<Self::Block>,
             input: Self::Input,
+            body: BodySink,
         ) -> impl Future<Output = Option<Digested<Self::Block>>> + Send;
 
         /// Verify a block produced by the application's proposer, relative to its ancestry.

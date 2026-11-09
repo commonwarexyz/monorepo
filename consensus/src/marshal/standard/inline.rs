@@ -288,7 +288,12 @@ where
 
             let ancestor_stream =
                 marshal.ancestor_stream(context.clone(), [parent], ancestor_fetch_duration);
-            Resolved::Build(ancestor_stream, build_duration.timer(&*context), ())
+            Resolved::Build(
+                ancestor_stream,
+                build_duration.timer(&*context),
+                (),
+                crate::BodySink::noop(),
+            )
         }
     }
 }

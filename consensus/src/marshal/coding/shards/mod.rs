@@ -16,10 +16,13 @@
 //! - Tracks subscriptions for shard arrival and block reconstruction, notifying waiters when
 //!   data becomes available.
 
-mod mailbox;
+pub(crate) mod mailbox;
 pub use mailbox::Mailbox;
 
 mod metrics;
 
 mod engine;
 pub use engine::{Config, Engine, Error};
+
+mod leader;
+pub use leader::{RoundLeader, scheduled_leader};

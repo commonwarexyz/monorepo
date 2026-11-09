@@ -12565,9 +12565,10 @@ mod tests {
             context: (Runtime, Ctx),
             ancestry: impl Ancestry<B>,
             input: (),
+            body: crate::BodySink,
         ) -> Handoff<Digested<B>> {
             self.prepares.fetch_add(1, Ordering::SeqCst);
-            self.propose(context, ancestry, input)
+            self.propose(context, ancestry, input, body)
                 .await
                 .map_or(Handoff::Wait, Handoff::Stage)
         }
@@ -12577,6 +12578,7 @@ mod tests {
             (_, context): (Runtime, Ctx),
             _: impl Ancestry<B>,
             _: (),
+            _: crate::BodySink,
         ) -> Option<Digested<B>> {
             self.build_started
                 .lock()

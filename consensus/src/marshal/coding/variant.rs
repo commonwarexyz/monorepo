@@ -4,15 +4,18 @@ use crate::{
         ancestry::BlockProvider,
         coding::{
             shards,
-            types::{CodedBlock, Shard, StoredCodedBlock, coding_config_for_participants},
+            types::{
+                CodedBlock, CodedLayout, ShardMessage, StoredCodedBlock,
+                coding_config_for_participants,
+            },
         },
         core::{Buffer, CommitmentFallback, ExpectedCommitment, Mailbox, Variant},
     },
     simplex::{scheme::Scheme as SimplexScheme, types::Context},
     types::{Round, coding::Commitment},
 };
-use commonware_codec::{Codec, Decode as _, Error as CodecError, Input, Read};
-use commonware_coding::{Config as CodingConfig, Scheme as CodingScheme};
+use commonware_codec::{Decode as _, Error as CodecError, Input, Read};
+use commonware_coding::{Config as CodingConfig, Segmentable};
 use commonware_cryptography::{
     Committable, Digested, Digestible, Hasher, PublicKey, certificate::Scheme,
 };
@@ -28,15 +31,15 @@ use std::{future::Future, sync::Arc};
 #[derive(Default)]
 pub struct Coding<B, C, H, P>(std::marker::PhantomData<(B, C, H, P)>)
 where
-    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>> + Codec,
-    C: CodingScheme,
+    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>> + CodedLayout,
+    C: Segmentable,
     H: Hasher,
     P: PublicKey;
 
 impl<B, C, H, P> Clone for Coding<B, C, H, P>
 where
-    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>> + Codec,
-    C: CodingScheme,
+    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>> + CodedLayout,
+    C: Segmentable,
     H: Hasher,
     P: PublicKey,
 {
@@ -47,8 +50,8 @@ where
 
 impl<B, C, H, P> Copy for Coding<B, C, H, P>
 where
-    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>> + Codec,
-    C: CodingScheme,
+    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>> + CodedLayout,
+    C: Segmentable,
     H: Hasher,
     P: PublicKey,
 {
@@ -56,8 +59,8 @@ where
 
 impl<B, C, H, P> Variant for Coding<B, C, H, P>
 where
-    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>> + Codec,
-    C: CodingScheme,
+    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>> + CodedLayout,
+    C: Segmentable,
     H: Hasher,
     P: PublicKey,
 {
@@ -139,34 +142,37 @@ where
         CodedBlock::<B, C, H>::max_encode_size(application)
     }
 
-    /// Returns an upper bound on the encoded size of any shard a committee of 4 to `participants`
-    /// members codes from a block of at most `application` bytes.
+    /// Returns an upper bound on the encoded size of any message the shards engine sends for a
+    /// committee of 4 to `participants` members and a block of at most `application` bytes.
+    ///
+    /// The engine sends shards one segment's chunk at a time, so this is the bound of a chunk
+    /// message, not of a whole shard.
     ///
     /// # Panics
     ///
     /// Panics if `participants` is below 4 or above `u16::MAX`.
     fn max_buffer_payload_size(participants: u32, application: usize) -> usize {
-        // The shards engine sends shards coded from the block with its coding configuration.
-        let block = CodedBlock::<B, C, H>::max_encode_size(application);
+        // The shards engine sends chunks coded from the block with its coding configuration.
+        let block = CodedBlock::<B, C, H>::max_coded_size(application);
 
-        // A larger committee can split a block into more data shards or prove each shard with a
-        // deeper tree, so shard width can shrink or grow with the committee. Coding supports
+        // A larger committee can split a segment into more data shards or prove each chunk with a
+        // deeper tree, so chunk width can shrink or grow with the committee. Coding supports
         // committees of at least 4, so take the widest over every size from 4 to `participants`.
         let participants =
             u16::try_from(participants).expect("committee must have at most u16::MAX members");
         let widest = (4..=participants)
-            .map(|n| C::max_shard_size(&coding_config_for_participants(n), block))
+            .map(|n| C::max_chunk_size(&coding_config_for_participants(n), block))
             .max()
             .expect("committee must have at least 4 members");
 
-        Shard::<B, C, H>::max_encode_size(widest)
+        ShardMessage::<B, C, H>::max_encode_size(widest, C::segments(block))
     }
 }
 
 impl<B, C, H, P> Buffer<Coding<B, C, H, P>> for shards::Mailbox<B, C, H, P>
 where
-    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>> + Codec,
-    C: CodingScheme,
+    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>> + CodedLayout,
+    C: Segmentable,
     H: Hasher,
     P: PublicKey,
 {
@@ -209,8 +215,8 @@ where
 impl<S, B, C, H, P> BlockProvider for Mailbox<S, Coding<B, C, H, P>>
 where
     S: Scheme,
-    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>> + Codec,
-    C: CodingScheme,
+    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>> + CodedLayout,
+    C: Segmentable,
     H: Hasher,
     P: PublicKey,
 {
@@ -238,13 +244,16 @@ mod tests {
     use crate::{
         marshal::{
             coding::types::StoredCodedBlock,
-            mocks::block::{Block, encode_block},
+            mocks::{
+                block::{Block, encode_block},
+                harness::TestCoding,
+            },
         },
         types::{Epoch, Height, View},
     };
     use bytes::BufMut;
     use commonware_codec::{Buf, Encode, EncodeSize, Error, Read, Write};
-    use commonware_coding::{Config as CodingConfig, ReedSolomon};
+    use commonware_coding::Config as CodingConfig;
     use commonware_cryptography::{
         Digest as _, Digestible, Signer as _,
         ed25519::{PrivateKey, PublicKey},
@@ -254,10 +263,10 @@ mod tests {
     use commonware_parallel::{Sequential, mocks::explore};
     use commonware_utils::{NZU16, test_rng};
 
-    type TestCommitment = Commitment<NoCloneBlock, ReedSolomon<Sha256>, Sha256>;
+    type TestCommitment = Commitment<NoCloneBlock, TestCoding, Sha256>;
     type TestContext = Context<TestCommitment, PublicKey>;
     type InnerBlock = Block<Sha256Digest, TestContext>;
-    type TestScheme = ReedSolomon<Sha256>;
+    type TestScheme = TestCoding;
     type TestVariant = Coding<NoCloneBlock, TestScheme, Sha256, PublicKey>;
 
     /// Coding configuration for the coded blocks built by these tests.
@@ -269,6 +278,8 @@ mod tests {
     struct NoCloneBlock {
         inner: InnerBlock,
     }
+
+    impl crate::marshal::coding::types::CodedLayout for NoCloneBlock {}
 
     impl Clone for NoCloneBlock {
         fn clone(&self) -> Self {

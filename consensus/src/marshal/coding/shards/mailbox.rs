@@ -2,11 +2,11 @@
 
 use crate::{
     CertifiableBlock,
-    marshal::coding::types::CodedBlock,
+    marshal::coding::{stream::StreamedSegment, types::CodedBlock},
     types::{Round, coding::Commitment},
 };
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
-use commonware_coding::Scheme as CodingScheme;
+use commonware_coding::Segmentable;
 use commonware_cryptography::{Hasher, PublicKey};
 use commonware_utils::channel::oneshot;
 use std::{collections::VecDeque, sync::Arc};
@@ -17,7 +17,7 @@ use std::{collections::VecDeque, sync::Arc};
 pub(crate) enum Message<B, C, H, P>
 where
     B: CertifiableBlock,
-    C: CodingScheme,
+    C: Segmentable,
     H: Hasher,
     P: PublicKey,
 {
@@ -27,6 +27,14 @@ where
         block: Arc<CodedBlock<B, C, H>>,
         /// The round in which the block was proposed.
         round: Round,
+    },
+    /// A segment of a block this node is building, coded before the block (and so its
+    /// commitment) exists.
+    StreamSegment {
+        /// The round in which the block is being built.
+        round: Round,
+        /// The coded segment.
+        segment: StreamedSegment<C>,
     },
     /// A notification from consensus that a [`Commitment`] has been discovered.
     Discovered {
@@ -99,7 +107,7 @@ where
 impl<B, C, H, P> Message<B, C, H, P>
 where
     B: CertifiableBlock,
-    C: CodingScheme,
+    C: Segmentable,
     H: Hasher,
     P: PublicKey,
 {
@@ -111,7 +119,10 @@ where
             Self::SubscribeAssignedShardVerified { response, .. } => response.is_closed(),
             Self::SubscribeByCommitment { response, .. }
             | Self::SubscribeByDigest { response, .. } => response.is_closed(),
-            Self::Proposed { .. } | Self::Discovered { .. } | Self::Notarized { .. } => false,
+            Self::Proposed { .. }
+            | Self::StreamSegment { .. }
+            | Self::Discovered { .. }
+            | Self::Notarized { .. } => false,
         }
     }
 }
@@ -119,14 +130,14 @@ where
 pub(crate) struct Pending<B, C, H, P>(VecDeque<Message<B, C, H, P>>)
 where
     B: CertifiableBlock,
-    C: CodingScheme,
+    C: Segmentable,
     H: Hasher,
     P: PublicKey;
 
 impl<B, C, H, P> Default for Pending<B, C, H, P>
 where
     B: CertifiableBlock,
-    C: CodingScheme,
+    C: Segmentable,
     H: Hasher,
     P: PublicKey,
 {
@@ -138,7 +149,7 @@ where
 impl<B, C, H, P> Overflow<Message<B, C, H, P>> for Pending<B, C, H, P>
 where
     B: CertifiableBlock,
-    C: CodingScheme,
+    C: Segmentable,
     H: Hasher,
     P: PublicKey,
 {
@@ -167,7 +178,7 @@ where
 impl<B, C, H, P> Policy for Message<B, C, H, P>
 where
     B: CertifiableBlock,
-    C: CodingScheme,
+    C: Segmentable,
     H: Hasher,
     P: PublicKey,
 {
@@ -188,7 +199,7 @@ where
 pub struct Mailbox<B, C, H, P>
 where
     B: CertifiableBlock,
-    C: CodingScheme,
+    C: Segmentable,
     H: Hasher,
     P: PublicKey,
 {
@@ -198,7 +209,7 @@ where
 impl<B, C, H, P> Clone for Mailbox<B, C, H, P>
 where
     B: CertifiableBlock,
-    C: CodingScheme,
+    C: Segmentable,
     H: Hasher,
     P: PublicKey,
 {
@@ -212,7 +223,7 @@ where
 impl<B, C, H, P> Mailbox<B, C, H, P>
 where
     B: CertifiableBlock,
-    C: CodingScheme,
+    C: Segmentable,
     H: Hasher,
     P: PublicKey,
 {
@@ -228,6 +239,15 @@ where
 
     pub(crate) fn proposed_shared(&self, round: Round, block: Arc<CodedBlock<B, C, H>>) {
         let _ = self.sender.enqueue(Message::Proposed { block, round });
+    }
+
+    /// Send the chunks of a segment of a block this node is building in `round`.
+    ///
+    /// Segments are sent in segment order, before the block is [`Self::proposed`].
+    pub(crate) fn stream_segment(&self, round: Round, segment: StreamedSegment<C>) {
+        let _ = self
+            .sender
+            .enqueue(Message::StreamSegment { round, segment });
     }
 
     /// Inform the engine of an externally proposed [`Commitment`].
@@ -345,14 +365,13 @@ mod tests {
         },
         types::{Epoch, Height, View},
     };
-    use commonware_coding::ReedSolomon;
     use commonware_cryptography::{
         Committable, Digest as _, Sha256, ed25519, sha256::Digest as Sha256Digest,
     };
 
     type B = EmptyBlock<Sha256>;
     type H = Sha256;
-    type C = ReedSolomon<H>;
+    type C = crate::marshal::mocks::harness::TestCoding;
     type TestMessage = Message<B, C, H, ed25519::PublicKey>;
 
     #[test]
