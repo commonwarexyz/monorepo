@@ -150,6 +150,7 @@ pub mod batch;
 mod db;
 pub use db::Db;
 pub mod operation;
+pub use operation::{COMMIT_CONTEXT, DELETE_CONTEXT, UPDATE_CONTEXT};
 pub mod ordered;
 pub(crate) mod sync;
 #[cfg(any(test, feature = "test-traits"))]

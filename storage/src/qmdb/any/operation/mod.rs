@@ -40,7 +40,7 @@ pub trait OperationCodec<F: Family, S: Update<ValueEncoding = Self>>:
     ) -> Result<Operation<F, S>, CodecError>;
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, Eq, PartialEq, Debug)]
 pub enum Operation<F: Family, S: Update> {
     Delete(S::Key),
     Update(S),

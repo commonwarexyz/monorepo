@@ -385,7 +385,10 @@ where
             bounds: chain::Bounds {
                 base: self.base,
                 db: boundary,
-                tip: Commitment::new(total_size, root),
+                tip: Commitment {
+                    size: total_size,
+                    root,
+                },
                 ancestors,
                 inactivity_floor,
             },

@@ -166,7 +166,10 @@ where
 
     /// The [`Commitment`] for the database's current state.
     pub(crate) fn commitment(&self) -> Commitment<F, H::Digest> {
-        Commitment::new(self.log.size(), self.root)
+        Commitment {
+            size: self.log.size(),
+            root: self.root,
+        }
     }
 
     /// Return the inactive_peaks count for the given leaf count and inactivity floor.
