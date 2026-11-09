@@ -17,6 +17,11 @@ commonware_macros::stability_scope!(ALPHA {
 
     mod reed_solomon;
     pub use reed_solomon::{Error as ReedSolomonError, ReedSolomon};
+    mod segmented;
+    pub use segmented::{
+        CheckedSegmentChunk, EncodedSegment, Error as SegmentedError, SegmentChunk, SegmentEncoder,
+        Segmentable, Segmented, SegmentedShard,
+    };
 
     /// Configuration common to all encoding schemes.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -271,9 +276,12 @@ mod test {
 
     mod scheme {
         use super::*;
-        use crate::{Scheme, reed_solomon::ReedSolomon};
+        use crate::{Scheme, Segmented, reed_solomon::ReedSolomon};
         use commonware_codec::Encode;
         use commonware_parallel::Sequential;
+
+        /// Small segments, so the generic cases cover data spanning many segments.
+        type Seg = Segmented<Sha256, 64>;
 
         fn roundtrip<S: Scheme>(config: &Config, data: &[u8], selected: &[u16]) {
             let (commitment, shards) = S::encode(config, data, &Sequential).unwrap();
@@ -343,6 +351,16 @@ mod test {
                 b"bravo payload",
             );
             decode_rejects_empty_checked_shards::<ReedSolomon<Sha256>>(&config, b"alpha payload");
+
+            decode_rejects_mixed_commitments::<Seg>(&config, b"alpha payload", b"bravo payload");
+            decode_rejects_empty_checked_shards::<Seg>(&config, b"alpha payload");
+
+            // Payloads that differ only in their last segment share every other segment root.
+            let alpha = [0x11; 200];
+            let mut bravo = alpha;
+            bravo[199] = 0x22;
+            decode_rejects_mixed_commitments::<Seg>(&config, &alpha, &bravo);
+            decode_rejects_empty_checked_shards::<Seg>(&config, &alpha);
         }
 
         #[test]
@@ -354,6 +372,7 @@ mod test {
             let selected: Vec<u16> = (0..30).collect();
 
             roundtrip::<ReedSolomon<Sha256>>(&config, b"", &selected);
+            roundtrip::<Seg>(&config, b"", &selected);
         }
 
         #[test]
@@ -366,6 +385,7 @@ mod test {
             let selected: Vec<u16> = (0..8).collect();
 
             roundtrip::<ReedSolomon<Sha256>>(&config, &data, &selected);
+            roundtrip::<Seg>(&config, &data, &selected);
         }
 
         #[test]
@@ -373,6 +393,15 @@ mod test {
             minifuzz::test(|u| {
                 let (config, data, selected) = generate_case(u)?;
                 roundtrip::<ReedSolomon<Sha256>>(&config, &data, &selected);
+                Ok(())
+            });
+        }
+
+        #[test]
+        fn minifuzz_roundtrip_segmented() {
+            minifuzz::test(|u| {
+                let (config, data, selected) = generate_case(u)?;
+                roundtrip::<Seg>(&config, &data, &selected);
                 Ok(())
             });
         }
