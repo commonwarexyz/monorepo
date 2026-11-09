@@ -1541,7 +1541,10 @@ where
             bounds: chain::Bounds {
                 base: self.base_state,
                 db: self.db_state,
-                tip: Commitment::new(commit_loc + 1, root),
+                tip: Commitment {
+                    size: commit_loc + 1,
+                    root,
+                },
                 ancestors,
                 inactivity_floor: floor,
             },
