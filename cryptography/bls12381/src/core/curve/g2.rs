@@ -397,7 +397,8 @@ impl<F> Point<F> {
             // 3b z^2 = (1 + i) (12 z) z.
             _ => {
                 let z12 = z.mul_small::<12, S>(simd).carry(simd);
-                let product = Fp2::<F>::product_mul_by_nonresidue(simd, z12.product_schoolbook(simd, z));
+                let product =
+                    Fp2::<F>::product_mul_by_nonresidue(simd, z12.product_schoolbook(simd, z));
                 Fp2::<F>::difference::<22, S>(simd, product)
             }
         }
@@ -406,7 +407,11 @@ impl<F> Point<F> {
     /// Returns the `k`th coordinate of the doubled point, as a sum of products to reduce, given the
     /// reduced values of [`Self::doubling`].
     #[inline(always)]
-    pub(crate) fn doubled<S: Simd>(simd: S, [yy, xy, yz, b3zz]: &[Fp2<F>; 4], k: usize) -> Fp2<F::Product>
+    pub(crate) fn doubled<S: Simd>(
+        simd: S,
+        [yy, xy, yz, b3zz]: &[Fp2<F>; 4],
+        k: usize,
+    ) -> Fp2<F::Product>
     where
         F: Field<S>,
     {
@@ -485,14 +490,12 @@ where
             0 => Fp2::<F>::difference::<8, S>(simd, self.cross(simd, 0, 1, (self.xx, self.yy))),
             1 => Fp2::<F>::difference::<8, S>(simd, self.cross(simd, 1, 2, (self.yy, self.zz))),
             2 => Fp2::<F>::difference::<8, S>(simd, self.cross(simd, 0, 2, (self.xx, self.zz))),
-            3 => Fp2::<F>::difference::<24, S>(
-                simd,
-                Fp2::<F>::accumulate(simd, self.yy, self.b3zz),
-            ),
-            4 => Fp2::<F>::difference::<26, S>(
-                simd,
-                Fp2::<F>::product_sub(simd, self.yy, self.b3zz),
-            ),
+            3 => {
+                Fp2::<F>::difference::<24, S>(simd, Fp2::<F>::accumulate(simd, self.yy, self.b3zz))
+            }
+            4 => {
+                Fp2::<F>::difference::<26, S>(simd, Fp2::<F>::product_sub(simd, self.yy, self.b3zz))
+            }
             _ => Fp2::<F>::difference::<5, S>(simd, self.xx),
         }
     }
@@ -502,7 +505,13 @@ where
     /// Karatsuba takes a schoolbook product of the sums less the two known products; under
     /// [`Field::SCHOOLBOOK`] the two products accumulate as they form.
     #[inline(always)]
-    fn cross(&self, simd: S, i: usize, j: usize, (pi, pj): (Product<F, S>, Product<F, S>)) -> Product<F, S> {
+    fn cross(
+        &self,
+        simd: S,
+        i: usize,
+        j: usize,
+        (pi, pj): (Product<F, S>, Product<F, S>),
+    ) -> Product<F, S> {
         let (a, b) = (&self.a, &self.b);
         if F::SCHOOLBOOK {
             return Fp2::<F>::accumulate_product(simd, a[i].product(simd, b[j]), a[j], b[i]);
@@ -516,7 +525,11 @@ where
     /// Returns the `k`th coordinate of the sum, as a sum of products to reduce, given the reduced
     /// values of [`Self::sum`].
     #[inline(always)]
-    pub(crate) fn coordinate(simd: S, [xy, yz, xz, sum, difference, xx]: &[Fp2<F>; 6], k: usize) -> Fp2<F::Product> {
+    pub(crate) fn coordinate(
+        simd: S,
+        [xy, yz, xz, sum, difference, xx]: &[Fp2<F>; 6],
+        k: usize,
+    ) -> Fp2<F::Product> {
         let (xy, yz, xz, sum, difference) = (*xy, *yz, *xz, *sum, *difference);
         let xx3 = xx.mul_small::<3, S>(simd).carry(simd);
         let xz12 = xz.mul_small::<12, S>(simd).carry(simd);
@@ -546,304 +559,92 @@ where
     #[inline(always)]
     fn by_b3xz(simd: S, factor: Fp2<F>, xz12: Fp2<F>) -> Product<F, S> {
         if F::SCHOOLBOOK {
-            let twisted = xz12.mul_by_nonresidue::<{ 12 * BOUND + 1 }, S>(simd).carry(simd);
+            let twisted = xz12
+                .mul_by_nonresidue::<{ 12 * BOUND + 1 }, S>(simd)
+                .carry(simd);
             return factor.product(simd, twisted);
         }
         Fp2::<F>::product_mul_by_nonresidue(simd, factor.product_schoolbook(simd, xz12))
     }
 }
 
-
-#[cfg(test)]
-mod tests {
+/// Reference arithmetic and coordinate bound hooks for the [curve formula checks](crate::core::curve::fuzz).
+#[cfg(any(test, feature = "fuzz"))]
+pub(crate) mod fuzz {
     use super::*;
-    use crate::core::field::fp::{
-        BYTES as FP_BYTES,
-        rns::Rns,
-        reference::{self, Element},
-        unsat28::Unsat28,
-        unsat49::Unsat49,
+    use crate::core::{
+        curve::fuzz::Curve,
+        field::fp2::reference::{self, Element},
     };
-    use commonware_simd::{
-        Operation, X86V4C, check_consistent,
-        emulated::{EmulatedNeon, EmulatedScalar, EmulatedX86V4C},
-        test_dispatch,
-    };
-    use std::{vec, vec::Vec};
+    use arbitrary::Unstructured;
 
-    /// Number of points summed into each lane.
-    const ROUNDS: usize = 12;
+    /// G2 over the reference extension field.
+    pub(crate) struct G2;
 
-    /// A reference extension element `(c0, c1)` with canonical components.
-    type Element2 = (Element, Element);
+    impl Curve for G2 {
+        const NAME: &'static str = "G2";
 
-    /// An affine point, or `None` for the identity.
-    type Affine = Option<(Element2, Element2)>;
+        type Element = Element;
+        type Encoded = [u8; BYTES];
 
-    const ZERO: Element2 = (reference::ZERO, reference::ZERO);
-    const ONE: Element2 = (reference::ONE, reference::ZERO);
+        const ZERO: Element = reference::ZERO;
+        const ONE: Element = reference::ONE;
+        const B: Element = reference::mul(reference::small(4), reference::NONRESIDUE);
+        const GENERATOR: Coordinates = GENERATOR;
+        const IDENTITY: Coordinates = IDENTITY;
 
-    fn add((a0, a1): Element2, (b0, b1): Element2) -> Element2 {
-        (reference::add(a0, b0), reference::add(a1, b1))
-    }
+        type Point<S: Simd, F: Field<S>> = Point<F>;
 
-    fn sub((a0, a1): Element2, (b0, b1): Element2) -> Element2 {
-        (reference::sub(a0, b0), reference::sub(a1, b1))
-    }
-
-    fn mul((a0, a1): Element2, (b0, b1): Element2) -> Element2 {
-        (
-            reference::sub(reference::mul(a0, b0), reference::mul(a1, b1)),
-            reference::add(reference::mul(a0, b1), reference::mul(a1, b0)),
-        )
-    }
-
-    fn invert((a0, a1): Element2) -> Element2 {
-        let norm = reference::add(reference::mul(a0, a0), reference::mul(a1, a1));
-        let inverse = reference::invert(norm);
-        (
-            reference::mul(a0, inverse),
-            reference::mul(reference::neg(a1), inverse),
-        )
-    }
-
-    fn small(n: u64) -> Element2 {
-        ([n, 0, 0, 0, 0, 0], reference::ZERO)
-    }
-
-    fn encode((c0, c1): Element2) -> [u8; BYTES] {
-        let mut bytes = [0; BYTES];
-        bytes[..FP_BYTES].copy_from_slice(&reference::to_bytes(c1));
-        bytes[FP_BYTES..].copy_from_slice(&reference::to_bytes(c0));
-        bytes
-    }
-
-    fn decode(bytes: &[u8; BYTES]) -> Element2 {
-        let (c1, c0) = bytes.split_at(FP_BYTES);
-        (
-            reference::reduce(c0.try_into().unwrap()),
-            reference::reduce(c1.try_into().unwrap()),
-        )
-    }
-
-    /// Returns the standard G2 generator in affine coordinates, read from blst.
-    fn generator() -> (Element2, Element2) {
-        let mut affine = blst::blst_p2_affine::default();
-        let mut words = [[0u8; FP_BYTES]; 4];
-        // SAFETY: every pointer references a valid value of the expected type, and each output
-        // buffer holds a base field element.
-        unsafe {
-            blst::blst_p2_to_affine(&mut affine, blst::blst_p2_generator());
-            blst::blst_bendian_from_fp(words[0].as_mut_ptr(), &affine.x.fp[0]);
-            blst::blst_bendian_from_fp(words[1].as_mut_ptr(), &affine.x.fp[1]);
-            blst::blst_bendian_from_fp(words[2].as_mut_ptr(), &affine.y.fp[0]);
-            blst::blst_bendian_from_fp(words[3].as_mut_ptr(), &affine.y.fp[1]);
-        }
-        let [x0, x1, y0, y1] = words.map(|bytes| reference::reduce(&bytes));
-        ((x0, x1), (y0, y1))
-    }
-
-    /// Returns `p + q` with the affine chord-and-tangent formulas.
-    fn affine_add(p: Affine, q: Affine) -> Affine {
-        let (Some((x1, y1)), Some((x2, y2))) = (p, q) else {
-            return p.or(q);
-        };
-        let slope = if x1 == x2 {
-            if add(y1, y2) == ZERO {
-                return None;
-            }
-            mul(mul(small(3), mul(x1, x1)), invert(add(y1, y1)))
-        } else {
-            mul(sub(y2, y1), invert(sub(x2, x1)))
-        };
-        let x3 = sub(sub(mul(slope, slope), x1), x2);
-        let y3 = sub(mul(slope, sub(x1, x3)), y1);
-        Some((x3, y3))
-    }
-
-    /// Returns projective coordinates as bytes, scaling affine points by `z`.
-    fn coordinates(point: Affine, z: Element2) -> Coordinates {
-        match point {
-            Some((x, y)) => [mul(x, z), mul(y, z), z].map(encode),
-            None => [ZERO, z, ZERO].map(encode),
-        }
-    }
-
-    /// Returns the affine point of projective coordinates.
-    fn affine(coordinates: &Coordinates) -> Affine {
-        let [x, y, z] = coordinates.map(|bytes| decode(&bytes));
-        if z == ZERO {
-            return None;
-        }
-        let inverse = invert(z);
-        Some((mul(x, inverse), mul(y, inverse)))
-    }
-
-    /// Returns the same points with every coordinate component at integer bound [`BOUND`].
-    ///
-    /// Scales loaded coordinates, with integer bound `2`, by `16`.
-    fn widen<S: Simd, F: Field<S>>(simd: S, point: Point<F>) -> Point<F> {
-        let widen = |value: Fp2<F>| {
-            value
-                .double(simd)
-                .carry(simd)
-                .mul_small::<{ BOUND / 4 }, S>(simd)
-                .carry(simd)
-        };
-        Point {
-            x: widen(point.x),
-            y: widen(point.y),
-            z: widen(point.z),
-        }
-    }
-
-    /// Checks, in debug builds, that every coordinate component satisfies the coordinate bounds.
-    fn check_bound<S: Simd, F: Field<S>>(simd: S, point: Point<F>) -> Point<F> {
-        for value in [point.x, point.y, point.z] {
-            value.neg::<{ BOUND + 1 }, S>(simd);
-        }
-        point
-    }
-
-    /// For each lane, sums `ROUNDS` points and doubles the sum, returning both.
-    ///
-    /// Every addend and some sums enter at the coordinate bound.
-    fn sum_and_double<S: Simd, F: Field<S>>(simd: S, points: &[Coordinates]) -> Vec<Coordinates> {
-        let lanes = points.len() / ROUNDS;
-        let mut output = vec![IDENTITY; 2 * lanes];
-        for start in (0..lanes).step_by(F::LANES) {
-            let mut sum = Point::<F>::load(simd, &[], &IDENTITY);
-            for round in 0..ROUNDS {
-                let addend = &points[round * lanes + start..(round + 1) * lanes];
-                let addend = widen(simd, Point::load(simd, addend, &IDENTITY));
-                check_bound(simd, addend.add(simd, addend));
-                check_bound(simd, addend.double(simd));
-                sum = check_bound(simd, sum.add(simd, addend));
-                // Chain some sums through doublings and round-trip others through bytes or raw
-                // coordinates.
-                match round % 3 {
-                    0 => {
-                        let double = check_bound(simd, sum.double(simd));
-                        let quadruple = check_bound(simd, double.double(simd));
-                        sum = check_bound(simd, sum.add(simd, sum).add(simd, quadruple));
-                    }
-                    1 => {
-                        let mut stored = [IDENTITY; MAX_LANES];
-                        sum.store(simd, &mut stored);
-                        sum = widen(simd, Point::load(simd, &stored, &IDENTITY));
-                    }
-                    // Negate through -s + 2s, and round-trip through raw coordinates.
-                    _ => {
-                        let negated = check_bound(simd, sum.negate(simd));
-                        sum = check_bound(simd, negated.add(simd, sum.double(simd)));
-                        let mut raw = [[[F::Raw::default(); 2]; 3]; MAX_LANES];
-                        sum.store_raw(simd, &mut raw);
-                        let lanes: Vec<_> = raw.iter().collect();
-                        sum = Point::load_raw(simd, &lanes);
-                    }
-                }
-            }
-            sum.store(simd, &mut output[start..lanes]);
-            sum.double(simd).store(simd, &mut output[lanes + start..]);
-        }
-        output
-    }
-
-    #[test]
-    fn sums_and_doublings_match_reference() {
-        /// Runs [`sum_and_double`] in every representation, returning the positional ones' outputs.
-        struct Evaluate<'a>(&'a [Coordinates]);
-
-        impl<S: Simd> Operation<S> for Evaluate<'_> {
-            type Output = [Vec<Coordinates>; 2];
-
-            fn portable(self, simd: S) -> [Vec<Coordinates>; 2] {
-                simd.execute(
-                    #[inline(always)]
-                    |simd: S| {
-                        [
-                            sum_and_double::<S, Unsat49<S>>(simd, self.0),
-                            sum_and_double::<S, Unsat28<S>>(simd, self.0),
-                        ]
-                    },
-                )
-            }
-
-            // Residues require x86v4c and must match the other representations.
-            fn x86_v4c(self, simd: S) -> [Vec<Coordinates>; 2]
-            where
-                S: X86V4C,
-            {
-                let points = self.0;
-                let outputs = self.portable(simd);
-                let residues = simd.execute(
-                    #[inline(always)]
-                    |simd: S| sum_and_double::<S, Rns<S>>(simd, points),
-                );
-                assert!(residues == outputs[0], "residues differ");
-                outputs
-            }
+        fn add(a: Element, b: Element) -> Element {
+            reference::add(a, b)
         }
 
-        let (x, y) = generator();
-        let b = mul(small(4), (reference::ONE, reference::ONE));
-        assert_eq!(
-            mul(y, y),
-            add(mul(x, mul(x, x)), b),
-            "the generator is on the curve"
-        );
-        // Multiples of the generator, with repeats, negations, and identities to exercise
-        // doubling, cancellation, and the identity cases, in varied projective scalings.
-        let mut points = Vec::new();
-        let mut inputs = Vec::new();
-        let mut point = Some((x, y));
-        for i in 0..ROUNDS * MAX_LANES {
-            let addend = match i % 7 {
-                3 => None,
-                5 => point.map(|(x, y)| (x, sub(ZERO, y))),
-                _ => point,
+        fn sub(a: Element, b: Element) -> Element {
+            reference::sub(a, b)
+        }
+
+        fn mul(a: Element, b: Element) -> Element {
+            reference::mul(a, b)
+        }
+
+        fn invert(a: Element) -> Element {
+            reference::invert(a)
+        }
+
+        fn encode(a: Element) -> [u8; BYTES] {
+            reference::encode(a)
+        }
+
+        fn decode(bytes: &[u8; BYTES]) -> Element {
+            reference::decode(bytes)
+        }
+
+        fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Element> {
+            reference::canonical(u)
+        }
+
+        /// Scales loaded coordinate components, with integer bound `2`, by `16`, to integer
+        /// bound [`BOUND`].
+        fn widen<S: Simd, F: Field<S>>(simd: S, point: Point<F>) -> Point<F> {
+            let widen = |value: Fp2<F>| {
+                value
+                    .double(simd)
+                    .carry(simd)
+                    .mul_small::<{ BOUND / 4 }, S>(simd)
+                    .carry(simd)
             };
-            points.push(addend);
-            let z = ([i as u64 + 1, 0, 0, 0, 0, 0], [i as u64 + 2, 0, 0, 0, 0, 0]);
-            inputs.push(coordinates(addend, if i % 2 == 0 { ONE } else { z }));
-            if i % 5 != 0 {
-                point = affine_add(point, Some((x, y)));
+            Point {
+                x: widen(point.x),
+                y: widen(point.y),
+                z: widen(point.z),
             }
         }
-        let mut expected = Vec::new();
-        for lane in 0..MAX_LANES {
-            let mut sum = None;
-            for round in 0..ROUNDS {
-                sum = affine_add(sum, points[round * MAX_LANES + lane]);
-                if round % 3 == 0 {
-                    // sum + sum + 4 sum.
-                    let double = affine_add(sum, sum);
-                    sum = affine_add(double, affine_add(double, double));
-                }
+
+        fn check_bound<S: Simd, F: Field<S>>(simd: S, point: Point<F>) -> Point<F> {
+            for value in [point.x, point.y, point.z] {
+                value.neg::<{ BOUND + 1 }, S>(simd);
             }
-            expected.push(sum);
+            point
         }
-        let check = |outputs: [Vec<Coordinates>; 2]| {
-            for (representation, output) in outputs.iter().enumerate() {
-                for lane in 0..MAX_LANES {
-                    assert_eq!(
-                        affine(&output[lane]),
-                        expected[lane],
-                        "sum {representation} {lane}"
-                    );
-                    assert_eq!(
-                        affine(&output[MAX_LANES + lane]),
-                        affine_add(expected[lane], expected[lane]),
-                        "double {representation} {lane}"
-                    );
-                }
-            }
-        };
-        check(test_dispatch(Evaluate(&inputs)));
-        check_consistent(|| Evaluate(&inputs));
-        // Run every representation and vector width even on hosts without native SIMD.
-        check(Evaluate(&inputs).portable(EmulatedScalar));
-        check(Evaluate(&inputs).portable(EmulatedNeon));
-        check(EmulatedX86V4C.execute(Evaluate(&inputs)));
     }
 }

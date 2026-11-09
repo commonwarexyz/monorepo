@@ -217,91 +217,88 @@ impl G1 {
     }
 }
 
-#[cfg(test)]
-mod tests {
+/// Fuzzing support for this group.
+#[cfg(any(test, feature = "fuzz"))]
+mod fuzz {
     use super::*;
-    use crate::group::{Scalar, tests as shared};
+    use crate::group::fuzz::{self as shared, Element};
     use arbitrary::{Arbitrary, Unstructured};
-    use commonware_invariants::minifuzz;
-    use commonware_math::algebra::{CryptoGroup, test_suites};
+    use std::{sync::LazyLock, vec::Vec};
+
+    /// The small multiples of the generator.
+    static MULTIPLES: LazyLock<Vec<G1>> = LazyLock::new(shared::table);
 
     impl<'a> Arbitrary<'a> for G1 {
         fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-            Ok(Self::generator() * &Scalar::arbitrary(u)?)
+            Ok(shared::element(u)?.0)
         }
     }
 
-    /// Returns `scalar` times the generator, computed by blst, with `Z = 1` unless it is the
-    /// identity.
-    fn reference(scalar: &Scalar) -> G1 {
-        let mut bytes = [0u8; 32];
-        for (chunk, word) in bytes
-            .as_chunks_mut::<8>()
-            .0
-            .iter_mut()
-            .zip(scalar.to_words())
-        {
-            *chunk = word.to_le_bytes();
+    impl Element for G1 {
+        fn eigenvalue() -> Scalar {
+            // -x^2 for the curve parameter x.
+            let [low, high] = crate::group::scalar::X_SQUARED;
+            -Scalar::from_words([low, high, 0, 0]).expect("below the order")
         }
-        let mut point = blst::blst_p1::default();
-        let mut affine = blst::blst_p1_affine::default();
-        let mut coordinates = GENERATOR;
-        // SAFETY: every pointer references a valid value of the expected type, the scalar holds
-        // 256 bits, and each output buffer holds a base field element.
-        unsafe {
-            blst::blst_p1_mult(&mut point, blst::blst_p1_generator(), bytes.as_ptr(), 256);
-            if blst::blst_p1_is_inf(&point) {
-                return G1(IDENTITY);
-            }
-            blst::blst_p1_to_affine(&mut affine, &point);
-            blst::blst_bendian_from_fp(coordinates[0].as_mut_ptr(), &affine.x);
-            blst::blst_bendian_from_fp(coordinates[1].as_mut_ptr(), &affine.y);
+
+        fn multiples() -> &'static [Self] {
+            &MULTIPLES
         }
-        G1(coordinates)
+
+        fn sum(elements: &[Self]) -> Self {
+            Self::sum(elements)
+        }
+
+        fn mul_each(elements: &mut [Self], scalars: &[Scalar]) {
+            Self::mul_each(elements, scalars);
+        }
     }
 
-    #[test]
-    fn generator_matches_blst() {
-        assert_eq!(G1::generator().0, reference(&Scalar::ONE).0);
-    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::core::field::fp::reference;
+        use commonware_formatting::hex;
 
-    #[test]
-    fn operations_match_blst() {
-        shared::check_operations(reference);
-    }
+        shared::tests!(G1);
 
-    #[test]
-    fn msm_matches_multiplications() {
-        shared::check_msm::<G1>();
-    }
+        /// Returns the affine coordinates of an element other than the identity.
+        fn affine(element: &G1) -> [[u8; BYTES]; 2] {
+            let [x, y, z] = element.0.map(|coordinate| reference::reduce(&coordinate));
+            let inverse = reference::invert(z);
+            [x, y].map(|coordinate| reference::to_bytes(reference::mul(coordinate, inverse)))
+        }
 
-    #[test]
-    fn sum_matches_additions() {
-        shared::check_sum::<G1>(G1::sum);
-    }
-
-    #[test]
-    fn mul_each_matches_multiplications() {
-        shared::check_mul_each::<G1>(G1::mul_each);
-    }
-
-    #[test]
-    fn representations_agree() {
-        shared::check_representations::<G1>();
-    }
-
-    #[test]
-    fn endomorphism_multiplies_by_eigenvalue() {
-        // -x^2 for the curve parameter x.
-        let [low, high] = crate::group::scalar::X_SQUARED;
-        shared::check_endomorphism::<G1>(-Scalar::from_words([low, high, 0, 0]).unwrap());
-    }
-
-    #[test]
-    fn satisfies_space_laws() {
-        // Each case multiplies several times, so a few cases keep debug builds fast.
-        minifuzz::Builder::default()
-            .with_search_limit(8)
-            .test(test_suites::fuzz_space_ring::<Scalar, G1>);
+        #[test]
+        fn multiples_match_known_answers() {
+            let [x, y, _] = GENERATOR;
+            assert_eq!(affine(&G1::generator()), [x, y]);
+            assert_eq!(
+                affine(&(G1::generator() * &Scalar::from_u64(2))),
+                [
+                    hex!(
+                        "0572cbea904d67468808c8eb50a9450c9721db309128012543902d0ac358a62ae28f75bb8f1c7c42c39a8c5529bf0f4e"
+                    ),
+                    hex!(
+                        "166a9d8cabc673a322fda673779d8e3822ba3ecb8670e461f73bb9021d5fd76a4c56d9d4cd16bd1bba86881979749d28"
+                    ),
+                ]
+            );
+            let scalar = Scalar::from_bytes(&hex!(
+                "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+            ))
+            .expect("below the order");
+            assert_eq!(
+                affine(&(G1::generator() * &scalar)),
+                [
+                    hex!(
+                        "172a59075fca0729b40b2cea5bb9685afdd219e77407e13631664c53b847cdcad45ab174a073aaa4122ad813fa094485"
+                    ),
+                    hex!(
+                        "028e53b49dfb3b48ebd12df0158912b6a5036da6204a58275b9ad64acc45e372b0dff305bb6134f9d350a89f75e65ab7"
+                    ),
+                ]
+            );
+        }
     }
 }

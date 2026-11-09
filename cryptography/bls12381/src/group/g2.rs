@@ -217,93 +217,91 @@ impl G2 {
     }
 }
 
-#[cfg(test)]
-mod tests {
+/// Fuzzing support for this group.
+#[cfg(any(test, feature = "fuzz"))]
+mod fuzz {
     use super::*;
-    use crate::group::{Scalar, tests as shared};
+    use crate::group::fuzz::{self as shared, Element};
     use arbitrary::{Arbitrary, Unstructured};
-    use commonware_invariants::minifuzz;
-    use commonware_math::algebra::{CryptoGroup, test_suites};
+    use std::{sync::LazyLock, vec::Vec};
+
+    /// The small multiples of the generator.
+    static MULTIPLES: LazyLock<Vec<G2>> = LazyLock::new(shared::table);
 
     impl<'a> Arbitrary<'a> for G2 {
         fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-            Ok(Self::generator() * &Scalar::arbitrary(u)?)
+            Ok(shared::element(u)?.0)
         }
     }
 
-    /// Returns `scalar` times the generator, computed by blst, with `Z = 1` unless it is the
-    /// identity.
-    fn reference(scalar: &Scalar) -> G2 {
-        let mut bytes = [0u8; 32];
-        for (chunk, word) in bytes
-            .as_chunks_mut::<8>()
-            .0
-            .iter_mut()
-            .zip(scalar.to_words())
-        {
-            *chunk = word.to_le_bytes();
+    impl Element for G2 {
+        fn eigenvalue() -> Scalar {
+            // The curve parameter x, which is negative.
+            -Scalar::from_u64(crate::group::scalar::X_ABS)
         }
-        let mut point = blst::blst_p2::default();
-        let mut affine = blst::blst_p2_affine::default();
-        let mut coordinates = GENERATOR;
-        // SAFETY: every pointer references a valid value of the expected type, the scalar holds
-        // 256 bits, and each output buffer holds a base field element: `c1` in the first half of
-        // an extension encoding and `c0` in the second.
-        unsafe {
-            blst::blst_p2_mult(&mut point, blst::blst_p2_generator(), bytes.as_ptr(), 256);
-            if blst::blst_p2_is_inf(&point) {
-                return G2(IDENTITY);
-            }
-            blst::blst_p2_to_affine(&mut affine, &point);
-            for (coordinate, value) in coordinates.iter_mut().zip([affine.x, affine.y]) {
-                blst::blst_bendian_from_fp(coordinate.as_mut_ptr(), &value.fp[1]);
-                blst::blst_bendian_from_fp(coordinate[FP_BYTES..].as_mut_ptr(), &value.fp[0]);
-            }
+
+        fn multiples() -> &'static [Self] {
+            &MULTIPLES
         }
-        G2(coordinates)
+
+        fn sum(elements: &[Self]) -> Self {
+            Self::sum(elements)
+        }
+
+        fn mul_each(elements: &mut [Self], scalars: &[Scalar]) {
+            Self::mul_each(elements, scalars);
+        }
     }
 
-    #[test]
-    fn generator_matches_blst() {
-        assert_eq!(G2::generator().0, reference(&Scalar::ONE).0);
-    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::core::field::fp2::reference;
+        use commonware_formatting::hex;
 
-    #[test]
-    fn operations_match_blst() {
-        shared::check_operations(reference);
-    }
+        shared::tests!(G2);
 
-    #[test]
-    fn msm_matches_multiplications() {
-        shared::check_msm::<G2>();
-    }
+        /// Returns the affine coordinates of an element other than the identity.
+        fn affine(element: &G2) -> [[u8; BYTES]; 2] {
+            let [x, y, z] = element.0.map(|coordinate| reference::decode(&coordinate));
+            let inverse = reference::invert(z);
+            [x, y].map(|coordinate| reference::encode(reference::mul(coordinate, inverse)))
+        }
 
-    #[test]
-    fn sum_matches_additions() {
-        shared::check_sum::<G2>(G2::sum);
-    }
-
-    #[test]
-    fn mul_each_matches_multiplications() {
-        shared::check_mul_each::<G2>(G2::mul_each);
-    }
-
-    #[test]
-    fn representations_agree() {
-        shared::check_representations::<G2>();
-    }
-
-    #[test]
-    fn endomorphism_multiplies_by_eigenvalue() {
-        // The curve parameter x, which is negative.
-        shared::check_endomorphism::<G2>(-Scalar::from_u64(crate::group::scalar::X_ABS));
-    }
-
-    #[test]
-    fn satisfies_space_laws() {
-        // Each case multiplies several times, so a few cases keep debug builds fast.
-        minifuzz::Builder::default()
-            .with_search_limit(4)
-            .test(test_suites::fuzz_space_ring::<Scalar, G2>);
+        #[test]
+        fn multiples_match_known_answers() {
+            let [x, y, _] = GENERATOR;
+            assert_eq!(affine(&G2::generator()), [x, y]);
+            assert_eq!(
+                affine(&(G2::generator() * &Scalar::from_u64(2))),
+                [
+                    hex!(
+                        "0a4edef9c1ed7f729f520e47730a124fd70662a904ba1074728114d1031e1572c6c886f6b57ec72a6178288c47c33577"
+                        "1638533957d540a9d2370f17cc7ed5863bc0b995b8825e0ee1ea1e1e4d00dbae81f14b0bf3611b78c952aacab827a053"
+                    ),
+                    hex!(
+                        "0f6d4552fa65dd2638b361543f887136a43253d9c66c411697003f7a13c308f5422e1aa0a59c8967acdefd8b6e36ccf3"
+                        "0468fb440d82b0630aeb8dca2b5256789a66da69bf91009cbfe6bd221e47aa8ae88dece9764bf3bd999d95d71e4c9899"
+                    ),
+                ]
+            );
+            let scalar = Scalar::from_bytes(&hex!(
+                "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+            ))
+            .expect("below the order");
+            assert_eq!(
+                affine(&(G2::generator() * &scalar)),
+                [
+                    hex!(
+                        "06c7468834785e7b83fcf140ddf26c348a16adcf0b3bc1fe5aa2daf7d32175257a8b83335486532f36786f271360e059"
+                        "0460179e06b1d17c1bc0dc9dbc27b107a52c9907e88e6856892cade7ce1ff7a09ec4caf0ea6c9f39a8c7057c5ba56695"
+                    ),
+                    hex!(
+                        "15a0a1bae250e8cc64d7e3c5bcd4c9eb47d6c489a24816df4ac52886964035e892ea63c8b4eec405f93cf1d325dc0786"
+                        "191379c0c4a561348798f7598ee8a935ecad1f19ca837f1ad79218cf15098b93ebd5f167ed3a7ed622b73d7d83f3682a"
+                    ),
+                ]
+            );
+        }
     }
 }

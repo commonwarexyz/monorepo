@@ -128,14 +128,6 @@ impl<S: Simd> Clone for Unsat49<S> {
 impl<S: Simd> Copy for Unsat49<S> {}
 
 impl<S: Simd> Unsat49<S> {
-    /// Returns every lane set to `element`.
-    #[cfg(test)]
-    #[inline(always)]
-    pub fn splat(simd: S, element: &[u8; BYTES]) -> Self {
-        let limbs = limbs_from_words(words_from_bytes(element));
-        Self::raw(simd, &[limbs; MAX_LANES], 10).to_lanes(simd)
-    }
-
     /// Loads up to `S::U64_LANES` elements, one per lane, filling the remaining lanes with `fill`.
     #[inline(always)]
     pub fn load(simd: S, elements: &[[u8; BYTES]], fill: &[u8; BYTES]) -> Self {
@@ -195,15 +187,6 @@ impl<S: Simd> Unsat49<S> {
         lanes
     }
 
-    /// Loads per-lane limbs in this module's representation, bounded by `bound * p`.
-    ///
-    /// The limbs must be carried.
-    #[cfg(test)]
-    #[inline(always)]
-    pub fn from_limbs(simd: S, lanes: &[[u64; LIMBS]; MAX_LANES], bound: u64) -> Self {
-        Self::raw(simd, lanes, bound)
-    }
-
     /// Converts an integer `a` into this module's Montgomery form `a * 2^392`.
     #[inline(always)]
     fn to_lanes(self, simd: S) -> Self {
@@ -254,13 +237,6 @@ impl<S: Simd> Unsat49<S> {
         self.bound = bound;
         self.limb_bound = DebugCounter::new(3);
         self
-    }
-
-    /// Returns `2 * self`, without carrying.
-    #[cfg(test)]
-    #[inline(always)]
-    pub fn double(self, simd: S) -> Self {
-        self.add(simd, self)
     }
 
     /// Propagates carries so every limb is below `2^49`, without reducing modulo `p`.
@@ -383,13 +359,6 @@ impl<S: Simd> Unsat49<S> {
         }
     }
 
-    /// Returns `self * self`.
-    #[cfg(test)]
-    #[inline(always)]
-    pub fn square(self, simd: S) -> Self {
-        self.mul(simd, self)
-    }
-
     /// Returns `self - p` in lanes where `self >= p`, for a carried value below `2p`.
     #[inline(always)]
     fn subtract_modulus(self, simd: S) -> Self {
@@ -478,7 +447,7 @@ impl<S: Simd> Field<S> for Unsat49<S> {
 
     #[inline(always)]
     fn neg<const K: u64>(self, simd: S) -> Self {
-       self.neg::<K>(simd)
+        self.neg::<K>(simd)
     }
 
     #[inline(always)]
@@ -547,339 +516,101 @@ impl<S: Simd> Field<S> for Unsat49<S> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{super::reference, *};
-    use arbitrary::Unstructured;
-    use commonware_invariants::minifuzz;
-    use commonware_simd::{Operation, check_consistent, emulated::EmulatedScalar, test_dispatch};
-    use reference::Element;
-    use std::{panic::catch_unwind, vec::Vec};
+/// Checks of [`Unsat49`] values with any bounds against the reference arithmetic.
+#[cfg(any(test, feature = "fuzz"))]
+pub mod fuzz {
+    use super::{
+        super::{
+            reference::Element,
+            testing::{self, Family, Formulas, Positional},
+        },
+        *,
+    };
+    use arbitrary::{Arbitrary, Unstructured};
 
-    /// Returns `k * p` in carried limbs.
-    fn multiple(k: u64) -> [u64; LIMBS] {
-        super::super::multiple::<LIMBS, LIMB_BITS>(k)
-    }
+    impl<S: Simd> Positional<S> for Unsat49<S> {
+        const LIMIT: u64 = LIMIT;
+        const SLACK: u64 = SLACK;
+        const LIMB_LIMIT: u64 = LIMB_LIMIT;
 
-    /// A formula evaluated on one pair of elements per lane.
-    #[derive(Clone, Copy, Debug)]
-    enum Formula {
-        Add,
-        Sub,
-        Neg,
-        Double,
-        Mul,
-        Square,
-        /// `(a + a + a) * (b - a) - b`: linear operations chained around a product.
-        Chain,
-        /// `(a + b) * (b + a)`, multiplying uncarried sums where the radix allows it.
-        Ready,
-        /// Addition up to the integer limit.
-        LooseAdd,
-        /// Doublings without carrying, then a product.
-        LooseDoubling,
-        /// Subtraction with a larger bias, then a square.
-        LooseSub,
-        /// Multiplication of inputs with large integer bounds.
-        LooseMul,
-        /// Storing a value at the integer limit.
-        LooseStore,
-        /// Loading the elements as bytes, then multiplying.
-        Load,
-    }
+        fn lifted(element: Element, bound: u64) -> [u64; LIMBS] {
+            testing::lift::<LIMBS, LIMB_BITS>(element, bound)
+        }
 
-    const FORMULAS: [Formula; 14] = [
-        Formula::Add,
-        Formula::Sub,
-        Formula::Neg,
-        Formula::Double,
-        Formula::Mul,
-        Formula::Square,
-        Formula::Chain,
-        Formula::Ready,
-        Formula::LooseAdd,
-        Formula::LooseDoubling,
-        Formula::LooseSub,
-        Formula::LooseMul,
-        Formula::LooseStore,
-        Formula::Load,
-    ];
-
-    impl Formula {
-        /// Returns the integer bounds of the inputs, in units of `p`.
-        fn bounds(self) -> (u64, u64) {
-            match self {
-                Self::LooseAdd => (LIMIT / 2, LIMIT / 2),
-                Self::LooseMul => (LIMIT, LIMIT - 1),
-                Self::LooseStore => (LIMIT, 1),
-                _ => (2, 2),
+        fn from_raw(simd: S, lanes: &[[u64; LIMBS]], bound: u64) -> Self {
+            let mut all = [[0; LIMBS]; MAX_LANES];
+            for (lane, limbs) in all.iter_mut().zip(lanes) {
+                *lane = *limbs;
             }
+            Self::raw(simd, &all, bound)
         }
 
-        /// Returns how many times `LooseDoubling` doubles, staying within the integer limit.
-        fn doublings() -> u32 {
-            (LIMIT.ilog2() - 1).min(11)
+        fn widest(bound: u64) -> Element {
+            testing::widest::<LIMBS, LIMB_BITS>(bound)
         }
 
-        fn scalar(self, a: Element, b: Element) -> Element {
-            match self {
-                Self::Add | Self::LooseAdd => reference::add(a, b),
-                Self::Sub => reference::sub(a, b),
-                Self::Neg => reference::neg(a),
-                Self::Double => reference::add(a, a),
-                Self::Mul | Self::LooseMul | Self::Load => reference::mul(a, b),
-                Self::Square => reference::mul(a, a),
-                Self::Chain => {
-                    let three = reference::add(reference::add(a, a), a);
-                    reference::sub(reference::mul(three, reference::sub(b, a)), b)
-                }
-                Self::Ready => {
-                    let sum = reference::add(a, b);
-                    reference::mul(sum, sum)
-                }
-                Self::LooseDoubling => {
-                    let doubled = (0..Self::doublings()).fold(a, |a, _| reference::add(a, a));
-                    reference::mul(doubled, b)
-                }
-                Self::LooseSub => {
-                    let difference = reference::sub(a, b);
-                    reference::mul(difference, difference)
-                }
-                Self::LooseStore => a,
-            }
-        }
-
-        #[inline(always)]
-        fn lanes<S: Simd>(self, simd: S, a: Unsat49<S>, b: Unsat49<S>) -> Unsat49<S> {
-            match self {
-                Self::Add | Self::LooseAdd => a.add(simd, b),
-                Self::Sub => a.sub::<3>(simd, b),
-                Self::Neg => a.neg::<3>(simd),
-                Self::Double => a.double(simd),
-                Self::Mul | Self::LooseMul | Self::Load => a.mul(simd, b),
-                Self::Square => a.square(simd),
-                Self::Chain => {
-                    let three = a.double(simd).add(simd, a).ready::<3>(simd);
-                    let difference = b.sub::<3>(simd, a).ready::<4>(simd);
-                    three.mul(simd, difference).sub::<3>(simd, b)
-                }
-                Self::Ready => {
-                    let sum = a.add(simd, b).ready::<2>(simd);
-                    sum.mul(simd, b.add(simd, a).ready::<2>(simd))
-                }
-                Self::LooseDoubling => {
-                    let mut a = a;
-                    for _ in 0..Self::doublings() {
-                        a = a.double(simd);
-                    }
-                    a.carry(simd).mul(simd, b)
-                }
-                Self::LooseSub => a.sub::<5>(simd, b).carry(simd).square(simd),
-                Self::LooseStore => a,
-            }
+        fn is_tight(raw: &[u64; LIMBS]) -> bool {
+            testing::is_tight::<LIMBS, LIMB_BITS>(*raw)
         }
     }
 
-    /// Returns the representative `a * 2^392 mod p` of an element, in limbs.
-    fn to_lanes_form(element: Element) -> [u64; LIMBS] {
-        limbs_from_words(reference::mul(element, power_of_two(8 * LIMB_BITS)))
+    /// Selects [`Unsat49`] on every backend.
+    struct Representation;
+
+    impl Family for Representation {
+        type Value<S: Simd> = Unsat49<S>;
     }
 
-    /// Returns the element whose representative is `limbs`, a carried value below `p`.
-    fn from_lanes_form(limbs: [u64; LIMBS]) -> Element {
-        let inverse = reference::invert(power_of_two(8 * LIMB_BITS));
-        reference::mul(words_from_limbs(limbs), inverse)
+    /// A formula over [`Unsat49`] values lifted to bounds drawn from the input, with distinct
+    /// elements in every lane, on an emulated backend drawn from the input.
+    #[derive(Clone, Copy, Debug, Arbitrary)]
+    pub enum Plan {
+        /// Checks additions, subtractions and negations with every bias, doublings, and stores, up
+        /// to the integer limit.
+        Linear,
+        /// Checks products of values up to the integer limit, of sums of [`SLACK`] values, of
+        /// values readied from static limb bounds, and of repeated doublings.
+        Products,
+        /// Checks that tight reductions of sums return carried values below `2p`.
+        Tight,
     }
 
-    /// Returns the representative of `element` plus `(bound - 1) * p`, in carried limbs.
-    fn lift(element: Element, bound: u64) -> [u64; LIMBS] {
-        let (value, offset) = (to_lanes_form(element), multiple(bound - 1));
-        let mut limbs = [0; LIMBS];
-        let mut carry = 0;
-        for (i, limb) in limbs.iter_mut().enumerate() {
-            let sum = value[i] + offset[i] + carry;
-            *limb = sum & MASK;
-            carry = sum >> LIMB_BITS;
-        }
-        assert_eq!(carry, 0);
-        limbs
-    }
-
-    /// Loads one element per lane, each lifted by `(bound - 1) * p`.
-    fn loose<S: Simd>(simd: S, elements: &[Element], bound: u64) -> Unsat49<S> {
-        let mut lanes = [[0; LIMBS]; MAX_LANES];
-        for (lane, element) in lanes.iter_mut().zip(elements) {
-            *lane = lift(*element, bound);
-        }
-        Unsat49::from_limbs(simd, &lanes, bound)
-    }
-
-    /// Returns the element whose representative is `p - 1`, which lifts to `bound * p - 1`.
-    fn largest() -> Element {
-        let mut limbs = multiple(1);
-        limbs[0] -= 1;
-        from_lanes_form(limbs)
-    }
-
-    fn elements(
-        u: &mut Unstructured<'_>,
-        largest: Element,
-    ) -> arbitrary::Result<[Element; MAX_LANES]> {
-        let mut elements = [reference::ZERO; MAX_LANES];
-        for element in &mut elements {
-            *element = match u.int_in_range(0..=9)? {
-                0 => reference::ZERO,
-                1 => reference::ONE,
-                2 => reference::neg(reference::ONE),
-                3 => largest,
-                _ => reference::canonical(u)?,
+    impl Plan {
+        /// Runs the operation using the remaining input.
+        pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+            let formulas = match self {
+                Self::Linear => Formulas::Linear,
+                Self::Products => Formulas::Products,
+                Self::Tight => Formulas::Tight,
             };
+            testing::run_formulas::<Representation>(formulas, u)
         }
-        Ok(elements)
     }
 
-    #[test]
-    fn representatives_round_trip() {
-        let mut limbs = multiple(1);
-        limbs[0] -= 1;
-        assert_eq!(to_lanes_form(largest()), limbs);
-        let element = reference::neg(reference::ONE);
-        assert_eq!(from_lanes_form(to_lanes_form(element)), element);
-    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use commonware_invariants::minifuzz;
+        use commonware_simd::emulated::EmulatedScalar;
 
-    #[test]
-    fn matches_reference() {
-        /// Evaluates a formula on every pair of elements, a lane-sized chunk at a time.
-        struct Evaluate<'a> {
-            formula: Formula,
-            a: &'a [Element; MAX_LANES],
-            b: &'a [Element; MAX_LANES],
+        #[test]
+        fn minifuzz_linear() {
+            minifuzz::test(|u| Plan::Linear.run(u));
         }
 
-        impl<S: Simd> Operation<S> for Evaluate<'_> {
-            type Output = [[u8; BYTES]; MAX_LANES];
-
-            fn portable(self, simd: S) -> [[u8; BYTES]; MAX_LANES] {
-                let mut output = [[0; BYTES]; MAX_LANES];
-                let (a_bound, b_bound) = self.formula.bounds();
-                let bytes = self.a.map(reference::to_bytes);
-                simd.execute(
-                    #[inline(always)]
-                    |simd: S| {
-                        for start in (0..MAX_LANES).step_by(S::U64_LANES) {
-                            let a = match self.formula {
-                                Formula::Load => Unsat49::load(simd, &bytes[start..], &[0; BYTES]),
-                                _ => loose(simd, &self.a[start..], a_bound),
-                            };
-                            let b = loose(simd, &self.b[start..], b_bound);
-                            self.formula
-                                .lanes(simd, a, b)
-                                .store(simd, &mut output[start..]);
-                        }
-                    },
-                );
-                output
-            }
+        #[test]
+        fn minifuzz_products() {
+            minifuzz::test(|u| Plan::Products.run(u));
         }
 
-        let largest = largest();
-        minifuzz::test(|u| {
-            let a = elements(u, largest)?;
-            let b = elements(u, largest)?;
-            for formula in FORMULAS {
-                let expected: Vec<[u8; BYTES]> = a
-                    .iter()
-                    .zip(&b)
-                    .map(|(a, b)| reference::to_bytes(formula.scalar(*a, *b)))
-                    .collect();
-                let evaluate = || Evaluate {
-                    formula,
-                    a: &a,
-                    b: &b,
-                };
-                let actual = test_dispatch(evaluate());
-                assert_eq!(actual, expected[..actual.len()], "{formula:?}");
-                check_consistent(evaluate);
-            }
-            Ok(())
-        });
-    }
-
-    #[test]
-    fn round_trip_reduces_bytes() {
-        /// Loads and stores every lane.
-        struct RoundTrip<'a>(&'a [[u8; BYTES]; MAX_LANES]);
-
-        impl<S: Simd> Operation<S> for RoundTrip<'_> {
-            type Output = [[u8; BYTES]; MAX_LANES];
-
-            fn portable(self, simd: S) -> [[u8; BYTES]; MAX_LANES] {
-                let mut output = [[0; BYTES]; MAX_LANES];
-                for start in (0..MAX_LANES).step_by(S::U64_LANES) {
-                    Unsat49::<S>::load(simd, &self.0[start..], &[0; BYTES])
-                        .store(simd, &mut output[start..]);
-                }
-                output
-            }
+        #[test]
+        fn minifuzz_tight() {
+            minifuzz::test(|u| Plan::Tight.run(u));
         }
 
-        let largest = largest();
-        minifuzz::test(|u| {
-            let a = elements(u, largest)?.map(reference::to_bytes);
-            assert_eq!(test_dispatch(RoundTrip(&a)), a);
-            check_consistent(|| RoundTrip(&a));
-            // Integers at or above p load as their residues.
-            let raw: [[u8; BYTES]; MAX_LANES] = u.arbitrary()?;
-            let reduced = raw.map(|bytes| reference::to_bytes(reference::reduce(&bytes)));
-            assert_eq!(test_dispatch(RoundTrip(&raw)), reduced);
-            Ok(())
-        });
-    }
-
-    #[test]
-    fn splat_fills_every_lane() {
-        /// Splats an element into every lane.
-        struct Splat([u8; BYTES]);
-
-        impl<S: Simd> Operation<S> for Splat {
-            type Output = [[u8; BYTES]; MAX_LANES];
-
-            fn portable(self, simd: S) -> [[u8; BYTES]; MAX_LANES] {
-                let mut output = [[0; BYTES]; MAX_LANES];
-                for start in (0..MAX_LANES).step_by(S::U64_LANES) {
-                    Unsat49::<S>::splat(simd, &self.0).store(simd, &mut output[start..]);
-                }
-                output
-            }
+        #[test]
+        fn rejects_values_beyond_the_limits() {
+            testing::check_limits::<_, Unsat49<_>>(EmulatedScalar);
         }
-
-        minifuzz::test(|u| {
-            let element = reference::to_bytes(reference::canonical(u)?);
-            assert_eq!(test_dispatch(Splat(element)), [element; MAX_LANES]);
-            check_consistent(|| Splat(element));
-            Ok(())
-        });
-    }
-
-    #[test]
-    fn rejects_values_beyond_the_limits() {
-        if !DebugCounter::live() {
-            return;
-        }
-        let simd = EmulatedScalar;
-        let largest = largest();
-        let at = |bound| loose(simd, &[largest], bound);
-        assert!(catch_unwind(|| at(LIMIT).add(simd, at(1))).is_err());
-        assert!(catch_unwind(|| at(2).sub::<3>(simd, at(2))).is_ok());
-        assert!(catch_unwind(|| at(2).sub::<3>(simd, at(3))).is_err());
-        assert!(catch_unwind(|| at(1).sub::<5>(simd, at(1).double(simd))).is_ok());
-        assert!(catch_unwind(|| at(1).sub::<9>(simd, at(1).double(simd).double(simd))).is_err());
-        assert!(catch_unwind(|| at(LIMIT).sub::<3>(simd, at(1))).is_err());
-        assert!(catch_unwind(|| at(3).neg::<3>(simd)).is_err());
-        assert!(catch_unwind(|| at(LIMIT).mul(simd, at(LIMIT))).is_err());
-        // A multiplicand may hold the sum of SLACK carried values, but no more.
-        let sum = |count: u64| (1..count).fold(at(1), |sum, _| sum.add(simd, at(1)));
-        assert!(catch_unwind(|| sum(SLACK).mul(simd, at(1))).is_ok());
-        assert!(catch_unwind(|| sum(SLACK + 1).mul(simd, at(1))).is_err());
     }
 }

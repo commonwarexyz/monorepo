@@ -265,7 +265,7 @@ pub trait Field<S: Simd>: Copy {
     ///
     /// Integer and limb bounds also constrain accumulation, including subtraction biases.
     #[cfg_attr(
-        not(test),
+        not(any(test, feature = "fuzz")),
         expect(
             dead_code,
             reason = "Documents the accumulation contract, which the tests check."
@@ -681,124 +681,262 @@ const INVERSE_EXPONENT: [u64; WORDS] = {
     exponent
 };
 
-#[cfg(test)]
-mod tests {
+/// Checks of the arithmetic of every representation against the reference arithmetic.
+#[cfg(any(test, feature = "fuzz"))]
+pub mod fuzz {
     use super::*;
     use crate::core::field::fp::{
-        rns::Rns, reference, unsat28::Unsat28, unsat49::Unsat49,
+        reference::{self, Element},
+        testing::{self, Check},
     };
-    use commonware_invariants::minifuzz;
-    use commonware_simd::{
-        Operation, X86V4C, check_consistent,
-        emulated::{EmulatedNeon, EmulatedScalar, EmulatedX86V4C},
-        test_dispatch,
-    };
+    use arbitrary::{Arbitrary, Unstructured};
+    use core::any::type_name;
+    use std::{vec, vec::Vec};
 
-    fn check<S: Simd, F: Field<S>>(simd: S, inputs: &[[u8; BYTES]; 4]) {
-        let mut lanes = vec![[0; BYTES]; F::LANES + 1];
-        F::load(simd, &inputs[..1], &inputs[1]).store(simd, &mut lanes);
-        assert_eq!(lanes[0], reference::to_bytes(reference::reduce(&inputs[0])));
-        for lane in &lanes[1..F::LANES] {
-            assert_eq!(*lane, reference::to_bytes(reference::reduce(&inputs[1])));
+    /// A check of every [`Field`] operation in a representation and on an emulated backend drawn
+    /// from the input, with distinct elements in every lane.
+    #[derive(Clone, Copy, Debug, Arbitrary)]
+    pub enum Plan {
+        /// Checks loads, stores, raw forms, selections, and every value and product operation,
+        /// including long and tight accumulations, against the reference.
+        Operations,
+        /// Checks inversion against the reference, mapping zero to zero.
+        Inverse,
+    }
+
+    impl Plan {
+        /// Runs the operation using the remaining input.
+        pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+            testing::check_any(u, self)
         }
-        assert_eq!(lanes[F::LANES], [0; BYTES]);
-        F::load(simd, inputs, &inputs[0]).store(simd, &mut []);
-        let [a, b, c, d] = inputs.map(|bytes| F::load(simd, &[], &bytes));
-        let [ra, rb, rc, rd] = inputs.map(|bytes| reference::reduce(&bytes));
-        let assert_value = |value: F, expected| {
-            let mut output = [[0; BYTES]];
-            value.store(simd, &mut output);
-            assert_eq!(output[0], reference::to_bytes(expected));
-        };
+    }
+
+    impl Check for Plan {
+        fn check<S: Simd, F: Field<S>>(
+            self,
+            simd: S,
+            u: &mut Unstructured<'_>,
+        ) -> arbitrary::Result<()> {
+            match self {
+                Self::Operations => operations::<S, F>(simd, u),
+                Self::Inverse => inverse::<S, F>(simd, u),
+            }
+        }
+    }
+
+    /// Draws one integer per lane and loads them, or draws one and loads it into every lane
+    /// through the fill, returning the value and its lanes' residues.
+    fn draw<S: Simd, F: Field<S>>(
+        simd: S,
+        u: &mut Unstructured<'_>,
+    ) -> arbitrary::Result<(F, Vec<Element>)> {
+        if u.int_in_range(0..=3)? == 1 {
+            let fill = testing::bytes(u)?;
+            let residues = vec![reference::reduce(&fill); F::LANES];
+            return Ok((F::load(simd, &[], &fill), residues));
+        }
+        let mut lanes = Vec::with_capacity(F::LANES);
+        for _ in 0..F::LANES {
+            lanes.push(testing::bytes(u)?);
+        }
+        let residues = lanes.iter().map(reference::reduce).collect();
+        Ok((F::load(simd, &lanes, &[0; BYTES]), residues))
+    }
+
+    /// Asserts that lane `i` of `value` is `expected(i)`.
+    fn assert_lanes<S: Simd, F: Field<S>>(
+        simd: S,
+        value: F,
+        label: &str,
+        expected: impl Fn(usize) -> Element,
+    ) {
+        let mut output = vec![[0; BYTES]; F::LANES];
+        value.store(simd, &mut output);
+        for (lane, output) in output.iter().enumerate() {
+            assert_eq!(
+                *output,
+                reference::to_bytes(expected(lane)),
+                "{label} on {}, lane {lane}",
+                type_name::<F>()
+            );
+        }
+    }
+
+    /// Returns the element with the integer value `n`.
+    const fn small(n: u64) -> Element {
+        [n, 0, 0, 0, 0, 0]
+    }
+
+    fn operations<S: Simd, F: Field<S>>(
+        simd: S,
+        u: &mut Unstructured<'_>,
+    ) -> arbitrary::Result<()> {
+        // Loads fill the lanes beyond the given elements and ignore elements beyond the lanes;
+        // stores leave entries beyond the lanes unchanged.
+        let lanes = F::LANES;
+        let mut elements = Vec::with_capacity(lanes + 1);
+        for _ in 0..=lanes {
+            elements.push(testing::bytes(u)?);
+        }
+        let fill = testing::bytes(u)?;
+        let count = lanes + 1 - u.int_in_range(0..=lanes + 1)?;
+        let length = lanes + 1 - u.int_in_range(0..=lanes + 1)?;
+        // Above p, so never a stored element.
+        let sentinel = [0xff; BYTES];
+        let mut stored = vec![sentinel; length];
+        F::load(simd, &elements[..count], &fill).store(simd, &mut stored);
+        for (lane, stored) in stored.iter().enumerate() {
+            let expected = match lane {
+                lane if lane >= lanes => sentinel,
+                lane if lane < count => reference::to_bytes(reference::reduce(&elements[lane])),
+                _ => reference::to_bytes(reference::reduce(&fill)),
+            };
+            assert_eq!(
+                *stored,
+                expected,
+                "load {count} and store {length} on {}, lane {lane}",
+                type_name::<F>()
+            );
+        }
+
+        let (a, ra) = draw::<S, F>(simd, u)?;
+        let (b, rb) = draw::<S, F>(simd, u)?;
+        let (c, rc) = draw::<S, F>(simd, u)?;
+        let (d, rd) = draw::<S, F>(simd, u)?;
+        let mul = |x: &[Element], y: &[Element], i: usize| reference::mul(x[i], y[i]);
+        let rab = |i| mul(&ra, &rb, i);
+        let rcd = |i| mul(&rc, &rd, i);
         let ab = a.product(simd, b);
         let cd = c.product(simd, d);
-        assert_value(F::reduce(simd, ab), reference::mul(ra, rb));
-        assert_value(F::mul(a, simd, b), reference::mul(ra, rb));
-        assert_value(a.add(simd, b), reference::add(ra, rb));
-        assert_value(a.double(simd), reference::add(ra, ra));
-        assert_value(a.mul_small::<1>(simd), ra);
-        assert_value(
-            a.mul_small::<3>(simd),
-            reference::mul(ra, [3, 0, 0, 0, 0, 0]),
-        );
+        assert_lanes(simd, F::reduce(simd, ab), "reduce(a * b)", rab);
+        assert_lanes(simd, F::mul(a, simd, b), "a * b", rab);
+        assert_lanes(simd, a.add(simd, b), "a + b", |i| {
+            reference::add(ra[i], rb[i])
+        });
+        assert_lanes(simd, a.double(simd), "2a", |i| reference::add(ra[i], ra[i]));
+        assert_lanes(simd, a.mul_small::<1>(simd), "1a", |i| ra[i]);
+        assert_lanes(simd, a.mul_small::<3>(simd), "3a", |i| {
+            reference::mul(ra[i], small(3))
+        });
+        let r12 = |i: usize| reference::mul(ra[i], small(12));
         let scaled = a.mul_small::<12>(simd);
-        assert_value(scaled, reference::mul(ra, [12, 0, 0, 0, 0, 0]));
+        assert_lanes(simd, scaled, "12a", r12);
         // A carried multiple is a valid subtrahend and factor.
         let scaled = scaled.carry(simd);
-        assert_value(
-            b.sub::<{ 12 * 17 }>(simd, scaled),
-            reference::sub(rb, reference::mul(ra, [12, 0, 0, 0, 0, 0])),
-        );
-        assert_value(
-            F::mul(scaled, simd, b),
-            reference::mul(reference::mul(ra, [12, 0, 0, 0, 0, 0]), rb),
-        );
-        assert_value(a.sub::<3>(simd, b), reference::sub(ra, rb));
-        assert_value(a.neg::<3>(simd), reference::neg(ra));
-        assert_value(F::reduce(simd, F::lift(a, simd)), ra);
-        assert_value(
+        assert_lanes(simd, b.sub::<{ 12 * 17 }>(simd, scaled), "b - 12a", |i| {
+            reference::sub(rb[i], r12(i))
+        });
+        assert_lanes(simd, F::mul(scaled, simd, b), "12a * b", |i| {
+            reference::mul(r12(i), rb[i])
+        });
+        assert_lanes(simd, a.sub::<3>(simd, b), "a - b", |i| {
+            reference::sub(ra[i], rb[i])
+        });
+        assert_lanes(simd, a.neg::<3>(simd), "-a", |i| reference::neg(ra[i]));
+        assert_lanes(simd, F::reduce(simd, F::lift(a, simd)), "lift(a)", |i| {
+            ra[i]
+        });
+        let sum = |i| reference::add(rab(i), rcd(i));
+        let difference = |i| reference::sub(rab(i), rcd(i));
+        let cross = |i| reference::add(mul(&ra, &rd, i), mul(&rc, &rb, i));
+        assert_lanes(
+            simd,
             F::reduce(simd, F::accumulate(simd, ab, cd)),
-            reference::add(reference::mul(ra, rb), reference::mul(rc, rd)),
+            "ab + cd",
+            sum,
         );
-        assert_value(
+        assert_lanes(
+            simd,
             F::reduce(simd, F::product_sub::<64>(simd, ab, cd)),
-            reference::sub(reference::mul(ra, rb), reference::mul(rc, rd)),
+            "ab - cd",
+            difference,
         );
-        assert_value(
+        assert_lanes(
+            simd,
             F::reduce_signed::<64>(simd, F::cross(simd, [a, c], [b, d], ab, cd)),
-            reference::add(reference::mul(ra, rd), reference::mul(rc, rb)),
+            "cross",
+            cross,
         );
-        assert_value(
+        assert_lanes(
+            simd,
             F::reduce(simd, F::accumulate_product(simd, ab, c, d)),
-            reference::add(reference::mul(ra, rb), reference::mul(rc, rd)),
+            "ab + c * d",
+            sum,
         );
         // (a + c i)(b + d i) = ab - cd + (ad + cb) i, accumulated into itself and subtracted
         // from the double.
-        let real = reference::sub(reference::mul(ra, rb), reference::mul(rc, rd));
-        let imaginary = reference::add(reference::mul(ra, rd), reference::mul(rc, rb));
         let quadratic = F::quadratic(simd, [a, c], [b, d]);
-        assert_value(F::reduce_signed::<64>(simd, quadratic[0]), real);
-        assert_value(F::reduce_signed::<64>(simd, quadratic[1]), imaginary);
-        let doubled = F::accumulate_quadratic(simd, quadratic, [a, c], [b, d]);
-        assert_value(
-            F::reduce_signed::<64>(simd, doubled[0]),
-            reference::add(real, real),
+        assert_lanes(
+            simd,
+            F::reduce_signed::<64>(simd, quadratic[0]),
+            "real",
+            difference,
         );
-        assert_value(
+        assert_lanes(
+            simd,
+            F::reduce_signed::<64>(simd, quadratic[1]),
+            "imaginary",
+            cross,
+        );
+        let doubled = F::accumulate_quadratic(simd, quadratic, [a, c], [b, d]);
+        assert_lanes(
+            simd,
+            F::reduce_signed::<64>(simd, doubled[0]),
+            "2 real",
+            |i| reference::add(difference(i), difference(i)),
+        );
+        assert_lanes(
+            simd,
             F::reduce_signed::<64>(simd, doubled[1]),
-            reference::add(imaginary, imaginary),
+            "2 imaginary",
+            |i| reference::add(cross(i), cross(i)),
         );
         let single = F::subtract_quadratic(simd, doubled, [a, c], [b, d]);
-        assert_value(F::reduce_signed::<64>(simd, single[0]), real);
-        assert_value(F::reduce_signed::<64>(simd, single[1]), imaginary);
-        let mut sum = ab;
-        let mut expected = reference::mul(ra, rb);
-        for _ in 1..F::PRODUCTS {
-            sum = F::accumulate(simd, sum, ab);
-            expected = reference::add(expected, reference::mul(ra, rb));
-        }
-        assert_value(
-            F::reduce(simd, F::product_sub::<64>(simd, ab, sum)),
-            reference::sub(reference::mul(ra, rb), expected),
+        assert_lanes(
+            simd,
+            F::reduce_signed::<64>(simd, single[0]),
+            "real again",
+            difference,
         );
-        let reduced = F::reduce(simd, sum);
-        assert_value(reduced, expected);
+        assert_lanes(
+            simd,
+            F::reduce_signed::<64>(simd, single[1]),
+            "imaginary again",
+            cross,
+        );
+        // A sum of PRODUCTS products reduces, and is a valid subtrahend.
+        let times = |n: usize, i| reference::mul(rab(i), small(n as u64));
+        let mut full = ab;
+        for _ in 1..F::PRODUCTS {
+            full = F::accumulate(simd, full, ab);
+        }
+        assert_lanes(
+            simd,
+            F::reduce(simd, F::product_sub::<64>(simd, ab, full)),
+            "ab - PRODUCTS ab",
+            |i| reference::sub(rab(i), times(F::PRODUCTS, i)),
+        );
+        let reduced = F::reduce(simd, full);
+        assert_lanes(simd, reduced, "PRODUCTS ab", |i| times(F::PRODUCTS, i));
+        assert_lanes(
+            simd,
+            F::mul(reduced.ready::<1>(simd), simd, a),
+            "PRODUCTS ab * a",
+            |i| reference::mul(times(F::PRODUCTS, i), ra[i]),
+        );
         // A carried sum of eight products, the fewest any representation accepts, accumulates
         // seven more, and a tight reduction bounds the result whatever the sum's bound.
         let mut long = ab;
-        let mut long_expected = reference::mul(ra, rb);
         for _ in 1..8 {
             long = F::accumulate(simd, long, ab);
-            long_expected = reference::add(long_expected, reference::mul(ra, rb));
         }
         long = F::carry_product(simd, long);
         for _ in 1..8 {
             long = F::accumulate(simd, long, ab);
-            long_expected = reference::add(long_expected, reference::mul(ra, rb));
         }
         let tight = F::reduce_tight(simd, long);
-        assert_value(tight, long_expected);
-        tight.neg::<{ TIGHT + 1 }>(simd);
+        assert_lanes(simd, tight, "tight 15 ab", |i| times(15, i));
+        let _ = tight.neg::<{ TIGHT + 1 }>(simd);
         let tight = F::reduce_signed_tight::<64>(
             simd,
             Signed {
@@ -806,167 +944,89 @@ mod tests {
                 neg: Some(cd),
             },
         );
-        assert_value(tight, reference::sub(long_expected, reference::mul(rc, rd)));
-        tight.neg::<{ TIGHT + 1 }>(simd);
-        assert_value(
-            F::reduce_signed_tight::<64>(simd, Signed::positive(ab)),
-            reference::mul(ra, rb),
-        );
-        assert_value(
-            F::mul(reduced.ready::<1>(simd), simd, a),
-            reference::mul(expected, ra),
-        );
-        let mut factor = a;
-        let mut scalar_factor = ra;
-        for _ in 1..16 {
-            factor = factor.add(simd, a);
-            scalar_factor = reference::add(scalar_factor, ra);
-            // Keep additions within the representation's limb limits.
-            factor = factor.ready::<16>(simd);
-        }
-        assert_value(
-            F::mul(factor.ready::<16>(simd), simd, b),
-            reference::mul(scalar_factor, rb),
-        );
-        let sum = a.add(simd, b).ready::<2>(simd);
-        assert_value(
-            F::mul(sum, simd, c),
-            reference::mul(reference::add(ra, rb), rc),
-        );
-        // Selection picks each lane independently and keeps the larger bounds.
-        assert_value(a.select(simd, b, 0), ra);
-        assert_value(a.select(simd, b, u64::MAX), rb);
-        let mut selected = vec![[0; BYTES]; F::LANES];
-        a.select(simd, scaled, 0x5555).store(simd, &mut selected);
-        let scaled_value = reference::mul(ra, [12, 0, 0, 0, 0, 0]);
-        for (lane, value) in selected.iter().enumerate() {
-            let expected = if lane % 2 == 0 { scaled_value } else { ra };
-            assert_eq!(*value, reference::to_bytes(expected));
-        }
-        // Raw forms round-trip without conversion and load as valid operands.
-        let mut raw = vec![F::Raw::default(); F::LANES];
-        F::mul(a, simd, b).store_raw::<TIGHT>(simd, &mut raw);
-        let lanes: Vec<&F::Raw> = raw.iter().collect();
-        let loaded = F::load_raw::<TIGHT>(simd, &lanes);
-        assert_value(loaded, reference::mul(ra, rb));
-        assert_value(
-            F::mul(loaded, simd, c),
-            reference::mul(reference::mul(ra, rb), rc),
-        );
-        // Each lane loads its own entry.
-        F::load(simd, &inputs[..1], &inputs[1]).store_raw::<2>(simd, &mut raw);
-        let reversed: Vec<&F::Raw> = raw.iter().rev().collect();
-        let mut stored = vec![[0; BYTES]; F::LANES];
-        F::load_raw::<2>(simd, &reversed).store(simd, &mut stored);
-        for (lane, value) in stored.iter().enumerate() {
-            let expected = if lane + 1 == F::LANES { ra } else { rb };
-            assert_eq!(*value, reference::to_bytes(expected));
-        }
-        assert!(F::LANES > 0);
-    }
-
-    #[test]
-    fn representations_match_reference() {
-        struct Evaluate([[u8; BYTES]; 4]);
-
-        impl<S: Simd> Operation<S> for Evaluate {
-            type Output = ();
-
-            fn portable(self, simd: S) {
-                simd.execute(|simd: S| {
-                    check::<S, Unsat49<S>>(simd, &self.0);
-                    check::<S, Unsat28<S>>(simd, &self.0);
-                });
-            }
-
-            // Residues require x86v4c.
-            fn x86_v4c(self, simd: S)
-            where
-                S: X86V4C,
-            {
-                let inputs = self.0;
-                self.portable(simd);
-                simd.execute(|simd: S| check::<S, Rns<S>>(simd, &inputs));
-            }
-        }
-
-        for value in [
-            reference::ZERO,
-            reference::ONE,
-            reference::neg(reference::ONE),
-        ] {
-            let inputs = [reference::to_bytes(value); 4];
-            check_consistent(|| Evaluate(inputs));
-        }
-        minifuzz::test(|u| {
-            let inputs = [
-                u.arbitrary()?,
-                u.arbitrary()?,
-                u.arbitrary()?,
-                u.arbitrary()?,
-            ];
-            test_dispatch(Evaluate(inputs));
-            check_consistent(|| Evaluate(inputs));
-            // Run every representation and vector width even on hosts without native SIMD.
-            Evaluate(inputs).portable(EmulatedScalar);
-            Evaluate(inputs).portable(EmulatedNeon);
-            EmulatedX86V4C.execute(Evaluate(inputs));
-            Ok(())
+        assert_lanes(simd, tight, "tight 15 ab - cd", |i| {
+            reference::sub(times(15, i), rcd(i))
         });
-    }
-
-    fn check_inverse<S: Simd, F: Field<S>>(simd: S, input: &[u8; BYTES]) {
-        let a = F::load(simd, &[], input);
-        let ra = reference::reduce(input);
-        let inverse = a.invert(simd);
-        let mut output = [[0; BYTES]; 2];
-        inverse.store(simd, &mut output[..1]);
-        F::mul(inverse, simd, a).store(simd, &mut output[1..]);
-        assert_eq!(output[0], reference::to_bytes(reference::invert(ra)));
-        let one = if ra == reference::ZERO {
-            reference::ZERO
-        } else {
-            reference::ONE
+        let _ = tight.neg::<{ TIGHT + 1 }>(simd);
+        assert_lanes(
+            simd,
+            F::reduce_signed_tight::<64>(simd, Signed::positive(ab)),
+            "tight ab",
+            rab,
+        );
+        // Sums of up to sixteen values multiply once readied.
+        let mut factor = a;
+        for _ in 1..16 {
+            // Keep additions within the representation's limb limits.
+            factor = factor.add(simd, a).ready::<16>(simd);
+        }
+        assert_lanes(
+            simd,
+            F::mul(factor.ready::<16>(simd), simd, b),
+            "16a * b",
+            |i| reference::mul(reference::mul(ra[i], small(16)), rb[i]),
+        );
+        let sum_ab = a.add(simd, b).ready::<2>(simd);
+        assert_lanes(simd, F::mul(sum_ab, simd, c), "(a + b) * c", |i| {
+            reference::mul(reference::add(ra[i], rb[i]), rc[i])
+        });
+        // Selection picks each lane independently and keeps the larger bounds.
+        let mask = match u.int_in_range(0..=2)? {
+            0 => u.arbitrary()?,
+            1 => 0,
+            _ => u64::MAX,
         };
-        assert_eq!(output[1], reference::to_bytes(one));
+        assert_lanes(simd, a.select(simd, scaled, mask), "select", |i| {
+            if (mask >> i) & 1 == 1 { r12(i) } else { ra[i] }
+        });
+        // Raw forms load each lane from its own entry without conversion, as valid operands.
+        let mut raw = vec![F::Raw::default(); lanes];
+        a.store_raw::<2>(simd, &mut raw);
+        let reversed: Vec<&F::Raw> = raw.iter().rev().collect();
+        assert_lanes(
+            simd,
+            F::load_raw::<2>(simd, &reversed),
+            "reversed raw a",
+            |i| ra[lanes - 1 - i],
+        );
+        F::mul(a, simd, b).store_raw::<TIGHT>(simd, &mut raw);
+        let ordered: Vec<&F::Raw> = raw.iter().collect();
+        let loaded = F::load_raw::<TIGHT>(simd, &ordered);
+        assert_lanes(simd, loaded, "raw ab", rab);
+        assert_lanes(simd, F::mul(loaded, simd, c), "raw ab * c", |i| {
+            reference::mul(rab(i), rc[i])
+        });
+        Ok(())
     }
 
-    #[test]
-    fn inverses_match_reference() {
-        struct Invert([u8; BYTES]);
-
-        impl<S: Simd> Operation<S> for Invert {
-            type Output = ();
-
-            fn portable(self, simd: S) {
-                simd.execute(|simd: S| {
-                    check_inverse::<S, Unsat49<S>>(simd, &self.0);
-                    check_inverse::<S, Unsat28<S>>(simd, &self.0);
-                });
+    fn inverse<S: Simd, F: Field<S>>(simd: S, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+        let (a, ra) = draw::<S, F>(simd, u)?;
+        let inverse = a.invert(simd);
+        let inverses: Vec<Element> = ra.iter().map(|a| reference::invert(*a)).collect();
+        assert_lanes(simd, inverse, "1 / a", |i| inverses[i]);
+        assert_lanes(simd, F::mul(inverse, simd, a), "a / a", |i| {
+            if ra[i] == reference::ZERO {
+                reference::ZERO
+            } else {
+                reference::ONE
             }
+        });
+        Ok(())
+    }
 
-            // Residues require x86v4c.
-            fn x86_v4c(self, simd: S)
-            where
-                S: X86V4C,
-            {
-                let input = self.0;
-                self.portable(simd);
-                simd.execute(|simd: S| check_inverse::<S, Rns<S>>(simd, &input));
-            }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use commonware_invariants::minifuzz;
+
+        #[test]
+        fn minifuzz_operations() {
+            minifuzz::test(|u| Plan::Operations.run(u));
         }
 
-        let mut u = arbitrary::Unstructured::new(&[0xa5; 64]);
-        for value in [
-            reference::ZERO,
-            reference::ONE,
-            reference::neg(reference::ONE),
-            reference::canonical(&mut u).unwrap(),
-        ] {
-            let input = reference::to_bytes(value);
-            test_dispatch(Invert(input));
-            Invert(input).portable(EmulatedNeon);
-            EmulatedX86V4C.execute(Invert(input));
+        #[test]
+        fn minifuzz_inverse() {
+            minifuzz::test(|u| Plan::Inverse.run(u));
         }
     }
 }

@@ -227,7 +227,8 @@ impl Scalar {
     /// Since `r = t^2 - t + 1`, the quotient by `t` is below `t`, so both halves fit in `128`
     /// bits.
     pub(crate) fn split(self) -> [u128; 2] {
-        let (quotient, remainder) = divide::<WORDS, 2, 3, 7>(&self.to_words(), &X_SQUARED, &X_SQUARED_RECIPROCAL);
+        let (quotient, remainder) =
+            divide::<WORDS, 2, 3, 7>(&self.to_words(), &X_SQUARED, &X_SQUARED_RECIPROCAL);
         [remainder, quotient].map(|words| words[0] as u128 | (words[1] as u128) << 64)
     }
 
@@ -509,354 +510,310 @@ impl Random for Scalar {
     }
 }
 
-#[cfg(test)]
-mod tests {
+#[cfg(any(test, feature = "fuzz"))]
+impl<'a> arbitrary::Arbitrary<'a> for Scalar {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        // Bias towards the edges of the range, where carries and reductions happen, and towards
+        // runs of zero and one bits, which become runs of zero digits and of carries in the
+        // windows of a multiplication.
+        Ok(match u.int_in_range(0u8..=7)? {
+            0 => Self::from_u64(u.arbitrary()?),
+            1 => Self::from_u64(u.arbitrary()?).neg(),
+            2 => {
+                let mut words = [0; WORDS];
+                for word in &mut words {
+                    *word = match u.int_in_range(0u8..=3)? {
+                        0 => 0,
+                        1 => u64::MAX,
+                        2 => 1 << u.int_in_range(0u8..=63)?,
+                        _ => u.arbitrary()?,
+                    };
+                }
+                Self::from_words_wide(&words)
+            }
+            _ => Self::from_bytes_wide(&u.arbitrary()?),
+        })
+    }
+}
+
+/// Fuzzing operations for the scalar field.
+#[cfg(any(test, feature = "fuzz"))]
+pub mod fuzz {
     use super::*;
     use arbitrary::{Arbitrary, Unstructured};
-    use blst::{
-        blst_bendian_from_scalar, blst_fr, blst_fr_add, blst_fr_from_scalar, blst_fr_from_uint64,
-        blst_fr_inverse, blst_fr_mul, blst_fr_rshift, blst_fr_sqr, blst_fr_sub, blst_scalar,
-        blst_scalar_fr_check, blst_scalar_from_be_bytes, blst_scalar_from_bendian,
-        blst_scalar_from_fr, blst_uint64_from_fr,
-    };
-    use commonware_invariants::minifuzz;
     use commonware_math::algebra::test_suites;
-    use commonware_utils::test_rng;
-    use rand_core::Rng as _;
+    use std::vec::Vec;
 
-    impl<'a> Arbitrary<'a> for Scalar {
-        fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-            // Bias towards the edges of the range, where carries and reductions happen.
-            Ok(match u.int_in_range(0u8..=3)? {
-                0 => Self::from_u64(u.arbitrary()?),
-                1 => Self::from_u64(u.arbitrary()?).neg(),
-                _ => Self::from_bytes_wide(&u.arbitrary()?),
-            })
-        }
+    /// A scalar field fuzzing operation.
+    #[derive(Clone, Copy, Debug, Arbitrary)]
+    pub enum Plan {
+        /// Checks the laws of a field with roots of unity, and that doubling and squaring agree
+        /// with addition and multiplication.
+        Field,
+        /// Checks that scalars round-trip through their encodings, and that exactly the integers
+        /// below the order decode.
+        Encoding,
+        /// Checks that integers of any length reduce to the value of their digits.
+        Wide,
+        /// Checks that the components of a scalar reconstruct it within their bounds.
+        Split,
     }
 
-    fn to_blst(value: Scalar) -> blst_fr {
-        let mut out = blst_fr::default();
-        let words = value.to_words();
-        // SAFETY: both pointers are valid; the input holds four words of a canonical scalar.
-        unsafe { blst_fr_from_uint64(&mut out, words.as_ptr()) };
-        out
-    }
-
-    fn from_blst(value: &blst_fr) -> Scalar {
-        let mut words = [0u64; WORDS];
-        // SAFETY: both pointers are valid; the output holds four words.
-        unsafe { blst_uint64_from_fr(words.as_mut_ptr(), value) };
-        Scalar::from_words(words).expect("blst returns canonical scalars")
-    }
-
-    /// Returns the Montgomery form blst uses for the canonical big-endian integer.
-    fn blst_montgomery(bytes: &[u8; Scalar::BYTES]) -> [u64; WORDS] {
-        let mut scalar = blst_scalar::default();
-        let mut fr = blst_fr::default();
-        // SAFETY: all pointers are valid; the input holds 32 bytes of a canonical scalar.
-        unsafe {
-            blst_scalar_from_bendian(&mut scalar, bytes.as_ptr());
-            assert!(blst_scalar_fr_check(&scalar));
-            blst_fr_from_scalar(&mut fr, &scalar);
-        }
-        fr.l
-    }
-
-    #[test]
-    fn constants_match_blst() {
-        // blst uses the same Montgomery radix, so internal representations agree.
-        assert_eq!(Scalar::ONE.0, blst_montgomery(&Scalar::ONE.to_bytes()));
-        assert_eq!(Scalar::ONE.to_words(), [1, 0, 0, 0]);
-        assert_eq!(Scalar::from_u64(7).to_words(), [7, 0, 0, 0]);
-        // The Montgomery forms commonware-cryptography uses for its NTT constants.
-        assert_eq!(
-            Scalar::root_of_unity(TWO_ADICITY).unwrap().0,
-            [
-                0xb9b5_8d8c_5f0e_466a,
-                0x5b1b_4c80_1819_d7ec,
-                0x0af5_3ae3_52a3_1e64,
-                0x5bf3_adda_19e9_b27b,
-            ]
-        );
-        assert_eq!(
-            Scalar::coset_shift().0,
-            [
-                0x0000_000e_ffff_fff1,
-                0x17e3_63d3_0018_9c0f,
-                0xff9c_5787_6f84_57b0,
-                0x3513_3220_8fc5_a8c4,
-            ]
-        );
-        assert_eq!(
-            Scalar::coset_shift_inv().0,
-            [
-                0xdb6d_b6da_db6d_b6dc,
-                0xe6b5_824a_db6c_c6da,
-                0xf8b3_56e0_0581_0db9,
-                0x66d0_f1e6_60ec_4796,
-            ]
-        );
-    }
-
-    #[test]
-    fn roots_of_unity_have_exact_order() {
-        assert_eq!(Scalar::root_of_unity(0), Some(Scalar::ONE));
-        assert_eq!(Scalar::root_of_unity(1), Some(Scalar::ONE.neg()));
-        assert_eq!(Scalar::root_of_unity(TWO_ADICITY + 1), None);
-        let mut root = Scalar::root_of_unity(TWO_ADICITY).unwrap();
-        for _ in 1..TWO_ADICITY {
-            root = root.square();
-            assert_ne!(root, Scalar::ONE);
-        }
-        assert_eq!(root, Scalar::ONE.neg());
-        // The coset shift lies outside the 2-Sylow subgroup and is not a square.
-        let mut shift = Scalar::coset_shift();
-        for _ in 0..TWO_ADICITY {
-            shift = shift.square();
-        }
-        assert_ne!(shift, Scalar::ONE);
-        let mut half = MODULUS;
-        half[0] -= 1;
-        let half =
-            core::array::from_fn(|i| (half[i] >> 1) | half.get(i + 1).map_or(0, |next| next << 63));
-        assert_eq!(GENERATOR.pow(half), Scalar::ONE.neg());
-    }
-
-    #[test]
-    fn encoding_edge_cases() {
-        let mut largest = MODULUS;
-        largest[0] -= 1;
-        let scalar = Scalar::from_words(largest).unwrap();
-        assert_eq!(scalar, Scalar::ONE.neg());
-        assert_eq!(scalar.to_words(), largest);
-        assert_eq!(Scalar::from_bytes(&scalar.to_bytes()), Some(scalar));
-        assert_eq!(Scalar::ZERO.to_bytes(), [0; Scalar::BYTES]);
-        assert_eq!(Scalar::ONE.to_bytes()[Scalar::BYTES - 1], 1);
-
-        // Non-canonical encodings: r itself, r + 1, the top bit, and all ones.
-        assert!(Scalar::from_words(MODULUS).is_none());
-        let mut above = MODULUS;
-        above[0] += 1;
-        assert!(Scalar::from_words(above).is_none());
-        let modulus = Scalar::ONE.neg().to_bytes();
-        let mut bytes = modulus;
-        bytes[Scalar::BYTES - 1] += 1;
-        assert!(Scalar::from_bytes(&bytes).is_none());
+    /// Returns the big-endian encoding of the order.
+    fn order() -> [u8; Scalar::BYTES] {
         let mut bytes = [0; Scalar::BYTES];
-        bytes[0] = 0x80;
-        assert!(Scalar::from_bytes(&bytes).is_none());
-        assert!(Scalar::from_bytes(&[0xff; Scalar::BYTES]).is_none());
-    }
-
-    #[test]
-    fn encoding_matches_blst() {
-        minifuzz::test(|u| {
-            let a = Scalar::arbitrary(u)?;
-            let mut scalar = blst_scalar::default();
-            let mut bytes = [0u8; Scalar::BYTES];
-            // SAFETY: all pointers are valid; the output holds 32 bytes.
-            unsafe {
-                blst_scalar_from_fr(&mut scalar, &to_blst(a));
-                blst_bendian_from_scalar(bytes.as_mut_ptr(), &scalar);
-            }
-            assert_eq!(a.to_bytes(), bytes);
-            assert_eq!(a.0, blst_montgomery(&bytes));
-
-            // Arbitrary 32-byte strings decode exactly when blst accepts them.
-            let bytes: [u8; Scalar::BYTES] = u.arbitrary()?;
-            // SAFETY: all pointers are valid; the input holds 32 bytes.
-            let canonical = unsafe {
-                blst_scalar_from_bendian(&mut scalar, bytes.as_ptr());
-                blst_scalar_fr_check(&scalar)
-            };
-            let decoded = Scalar::from_bytes(&bytes);
-            assert_eq!(decoded.is_some(), canonical);
-            if let Some(decoded) = decoded {
-                assert_eq!(decoded.to_bytes(), bytes);
-            }
-            Ok(())
-        });
-    }
-
-    fn reduce_wide_blst(bytes: &[u8; Scalar::WIDE_BYTES]) -> Scalar {
-        let mut scalar = blst_scalar::default();
-        let mut fr = blst_fr::default();
-        // SAFETY: all pointers are valid; the input holds the given number of bytes.
-        unsafe {
-            blst_scalar_from_be_bytes(&mut scalar, bytes.as_ptr(), bytes.len());
-            blst_fr_from_scalar(&mut fr, &scalar);
+        for (chunk, word) in bytes
+            .as_chunks_mut::<8>()
+            .0
+            .iter_mut()
+            .zip(MODULUS.iter().rev())
+        {
+            *chunk = word.to_be_bytes();
         }
-        from_blst(&fr)
+        bytes
     }
 
-    #[test]
-    fn wide_reduction_matches_blst() {
-        assert_eq!(
-            Scalar::from_bytes_wide(&[0; Scalar::WIDE_BYTES]),
-            Scalar::ZERO
-        );
-        let ones = [0xff; Scalar::WIDE_BYTES];
-        // 2^512 - 1, computed from 2^256 = R mod r.
-        let r = Scalar::from_words(R).unwrap();
-        let expected = r.square().sub(Scalar::ONE);
-        assert_eq!(Scalar::from_bytes_wide(&ones), expected);
-        assert_eq!(reduce_wide_blst(&ones), expected);
-        minifuzz::test(|u| {
-            let bytes: [u8; Scalar::WIDE_BYTES] = u.arbitrary()?;
-            assert_eq!(Scalar::from_bytes_wide(&bytes), reduce_wide_blst(&bytes));
-            Ok(())
-        });
+    /// Returns the value of big-endian digits in the given base, by Horner's rule.
+    fn digits(base: Scalar, digits: impl Iterator<Item = u64>) -> Scalar {
+        digits.fold(Scalar::ZERO, |sum, digit| {
+            sum * &base + &Scalar::from_u64(digit)
+        })
     }
 
-    #[test]
-    fn arithmetic_matches_blst() {
-        minifuzz::test(|u| {
-            let a = Scalar::arbitrary(u)?;
-            let b = Scalar::arbitrary(u)?;
-            let (ba, bb) = (to_blst(a), to_blst(b));
-            let mut out = blst_fr::default();
-            // SAFETY: all pointers reference valid scalars.
-            unsafe {
-                blst_fr_add(&mut out, &ba, &bb);
-                assert_eq!(from_blst(&out), a.add(b));
-                blst_fr_sub(&mut out, &ba, &bb);
-                assert_eq!(from_blst(&out), a.sub(b));
-                blst_fr_mul(&mut out, &ba, &bb);
-                assert_eq!(from_blst(&out), a.mul(b));
-                blst_fr_sqr(&mut out, &ba);
-                assert_eq!(from_blst(&out), a.square());
-                blst_fr_rshift(&mut out, &ba, 1);
-                assert_eq!(from_blst(&out), a.halve());
+    impl Plan {
+        /// Runs the operation using the remaining input.
+        pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+            match self {
+                Self::Field => {
+                    test_suites::fuzz_field_ntt::<Scalar>(u)?;
+                    let a = Scalar::arbitrary(u)?;
+                    let mut doubled = a;
+                    Additive::double(&mut doubled);
+                    assert_eq!(doubled, a + &a);
+                    let mut squared = a;
+                    Multiplicative::square(&mut squared);
+                    assert_eq!(squared, a * &a);
+                }
+                Self::Encoding => {
+                    let a = Scalar::arbitrary(u)?;
+                    assert_eq!(Scalar::from_bytes(&a.to_bytes()), Some(a));
+                    assert_eq!(Scalar::from_words(a.to_words()), Some(a));
+                    let small: u64 = u.arbitrary()?;
+                    assert_eq!(Scalar::from_u64(small).to_words(), [small, 0, 0, 0]);
+
+                    // Strings that share a prefix of any length with the order straddle it.
+                    let order = order();
+                    let mut bytes: [u8; Scalar::BYTES] = u.arbitrary()?;
+                    let shared = u.int_in_range(0..=Scalar::BYTES)?;
+                    bytes[..shared].copy_from_slice(&order[..shared]);
+                    // Big-endian strings of one length order as their integers do.
+                    let canonical = bytes < order;
+                    let decoded = Scalar::from_bytes(&bytes);
+                    assert_eq!(decoded.is_some(), canonical);
+                    if let Some(decoded) = decoded {
+                        assert_eq!(decoded.to_bytes(), bytes);
+                        let mut wide = [0; Scalar::WIDE_BYTES];
+                        wide[Scalar::BYTES..].copy_from_slice(&bytes);
+                        assert_eq!(decoded, Scalar::from_bytes_wide(&wide));
+                    }
+                }
+                Self::Wide => {
+                    let bytes: [u8; Scalar::WIDE_BYTES] = u.arbitrary()?;
+                    assert_eq!(
+                        Scalar::from_bytes_wide(&bytes),
+                        digits(
+                            Scalar::from_u64(1 << 8),
+                            bytes.iter().map(|byte| (*byte).into())
+                        )
+                    );
+                    // More words than the reduction handles in one step.
+                    let count = u.int_in_range(0..=9)?;
+                    let words = (0..count)
+                        .map(|_| u.arbitrary())
+                        .collect::<arbitrary::Result<Vec<u64>>>()?;
+                    assert_eq!(
+                        Scalar::from_words_wide(&words),
+                        digits(
+                            Scalar::from_u64(1 << 32).square(),
+                            words.iter().rev().copied()
+                        )
+                    );
+                }
+                Self::Split => {
+                    let t = Scalar::from_words([X_SQUARED[0], X_SQUARED[1], 0, 0])
+                        .expect("below the order");
+                    let x = Scalar::from_u64(X_ABS);
+                    // Values at which a quotient or a remainder wraps, or arbitrary ones.
+                    let value = match u.int_in_range(0u8..=7)? {
+                        0 => t,
+                        1 => t - &Scalar::ONE,
+                        2 => t * &t,
+                        3 => t * &t - &Scalar::ONE,
+                        4 => x * &x * &x,
+                        _ => Scalar::arbitrary(u)?,
+                    };
+                    let from_u128 = |value: u128| {
+                        Scalar::from_words([value as u64, (value >> 64) as u64, 0, 0])
+                            .expect("below the order")
+                    };
+                    let bound = X_SQUARED[0] as u128 | (X_SQUARED[1] as u128) << 64;
+                    let [a, b] = value.split();
+                    assert!(a < bound && b < bound);
+                    assert_eq!(from_u128(a) + &(from_u128(b) * &t), value);
+                    let [a0, a1, b0, b1] = value.split_quarters();
+                    assert!([a0, a1, b0, b1].iter().all(|quarter| *quarter < X_ABS));
+                    assert_eq!(a0 as u128 + a1 as u128 * X_ABS as u128, a);
+                    assert_eq!(b0 as u128 + b1 as u128 * X_ABS as u128, b);
+                }
             }
-            if a != Scalar::ZERO {
-                // SAFETY: all pointers reference valid scalars, and the input is nonzero.
-                unsafe { blst_fr_inverse(&mut out, &ba) };
-                assert_eq!(from_blst(&out), a.invert());
-            }
-            assert_eq!(a.neg().add(a), Scalar::ZERO);
             Ok(())
-        });
-    }
-
-    #[test]
-    fn inversion_edge_cases() {
-        assert_eq!(Scalar::ZERO.invert(), Scalar::ZERO);
-        assert_eq!(Scalar::ZERO.inv(), Scalar::ZERO);
-        assert_eq!(Scalar::ONE.invert(), Scalar::ONE);
-        assert_eq!(Scalar::ONE.neg().invert(), Scalar::ONE.neg());
-        assert_eq!(Scalar::from_u64(2).invert(), Scalar::ONE.halve());
-    }
-
-    #[test]
-    fn random_reduces_wide_bytes() {
-        let mut rng = test_rng();
-        let a = Scalar::random(&mut rng);
-        let b = Scalar::random(&mut rng);
-        assert_ne!(a, b);
-        let mut rng = test_rng();
-        let mut bytes = [0u8; Scalar::WIDE_BYTES];
-        rng.fill_bytes(&mut bytes);
-        assert_eq!(a, Scalar::from_bytes_wide(&bytes));
-    }
-
-    #[test]
-    fn debug_shows_canonical_integer() {
-        assert_eq!(
-            format!("{:?}", Scalar::from_u64(0xabc)),
-            "Scalar(0x0000000000000000000000000000000000000000000000000000000000000abc)"
-        );
-    }
-
-    #[test]
-    fn endomorphism_constants() {
-        let t: [u64; 2] = mul_words(&[X_ABS], &[X_ABS]);
-        assert_eq!(t, X_SQUARED);
-        // r = t^2 - t + 1.
-        let mut order: [u64; 4] = mul_words(&t, &t);
-        (order, _) = sub_words(&order, &[t[0], t[1], 0, 0]);
-        order[0] += 1;
-        assert_eq!(order, MODULUS);
-        // The reciprocals are the floors of 2^256 / t and 2^128 / |x|: the products fall short
-        // of the powers of two by less than the divisors.
-        let product: [u64; 5] = mul_words(&X_SQUARED_RECIPROCAL, &t);
-        assert_eq!(product[4], 0);
-        let (short, borrow) = sub_words(&[0, 0, 0, 0], &product[..4].try_into().unwrap());
-        assert!(borrow && short[2] == 0 && short[3] == 0);
-        assert!(short[1] < t[1] || (short[1] == t[1] && short[0] < t[0]));
-        let product: [u64; 3] = mul_words(&X_ABS_RECIPROCAL, &[X_ABS]);
-        assert_eq!(product[2], 0);
-        let (short, borrow) = sub_words(&[0, 0], &[product[0], product[1]]);
-        assert!(borrow && short[1] == 0 && short[0] < X_ABS);
-    }
-
-    #[test]
-    fn splits_reconstruct_value() {
-        let t = Scalar::from_words([X_SQUARED[0], X_SQUARED[1], 0, 0]).unwrap();
-        let x = Scalar::from_u64(X_ABS);
-        let from_u128 = |value: u128| {
-            Scalar::from_words([value as u64, (value >> 64) as u64, 0, 0]).unwrap()
-        };
-        let mut values = vec![
-            Scalar::ZERO,
-            Scalar::ONE,
-            -Scalar::ONE,
-            t,
-            t - &Scalar::ONE,
-            t * &t,
-            t * &t - &Scalar::ONE,
-            x * &x * &x,
-        ];
-        let mut rng = test_rng();
-        values.extend((0..64).map(|_| Scalar::random(&mut rng)));
-        let t_value = X_SQUARED[0] as u128 | (X_SQUARED[1] as u128) << 64;
-        for value in values {
-            let [a, b] = value.split();
-            assert!(a < t_value && b < t_value);
-            assert_eq!(from_u128(a) + &(from_u128(b) * &t), value);
-            let [a0, a1, b0, b1] = value.split_quarters();
-            assert!([a0, a1, b0, b1].iter().all(|quarter| *quarter < X_ABS));
-            assert_eq!(a0 as u128 + a1 as u128 * X_ABS as u128, a);
-            assert_eq!(b0 as u128 + b1 as u128 * X_ABS as u128, b);
         }
     }
 
-    #[test]
-    fn wide_words_reduce() {
-        assert_eq!(Scalar::from_words_wide(&[]), Scalar::ZERO);
-        assert_eq!(Scalar::from_words_wide(&[1]), Scalar::ONE);
-        assert_eq!(Scalar::from_words_wide(&MODULUS), Scalar::ZERO);
-        assert_eq!(Scalar::from_words_wide(&[0, 0, 0, 0, 1]), SHIFT);
-        let mut rng = test_rng();
-        let mut bytes = [0u8; Scalar::WIDE_BYTES];
-        rng.fill_bytes(&mut bytes);
-        let mut words = [0u64; 2 * WORDS];
-        for (word, chunk) in words.iter_mut().zip(bytes.as_chunks::<8>().0.iter().rev()) {
-            *word = u64::from_be_bytes(*chunk);
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use commonware_invariants::minifuzz;
+        use commonware_utils::test_rng;
+        use rand_core::Rng as _;
+
+        #[test]
+        fn minifuzz_field() {
+            minifuzz::test(|u| Plan::Field.run(u));
         }
-        assert_eq!(Scalar::from_words_wide(&words), Scalar::from_bytes_wide(&bytes));
-        // Nine words: the top word is shifted by 2^512.
-        let mut nine = [0; 9];
-        nine[..8].copy_from_slice(&words);
-        nine[8] = 0xdead_beef;
-        assert_eq!(
-            Scalar::from_words_wide(&nine),
-            Scalar::from_bytes_wide(&bytes) + &(Scalar::from_u64(0xdead_beef) * &SHIFT * &SHIFT)
-        );
-        // Short and padded integers agree.
-        assert_eq!(
-            Scalar::from_words_wide(&words[..5]),
-            Scalar::from_words_wide(&[words[0], words[1], words[2], words[3], words[4], 0, 0])
-        );
-    }
 
-    #[test]
-    fn field_laws() {
-        minifuzz::test(test_suites::fuzz_field::<Scalar>);
-    }
+        #[test]
+        fn minifuzz_encoding() {
+            minifuzz::test(|u| Plan::Encoding.run(u));
+        }
 
-    #[test]
-    fn field_ntt_laws() {
-        minifuzz::test(test_suites::fuzz_field_ntt::<Scalar>);
+        #[test]
+        fn minifuzz_wide() {
+            minifuzz::test(|u| Plan::Wide.run(u));
+        }
+
+        #[test]
+        fn minifuzz_split() {
+            minifuzz::test(|u| Plan::Split.run(u));
+        }
+
+        #[test]
+        fn transform_constants_match_known_answers() {
+            // The Montgomery forms commonware-cryptography uses for its NTT constants.
+            assert_eq!(
+                Scalar::root_of_unity(TWO_ADICITY).unwrap().0,
+                [
+                    0xb9b5_8d8c_5f0e_466a,
+                    0x5b1b_4c80_1819_d7ec,
+                    0x0af5_3ae3_52a3_1e64,
+                    0x5bf3_adda_19e9_b27b,
+                ]
+            );
+            assert_eq!(
+                Scalar::coset_shift().0,
+                [
+                    0x0000_000e_ffff_fff1,
+                    0x17e3_63d3_0018_9c0f,
+                    0xff9c_5787_6f84_57b0,
+                    0x3513_3220_8fc5_a8c4,
+                ]
+            );
+            assert_eq!(
+                Scalar::coset_shift_inv().0,
+                [
+                    0xdb6d_b6da_db6d_b6dc,
+                    0xe6b5_824a_db6c_c6da,
+                    0xf8b3_56e0_0581_0db9,
+                    0x66d0_f1e6_60ec_4796,
+                ]
+            );
+        }
+
+        #[test]
+        fn roots_of_unity_have_exact_order() {
+            let mut root = Scalar::root_of_unity(TWO_ADICITY).unwrap();
+            for _ in 1..TWO_ADICITY {
+                root = root.square();
+                assert_ne!(root, Scalar::ONE);
+            }
+            assert_eq!(root, Scalar::ONE.neg());
+            // The coset shift lies outside the 2-Sylow subgroup and is not a square.
+            let mut shift = Scalar::coset_shift();
+            for _ in 0..TWO_ADICITY {
+                shift = shift.square();
+            }
+            assert_ne!(shift, Scalar::ONE);
+            let mut half = MODULUS;
+            half[0] -= 1;
+            let half = core::array::from_fn(|i| {
+                (half[i] >> 1) | half.get(i + 1).map_or(0, |next| next << 63)
+            });
+            assert_eq!(GENERATOR.pow(half), Scalar::ONE.neg());
+        }
+
+        #[test]
+        fn order_bounds_the_encodings() {
+            assert_eq!(Scalar::ZERO.to_bytes(), [0; Scalar::BYTES]);
+            assert_eq!(Scalar::ONE.to_words(), [1, 0, 0, 0]);
+            // The largest scalar is one less than the order.
+            let mut largest = MODULUS;
+            largest[0] -= 1;
+            assert_eq!(Scalar::ONE.neg().to_words(), largest);
+            assert_eq!(Scalar::from_words(largest), Some(Scalar::ONE.neg()));
+            // The order itself, the next integer, and the largest string do not decode.
+            assert!(Scalar::from_words(MODULUS).is_none());
+            assert!(Scalar::from_bytes(&order()).is_none());
+            let mut above = MODULUS;
+            above[0] += 1;
+            assert!(Scalar::from_words(above).is_none());
+            assert!(Scalar::from_bytes(&[0xff; Scalar::BYTES]).is_none());
+            // The order reduces to zero.
+            assert_eq!(Scalar::from_words_wide(&MODULUS), Scalar::ZERO);
+            let mut wide = [0; Scalar::WIDE_BYTES];
+            wide[Scalar::BYTES..].copy_from_slice(&order());
+            assert_eq!(Scalar::from_bytes_wide(&wide), Scalar::ZERO);
+        }
+
+        #[test]
+        fn random_reduces_wide_bytes() {
+            let mut rng = test_rng();
+            let a = Scalar::random(&mut rng);
+            let b = Scalar::random(&mut rng);
+            assert_ne!(a, b);
+            let mut rng = test_rng();
+            let mut bytes = [0u8; Scalar::WIDE_BYTES];
+            rng.fill_bytes(&mut bytes);
+            assert_eq!(a, Scalar::from_bytes_wide(&bytes));
+        }
+
+        #[test]
+        fn debug_shows_canonical_integer() {
+            assert_eq!(
+                format!("{:?}", Scalar::from_u64(0xabc)),
+                "Scalar(0x0000000000000000000000000000000000000000000000000000000000000abc)"
+            );
+        }
+
+        #[test]
+        fn endomorphism_constants() {
+            let t: [u64; 2] = mul_words(&[X_ABS], &[X_ABS]);
+            assert_eq!(t, X_SQUARED);
+            // r = t^2 - t + 1.
+            let mut order: [u64; 4] = mul_words(&t, &t);
+            (order, _) = sub_words(&order, &[t[0], t[1], 0, 0]);
+            order[0] += 1;
+            assert_eq!(order, MODULUS);
+            // The reciprocals are the floors of 2^256 / t and 2^128 / |x|: the products fall short
+            // of the powers of two by less than the divisors.
+            let product: [u64; 5] = mul_words(&X_SQUARED_RECIPROCAL, &t);
+            assert_eq!(product[4], 0);
+            let (short, borrow) = sub_words(&[0, 0, 0, 0], &product[..4].try_into().unwrap());
+            assert!(borrow && short[2] == 0 && short[3] == 0);
+            assert!(short[1] < t[1] || (short[1] == t[1] && short[0] < t[0]));
+            let product: [u64; 3] = mul_words(&X_ABS_RECIPROCAL, &[X_ABS]);
+            assert_eq!(product[2], 0);
+            let (short, borrow) = sub_words(&[0, 0], &[product[0], product[1]]);
+            assert!(borrow && short[1] == 0 && short[0] < X_ABS);
+        }
     }
 }

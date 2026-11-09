@@ -14,9 +14,9 @@ use crate::core::{
     },
     pairing::{G1Affine, G2Affine, Pair, SHARED, final_exponentiation, miller_loop},
 };
+use alloc::{vec, vec::Vec};
 use commonware_formatting::Hex;
 use commonware_math::algebra::{Multiplicative, Object};
-use alloc::{vec, vec::Vec};
 use commonware_simd::Simd;
 use core::{
     fmt::{self, Debug, Formatter},
@@ -266,7 +266,8 @@ fn to_affine<S: Simd, F: Field<S>>(
                 }
                 let p = g1::Point::<F>::load(simd, &g1[..group.len()], &p_fill);
                 let q = g2::Point::<F>::load(simd, &g2[..group.len()], &q_fill);
-                let norm = F::accumulate_product(simd, q.z.c0.product(simd, q.z.c0), q.z.c1, q.z.c1);
+                let norm =
+                    F::accumulate_product(simd, q.z.c0.product(simd, q.z.c0), q.z.c1, q.z.c1);
                 denominators.push(p.z);
                 denominators.push(F::reduce_tight(simd, norm));
                 loaded.push((p, q));
@@ -292,7 +293,8 @@ fn to_affine<S: Simd, F: Field<S>>(
                 let (p_inverse, norm_inverse) = (inverses[2 * group], inverses[2 * group + 1]);
                 // The inverse of the G2 denominator is its conjugate over its norm.
                 let conjugate = q.z.conjugate::<{ TIGHT + 1 }, S>(simd).carry(simd);
-                let q_inverse = Fp2::reduce_tight::<1, S>(simd, conjugate.product_base(simd, norm_inverse));
+                let q_inverse =
+                    Fp2::reduce_tight::<1, S>(simd, conjugate.product_base(simd, norm_inverse));
                 // Multiplying tight coordinates by tight inverses stays within every product
                 // bound.
                 let mut px = [[0; FP_BYTES]; MAX_LANES];
@@ -312,162 +314,187 @@ fn to_affine<S: Simd, F: Field<S>>(
     )
 }
 
-#[cfg(test)]
-mod tests {
+/// Fuzzing operations for the pairing.
+#[cfg(any(test, feature = "fuzz"))]
+pub mod fuzz {
     use super::*;
-    use crate::group::Scalar;
-    use commonware_formatting::hex;
-    use commonware_math::algebra::{Additive, CryptoGroup};
-    use std::vec::Vec;
+    use crate::group::{
+        Scalar,
+        fuzz::{check_representations, dot, elements},
+    };
+    use arbitrary::{Arbitrary, Unstructured};
+    use commonware_math::algebra::{CryptoGroup, test_suites};
+    use std::sync::LazyLock;
 
-    /// The pairing of the generators.
-    const GENERATOR: GT = GT(hex!(
-        "0f41e58663bf08cf068672cbd01a7ec73baca4d72ca93544deff686bfd6df543d48eaa24afe47e1efde449383b67663104c581234d086a9902249b64728ffd21a189e87935a954051c7cdba7b3872629a4fafc05066245cb9108f0242d0fe3ef03350f55a7aefcd3c31b4fcb6ce5771cc6a0e9786ab5973320c806ad360829107ba810c5a09ffdd9be2291a0c25a99a211b8b424cd48bf38fcef68083b0b0ec5c81a93b330ee1a677d0d15ff7b984e8978ef48881e32fac91b93b47333e2ba5706fba23eb7c5af0d9f80940ca771b6ffd5857baaf222eb95a7d2809d61bfe02e1bfd1b68ff02f0b8102ae1c2d5d5ab1a19f26337d205fb469cd6bd15c3d5a04dc88784fbb3d0b2dbdea54d43b2b73f2cbb12d58386a8703e0f948226e47ee89d018107154f25a764bd3c79937a45b84546da634b8f6be14a8061e55cceba478b23f7dacaa35c8ca78beae9624045b4b601b2f522473d171391125ba84dc4007cfbf2f8da752f7c74185203fcca589ac719c34dffbbaad8431dad1c1fb597aaa5193502b86edb8857c273fa075a50512937e0794e1e65a7617c90d8bd66065b1fffe51d7a579973b1315021ec3c19934f1368bb445c7c2d209703f239689ce34c0378a68e72a6b3b216da0e22a5031b54ddff57309396b38c881c4c849ec23e87089a1c5b46e5110b86750ec6a532348868a84045483c92b7af5af689452eafabf1a8943e50439f1d59882a98eaa0170f1250ebd871fc0a92a7b2d83168d0d727272d441befa15c503dd8e90ce98db3e7b6d194f60839c508a84305aaca1789b6"
-    ));
+    /// The pairing of the generators, which generates the target group.
+    static GENERATOR: LazyLock<GT> = LazyLock::new(|| pairing(&G1::generator(), &G2::generator()));
 
-    fn multiple<G: CryptoGroup<Scalar = Scalar>>(k: u64) -> G {
-        G::generator() * &Scalar::from_u64(k)
-    }
-
-    #[test]
-    fn generators_pair_to_known_answer() {
-        assert_eq!(pairing(&G1::generator(), &G2::generator()), GENERATOR);
-    }
-
-    #[test]
-    fn identities_pair_to_one() {
-        assert_eq!(multi_pairing(&[]), GT::ONE);
-        assert_eq!(pairing(&G1::zero(), &multiple(3)), GT::ONE);
-        assert_eq!(pairing(&multiple(3), &G2::zero()), GT::ONE);
-        let (p, q) = (multiple::<G1>(5), multiple::<G2>(7));
-        assert_eq!(
-            multi_pairing(&[(G1::zero(), q), (p, q), (p, G2::zero())]),
-            pairing(&p, &q)
-        );
-    }
-
-    #[test]
-    fn pairings_match_separate_pairings() {
-        // More pairs than the lanes of the widest representation, with identities among them.
-        let mut pairs: Vec<(G1, G2)> = (1..=MAX_LANES as u64 + 3)
-            .map(|k| (multiple(k), multiple(k + 5)))
-            .collect();
-        pairs[1].0 = G1::zero();
-        pairs[MAX_LANES].1 = G2::zero();
-        let expected: Vec<GT> = pairs.iter().map(|(p, q)| pairing(p, q)).collect();
-        assert_eq!(expected[1], GT::ONE);
-        assert_eq!(expected[MAX_LANES], GT::ONE);
-        let unchanged = pairing(&multiple(2), &multiple(3));
-        let mut outputs = vec![GT::ONE; pairs.len() + 1];
-        outputs[pairs.len()] = unchanged;
-        pairings(&pairs, &mut outputs);
-        assert_eq!(outputs[..pairs.len()], expected);
-        assert_eq!(outputs[pairs.len()], unchanged);
-        // The longer input is truncated.
-        let mut outputs = vec![GT::ONE; 3];
-        pairings(&pairs, &mut outputs);
-        assert_eq!(outputs, expected[..3]);
-        let mut outputs = vec![unchanged; 3];
-        pairings(&pairs[..2], &mut outputs);
-        assert_eq!(outputs, [expected[0], expected[1], unchanged]);
-        pairings(&[], &mut []);
-    }
-
-    #[test]
-    fn products_match_separate_pairings() {
-        // More pairs than share squarings in every lane of the widest representation.
-        let ks = 1..=(SHARED * MAX_LANES) as u64 + 3;
-        let pairs: Vec<(G1, G2)> = ks
-            .clone()
-            .map(|k| (multiple(k), multiple(k + 11)))
-            .collect();
-        // By bilinearity, the product is e(G1, G2) to the sum of k (k + 11).
-        let exponent = ks.map(|k| k * (k + 11)).sum();
-        let expected = pairing(&G1::generator(), &multiple(exponent));
-        assert_eq!(multi_pairing(&pairs), expected);
-        let (first, second) = pairs.split_at(7);
-        assert_eq!(multi_pairing(first) * &multi_pairing(second), expected);
-    }
-
-    #[test]
-    fn checks_are_bilinear() {
-        let (p, q) = (multiple::<G1>(6), multiple::<G2>(35));
-        let (r, s) = (multiple::<G1>(14), multiple::<G2>(15));
-        assert_eq!(multi_pairing(&[(p, q), (-r, s)]), GT::ONE);
-        assert_ne!(multi_pairing(&[(p, q), (r, s)]), GT::ONE);
-    }
-
-    #[test]
-    fn representations_agree() {
-        /// Runs the kernel of [`pairings`] in every representation, checking that they agree.
-        struct EachRepresentations<'a>(&'a [(G1, G2)]);
-
-        impl<S: Simd> commonware_simd::Operation<S> for EachRepresentations<'_> {
-            type Output = Vec<GT>;
-
-            fn portable(self, simd: S) -> Vec<GT> {
-                use crate::core::field::fp::{unsat28::Unsat28, unsat49::Unsat49};
-                simd.execute(|simd: S| {
-                    let mut expected = vec![GT::ONE; self.0.len()];
-                    Each(self.0, &mut expected).run::<S, Unsat49<S>>(simd);
-                    let mut outputs = vec![GT::ONE; self.0.len()];
-                    Each(self.0, &mut outputs).run::<S, Unsat28<S>>(simd);
-                    assert_eq!(outputs, expected);
-                    expected
-                })
+    impl<'a> Arbitrary<'a> for GT {
+        fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+            // A small power of the generator, which costs a few multiplications.
+            let exponent: u8 = u.arbitrary()?;
+            let mut power = Self::ONE;
+            for bit in (0..u8::BITS).rev() {
+                power = power * &power;
+                if (exponent >> bit) & 1 == 1 {
+                    power *= &GENERATOR;
+                }
             }
+            Ok(power)
+        }
+    }
 
-            // Residues require x86v4c.
-            fn x86_v4c(self, simd: S) -> Vec<GT>
-            where
-                S: commonware_simd::X86V4C,
-            {
-                use crate::core::field::fp::rns::Rns;
-                let pairs = self.0;
-                let expected = self.portable(simd);
-                simd.execute(|simd: S| {
-                    let mut outputs = vec![GT::ONE; pairs.len()];
-                    Each(pairs, &mut outputs).run::<S, Rns<S>>(simd);
-                    assert_eq!(outputs, expected);
-                });
-                expected
+    /// Draws pairs of elements with the discrete logarithm of the product of their pairings to
+    /// the pairing of the generators: by bilinearity, the sum of the products of the discrete
+    /// logarithms of each pair.
+    fn pairs(u: &mut Unstructured<'_>, count: usize) -> arbitrary::Result<(Vec<(G1, G2)>, Scalar)> {
+        let (p, a) = elements::<G1>(u, count)?;
+        let (q, b) = elements::<G2>(u, count)?;
+        Ok((p.into_iter().zip(q).collect(), dot(&a, &b)))
+    }
+
+    /// Returns the power of the pairing of the generators by a scalar, multiplying either
+    /// generator by it.
+    fn power(u: &mut Unstructured<'_>, logarithm: &Scalar) -> arbitrary::Result<GT> {
+        Ok(if u.arbitrary()? {
+            pairing(&G1::generator(), &(G2::generator() * logarithm))
+        } else {
+            pairing(&(G1::generator() * logarithm), &G2::generator())
+        })
+    }
+
+    /// Computes the pairing of each pair, returning the pairings.
+    #[derive(Clone, Copy)]
+    struct Separate<'a>(&'a [(G1, G2)]);
+
+    impl Kernel for Separate<'_> {
+        type Output = Vec<GT>;
+
+        fn run<S: Simd, F: Field<S>>(self, simd: S) -> Vec<GT> {
+            let mut outputs = vec![GT::ONE; self.0.len()];
+            Each(self.0, &mut outputs).run::<S, F>(simd);
+            outputs
+        }
+    }
+
+    /// A pairing fuzzing operation.
+    #[derive(Clone, Copy, Debug, Arbitrary)]
+    pub enum Plan {
+        /// Checks the laws of multiplication in the target group.
+        Multiplicative,
+        /// Checks that a product of pairings, whole or in two parts, is the power of the pairing
+        /// of the generators that bilinearity gives.
+        Product,
+        /// Checks the pairings of a slice against one pairing at a time.
+        Each,
+        /// Checks that every representation and backend computes what each kernel's dispatch
+        /// does.
+        Representations,
+    }
+
+    impl Plan {
+        /// Runs the operation using the remaining input.
+        pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+            match self {
+                Self::Multiplicative => {
+                    test_suites::fuzz_multiplicative::<GT>(u)?;
+                    let a = GT::arbitrary(u)?;
+                    assert_eq!(a * &GT::ONE, a);
+                }
+                Self::Product => {
+                    // More pairs than share their squarings on one lane.
+                    let count = SHARED + 1 - u.int_in_range(0..=SHARED + 1)?;
+                    let (pairs, logarithm) = pairs(u, count)?;
+                    let expected = power(u, &logarithm)?;
+                    assert_eq!(multi_pairing(&pairs), expected);
+                    let (first, second) = pairs.split_at(u.int_in_range(0..=count)?);
+                    assert_eq!(multi_pairing(first) * &multi_pairing(second), expected);
+                }
+                Self::Each => {
+                    // Outputs beyond the pairs are unchanged, and pairs beyond the outputs are
+                    // ignored.
+                    const LONGEST: usize = 6;
+                    let count = LONGEST - u.int_in_range(0..=LONGEST)?;
+                    let (pairs, _) = pairs(u, count)?;
+                    let unchanged = GT::arbitrary(u)?;
+                    let mut outputs = vec![unchanged; LONGEST - u.int_in_range(0..=LONGEST)?];
+                    pairings(&pairs, &mut outputs);
+                    for (i, output) in outputs.iter().enumerate() {
+                        let expected = pairs.get(i).map_or(unchanged, |(p, q)| pairing(p, q));
+                        assert_eq!(*output, expected, "output {i}");
+                    }
+                }
+                Self::Representations => {
+                    let kind = u.int_in_range(0u8..=2)?;
+                    // More pairs than share their squarings on one lane, or than the lanes of
+                    // the widest representation.
+                    let longest = if kind == 1 { MAX_LANES } else { SHARED } + 1;
+                    let count = longest - u.int_in_range(0..=longest)?;
+                    let (pairs, _) = pairs(u, count)?;
+                    match kind {
+                        0 => check_representations(u, Pairings(&pairs))?,
+                        1 => check_representations(u, Separate(&pairs))?,
+                        _ => {
+                            let product = Product(GT::arbitrary(u)?, GT::arbitrary(u)?);
+                            check_representations(u, product)?;
+                        }
+                    }
+                }
             }
+            Ok(())
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use commonware_formatting::hex;
+        use commonware_invariants::minifuzz;
+        use commonware_math::algebra::Additive;
+
+        #[test]
+        fn minifuzz_multiplicative() {
+            minifuzz::Builder::default()
+                .with_min_iterations(32)
+                .test(|u| Plan::Multiplicative.run(u));
         }
 
-        /// Runs the pairing kernel in every representation, checking that they agree.
-        struct Representations<'a>(Pairings<'a>);
+        // The remaining cases compute several pairings, so debug builds run few of them.
 
-        impl<S: Simd> commonware_simd::Operation<S> for Representations<'_> {
-            type Output = GT;
-
-            fn portable(self, simd: S) -> GT {
-                use crate::core::field::fp::{unsat28::Unsat28, unsat49::Unsat49};
-                simd.execute(|simd: S| {
-                    let expected = self.0.run::<S, Unsat49<S>>(simd);
-                    assert_eq!(self.0.run::<S, Unsat28<S>>(simd), expected);
-                    expected
-                })
-            }
-
-            // Residues require x86v4c.
-            fn x86_v4c(self, simd: S) -> GT
-            where
-                S: commonware_simd::X86V4C,
-            {
-                use crate::core::field::fp::rns::Rns;
-                let kernel = self.0;
-                let expected = self.portable(simd);
-                simd.execute(|simd: S| assert_eq!(kernel.run::<S, Rns<S>>(simd), expected));
-                expected
-            }
+        #[test]
+        fn minifuzz_product() {
+            minifuzz::Builder::default()
+                .with_min_iterations(2)
+                .test(|u| Plan::Product.run(u));
         }
 
-        let pairs = [
-            (multiple::<G1>(3), multiple::<G2>(4)),
-            (multiple::<G1>(5), G2::zero()),
-            (multiple::<G1>(6), multiple::<G2>(7)),
-        ];
-        commonware_simd::check_consistent(|| Representations(Pairings(&pairs)));
-        commonware_simd::check_consistent(|| EachRepresentations(&pairs));
+        #[test]
+        fn minifuzz_each() {
+            minifuzz::Builder::default()
+                .with_min_iterations(2)
+                .test(|u| Plan::Each.run(u));
+        }
+
+        #[test]
+        fn minifuzz_representations() {
+            minifuzz::Builder::default()
+                .with_min_iterations(2)
+                .test(|u| Plan::Representations.run(u));
+        }
+
+        #[test]
+        fn generators_pair_to_known_answer() {
+            let expected = hex!(
+                "0f41e58663bf08cf068672cbd01a7ec73baca4d72ca93544deff686bfd6df543d48eaa24afe47e1efde449383b67663104c581234d086a9902249b64728ffd21a189e87935a954051c7cdba7b3872629a4fafc05066245cb9108f0242d0fe3ef03350f55a7aefcd3c31b4fcb6ce5771cc6a0e9786ab5973320c806ad360829107ba810c5a09ffdd9be2291a0c25a99a211b8b424cd48bf38fcef68083b0b0ec5c81a93b330ee1a677d0d15ff7b984e8978ef48881e32fac91b93b47333e2ba5706fba23eb7c5af0d9f80940ca771b6ffd5857baaf222eb95a7d2809d61bfe02e1bfd1b68ff02f0b8102ae1c2d5d5ab1a19f26337d205fb469cd6bd15c3d5a04dc88784fbb3d0b2dbdea54d43b2b73f2cbb12d58386a8703e0f948226e47ee89d018107154f25a764bd3c79937a45b84546da634b8f6be14a8061e55cceba478b23f7dacaa35c8ca78beae9624045b4b601b2f522473d171391125ba84dc4007cfbf2f8da752f7c74185203fcca589ac719c34dffbbaad8431dad1c1fb597aaa5193502b86edb8857c273fa075a50512937e0794e1e65a7617c90d8bd66065b1fffe51d7a579973b1315021ec3c19934f1368bb445c7c2d209703f239689ce34c0378a68e72a6b3b216da0e22a5031b54ddff57309396b38c881c4c849ec23e87089a1c5b46e5110b86750ec6a532348868a84045483c92b7af5af689452eafabf1a8943e50439f1d59882a98eaa0170f1250ebd871fc0a92a7b2d83168d0d727272d441befa15c503dd8e90ce98db3e7b6d194f60839c508a84305aaca1789b6"
+            );
+            assert_eq!(GENERATOR.to_bytes(), expected);
+        }
+
+        #[test]
+        fn identities_pair_to_one() {
+            assert_eq!(multi_pairing(&[]), GT::ONE);
+            assert_eq!(pairing(&G1::zero(), &G2::generator()), GT::ONE);
+            assert_eq!(pairing(&G1::generator(), &G2::zero()), GT::ONE);
+        }
     }
 }

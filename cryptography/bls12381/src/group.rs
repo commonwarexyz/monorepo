@@ -18,97 +18,155 @@ pub use scalar::Scalar;
 /// cost about as much as adding a few hundred elements.
 const MSM_BATCH: NonZeroUsize = NonZeroUsize::new(256).unwrap();
 
-/// Checks shared by both groups.
-#[cfg(test)]
-mod tests {
+/// Fuzzing operations shared by both groups.
+#[cfg(any(test, feature = "fuzz"))]
+pub mod fuzz {
     use super::{
         MSM_BATCH, Scalar,
-        kernel::{Group, Kernel, MAX_LANES, Msm, Multiply, MultiplyEach, Plan, Sum},
+        kernel::{self, Add, Double, Group, Kernel, MAX_LANES, Msm, Multiply, MultiplyEach, Sum},
     };
+    pub use super::{pairing::fuzz as pairing, scalar::fuzz as scalar};
     use crate::core::{
         curve::Points,
         field::{
             arithmetic::Field,
-            fp::{rns::Rns, unsat28::Unsat28, unsat49::Unsat49},
+            fp::{rns::Rns, testing::Backend, unsat28::Unsat28, unsat49::Unsat49},
         },
     };
-    use commonware_math::algebra::{CryptoGroup, Random};
+    use arbitrary::{Arbitrary, Unstructured};
+    use commonware_math::algebra::{CryptoGroup, test_suites};
     use commonware_parallel::{
         Sequential,
         mocks::{Explorer, pooled},
     };
-    use commonware_simd::{Operation, Simd, X86V4C, check_consistent};
-    use commonware_utils::{NZUsize, test_rng};
-    use std::{fmt::Debug, vec, vec::Vec};
+    use commonware_simd::{Operation, Simd, X86V4C};
+    use core::{fmt::Debug, num::NonZeroUsize};
+    use std::vec::Vec;
 
-    /// Elements of a slice operation, more than the lanes of the widest representation.
+    /// Largest multiple of the generator in [`Element::multiples`].
+    const MULTIPLES: usize = 32;
+
+    /// Most elements of a slice operation, more than the lanes of the widest representation.
     const SLICE: usize = 2 * MAX_LANES + 3;
 
-    /// Returns the first `count` positive multiples of the generator and distinct scalars.
-    fn multiples<G: CryptoGroup<Scalar = Scalar>>(count: usize) -> (Vec<G>, Vec<Scalar>) {
-        let generator = G::generator();
-        let mut scalar = Scalar::from_u64(3);
-        let mut scalars = Vec::with_capacity(count);
-        let mut points = Vec::with_capacity(count);
-        let mut point = G::zero();
-        for i in 0..count {
-            scalar = scalar * &scalar + &Scalar::from_u64(i as u64);
-            scalars.push(scalar);
-            // The point is (i + 1) times the generator.
-            point += &generator;
-            points.push(point.clone());
-        }
-        (points, scalars)
+    /// Widest window of a drawn [`kernel::Plan`]; wider ones only add buckets.
+    const WIDEST: u32 = 8;
+
+    /// A group under test.
+    pub trait Element:
+        CryptoGroup<Scalar = Scalar> + Group + for<'a> Arbitrary<'a> + 'static
+    {
+        /// Returns the eigenvalue of the group's endomorphism.
+        fn eigenvalue() -> Scalar;
+
+        /// Returns the multiples of the generator by zero through [`MULTIPLES`], as [`table`]
+        /// builds them.
+        fn multiples() -> &'static [Self];
+
+        /// Returns the sum of the elements.
+        fn sum(elements: &[Self]) -> Self;
+
+        /// Multiplies each element by the scalar at the same index.
+        fn mul_each(elements: &mut [Self], scalars: &[Scalar]);
     }
 
-    /// Returns scalars that cover zero, one, `r - 1`, and full-width values.
-    fn scalars() -> Vec<Scalar> {
-        let mut scalars = vec![
-            Scalar::ZERO,
-            Scalar::ONE,
-            -Scalar::ONE,
-            Scalar::from_u64(2),
-            Scalar::from_u64(0xdead_beef),
-        ];
-        let mut value = Scalar::from_u64(7);
-        for _ in 0..3 {
-            value = value * &value + &Scalar::ONE;
-            scalars.push(value);
-        }
-        scalars
+    /// Returns the multiples of the generator by zero through [`MULTIPLES`], one addition at a
+    /// time.
+    pub fn table<G: CryptoGroup>() -> Vec<G> {
+        let generator = G::generator();
+        let mut multiple = G::zero();
+        (0..=MULTIPLES)
+            .map(|_| {
+                let current = multiple.clone();
+                multiple += &generator;
+                current
+            })
+            .collect()
     }
 
-    /// Checks the group operations against `reference`, which returns a multiple of the generator.
-    pub fn check_operations<G: CryptoGroup<Scalar = Scalar>>(reference: impl Fn(&Scalar) -> G) {
-        let generator = G::generator();
-        assert_eq!(generator, reference(&Scalar::ONE));
-        assert_eq!(G::zero(), reference(&Scalar::ZERO));
-        let scalars = scalars();
-        for a in &scalars {
-            let p = generator.clone() * a;
-            assert_eq!(p, reference(a));
-            assert_eq!(generator.scale(&a.to_words()), p);
-            assert_eq!(-p.clone(), reference(&-*a));
-            let mut doubled = p.clone();
-            doubled.double();
-            assert_eq!(doubled, reference(&(*a + a)));
-            assert_eq!(G::zero() + &p, p);
-            assert_eq!(p.clone() - &p, G::zero());
-            for b in &scalars[..4] {
-                let q = reference(b);
-                assert_eq!(p.clone() + &q, reference(&(*a + b)));
-                assert_eq!(p.clone() - &q, reference(&(*a - b)));
-                assert_eq!(p == q, a == b);
+    /// Draws an element with its discrete logarithm: mostly a small multiple of the generator or
+    /// its negation, which cost nothing to draw, and otherwise an arbitrary multiple.
+    pub fn element<G: Element>(u: &mut Unstructured<'_>) -> arbitrary::Result<(G, Scalar)> {
+        let small = |u: &mut Unstructured<'_>| {
+            let k = u.int_in_range(0..=MULTIPLES)?;
+            Ok((G::multiples()[k], Scalar::from_u64(k as u64)))
+        };
+        Ok(match u.int_in_range(0u8..=15)? {
+            0 => (G::zero(), Scalar::ZERO),
+            1..=6 => small(u)?,
+            7..=12 => {
+                let (element, logarithm) = small(u)?;
+                (-element, -logarithm)
             }
+            _ => {
+                let logarithm = Scalar::arbitrary(u)?;
+                (G::generator() * &logarithm, logarithm)
+            }
+        })
+    }
+
+    /// Draws elements with their discrete logarithms. Past the end of the input, the elements
+    /// cycle through the small multiples of the generator.
+    pub fn elements<G: Element>(
+        u: &mut Unstructured<'_>,
+        count: usize,
+    ) -> arbitrary::Result<(Vec<G>, Vec<Scalar>)> {
+        let mut elements = Vec::with_capacity(count);
+        let mut logarithms = Vec::with_capacity(count);
+        for i in 0..count {
+            let (element, logarithm) = if u.is_empty() {
+                let k = (5 * i + 1) % (MULTIPLES + 1);
+                (G::multiples()[k], Scalar::from_u64(k as u64))
+            } else {
+                element(u)?
+            };
+            elements.push(element);
+            logarithms.push(logarithm);
         }
-        // Integers of any length, reduced modulo the order.
-        let a = scalars[6];
-        let mut words = [0; 9];
-        words[..4].copy_from_slice(&a.to_words());
-        words[8] = 5;
-        let expected = reference(&Scalar::from_words_wide(&words));
-        assert_eq!(generator.scale(&words), expected);
-        assert_eq!(generator.scale(&[]), G::zero());
+        Ok((elements, logarithms))
+    }
+
+    /// Draws scalars. Past the end of the input, each scalar follows from the one before, so the
+    /// scalars stay distinct and of full width.
+    fn scalars(u: &mut Unstructured<'_>, count: usize) -> arbitrary::Result<Vec<Scalar>> {
+        let mut previous = Scalar::from_u64(3);
+        (0..count)
+            .map(|i| {
+                previous = if u.is_empty() {
+                    previous * &previous + &Scalar::from_u64(i as u64)
+                } else {
+                    Scalar::arbitrary(u)?
+                };
+                Ok(previous)
+            })
+            .collect()
+    }
+
+    /// Draws the length of a slice operation, the longest past the end of the input.
+    fn length(u: &mut Unstructured<'_>, longest: usize) -> arbitrary::Result<usize> {
+        Ok(longest - u.int_in_range(0..=longest)?)
+    }
+
+    /// Draws the method of a multi-scalar multiplication, or `None` for the one chosen by cost.
+    fn method(u: &mut Unstructured<'_>) -> arbitrary::Result<Option<kernel::Plan>> {
+        Ok(match u.int_in_range(0u8..=2)? {
+            0 => None,
+            1 => Some(kernel::Plan::Straus {
+                width: u.int_in_range(2..=WIDEST)?,
+                split: u.arbitrary()?,
+            }),
+            _ => Some(kernel::Plan::Pippenger(u.int_in_range(2..=WIDEST)?)),
+        })
+    }
+
+    /// Returns the sum of the products of logarithms and scalars at the same index.
+    pub fn dot(logarithms: &[Scalar], scalars: &[Scalar]) -> Scalar {
+        logarithms
+            .iter()
+            .zip(scalars)
+            .fold(Scalar::ZERO, |sum, (logarithm, scalar)| {
+                sum + &(*logarithm * scalar)
+            })
     }
 
     /// Applies the endomorphism to an element.
@@ -127,315 +185,320 @@ mod tests {
         }
     }
 
-    /// Checks that the endomorphism multiplies by `eigenvalue` in every representation, and that
-    /// the components of a scalar, weighted by the powers of the negated eigenvalue, reconstruct
-    /// it.
-    pub fn check_endomorphism<G: CryptoGroup<Scalar = Scalar> + Group + Debug>(eigenvalue: Scalar) {
-        let generator = G::generator();
-        let mut scalars = scalars();
-        let mut rng = test_rng();
-        scalars.extend((0..16).map(|_| Scalar::random(&mut rng)));
-        let bound = 1u128.checked_shl(G::COMPONENT_BITS - 1);
-        for scalar in scalars {
-            let element = generator * &scalar;
-            assert_eq!(Endomorphism(element).dispatch(), element * &eigenvalue);
-            check_kernel_representations(Endomorphism(element));
+    /// Multiplies each element by the scalar at the same index, returning the products.
+    #[derive(Clone, Copy)]
+    struct Each<'a, G>(&'a [G], &'a [Scalar]);
 
-            let components = G::components(&scalar);
-            let mut sum = Scalar::ZERO;
-            let mut power = Scalar::ONE;
-            for (c, component) in components.into_iter().enumerate() {
-                assert!(bound.is_none_or(|bound| component < bound));
-                assert!(c < G::COMPONENTS || component == 0);
-                let component =
-                    Scalar::from_words([component as u64, (component >> 64) as u64, 0, 0]).unwrap();
-                sum += &(component * &power);
-                power *= &-eigenvalue;
+    impl<G: Group> Kernel for Each<'_, G> {
+        type Output = Vec<G>;
+
+        fn run<S: Simd, F: Field<S>>(self, simd: S) -> Vec<G> {
+            let mut elements = self.0.to_vec();
+            MultiplyEach {
+                elements: &mut elements,
+                scalars: self.1,
             }
-            assert_eq!(sum, scalar);
+            .run::<S, F>(simd);
+            elements
         }
-        assert_eq!(Endomorphism(G::zero()).dispatch(), G::zero());
     }
 
-    /// Returns `count` elements of a multi-scalar multiplication with their discrete logarithms:
-    /// positive multiples of the generator, with identities and repeated elements.
-    fn msm_elements<G: CryptoGroup<Scalar = Scalar>>(count: usize) -> (Vec<G>, Vec<u64>) {
-        let (mut elements, _) = multiples::<G>(count);
-        let mut logarithms: Vec<u64> = (1..=count as u64).collect();
-        for i in (3..count).step_by(10) {
-            elements[i] = G::zero();
-            logarithms[i] = 0;
-        }
-        for i in (9..count).step_by(10) {
-            elements[i] = elements[i - 5].clone();
-            logarithms[i] = logarithms[i - 5];
-        }
-        (elements, logarithms)
-    }
-
-    /// Returns `count` scalars of a multi-scalar multiplication: every third is zero, one, `r - 1`,
-    /// or has mostly zero digits or digits that carry through every window, and the rest are
-    /// full-width values.
-    fn msm_scalars(count: usize) -> Vec<Scalar> {
-        let mut patterns = scalars();
-        patterns.push(Scalar::from_u64(1 << 40));
-        patterns.push(Scalar::from_words([0, 0, 0, 1 << 62]).unwrap());
-        patterns.push(Scalar::from_words([0, 0, 0, 1 << 8]).unwrap() - &Scalar::ONE);
-        patterns.push(Scalar::from_words([u64::MAX, 0, u64::MAX, 0]).unwrap());
-        let mut value = Scalar::from_u64(11);
-        (0..count)
-            .map(|i| {
-                if i % 3 == 0 {
-                    patterns[(i / 3) % patterns.len()]
-                } else {
-                    value = value * &value + &Scalar::from_u64(i as u64);
-                    value
-                }
-            })
-            .collect()
-    }
-
-    /// Returns the sum of the elements with discrete logarithms `logarithms` times `scalars`.
-    fn msm_expected<G: CryptoGroup<Scalar = Scalar>>(logarithms: &[u64], scalars: &[Scalar]) -> G {
-        let exponent = logarithms
-            .iter()
-            .zip(scalars)
-            .fold(Scalar::ZERO, |sum, (logarithm, scalar)| {
-                sum + &(Scalar::from_u64(*logarithm) * scalar)
-            });
-        G::generator() * &exponent
-    }
-
-    /// Checks [`Space::msm`] against a sum of multiplications, across lane boundaries, the
-    /// crossover between methods, every window width, and parallel batches.
-    pub fn check_msm<G: CryptoGroup<Scalar = Scalar> + Group>() {
-        let count = 2 * MSM_BATCH.get() + 5;
-        let (elements, logarithms) = msm_elements::<G>(count);
-        let scalars = msm_scalars(count);
-
-        // A sum of individual multiplications.
-        let products = elements[..12]
-            .iter()
-            .zip(&scalars)
-            .fold(G::zero(), |sum, (element, scalar)| {
-                sum + &(*element * scalar)
-            });
-        assert_eq!(
-            G::msm(&elements[..12], &scalars[..12], &Sequential),
-            products
-        );
-
-        // Sizes around every lane count and around the crossover from Straus's method to
-        // Pippenger's for each lane count.
-        let mut sizes = vec![0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 33];
-        for lanes in [1, 4, 8, 16] {
-            let crossover = (1..count)
-                .find(|&n| matches!(Plan::choose::<G>(n, lanes), Plan::Pippenger(_)))
-                .unwrap();
-            sizes.extend([crossover - 1, crossover]);
-        }
-        for n in sizes {
-            assert_eq!(
-                G::msm(&elements[..n], &scalars[..n], &Sequential),
-                msm_expected::<G>(&logarithms[..n], &scalars[..n]),
-                "n={n}"
-            );
-        }
-
-        // The window widths of both methods up to eight bits, with and without splitting the
-        // scalars; wider ones only add buckets.
-        let n = 37;
-        let expected = msm_expected::<G>(&logarithms[..n], &scalars[..n]);
-        let plans = (2..=8)
-            .flat_map(|width| [false, true].map(|split| Plan::Straus { width, split }))
-            .chain((2..=8).map(Plan::Pippenger));
-        for plan in plans {
-            let msm = Msm {
-                elements: &elements[..n],
-                scalars: &scalars[..n],
-                plan: Some(plan),
-            };
-            assert_eq!(msm.dispatch(), expected, "{plan:?}");
-        }
-
-        // Batches split across threads.
-        let strategy = Explorer::parallel(&pooled(NZUsize!(2), NZUsize!(3)));
-        assert_eq!(
-            G::msm(&elements, &scalars, &strategy),
-            msm_expected::<G>(&logarithms, &scalars)
-        );
-
-        // The longer input is truncated.
-        assert_eq!(
-            G::msm(&elements[..3], &scalars[..5], &Sequential),
-            G::msm(&elements[..3], &scalars[..3], &Sequential)
-        );
-        assert_eq!(
-            G::msm(&elements[..5], &scalars[..3], &Sequential),
-            G::msm(&elements[..3], &scalars[..3], &Sequential)
-        );
-    }
-
-    /// Checks a sum of a slice against one addition at a time, across lane boundaries.
-    pub fn check_sum<G: CryptoGroup<Scalar = Scalar>>(sum: impl Fn(&[G]) -> G) {
-        let (points, _) = multiples::<G>(SLICE);
-        for count in [0, 1, 5, SLICE] {
-            // The sum of the first count positive multiples.
-            let expected = G::generator() * &Scalar::from_u64((count * (count + 1) / 2) as u64);
-            assert_eq!(sum(&points[..count]), expected);
-        }
-        let mut with_identities = points.clone();
-        with_identities[1] = G::zero();
-        with_identities[SLICE - 1] = G::zero();
-        assert_eq!(
-            sum(&with_identities),
-            sum(&points) - &points[1] - &points[SLICE - 1]
-        );
-    }
-
-    /// Checks multiplying a slice against one multiplication at a time, across lane boundaries.
-    pub fn check_mul_each<G: CryptoGroup<Scalar = Scalar>>(mul_each: impl Fn(&mut [G], &[Scalar])) {
-        let (points, scalars) = multiples::<G>(SLICE);
-        for count in [0, 1, 5, SLICE] {
-            let mut products = points.clone();
-            mul_each(&mut products[..count], &scalars);
-            for (i, (product, point)) in products.iter().zip(&points).enumerate() {
-                let expected = if i < count {
-                    point.clone() * &scalars[i]
-                } else {
-                    point.clone()
-                };
-                assert_eq!(*product, expected);
-            }
-        }
-        // The longer input is truncated.
-        let mut products = points.clone();
-        mul_each(&mut products, &scalars[..3]);
-        for (i, (product, point)) in products.iter().zip(&points).enumerate() {
-            let expected = if i < 3 {
-                point.clone() * &scalars[i]
-            } else {
-                point.clone()
-            };
-            assert_eq!(*product, expected);
-        }
-        let mut products = points;
-        products[2] = G::zero();
-        mul_each(&mut products, &scalars);
-        assert_eq!(products[2], G::zero());
-    }
-
-    /// Runs a kernel in every representation, checking that they compute the same element.
+    /// Runs a kernel in every representation of a backend, checking that they compute the same
+    /// output.
     ///
     /// Representations with different lane counts may sum in different orders, which changes the
     /// projective coordinates but not the element.
-    fn check_kernel_representations<G: Group + PartialEq + Debug, K: Kernel<Output = G> + Copy>(
-        kernel: K,
-    ) {
-        struct Representations<K>(K);
+    struct Representations<K>(K);
 
-        impl<S: Simd, G: Group + PartialEq + Debug, K: Kernel<Output = G> + Copy> Operation<S>
-            for Representations<K>
+    impl<S: Simd, K: Kernel<Output: PartialEq + Debug> + Copy> Operation<S> for Representations<K> {
+        type Output = K::Output;
+
+        fn portable(self, simd: S) -> K::Output {
+            simd.execute(|simd: S| {
+                let expected = self.0.run::<S, Unsat49<S>>(simd);
+                assert_eq!(self.0.run::<S, Unsat28<S>>(simd), expected);
+                expected
+            })
+        }
+
+        // Residues require x86v4c.
+        fn x86_v4c(self, simd: S) -> K::Output
+        where
+            S: X86V4C,
         {
-            type Output = G;
-
-            fn portable(self, simd: S) -> G {
-                simd.execute(|simd: S| {
-                    let expected = self.0.run::<S, Unsat49<S>>(simd);
-                    assert_eq!(self.0.run::<S, Unsat28<S>>(simd), expected);
-                    expected
-                })
-            }
-
-            // Residues require x86v4c.
-            fn x86_v4c(self, simd: S) -> G
-            where
-                S: X86V4C,
-            {
-                let kernel = self.0;
-                let expected = self.portable(simd);
-                simd.execute(|simd: S| assert_eq!(kernel.run::<S, Rns<S>>(simd), expected));
-                expected
-            }
+            let kernel = self.0;
+            let expected = self.portable(simd);
+            simd.execute(|simd: S| assert_eq!(kernel.run::<S, Rns<S>>(simd), expected));
+            expected
         }
-
-        check_consistent(|| Representations(kernel));
     }
 
-    /// Checks that every representation and backend computes the same coordinates.
-    pub fn check_representations<G: CryptoGroup<Scalar = Scalar> + Group>() {
-        /// Runs [`MultiplyEach`] in every representation, checking that they compute the same
-        /// elements.
-        struct EachRepresentations<'a, G>(&'a [G], &'a [Scalar]);
-
-        impl<S: Simd, G: Group + PartialEq + Debug> Operation<S> for EachRepresentations<'_, G> {
-            type Output = Vec<G>;
-
-            fn portable(self, simd: S) -> Vec<G> {
-                simd.execute(|simd: S| {
-                    let mut expected = self.0.to_vec();
-                    MultiplyEach {
-                        elements: &mut expected,
-                        scalars: self.1,
-                    }
-                    .run::<S, Unsat49<S>>(simd);
-                    let mut unsat28 = self.0.to_vec();
-                    MultiplyEach {
-                        elements: &mut unsat28,
-                        scalars: self.1,
-                    }
-                    .run::<S, Unsat28<S>>(simd);
-                    assert_eq!(unsat28, expected);
-                    expected
-                })
-            }
-
-            // Residues require x86v4c.
-            fn x86_v4c(self, simd: S) -> Vec<G>
-            where
-                S: X86V4C,
-            {
-                let (elements, scalars) = (self.0, self.1);
-                let expected = self.portable(simd);
-                simd.execute(|simd: S| {
-                    let mut rns = elements.to_vec();
-                    MultiplyEach {
-                        elements: &mut rns,
-                        scalars,
-                    }
-                    .run::<S, Rns<S>>(simd);
-                    assert_eq!(rns, expected);
-                });
-                expected
-            }
-        }
-
-        let generator = G::generator();
-        let scalars = scalars();
-        let elements: Vec<G> = scalars.iter().map(|scalar| generator * scalar).collect();
-        let plans = [
-            Plan::Straus {
-                width: 5,
-                split: false,
-            },
-            Plan::Straus {
-                width: 4,
-                split: true,
-            },
-            Plan::Pippenger(3),
-        ];
-        for plan in plans {
-            check_kernel_representations(Msm {
-                elements: &elements,
-                scalars: &scalars,
-                plan: Some(plan),
-            });
-        }
-        check_kernel_representations(Sum(&elements));
-        check_kernel_representations(Multiply {
-            element: elements[6],
-            scalar: scalars[5],
-        });
-        check_consistent(|| EachRepresentations(&elements, &scalars));
+    /// Checks that every representation of an emulated backend drawn from the input computes
+    /// what the kernel's dispatch does.
+    pub fn check_representations<K: Kernel<Output: PartialEq + Debug> + Copy>(
+        u: &mut Unstructured<'_>,
+        kernel: K,
+    ) -> arbitrary::Result<()> {
+        let output = Backend::draw(u)?.execute(Representations(kernel));
+        assert_eq!(output, kernel.dispatch());
+        Ok(())
     }
+
+    /// A group fuzzing operation, run on either group.
+    #[derive(Clone, Copy, Debug, Arbitrary)]
+    pub enum Plan {
+        /// Checks the laws of addition, and that doubling agrees with it.
+        Additive,
+        /// Checks the laws of multiplication by scalars, including that a short multi-scalar
+        /// multiplication is the sum of its products.
+        Space,
+        /// Checks that multiples of the generator add, compare, and multiply as their discrete
+        /// logarithms do, for scalars and for integers of any length.
+        Multiples,
+        /// Checks a multi-scalar multiplication by each method against the discrete logarithms
+        /// of its elements, around the lane counts and the crossover between methods.
+        Msm,
+        /// Checks a multi-scalar multiplication split into batches by a parallel strategy.
+        Batches,
+        /// Checks the sum of a slice against the discrete logarithms of its elements.
+        Sum,
+        /// Checks multiplying a slice against one multiplication at a time.
+        MulEach,
+        /// Checks that the endomorphism multiplies by its eigenvalue, and that the components of
+        /// a scalar reconstruct it.
+        Endomorphism,
+        /// Checks that every representation and backend computes what each kernel's dispatch
+        /// does.
+        Representations,
+    }
+
+    impl Plan {
+        /// Runs the operation on the group `G` using the remaining input.
+        pub fn run<G: Element>(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+            let generator = G::generator();
+            match self {
+                Self::Additive => {
+                    test_suites::fuzz_additive::<G>(u)?;
+                    let a = G::arbitrary(u)?;
+                    let mut doubled = a;
+                    doubled.double();
+                    assert_eq!(doubled, a + &a);
+                }
+                Self::Space => test_suites::fuzz_space_ring::<Scalar, G>(u)?,
+                Self::Multiples => {
+                    let (p, a) = element::<G>(u)?;
+                    let (q, b) = element::<G>(u)?;
+                    assert_eq!(p + &q, generator * &(a + &b));
+                    assert_eq!(p == q, a == b);
+                    let c = Scalar::arbitrary(u)?;
+                    assert_eq!(p * &c, generator * &(a * &c));
+                    // More words than a scalar holds.
+                    let count = u.int_in_range(0..=9)?;
+                    let words = (0..count)
+                        .map(|_| u.arbitrary())
+                        .collect::<arbitrary::Result<Vec<u64>>>()?;
+                    assert_eq!(p.scale(&words), p * &Scalar::from_words_wide(&words));
+                }
+                Self::Msm => {
+                    let plan = method(u)?;
+                    let count = match u.int_in_range(0u8..=7)? {
+                        0 => {
+                            let lanes = *u.choose(&[1, 4, 8, 16])?;
+                            let crossover = (1..)
+                                .find(|&n| {
+                                    let plan = kernel::Plan::choose::<G>(n, lanes);
+                                    matches!(plan, kernel::Plan::Pippenger(_))
+                                })
+                                .expect("Pippenger's method costs less for many elements");
+                            crossover - u.int_in_range(0..=1)?
+                        }
+                        _ => length(u, SLICE)?,
+                    };
+                    // The longer input is truncated.
+                    let (extra_elements, extra_scalars) = match u.int_in_range(0u8..=3)? {
+                        0 => (u.int_in_range(1..=2)?, 0),
+                        1 => (0, u.int_in_range(1..=2)?),
+                        _ => (0, 0),
+                    };
+                    let (elements, logarithms) = elements::<G>(u, count + extra_elements)?;
+                    let scalars = scalars(u, count + extra_scalars)?;
+                    let actual = match plan {
+                        None => G::msm(&elements, &scalars, &Sequential),
+                        plan => Msm {
+                            elements: &elements[..count],
+                            scalars: &scalars[..count],
+                            plan,
+                        }
+                        .dispatch(),
+                    };
+                    let expected = generator * &dot(&logarithms[..count], &scalars[..count]);
+                    assert_eq!(actual, expected, "{plan:?} for {count} elements");
+                }
+                Self::Batches => {
+                    const WORKERS: NonZeroUsize = NonZeroUsize::new(2).unwrap();
+                    const TASKS: NonZeroUsize = NonZeroUsize::new(3).unwrap();
+                    let strategy = pooled(WORKERS, TASKS);
+                    let strategy = match u.int_in_range(0u8..=1)? {
+                        0 => Explorer::parallel(&strategy),
+                        _ => Explorer::seeded(&strategy, u.arbitrary()?),
+                    };
+                    // Enough elements for two batches, and a remainder.
+                    let count = 2 * MSM_BATCH.get() + u.int_in_range(0..=5)?;
+                    let (elements, logarithms) = elements::<G>(u, count)?;
+                    let scalars = scalars(u, count)?;
+                    assert_eq!(
+                        G::msm(&elements, &scalars, &strategy),
+                        generator * &dot(&logarithms, &scalars)
+                    );
+                }
+                Self::Sum => {
+                    let count = length(u, SLICE)?;
+                    let (elements, logarithms) = elements::<G>(u, count)?;
+                    let logarithm = logarithms
+                        .iter()
+                        .fold(Scalar::ZERO, |sum, logarithm| sum + logarithm);
+                    assert_eq!(G::sum(&elements), generator * &logarithm);
+                }
+                Self::MulEach => {
+                    // Elements beyond the scalars are unchanged, and scalars beyond the elements
+                    // are ignored.
+                    let elements_count = length(u, MAX_LANES + 3)?;
+                    let scalars_count = length(u, MAX_LANES + 3)?;
+                    let (elements, _) = elements::<G>(u, elements_count)?;
+                    let scalars = scalars(u, scalars_count)?;
+                    let mut products = elements.clone();
+                    G::mul_each(&mut products, &scalars);
+                    for (i, (product, element)) in products.iter().zip(&elements).enumerate() {
+                        let expected = scalars.get(i).map_or(*element, |scalar| *element * scalar);
+                        assert_eq!(*product, expected, "element {i}");
+                    }
+                }
+                Self::Endomorphism => {
+                    let eigenvalue = G::eigenvalue();
+                    let (p, _) = element::<G>(u)?;
+                    assert_eq!(Endomorphism(p).dispatch(), p * &eigenvalue);
+
+                    let scalar = Scalar::arbitrary(u)?;
+                    let bound = 1u128.checked_shl(G::COMPONENT_BITS - 1);
+                    let mut sum = Scalar::ZERO;
+                    let mut power = Scalar::ONE;
+                    for (c, component) in G::components(&scalar).into_iter().enumerate() {
+                        assert!(bound.is_none_or(|bound| component < bound));
+                        assert!(c < G::COMPONENTS || component == 0);
+                        let words = [component as u64, (component >> 64) as u64, 0, 0];
+                        let component = Scalar::from_words(words).expect("below the order");
+                        sum += &(component * &power);
+                        power *= &-eigenvalue;
+                    }
+                    assert_eq!(sum, scalar);
+                }
+                Self::Representations => {
+                    let kind = u.int_in_range(0u8..=6)?;
+                    let count = length(u, MAX_LANES + 3)?;
+                    let (elements, _) = elements::<G>(u, count.max(2))?;
+                    let scalars = scalars(u, count.max(1))?;
+                    let plan = method(u)?;
+                    match kind {
+                        0 => check_representations(
+                            u,
+                            Msm {
+                                elements: &elements[..count],
+                                scalars: &scalars[..count],
+                                plan,
+                            },
+                        )?,
+                        1 => check_representations(u, Sum(&elements[..count]))?,
+                        2 => check_representations(u, Each(&elements[..count], &scalars[..count]))?,
+                        3 => check_representations(
+                            u,
+                            Multiply {
+                                element: elements[0],
+                                scalar: scalars[0],
+                            },
+                        )?,
+                        4 => check_representations(u, Add(elements[0], elements[1]))?,
+                        5 => check_representations(u, Double(elements[0]))?,
+                        _ => check_representations(u, Endomorphism(elements[0]))?,
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// Defines a test of each [`Plan`] variant on a group.
+    #[cfg(test)]
+    macro_rules! tests {
+        ($group:ty) => {
+            use crate::group::fuzz::Plan;
+            use commonware_invariants::minifuzz;
+
+            // Most cases multiply several times, so debug builds run few of them.
+
+            #[test]
+            fn minifuzz_additive() {
+                minifuzz::Builder::default()
+                    .with_min_iterations(16)
+                    .test(|u| Plan::Additive.run::<$group>(u));
+            }
+
+            #[test]
+            fn minifuzz_space() {
+                minifuzz::Builder::default()
+                    .with_min_iterations(4)
+                    .test(|u| Plan::Space.run::<$group>(u));
+            }
+
+            #[test]
+            fn minifuzz_multiples() {
+                minifuzz::Builder::default()
+                    .with_min_iterations(8)
+                    .test(|u| Plan::Multiples.run::<$group>(u));
+            }
+
+            #[test]
+            fn minifuzz_msm() {
+                minifuzz::Builder::default()
+                    .with_min_iterations(8)
+                    .test(|u| Plan::Msm.run::<$group>(u));
+            }
+
+            #[test]
+            fn minifuzz_batches() {
+                minifuzz::Builder::default()
+                    .with_min_iterations(1)
+                    .test(|u| Plan::Batches.run::<$group>(u));
+            }
+
+            #[test]
+            fn minifuzz_sum() {
+                minifuzz::Builder::default()
+                    .with_min_iterations(16)
+                    .test(|u| Plan::Sum.run::<$group>(u));
+            }
+
+            #[test]
+            fn minifuzz_mul_each() {
+                minifuzz::Builder::default()
+                    .with_min_iterations(4)
+                    .test(|u| Plan::MulEach.run::<$group>(u));
+            }
+
+            #[test]
+            fn minifuzz_endomorphism() {
+                minifuzz::Builder::default()
+                    .with_min_iterations(16)
+                    .test(|u| Plan::Endomorphism.run::<$group>(u));
+            }
+
+            #[test]
+            fn minifuzz_representations() {
+                minifuzz::Builder::default()
+                    .with_min_iterations(4)
+                    .test(|u| Plan::Representations.run::<$group>(u));
+            }
+        };
+    }
+    #[cfg(test)]
+    pub(crate) use tests;
 }
