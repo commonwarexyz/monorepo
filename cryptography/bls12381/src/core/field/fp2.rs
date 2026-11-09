@@ -794,12 +794,91 @@ fn split(element: &[u8; BYTES]) -> (&[u8; FP_BYTES], &[u8; FP_BYTES]) {
     (c1, c0.try_into().expect("two components"))
 }
 
+/// Reference arithmetic on elements with canonical components, for testing formulas.
+#[cfg(any(test, feature = "fuzz"))]
+pub(crate) mod reference {
+    use super::{BYTES, FP_BYTES};
+    use crate::core::field::fp::reference as fp;
+    use arbitrary::Unstructured;
+
+    /// An element `c0 + c1 i` as `(c0, c1)`, with canonical components.
+    pub(crate) type Element = (fp::Element, fp::Element);
+
+    /// Zero.
+    pub(crate) const ZERO: Element = (fp::ZERO, fp::ZERO);
+
+    /// One.
+    pub(crate) const ONE: Element = (fp::ONE, fp::ZERO);
+
+    /// `1 + i`, the nonresidue that defines the cubic extension.
+    pub(crate) const NONRESIDUE: Element = (fp::ONE, fp::ONE);
+
+    /// Returns the element of the base field with the integer value `n`.
+    pub(crate) const fn small(n: u64) -> Element {
+        ([n, 0, 0, 0, 0, 0], fp::ZERO)
+    }
+
+    /// Returns `a + b`.
+    pub(crate) const fn add((a0, a1): Element, (b0, b1): Element) -> Element {
+        (fp::add(a0, b0), fp::add(a1, b1))
+    }
+
+    /// Returns `-a`.
+    pub(crate) const fn neg((a0, a1): Element) -> Element {
+        (fp::neg(a0), fp::neg(a1))
+    }
+
+    /// Returns `a - b`.
+    pub(crate) const fn sub((a0, a1): Element, (b0, b1): Element) -> Element {
+        (fp::sub(a0, b0), fp::sub(a1, b1))
+    }
+
+    /// Returns `a * b`.
+    pub(crate) const fn mul((a0, a1): Element, (b0, b1): Element) -> Element {
+        (
+            fp::sub(fp::mul(a0, b0), fp::mul(a1, b1)),
+            fp::add(fp::mul(a0, b1), fp::mul(a1, b0)),
+        )
+    }
+
+    /// Returns the conjugate `c0 - c1 i`.
+    pub(crate) const fn conjugate((a0, a1): Element) -> Element {
+        (a0, fp::neg(a1))
+    }
+
+    /// Returns the inverse of a nonzero `a`: its conjugate over its norm.
+    pub(crate) fn invert((a0, a1): Element) -> Element {
+        let norm = fp::add(fp::mul(a0, a0), fp::mul(a1, a1));
+        let inverse = fp::invert(norm);
+        (fp::mul(a0, inverse), fp::mul(fp::neg(a1), inverse))
+    }
+
+    /// Returns the residues of an encoding's components.
+    pub(crate) fn decode(bytes: &[u8; BYTES]) -> Element {
+        let (c1, c0) = super::split(bytes);
+        (fp::reduce(c0), fp::reduce(c1))
+    }
+
+    /// Returns the encoding of an element, the imaginary component first.
+    pub(crate) fn encode((c0, c1): Element) -> [u8; BYTES] {
+        let mut bytes = [0; BYTES];
+        bytes[..FP_BYTES].copy_from_slice(&fp::to_bytes(c1));
+        bytes[FP_BYTES..].copy_from_slice(&fp::to_bytes(c0));
+        bytes
+    }
+
+    /// Draws an element with canonical components, as [`fp::canonical`] draws each.
+    pub(crate) fn canonical(u: &mut Unstructured<'_>) -> arbitrary::Result<Element> {
+        Ok((fp::canonical(u)?, fp::canonical(u)?))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::field::fp::{
         rns::Rns,
-        tests::{self as reference, Element},
+        reference::{self, Element},
         unsat28::Unsat28,
         unsat49::Unsat49,
     };

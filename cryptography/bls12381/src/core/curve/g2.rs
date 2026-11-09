@@ -33,6 +33,7 @@ use crate::core::{
         fp2::{BYTES, Fp2, Product, encode},
     },
 };
+use commonware_formatting::hex;
 use commonware_simd::Simd;
 
 /// Projective coordinates `[X, Y, Z]` as big-endian extension elements.
@@ -44,6 +45,24 @@ pub const IDENTITY: Coordinates = {
     identity[1][BYTES - 1] = 1;
     identity
 };
+
+/// The generator in projective coordinates, with `Z = 1`. Each coordinate is `c1` followed by
+/// `c0`.
+pub const GENERATOR: Coordinates = [
+    hex!(
+        "13e02b6052719f607dacd3a088274f65596bd0d09920b61ab5da61bbdc7f5049334cf11213945d57e5ac7d055d042b7e"
+        "024aa2b2f08f0a91260805272dc51051c6e47ad4fa403b02b4510b647ae3d1770bac0326a805bbefd48056c8c121bdb8"
+    ),
+    hex!(
+        "0606c4a02ea734cc32acd2b02bc28b99cb3e287e85a763af267492ab572e99ab3f370d275cec1da1aaa9075ff05f79be"
+        "0ce5d527727d6e118cc9cdc6da2e351aadfd9baa8cbdd3a76d429a695160d12c923ac9cc3baca289e193548608b82801"
+    ),
+    {
+        let mut one = [0; BYTES];
+        one[BYTES - 1] = 1;
+        one
+    },
+];
 
 /// Largest integer bound of a coordinate component, in units of `p`.
 ///
@@ -541,7 +560,7 @@ mod tests {
     use crate::core::field::fp::{
         BYTES as FP_BYTES,
         rns::Rns,
-        tests::{self as reference, Element},
+        reference::{self, Element},
         unsat28::Unsat28,
         unsat49::Unsat49,
     };

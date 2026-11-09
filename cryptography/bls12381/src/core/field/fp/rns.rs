@@ -1497,7 +1497,7 @@ fn accumulate_into<S: X86V4C>(simd: S, sum: Option<Wide<S>>, a: Rns<S>, b: Rns<S
 
 #[cfg(test)]
 mod tests {
-    use super::{super::tests as reference, *};
+    use super::{super::reference, *};
     use arbitrary::Unstructured;
     use commonware_invariants::minifuzz;
     use commonware_simd::{Operation, check_consistent, emulated::EmulatedX86V4C};
