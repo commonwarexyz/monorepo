@@ -178,7 +178,7 @@ use super::{
     pool::{MAX_WORKERS, Pool, Threads},
     request::{RequestOutput, RetiredResources},
     slab::Id,
-    sleep::{self, DROPPED_CAPACITY, RESCUE_INTERVAL, Sleep, Timers},
+    sleep::{DROPPED_CAPACITY, RESCUE_INTERVAL, Sleep, Timers},
     spinner::{Config as SpinnerConfig, Spinner},
     task::{AfterPoll, Ready, RootWaker, Runnable},
     tasks::Tasks,
@@ -2003,7 +2003,7 @@ impl Worker {
 
         // Sleeps polled on this thread complete at once if this time has
         // reached their deadlines. The timers count it from their origin.
-        sleep::set_turn(*now);
+        Sleep::set_turn(*now);
         let nanos = timers.nanos(*now);
 
         // Registrations of sleeps dropped here leave first, in critical
@@ -2053,7 +2053,7 @@ impl Worker {
             && *now >= self.rescue_at
         {
             self.rescue_at = *now + RESCUE_INTERVAL;
-            sleep::rescue(shared.pool.timers(), seat.index as usize, *now, deferred);
+            Timers::rescue_peers(shared.pool.timers(), seat.index as usize, *now, deferred);
         }
         local.update_pending();
         outcome
@@ -2171,7 +2171,7 @@ impl Worker {
         // The first polls precede the first service pass, so sleeps polled in
         // between compare their deadlines with the time of this start, not
         // with a time that an earlier worker left on this thread.
-        sleep::set_turn(Instant::now());
+        Sleep::set_turn(Instant::now());
 
         loop {
             if self.panics.first.is_some() {
@@ -2399,7 +2399,7 @@ impl Worker {
             // The wait may have lasted long, and the next polls precede the
             // next service pass, so sleeps polled in between compare their
             // deadlines with the time of this return.
-            sleep::set_turn(Instant::now());
+            Sleep::set_turn(Instant::now());
         }
     }
 }

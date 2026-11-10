@@ -225,7 +225,7 @@ impl Waiters {
     /// A ready result is removed and its slot recycled. An unfinished request
     /// remains in place, returning whether its waker needs refreshing. Panics
     /// if the ID no longer belongs to a local observer.
-    pub fn observe(&mut self, id: WaiterId, waker: &Waker) -> Observation<RequestOutput> {
+    pub fn observe(&mut self, id: WaiterId, waker: &Waker) -> Observation {
         match self.entries.get(id.0).expect("live observer missing") {
             Entry::Ready(_) => {
                 let Some(Entry::Ready(output)) = self.entries.remove(id.0) else {
