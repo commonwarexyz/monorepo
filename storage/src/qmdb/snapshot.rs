@@ -300,8 +300,10 @@ trait ChunkVisitor<F: Family, Item>: Send + 'static {
     /// The chunk's result, passed on in position order once the chunk is routed.
     type Output: Send + 'static;
 
+    /// See the chunk's next operation, in position order.
     fn visit(&mut self, item: &Item);
 
+    /// The chunk's result, once every operation in it has been visited.
     fn finish(self) -> Result<Self::Output, merkle::Error<F>>;
 }
 
@@ -456,6 +458,9 @@ where
 }
 
 /// Hash every chunk of `leaves` from a scan of `log` of its own, for builds without decode tasks.
+/// Initialization never takes this path: it asks for a hashing build only when
+/// [SnapshotBuild::hashes_leaves] says decode tasks will hash, and otherwise the journal replays
+/// on tasks of its own, `replay_concurrency` at a time.
 async fn hash_serially<F, C, H>(
     log: &C,
     init_buffer: NonZeroUsize,
