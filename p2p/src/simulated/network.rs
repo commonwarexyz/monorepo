@@ -141,21 +141,11 @@ impl<P: PublicKey> Tracker<P> {
         }
     }
 
-    /// Returns a tracker that starts with the same peer sets and has no subscribers.
+    /// Returns a tracker that starts with the same peer sets. Subscribers stay with this tracker,
+    /// so the fork has none.
     fn fork(&self) -> Self {
-        let sets = self
-            .sets
-            .iter()
-            .map(|(id, entry)| {
-                let entry = PeerSetsAtIndex {
-                    primary: entry.primary.clone(),
-                    secondary: entry.secondary.clone(),
-                };
-                (*id, entry)
-            })
-            .collect();
         Self {
-            sets,
+            sets: self.sets.clone(),
             counts: self.counts.clone(),
             subscribers: Vec::new(),
         }
