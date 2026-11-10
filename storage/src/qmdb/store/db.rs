@@ -11,7 +11,7 @@ use crate::{
     merkle::mmr::Location,
     qmdb::{
         any::{
-            BITMAP_CHUNK_BYTES,
+            BITMAP_CHUNK_BYTES, dedup_positions, match_read_ops,
             unordered::{Update, variable::Operation},
         },
         bitmap::fill_from,
@@ -20,14 +20,14 @@ use crate::{
         metrics::Metrics,
         operation::{Committable as _, Floored as _, Key, Operation as _},
         update_known_loc,
-        value::VariableValue,
+        value::{VariableEncoding, VariableValue},
     },
     translator::Translator,
 };
 use commonware_codec::{CodecShared, Read};
 use commonware_macros::boxed;
 use commonware_runtime::Handle;
-use commonware_utils::{Widen, bitmap, iter::zip_eq};
+use commonware_utils::{Widen, bitmap};
 use core::{borrow::Borrow, num::NonZeroUsize};
 use std::collections::{BTreeMap, HashMap};
 use tracing::{debug, warn};
@@ -257,43 +257,44 @@ where
         self.metrics.get_many_calls.inc();
         self.metrics.lookups_requested.inc_by(keys.len() as u64);
 
-        // Read every location the index reports for any key in one batched read.
-        let mut candidates: Vec<(Location, usize)> = keys
-            .iter()
-            .enumerate()
-            .flat_map(|(index, key)| {
-                self.snapshot
-                    .get(key.borrow())
-                    .map(move |&loc| (loc, index))
-            })
-            .collect();
-        candidates.sort_unstable();
-        let mut locs: Vec<u64> = candidates.iter().map(|&(loc, _)| *loc).collect();
-        locs.dedup();
-        let ops = self.log.read_many(&locs).await?;
+        // Probe the index. Translated keys can collide, so a key may have several candidates.
+        let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
+        self.snapshot
+            .get_many(keys.iter().map(Borrow::borrow), |key_idx, &loc| {
+                candidates.push((key_idx, *loc))
+            });
+        candidates.sort_unstable_by_key(|&(_, pos)| pos);
+        let positions = dedup_positions(&candidates);
 
+        // Serve every position the page cache holds without awaiting, collecting the rest. A
+        // miss is recorded even when its key already resolved, so the read below still
+        // validates the position.
+        let value = |update: Update<K, VariableEncoding<V>>, _| update.1;
         let mut values = vec![None; keys.len()];
-        for (op, group) in zip_eq(ops, candidates.chunk_by(|a, b| a.0 == b.0)) {
-            let Operation::Update(Update(k, v)) = op else {
-                unreachable!(
-                    "location ({}) does not reference update operation",
-                    group[0].0
-                );
-            };
-            // Clone for earlier matching slots and move the decoded value into the last.
-            let mut pending = None;
-            for &(_, index) in group {
-                if &k != keys[index].borrow() {
-                    continue;
-                }
-                if let Some(previous) = pending.replace(index) {
-                    values[previous] = Some(v.clone());
-                }
-            }
-            if let Some(last) = pending {
-                values[last] = Some(v);
-            }
+        let mut misses = Vec::new();
+        match_read_ops(
+            keys,
+            &candidates,
+            self.log.try_read_many_sync(&positions).into_iter(),
+            &value,
+            &mut values,
+            |key_idx, pos| misses.push((key_idx, pos)),
+        );
+        if misses.is_empty() {
+            return Ok(values);
         }
+
+        // Read the missed positions, which are still in position order, in one batch.
+        let positions = dedup_positions(&misses);
+        let ops = self.log.read_many(&positions).await?;
+        match_read_ops(
+            keys,
+            &misses,
+            ops.into_iter().map(Some),
+            &value,
+            &mut values,
+            |_, pos| unreachable!("read_many returns one operation per position, pos={pos}"),
+        );
         Ok(values)
     }
 
@@ -1692,6 +1693,48 @@ mod test {
             let values = batch.get_many(&keys).await.unwrap();
             assert_eq!(batch.get_many(&keys.each_ref()).await.unwrap(), values);
             assert_eq!(values, [None, Some(v2), Some(v4)]);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A batched read answers alike whether the page cache serves a position or the log does.
+    #[test_traced("WARN")]
+    fn test_store_get_many_cached_and_uncached() {
+        deterministic::Runner::default().start(|context| async move {
+            // Half the keys share a translated key, and the values outgrow the page cache.
+            let key = |i: u64| {
+                let mut bytes = [0u8; 32];
+                if i % 2 == 0 {
+                    bytes[..2].copy_from_slice(&[0xa5, 0x5a]);
+                } else {
+                    bytes[..2].copy_from_slice(&(i as u16).to_be_bytes());
+                }
+                bytes[24..].copy_from_slice(&i.to_be_bytes());
+                Digest::from(bytes)
+            };
+            let db = create_test_store(context.child("seed")).await;
+            let writes = (0..32u64).map(|i| (key(i), Some(vec![i as u8; 64])));
+            let (db, _) = apply_entries(db, writes).await;
+            drop(db.sync().await.unwrap());
+
+            // A reopened store starts with an empty page cache.
+            let db = create_test_store(context.child("reopened")).await;
+            let keys: Vec<_> = [3, 40, 8, 3, 17, 8, 30, 1].into_iter().map(key).collect();
+            let expected: Vec<_> = [3u8, 40, 8, 3, 17, 8, 30, 1]
+                .into_iter()
+                .map(|i| (i < 32).then(|| vec![i; 64]))
+                .collect();
+            let hits = || counter(&context, "reopened_log_cache_hits_total");
+            let reads = || counter(&context, "reopened_log_items_read_total");
+
+            // The first read finds little in the cache and the second finds what the first left
+            // there, so between them both paths serve positions.
+            let (hits_before, reads_before) = (hits(), reads());
+            assert_eq!(db.get_many(&keys).await.unwrap(), expected);
+            assert_eq!(db.get_many(&keys).await.unwrap(), expected);
+            let (hits, reads) = (hits() - hits_before, reads() - reads_before);
+            assert!(hits > 0 && hits < reads, "hits={hits} reads={reads}");
 
             db.destroy().await.unwrap();
         });

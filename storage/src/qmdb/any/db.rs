@@ -35,6 +35,57 @@ const fn same_position(a: &(usize, u64), b: &(usize, u64)) -> bool {
     a.1 == b.1
 }
 
+/// Collapse position-sorted `(key index, position)` candidates into deduplicated positions.
+pub(crate) fn dedup_positions(candidates: &[(usize, u64)]) -> Vec<u64> {
+    let mut positions = Vec::with_capacity(candidates.len());
+    positions.extend(candidates.chunk_by(same_position).map(|group| group[0].1));
+    positions
+}
+
+/// Match the operations read for the deduplicated positions of position-sorted
+/// `(key index, position)` candidates back to those candidates, filling each unresolved key
+/// slot whose operation carries its exact key. `ops` yields one slot per deduplicated
+/// position, in order: the operation read there, or `None` when the page cache could not
+/// serve it, which is reported to `on_miss` with each candidate's key index and position.
+pub(crate) fn match_read_ops<F: Family, U: Update, T>(
+    keys: &[impl Borrow<U::Key>],
+    candidates: &[(usize, u64)],
+    ops: impl Iterator<Item = Option<Operation<F, U>>>,
+    map: &impl Fn(U, Location<F>) -> T,
+    results: &mut [Option<T>],
+    mut on_miss: impl FnMut(usize, u64),
+) {
+    for (group, op) in candidates.chunk_by(same_position).zip(ops) {
+        let pos = group[0].1;
+        let Some(op) = op else {
+            for &(key_idx, _) in group {
+                on_miss(key_idx, pos);
+            }
+            continue;
+        };
+        let Operation::Update(data) = op else {
+            panic!("location does not reference update operation. loc={pos}");
+        };
+
+        // The candidates sharing this position match the update only for repeated input
+        // keys. Defer each match so every slot but the last takes a clone and the last
+        // takes the update itself.
+        let loc = Location::new(pos);
+        let mut pending = None;
+        for &(key_idx, _) in group {
+            if results[key_idx].is_some() || data.key() != keys[key_idx].borrow() {
+                continue;
+            }
+            if let Some(prev) = pending.replace(key_idx) {
+                results[prev] = Some(map(data.clone(), loc));
+            }
+        }
+        if let Some(last) = pending {
+            results[last] = Some(map(data, loc));
+        }
+    }
+}
+
 /// Type alias for the authenticated journal used by [Db].
 pub(crate) type AuthenticatedLog<F, E, C, H, S> = authenticated::Journal<F, E, C, H, S>;
 
@@ -275,14 +326,14 @@ where
         // validates the missed positions: every candidate position is decoded by exactly one of
         // the two passes, so corruption detection does not depend on cache state.
         misses.sort_unstable_by_key(|&(_, pos)| pos);
-        let positions = Self::dedup_positions(&misses);
+        let positions = dedup_positions(&misses);
         let ops = self.log.read_many(&positions).await?;
         assert_eq!(
             ops.len(),
             positions.len(),
             "read_many returns one operation per position"
         );
-        Self::match_read_ops(
+        match_read_ops(
             keys,
             &misses,
             ops.into_iter().map(Some),
@@ -313,7 +364,7 @@ where
 
         // Sort by position and deduplicate for the batched cache read.
         candidates.sort_unstable_by_key(|&(_, pos)| pos);
-        let positions = Self::dedup_positions(&candidates);
+        let positions = dedup_positions(&candidates);
 
         let served = self.log.try_read_many_sync(&positions);
         assert_eq!(
@@ -323,7 +374,7 @@ where
         );
         let mut results: Vec<Option<T>> = (0..keys.len()).map(|_| None).collect();
         let mut misses: Vec<(usize, u64)> = Vec::new();
-        Self::match_read_ops(
+        match_read_ops(
             keys,
             &candidates,
             served.into_iter(),
@@ -332,57 +383,6 @@ where
             |key_idx, pos| misses.push((base + key_idx, pos)),
         );
         (results, misses)
-    }
-
-    /// Collapse position-sorted `(key index, position)` candidates into deduplicated positions.
-    fn dedup_positions(candidates: &[(usize, u64)]) -> Vec<u64> {
-        let mut positions = Vec::with_capacity(candidates.len());
-        positions.extend(candidates.chunk_by(same_position).map(|group| group[0].1));
-        positions
-    }
-
-    /// Match the operations read for the deduplicated positions of position-sorted
-    /// `(key index, position)` candidates back to those candidates, filling each unresolved key
-    /// slot whose operation carries its exact key. `ops` yields one slot per deduplicated
-    /// position, in order: the operation read there, or `None` when the page cache could not
-    /// serve it, which is reported to `on_miss` with each candidate's key index and position.
-    fn match_read_ops<T>(
-        keys: &[impl Borrow<U::Key>],
-        candidates: &[(usize, u64)],
-        ops: impl Iterator<Item = Option<Operation<F, U>>>,
-        map: &impl Fn(U, Location<F>) -> T,
-        results: &mut [Option<T>],
-        mut on_miss: impl FnMut(usize, u64),
-    ) {
-        for (group, op) in candidates.chunk_by(same_position).zip(ops) {
-            let pos = group[0].1;
-            let Some(op) = op else {
-                for &(key_idx, _) in group {
-                    on_miss(key_idx, pos);
-                }
-                continue;
-            };
-            let Operation::Update(data) = op else {
-                panic!("location does not reference update operation. loc={pos}");
-            };
-
-            // The candidates sharing this position match the update only for repeated input
-            // keys. Defer each match so every slot but the last takes a clone and the last
-            // takes the update itself.
-            let loc = Location::new(pos);
-            let mut pending = None;
-            for &(key_idx, _) in group {
-                if results[key_idx].is_some() || data.key() != keys[key_idx].borrow() {
-                    continue;
-                }
-                if let Some(prev) = pending.replace(key_idx) {
-                    results[prev] = Some(map(data.clone(), loc));
-                }
-            }
-            if let Some(last) = pending {
-                results[last] = Some(map(data, loc));
-            }
-        }
     }
 
     /// Return the retained operation range `[start, end)`.
