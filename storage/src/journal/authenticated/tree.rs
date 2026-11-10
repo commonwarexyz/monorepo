@@ -691,7 +691,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         let mut chunks = plan.chunks();
         let mut spawn_next = |pending: &mut VecDeque<AbortOnDrop<_>>| {
             let Some(chunk) = chunks.next() else {
-                return;
+                return false;
             };
             let task_journal = TaskJournal {
                 journal: journal.clone(),
@@ -703,13 +703,15 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
                 .dedicated()
                 .spawn(move |_| Self::hash_chunk(task_journal, chunk, chunk_hasher, buffer));
             pending.push_back(task.abort_on_drop());
+            true
         };
 
         // Hash chunks ahead of appending them, and append them in order.
-        let concurrency = self.replay_concurrency.get();
-        let mut pending = VecDeque::with_capacity(concurrency);
-        for _ in 0..concurrency {
-            spawn_next(&mut pending);
+        let mut pending = VecDeque::new();
+        for _ in 0..self.replay_concurrency.get() {
+            if !spawn_next(&mut pending) {
+                break;
+            }
         }
         while let Some(task) = pending.pop_front() {
             let appended = match task.join().await {
@@ -1321,13 +1323,17 @@ mod tests {
 
     /// Replaying in aligned subtrees builds the same tree as replaying in batches: subtrees of
     /// several heights, opened at boundaries on and off subtree edges, replayed to ends before, on,
-    /// and past them with one or several subtrees in flight. Every node at or past the boundary
-    /// matches an oracle.
+    /// and past them with one, several or unboundedly many subtrees in flight. Every node at or
+    /// past the boundary matches an oracle.
     async fn subtrees_match_batches<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new(Bagging::ForwardFold);
         let total = 200;
         let expected = oracle::<F>(&Operations::new(total), &hasher);
-        for (subtree, concurrency) in [1, 2, 4].into_iter().flat_map(|s| [(s, 1), (s, 3)]) {
+        let concurrencies = [1, 3, usize::MAX];
+        for (subtree, concurrency) in [1, 2, 4]
+            .into_iter()
+            .flat_map(|s| concurrencies.map(|c| (s, c)))
+        {
             for resident in [0, 2, 5] {
                 for boundary in [0, 1, 5, 16, 17, 45] {
                     for end in [boundary, boundary + 1, 16, 31, 64, 100, 129, total] {

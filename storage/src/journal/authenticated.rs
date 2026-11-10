@@ -401,6 +401,8 @@ where
     ///
     /// Returns a proof and the items corresponding to the leaves in the range `start_loc..end_loc`,
     /// where `end_loc` is the minimum of the current item count and `start_loc + max_ops`.
+    /// After a restart from an anchor, items between the pruning boundary and the anchor stay
+    /// readable but cannot be proven until a prune passes the anchor.
     ///
     /// # Errors
     ///
@@ -467,6 +469,8 @@ where
     ///
     /// Returns a proof and the items corresponding to the leaves in the range `start_loc..end_loc`,
     /// where `end_loc` is the minimum of `historical_leaves` and `start_loc + max_ops`.
+    /// After a restart from an anchor, items between the pruning boundary and the anchor stay
+    /// readable but cannot be proven until a prune passes the anchor.
     ///
     /// # Errors
     ///
@@ -514,19 +518,24 @@ where
     }
 
     /// Return the digests [`Family::nodes_to_pin`] lists for `location`, in that order.
-    pub async fn pinned_nodes_at(
-        &self,
-        location: Location<F>,
-    ) -> Result<Vec<H::Digest>, merkle::Error<F>> {
+    ///
+    /// Like [Self::historical_proof], it returns [crate::journal::Error::ItemPruned] for a
+    /// location before the Merkle structure's start, which a restart from an anchor leaves past
+    /// the pruning boundary until a prune passes it.
+    pub async fn pinned_nodes_at(&self, location: Location<F>) -> Result<Vec<H::Digest>, Error<F>> {
         if !location.is_valid() {
-            return Err(merkle::Error::LocationOverflow(location));
+            return Err(merkle::Error::LocationOverflow(location).into());
         }
-        if location < self.merkle.bounds().start || location > self.size() {
-            return Err(merkle::Error::RangeOutOfBounds(location));
+        if location < self.merkle.bounds().start {
+            return Err(JournalError::ItemPruned(*location).into());
         }
-        self.merkle
+        if location > self.size() {
+            return Err(merkle::Error::RangeOutOfBounds(location).into());
+        }
+        Ok(self
+            .merkle
             .pinned_nodes_at(&self.journal, &self.hasher, location)
-            .await
+            .await?)
     }
 
     /// Like [`Contiguous::read_many`], but returns the items partitioned into the shards the
@@ -3207,6 +3216,10 @@ mod tests {
             journal
                 .historical_proof(size, Location::new(10), NZU64!(5), 0)
                 .await,
+            Err(Error::Journal(JournalError::ItemPruned(10)))
+        ));
+        assert!(matches!(
+            journal.pinned_nodes_at(Location::new(10)).await,
             Err(Error::Journal(JournalError::ItemPruned(10)))
         ));
         let (proof, ops) = journal

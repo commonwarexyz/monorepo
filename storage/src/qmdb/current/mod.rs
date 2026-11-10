@@ -513,16 +513,27 @@ where
     // sizes, and the delayed-pair absorption threshold. The underlying `any` database checks them
     // before publishing the selected journal prefix, then populates the bitmap during snapshot
     // rebuild.
-    let boundary = |chunks: usize| any::BitmapBoundary {
-        chunks,
-        min_size: db::pair_absorption_threshold::<F, N>(chunks as u64),
+    let boundary = |chunks: usize| {
+        // A boundary must stand for a valid operation location, which a corrupt count can exceed.
+        let valid = (chunks as u64)
+            .checked_mul(commonware_utils::bitmap::Prunable::<N>::CHUNK_SIZE_BITS)
+            .is_some_and(|bits| Location::<F>::new(bits).is_valid());
+        if !valid {
+            return Err(crate::qmdb::Error::<F>::DataCorrupted(
+                "bitmap boundary past the last operation location",
+            ));
+        }
+        Ok(any::BitmapBoundary {
+            chunks,
+            min_size: db::pair_absorption_threshold::<F, N>(chunks as u64),
+        })
     };
     let boundaries = any::BitmapBoundaries {
-        base: boundary(base.0),
+        base: boundary(base.0)?,
         anchors: anchors
             .iter()
             .map(|(chunks, _)| boundary(*chunks))
-            .collect(),
+            .collect::<Result<_, _>>()?,
     };
     let any =
         any::init_with_bitmap(context.child("any"), cfg.into(), Some(boundaries), max_size).await?;
@@ -2675,6 +2686,49 @@ pub mod tests {
             assert_eq!(db.root(), earlier.root);
             assert_eq!(db.pruned_bits(), 0);
             db.destroy().await.unwrap();
+        });
+    }
+
+    /// A grafted anchor whose chunk count is a valid location but overflows the operations it
+    /// stands for is reported as corruption.
+    #[test_traced("INFO")]
+    fn test_current_rejects_overflowing_anchor() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let partition = "current-overflowing-anchor";
+            let (db, _) = build_generations(&context, partition, 1).await;
+            let db = db.sync().await.unwrap();
+            drop(db);
+
+            // 2^60 chunks of 256 bits pass the location check but overflow 64 bits.
+            let chunks = 1u64 << 60;
+            type U64 = commonware_utils::sequence::prefixed_u64::U64;
+            let mut metadata = crate::metadata::Metadata::<_, U64, Vec<u8>>::init(
+                context.child("corrupt"),
+                crate::metadata::Config {
+                    partition: format!("{partition}-grafted-metadata-partition"),
+                    codec_config: ((0..).into(), ()),
+                },
+            )
+            .await
+            .unwrap();
+            let pins = <mmr::Family as merkle::Family>::nodes_to_pin(Location::new(chunks)).count();
+            let pins = vec![0; pins * <Digest as commonware_codec::FixedSize>::SIZE];
+            metadata.put(U64::new(db::ANCHOR_PREFIX, chunks), pins);
+            drop(metadata.sync().await.unwrap());
+
+            let result = UnorderedVariableDb::init(
+                context.child("reopen"),
+                variable_config::<OneCap>(partition),
+                None,
+            )
+            .await;
+            assert!(matches!(
+                result,
+                Err(crate::qmdb::Error::DataCorrupted(
+                    "bitmap boundary past the last operation location"
+                ))
+            ));
         });
     }
 
