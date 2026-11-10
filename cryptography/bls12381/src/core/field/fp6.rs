@@ -39,6 +39,7 @@ use super::{
     MAX_LANES,
     arithmetic::{Field, Signed, TIGHT},
     fp2::{self, BYTES as FP2_BYTES, Fp2},
+    gather, scatter,
 };
 use commonware_simd::Simd;
 
@@ -82,13 +83,9 @@ impl<F> Fp6<F> {
         F: Field<S>,
     {
         const { assert!(F::LANES <= MAX_LANES) };
-        let mut coefficients = [[[0; FP2_BYTES]; MAX_LANES]; 3];
         let lanes = elements.len().min(F::LANES);
-        for (lane, element) in elements[..lanes].iter().enumerate() {
-            for (coefficient, bytes) in coefficients.iter_mut().zip(split(element)) {
-                coefficient[lane] = *bytes;
-            }
-        }
+        let mut coefficients = [[[0; FP2_BYTES]; MAX_LANES]; 3];
+        gather(&mut coefficients, &elements[..lanes], split);
         let [fill0, fill1, fill2] = split(fill);
         Self {
             c0: Fp2::load(simd, &coefficients[0][..lanes], fill0),
@@ -111,13 +108,16 @@ impl<F> Fp6<F> {
         self.c0.store(simd, &mut coefficients[0][..lanes]);
         self.c1.store(simd, &mut coefficients[1][..lanes]);
         self.c2.store(simd, &mut coefficients[2][..lanes]);
-        for (lane, element) in elements[..lanes].iter_mut().enumerate() {
-            let (c2, rest) = element.split_at_mut(FP2_BYTES);
-            let (c1, c0) = rest.split_at_mut(FP2_BYTES);
-            c0.copy_from_slice(&coefficients[0][lane]);
-            c1.copy_from_slice(&coefficients[1][lane]);
-            c2.copy_from_slice(&coefficients[2][lane]);
-        }
+        scatter(
+            &coefficients,
+            &mut elements[..lanes],
+            |element, [c0, c1, c2]| {
+                let (chunks, _) = element.as_chunks_mut::<FP2_BYTES>();
+                chunks[0] = *c2;
+                chunks[1] = *c1;
+                chunks[2] = *c0;
+            },
+        );
     }
 
     /// Returns `self + rhs`, without reducing.
