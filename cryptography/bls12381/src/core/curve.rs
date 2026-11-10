@@ -52,15 +52,13 @@ pub trait Points<S: Simd>: Copy {
 pub mod fuzz {
     use super::*;
     use crate::core::field::{
+        MAX_LANES,
         arithmetic::Field,
         fp::testing::{Check, check_any},
     };
     use arbitrary::{Arbitrary, Unstructured};
     use core::{fmt::Debug, marker::PhantomData};
     use std::{format, vec::Vec};
-
-    /// Largest number of points in a value, the widest representation's lane count.
-    const MAX_LANES: usize = 16;
 
     /// Largest number of points added into each lane in one case.
     const MAX_ROUNDS: usize = 4;
