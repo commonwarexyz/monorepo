@@ -827,8 +827,8 @@ impl Workload {
     }
 
     /// Delivers `receipt` to its receiver and checks the outcome R1 and R2 predict. The receipt is
-    /// kept exactly if its epoch is the one whose close the ledger expects or the one after, the
-    /// ledger has not halted, and it promises more than the one held.
+    /// kept exactly if its epoch has not posted, the ledger has not halted, and it promises more
+    /// than the one held.
     fn receive(&self, world: &mut World, receipt: Receipt<PublicKey, PublicKey, Digest, u64>) {
         let receiver = self.user_of(&receipt.receiver);
         let sender = self.user_of(&receipt.state.account);
@@ -840,8 +840,6 @@ impl Workload {
             matches!(outcome, Err(Receiving::Halted))
         } else if epoch <= world.last_posted() {
             matches!(outcome, Err(Receiving::Closed))
-        } else if epoch > world.last_posted() + 2 {
-            matches!(outcome, Err(Receiving::Unopened))
         } else if amount <= held {
             matches!(outcome, Err(Receiving::NotIncreasing))
         } else {
