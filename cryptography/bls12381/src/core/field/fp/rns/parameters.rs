@@ -7,19 +7,6 @@
 
 use super::{Basis, Conversion, MODULI, WORDS};
 
-/// The modulus `p` as little-endian 64-bit words.
-pub(crate) const MODULUS: [u64; WORDS] = [
-    0xb9feffffffffaaab,
-    0x1eabfffeb153ffff,
-    0x6730d2a0f6b0f624,
-    0x64774b84f38512bf,
-    0x4b1ba7b6434bacd7,
-    0x1a0111ea397fe69a,
-];
-
-/// `-p^(-1) mod 2^64`, the word Montgomery constant of the canonical conversion.
-pub(crate) const MODULUS_N0: u64 = 0x89f3fffcfffcfffd;
-
 /// `floor(M / p)` for the product `M` of the first basis.
 pub(crate) const M_OVER_P: u64 = 645173;
 
