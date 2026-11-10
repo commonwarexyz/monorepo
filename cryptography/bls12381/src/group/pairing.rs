@@ -2,14 +2,15 @@
 
 use super::{
     G1, G2,
-    kernel::{Group, Kernel, MAX_LANES},
+    kernel::{Group, Kernel},
 };
 use crate::core::{
     curve::{Points, g1, g2},
     field::{
+        MAX_LANES,
         arithmetic::{Field, TIGHT},
         fp::{self, BYTES as FP_BYTES},
-        fp2::{BYTES as FP2_BYTES, Fp2},
+        fp2::{self, BYTES as FP2_BYTES, Fp2},
         fp12::{self, BYTES, Fp12},
     },
     pairing::{G1Affine, G2Affine, Pair, SHARED, final_exponentiation, miller_loop},
@@ -172,7 +173,7 @@ const P_FILL: g1::Coordinates = {
 /// The G2 point `(0 : 1 : 1)`, whose denominator is one.
 const Q_FILL: g2::Coordinates = {
     let mut fill = g2::IDENTITY;
-    fill[2][FP2_BYTES - 1] = 1;
+    fill[2] = fp2::ONE;
     fill
 };
 

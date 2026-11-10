@@ -19,15 +19,13 @@ use super::Scalar;
 use crate::core::{
     curve::Points,
     field::{
+        MAX_LANES,
         arithmetic::Field,
         fp::{rns::Rns, unsat28::Unsat28, unsat49::Unsat49},
     },
 };
 use commonware_simd::{Operation, Simd, X86V4C};
 use core::fmt::Debug;
-
-/// Largest lane count of any representation.
-pub const MAX_LANES: usize = 16;
 
 /// Width in bits of the signed scalar windows of [`multiply`].
 const WINDOW_BITS: u32 = 5;

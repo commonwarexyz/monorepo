@@ -66,13 +66,14 @@ fn fmt_coordinates<const N: usize>(
 pub mod fuzz {
     use super::{
         MSM_BATCH, Scalar,
-        kernel::{Add, Double, Group, Kernel, MAX_LANES, Multiply, MultiplyEach, Sum},
+        kernel::{Add, Double, Group, Kernel, Multiply, MultiplyEach, Sum},
         msm::{self, Msm},
     };
     pub use super::{pairing::fuzz as pairing, scalar::fuzz as scalar};
     use crate::core::{
         curve::Points,
         field::{
+            MAX_LANES,
             arithmetic::Field,
             fp::{rns::Rns, testing::Backend, unsat28::Unsat28, unsat49::Unsat49},
         },

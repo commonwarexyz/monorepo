@@ -48,10 +48,9 @@
 //! builds check these rules; release builds do not, and results are unspecified when a formula
 //! violates them.
 
-pub use super::super::MAX_LANES;
 use super::{
-    super::arithmetic::Field, BYTES, MODULUS, WORDS, bytes_from_words, power_of_two,
-    words_from_bytes,
+    super::{MAX_LANES, arithmetic::Field},
+    BYTES, MODULUS, WORDS, bytes_from_words, power_of_two, words_from_bytes,
 };
 use crate::{core::debug_counter::DebugCounter, montgomery::negated_inverse};
 use commonware_simd::{Neon, Operation, Simd};
