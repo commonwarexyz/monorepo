@@ -279,10 +279,10 @@ impl<F> Fp12<F> {
     where
         F: Field<S>,
     {
-        let a = coefficients(a);
-        let b = coefficients(b);
+        let a = by_degree(a);
+        let b = by_degree(b);
         let twisted = twist::<{ BOUND + 1 }, S, F>(simd, &b);
-        from_coefficients(Fp2::<F>::reduce_each_tight::<6, 12, BIAS, S>(
+        from_storage(Fp2::<F>::reduce_each_tight::<6, 12, BIAS, S>(
             simd,
             #[cfg_attr(not(debug_assertions), inline(always))]
             |k| {
@@ -337,14 +337,14 @@ impl<F> Fp12<F> {
         F: Field<S>,
     {
         const K: u64 = BOUND + 1;
-        let a = coefficients(a);
+        let a = by_degree(a);
         let t = twist::<K, S, F>(simd, &a);
         let mut d = [a[0]; 5];
         unroll::<5>(
             #[inline(always)]
             |j| d[j] = a[j].double(simd).carry(simd),
         );
-        from_coefficients(Fp2::<F>::reduce_each_tight::<6, 12, BIAS, S>(
+        from_storage(Fp2::<F>::reduce_each_tight::<6, 12, BIAS, S>(
             simd,
             #[cfg_attr(not(debug_assertions), inline(always))]
             |k| {
@@ -424,10 +424,10 @@ impl<F> Fp12<F> {
         F: Field<S>,
     {
         const K: u64 = LINE_BOUND + 1;
-        let a = coefficients(a);
+        let a = by_degree(a);
         let t2 = l2.mul_by_nonresidue::<K, S>(simd).carry(simd);
         let t3 = l3.mul_by_nonresidue::<K, S>(simd).carry(simd);
-        from_coefficients(Fp2::<F>::reduce_each_tight::<6, 12, BIAS, S>(
+        from_storage(Fp2::<F>::reduce_each_tight::<6, 12, BIAS, S>(
             simd,
             #[cfg_attr(not(debug_assertions), inline(always))]
             |k| {
@@ -479,14 +479,12 @@ impl<F> Fp12<F> {
     where
         F: Field<S>,
     {
-        // The coefficients a0, ..., a5 of 1, w, ..., w^5.
-        let (a0, a1, a2) = (a.c0.c0, a.c1.c0, a.c0.c1);
-        let (a3, a4, a5) = (a.c1.c1, a.c0.c2, a.c1.c2);
+        let [a0, a1, a2, a3, a4, a5] = by_degree(a);
         let (real03, imaginary03) = square_pair::<S, F>(simd, a0, a3);
         let (real14, imaginary14) = square_pair::<S, F>(simd, a1, a4);
         let (real25, imaginary25) = square_pair::<S, F>(simd, a2, a5);
         let imaginary25 = Fp2::<F>::product_mul_by_nonresidue(simd, imaginary25);
-        from_coefficients(Fp2::<F>::reduce_each_tight::<6, 12, BIAS, S>(
+        from_storage(Fp2::<F>::reduce_each_tight::<6, 12, BIAS, S>(
             simd,
             #[inline(always)]
             |k| match k {
@@ -512,8 +510,8 @@ impl<F> Fp12<F> {
     where
         F: Field<S>,
     {
-        let a = coefficients(a);
-        from_coefficients(Fp2::<F>::reduce_each_tight::<6, 12, BIAS, S>(
+        let a = by_degree(a);
+        from_storage(Fp2::<F>::reduce_each_tight::<6, 12, BIAS, S>(
             simd,
             #[cfg_attr(not(debug_assertions), inline(always))]
             |k| {
@@ -592,10 +590,7 @@ impl<F> Fp12<F> {
         simd.execute(
             #[inline(always)]
             move |simd: S| {
-                // The coefficients of 1, w, ..., w^5.
-                let a = [
-                    self.c0.c0, self.c1.c0, self.c0.c1, self.c1.c1, self.c0.c2, self.c1.c2,
-                ];
+                let a = by_degree(self);
                 let mut b = a;
                 let conjugate = a[0].conjugate::<{ BOUND + 1 }, S>(simd);
                 b[0] = Fp2::<F>::reduce_tight::<1, S>(simd, conjugate.lift(simd));
@@ -604,18 +599,7 @@ impl<F> Fp12<F> {
                     let gamma = coefficients[j - 1];
                     b[j] = Fp2::<F>::reduce_tight::<BIAS, S>(simd, conjugate.product(simd, gamma));
                 }
-                Self {
-                    c0: Fp6 {
-                        c0: b[0],
-                        c1: b[2],
-                        c2: b[4],
-                    },
-                    c1: Fp6 {
-                        c0: b[1],
-                        c1: b[3],
-                        c2: b[5],
-                    },
-                }
+                from_degree(b)
             },
         )
     }
@@ -695,16 +679,17 @@ fn combine<S: Simd, F: Field<S>>(
     let c0 = Fp6::<F>::accumulate(simd, t0, Fp6::<F>::product_mul_by_nonresidue(simd, t1));
     let c1 = Fp6::<F>::product_sub(simd, Fp6::<F>::product_sub(simd, sum, t0), t1);
     let products = [c0.c0, c0.c1, c0.c2, c1.c0, c1.c1, c1.c2];
-    from_coefficients(Fp2::<F>::reduce_each_tight::<6, 12, BIAS, S>(
+    from_storage(Fp2::<F>::reduce_each_tight::<6, 12, BIAS, S>(
         simd,
         #[inline(always)]
         |k| products[k],
     ))
 }
 
-/// Returns the element with the coefficients of `1`, `v`, and `v^2` in `c0`, then in `c1`.
+/// Returns the element with the coefficients of `1`, `v`, and `v^2` in `c0`, then in `c1`: the
+/// order in which they are stored.
 #[inline(always)]
-fn from_coefficients<T>([c00, c01, c02, c10, c11, c12]: [Fp2<T>; 6]) -> Fp12<T> {
+fn from_storage<T>([c00, c01, c02, c10, c11, c12]: [Fp2<T>; 6]) -> Fp12<T> {
     Fp12 {
         c0: Fp6 {
             c0: c00,
@@ -721,11 +706,17 @@ fn from_coefficients<T>([c00, c01, c02, c10, c11, c12]: [Fp2<T>; 6]) -> Fp12<T> 
 
 /// Returns the coefficients of `1, w, ..., w^5`, where `w^2 = v`.
 #[inline(always)]
-const fn coefficients<T: Copy>(a: &Fp12<T>) -> [Fp2<T>; 6] {
+const fn by_degree<T: Copy>(a: &Fp12<T>) -> [Fp2<T>; 6] {
     [a.c0.c0, a.c1.c0, a.c0.c1, a.c1.c1, a.c0.c2, a.c1.c2]
 }
 
-/// The degree in `w` of each coefficient in the order of [`from_coefficients`].
+/// Returns the element with the coefficients of `1, w, ..., w^5`, the inverse of [`by_degree`].
+#[inline(always)]
+fn from_degree<T>([a0, a1, a2, a3, a4, a5]: [Fp2<T>; 6]) -> Fp12<T> {
+    from_storage([a0, a2, a4, a1, a3, a5])
+}
+
+/// The degree in `w` of each coefficient in the order of [`from_storage`].
 const DEGREE: [usize; 6] = [0, 2, 4, 1, 3, 5];
 
 /// Returns the coefficients of `w^7, ..., w^11` of an element with the given coefficients of
