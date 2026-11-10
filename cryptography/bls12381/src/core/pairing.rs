@@ -36,7 +36,7 @@ use crate::core::{
         MAX_LANES,
         arithmetic::Field,
         fp::BYTES as FP_BYTES,
-        fp2::{BYTES as FP2_BYTES, Fp2},
+        fp2::{self, BYTES as FP2_BYTES, Fp2},
         fp12::Fp12,
     },
 };
@@ -92,8 +92,6 @@ impl<F> Pair<F> {
             }
         }
         let (g1, g2) = fill;
-        let mut one = [0; FP2_BYTES];
-        one[FP2_BYTES - 1] = 1;
         let y = F::load(simd, &p[1][..lanes], &g1[1]);
         Self {
             x: F::load(simd, &p[0][..lanes], &g1[0]),
@@ -102,7 +100,7 @@ impl<F> Pair<F> {
             q: Point {
                 x: Fp2::load(simd, &q[0][..lanes], &g2[0]),
                 y: Fp2::load(simd, &q[1][..lanes], &g2[1]),
-                z: Fp2::load(simd, &[], &one),
+                z: Fp2::load(simd, &[], &fp2::ONE),
             },
         }
     }

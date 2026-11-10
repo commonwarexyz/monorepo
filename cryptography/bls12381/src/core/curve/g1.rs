@@ -40,11 +40,7 @@ pub type Coordinates = [[u8; BYTES]; 3];
 pub const BOUND: u64 = 73;
 
 /// The identity `(0 : 1 : 0)` as projective coordinates.
-pub const IDENTITY: Coordinates = {
-    let mut identity = [[0; BYTES]; 3];
-    identity[1][BYTES - 1] = 1;
-    identity
-};
+pub const IDENTITY: Coordinates = [[0; BYTES], ONE, [0; BYTES]];
 
 /// The generator in projective coordinates, with `Z = 1`.
 pub const GENERATOR: Coordinates = [
@@ -54,11 +50,7 @@ pub const GENERATOR: Coordinates = [
     hex!(
         "08b3f481e3aaa0f1a09e30ed741d8ae4fcf5e095d5d00af600db18cb2c04b3edd03cc744a2888ae40caa232946c5e7e1"
     ),
-    {
-        let mut one = [0; BYTES];
-        one[BYTES - 1] = 1;
-        one
-    },
+    ONE,
 ];
 
 /// Largest integer bound of a reduced value in residues, in units of `p`.

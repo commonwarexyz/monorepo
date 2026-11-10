@@ -31,7 +31,7 @@
 use super::{
     MAX_LANES,
     arithmetic::{Field, TIGHT, unroll},
-    fp::{BYTES as FP_BYTES, WORDS},
+    fp::{self, BYTES as FP_BYTES, WORDS},
     fp2::{BYTES as FP2_BYTES, Fp2, encode},
     fp6::{self, BYTES as FP6_BYTES, Fp6},
 };
@@ -196,9 +196,7 @@ impl<F> Fp12<F> {
             #[inline(always)]
             move |simd: S| {
                 let zero = F::load(simd, &[], &[0; FP_BYTES]);
-                let mut one = [0; FP_BYTES];
-                one[FP_BYTES - 1] = 1;
-                let one = F::load(simd, &[], &one);
+                let one = F::load(simd, &[], &fp::ONE);
                 let zero2 = Fp2 { c0: zero, c1: zero };
                 Self {
                     c0: Fp6 {

@@ -80,6 +80,9 @@ pub(crate) const fn encode(c0: [u64; WORDS], c1: [u64; WORDS]) -> [u8; BYTES] {
     bytes
 }
 
+/// The encoding of one.
+pub const ONE: [u8; BYTES] = encode([1, 0, 0, 0, 0, 0], [0; WORDS]);
+
 /// Signed sums of products of elements in the representation `F` on backend `S`.
 pub type Product<F, S> = Fp2<Signed<<F as Field<S>>::Product>>;
 
