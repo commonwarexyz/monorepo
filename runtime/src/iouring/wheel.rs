@@ -11,7 +11,7 @@
 //! its identity while it cascades and removal unlinks it in O(1). Occupancy
 //! bitmaps let expiry and bounds visit only occupied buckets.
 //!
-//! Expiry is budgeted: one pass spends one budget unit per slot it fires and
+//! Expiry is budgeted. One pass spends one budget unit per slot it fires and
 //! one per [`REFILES_PER_UNIT`] slots it refiles. Reaching a bucket detaches
 //! it in O(1) by clearing its occupancy bit. The bucket keeps its list, so
 //! removals still find their slots, and passes drain it, firing due slots and
@@ -47,7 +47,7 @@
 //! driver's request deadlines ([`super::deadlines::Deadlines`], 2^20 ns ticks)
 //! own an instance. Each owner counts nanoseconds from an [`Instant`] of its
 //! own, its creation, at which its wheel's base starts, and converts with
-//! [`InstantExt`]: an instant before that origin counts as zero, so a
+//! [`InstantExt`]. An instant before that origin counts as zero, so a
 //! deadline there is due at once, and a firing time converts back to an
 //! instant at or after its deadline.
 
@@ -682,16 +682,16 @@ pub mod tests {
     /// Random insertions (past, current and future, up to the end of time),
     /// removals with slot reuse, and expiries with random budgets and
     /// occasionally stale times, checked against a `BTreeMap` of firing
-    /// times after every step: a fired slot was resident and its firing
-    /// time had passed at the latest time any caller passed, a pass fires no
-    /// more slots than its budget has units, an unbudgeted pass leaves
-    /// nothing due, firing times are less than one tick after their
-    /// deadlines, the bound never exceeds the earliest firing time or, while
-    /// a bucket is detached, the base's time, and an insertion returns a time
-    /// between the bound and its firing time without lowering the bound
-    /// below what it returns. Each insertion step inserts `crowd` slots
-    /// within 2^16 ns of one deadline, so that a large crowd fills buckets
-    /// past their lazy size.
+    /// times after every step. The checks are that a fired slot was resident
+    /// and its firing time had passed at the latest time any caller passed,
+    /// that a pass fires no more slots than its budget has units, that an
+    /// unbudgeted pass leaves nothing due, that firing times are less than
+    /// one tick after their deadlines, that the bound never exceeds the
+    /// earliest firing time or, while a bucket is detached, the base's time,
+    /// and that an insertion returns a time between the bound and its firing
+    /// time without lowering the bound below what it returns. Each insertion
+    /// step inserts `crowd` slots within 2^16 ns of one deadline, so that a
+    /// large crowd fills buckets past their lazy size.
     fn model<const RESOLUTION: u64>(seed: u64, steps: usize, max_bits: u32, crowd: u32) {
         // A wheel and its model: live slots with their firing times, the
         // same ordered by firing time, and free slots for reuse.

@@ -92,18 +92,26 @@
 //! [`BUDGET`] per pass. A pool worker fires no more than its run queue has
 //! room for, and at least one, since wakes that overflow the queue would move
 //! its newest runnables, such as a task that has just requeued itself, behind
-//! them in the global queue. A saturated pool worker therefore fires only what
-//! its run queue can take, in deadline order, and the sleeps that one task
+//! them in the global queue. The room bounds only the sleeps' own wakes. The
+//! wakes of requests that complete in the same service pass, and those of its
+//! rescue of stalled peers, can add more. A saturated pool worker therefore
+//! fires only what its run queue can take, and the sleeps that one task
 //! multiplexes complete at that rate, although their wakes reach a single
-//! task. A pass that leaves due registrations behind keeps the published
-//! bound at or below its time, so the worker serves again before it parks,
-//! and a pool worker serves again after a short slice of task polls rather
-//! than a full batch, once its run queue has room (see [`super::runtime`]).
-//! So does a pass that leaves a wheel bucket partly refiled. The wheel bounds
-//! a crowded bucket by its start (see [`Wheel::bound`]), so the owner, parked
-//! or not, starts to refile it then, in such consecutive passes, rather than
-//! at its first deadline. Refiles wake nothing, so the room in the run queue
-//! caps only fires, and those passes refile with a full budget.
+//! task. It fires them in the wheel's order, bucket by bucket in time order.
+//! Within a bucket that a pass reaches after some of its deadlines passed, as
+//! a worker that is behind reaches buckets of 65 us on level one and of 4.2 ms
+//! on level two, the due ones fire in registration order rather than deadline
+//! order.
+//!
+//! A pass that leaves due registrations behind keeps the published bound at
+//! or below its time, so the worker serves again before it parks, and a pool
+//! worker serves again after a short slice of task polls rather than a full
+//! batch, once its run queue has room (see [`super::runtime`]). So does a
+//! pass that leaves a wheel bucket partly refiled. The wheel bounds a crowded
+//! bucket by its start (see [`Wheel::bound`]), so the owner, parked or not,
+//! starts to refile it then, in such consecutive passes, rather than at its
+//! first deadline. Refiles wake nothing, so the room in the run queue caps
+//! only fires, and those passes refile with a full budget.
 //!
 //! A poll that does not return freezes its worker's service, timers included.
 //! A pool worker that is not closing therefore checks its peers' published
@@ -131,24 +139,25 @@
 //! expiry, so the owner never fires one. It locks once per [`BUDGET`] of
 //! them, as cleanup does, so no critical section removes more than one
 //! budget. A queued registration keeps its slot until then, unless the owner
-//! registers first: each registration on the owner removes the most recently
+//! registers first. Each registration on the owner removes the most recently
 //! queued one in the critical section that it takes anyway, and so frees that
-//! slot for itself. Serial registrations and drops within one task
-//! poll therefore reuse one slot however many there are. A registration takes
+//! slot for itself. Serial registrations and drops within one task poll
+//! therefore reuse one slot however many there are. A registration takes
 //! a new slot only when none is free, so the timers' slots stay within the
 //! most registrations that waited at once. Each service pass leaves the queue
 //! empty, whether its removals or the registrations emptied it, and shrinks a
 //! capacity beyond [`DROPPED_CAPACITY`] to it. A callback that drops a sleep
 //! after the service pass makes the worker serve again before it parks.
 //!
-//! An identity queued after its registration fired, by an early completion or
-//! by the drop of a sleep whose poll observed the firing and then unwound, is
-//! stale. It no longer matches its slot's generation, so its removal never
-//! reaches a later registration in that slot. A peer's rescue can also fire a
-//! queued registration first and wake its sleep's waker once, a spurious wake
-//! that the future contract allows, and the removal then finds nothing. No
-//! sleep remains to poll a queued registration, so its removal ends nothing
-//! that the epoch guards.
+//! An identity queued after its registration fired is stale. An early
+//! completion queues one, and so does the drop of a sleep that did not observe
+//! the firing, such as one whose select took another branch, or whose poll
+//! observed it and then unwound. It no longer matches its slot's generation,
+//! so its removal never reaches a later registration in that slot. A peer's
+//! rescue can also fire a queued registration first and wake its sleep's
+//! waker once, a spurious wake that the future contract allows, and the
+//! removal then finds nothing. No sleep remains to poll a queued
+//! registration, so its removal ends nothing that the epoch guards.
 //!
 //! # Bounds and Lock Order
 //!
@@ -174,8 +183,8 @@
 //!
 //! # Closure
 //!
-//! Worker cleanup removes the queued registrations and then closes the timers:
-//! later registration is rejected, every waiting registration ends and its
+//! Worker cleanup removes the queued registrations and then closes the timers.
+//! Later registration is rejected, every waiting registration ends and its
 //! sleeper is woken, but no dropped one's, and the timers free their storage.
 //! A sleep that outlives its worker therefore keeps empty timers alive, not
 //! the worker's peak population of registrations. A registration that fired
@@ -552,10 +561,11 @@ impl Timers {
     /// of them, refiles later ones within the rest of that budget, and
     /// publishes the new bound, which the owner caches. A pool worker passes
     /// the room in its run queue as `fires`, so a saturated worker fires only
-    /// what that queue can take, in deadline order, while a crowded wheel
-    /// bucket cascades as fast as beside an empty queue. A peer's rescue keeps
-    /// a full budget. The bound stays at or below `now` while due
-    /// registrations remain.
+    /// what that queue can take, in the wheel's order (see the module
+    /// documentation), while a crowded wheel bucket cascades as fast as beside
+    /// an empty queue. The room bounds only these wakes, not others that the
+    /// same service pass collects. A peer's rescue keeps a full budget. The
+    /// bound stays at or below `now` while due registrations remain.
     pub fn expire(&self, now: u64, fires: u32, deferred: &mut Deferred) -> u64 {
         let mut registrations = self.lock();
         self.end(&mut registrations, deferred, |registrations, ending| {
@@ -750,8 +760,8 @@ impl Sleeper {
     /// Poll the registration. A deadline at or before this thread's latest
     /// worker service time completes it at once, ending the registration as a
     /// drop would (see [`Self::abandon`]). Every ready result ends the
-    /// registration, so the sleeper must then be dropped without
-    /// [`Self::abandon`].
+    /// registration, so the sleeper needs no [`Self::abandon`] afterwards, and
+    /// one after closure finds nothing.
     ///
     /// A poll at an unchanged epoch returns pending without the lock if its
     /// waker matches [`TaskIdentity`], a task waker with the stored waker's

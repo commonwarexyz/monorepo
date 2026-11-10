@@ -245,15 +245,19 @@ const BATCH_SIZE: usize = 64;
 ///
 /// A service pass fires at most one [`BUDGET`] of due request deadlines, and
 /// of due sleeps no more than the run queue has room for, at least one and at
-/// most one budget, so that their wakes never overflow the queue and move a
-/// task that has just requeued itself behind them in the global queue. A
-/// larger burst leaves due timers for later passes, one per turn. A saturated
-/// pool worker therefore fires sleeps only as fast as its run queue takes
-/// them, in deadline order, and the sleeps that one task multiplexes complete
-/// at that rate. Request deadlines, and a peer's rescue of a stalled worker's
-/// sleeps, keep a full budget per pass, and so do the refiles of later sleeps,
-/// which wake nothing, so a crowded wheel bucket cascades as fast beside a
-/// full run queue as beside an empty one.
+/// most one budget, so that the sleeps' wakes do not overflow the queue and
+/// move a task that has just requeued itself behind them in the global queue.
+/// The room counts only the run queue, not the wakes that the same pass
+/// collects from completed requests or from its rescue of stalled peers, so
+/// it bounds the sleeps' own wakes, and those others can still overflow the
+/// queue. A larger burst leaves due timers for later passes, one per turn. A
+/// saturated pool worker therefore fires sleeps only as fast as its run queue
+/// takes them, in the wheel's order (see [`super::sleep`]), and the sleeps
+/// that one task multiplexes complete at that rate. Request deadlines, and a
+/// peer's rescue of a stalled worker's sleeps, keep a full budget per pass,
+/// and so do the refiles of later sleeps, which wake nothing, so a crowded
+/// wheel bucket cascades as fast beside a full run queue as beside an empty
+/// one.
 ///
 /// Between two passes the worker polls a batch of up to [`BATCH_SIZE`]
 /// tasks, so with long polls a full batch would hold each further budget back
@@ -1574,7 +1578,7 @@ pub struct Worker {
     /// budgeted pass without waiting for a full batch of long polls. A pool
     /// worker fires no more sleeps per pass than its run queue has room for,
     /// so a saturated worker stays behind while it fires sleeps only as fast
-    /// as that queue takes them, in deadline order. Refiles and request
+    /// as that queue takes them, in the wheel's order. Refiles and request
     /// deadlines keep a full budget. Cleared by a pass that reaches every due
     /// deadline. A pass that runs out of budget while draining a detached
     /// wheel bucket leaves its bound at or below its time, even with only
