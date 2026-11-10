@@ -1914,7 +1914,6 @@ where
         round: Round,
         segment: StreamedSegment<C>,
     ) {
-        self.signal(round);
         let Some(scheme) = self.scheme_provider.scheme(round.epoch()) else {
             warn!(%round, "no scheme available, cannot stream segment");
             return;
@@ -10340,6 +10339,63 @@ mod tests {
                 [stream_of(&block, at(0, 11), 2).remove(0).into()],
             );
             assert_eq!(asked.load(Ordering::Relaxed), before);
+            assert!(oracle.blocked().await.unwrap().is_empty());
+        });
+    }
+
+    /// A node that streams a segment for view 3 relays the chunk at its index from view 2's leader
+    /// before naming. Consensus has signaled only view 1, so the horizon starts there.
+    #[test_traced]
+    fn test_earlier_view_relayed_before_naming_while_streaming_a_later_view() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
+                context.child("network"),
+                network_config(4),
+            );
+            network.start();
+            let ChunkSetup {
+                mut engine,
+                mut sender,
+                peer_keys,
+                mut observer,
+                block,
+                other,
+                round,
+            } = chunk_setup(&context, &oracle).await;
+
+            // Peer 1 leads view 2, and consensus has notarized view 1.
+            let leader = peer_keys[1].clone();
+            let next = Round::new(Epoch::zero(), View::new(2));
+            let named = leader.clone();
+            engine.leader = Arc::new(move |asked| (asked == next).then(|| named.clone()));
+            engine.handle_notarized_commitment(&mut sender, unrelated().commitment(), round);
+
+            // Peer 2 receives its chunk of the first segment this node streams for view 3.
+            let building = Round::new(Epoch::zero(), View::new(3));
+            let shards: Vec<_> = (0..4)
+                .map(|index| stream_of(&other, building, index))
+                .collect();
+            engine.stream_segment(
+                &mut sender,
+                building,
+                StreamedSegment::<SC> {
+                    segment: 0,
+                    root: shards[2][0].root,
+                    chunks: shards.iter().map(|shard| shard[0].chunk.clone()).collect(),
+                },
+            );
+            let sent = next_message::<SC>(&context, &mut observer).await;
+            assert!(sent == Some(ShardMessage::Stream(shards[2][0].clone())));
+
+            // The chunk at this node's index from view 2's leader is relayed on arrival.
+            let chunk = stream_of(&block, next, 0).remove(0);
+            receive(&mut engine, &mut sender, &leader, [chunk.clone().into()]);
+            let relayed = next_message::<SC>(&context, &mut observer).await;
+            assert!(
+                relayed == Some(ShardMessage::Stream(chunk)),
+                "view 2's chunk must be relayed while this node streams view 3"
+            );
             assert!(oracle.blocked().await.unwrap().is_empty());
         });
     }
