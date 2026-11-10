@@ -32,7 +32,7 @@ pub enum RequestError {
     Overflow,
     /// The latest state's root is that of its map with the batch already added, so both states
     /// derived from the pair could settle.
-    #[error("latest state does not commit to its map")]
+    #[error("latest state already holds the batch")]
     InvalidLatest,
     /// The request builds on a root other than the one its latest state builds on.
     #[error("previous root is not the latest state's")]
