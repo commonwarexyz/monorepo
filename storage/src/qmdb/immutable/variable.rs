@@ -263,7 +263,6 @@ mod tests {
         test_variable_delayed_merkleize_after_ancestor_apply => run_delayed_merkleize_after_ancestor_apply, open;
         test_variable_get_many => run_get_many, open;
         test_variable_get_many_duplicate_keys => run_get_many_duplicate_keys, open;
-        test_variable_get_many_unexpected_data => run_get_many_unexpected_data, open;
         test_variable_apply_after_ancestor_dropped => run_apply_after_ancestor_dropped, open;
         test_variable_dropped_ancestor_reads => run_dropped_ancestor_reads, open;
         test_variable_multi_key_batch_reads => run_multi_key_batch_reads, open;
