@@ -3,7 +3,7 @@
 use super::{Amount, Amounts, Epoch, Flow, Matrix, Namespace, matrix, settlement::Flows};
 use bytes::BufMut;
 use commonware_codec::{
-    Buf, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
+    Buf, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write, varint::UInt,
 };
 use commonware_cryptography::{Digest, Hasher, PublicKey, Signer};
 use thiserror::Error;
@@ -400,13 +400,18 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
         deposits: u64,
         forced_withdrawals: u64,
     ) -> Vec<u8> {
-        let mut message =
-            Vec::with_capacity(Epoch::SIZE + D::SIZE + withdrawals.encode_size() + 2 * u64::SIZE);
+        let mut message = Vec::with_capacity(
+            Epoch::SIZE
+                + D::SIZE
+                + withdrawals.encode_size()
+                + UInt(deposits).encode_size()
+                + UInt(forced_withdrawals).encode_size(),
+        );
         epoch.write(&mut message);
         matrix.write(&mut message);
         withdrawals.write(&mut message);
-        deposits.write(&mut message);
-        forced_withdrawals.write(&mut message);
+        UInt(deposits).write(&mut message);
+        UInt(forced_withdrawals).write(&mut message);
         message
     }
 
@@ -561,8 +566,8 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Write for Close<P, O, A> {
         self.epoch.write(buf);
         self.rows.write(buf);
         self.withdrawals.write(buf);
-        self.deposits.write(buf);
-        self.forced_withdrawals.write(buf);
+        UInt(self.deposits).write(buf);
+        UInt(self.forced_withdrawals).write(buf);
         self.signature.write(buf);
     }
 }
@@ -572,7 +577,8 @@ impl<P: PublicKey, O: PublicKey, A: Amount> EncodeSize for Close<P, O, A> {
         Epoch::SIZE
             + self.rows.encode_size()
             + self.withdrawals.encode_size()
-            + 2 * u64::SIZE
+            + UInt(self.deposits).encode_size()
+            + UInt(self.forced_withdrawals).encode_size()
             + O::Signature::SIZE
     }
 }
@@ -596,8 +602,8 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Read for Close<P, O, A> {
             epoch,
             rows,
             withdrawals,
-            deposits: u64::read(buf)?,
-            forced_withdrawals: u64::read(buf)?,
+            deposits: UInt::read(buf)?.into(),
+            forced_withdrawals: UInt::read(buf)?.into(),
             signature: O::Signature::read(buf)?,
         })
     }
@@ -662,8 +668,8 @@ mod tests {
         1u64.write(&mut encoded);
         rows.write(&mut encoded);
         withdrawals.write(&mut encoded);
-        2u64.write(&mut encoded);
-        3u64.write(&mut encoded);
+        UInt(2u64).write(&mut encoded);
+        UInt(3u64).write(&mut encoded);
         operator_key().sign(b"close", b"close").write(&mut encoded);
         encoded
     }
@@ -861,15 +867,14 @@ mod tests {
         assert_eq!(close.withdrawals(), &withdrawals);
 
         // The operator signs the epoch, the matrix root of the rows, the withdrawals, and both
-        // counts. The flows sum every account's part of the close.
+        // counts as varints. The flows sum every account's part of the close.
         let root = close.matrix::<Sha256>().root();
         let message = TestClose::message(1, &root, close.withdrawals(), 1, 0);
         let mut signed = Vec::new();
         1u64.write(&mut signed);
         root.write(&mut signed);
         close.withdrawals().write(&mut signed);
-        1u64.write(&mut signed);
-        0u64.write(&mut signed);
+        signed.extend([1, 0]);
         assert_eq!(message, signed);
         assert!(
             operator

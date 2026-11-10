@@ -3,7 +3,7 @@ hash = "29e0dd6ffa29d78b9696ddb44b358a3af89db75f00422922b0ca6136eb1d580e"
 n_cases = 65536
 
 ["commonware_clearing::bajillion::close::tests::conformance::CodecConformance<Close<PublicKey,PublicKey,u64>>"]
-hash = "f87d0aeb5989609fcf7b69e4e7426a1d3b758efc1938555602cbfe1b95b42ca4"
+hash = "07c35652f363b46b5d2039e934aac3416284646e0f77343dbb9a5fb150ae260f"
 n_cases = 65536
 
 ["commonware_clearing::bajillion::close::tests::conformance::CodecConformance<Deposit<PublicKey,u64>>"]
