@@ -31,9 +31,9 @@
 //!   |     |     +-- io_uring ring (SQ/CQ)
 //!   |     |     +-- Waiters (requests and unconsumed results)
 //!   |     |     `-- ready queue, deadlines, cancellations (IDs)
-//!   |     +-- Mailbox (messages and the unparker of the worker's word)
+//!   |     +-- Mailbox (messages, mail flag, unparker of the worker's word)
 //!   |     `-- Deferred (callbacks and retired owners)
-//!   +-- parker (the worker's word and mail flag)
+//!   +-- parker (the only handle that waits on the worker's word)
 //!   +-- inbox (batch taken from Mailbox)
 //!   +-- deferred (batch detached from Local)
 //!   `-- panics (first failure retained through cleanup)
@@ -1875,12 +1875,12 @@ impl Worker {
 
     /// Apply a bounded batch of messages, taking another mailbox batch when needed.
     ///
-    /// A take is due only while the mail flag beside the worker's word is set,
-    /// which needs no lock, so pool claims and permit grants, which move the
-    /// word without a message, cost no take. The turn observed the word before
-    /// this check, so a batch whose flag it cannot see yet moves the word after
-    /// that observation. A batch is taken only into an empty scratch, so one
-    /// that starts while an earlier batch is still being applied stays in the
+    /// A take is due only while the mailbox's mail flag is set, which needs no
+    /// lock, so pool claims and permit grants, which move the word without a
+    /// message, cost no take. The turn observed the word before this check, so
+    /// a batch whose flag it cannot see yet moves the word after that
+    /// observation. A batch is taken only into an empty scratch, so one that
+    /// starts while an earlier batch is still being applied stays in the
     /// mailbox with its flag set, and the drive loop reads the flag again
     /// before it parks.
     fn messages(&mut self, mailbox: &Arc<Mailbox>) {
