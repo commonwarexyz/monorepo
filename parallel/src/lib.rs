@@ -1654,6 +1654,27 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 .unwrap_or(rayon::Placement::Wide { near: 0 })
         }
 
+        /// Runs `op` under `placement` on the backing pool and returns its result. A thread
+        /// outside the pool blocks until then, so this first calls the calling thread's block
+        /// hook (see [`set_block_hook`]). Every synchronous parallel body of the strategy runs
+        /// through here, except a join on a worker of the pool, which joins in place and calls
+        /// the hook itself.
+        fn install_in<OP, R>(&self, placement: rayon::Placement, op: OP) -> R
+        where
+            OP: FnOnce() -> R + Send,
+            R: Send,
+        {
+            Self::call_block_hook();
+            self.groups.pool().install_in(placement, op)
+        }
+
+        /// Calls the calling thread's block hook, if it has one (see [`set_block_hook`]).
+        fn call_block_hook() {
+            if let Some(hook) = BLOCK_HOOK.try_with(core::cell::Cell::get).ok().flatten() {
+                hook();
+            }
+        }
+
         /// Runs [`Self::try_execute`] with an infallible `run`.
         #[track_caller]
         fn execute<R>(
@@ -1796,10 +1817,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 Body::Group,
                 |execution, placement| match execution {
                     policy::RunExecution::Serial => serial(items, compare),
-                    policy::RunExecution::Parallel => self
-                        .groups
-                        .pool()
-                        .install_in(placement, || parallel(items, compare)),
+                    policy::RunExecution::Parallel => {
+                        self.install_in(placement, || parallel(items, compare))
+                    }
                 },
             );
         }
@@ -2184,7 +2204,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 policy::RunExecution::Serial => {
                     Sequential.fold_init(items, init, identity, fold_op, reduce_op)
                 }
-                policy::RunExecution::Parallel => self.groups.pool().install_in(placement, || {
+                policy::RunExecution::Parallel => self.install_in(placement, || {
                     rayon::fold_init(items, &init, &identity, &fold_op, &reduce_op)
                 }),
             })
@@ -2200,7 +2220,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             let items: Vec<I::Item> = iter.into_iter().collect();
             self.execute(items.len(), items.len(), Body::Placed, |execution, placement| match execution {
                 policy::RunExecution::Serial => Sequential.map_collect_vec(items, map_op),
-                policy::RunExecution::Parallel => self.groups.pool().install_in(placement, || {
+                policy::RunExecution::Parallel => self.install_in(placement, || {
                     rayon::map_collect_vec(items, &map_op)
                 }),
             })
@@ -2217,7 +2237,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             let items: Vec<I::Item> = iter.into_iter().collect();
             self.try_execute(items.len(), items.len(), Body::Placed, |execution, placement| match execution {
                 policy::RunExecution::Serial => Sequential.try_map_collect_vec(items, map_op),
-                policy::RunExecution::Parallel => self.groups.pool().install_in(placement, || {
+                policy::RunExecution::Parallel => self.install_in(placement, || {
                     rayon::try_map_collect_vec(items, &map_op)
                 }),
             })
@@ -2235,7 +2255,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             let items: Vec<I::Item> = iter.into_iter().collect();
             self.execute(items.len(), items.len(), Body::Placed, |execution, placement| match execution {
                 policy::RunExecution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
-                policy::RunExecution::Parallel => self.groups.pool().install_in(placement, || {
+                policy::RunExecution::Parallel => self.install_in(placement, || {
                     rayon::map_init_collect_vec(items, &init, &map_op)
                 }),
             })
@@ -2259,7 +2279,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             let items: Vec<I::Item> = iter.into_iter().collect();
             self.execute(items.len(), items.len().saturating_mul(multiplier), Body::Placed, |execution, placement| match execution {
                 policy::RunExecution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
-                policy::RunExecution::Parallel => self.groups.pool().install_in(placement, || {
+                policy::RunExecution::Parallel => self.install_in(placement, || {
                     rayon::map_init_collect_vec(items, &init, &map_op)
                 }),
             })
@@ -2286,7 +2306,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 policy::RunExecution::Serial => {
                     Sequential.try_fold(items, identity, fold_op, reduce_op)
                 }
-                policy::RunExecution::Parallel => self.groups.pool().install_in(placement, || {
+                policy::RunExecution::Parallel => self.install_in(placement, || {
                     rayon::try_fold(items, &identity, &fold_op, &reduce_op)
                 }),
             })
@@ -2304,16 +2324,19 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             // Other threads share one size class per call site. The policy chooses between
             // serial execution on the caller, one group, and the whole pool.
             if self.current_placement().is_some() {
+                // Joining in place can still hold this thread until the other side returns, so it
+                // calls the thread's block hook as an install does.
+                Self::call_block_hook();
                 return rayon::join(a, b);
             }
 
             // A strategy without a policy always joins on its pool under its own placement.
             if self.policy.is_none() {
-                return self.groups.pool().install_in(self.resolve_placement(), || rayon::join(a, b));
+                return self.install_in(self.resolve_placement(), || rayon::join(a, b));
             }
             self.execute(1, 1, Body::Placed, |execution, placement| match execution {
                 policy::RunExecution::Serial => (a(), b()),
-                policy::RunExecution::Parallel => self.groups.pool().install_in(placement, || rayon::join(a, b)),
+                policy::RunExecution::Parallel => self.install_in(placement, || rayon::join(a, b)),
             })
         }
 
@@ -2348,6 +2371,24 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 },
             );
         }
+    }
+});
+#[cfg(any(feature = "std", test))]
+std::thread_local! {
+    /// The function [`Rayon`] calls on this thread before blocking it in its pool.
+    static BLOCK_HOOK: core::cell::Cell<Option<fn()>> = const { core::cell::Cell::new(None) };
+}
+commonware_macros::stability_scope!(ALPHA, cfg(any(feature = "std", test)) {
+    /// Sets the function that [`Rayon`] calls on the current thread before it blocks the thread
+    /// in its pool, or clears it with `None`, and returns the function it replaces. A runtime
+    /// worker installs one to hand off its queued work before a parallel call blocks it, and
+    /// restores the replaced one when it stops. The hook runs inside the call, so its time counts
+    /// toward the call's measured run, and a hook must not itself make a parallel call.
+    pub fn set_block_hook(hook: Option<fn()>) -> Option<fn()> {
+        BLOCK_HOOK
+            .try_with(|current| current.replace(hook))
+            .ok()
+            .flatten()
     }
 });
 commonware_macros::stability_scope!(ALPHA, cfg(any(feature = "test-utils", test)) {
@@ -5828,5 +5869,133 @@ mod test {
             .try_map_collect_vec(0..128, |i| if i == 17 || i == 42 { Err(i) } else { Ok(i) });
 
         assert!(matches!(result, Err(17 | 42)));
+    }
+
+    std::thread_local! {
+        /// Calls of [`count_block_hook`] on this thread.
+        static BLOCK_HOOK_CALLS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    }
+
+    /// Whether [`count_block_hook`] ran since a test last cleared it, read on the pool's threads.
+    static BLOCK_HOOK_RAN: AtomicBool = AtomicBool::new(false);
+
+    /// A block hook that counts its calls on the calling thread.
+    fn count_block_hook() {
+        BLOCK_HOOK_CALLS.with(|calls| calls.set(calls.get() + 1));
+        BLOCK_HOOK_RAN.store(true, Ordering::Release);
+    }
+
+    /// Every synchronous parallel body calls the calling thread's block hook exactly once
+    /// before the pool runs it, with or without a policy. A serial run and a cleared hook call
+    /// nothing, and setting a hook returns the one it replaces.
+    #[test]
+    fn parallel_bodies_call_the_block_hook() {
+        /// A named strategy call.
+        type Body = (&'static str, fn(&Rayon));
+        fn items() -> Vec<u64> {
+            (0..64).collect()
+        }
+        let calls = || BLOCK_HOOK_CALLS.with(core::cell::Cell::get);
+        let parallel = parallel_strategy().without_policy();
+        let bodies: [Body; 9] = [
+            ("fold_init", |s| {
+                let sum = s.fold_init(items(), || (), || 0, |sum, _, x| sum + x, |a, b| a + b);
+                assert_eq!(sum, 2016);
+            }),
+            ("map_collect_vec", |s| {
+                // The hook runs before the pool runs any of the body.
+                let out = s.map_collect_vec(items(), |x| {
+                    assert!(BLOCK_HOOK_RAN.load(Ordering::Acquire));
+                    x
+                });
+                assert_eq!(out, items());
+            }),
+            ("try_map_collect_vec", |s| {
+                let out: Result<Vec<u64>, ()> = s.try_map_collect_vec(items(), Ok);
+                assert_eq!(out, Ok(items()));
+            }),
+            ("map_init_collect_vec", |s| {
+                assert_eq!(s.map_init_collect_vec(items(), || (), |_, x| x), items());
+            }),
+            ("map_init_collect_vec_with_multiplier", |s| {
+                let out = s.map_init_collect_vec_with_multiplier(items(), 2, || (), |_, x| x);
+                assert_eq!(out, items());
+            }),
+            ("try_fold", |s| {
+                let sum: Result<u64, ()> =
+                    s.try_fold(items(), || 0, |sum, x| Ok(sum + x), |a, b| a + b);
+                assert_eq!(sum, Ok(2016));
+            }),
+            ("join", |s| assert_eq!(s.join(|| 1, || 2), (1, 2))),
+            ("sort_by", |s| {
+                let mut values: Vec<u64> = items().into_iter().rev().collect();
+                s.sort_by(&mut values, |a, b| a.cmp(b));
+                assert_eq!(values, items());
+            }),
+            ("sort_unstable_by", |s| {
+                let mut values: Vec<u64> = items().into_iter().rev().collect();
+                s.sort_unstable_by(&mut values, |a, b| a.cmp(b));
+                assert_eq!(values, items());
+            }),
+        ];
+
+        assert!(crate::set_block_hook(Some(count_block_hook)).is_none());
+        for (name, body) in bodies {
+            BLOCK_HOOK_RAN.store(false, Ordering::Release);
+            let before = calls();
+            body(&parallel);
+            assert_eq!(calls(), before + 1, "{name} must call the hook once");
+        }
+
+        // An adaptive join that runs on the pool calls the hook too. The first join at a call
+        // site is a measured parallel run.
+        let adaptive = parallel_strategy();
+        let before = calls();
+        let (pooled, ()) = adaptive.join(|| rayon::current_thread_index().is_some(), || ());
+        assert!(pooled, "the first join at a call site must run on the pool");
+        assert_eq!(
+            calls(),
+            before + 1,
+            "an adaptive join must call the hook once"
+        );
+
+        // A serial run blocks nothing, so it calls no hook.
+        let serial = parallel.clone().with_parallelism(NZUsize!(1));
+        let before = calls();
+        assert_eq!(serial.map_collect_vec(items(), |x| x), items());
+        assert_eq!(calls(), before);
+
+        // A cleared hook is not called.
+        assert!(crate::set_block_hook(None).is_some());
+        let before = calls();
+        assert_eq!(parallel.map_collect_vec(items(), |x| x), items());
+        assert_eq!(calls(), before);
+    }
+
+    /// A join from a worker of the strategy's own pool joins in place, and still calls the
+    /// thread's block hook, since the join can hold the thread until its other side returns. A
+    /// thread that a pool took over as its worker, as a runtime thread can be, runs it.
+    #[test]
+    fn same_pool_join_calls_the_block_hook() {
+        std::thread::spawn(|| {
+            /// A block hook that only counts its calls.
+            fn count() {
+                BLOCK_HOOK_CALLS.with(|calls| calls.set(calls.get() + 1));
+            }
+            let pool = Arc::new(
+                ThreadPoolBuilder::new(NZUsize!(1))
+                    .use_current_thread()
+                    .build()
+                    .unwrap(),
+            );
+            let strategy = Rayon::with_pool(pool);
+            assert!(strategy.current_placement().is_some());
+            assert!(crate::set_block_hook(Some(count)).is_none());
+            assert_eq!(strategy.join(|| 1, || 2), (1, 2));
+            assert!(crate::set_block_hook(None).is_some());
+            assert_eq!(BLOCK_HOOK_CALLS.with(core::cell::Cell::get), 1);
+        })
+        .join()
+        .unwrap();
     }
 }

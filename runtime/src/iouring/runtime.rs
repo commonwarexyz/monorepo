@@ -65,10 +65,15 @@
 //! its run queue overflows or to a worker that steals it, as the
 //! [pool](super::pool) describes.
 //!
-//! A push that leaves a stealable backlog offers it to a parked worker unless
-//! an existing search count covers finding or handing on that work. A count
-//! can belong to a searching worker or to a wake that has reserved it but has
-//! not yet claimed a worker.
+//! A push that leaves two or more queued runnables offers them to a parked
+//! worker unless an existing search count covers finding or handing on that
+//! work. A lone runnable is stealable but wakes no one, and a worker looking
+//! for work takes it only once it has waited [`Config::with_steal_age`] since
+//! such a worker first saw it there, or at once if a spawn queued it. Its
+//! owner usually polls a lone woken runnable next, so this keeps tasks that
+//! work together on one worker from splitting while still moving one stuck
+//! behind a long poll. A count can belong to a searching worker or to a wake
+//! that has reserved it but has not yet claimed a worker.
 //!
 //! ```text
 //! ordinary spawn:
@@ -104,11 +109,18 @@
 //!
 //! A pool worker takes a share of the global queue every
 //! [`Config::with_global_queue_interval`] takes and whenever its own run queue
-//! is empty. Taking a share returns one runnable to poll next and queues the
-//! rest in the run queue, no more than it has room for and no more than would
-//! fill it to half. A pool worker that finds both queues empty after a service
-//! pass tries to steal before parking, or relies on workers already holding
-//! search counts when the search cap refuses it.
+//! is empty. It also takes one ahead of its run queue when a push that woke no
+//! worker left an unserved hint that has aged, at most once per pop from its
+//! run queue, as the [pool](super::pool) describes. Taking a share returns one
+//! runnable to poll next and queues the rest in the run queue, no more than it
+//! has room for and no more than would fill it to half. A pool worker that
+//! finds both queues empty after a service pass tries to steal before parking,
+//! or relies on workers already holding search counts when the search cap
+//! refuses it.
+//!
+//! Before a synchronous [`commonware_parallel`] Rayon call blocks a pool
+//! worker's thread, the block hook the worker installs moves its queued
+//! runnables to the global queue, which wakes a parked worker for them.
 //!
 //! Before parking, the worker checks readiness again because polls and
 //! callbacks can produce more work. Pool workers coordinate through
@@ -170,7 +182,7 @@ use super::{
     idle::Searcher,
     mailbox::{Cancel, Forward, Mailbox, Message},
     park::Parker,
-    pool::{MAX_WORKERS, Pool, Threads},
+    pool::{MAX_STEAL_AGE, MAX_WORKERS, MIN_STEAL_AGE, Pool, Threads},
     request::{RequestOutput, RetiredResources},
     sleep::{Sleep, Timers},
     spinner::{Config as SpinnerConfig, Spinner},
@@ -215,7 +227,7 @@ use std::{
     convert::Infallible,
     env,
     future::{Future, poll_fn},
-    mem,
+    iter, mem,
     net::{IpAddr, SocketAddr, ToSocketAddrs},
     num::{NonZeroU64, NonZeroUsize},
     ops::RangeInclusive,
@@ -232,6 +244,8 @@ use std::{
 
 /// Maximum task polls or mailbox messages processed before yielding to other work.
 const BATCH_SIZE: usize = 64;
+/// Default for [`Config::with_steal_age`].
+const DEFAULT_STEAL_AGE: Duration = Duration::from_micros(100);
 
 /// Pinned future polled as a dedicated worker's root, or the runner's service
 /// task before it becomes a [`Task`](super::task::Task).
@@ -284,6 +298,9 @@ pub struct Config {
     /// Every Nth poll of a busy pool worker looks at the global queue first,
     /// defaulting to 31.
     global_queue_interval: u32,
+    /// How long a pool worker's lone queued task waits before another worker
+    /// may steal it, defaulting to 100 microseconds.
+    steal_age: Duration,
     /// Per-worker io_uring ring capacity and operation wheel tick.
     ring_config: RingConfig,
     /// Idle spinning policy, shared by all workers.
@@ -321,6 +338,7 @@ impl Config {
         Self {
             worker_threads: 2,
             global_queue_interval: 31,
+            steal_age: DEFAULT_STEAL_AGE,
             ring_config,
             idle_spinner: SpinnerConfig::default(),
             thread_stack_size: utils::thread::system_thread_stack_size(),
@@ -354,6 +372,25 @@ impl Config {
     /// while the global queue is empty.
     pub const fn with_global_queue_interval(mut self, interval: u32) -> Self {
         self.global_queue_interval = interval;
+        self
+    }
+
+    /// Set how long a task queued alone on a pool worker must wait before
+    /// another worker may steal it. Defaults to 100 microseconds.
+    ///
+    /// Must be zero or between 10 microseconds and one second. A worker with
+    /// nothing to run steals half of another worker's queued tasks, rounded
+    /// up, at once when two or more are queued. A task queued alone is usually
+    /// polled next by its own worker, and taking it would split tasks that work
+    /// together on that worker, so it is stolen only once it has stayed queued
+    /// this long since a worker looking for work first saw it, as behind a
+    /// long poll. That worker looks again when the task is old enough, unless
+    /// other work keeps it busy first, so the age is when a lone task may move,
+    /// not a bound on how long it waits. A newly spawned task queued alone on
+    /// its spawner's worker can be stolen at once whatever this age. Zero
+    /// steals every lone task at once.
+    pub const fn with_steal_age(mut self, age: Duration) -> Self {
+        self.steal_age = age;
         self
     }
 
@@ -470,6 +507,12 @@ impl Config {
         self.global_queue_interval
     }
 
+    /// Return how long a task queued alone on a pool worker must wait before
+    /// another worker may steal it.
+    pub const fn steal_age(&self) -> Duration {
+        self.steal_age
+    }
+
     /// Return per-worker io_uring ring configuration.
     pub const fn ring_config(&self) -> &RingConfig {
         &self.ring_config
@@ -535,6 +578,10 @@ impl Config {
         assert!(
             self.global_queue_interval != 0,
             "global queue interval must be nonzero"
+        );
+        assert!(
+            self.steal_age.is_zero() || (MIN_STEAL_AGE..=MAX_STEAL_AGE).contains(&self.steal_age),
+            "steal age must be zero or between 10 microseconds and one second"
         );
         assert!(self.ring_config.size != 0, "ring size must be nonzero");
         self.ring_config.size = self
@@ -1238,14 +1285,45 @@ impl Local {
             .ready
     }
 
-    /// Queue a runnable on this pool worker, offering stealable backlog or
-    /// exporting overflow through [`Pool::enqueue`]. The runnable must belong
-    /// to this pool. Panics on a dedicated worker.
+    /// Queue a runnable on this pool worker, offering a backlog to a parked
+    /// worker or exporting overflow through [`Pool::enqueue`]. The runnable
+    /// must belong to this pool. Panics on a dedicated worker.
     #[inline]
     pub fn enqueue(&mut self, runnable: Runnable) {
         let Self { seat, shared, .. } = self;
         let seat = seat.as_mut().expect("the worker must be a pool worker");
         shared.pool.enqueue(&mut seat.ready, runnable);
+    }
+
+    /// Queue a new task's first runnable on this pool worker, where another
+    /// worker may steal it at once, as [`Pool::enqueue_spawned`] does. The
+    /// runnable must belong to this pool. Panics on a dedicated worker.
+    #[inline]
+    pub fn enqueue_spawned(&mut self, runnable: Runnable) {
+        let Self { seat, shared, .. } = self;
+        let seat = seat.as_mut().expect("the worker must be a pool worker");
+        shared.pool.enqueue_spawned(&mut seat.ready, runnable);
+    }
+
+    /// Move this pool worker's queued runnables to the global queue in one
+    /// batch, waking a parked worker, before the thread blocks. Does nothing
+    /// on a dedicated or closing worker, with an empty run queue, or in a pool
+    /// of one worker. A closed global queue leaves the runnables queued here.
+    fn spill(&mut self) {
+        let Self {
+            seat,
+            shared,
+            closing,
+            ..
+        } = self;
+        let Some(seat) = seat.as_mut() else {
+            return;
+        };
+        if *closing || seat.ready.is_empty() || shared.pool.workers() == 1 {
+            return;
+        }
+        let ready = &mut seat.ready;
+        let _ = shared.pool.push_batch(iter::from_fn(|| ready.pop()));
     }
 
     /// Release an operation or timer on its worker, directly or through its mailbox.
@@ -1320,8 +1398,30 @@ thread_local! {
     static CURRENT: RefCell<Option<Rc<RefCell<Local>>>> = const { RefCell::new(None) };
 }
 
+/// The block hook a pool worker installs in [`commonware_parallel`]: before a
+/// Rayon call blocks this thread, move the worker's queued runnables to the
+/// global queue so other workers run them meanwhile. Does nothing without an
+/// installed worker or while the worker is borrowed.
+fn spill_before_block() {
+    let _ = CURRENT.try_with(|current| {
+        let Ok(current) = current.try_borrow() else {
+            return;
+        };
+        let Some(local) = current.as_ref() else {
+            return;
+        };
+        if let Ok(mut local) = local.try_borrow_mut() {
+            local.spill();
+        }
+    });
+}
+
 /// Thread-local worker access, cleared after mandatory cleanup on every exit.
-struct Scope;
+struct Scope {
+    /// The block hook a pool worker's scope replaced, restored when it ends.
+    /// `None` on other workers, which install no hook.
+    replaced_hook: Option<Option<fn()>>,
+}
 
 impl Scope {
     /// Reject nesting before any directory hold, thread, or io_uring ring is
@@ -1336,18 +1436,26 @@ impl Scope {
     }
 
     /// Install one worker, retaining the entry check as a defensive invariant.
+    /// A pool worker also installs the block hook that moves its queued
+    /// runnables to the global queue before a Rayon call blocks its thread.
     fn install(local: Rc<RefCell<Local>>) -> Self {
+        let pool_worker = local.borrow().role().is_pool();
         CURRENT.with(|current| {
             let mut current = current.borrow_mut();
             assert!(current.is_none(), "nested io_uring worker scope");
             *current = Some(local);
         });
-        Self
+        let replaced_hook =
+            pool_worker.then(|| commonware_parallel::set_block_hook(Some(spill_before_block)));
+        Self { replaced_hook }
     }
 }
 
 impl Drop for Scope {
     fn drop(&mut self) {
+        if let Some(hook) = self.replaced_hook {
+            commonware_parallel::set_block_hook(hook);
+        }
         CURRENT.with(|current| {
             // Worker still owns Local, so clearing TLS cannot destroy it under this borrow.
             current.borrow_mut().take();
@@ -1524,6 +1632,14 @@ pub struct Worker {
     /// Configured interval between forced global checks. An empty run queue
     /// can trigger an earlier check.
     global_queue_interval: u32,
+    /// The pool's unserved hint this worker last saw.
+    unserved_seen: u64,
+    /// When the hint in `unserved_seen` reaches the global age.
+    unserved_due: Instant,
+    /// Whether this worker took from the global queue for a hint ahead of a
+    /// nonempty run queue and has not popped that run queue since. It acts on
+    /// no hint meanwhile, so hints cannot starve the run queue.
+    unserved_debt: bool,
     /// False until kernel retirement and callback cleanup have finished.
     finished: bool,
 }
@@ -1550,6 +1666,9 @@ impl Worker {
             seen_seq: 0,
             until_global: global_queue_interval,
             global_queue_interval,
+            unserved_seen: 0,
+            unserved_due: Instant::now(),
+            unserved_debt: false,
             finished: false,
         };
         worker.scope = Some(Scope::install(local));
@@ -1948,7 +2067,9 @@ impl Worker {
     }
 
     /// Take the next runnable to poll: a share of the pool's global queue every
-    /// [`Config::with_global_queue_interval`] calls, otherwise the oldest
+    /// [`Config::with_global_queue_interval`] calls or for a due unserved
+    /// hint (see [`super::pool`]) unless a take for an earlier hint has not
+    /// yet been followed by a pop from the run queue, otherwise the oldest
     /// runnable in this worker's run queue, otherwise a share of the global
     /// queue. An empty global take falls back to the run queue. `pool` must be
     /// this worker's pool, and the caller must hold no Local borrow.
@@ -1964,7 +2085,15 @@ impl Worker {
         if self.until_global == 0 {
             self.until_global = self.global_queue_interval;
         } else {
+            let hint = pool.unserved();
+            if hint != 0
+                && !self.unserved_debt
+                && let Some(runnable) = self.take_unserved(pool, hint)
+            {
+                return Some(runnable);
+            }
             if let Some(runnable) = self.local.borrow_mut().ready_mut().pop() {
+                self.unserved_debt = false;
                 return Some(runnable);
             }
             if !pool.has_global() {
@@ -1972,6 +2101,32 @@ impl Worker {
             }
         }
         Self::take_global(&self.local, pool)
+    }
+
+    /// Act on the pool's nonzero unserved hint `hint` once it is due, taking
+    /// from the global queue ahead of the run queue. A hint seen for the first
+    /// time is checked against the clock, since it may have been left during
+    /// this worker's last poll. One seen before is checked against the
+    /// current turn's time sample. A take ahead of a nonempty run queue owes
+    /// that run queue its next pop. `pool` must be this worker's pool, and
+    /// the caller must hold no Local borrow.
+    #[inline]
+    fn take_unserved(&mut self, pool: &Pool, hint: u64) -> Option<Runnable> {
+        if hint != self.unserved_seen {
+            self.unserved_seen = hint;
+            self.unserved_due = pool.unserved_due(hint);
+            if Instant::now() < self.unserved_due {
+                return None;
+            }
+        } else if self.local.borrow().now < self.unserved_due {
+            return None;
+        }
+        let mut local = self.local.borrow_mut();
+        let ready = local.ready_mut();
+        let preempts = !ready.is_empty();
+        let runnable = pool.take_unserved(hint, ready)?;
+        self.unserved_debt = preempts;
+        Some(runnable)
     }
 
     /// Return the oldest global runnable and append the rest of its capped
@@ -2228,6 +2383,16 @@ impl Worker {
                 continue;
             }
 
+            // A young lone runnable that a look refused may be stolen once it
+            // ripens, so wait no longer than that before looking again.
+            let relook = searcher.as_ref().and_then(Searcher::relook);
+            let deadline = deadline.into_iter().chain(relook).min();
+
+            #[cfg(test)]
+            if let (Some(pool), Some(index)) = (pool, index) {
+                pool.set_relooking(index, relook.is_some());
+            }
+
             #[cfg(test)]
             tests::before_park();
 
@@ -2409,7 +2574,7 @@ impl crate::Runner for Runner {
         // Every pool worker's mailbox exists before any worker starts, so a
         // push can wake any of them from the first spawn on. Each worker
         // starts with the parker the pool created for it.
-        let (pool, parkers) = Pool::new(self.cfg.worker_threads);
+        let (pool, parkers) = Pool::new(self.cfg.worker_threads, self.cfg.steal_age);
         let workers = pool.workers();
         let mut parkers = parkers.into_iter();
         let parker = parkers.next().expect("the pool must have worker zero");
