@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 /// Metrics for an operation-log database.
 ///
-/// All QMDB variants register the same set. Sub-components (the operation log, index, and
+/// Every database that reports metrics registers the same set. Sub-components (the operation log, index, and
 /// grafted layers) register their own metrics under their own contexts.
 pub(crate) struct Metrics<E: Clock> {
     /// Logical operation end.
