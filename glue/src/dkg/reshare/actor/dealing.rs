@@ -31,7 +31,7 @@ use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Spawner, Storage, telemetry::traces::TracedExt as _};
 use commonware_utils::{Acknowledgement, channel::fallible::OneshotExt};
 use rand_core::CryptoRng;
-use std::ops::ControlFlow;
+use std::{collections::BTreeMap, ops::ControlFlow};
 use tracing::{Instrument as _, debug, info, info_span, warn};
 
 impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
@@ -78,6 +78,7 @@ where
         self.metrics.set_phase(Phase::Dealing);
 
         let mut requests = ArtifactRequests::default();
+        let mut solicited = Solicited::default();
         select_loop! {
             self.context,
             on_stopped => {
@@ -142,6 +143,7 @@ where
                                 dealer,
                                 player.as_deref_mut(),
                                 &mut sender,
+                                &mut solicited,
                             )
                             .await;
                         }
@@ -172,6 +174,7 @@ where
                     dealer.as_deref_mut(),
                     player.as_deref_mut(),
                     &mut sender,
+                    &mut solicited,
                     message,
                 )
                 .await
@@ -181,6 +184,7 @@ where
         ControlFlow::Break(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_message<SE>(
         &mut self,
         epoch: Epoch,
@@ -188,6 +192,7 @@ where
         dealer: Option<&mut Dealer<V, C>>,
         player: Option<&mut Player<V, C>>,
         sender: &mut SE,
+        solicited: &mut Solicited<C::PublicKey>,
         (from, bytes): NetworkMessage<C::PublicKey>,
     ) where
         SE: Sender<PublicKey = C::PublicKey>,
@@ -280,10 +285,28 @@ where
                     }
                     Err(DkgAckError::InvalidAck) => {
                         // This dealer sends one public message per epoch (its seed is
-                        // persisted) and the channel authenticates the sender, so an
-                        // acknowledgement that does not match it cannot come from an
-                        // honest player.
-                        commonware_p2p::block!(self.blocker, from, ?epoch, "invalid ack signature");
+                        // persisted) and the channel authenticates the sender, so the
+                        // player signed a transcript this dealer never sent, or signed
+                        // with a key other than its identity. A player whose signer is
+                        // remote (an HSM or KMS) does the latter during a signer outage:
+                        // `Signer::sign` cannot fail, so it returns a signature that
+                        // does not verify. Such an acknowledgement is worth exactly as
+                        // much as no acknowledgement (the dealer reveals the player's
+                        // share either way), so it is dropped rather than attributed.
+                        //
+                        // An honest player sends one acknowledgement per dealing it
+                        // receives. Invalid acknowledgements beyond the dealings this
+                        // dealer sent to the player are a flood and are blocked.
+                        if solicited.consume(&from) {
+                            warn!(?epoch, player = ?from, "dropping ack with invalid signature");
+                        } else {
+                            commonware_p2p::block!(
+                                self.blocker,
+                                from,
+                                ?epoch,
+                                "unsolicited invalid ack signature"
+                            );
+                        }
                     }
                 }
             }
@@ -297,6 +320,7 @@ where
         dealer: &mut Dealer<V, C>,
         mut player: Option<&mut Player<V, C>>,
         sender: &mut SE,
+        solicited: &mut Solicited<C::PublicKey>,
     ) where
         SE: Sender<PublicKey = C::PublicKey>,
     {
@@ -309,10 +333,13 @@ where
                     .handle(store, epoch, public_key.clone(), public, private)
                     .await
                     .expect("locally generated dealing must validate");
-                dealer
-                    .handle(store, epoch, public_key.clone(), ack)
-                    .await
-                    .expect("locally generated acknowledgement must validate");
+                // The acknowledgement is signed by this node's signer, which
+                // may be remote and unavailable (see `handle_message`). The
+                // share then stays unacknowledged and is revealed, as for
+                // any absent player.
+                if let Err(error) = dealer.handle(store, epoch, public_key.clone(), ack).await {
+                    warn!(?epoch, ?error, "local acknowledgement does not validate");
+                }
                 continue;
             }
 
@@ -325,7 +352,43 @@ where
                 debug!(?epoch, ?recipient, "failed to send share");
             } else {
                 debug!(?epoch, ?recipient, "sent share");
+                solicited.grant(recipient);
             }
+        }
+    }
+}
+
+/// Acknowledgements this dealer can still expect from each player in the
+/// current dealing window: one per dealing sent and not yet answered by an
+/// invalid acknowledgement.
+///
+/// Bounds the invalid acknowledgements a player can make this dealer verify
+/// to the number of dealings this dealer sent it, the same work an honest
+/// player causes.
+#[derive(Debug)]
+pub(super) struct Solicited<P>(BTreeMap<P, u64>);
+
+impl<P> Default for Solicited<P> {
+    fn default() -> Self {
+        Self(BTreeMap::new())
+    }
+}
+
+impl<P: Ord> Solicited<P> {
+    /// Records a dealing sent to `player`.
+    fn grant(&mut self, player: P) {
+        *self.0.entry(player).or_default() += 1;
+    }
+
+    /// Consumes one expected acknowledgement from `player`, returning `false`
+    /// if none is left.
+    fn consume(&mut self, player: &P) -> bool {
+        match self.0.get_mut(player) {
+            Some(count) if *count > 0 => {
+                *count -= 1;
+                true
+            }
+            _ => false,
         }
     }
 }
@@ -371,6 +434,49 @@ mod tests {
 
     const TEST_NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_RESHARE_DEALING_TEST";
     const FAULT_TEST_NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_RESHARE_AUTHENTICATED_FAULT_TEST";
+    const OUTAGE_TEST_NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_RESHARE_SIGNER_OUTAGE_TEST";
+
+    /// A signer whose key lives in an unreachable remote signer: it reports
+    /// its identity but, since [`Signer::sign`] cannot fail, signs with a
+    /// fallback key whose signatures do not verify under that identity.
+    #[derive(Clone)]
+    struct UnavailableSigner {
+        identity: ed25519::PublicKey,
+        fallback: ed25519::PrivateKey,
+    }
+
+    impl commonware_math::algebra::Random for UnavailableSigner {
+        fn random(mut rng: impl rand_core::CryptoRng) -> Self {
+            Self {
+                identity: <ed25519::PrivateKey as commonware_math::algebra::Random>::random(&mut rng)
+                    .public_key(),
+                fallback: <ed25519::PrivateKey as commonware_math::algebra::Random>::random(&mut rng),
+            }
+        }
+    }
+
+    impl Signer for UnavailableSigner {
+        type Signature = ed25519::Signature;
+        type PublicKey = ed25519::PublicKey;
+
+        fn public_key(&self) -> Self::PublicKey {
+            self.identity.clone()
+        }
+
+        fn sign(&self, namespace: &[u8], msg: &[u8]) -> Self::Signature {
+            self.fallback.sign(namespace, msg)
+        }
+    }
+
+    fn ack_message(
+        ack: commonware_cryptography::bls12381::dkg::feldman_desmedt::PlayerAck<
+            mocks::TestPublicKey,
+        >,
+    ) -> IoBuf {
+        Message::<mocks::TestBlsVariant, mocks::TestPublicKey>::Ack(ack)
+            .encode()
+            .into()
+    }
 
     #[derive(Debug)]
     struct QueuedReceiver {
@@ -558,6 +664,7 @@ mod tests {
                     None,
                     Some(&mut player),
                     &mut sender,
+                    &mut Solicited::default(),
                     (
                         dealer.public_key(),
                         Message::<mocks::TestBlsVariant, mocks::TestPublicKey>::Dealer(
@@ -599,8 +706,9 @@ mod tests {
                 .expect("valid fixture dealing")
                 .expect("new fixture dealing");
 
-            // The local dealer has one recoverable transcript, so a configured
-            // authenticated player acknowledging another transcript is blocked.
+            // The local dealer has one recoverable transcript and sent this
+            // player no dealing, so an unsolicited acknowledgement of another
+            // transcript is blocked.
             actor
                 .handle_message(
                     Epoch::zero(),
@@ -608,6 +716,7 @@ mod tests {
                     Some(&mut local_dealer),
                     None,
                     &mut sender,
+                    &mut Solicited::default(),
                     (
                         ack_player.public_key(),
                         Message::<mocks::TestBlsVariant, mocks::TestPublicKey>::Ack(ack.clone())
@@ -626,6 +735,7 @@ mod tests {
                     Some(&mut local_dealer),
                     None,
                     &mut sender,
+                    &mut Solicited::default(),
                     (
                         outsider.public_key(),
                         Message::<mocks::TestBlsVariant, mocks::TestPublicKey>::Ack(ack)
@@ -643,6 +753,220 @@ mod tests {
                     (target.public_key(), outsider.public_key()),
                 ]
             );
+        });
+    }
+
+    #[test]
+    fn invalid_acks_count_as_absence_up_to_the_dealings_sent() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let signers: Vec<_> = (0..4).map(ed25519::PrivateKey::from_seed).collect();
+            let participants = Set::from_iter_dedup(signers.iter().map(Signer::public_key));
+            let players =
+                Set::from_iter_dedup([0usize, 1, 2].map(|index| signers[index].public_key()));
+            let target = signers[0].clone();
+            let outage = signers[2].public_key();
+            let (network, oracle) = Network::new_with_peers(
+                context.child("network"),
+                NetworkConfig {
+                    max_size: 1024,
+                    max_peers_per_set: NZUsize!(participants.len()),
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+                participants.iter().cloned(),
+            )
+            .await;
+            let _network = network.start();
+            let (mut actor, _mailbox) = utils::new_actor(
+                context.child("actor_fixture"),
+                target.clone(),
+                participants.clone(),
+                &oracle,
+                OUTAGE_TEST_NAMESPACE,
+                "signer-outage",
+                NZU64!(8),
+            )
+            .await;
+            let mut store = mocks::store(
+                context.child("store"),
+                "signer-outage-store",
+                MemorySecretStore::default(),
+            )
+            .await;
+            let info = Info::new::<N3f1>(
+                OUTAGE_TEST_NAMESPACE,
+                0,
+                None,
+                Mode::NonZeroCounter,
+                Reveal::V1,
+                participants.clone(),
+                players,
+            )
+            .expect("valid info");
+            let seed = store.seed_or_random(Epoch::zero(), TestRng::new(0)).await;
+            let mut local_dealer = store
+                .create_dealer::<ed25519::PrivateKey, N3f1>(
+                    Epoch::zero(),
+                    target.clone(),
+                    info.clone(),
+                    None,
+                    seed,
+                )
+                .expect("target is a dealer");
+            let (_, public, private) = local_dealer
+                .shares_to_distribute()
+                .find(|(player, _, _)| *player == outage)
+                .expect("dealing for the outage player");
+
+            // The player's signer is unreachable, so its acknowledgement of the
+            // genuine dealing carries a signature that does not verify.
+            let mut outage_player = CryptoPlayer::new(
+                info,
+                UnavailableSigner {
+                    identity: outage.clone(),
+                    fallback: ed25519::PrivateKey::from_seed(100),
+                },
+            )
+            .expect("outage signer is a player");
+            let ack = outage_player
+                .dealer_message::<N3f1>(target.public_key(), public, private)
+                .expect("genuine dealing validates")
+                .expect("new dealing");
+
+            // Two dealing rounds reach the player, which answers each with the
+            // same cached acknowledgement.
+            let (mut sender, _) = inert_channel(participants.iter().cloned().collect::<Vec<_>>());
+            let mut solicited = Solicited::default();
+            for _ in 0..2 {
+                mocks::TestReshareActor::send_dealings(
+                    &target.public_key(),
+                    &mut store,
+                    Epoch::zero(),
+                    &mut local_dealer,
+                    None,
+                    &mut sender,
+                    &mut solicited,
+                )
+                .await;
+            }
+            for _ in 0..2 {
+                actor
+                    .handle_message(
+                        Epoch::zero(),
+                        &mut store,
+                        Some(&mut local_dealer),
+                        None,
+                        &mut sender,
+                        &mut solicited,
+                        (outage.clone(), ack_message(ack.clone())),
+                    )
+                    .await;
+            }
+
+            // Both are dropped: the player counts as absent for this dealing
+            // and stays connected.
+            assert!(
+                oracle
+                    .blocked()
+                    .await
+                    .expect("network remains available")
+                    .is_empty()
+            );
+            assert!(
+                local_dealer
+                    .shares_to_distribute()
+                    .any(|(player, _, _)| player == outage),
+                "an invalid acknowledgement must not be recorded"
+            );
+
+            // A third invalid acknowledgement answers no dealing and is blocked.
+            actor
+                .handle_message(
+                    Epoch::zero(),
+                    &mut store,
+                    Some(&mut local_dealer),
+                    None,
+                    &mut sender,
+                    &mut solicited,
+                    (outage.clone(), ack_message(ack)),
+                )
+                .await;
+            assert_eq!(
+                oracle.blocked().await.expect("network remains available"),
+                vec![(target.public_key(), outage)]
+            );
+        });
+    }
+
+    #[test]
+    fn invalid_local_ack_leaves_own_dealing_unacknowledged() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let signers: Vec<_> = (0..4).map(ed25519::PrivateKey::from_seed).collect();
+            let participants = Set::from_iter_dedup(signers.iter().map(Signer::public_key));
+            let target = signers[0].clone();
+            let mut store = mocks::store(
+                context.child("store"),
+                "local-ack-store",
+                MemorySecretStore::default(),
+            )
+            .await;
+            let info = |namespace| {
+                Info::new::<N3f1>(
+                    namespace,
+                    0,
+                    None,
+                    Mode::NonZeroCounter,
+                    Reveal::V1,
+                    participants.clone(),
+                    participants.clone(),
+                )
+                .expect("valid info")
+            };
+            let seed = store.seed_or_random(Epoch::zero(), TestRng::new(0)).await;
+            let mut local_dealer = store
+                .create_dealer::<ed25519::PrivateKey, N3f1>(
+                    Epoch::zero(),
+                    target.clone(),
+                    info(OUTAGE_TEST_NAMESPACE),
+                    None,
+                    seed,
+                )
+                .expect("target is a dealer");
+            // The local player signs a transcript the local dealer does not
+            // recognize, standing in for a local signer that cannot sign: the
+            // dealer rejects the local acknowledgement either way.
+            let mut local_player = store
+                .create_player::<ed25519::PrivateKey, N3f1>(
+                    Epoch::zero(),
+                    target.clone(),
+                    info(FAULT_TEST_NAMESPACE),
+                )
+                .expect("target is a player");
+
+            let (mut sender, _) = inert_channel(participants.iter().cloned().collect::<Vec<_>>());
+            let mut solicited = Solicited::default();
+            mocks::TestReshareActor::send_dealings(
+                &target.public_key(),
+                &mut store,
+                Epoch::zero(),
+                &mut local_dealer,
+                Some(&mut local_player),
+                &mut sender,
+                &mut solicited,
+            )
+            .await;
+
+            // The own share stays unacknowledged (it is revealed in the log),
+            // as for any absent player, and is not counted as solicited.
+            assert!(
+                local_dealer
+                    .shares_to_distribute()
+                    .any(|(player, _, _)| player == target.public_key())
+            );
+            assert!(!solicited.consume(&target.public_key()));
+            assert!(solicited.consume(&signers[1].public_key()));
         });
     }
 }
