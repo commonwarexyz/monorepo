@@ -221,26 +221,24 @@ impl Scalar {
         sum
     }
 
-    /// Returns `[a, b]` with `a + b t` the canonical integer and `a, b < t`, for `t = x^2`,
-    /// without branching on the value.
+    /// Returns `[a, b]` as little-endian words, with `a + b t` the canonical integer and
+    /// `a, b < t`, for `t = x^2`, without branching on the value.
     ///
-    /// Since `r = t^2 - t + 1`, the quotient by `t` is below `t`, so both halves fit in `128`
-    /// bits.
-    pub(crate) fn split(self) -> [u128; 2] {
+    /// Since `r = t^2 - t + 1`, the quotient by `t` is below `t`, so both halves fit in two
+    /// words.
+    pub(crate) const fn split(self) -> [[u64; 2]; 2] {
         let (quotient, remainder) =
             divide::<WORDS, 2, 3, 7>(&self.to_words(), &X_SQUARED, &X_SQUARED_RECIPROCAL);
-        [remainder, quotient].map(|words| words[0] as u128 | (words[1] as u128) << 64)
+        [remainder, quotient]
     }
 
     /// Returns `[a0, a1, b0, b1]` with `a = a0 + a1 |x|` and `b = b0 + b1 |x|` for the halves
     /// `[a, b]` of [`Self::split`] and every quarter below `|x|`, without branching on the
     /// value.
     pub(crate) fn split_quarters(self) -> [u64; 4] {
-        let [a, b] = self.split();
         let mut quarters = [0; 4];
-        for (half, quarters) in [a, b].iter().zip(quarters.as_chunks_mut::<2>().0) {
-            let words = [*half as u64, (*half >> 64) as u64];
-            let (quotient, remainder) = divide::<2, 1, 2, 4>(&words, &[X_ABS], &X_ABS_RECIPROCAL);
+        for (half, quarters) in self.split().iter().zip(quarters.as_chunks_mut::<2>().0) {
+            let (quotient, remainder) = divide::<2, 1, 2, 4>(half, &[X_ABS], &X_ABS_RECIPROCAL);
             *quarters = [remainder[0], quotient[0]];
         }
         quarters
@@ -656,8 +654,9 @@ pub mod fuzz {
                         Scalar::from_words([value as u64, (value >> 64) as u64, 0, 0])
                             .expect("below the order")
                     };
-                    let bound = X_SQUARED[0] as u128 | (X_SQUARED[1] as u128) << 64;
-                    let [a, b] = value.split();
+                    let wide = |[low, high]: [u64; 2]| u128::from(low) | u128::from(high) << 64;
+                    let bound = wide(X_SQUARED);
+                    let [a, b] = value.split().map(wide);
                     assert!(a < bound && b < bound);
                     assert_eq!(from_u128(a) + &(from_u128(b) * &t), value);
                     let [a0, a1, b0, b1] = value.split_quarters();

@@ -43,9 +43,9 @@ impl Group for G1 {
     const COMPONENTS: usize = 2;
     const COMPONENT_BITS: u32 = 129;
 
-    fn components(scalar: &Scalar) -> [u128; MAX_COMPONENTS] {
+    fn components(scalar: &Scalar) -> [[u64; 2]; MAX_COMPONENTS] {
         let [a, b] = scalar.split();
-        [a, b, 0, 0]
+        [a, b, [0; 2], [0; 2]]
     }
 
     fn coordinates(&self) -> &Coordinates {
