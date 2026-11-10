@@ -153,14 +153,14 @@
 //! bounds early but never late. An early bound costs spurious expiry passes or
 //! lock attempts until expiry has drained the wheel bucket whose minimum was
 //! removed (see [`Wheel`]). A removal that empties the wheel publishes no
-//! bound, and on the owner it also clears the owner's cached bound, so an idle
-//! worker takes no timed wake for a cancelled sleep. A queued registration
-//! keeps both bounds until its removal. A registration that crowds a wheel
-//! bucket lowers the owner's cached bound to the bucket's start, which may
-//! have passed, and the published one only to its own firing time. The owner
-//! refiles the bucket from its next pass on, and until that pass publishes
-//! the wheel's bound, peers see no overdue time that it has had no pass to
-//! serve.
+//! bound, and the owner's removal of queued registrations then also clears its
+//! cached bound, so an idle worker takes no timed wake for a cancelled sleep.
+//! A queued registration keeps both bounds until its removal. A registration
+//! that crowds a wheel bucket lowers the owner's cached bound to the bucket's
+//! start, which may have passed, and the published one only to its own firing
+//! time. The owner refiles the bucket from its next pass on, and until that
+//! pass publishes the wheel's bound, peers see no overdue time that it has had
+//! no pass to serve.
 //!
 //! # Closure
 //!
@@ -174,11 +174,11 @@
 //! registration of a sleep that can still be polled. Closure ends waiting
 //! registrations as expiry does, advancing the epoch before their wakes, so a
 //! lock-free poll cannot miss it. The worker is closing by then, so no drop
-//! queues afterwards. Closed timers never look a registration up: a poll that
-//! takes the lock reports closure, and a drop, an early completion, or a
-//! removal of queued identities finds nothing to remove. A sleep that observes
-//! closure completes if its deadline has passed by then, as every fired one's
-//! has, and its poll panics otherwise, since a sleep has no error output.
+//! queues afterwards. Closed timers hold no registration. A poll that takes
+//! the lock reports closure, and a drop, an early completion, or a removal of
+//! queued identities finds nothing to remove. A sleep that observes closure
+//! completes if its deadline has passed by then, as every fired one's has, and
+//! its poll panics otherwise, since a sleep has no error output.
 
 use super::{
     runtime::{Deferred, Local, MAX_TIMEOUT},
@@ -220,7 +220,7 @@ const RESOLUTION: u64 = 1024;
 /// drains a large one itself one budget per pass, so peers act on a worker
 /// that has not run an expiry pass for about this long, such as one stalled
 /// in a long poll.
-pub const RESCUE_THRESHOLD: Duration = Duration::from_millis(1);
+const RESCUE_THRESHOLD: Duration = Duration::from_millis(1);
 
 /// Least time between two checks of the peers' bounds by one pool worker, a
 /// quarter of [`RESCUE_THRESHOLD`]. Checks run only in the worker's service
@@ -252,20 +252,6 @@ thread_local! {
     static TURN: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 
-/// Record the time of this worker's start, service pass, or return from an
-/// idle wait, which sleeps polled on this thread compare their deadlines with.
-#[inline]
-pub fn set_turn(now: Instant) {
-    TURN.set(Some(now));
-}
-
-/// Whether `deadline` is at or before this thread's latest worker service
-/// time, which never runs ahead of the clock, so that it has passed.
-#[inline]
-fn reached(deadline: Instant) -> bool {
-    TURN.get().is_some_and(|turn| deadline <= turn)
-}
-
 /// How a registration ended.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Outcome {
@@ -286,7 +272,7 @@ struct Registrations {
     /// holding no slot storage after closure.
     wheel: Wheel<RESOLUTION>,
     /// Set once by the owner's cleanup, after which nothing registers and no
-    /// party looks up a registration.
+    /// identity resolves.
     closed: bool,
     /// Number of critical sections in which a party other than a sleep ended
     /// a waiting registration, advanced by [`Timers::end`]. A sleeper caches
@@ -384,12 +370,6 @@ pub struct Timers {
 impl Timers {
     /// Empty timers whose origin is the current time.
     pub fn new() -> Self {
-        Self::with_origin(Instant::now())
-    }
-
-    /// Empty timers whose time counts from `origin`, which must not be later
-    /// than the current time.
-    fn with_origin(origin: Instant) -> Self {
         Self {
             registrations: CachePadded::new(Mutex::new(Registrations {
                 entries: Slab::default(),
@@ -400,7 +380,7 @@ impl Timers {
             published: CachePadded::new(AtomicU64::new(u64::MAX)),
             served: CachePadded::new(AtomicU64::new(0)),
             epoch: CachePadded::new(AtomicU64::new(0)),
-            origin,
+            origin: Instant::now(),
         }
     }
 
@@ -494,7 +474,7 @@ impl Timers {
         dropped: &mut Vec<Id>,
         deferred: &mut Deferred,
     ) -> (Sleeper, u64) {
-        let fast = Fast::stored(&waker);
+        let task = TaskIdentity::stored(&waker);
         let nanos = self.nanos(deadline);
         let recycled = dropped.pop();
         if recycled.is_some() {
@@ -541,7 +521,7 @@ impl Timers {
             timers: self.clone(),
             id,
             deadline,
-            fast,
+            task,
             epoch,
         };
         (sleeper, at)
@@ -604,32 +584,21 @@ impl Timers {
     }
 
     /// Remove the registration `id` at once, unlinking it from the wheel, if
-    /// it still waits. Returns its waker if it waited, and whether that
-    /// emptied the wheel, which then publishes no bound. Closed timers hold no
-    /// registration, so this finds nothing in them.
+    /// it still waits. Returns its waker if it waited. A removal that empties
+    /// the wheel publishes no bound. Closed timers hold no registration, so
+    /// this finds nothing in them.
     #[inline]
-    fn remove(&self, id: Id) -> (Option<Waker>, bool) {
+    fn remove(&self, id: Id) -> Option<Waker> {
         let mut registrations = self.lock();
-        let Registrations {
-            entries,
-            wheel,
-            closed,
-            ..
-        } = &mut *registrations;
-        if *closed {
-            return (None, false);
-        }
-        let Some(waker) = entries.remove(id) else {
-            return (None, false);
-        };
+        let Registrations { entries, wheel, .. } = &mut *registrations;
+        let waker = entries.remove(id)?;
         wheel.remove(id.index);
 
         // An empty wheel has no firing time to publish.
-        let emptied = wheel.is_empty();
-        if emptied {
+        if wheel.is_empty() {
             self.published.store(u64::MAX, Ordering::Relaxed);
         }
-        (Some(waker), emptied)
+        Some(waker)
     }
 
     /// The owner's removal of the registrations in `dropped`, whose sleeps
@@ -651,22 +620,12 @@ impl Timers {
             // lock reallocates, and the reservation never exceeds one budget.
             deferred.drops.reserve(dropped.len() - rest);
             let mut registrations = self.lock();
-            let Registrations {
-                entries,
-                wheel,
-                closed,
-                ..
-            } = &mut *registrations;
-            if *closed {
-                // Closed timers hold no registration to remove.
-                dropped.truncate(rest);
-            } else {
-                for id in dropped.drain(rest..) {
-                    // A fired registration's identity no longer resolves.
-                    if let Some(waker) = entries.remove(id) {
-                        wheel.remove(id.index);
-                        deferred.drops.push(waker);
-                    }
+            let Registrations { entries, wheel, .. } = &mut *registrations;
+            for id in dropped.drain(rest..) {
+                // A fired registration's identity no longer resolves.
+                if let Some(waker) = entries.remove(id) {
+                    wheel.remove(id.index);
+                    deferred.drops.push(waker);
                 }
             }
             let empty = wheel.is_empty();
@@ -679,38 +638,40 @@ impl Timers {
             }
         }
     }
-}
 
-/// Expire, at `now`, the due registrations of the timers in `all` of every
-/// worker but `own` whose published bound is overdue by [`RESCUE_THRESHOLD`]
-/// and whose owner has run no expiry pass for as long, with one budget per
-/// worker, skipping timers whose lock is held. Each worker's timers compare
-/// `now` in their own nanoseconds. Wakes land in `deferred`.
-pub fn rescue(all: &[Arc<Timers>], own: usize, now: Instant, deferred: &mut Deferred) {
-    let threshold = RESCUE_THRESHOLD.as_nanos() as u64;
-    for (index, timers) in all.iter().enumerate() {
-        if index == own {
-            continue;
-        }
+    /// Expire, at `now`, the due registrations of the timers in `all` of
+    /// every worker but `own` whose published bound is overdue by
+    /// [`RESCUE_THRESHOLD`] and whose owner has run no expiry pass for as
+    /// long, with one budget per worker, skipping timers whose lock is held.
+    /// Each worker's timers compare `now` in their own nanoseconds. Wakes
+    /// land in `deferred`.
+    pub fn rescue_peers(all: &[Arc<Self>], own: usize, now: Instant, deferred: &mut Deferred) {
+        let threshold = RESCUE_THRESHOLD.as_nanos() as u64;
+        for (index, timers) in all.iter().enumerate() {
+            if index == own {
+                continue;
+            }
 
-        // The bound only selects timers worth locking. The lock synchronizes
-        // their state, so a stale bound costs one check, never a timer.
-        let bound = timers.published.load(Ordering::Relaxed);
-        if bound == u64::MAX {
-            continue;
-        }
-        let now = timers.nanos(now);
-        if now < bound.saturating_add(threshold) {
-            continue;
-        }
+            // The bound only selects timers worth locking. The lock
+            // synchronizes their state, so a stale bound costs one check,
+            // never a timer.
+            let bound = timers.published.load(Ordering::Relaxed);
+            if bound == u64::MAX {
+                continue;
+            }
+            let now = timers.nanos(now);
+            if now < bound.saturating_add(threshold) {
+                continue;
+            }
 
-        // An owner that served recently drains its own backlog. Like the
-        // bound, a stale time only delays or advances one check.
-        let served = timers.served.load(Ordering::Relaxed);
-        if now < served.saturating_add(threshold) {
-            continue;
+            // An owner that served recently drains its own backlog. Like the
+            // bound, a stale time only delays or advances one check.
+            let served = timers.served.load(Ordering::Relaxed);
+            if now < served.saturating_add(threshold) {
+                continue;
+            }
+            timers.rescue(now, deferred);
         }
-        timers.rescue(now, deferred);
     }
 }
 
@@ -721,9 +682,9 @@ pub fn rescue(all: &[Arc<Timers>], own: usize, now: Instant, deferred: &mut Defe
 /// nothing matches. The address is held as an integer so that a sleep stays
 /// `Send` and `Sync`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct Fast(Option<NonZeroUsize>);
+struct TaskIdentity(Option<NonZeroUsize>);
 
-impl Fast {
+impl TaskIdentity {
     /// The identity of a newly stored `waker`.
     fn stored(waker: &Waker) -> Self {
         // A task waker's data is its task header, which is never null.
@@ -753,9 +714,10 @@ struct Sleeper {
     /// The sleep's deadline, which polls compare with their thread's latest
     /// worker service time.
     deadline: Instant,
-    /// What a poll may match to skip the lock while the registration waits,
-    /// updated whenever this sleeper stores a waker.
-    fast: Fast,
+    /// The stored waker's task identity, which a poll may match to skip the
+    /// lock while the registration waits, updated whenever this sleeper
+    /// stores a waker.
+    task: TaskIdentity,
     /// The timers' epoch, read under their lock when this sleeper last saw its
     /// registration waiting.
     epoch: u64,
@@ -769,13 +731,13 @@ impl Sleeper {
     /// [`Self::abandon`].
     ///
     /// A poll at an unchanged epoch returns pending without the lock if its
-    /// waker matches [`Fast`], a task waker with the stored waker's address.
-    /// The registration then still waits with an equivalent waker: only this
-    /// sleeper writes its waker, every other ending advances the epoch before
-    /// its wake, and that identity cannot recur before the wake (see the
-    /// module documentation). Any other poll locks.
+    /// waker matches [`TaskIdentity`], a task waker with the stored waker's
+    /// address. The registration then still waits with an equivalent waker:
+    /// only this sleeper writes its waker, every other ending advances the
+    /// epoch before its wake, and that identity cannot recur before the wake
+    /// (see the module documentation). Any other poll locks.
     fn poll(&mut self, cx: &Context<'_>) -> Poll<Outcome> {
-        if reached(self.deadline) {
+        if Sleep::reached(self.deadline) {
             self.abandon();
             return Poll::Ready(Outcome::Fired);
         }
@@ -783,7 +745,7 @@ impl Sleeper {
         // An ending that this load misses wakes the stored waker afterwards,
         // and the poll that wake schedules reads the advanced epoch.
         let waker = cx.waker();
-        let matched = self.fast.matches(waker);
+        let matched = self.task.matches(waker);
         if matched && self.timers.epoch.load(Ordering::Acquire) == self.epoch {
             return Poll::Pending;
         }
@@ -791,13 +753,14 @@ impl Sleeper {
     }
 
     /// The part of [`Self::poll`] that takes the lock, after its waker failed
-    /// to match [`Fast`] (`matched` is false) or matched at a moved epoch.
-    /// A waker's clone may reenter the runtime, so a changed waker is cloned
-    /// outside the lock: a task waker that failed to match, which differs from
-    /// the stored one, before locking, and any other waker once a critical
-    /// section has found that it differs, after which a second one checks the
-    /// registration again. Kept out of line, since it locks anyway, so that
-    /// the code of the first poll and of the lock-free path stays compact.
+    /// to match [`TaskIdentity`] (`matched` is false) or matched at a moved
+    /// epoch. A waker's clone may reenter the runtime, so a changed waker is
+    /// cloned outside the lock: a task waker that failed to match, which
+    /// differs from the stored one, before locking, and any other waker once
+    /// a critical section has found that it differs, after which a second one
+    /// checks the registration again. Kept out of line, since it locks
+    /// anyway, so that the code of the first poll and of the lock-free path
+    /// stays compact.
     #[inline(never)]
     fn poll_locked(&mut self, waker: &Waker, matched: bool) -> Poll<Outcome> {
         // A task waker that failed to match differs from the stored one, so
@@ -810,25 +773,25 @@ impl Sleeper {
             // woke its waker if it still waited.
             if registrations.closed {
                 drop(registrations);
-                release(clone);
+                Self::release(clone);
                 return Poll::Ready(Outcome::Closed);
             }
             let Some(current) = registrations.entries.get_mut(self.id) else {
                 // Only firing removes the registration of a sleep that can
                 // still be polled.
                 drop(registrations);
-                release(clone);
+                Self::release(clone);
                 return Poll::Ready(Outcome::Fired);
             };
 
             // Only this sleeper writes its waker, so its cached identity is
             // the stored waker's.
-            debug_assert_eq!(self.fast, Fast::stored(current));
+            debug_assert_eq!(self.task, TaskIdentity::stored(current));
             let displaced = match clone.take() {
                 // An equivalent waker needs no replacement, nor a clone.
                 unused if current.will_wake(waker) => unused,
                 Some(clone) => {
-                    self.fast = Fast::stored(&clone);
+                    self.task = TaskIdentity::stored(&clone);
                     Some(mem::replace(current, clone))
                 }
                 // Clone a changed waker of another kind after the lock, then
@@ -845,7 +808,7 @@ impl Sleeper {
             // reads this epoch may skip the lock.
             self.epoch = registrations.epoch;
             drop(registrations);
-            release(displaced);
+            Self::release(displaced);
             return Poll::Pending;
         }
     }
@@ -881,39 +844,33 @@ impl Sleeper {
     /// compact.
     #[inline(never)]
     fn evict(&self, local: Option<&mut Local>) -> Option<Waker> {
-        let (removed, emptied) = self.timers.remove(self.id);
+        let removed = self.timers.remove(self.id);
         let Some(local) = local else {
             return removed;
         };
-
-        // A closing owner that empties its wheel clears its cached bound, so
-        // that it takes no timed wake for the removed registration.
-        if emptied && Arc::ptr_eq(&self.timers, &local.timers) {
-            local.timers_next = u64::MAX;
-        }
         if let Some(removed) = removed {
             local.deferred.drops.push(removed);
         }
         None
     }
-}
 
-/// Destroy `waker`, if any, in the current worker's next callback batch,
-/// whose failures that worker retains, or at once on a thread without a
-/// worker. The caller holds no worker borrow and no timers' lock.
-#[inline]
-fn release(waker: Option<Waker>) {
-    let Some(waker) = waker else {
-        return;
-    };
-    let waker = Local::with_current(|local| match local {
-        Some(local) => {
-            local.deferred.drops.push(waker);
-            None
-        }
-        None => Some(waker),
-    });
-    drop(waker);
+    /// Destroy `waker`, if any, in the current worker's next callback batch,
+    /// whose failures that worker retains, or at once on a thread without a
+    /// worker. The caller holds no worker borrow and no timers' lock.
+    #[inline]
+    fn release(waker: Option<Waker>) {
+        let Some(waker) = waker else {
+            return;
+        };
+        let waker = Local::with_current(|local| match local {
+            Some(local) => {
+                local.deferred.drops.push(waker);
+                None
+            }
+            None => Some(waker),
+        });
+        drop(waker);
+    }
 }
 
 /// Ownership held by a sleep between polls.
@@ -966,6 +923,21 @@ impl Sleep {
         Self::new(duration)
     }
 
+    /// Record the time of this worker's start, service pass, or return from an
+    /// idle wait, which sleeps polled on this thread compare their deadlines
+    /// with.
+    #[inline]
+    pub fn set_turn(now: Instant) {
+        TURN.set(Some(now));
+    }
+
+    /// Whether `deadline` is at or before this thread's latest worker service
+    /// time, which never runs ahead of the clock, so that it has passed.
+    #[inline]
+    fn reached(deadline: Instant) -> bool {
+        TURN.get().is_some_and(|turn| deadline <= turn)
+    }
+
     /// Whether the first poll of a sleep may take its deadline to be ahead
     /// without reading the clock. It may if the sleep kept `created`, its
     /// creation time, and this thread's latest worker service time is not
@@ -1006,7 +978,9 @@ impl Future for Sleep {
                 // the clock, so a deadline at or before it has passed, and the
                 // sleep needs neither a worker nor a registration. Otherwise
                 // the clock decides, unless the sleep may register unchecked.
-                if reached(deadline) || (!Self::unchecked(created) && deadline <= Instant::now()) {
+                if Self::reached(deadline)
+                    || (!Self::unchecked(created) && deadline <= Instant::now())
+                {
                     this.state = State::Done;
                     return Poll::Ready(());
                 }
@@ -1112,6 +1086,15 @@ pub mod tests {
     }
 
     impl Timers {
+        /// Empty timers whose time counts from `origin`, which must not be
+        /// later than the current time.
+        fn with_origin(origin: Instant) -> Self {
+            Self {
+                origin,
+                ..Self::new()
+            }
+        }
+
         /// Number of waiting registrations.
         fn live(&self) -> usize {
             self.guard().entries.len()
@@ -1309,7 +1292,7 @@ pub mod tests {
         // What a poll may match without the lock is a task waker's address,
         // one word with a niche, and an unregistered sleep's deadline fits
         // beside the niche in a registered sleep's deadline.
-        assert_eq!(size_of::<Fast>(), size_of::<usize>());
+        assert_eq!(size_of::<TaskIdentity>(), size_of::<usize>());
         assert_eq!(size_of::<Sleeper>(), 56);
         assert_eq!(size_of::<Sleep>(), 56);
     }
@@ -1762,11 +1745,11 @@ pub mod tests {
         // Overdue by less than the threshold, nobody is rescued.
         let mut deferred = Deferred::default();
         let at = |nanos| all[0].instant(nanos).unwrap();
-        rescue(&all, 0, at(firing + threshold - 1), &mut deferred);
+        Timers::rescue_peers(&all, 0, at(firing + threshold - 1), &mut deferred);
         assert!(deferred.is_empty());
 
         // At the threshold, every peer is, but never the caller's own timers.
-        rescue(&all, 0, at(firing + threshold), &mut deferred);
+        Timers::rescue_peers(&all, 0, at(firing + threshold), &mut deferred);
         run(&mut deferred);
         assert_eq!(count.get(), 2);
         assert_eq!(all[0].resident(), 1);
@@ -1802,11 +1785,11 @@ pub mod tests {
         // The bound is overdue by more than the threshold, but while the
         // owner's pass is recent, peers leave the backlog to the owner.
         let at = |nanos| all[0].instant(nanos).unwrap();
-        rescue(&all, 0, at(served + threshold - 1), &mut deferred);
+        Timers::rescue_peers(&all, 0, at(served + threshold - 1), &mut deferred);
         assert!(deferred.is_empty());
 
         // An owner that has not served for the threshold is rescued.
-        rescue(&all, 0, at(served + threshold), &mut deferred);
+        Timers::rescue_peers(&all, 0, at(served + threshold), &mut deferred);
         run(&mut deferred);
         assert!(count.get() > fired);
     }
@@ -1821,9 +1804,9 @@ pub mod tests {
 
         // A poll completes early once the worker's turn time reaches the
         // deadline. Reset the turn time so later tests on this thread see none.
-        set_turn(timers.instant(deadline - 1).unwrap());
+        Sleep::set_turn(timers.instant(deadline - 1).unwrap());
         assert!(poll_with(&mut sleeper, &waker).is_pending());
-        set_turn(timers.instant(deadline).unwrap());
+        Sleep::set_turn(timers.instant(deadline).unwrap());
         assert_eq!(poll_with(&mut sleeper, &waker), Poll::Ready(Outcome::Fired));
         TURN.set(None);
         drop(sleeper);

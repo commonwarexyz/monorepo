@@ -31,9 +31,9 @@ use std::{
 };
 
 /// Inspection without cloning or invoking the observer's waker.
-pub enum Observation<T> {
-    /// The registration has completed and relinquished its output.
-    Ready(T),
+pub enum Observation {
+    /// The request has completed and relinquished its output.
+    Ready(RequestOutput),
     /// The installed waker already matches the current task.
     Pending,
     /// A new waker must be cloned outside the worker borrow.

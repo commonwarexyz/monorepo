@@ -242,7 +242,7 @@ impl Driver {
     }
 
     /// Consume a retained result or check whether its waker needs refreshing.
-    pub fn observe(&mut self, id: WaiterId, waker: &TaskWaker) -> Observation<RequestOutput> {
+    pub fn observe(&mut self, id: WaiterId, waker: &TaskWaker) -> Observation {
         self.state.waiters.observe(id, waker)
     }
 

@@ -46,7 +46,7 @@
 //! driver's request deadlines ([`super::deadlines::Deadlines`], 2^20 ns ticks)
 //! own an instance. Each owner counts nanoseconds from an [`Instant`] of its
 //! own, its creation, and converts with [`InstantExt`]: an instant before
-//! that epoch counts as zero, so a deadline there is due at once, and a
+//! that origin counts as zero, so a deadline there is due at once, and a
 //! firing time converts back to an instant at or after its deadline.
 
 use std::time::{Duration, Instant};
@@ -76,13 +76,13 @@ const LAZY_SLOTS: u32 = REFILES_PER_UNIT * BUDGET / 4;
 const LEVELS: usize = 9;
 
 /// Bits of the tick consumed per level.
-const SLOT_BITS: usize = 6;
+const LEVEL_BITS: usize = 6;
 
 /// Buckets per level.
-const SLOTS: usize = 1 << SLOT_BITS;
+const LEVEL_BUCKETS: usize = 1 << LEVEL_BITS;
 
 /// Buckets across all levels.
-const WHEEL_BUCKETS: usize = LEVELS * SLOTS;
+const WHEEL_BUCKETS: usize = LEVELS * LEVEL_BUCKETS;
 
 /// Bucket of ticks below the base, which are already due.
 const DUE: usize = WHEEL_BUCKETS;
@@ -139,11 +139,11 @@ const EMPTY: Bucket = Bucket {
     count: 0,
 };
 
-/// Conversions between instants and a wheel's nanoseconds since an epoch.
+/// Conversions between instants and a wheel's nanoseconds since an origin.
 pub trait InstantExt {
-    /// Nanoseconds from `epoch` to this instant: zero for an instant before
-    /// `epoch`, and `u64::MAX` for one more than about 584 years after it.
-    fn nanos_since(self, epoch: Instant) -> u64;
+    /// Nanoseconds from `origin` to this instant: zero for an instant before
+    /// `origin`, and `u64::MAX` for one more than about 584 years after it.
+    fn nanos_since(self, origin: Instant) -> u64;
 
     /// The instant `nanos` after this one, or `None` for `u64::MAX`, the
     /// bound of an empty wheel, and past the end of [`Instant`]'s range.
@@ -152,8 +152,8 @@ pub trait InstantExt {
 
 impl InstantExt for Instant {
     #[inline]
-    fn nanos_since(self, epoch: Instant) -> u64 {
-        let since = self.saturating_duration_since(epoch);
+    fn nanos_since(self, origin: Instant) -> u64 {
+        let since = self.saturating_duration_since(origin);
         u64::try_from(since.as_nanos()).unwrap_or(u64::MAX)
     }
 
@@ -260,25 +260,25 @@ impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
     fn bucket_for(tick: u64, base: u64) -> usize {
         assert!(tick >= base);
 
-        // The level is the group of `SLOT_BITS` bits holding the highest bit
+        // The level is the group of `LEVEL_BITS` bits holding the highest bit
         // in which the tick differs from the base. Setting every bit of the
         // lowest group keeps the difference nonzero, so a tick equal to the
         // base lands on level zero.
-        let diff = (tick ^ base) | (SLOTS as u64 - 1);
-        let level = (63 - diff.leading_zeros() as usize) / SLOT_BITS;
+        let diff = (tick ^ base) | (LEVEL_BUCKETS as u64 - 1);
+        let level = (63 - diff.leading_zeros() as usize) / LEVEL_BITS;
         assert!(level < LEVELS);
 
         // Above that group the tick matches the base, so within the level the
         // tick's own bits in the group pick the bucket. They exceed the base's
         // on every level but zero, so the bucket starts after the base.
-        level * SLOTS + ((tick >> (level * SLOT_BITS)) as usize & (SLOTS - 1))
+        level * LEVEL_BUCKETS + ((tick >> (level * LEVEL_BITS)) as usize & (LEVEL_BUCKETS - 1))
     }
 
     /// Mark the level bucket `bucket` occupied in the bitmaps.
     const fn set_occupied(&mut self, bucket: usize) {
         if bucket < WHEEL_BUCKETS {
-            let level = bucket / SLOTS;
-            self.occupied[level] |= 1 << (bucket % SLOTS);
+            let level = bucket / LEVEL_BUCKETS;
+            self.occupied[level] |= 1 << (bucket % LEVEL_BUCKETS);
             self.levels |= 1 << level;
         }
     }
@@ -286,8 +286,8 @@ impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
     /// Mark the level bucket `bucket` unoccupied in the bitmaps.
     const fn clear_occupied(&mut self, bucket: usize) {
         if bucket < WHEEL_BUCKETS {
-            let level = bucket / SLOTS;
-            self.occupied[level] &= !(1 << (bucket % SLOTS));
+            let level = bucket / LEVEL_BUCKETS;
+            self.occupied[level] &= !(1 << (bucket % LEVEL_BUCKETS));
             if self.occupied[level] == 0 {
                 self.levels &= !(1 << level);
             }
@@ -380,27 +380,30 @@ impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
         // time order, so the earliest residents sit in the lowest occupied
         // bucket of the lowest occupied level.
         let level = self.levels.trailing_zeros() as usize;
-        let slot = self.occupied[level].trailing_zeros() as usize;
+        let position = self.occupied[level].trailing_zeros() as usize;
 
         // The bucket's ticks share the base's bits above this level, so its
         // first tick is the base with this level's group set to the bucket's
         // position and every lower bit cleared.
-        let block = self.base & !((1u64 << ((level + 1) * SLOT_BITS)) - 1);
-        let start = block | ((slot as u64) << (level * SLOT_BITS));
+        let block = self.base & !((1u64 << ((level + 1) * LEVEL_BITS)) - 1);
+        let start = block | ((position as u64) << (level * LEVEL_BITS));
         assert!(start >= self.base);
-        Some((level * SLOTS + slot, start))
+        Some((level * LEVEL_BUCKETS + position, start))
     }
 
-    /// Insert `slot`, which must not be resident, at `deadline`. Returns the
-    /// time by which a pass must reach the slot, never later than its firing
-    /// time and never earlier than [`Self::bound`]: its firing time, or the
-    /// start of its bucket if that one now cascades from its start. An owner
-    /// that caches the bound lowers its cache to this time.
+    /// Insert `slot`, which must not be resident and must be below
+    /// `u32::MAX`, at `deadline`. Returns the time by which a pass must
+    /// reach the slot, never later than its firing time and never earlier
+    /// than [`Self::bound`]: its firing time, or the start of its bucket if
+    /// that one now cascades from its start. An owner that caches the bound
+    /// lowers its cache to this time.
     pub fn insert(&mut self, slot: u32, deadline: u64) -> u64 {
         // The owner picks the slot indices, so the links grow to the highest
-        // one inserted and keep that storage until [`Self::clear`].
+        // one inserted and keep that storage until [`Self::clear`]. The last
+        // index is the null link, which only growth could admit.
         let index = slot as usize;
         if index >= self.links.len() {
+            assert_ne!(slot, NIL, "slot index reserved for the null link");
             self.links.resize(index + 1, ABSENT);
         }
         assert_eq!(self.links[index].bucket, NONE, "slot already resident");
@@ -419,9 +422,9 @@ impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
         // A bucket above level zero that has grown past its lazy size is
         // reached at its first tick, the slot's tick without the bits of the
         // levels below. The due list is beyond the last level.
-        let level = bucket / SLOTS;
+        let level = bucket / LEVEL_BUCKETS;
         let reach = if (1..LEVELS).contains(&level) && self.buckets[bucket].count > LAZY_SLOTS {
-            tick & !((1 << (level * SLOT_BITS)) - 1)
+            tick & !((1 << (level * LEVEL_BITS)) - 1)
         } else {
             tick
         };
@@ -539,7 +542,7 @@ impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
         if let Some((bucket, start)) = self.next_event() {
             // Every slot of a level zero bucket holds its start tick.
             let entry = &self.buckets[bucket];
-            tick = tick.min(if bucket < SLOTS || entry.count > LAZY_SLOTS {
+            tick = tick.min(if bucket < LEVEL_BUCKETS || entry.count > LAZY_SLOTS {
                 start
             } else {
                 entry.min
@@ -616,28 +619,28 @@ pub mod tests {
 
     #[test]
     fn test_instant_conversions_round_trip_and_saturate() {
-        // Instants from the epoch on round trip exactly.
-        let epoch = Instant::now();
+        // Instants from the origin on round trip exactly.
+        let origin = Instant::now();
         for nanos in [0, 1, FINE - 1, 1_000_000_007, 3_600_000_000_000] {
-            let at = epoch.after_nanos(nanos).unwrap();
-            assert_eq!(at.nanos_since(epoch), nanos);
+            let at = origin.after_nanos(nanos).unwrap();
+            assert_eq!(at.nanos_since(origin), nanos);
         }
 
-        // Earlier instants count as the epoch, much later ones saturate, and
+        // Earlier instants count as the origin, much later ones saturate, and
         // an empty wheel's bound has no instant.
-        if let Some(earlier) = epoch.checked_sub(Duration::from_secs(1)) {
-            assert_eq!(earlier.nanos_since(epoch), 0);
+        if let Some(earlier) = origin.checked_sub(Duration::from_secs(1)) {
+            assert_eq!(earlier.nanos_since(origin), 0);
         }
-        if let Some(far) = epoch.checked_add(Duration::from_secs(600 * 365 * 24 * 60 * 60)) {
-            assert_eq!(far.nanos_since(epoch), u64::MAX);
+        if let Some(far) = origin.checked_add(Duration::from_secs(600 * 365 * 24 * 60 * 60)) {
+            assert_eq!(far.nanos_since(origin), u64::MAX);
         }
-        assert_eq!(epoch.after_nanos(u64::MAX), None);
+        assert_eq!(origin.after_nanos(u64::MAX), None);
 
         // A deadline's firing time converts back to an instant after it.
-        let deadline = epoch + Duration::from_nanos(FINE + 1);
-        let firing = Wheel::<FINE>::rounded(deadline.nanos_since(epoch));
-        let fires = epoch + Duration::from_nanos(2 * FINE);
-        assert_eq!(epoch.after_nanos(firing), Some(fires));
+        let deadline = origin + Duration::from_nanos(FINE + 1);
+        let firing = Wheel::<FINE>::rounded(deadline.nanos_since(origin));
+        let fires = origin + Duration::from_nanos(2 * FINE);
+        assert_eq!(origin.after_nanos(firing), Some(fires));
     }
 
     /// Random insertions (past, current and future, up to the end of time),

@@ -9,6 +9,7 @@ use super::{
         operation::Operation,
         queue::CAPACITY,
         request::{RecvRequest, Request, SyncRequest},
+        sleep,
         task::{Task, tests::cancelled},
         tasks::tests::AFTER_INSERT,
         waiter::Observer,
