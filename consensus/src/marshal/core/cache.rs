@@ -589,6 +589,21 @@ where
             .expect("failed to get notarization")
     }
 
+    /// Get a notarization from the prunable archive by block digest.
+    pub(crate) async fn get_notarization_for(
+        &self,
+        digest: <V::Block as Digestible>::Digest,
+    ) -> Option<Notarization<S, V::Commitment>> {
+        for cache in self.caches.values().rev() {
+            match cache.notarizations.get(Identifier::Key(&digest)).await {
+                Ok(Some(notarization)) => return Some(notarization),
+                Ok(None) => continue,
+                Err(e) => panic!("failed to get cached notarization: {e}"),
+            }
+        }
+        None
+    }
+
     /// Returns whether the verified archive holds `digest` at `round`.
     pub(crate) async fn has_verified(
         &self,

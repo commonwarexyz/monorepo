@@ -6492,6 +6492,79 @@ mod tests {
         });
     }
 
+    /// A block acquired while marshal holds its notarization is stored, so its finalization is
+    /// served without requesting the block again.
+    #[test_traced("WARN")]
+    fn test_standard_acquired_notarized_block_is_stored() {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let application = Application::<B>::default();
+            let (mut mailbox, _, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "acquired-notarized-block",
+                ConstantProvider::new(schemes[0].clone()),
+                application.clone(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(genesis.clone()),
+            )
+            .await;
+
+            // Marshal holds the notarization but not the block it names.
+            let block = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let proposal = Proposal::new(
+                Round::new(Epoch::zero(), View::new(1)),
+                View::zero(),
+                block.digest(),
+            );
+            StandardHarness::report_notarization(
+                &mut mailbox,
+                StandardHarness::make_notarization(proposal.clone(), &schemes, QUORUM),
+            )
+            .await;
+
+            // The block arrives through an exact acquisition.
+            let is_acquisition = |fetch: &FetchRecord| {
+                fetch.key == handler::Key::Block(block.digest())
+                    && fetch.subscriber == handler::Annotation::Subscription
+            };
+            let acquisition = mailbox.acquire(block.digest());
+            wait_until(&context, Duration::from_secs(1), "acquisition", || {
+                resolver.active_fetches().iter().any(is_acquisition)
+            })
+            .await;
+            let fetch = resolver
+                .active_fetches()
+                .into_iter()
+                .find(is_acquisition)
+                .unwrap();
+            deliver_acquisition_test_block(&resolver, fetch, &block).await;
+            assert_eq!(acquisition.await.unwrap().digest(), block.digest());
+            assert!(
+                mailbox.get_block(&block.digest()).await.is_some(),
+                "a delivered block that a held notarization backs must be stored"
+            );
+
+            // The finalization finds the block in storage.
+            let fetched = resolver.fetches().len();
+            StandardHarness::report_finalization(
+                &mut mailbox,
+                StandardHarness::make_finalization(proposal, &schemes, QUORUM),
+            )
+            .await;
+            wait_until(&context, Duration::from_secs(1), "finalized block", || {
+                application.blocks().contains_key(&Height::new(1))
+            })
+            .await;
+            assert_eq!(
+                resolver.fetches().len(),
+                fetched,
+                "a stored block must not be requested again"
+            );
+        });
+    }
+
     #[test_traced("WARN")]
     fn test_standard_finalized_waiter_survives_sibling_cancel_and_gap_repair_with_held_ack() {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {

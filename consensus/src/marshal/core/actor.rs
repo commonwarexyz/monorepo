@@ -1049,6 +1049,7 @@ where
                                 response,
                             },
                             &mut delivers,
+                            syncs,
                             buffer,
                             application,
                             resolver,
@@ -1495,6 +1496,7 @@ where
         mut self: Box<Self>,
         message: ResolverDelivery<V>,
         delivers: &mut Vec<PendingVerification<P::Scheme, V>>,
+        syncs: &mut Pool<'_, PooledSync>,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
@@ -1633,6 +1635,24 @@ where
                 .cache
                 .put_certified(bounds.epoch(), height, digest, &block)
                 .await;
+            self.prefetch.retire(commitment);
+        } else if let Some(notarization) = self
+            .cache
+            .get_notarization_for(digest)
+            .await
+            .filter(|notarization| notarization.proposal.payload == commitment)
+        {
+            // A notarization marshal already holds backs this block, so store it under that
+            // round as a locally available notarized block is. Its finalization and later
+            // readers then find it in storage. No caller awaits this write, so the pool
+            // observes its sync.
+            let round = notarization.round();
+            let handle;
+            (self.cache, handle) = self.cache.put_notarized(round, digest, &block).await;
+            syncs.push(async move {
+                handle.durable(round, "notarized").await;
+                PooledSync::Observed
+            });
             self.prefetch.retire(commitment);
         }
         response.send_lossy(Outcome::Resolved(Resolution::Complete));
