@@ -43,6 +43,7 @@ use crate::core::{
         fp::BYTES as FP_BYTES,
         fp2::{self, BYTES as FP2_BYTES, Fp2},
         fp12::Fp12,
+        gather,
     },
 };
 use commonware_simd::Simd;
@@ -90,12 +91,8 @@ impl<F> Pair<F> {
         let lanes = pairs.len().min(F::LANES);
         let mut p = [[[0; FP_BYTES]; MAX_LANES]; 2];
         let mut q = [[[0; FP2_BYTES]; MAX_LANES]; 2];
-        for (lane, (g1, g2)) in pairs[..lanes].iter().enumerate() {
-            for k in 0..2 {
-                p[k][lane] = g1[k];
-                q[k][lane] = g2[k];
-            }
-        }
+        gather(&mut p, &pairs[..lanes], |(g1, _)| g1.each_ref());
+        gather(&mut q, &pairs[..lanes], |(_, g2)| g2.each_ref());
         let (g1, g2) = fill;
         let y = F::load(simd, &p[1][..lanes], &g1[1]);
         Self {

@@ -41,6 +41,7 @@ use super::{
     fp::{self, BYTES as FP_BYTES, WORDS},
     fp2::{self, BYTES as FP2_BYTES, Fp2, encode},
     fp6::{self, BYTES as FP6_BYTES, Fp6},
+    gather, scatter,
 };
 use commonware_simd::Simd;
 
@@ -171,13 +172,9 @@ impl<F> Fp12<F> {
         F: Field<S>,
     {
         const { assert!(F::LANES <= MAX_LANES) };
-        let mut coefficients = [[[0; FP6_BYTES]; MAX_LANES]; 2];
         let lanes = elements.len().min(F::LANES);
-        for (lane, element) in elements[..lanes].iter().enumerate() {
-            let [c0, c1] = split(element);
-            coefficients[0][lane] = *c0;
-            coefficients[1][lane] = *c1;
-        }
+        let mut coefficients = [[[0; FP6_BYTES]; MAX_LANES]; 2];
+        gather(&mut coefficients, &elements[..lanes], split);
         let [fill0, fill1] = split(fill);
         simd.execute(
             #[inline(always)]
@@ -235,11 +232,15 @@ impl<F> Fp12<F> {
                 coefficients
             },
         );
-        for (lane, element) in elements[..lanes].iter_mut().enumerate() {
-            let (c1, c0) = element.split_at_mut(FP6_BYTES);
-            c0.copy_from_slice(&coefficients[0][lane]);
-            c1.copy_from_slice(&coefficients[1][lane]);
-        }
+        scatter(
+            &coefficients,
+            &mut elements[..lanes],
+            |element, [c0, c1]| {
+                let (chunks, _) = element.as_chunks_mut::<FP6_BYTES>();
+                chunks[0] = *c1;
+                chunks[1] = *c0;
+            },
+        );
     }
 
     /// Multiplies by `rhs` in place, with Karatsuba's three products over `Fp6`, eighteen
