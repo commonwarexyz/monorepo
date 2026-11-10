@@ -29,6 +29,11 @@
 //! lines the bounds of [`Fp12::mul_by_line`]: every line component has limb bound `1` and integer
 //! bound at most `61`, below [`LINE_BOUND`](crate::core::field::fp12::LINE_BOUND). Every element of
 //! `Fp12` satisfies the [element bounds](crate::core::field::fp12).
+//!
+//! # Kernels
+//!
+//! Each step of the Miller loop runs as its own kernel, so the loop calls one copy, and updates its
+//! point in place, so that the loop copies nothing.
 
 use crate::core::{
     curve::g2::{self, Addition, Point},
@@ -158,8 +163,6 @@ fn shared_miller_loop<S: Simd, F: Field<S>>(simd: S, pairs: &[Pair<F>]) -> Fp12<
 /// `-2 y z^2 / z` leaves `[3b z^2 - y^2, 3 x^2 xp, -2 y z yp]`. The point is
 /// [`Points::double`](crate::core::curve::Points::double)'s, whose stages the line's values join:
 /// `x^2` reduces with the first stage and the last two coefficients with the coordinates.
-/// Runs as its own kernel, so callers share one copy, and replaces the point in place, so that
-/// the loop copies nothing.
 #[cfg_attr(not(debug_assertions), inline(always))]
 fn double_step<S: Simd, F: Field<S>>(simd: S, t: &mut Point<F>, pair: &Pair<F>) -> [Fp2<F>; 3] {
     simd.execute(
@@ -206,7 +209,6 @@ fn double_step<S: Simd, F: Field<S>>(simd: S, t: &mut Point<F>, pair: &Pair<F>) 
 /// The line is `[qx y - qy x, (qy z - y) xp, -(qx z - x) yp]` and the point is
 /// [`Points::add`](crate::core::curve::Points::add)'s, whose second stage the line's first products
 /// join.
-/// Runs as its own kernel, so callers share one copy, and replaces the point in place.
 #[cfg_attr(not(debug_assertions), inline(always))]
 fn add_step<S: Simd, F: Field<S>>(simd: S, t: &mut Point<F>, pair: &Pair<F>) -> [Fp2<F>; 3] {
     simd.execute(

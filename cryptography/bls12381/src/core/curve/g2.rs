@@ -24,6 +24,12 @@
 //! within [`BOUND`], and each value subtraction the smallest bias covering its subtrahend in every
 //! representation. Inside a formula, values reach integer bounds of at most `384` and positional
 //! limb bounds of at most `12`, and wide sums of products reach at most `334848`.
+//!
+//! # Kernels
+//!
+//! Conversions and formulas ([`load`](Points::load), [`store`](Points::store),
+//! [`endomorphism`](Points::endomorphism), [`add`](Points::add), and [`double`](Points::double))
+//! run as their own kernels, so callers share one copy.
 
 use crate::core::{
     curve::Points,
@@ -234,8 +240,6 @@ impl<S: Simd, F: Field<S>> Points<S> for Point<F> {
     /// bias; `Z`'s conjugate multiplies its imaginary component by `-1` instead, as
     /// [`Self::negate`] does, so the coordinates keep their bounds. Seven base field products and
     /// five reductions in all.
-    ///
-    /// Runs as its own kernel, so callers share one copy.
     #[inline(always)]
     fn endomorphism(self, simd: S) -> Self {
         simd.execute(
@@ -285,8 +289,6 @@ impl<S: Simd, F: Field<S>> Points<S> for Point<F> {
     /// or the two products accumulated for [`Field::SCHOOLBOOK`], and `3b z1 z2` comes from one
     /// more product, so that `Y1 Y2 + 3b Z1 Z2` and `Y1 Y2 - 3b Z1 Z2` each take one reduction. That
     /// leaves thirteen extension products, reduced in two stages of six and three values.
-    ///
-    /// Runs as its own kernel, so callers share one copy of the formula.
     #[inline(always)]
     fn add(self, simd: S, rhs: Self) -> Self {
         simd.execute(
@@ -313,8 +315,6 @@ impl<S: Simd, F: Field<S>> Points<S> for Point<F> {
     /// This is Algorithm 9 of Renes, Costello, and Batina, which accepts any point, including the
     /// identity. It returns the same point as [`Self::add`] of `self` with itself, with seven
     /// extension products and one squaring, reduced in two stages of four and three values.
-    ///
-    /// Runs as its own kernel, so callers share one copy of the formula.
     #[inline(always)]
     fn double(self, simd: S) -> Self {
         simd.execute(
