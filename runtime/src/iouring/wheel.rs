@@ -647,14 +647,15 @@ pub mod tests {
     /// removals with slot reuse, and expiries with random budgets and
     /// occasionally stale times, checked against a `BTreeMap` of firing
     /// times after every step: a fired slot was resident and its firing
-    /// time had passed at the latest time any caller passed, an unbudgeted
-    /// pass leaves nothing due, firing times are less than one tick after
-    /// their deadlines, the bound never exceeds the earliest firing time or,
-    /// while a bucket is detached, the base's time, and an insertion returns
-    /// a time between the bound and its firing time without lowering the
-    /// bound below what it returns. Each insertion step inserts `crowd`
-    /// slots within 2^16 ns of one deadline, so that a large crowd fills
-    /// buckets past their lazy size.
+    /// time had passed at the latest time any caller passed, a pass fires no
+    /// more slots than its budget has units, an unbudgeted pass leaves
+    /// nothing due, firing times are less than one tick after their
+    /// deadlines, the bound never exceeds the earliest firing time or, while
+    /// a bucket is detached, the base's time, and an insertion returns a time
+    /// between the bound and its firing time without lowering the bound
+    /// below what it returns. Each insertion step inserts `crowd` slots
+    /// within 2^16 ns of one deadline, so that a large crowd fills buckets
+    /// past their lazy size.
     fn model<const RESOLUTION: u64>(seed: u64, steps: usize, max_bits: u32, crowd: u32) {
         // A wheel and its model: live slots with their firing times, the
         // same ordered by firing time, and free slots for reuse.
@@ -735,10 +736,16 @@ pub mod tests {
                     } else {
                         u32::MAX
                     };
+                    let allowance = budget;
 
-                    // Every fired slot was live and due by the latest time.
+                    // Every fired slot was live and due by the latest time, and
+                    // each cost one unit of the budget.
                     fired.clear();
                     wheel.expire(now, &mut budget, &mut |slot| fired.push(slot));
+                    assert!(
+                        fired.len() <= (allowance - budget) as usize,
+                        "uncharged firing at step {step}"
+                    );
                     for slot in &fired {
                         let firing = live.remove(slot).expect("stale or duplicate firing");
                         assert!(firing <= latest, "early firing at step {step}");
@@ -1112,13 +1119,16 @@ pub mod tests {
 
     #[test]
     fn test_clear_empties_and_allows_reuse() {
-        // A budgeted pass leaves a partly drained backlog for clear to discard.
+        // A budgeted pass leaves a partly drained detached bucket and two
+        // occupied ones for clear to discard.
         let mut wheel = Wheel::<FINE>::new(0);
         for slot in 0..10u32 {
-            wheel.insert(slot, 1_000_000 * u64::from(slot));
+            wheel.insert(slot, 1_000_000 * u64::from(slot / 4));
         }
         let mut budget = 3;
         wheel.expire(5_000_000, &mut budget, &mut |_| {});
+        assert_ne!(wheel.pending, NONE);
+        assert_eq!(wheel.len(), 7);
 
         // Clearing leaves an empty wheel that holds no link storage.
         wheel.clear();

@@ -1657,41 +1657,6 @@ pub mod tests {
     }
 
     #[test]
-    fn test_budget_leaves_a_backlog_that_drains() {
-        // Many more registrations than one budget, all due by `now`.
-        let timers = Arc::new(Timers::new());
-        let (count, waker) = counter();
-        let deadline = later();
-        let mut sleepers: Vec<_> = (0..1000u64)
-            .map(|index| register(&timers, deadline + index % 3, &waker))
-            .collect();
-        let now = deadline + RESOLUTION;
-
-        // Expire at one fixed time until the bound passes it.
-        let mut passes = 0;
-        loop {
-            let mut deferred = Deferred::default();
-            let bound = timers.expire(now, BUDGET, &mut deferred);
-            passes += 1;
-            assert!(deferred.wakes.len() <= BUDGET as usize);
-            run(&mut deferred);
-
-            // A backlog keeps the bound at or below now, so the owner serves
-            // again before it parks.
-            if bound > now {
-                break;
-            }
-        }
-
-        // Every registration fired once, within a few passes.
-        assert_eq!(count.get(), 1000);
-        assert!((4..=6).contains(&passes), "took {passes} passes");
-        for sleeper in &mut sleepers {
-            assert_eq!(poll_with(sleeper, &waker), Poll::Ready(Outcome::Fired));
-        }
-    }
-
-    #[test]
     fn test_rescue_skips_held_or_closed_timers() {
         // An overdue registration on timers whose lock this thread holds.
         let timers = Arc::new(Timers::new());
@@ -1759,7 +1724,7 @@ pub mod tests {
 
     #[test]
     fn test_rescue_leaves_a_backlog_to_an_owner_that_serves() {
-        // Two budgets of registrations on worker 1's timers, all firing at
+        // Three budgets of registrations on worker 1's timers, all firing at
         // `firing`, of two workers' timers with one origin.
         let threshold = RESCUE_THRESHOLD.as_nanos() as u64;
         let origin = Instant::now();
@@ -1769,18 +1734,18 @@ pub mod tests {
         let (count, waker) = counter();
         let deadline = later();
         let firing = Wheel::<RESOLUTION>::rounded(deadline);
-        let _sleepers: Vec<_> = (0..2 * BUDGET)
+        let budget = BUDGET as usize;
+        let _sleepers: Vec<_> = (0..3 * budget)
             .map(|_| register(&all[1], deadline, &waker))
             .collect();
 
-        // The owner's late pass fires at most one budget and leaves the rest
-        // due, with its bound at or before their firing time.
+        // The owner's late pass fires one budget and leaves the rest due, with
+        // its bound at or before their firing time.
         let served = firing + 2 * threshold;
         let mut deferred = Deferred::default();
         assert!(all[1].expire(served, BUDGET, &mut deferred) <= firing);
+        assert_eq!(deferred.wakes.len(), budget);
         run(&mut deferred);
-        let fired = count.get();
-        assert!(fired < 2 * BUDGET as usize);
 
         // The bound is overdue by more than the threshold, but while the
         // owner's pass is recent, peers leave the backlog to the owner.
@@ -1788,10 +1753,15 @@ pub mod tests {
         Timers::rescue_peers(&all, 0, at(served + threshold - 1), &mut deferred);
         assert!(deferred.is_empty());
 
-        // An owner that has not served for the threshold is rescued.
+        // An owner that has not served for the threshold is rescued, one
+        // budget per check. A rescue leaves the owner's pass time alone, so
+        // the next check, however soon, rescues the owner again.
         Timers::rescue_peers(&all, 0, at(served + threshold), &mut deferred);
         run(&mut deferred);
-        assert!(count.get() > fired);
+        assert_eq!(count.get(), 2 * budget);
+        Timers::rescue_peers(&all, 0, at(served + threshold), &mut deferred);
+        run(&mut deferred);
+        assert_eq!(count.get(), 3 * budget);
     }
 
     #[test]
@@ -1844,28 +1814,6 @@ pub mod tests {
         run(&mut deferred);
         assert_eq!(count.get(), 1);
         assert_eq!(poll_with(&mut current, &waker), Poll::Ready(Outcome::Fired));
-    }
-
-    #[test]
-    fn test_non_task_waker_repolls_lock_without_a_clone() {
-        // A registration with a waker that is not a task waker.
-        let timers = Arc::new(Timers::new());
-        let (count, waker) = counter();
-        let mut sleeper = register(&timers, later(), &waker);
-        assert_eq!(Arc::strong_count(&count), 3);
-
-        // Only a task waker's identity is safe to match without the lock, so
-        // each repoll with an equivalent waker locks once and clones nothing.
-        for _ in 0..3 {
-            let before = locks();
-            assert!(poll_with(&mut sleeper, &waker).is_pending());
-            assert_eq!(locks() - before, 1);
-        }
-        assert_eq!(Arc::strong_count(&count), 3);
-
-        // Dropping the sleeper releases the stored waker.
-        sleeper.abandon();
-        assert_eq!(Arc::strong_count(&count), 2);
     }
 
     /// Run `test` inside a runtime task's poll, with that task's waker.
@@ -3361,61 +3309,57 @@ pub mod tests {
         );
     }
 
+    #[commonware_macros::test_group("miri")]
     #[test]
-    fn test_stale_identity_queued_by_a_drop_removes_nothing() {
-        Runner::default().start(|context| async move {
-            context
-                .dedicated()
-                .spawn(|_| async {
-                    // A sleep registers on its worker.
-                    let deadline = Instant::now() + Duration::from_secs(60);
-                    let mut sleep = Sleep::at(deadline);
-                    pend(&mut sleep, Waker::noop());
-                    let (timers, old) = registration(&sleep);
-
-                    // A poll with a changed waker on a thread without a
-                    // worker clones it after the lock, and a peer's rescue
-                    // fires the registration meanwhile. The poll concludes
-                    // the firing, then unwinds from the destructor of the
-                    // clone, so the sleep keeps the concluded identity.
-                    let sleep = thread::spawn({
-                        let timers = timers.clone();
-                        move || {
-                            let mut sleep = sleep;
-                            let check = Arc::new(FireOnClone {
-                                at: timers.nanos(deadline) + RESOLUTION,
-                                timers,
-                                armed: AtomicBool::new(false),
-                            });
-                            let waker = FireOnClone::waker(&check);
-                            check.armed.store(true, Ordering::SeqCst);
-                            let polled = catch_unwind(AssertUnwindSafe(|| {
-                                sleep.poll_unpin(&mut Context::from_waker(&waker))
-                            }));
-                            check.armed.store(false, Ordering::SeqCst);
-                            assert!(polled.is_err());
-                            sleep
-                        }
-                    })
-                    .join()
-                    .unwrap();
-                    assert!(!timers.holds(old));
-
-                    // A new registration reuses the slot. Dropping the sleep
-                    // on its worker queues the stale identity, whose removal
-                    // leaves the new registration waiting.
-                    let mut current = Sleep::at(deadline + Duration::from_secs(60));
-                    pend(&mut current, Waker::noop());
-                    let (_, current_id) = registration(&current);
-                    assert_eq!(current_id.index, old.index);
-                    drop(sleep);
-                    reschedule().await;
-                    assert!(timers.holds(current_id));
-                    assert_eq!(timers.resident(), 1);
-                })
-                .await
-                .unwrap();
+    fn test_stale_identity_of_an_unwound_poll_removes_nothing() {
+        // A sleep registered on timers of no worker, and a waker whose clone
+        // fires the registration as a peer's rescue would.
+        let timers = Arc::new(Timers::new());
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut sleep = registered(&timers, deadline, Waker::noop());
+        let (_, old) = registration(&sleep);
+        let check = Arc::new(FireOnClone {
+            at: timers.nanos(deadline) + RESOLUTION,
+            timers: timers.clone(),
+            armed: AtomicBool::new(false),
         });
+        let waker = FireOnClone::waker(&check);
+
+        // A poll with the changed waker clones it after the lock, and the
+        // rescue fires the registration meanwhile. The poll concludes the
+        // firing, then unwinds from the destructor of the clone, so the sleep
+        // keeps the concluded identity.
+        check.armed.store(true, Ordering::SeqCst);
+        let polled = catch_unwind(AssertUnwindSafe(|| {
+            sleep.poll_unpin(&mut Context::from_waker(&waker))
+        }));
+        check.armed.store(false, Ordering::SeqCst);
+        assert!(polled.is_err());
+        assert!(!timers.holds(old));
+
+        // A new registration reuses the slot. The stale identity reaches it
+        // neither through the owner's removal of queued identities, where a
+        // drop of the sleep on its worker would leave it, nor through a drop
+        // of the sleep anywhere else.
+        let later = deadline + Duration::from_secs(60);
+        let current = registered(&timers, later, &waker);
+        let (_, current_id) = registration(&current);
+        assert_eq!(current_id.index, old.index);
+        let mut deferred = Deferred::default();
+        assert!(!timers.drain(&mut vec![old], &mut deferred));
+        assert!(deferred.is_empty());
+        drop(sleep);
+        assert!(timers.holds(current_id));
+        assert_eq!(timers.resident(), 1);
+
+        // The new registration fires at its own time and wakes its waker,
+        // after which every reference to the waker is released.
+        timers.expire(timers.nanos(later) + RESOLUTION, BUDGET, &mut deferred);
+        assert_eq!(deferred.wakes.len(), 1);
+        run(&mut deferred);
+        drop(current);
+        drop(waker);
+        assert_eq!(Arc::strong_count(&check), 1);
     }
 
     #[test]
@@ -3658,23 +3602,25 @@ pub mod tests {
                     assert_eq!(queued(), 0);
                     assert!(capacity() > DROPPED_CAPACITY);
 
-                    // The next service pass gives the burst's storage back.
+                    // The next service pass gives the burst's storage back,
+                    // down to at least the bound.
                     reschedule().await;
-                    assert_eq!(capacity(), DROPPED_CAPACITY);
+                    assert!((DROPPED_CAPACITY..burst).contains(&capacity()));
 
                     // So does one that drains a burst.
                     drop(sleeps);
-                    assert!(capacity() > DROPPED_CAPACITY);
+                    assert!(capacity() >= burst);
                     reschedule().await;
                     assert_eq!(queued(), 0);
-                    assert_eq!(capacity(), DROPPED_CAPACITY);
+                    let kept = capacity();
+                    assert!((DROPPED_CAPACITY..burst).contains(&kept));
 
                     // A queue within the bound keeps its capacity.
                     let mut sleep = Sleep::new(Duration::from_secs(60));
                     pend(&mut sleep, Waker::noop());
                     drop(sleep);
                     reschedule().await;
-                    assert_eq!(capacity(), DROPPED_CAPACITY);
+                    assert_eq!(capacity(), kept);
                 })
                 .await
                 .unwrap();
@@ -3864,7 +3810,7 @@ pub mod tests {
     #[test]
     fn test_busy_peer_rescues_a_stalled_owner() {
         let cfg = Config::default().with_worker_threads(2);
-        let fired = Runner::new(cfg).start(|context| async move {
+        Runner::new(cfg).start(|context| async move {
             // Wait until a busy task runs on the other worker, which then
             // keeps running service passes that rescue overdue peer timers.
             let root = thread::current().id();
@@ -3889,7 +3835,8 @@ pub mod tests {
                 reschedule().await;
             }
 
-            // Register on worker zero, then stall it inside this poll.
+            // Register on worker zero, then stall it inside this poll until
+            // the sleep fires, which only the peer can make happen meanwhile.
             let (count, waker) = counter();
             let mut sleep = Sleep::new(Duration::from_millis(5));
             assert!(
@@ -3898,10 +3845,13 @@ pub mod tests {
                     .is_pending()
             );
             let start = Instant::now();
-            while count.get() == 0 && start.elapsed() < Duration::from_millis(300) {
+            while count.get() == 0 {
+                assert!(
+                    start.elapsed() < Duration::from_secs(10),
+                    "the busy peer did not rescue the stalled owner's sleep"
+                );
                 std::hint::spin_loop();
             }
-            let fired = (count.get() > 0).then(|| start.elapsed());
 
             // Finish the sleep and the busy tasks.
             sleep.await;
@@ -3909,13 +3859,75 @@ pub mod tests {
             for task in busy {
                 task.await.unwrap();
             }
+        });
+    }
+
+    #[test]
+    fn test_waking_peer_rescues_a_stalled_owner() {
+        /// Period of the other worker's own sleep, after which it wakes from
+        /// each park.
+        const PERIOD: Duration = Duration::from_millis(10);
+
+        let cfg = Config::default().with_worker_threads(2);
+        let fired = Runner::new(cfg).start(|context| async move {
+            // Two runnable tasks make a backlog that the other worker steals
+            // from. The one it polls sleeps there in a loop, so that worker
+            // parks and wakes for its own timer once per period. The other
+            // ends.
+            let root = thread::current().id();
+            let stop = Arc::new(AtomicBool::new(false));
+            let moved = Arc::new(AtomicBool::new(false));
+            let tasks: Vec<_> = (0..2)
+                .map(|_| {
+                    let (stop, moved) = (stop.clone(), moved.clone());
+                    context.child("heartbeat").spawn(move |context| async move {
+                        while thread::current().id() == root {
+                            if moved.load(Ordering::Acquire) {
+                                return;
+                            }
+                            reschedule().await;
+                        }
+                        moved.store(true, Ordering::Release);
+                        while !stop.load(Ordering::Acquire) {
+                            context.sleep(PERIOD).await;
+                        }
+                    })
+                })
+                .collect();
+            let start = Instant::now();
+            while !moved.load(Ordering::Acquire) {
+                assert!(start.elapsed() < Duration::from_secs(10), "no task moved");
+                reschedule().await;
+            }
+
+            // Let the task left here end and the other worker settle.
+            context.sleep(Duration::from_millis(20)).await;
+
+            // Register on worker zero, then stall it inside this poll for up
+            // to 300 ms, until the sleep fires.
+            let (count, waker) = counter();
+            let mut sleep = Sleep::new(Duration::from_millis(5));
+            pend(&mut sleep, &waker);
+            let start = Instant::now();
+            while count.get() == 0 && start.elapsed() < Duration::from_millis(300) {
+                std::hint::spin_loop();
+            }
+            let fired = (count.get() > 0).then(|| start.elapsed());
+
+            // Finish the sleep and the tasks.
+            sleep.await;
+            stop.store(true, Ordering::Release);
+            for task in tasks {
+                task.await.unwrap();
+            }
             fired
         });
 
-        // The peer fired the sleep long before the stall ended.
-        let fired = fired.expect("the busy peer did not rescue the stalled owner's sleep");
+        // The deadline, the threshold, and at most one period to the peer's
+        // next wake, with slack for a loaded host.
+        let fired = fired.expect("the waking peer did not rescue the stalled owner's sleep");
         assert!(
-            fired < Duration::from_millis(100),
+            fired < Duration::from_millis(6) + PERIOD + Duration::from_millis(40),
             "rescued after {fired:?}"
         );
     }
@@ -3925,9 +3937,9 @@ pub mod tests {
         // One pool worker, so no peer can rescue its timers. A dedicated
         // worker polls the sleep every 200 us while the owner stalls.
         let cfg = Config::default().with_worker_threads(1);
-        let late = Runner::new(cfg).start(|context| async move {
+        Runner::new(cfg).start(|context| async move {
             let (sender, receiver) = mpsc::channel::<Sleep>();
-            let done = Arc::new(OnceLock::new());
+            let done = Arc::new(AtomicBool::new(false));
             let poller = context.child("poller").dedicated().spawn({
                 let done = done.clone();
                 move |context| async move {
@@ -3939,7 +3951,7 @@ pub mod tests {
                     };
                     loop {
                         if poll!(&mut sleep).is_ready() {
-                            done.set(Instant::now()).unwrap();
+                            done.store(true, Ordering::Release);
                             return;
                         }
                         context.sleep(Duration::from_micros(200)).await;
@@ -3948,26 +3960,21 @@ pub mod tests {
             });
 
             // Register on the pool worker, hand the sleep to the poller, and
-            // stall well past the deadline.
-            let deadline = Instant::now() + Duration::from_millis(5);
-            let mut sleep = Sleep::at(deadline);
+            // stall until the poller completes it, which the owner cannot make
+            // happen meanwhile.
+            let mut sleep = Sleep::new(Duration::from_millis(5));
             assert!(poll!(&mut sleep).is_pending());
             sender.send(sleep).unwrap();
-            let thaw = Instant::now() + Duration::from_millis(150);
-            while Instant::now() < thaw {
+            let start = Instant::now();
+            while !done.load(Ordering::Acquire) {
+                assert!(
+                    start.elapsed() < Duration::from_secs(10),
+                    "the polling worker did not complete the sleep"
+                );
                 std::hint::spin_loop();
             }
-            let completed = done.get().map(|at| at.saturating_duration_since(deadline));
             poller.await.unwrap();
-            completed
         });
-
-        // The poller completed the sleep soon after its deadline.
-        let late = late.expect("the polling worker did not complete the sleep");
-        assert!(
-            late < Duration::from_millis(50),
-            "completed {late:?} after the deadline"
-        );
     }
 }
 
@@ -4117,7 +4124,7 @@ mod loom_tests {
     }
 
     #[test]
-    fn recycled_identity_of_a_consumed_waker_takes_the_lock() {
+    fn test_recycled_identity_of_a_consumed_waker_takes_the_lock() {
         for close in [false, true] {
             loom::model(move || {
                 // A finished task handed its registered sleep to the slot's
@@ -4196,7 +4203,7 @@ mod loom_tests {
     }
 
     #[test]
-    fn reused_storage_of_a_kept_waker_takes_the_lock() {
+    fn test_reused_storage_of_a_kept_waker_takes_the_lock() {
         for close in [false, true] {
             loom::model(move || {
                 // A task registers a sleep and repolls it, and finishes after

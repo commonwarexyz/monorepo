@@ -4432,7 +4432,10 @@ fn test_expiry_backlog_keeps_pace_with_long_polls() {
                         .collect();
                     poll_fn(|cx| {
                         for sleep in &mut sleeps {
-                            assert!(sleep.poll_unpin(cx).is_pending());
+                            assert!(
+                                sleep.poll_unpin(cx).is_pending(),
+                                "the storm's deadline passed before its group registered"
+                            );
                         }
                         Poll::Ready(())
                     })
@@ -4473,6 +4476,89 @@ fn test_expiry_backlog_keeps_pace_with_long_polls() {
         assert_eq!(
             longest, BATCH_SIZE,
             "longest run of long polls between passes in {MEASURED} after the storm"
+        );
+    });
+}
+
+/// A storm of request deadlines due at once beside a task whose every poll
+/// outlasts the backlog slice. Each expiry pass times out one budget of
+/// requests. With a full batch between passes, each further budget would wait
+/// for about [`BATCH_SIZE`] of the long polls. The slice holds the whole storm to
+/// a few.
+#[test]
+fn test_deadline_backlog_keeps_pace_with_long_polls() {
+    /// Requests in the storm, three budgets.
+    const REQUESTS: usize = 3 * BUDGET as usize;
+
+    /// Time from the storm's setup to its deadline, by which every request
+    /// must have registered, with ample room for a slow host.
+    const LEAD: Duration = Duration::from_millis(200);
+
+    // The ring holds one request in flight, the first, which has no deadline,
+    // so the storm's requests stay queued and time out without the kernel.
+    let cfg = config().with_ring_config(RingConfig { size: 1 });
+    Runner::new(cfg).start(|context| async move {
+        // A task that requeues itself after polling for twice the slice.
+        let polls = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let spinner = context.child("spinner").spawn({
+            let polls = polls.clone();
+            let stop = stop.clone();
+            move |_| async move {
+                while !stop.load(Ordering::Relaxed) {
+                    let began = Instant::now();
+                    while began.elapsed() < 2 * BACKLOG_SLICE {
+                        std::hint::spin_loop();
+                    }
+                    polls.fetch_add(1, Ordering::Relaxed);
+                    reschedule().await;
+                }
+            }
+        });
+
+        // Receives on a socket that never has data, registered in one poll
+        // on the only worker, all but the first at one deadline.
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        let fd: Arc<OwnedFd> = Arc::new(socket.into());
+        let receive = move |deadline| {
+            Operation::register(Request::Recv(RecvRequest {
+                fd: fd.clone(),
+                buf: IoBufMut::zeroed(1),
+                offset: 0,
+                len: 1,
+                exact: true,
+                deadline,
+            }))
+        };
+        let storm = context.child("storm").spawn({
+            let polls = polls.clone();
+            move |_| async move {
+                let _in_flight = receive(None);
+                let deadline = Instant::now() + LEAD;
+                let requests: Vec<_> = (0..REQUESTS).map(|_| receive(Some(deadline))).collect();
+
+                // Report the long polls counted when the first request timed
+                // out and when the last one did.
+                let mut first = None;
+                for request in requests {
+                    assert!(matches!(
+                        request.await,
+                        Ok(RequestOutput::Recv(Err((_, Error::Timeout))))
+                    ));
+                    first.get_or_insert(polls.load(Ordering::Relaxed));
+                }
+                (first.unwrap(), polls.load(Ordering::Relaxed))
+            }
+        });
+        let (first, last) = storm.await.unwrap();
+        stop.store(true, Ordering::Relaxed);
+        spinner.await.unwrap();
+
+        // Every pass after the first followed a slice, not a full batch.
+        assert!(
+            last - first < BATCH_SIZE,
+            "the storm spanned {} long polls",
+            last - first
         );
     });
 }
