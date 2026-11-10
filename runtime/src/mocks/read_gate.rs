@@ -1,7 +1,7 @@
 //! Read gates for cancelling storage operations at a known read.
 
 use super::*;
-use std::future::pending;
+use std::{collections::VecDeque, future::pending};
 
 /// Parks reads of one partition while armed so tests can cancel their callers.
 #[derive(Clone)]
@@ -27,11 +27,24 @@ impl ReadGate {
         self.state.lock().blocked
     }
 
+    /// Return a receiver that resolves when a later read parks at the gate. Each parked read
+    /// resolves the oldest receiver still held.
+    pub fn parked(&self) -> oneshot::Receiver<()> {
+        let (parked, receiver) = oneshot::channel();
+        self.state.lock().parked.push_back(parked);
+        receiver
+    }
+
     async fn wait(&self, selected: bool) {
         let block = {
             let mut state = self.state.lock();
             if selected && state.armed {
                 state.blocked += 1;
+                while let Some(parked) = state.parked.pop_front() {
+                    if parked.send(()).is_ok() {
+                        break;
+                    }
+                }
                 true
             } else {
                 false
@@ -47,6 +60,8 @@ struct ReadGateState {
     partition: String,
     armed: bool,
     blocked: usize,
+    /// Senders for [ReadGate::parked] receivers that no read has resolved yet, oldest first.
+    parked: VecDeque<oneshot::Sender<()>>,
 }
 
 /// Context wrapper that gates reads of a selected partition.
@@ -64,6 +79,7 @@ impl<E> ReadGateContext<E> {
                 partition,
                 armed: false,
                 blocked: 0,
+                parked: VecDeque::new(),
             })),
         };
         (
@@ -77,6 +93,36 @@ impl<E> ReadGateContext<E> {
 }
 
 forward_context!(ReadGateContext, gate);
+
+impl<E: Spawner> Spawner for ReadGateContext<E> {
+    fn shared(mut self, blocking: bool) -> Self {
+        self.inner = self.inner.shared(blocking);
+        self
+    }
+
+    fn dedicated(mut self) -> Self {
+        self.inner = self.inner.dedicated();
+        self
+    }
+
+    fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
+    where
+        F: FnOnce(Self) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let gate = self.gate;
+        self.inner.spawn(move |inner| f(Self { inner, gate }))
+    }
+
+    async fn stop(self, value: i32, timeout: Option<std::time::Duration>) -> Result<(), Error> {
+        self.inner.stop(value, timeout).await
+    }
+
+    fn stopped(&self) -> Signal {
+        self.inner.stopped()
+    }
+}
 
 impl<E: crate::Storage> crate::Storage for ReadGateContext<E> {
     type Blob = ReadGateBlob<E::Blob>;

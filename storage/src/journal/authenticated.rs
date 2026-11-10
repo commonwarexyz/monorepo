@@ -1572,7 +1572,10 @@ mod tests {
         Runner as _, Strategizer as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        mocks::{DelayedSyncContext, PendingSyncs, RecordingContext, drive_pending_syncs},
+        mocks::{
+            DelayedSyncContext, PendingSyncs, ReadGateContext, RecordingContext,
+            drive_pending_syncs,
+        },
         reschedule,
         telemetry::traces::collector::TraceStorage,
     };
@@ -2949,47 +2952,68 @@ mod tests {
     /// have released it, so the journal reopens at once.
     #[test_traced]
     fn test_finish_with_failed_read_releases_journal() {
-        deterministic::Runner::default().start(|context| async move {
-            type F = mmr::Family;
-            drop(create_journal_with_ops::<F>(context.child("initial"), "failed-read", 200).await);
-            let recovery = TestJournal::<F>::prepare(
-                context.child("failed"),
-                merkle_config("failed-read"),
-                journal_config("failed-read"),
-                None,
-                |_| true,
-                ForwardFold,
-            )
-            .await
-            .unwrap();
-            let result: Result<(_, ()), Error<F>> = recovery
-                .finish_with(|journal| async move {
-                    // The caller, this reader and the replay task hold three references. Fail
-                    // only once a subtree task holds one too.
-                    let mut yields = 0;
-                    while Arc::strong_count(&journal) <= 3 {
-                        yields += 1;
-                        assert!(yields < 1_000, "no subtree task ever held the journal");
-                        reschedule().await;
-                    }
-                    drop(journal);
-                    Err(Error::Merkle(merkle::Error::DataCorrupted("read")))
-                })
-                .await;
-            assert!(matches!(
-                result,
-                Err(Error::Merkle(merkle::Error::DataCorrupted(_)))
-            ));
-            TestJournal::<F>::new(
-                context.child("reopened"),
-                merkle_config("failed-read"),
-                journal_config("failed-read"),
-                |_| true,
-                ForwardFold,
-            )
-            .await
-            .unwrap();
-        });
+        type Gated = ReadGateContext<deterministic::Context>;
+        type GatedJournal = Journal<
+            mmr::Family,
+            Gated,
+            ContiguousJournal<Gated, TestOp<mmr::Family>>,
+            Sha256,
+            Sequential,
+        >;
+
+        // The executor's poll order decides whether an aborted subtree task still holds the journal
+        // once `finish_with` resumes, so cover several seeds.
+        for seed in 0..8u64 {
+            deterministic::Runner::seeded(seed).start(|context| async move {
+                let (merkle_cfg, journal_cfg) =
+                    (merkle_config("failed-read"), journal_config("failed-read"));
+                let initial = context.child("initial");
+                drop(create_journal_with_ops::<mmr::Family>(initial, "failed-read", 200).await);
+
+                // Open the recovery over storage whose reads of the operations can be parked.
+                let (gated, gate) = ReadGateContext::new(
+                    context.child("failed"),
+                    format!("{}-blobs", journal_cfg.partition),
+                );
+                let recovery = GatedJournal::prepare(
+                    gated,
+                    merkle_cfg.clone(),
+                    journal_cfg.clone(),
+                    None,
+                    |_| true,
+                    ForwardFold,
+                )
+                .await
+                .unwrap();
+
+                // Fail once every subtree task is parked in a read, holding the journal.
+                let subtrees = merkle_cfg.replay_concurrency.get();
+                let result: Result<(_, ()), Error<mmr::Family>> = recovery
+                    .finish_with(|journal| async move {
+                        drop(journal);
+                        gate.arm();
+                        let parked: Vec<_> = (0..subtrees).map(|_| gate.parked()).collect();
+                        for parked in parked {
+                            parked.await.unwrap();
+                        }
+                        Err(Error::Merkle(merkle::Error::DataCorrupted("read")))
+                    })
+                    .await;
+                assert!(matches!(
+                    result,
+                    Err(Error::Merkle(merkle::Error::DataCorrupted(_)))
+                ));
+                TestJournal::<mmr::Family>::new(
+                    context.child("reopened"),
+                    merkle_cfg,
+                    journal_cfg,
+                    |_| true,
+                    ForwardFold,
+                )
+                .await
+                .unwrap();
+            });
+        }
     }
 
     /// A journal built from synced operations records the synced boundary, and reopens there with
