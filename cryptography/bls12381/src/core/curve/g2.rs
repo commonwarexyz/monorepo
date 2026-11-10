@@ -111,9 +111,6 @@ impl<S: Simd, F: Field<S>> Points<S> for Point<F> {
     type Coordinates = Coordinates;
     type Raw = [[F::Raw; 2]; 3];
 
-    /// Loads up to one projective point per lane, filling the remaining lanes with `fill`.
-    ///
-    /// Runs as its own kernel, so callers share one copy of the conversions.
     #[inline(always)]
     fn load(simd: S, points: &[Coordinates], fill: &Coordinates) -> Self {
         simd.execute(
@@ -136,9 +133,6 @@ impl<S: Simd, F: Field<S>> Points<S> for Point<F> {
         )
     }
 
-    /// Stores each lane's canonical projective coordinates, dropping lanes beyond `points`.
-    ///
-    /// Runs as its own kernel, so callers share one copy of the conversions.
     #[inline(always)]
     fn store(self, simd: S, points: &mut [Coordinates]) {
         simd.execute(
@@ -161,19 +155,6 @@ impl<S: Simd, F: Field<S>> Points<S> for Point<F> {
         )
     }
 
-    /// Returns `rhs` in every lane whose bit is set in `lanes`, and `self` in the others.
-    ///
-    /// Bit `i` of `lanes` selects lane `i`, without branching on `lanes`.
-    #[inline(always)]
-    fn select(self, simd: S, rhs: Self, lanes: u64) -> Self {
-        Self {
-            x: self.x.select(simd, rhs.x, lanes),
-            y: self.y.select(simd, rhs.y, lanes),
-            z: self.z.select(simd, rhs.z, lanes),
-        }
-    }
-
-    /// Stores each lane's raw coordinates, dropping lanes beyond `points`.
     #[inline(always)]
     fn store_raw(self, simd: S, points: &mut [[[F::Raw; 2]; 3]]) {
         const { assert!(F::LANES <= MAX_LANES) };
@@ -194,7 +175,6 @@ impl<S: Simd, F: Field<S>> Points<S> for Point<F> {
         }
     }
 
-    /// Loads lane `i` from the raw coordinates `points[i]`, for at least `F::LANES` entries.
     #[inline(always)]
     fn load_raw(simd: S, points: &[&[[F::Raw; 2]; 3]]) -> Self {
         const { assert!(F::LANES <= MAX_LANES) };
@@ -209,6 +189,15 @@ impl<S: Simd, F: Field<S>> Points<S> for Point<F> {
             x: coordinate(0),
             y: coordinate(1),
             z: coordinate(2),
+        }
+    }
+
+    #[inline(always)]
+    fn select(self, simd: S, rhs: Self, lanes: u64) -> Self {
+        Self {
+            x: self.x.select(simd, rhs.x, lanes),
+            y: self.y.select(simd, rhs.y, lanes),
+            z: self.z.select(simd, rhs.z, lanes),
         }
     }
 
