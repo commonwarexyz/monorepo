@@ -351,10 +351,10 @@
 //! the last post.
 //!
 //! - **R1.** Rely on a receipt only if it names this account as receiver, [Receipt::verify] accepts
-//!   it under the deployment's namespace and operator key, the close of its epoch has not posted,
-//!   and the ledger has not halted. Verify it before comparing it with the receipts held. Otherwise
-//!   the receiver relies on a payment it cannot enforce, and a refusal that depends on what it
-//!   holds reveals that to whoever sent a forged receipt.
+//!   it under the deployment's namespace and operator key, its epoch is the one whose close the
+//!   ledger expects or the one after, and the ledger has not halted. Verify it before comparing it
+//!   with the receipts held. Otherwise the receiver relies on a payment it cannot enforce, and a
+//!   refusal that depends on what it holds reveals that to whoever sent a forged receipt.
 //!
 //! - **R2.** Keep, per epoch and sender, the receipt with the largest amount, persisted before
 //!   relying on it. Otherwise, after an omission, it may hold no receipt above the posted amount

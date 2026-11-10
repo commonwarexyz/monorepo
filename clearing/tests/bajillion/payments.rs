@@ -864,3 +864,32 @@ fn test_posted_close_needs_a_valid_opening() {
     ));
     assert!(alice.pending().is_some());
 }
+
+/// A receiver relies on a receipt only of the epoch whose close the ledger expects or the one
+/// after, the epochs an operator that keeps its obligations admits in. It refuses a receipt of a
+/// later epoch until the posts in between are final.
+#[test]
+fn test_receiver_refuses_receipts_of_unopened_epochs() {
+    // Alice and a faulty operator countersign a state of epoch 4 while the ledger expects the
+    // close of epoch 2.
+    let mut alice = sender(0);
+    let request = alice.send(4, amounts(&[(1, 10)])).unwrap();
+    let state = State {
+        epoch: 4,
+        account: account(0),
+        payments: request.payments,
+        previous: request.previous,
+    };
+    let acknowledgement = state.acknowledge(&operator_key(), &namespace());
+    let receipts = alice.acknowledged(&acknowledgement).unwrap();
+    let mut bob = receiver(1, 2);
+    assert!(matches!(
+        bob.receive(receipts[0].clone()),
+        Err(Receiving::Unopened)
+    ));
+
+    // Once the close of epoch 2 posts, the ledger expects the close of epoch 3, and epoch 4 is
+    // the one after.
+    bob.posted(2);
+    assert_eq!(bob.receive(receipts[0].clone()).unwrap(), 10);
+}

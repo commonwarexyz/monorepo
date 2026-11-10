@@ -20,6 +20,9 @@ pub enum Refusal {
     /// The close of the receipt's epoch already posted.
     #[error("the close of the receipt's epoch already posted")]
     Closed,
+    /// The receipt's epoch is more than one past the close the ledger expects.
+    #[error("the receipt's epoch is more than one past the close the ledger expects")]
+    Unopened,
     /// The ledger halted.
     #[error("the ledger halted")]
     Halted,
@@ -196,6 +199,9 @@ impl<P: PublicKey, O: PublicKey, H: Hasher, A: Amount> Receiver<P, O, H, A> {
         }
         if receipt.state.epoch < self.persisted.next {
             return Err(Refusal::Closed);
+        }
+        if receipt.state.epoch > self.persisted.next.saturating_add(1) {
+            return Err(Refusal::Unopened);
         }
 
         // The receipt is verified before it is compared with the one held, so a receipt this
