@@ -57,14 +57,14 @@ const ROOTS_OF_UNITY: [Scalar; TWO_ADICITY as usize + 1] = {
     let mut lg = TWO_ADICITY as usize;
     roots[lg] = GENERATOR.pow(odd);
     while lg > 0 {
-        roots[lg - 1] = roots[lg].square();
+        roots[lg - 1] = roots[lg].square_inner();
         lg -= 1;
     }
     roots
 };
 
 /// The inverse of the coset shift [`GENERATOR`].
-const GENERATOR_INV: Scalar = GENERATOR.invert();
+const GENERATOR_INV: Scalar = GENERATOR.inv_inner();
 
 /// `2^256` as an element of the field, which shifts a word chunk of a wide integer into place.
 const SHIFT: Scalar = Scalar(R2);
@@ -216,7 +216,7 @@ impl Scalar {
             let mut padded = [0; WORDS];
             padded[..chunk.len()].copy_from_slice(chunk);
             let chunk = Self(montgomery::mul(&padded, &R2, &MODULUS, INV));
-            sum = sum.mul(SHIFT).add(chunk);
+            sum = sum.mul_inner(SHIFT).add_inner(chunk);
         }
         sum
     }
@@ -289,32 +289,32 @@ impl Scalar {
     }
 
     /// Returns `self + rhs`.
-    pub const fn add(self, rhs: Self) -> Self {
+    const fn add_inner(self, rhs: Self) -> Self {
         Self(montgomery::add(&self.0, &rhs.0, &MODULUS))
     }
 
     /// Returns `self - rhs`.
-    pub const fn sub(self, rhs: Self) -> Self {
-        self.add(rhs.neg())
+    const fn sub_inner(self, rhs: Self) -> Self {
+        self.add_inner(rhs.neg_inner())
     }
 
     /// Returns `-self`.
-    pub const fn neg(self) -> Self {
+    const fn neg_inner(self) -> Self {
         Self(montgomery::neg(&self.0, &MODULUS))
     }
 
     /// Returns `self * rhs`.
-    pub const fn mul(self, rhs: Self) -> Self {
+    const fn mul_inner(self, rhs: Self) -> Self {
         Self(montgomery::mul(&self.0, &rhs.0, &MODULUS, INV))
     }
 
     /// Returns `self * self`.
-    pub const fn square(self) -> Self {
-        self.mul(self)
+    const fn square_inner(self) -> Self {
+        self.mul_inner(self)
     }
 
     /// Returns the multiplicative inverse, or zero for zero.
-    pub const fn invert(self) -> Self {
+    const fn inv_inner(self) -> Self {
         // Fermat: a^(r - 2). The low word of r is odd, so subtracting two does not borrow.
         let mut exponent = MODULUS;
         exponent[0] -= 2;
@@ -322,7 +322,7 @@ impl Scalar {
     }
 
     /// Returns `self / 2`.
-    pub const fn halve(self) -> Self {
+    const fn div_2_inner(self) -> Self {
         // Halving commutes with the Montgomery factor: add r when the representative is odd,
         // then shift. The sum is below 2r < 2^256, so it fits in four words.
         let mask = (self.0[0] & 1).wrapping_neg();
@@ -357,9 +357,9 @@ impl Scalar {
             let mut bit = 64;
             while bit > 0 {
                 bit -= 1;
-                result = result.square();
+                result = result.square_inner();
                 if (exponent[i] >> bit) & 1 == 1 {
-                    result = result.mul(self);
+                    result = result.mul_inner(self);
                 }
             }
         }
@@ -402,7 +402,7 @@ impl Eq for Scalar {}
 
 impl<'a> AddAssign<&'a Self> for Scalar {
     fn add_assign(&mut self, rhs: &'a Self) {
-        *self = Self::add(*self, *rhs);
+        *self = self.add_inner(*rhs);
     }
 }
 
@@ -410,13 +410,13 @@ impl<'a> Add<&'a Self> for Scalar {
     type Output = Self;
 
     fn add(self, rhs: &'a Self) -> Self {
-        Self::add(self, *rhs)
+        self.add_inner(*rhs)
     }
 }
 
 impl<'a> SubAssign<&'a Self> for Scalar {
     fn sub_assign(&mut self, rhs: &'a Self) {
-        *self = Self::sub(*self, *rhs);
+        *self = self.sub_inner(*rhs);
     }
 }
 
@@ -424,7 +424,7 @@ impl<'a> Sub<&'a Self> for Scalar {
     type Output = Self;
 
     fn sub(self, rhs: &'a Self) -> Self {
-        Self::sub(self, *rhs)
+        self.sub_inner(*rhs)
     }
 }
 
@@ -432,13 +432,13 @@ impl Neg for Scalar {
     type Output = Self;
 
     fn neg(self) -> Self {
-        Self::neg(self)
+        self.neg_inner()
     }
 }
 
 impl<'a> MulAssign<&'a Self> for Scalar {
     fn mul_assign(&mut self, rhs: &'a Self) {
-        *self = Self::mul(*self, *rhs);
+        *self = self.mul_inner(*rhs);
     }
 }
 
@@ -446,7 +446,7 @@ impl<'a> Mul<&'a Self> for Scalar {
     type Output = Self;
 
     fn mul(self, rhs: &'a Self) -> Self {
-        Self::mul(self, *rhs)
+        self.mul_inner(*rhs)
     }
 }
 
@@ -458,13 +458,13 @@ impl Additive for Scalar {
     }
 
     fn double(&mut self) {
-        *self = Self::add(*self, *self);
+        *self = self.add_inner(*self);
     }
 }
 
 impl Multiplicative for Scalar {
     fn square(&mut self) {
-        *self = Self::square(*self);
+        *self = self.square_inner();
     }
 }
 
@@ -476,7 +476,7 @@ impl Ring for Scalar {
 
 impl Field for Scalar {
     fn inv(&self) -> Self {
-        self.invert()
+        self.inv_inner()
     }
 }
 
@@ -497,7 +497,7 @@ impl FieldNTT for Scalar {
     }
 
     fn div_2(&self) -> Self {
-        self.halve()
+        self.div_2_inner()
     }
 }
 
@@ -518,7 +518,7 @@ impl<'a> arbitrary::Arbitrary<'a> for Scalar {
         // windows of a multiplication.
         Ok(match u.int_in_range(0u8..=7)? {
             0 => Self::from_u64(u.arbitrary()?),
-            1 => Self::from_u64(u.arbitrary()?).neg(),
+            1 => -Self::from_u64(u.arbitrary()?),
             2 => {
                 let mut words = [0; WORDS];
                 for word in &mut words {
@@ -634,7 +634,7 @@ pub mod fuzz {
                     assert_eq!(
                         Scalar::from_words_wide(&words),
                         digits(
-                            Scalar::from_u64(1 << 32).square(),
+                            Scalar::from_u64(1 << 32).square_inner(),
                             words.iter().rev().copied()
                         )
                     );
@@ -733,14 +733,14 @@ pub mod fuzz {
         fn roots_of_unity_have_exact_order() {
             let mut root = Scalar::root_of_unity(TWO_ADICITY).unwrap();
             for _ in 1..TWO_ADICITY {
-                root = root.square();
+                root = root.square_inner();
                 assert_ne!(root, Scalar::ONE);
             }
-            assert_eq!(root, Scalar::ONE.neg());
+            assert_eq!(root, -Scalar::ONE);
             // The coset shift lies outside the 2-Sylow subgroup and is not a square.
             let mut shift = Scalar::coset_shift();
             for _ in 0..TWO_ADICITY {
-                shift = shift.square();
+                shift = shift.square_inner();
             }
             assert_ne!(shift, Scalar::ONE);
             let mut half = MODULUS;
@@ -748,7 +748,7 @@ pub mod fuzz {
             let half = core::array::from_fn(|i| {
                 (half[i] >> 1) | half.get(i + 1).map_or(0, |next| next << 63)
             });
-            assert_eq!(GENERATOR.pow(half), Scalar::ONE.neg());
+            assert_eq!(GENERATOR.pow(half), -Scalar::ONE);
         }
 
         #[test]
@@ -758,8 +758,8 @@ pub mod fuzz {
             // The largest scalar is one less than the order.
             let mut largest = MODULUS;
             largest[0] -= 1;
-            assert_eq!(Scalar::ONE.neg().to_words(), largest);
-            assert_eq!(Scalar::from_words(largest), Some(Scalar::ONE.neg()));
+            assert_eq!((-Scalar::ONE).to_words(), largest);
+            assert_eq!(Scalar::from_words(largest), Some(-Scalar::ONE));
             // The order itself, the next integer, and the largest string do not decode.
             assert!(Scalar::from_words(MODULUS).is_none());
             assert!(Scalar::from_bytes(&order()).is_none());
