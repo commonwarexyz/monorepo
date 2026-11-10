@@ -2,7 +2,8 @@
 //!
 //! Each pool worker's run queue is a [`Queue`] of its runnables. Only the
 //! holder of its [`Owner`] pushes and pops. Other workers hold the shared
-//! handle and steal half of an unclaimed backlog with [`Queue::steal_into`].
+//! handle and steal half of an unclaimed backlog with
+//! [`Queue::steal_into_if`].
 //!
 //! # Overview
 //!
@@ -13,7 +14,7 @@
 //! The queue keeps its values in a ring of [`CAPACITY`] slots, and three
 //! positions divide the ring. The owner pushes at `tail` and pops at `real`,
 //! so the values from `real` up to `tail` are queued. A thief claims the oldest
-//! half of them, rounded down, by moving `real` past that half. It then moves
+//! half of them, rounded up, by moving `real` past that half. It then moves
 //! the claimed values into its own queue while `steal` still marks where they
 //! start, and `steal` catches up with `real` once it is done. Every other slot
 //! is free, and the free slots wrap around the end of the ring. With eight
@@ -117,13 +118,35 @@
 //!
 //! # Stealing
 //!
-//! A steal takes half the unclaimed backlog, rounded down, so a lone value
-//! stays with its owner. It claims the values with one exchange on the head,
+//! A steal takes half the unclaimed backlog, rounded up, so even a lone value
+//! can move to a thief. It claims the values with one exchange on the head,
 //! moves them into the thief's own queue, releases the claim, then publishes
 //! them with one tail store. It goes only into a queue with at least half its
-//! slots free, so the batch always fits. [`Queue::is_stealable`] is a hint
+//! slots free, so the batch always fits. [`Queue::backlog`] is a hint
 //! about the source's backlog. The claim checks the source again, and the
 //! steal also checks the destination's room.
+//!
+//! The thief may refuse a lone value. It decides from the value's 55-bit head
+//! count inside the claim, on the head snapshot that the claim's exchange
+//! compares, so a lone claim takes exactly the value at the count it
+//! approved. A count names one queued value: every pop or claim moves `real`
+//! past it, and a push makes the backlog two, so a lone value seen twice at
+//! the same count has stayed queued in between, unless the count went round
+//! all `2^55` positions in between, the stall assumption below. The backlog
+//! hint reports that count as well.
+//!
+//! The owner can mark a value as it pushes it, and the queue keeps the 55-bit
+//! count of the newest marked value, stored before the tail store that
+//! publishes it. A lone value is the newest one queued, so it is marked
+//! exactly when its count is the one kept, and a thief that sees it through
+//! the tail sees its mark too. The thief's decision also learns whether the
+//! lone value is marked. The mark is only a hint for that decision: the
+//! claim's exchange alone decides which value a steal takes. A stale mark
+//! names a queued value only after the head's count repeats.
+//!
+//! Under loom, a queue can be built to claim half rounded down instead, so
+//! it never takes or reports a lone value. Models of the idle protocol use it
+//! to bound their interleavings.
 //!
 //! A steal from a queue of eight slots into an empty one:
 //!
@@ -135,21 +158,21 @@
 //!           +-------+-------+-------+-------+-------+-------+-------+-------+
 //!           |<---------------------- queued ----------------------->|
 //!
-//!   1. the thief claims 3 of 7 (real 0 -> 3), then the owner pops d and e (real 3 -> 5)
+//!   1. the thief claims 4 of 7 (real 0 -> 4), then the owner pops e (real 4 -> 5)
 //!           +-------+-------+-------+-------+-------+-------+-------+-------+
-//!   source  |   a   |   b   |   c   |       |       |   f   |   g   |       |
+//!   source  |   a   |   b   |   c   |   d   |       |   f   |   g   |       |
 //!           +-------+-------+-------+-------+-------+-------+-------+-------+
-//!           |<------ claimed ------>|<-- popped --->|<-- queued --->|
+//!           |<---------- claimed ---------->|popped |<-- queued --->|
 //!
-//!   2. the thief copies a b c, releases (steal 0 -> 5), then publishes (its tail 0 -> 3)
+//!   2. the thief copies a b c d, releases (steal 0 -> 5), then publishes (its tail 0 -> 4)
 //!           +-------+-------+-------+-------+-------+-------+-------+-------+
 //!   source  |       |       |       |       |       |   f   |   g   |       |
 //!           +-------+-------+-------+-------+-------+-------+-------+-------+
 //!                                                   |<-- queued --->|
 //!           +-------+-------+-------+-------+-------+-------+-------+-------+
-//!   thief   |   a   |   b   |   c   |       |       |       |       |       |
+//!   thief   |   a   |   b   |   c   |   d   |       |       |       |       |
 //!           +-------+-------+-------+-------+-------+-------+-------+-------+
-//!           |<------ queued ------->|
+//!           |<----------- queued ---------->|
 //! ```
 //!
 //! A steal assumes that a thief does not stall between its head load and its
@@ -169,20 +192,17 @@
 //! pushes nothing, so thieves can move `real` no further than `tail`, and the
 //! head cannot return to the value the owner loaded.
 //!
-//! # Pops without an exchange
+//! # Pops
 //!
 //! A queue built exclusive has no reader but its owner, so the owner pops with
-//! plain loads and a store rather than an exchange. [`Queue::steal_into`]
-//! asserts that its source is shared.
+//! plain loads and a store rather than an exchange. [`Queue::steal_into_if`]
+//! asserts that its source is shared. A pool of one worker has no other worker
+//! to steal from its run queue, so that queue is exclusive.
 //!
-//! The owner of a shared queue also pops a lone value with a store when no
-//! claim is held. A claim takes half the backlog, rounded down, so no claim
-//! takes a lone value. Only the owner can push more, and the pop's mutable
-//! borrow excludes a push. A thief still expecting the pre-pop head needs a
-//! later tail publication to see two values. That publication follows the head
-//! store, so acquiring the tail orders the store before the thief's stale
-//! exchange. The exchange can succeed only if the thief stalled through a full
-//! `2^55` positions, and [Stealing](#stealing) assumes no thief does.
+//! The owner of a shared queue pops every value with an exchange on the head,
+//! a lone one included, since a claim rounded up can take a lone value. The
+//! exchange arbitrates between the pop and such a claim: whichever moves
+//! `real` first owns the value, and the other finds the queue empty.
 //!
 //! # Dropping handles
 //!
@@ -211,9 +231,9 @@ pub const CAPACITY: usize = if cfg!(feature = "loom") { 4 } else { 256 };
 /// Half the capacity: what an overflow keeps, as a position count.
 const HALF: u32 = CAPACITY as u32 / 2;
 
-/// Fewest values an unclaimed queue holds for a steal to take any, since a
-/// steal takes half rounded down.
-pub const STEALABLE: usize = 2;
+/// Fewest values an unclaimed queue holds for a steal to take any. A steal
+/// takes half rounded up, so one is enough.
+pub const STEALABLE: usize = 1;
 
 /// Mask that selects a position's slot.
 const MASK: usize = CAPACITY - 1;
@@ -223,6 +243,10 @@ const REAL_BITS: u32 = 55;
 
 /// Mask that selects a head's `real` count.
 const REAL_MASK: u64 = (1 << REAL_BITS) - 1;
+
+/// The mark of a queue that has never queued a marked value. No 55-bit count
+/// equals it.
+const UNMARKED: u64 = u64::MAX;
 
 /// Positions select slots by masking, a full queue's distance must fit in a
 /// wrapping `u32` comparison, and the gap field must hold every gap from zero
@@ -243,11 +267,19 @@ struct Inner<T> {
     head: AtomicU64,
     /// One past the newest published value, written only by the owner.
     tail: AtomicU32,
+    /// The 55-bit head count of the newest value pushed marked, or
+    /// [`UNMARKED`]. Written only by the owner, before the tail store that
+    /// publishes that value.
+    marked: AtomicU64,
     /// Whether the unique owner has been taken.
     owned: AtomicBool,
     /// Whether no reader but the owner ever touches the queue, fixed at
     /// construction.
     exclusive: bool,
+    /// Loom only: whether claims take half the backlog rounded down, so a
+    /// lone value is never claimed or reported stealable.
+    #[cfg(feature = "loom")]
+    round_down: bool,
     /// Storage for unclaimed, claimed, and overflow values. A pop owns its
     /// slot from the head update until its read completes.
     slots: Box<[UnsafeCell<MaybeUninit<T>>]>,
@@ -299,6 +331,18 @@ pub enum Push<'a, T> {
     ),
 }
 
+/// What a snapshot of a queue offers a thief, as [`Queue::backlog`] reports.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Backlog {
+    /// Nothing a claim could take: no value, or a claim already held.
+    None,
+    /// One unclaimed value, at this 55-bit head count, and whether it was
+    /// pushed marked.
+    Lone(u64, bool),
+    /// Two or more unclaimed values.
+    More,
+}
+
 /// Newest half of a full queue, yielded oldest first.
 ///
 /// The iterator must be exhausted before it is dropped. Its mutable borrow
@@ -329,6 +373,12 @@ const fn steal(real: u64, gap: u32) -> u32 {
     (real as u32).wrapping_sub(gap)
 }
 
+/// The 55-bit count of `position`, a position at most [`CAPACITY`] past the
+/// head count `real`.
+const fn count_at(real: u64, position: u32) -> u64 {
+    real.wrapping_add(position.wrapping_sub(real as u32) as u64) & REAL_MASK
+}
+
 impl<T> Queue<T> {
     /// An empty queue that thieves may steal from.
     pub fn shared() -> Self {
@@ -347,12 +397,41 @@ impl<T> Queue<T> {
         Self(Arc::new(CachePadded::new(Inner {
             head: AtomicU64::new(pack(real, 0)),
             tail: AtomicU32::new(real as u32),
+            marked: AtomicU64::new(UNMARKED),
             owned: AtomicBool::new(false),
             exclusive,
+            #[cfg(feature = "loom")]
+            round_down: false,
             slots: (0..CAPACITY)
                 .map(|_| UnsafeCell::new(MaybeUninit::uninit()))
                 .collect(),
         })))
+    }
+
+    /// Fewest values an unclaimed backlog needs for a claim to take any:
+    /// [`STEALABLE`], or two for a queue that rounds down under loom.
+    // Loom's handles cannot be read in a const fn.
+    #[allow(clippy::missing_const_for_fn)]
+    #[inline]
+    fn stealable(&self) -> u32 {
+        #[cfg(feature = "loom")]
+        if self.0.round_down {
+            return 2;
+        }
+        STEALABLE as u32
+    }
+
+    /// Values a claim takes from an unclaimed backlog of `available`: half
+    /// rounded up, or rounded down for a queue that rounds down under loom.
+    // Loom's handles cannot be read in a const fn.
+    #[allow(clippy::missing_const_for_fn)]
+    #[inline]
+    fn claim_count(&self, available: u32) -> u32 {
+        #[cfg(feature = "loom")]
+        if self.0.round_down {
+            return available / 2;
+        }
+        available.div_ceil(2)
     }
 
     /// Take the owner, panicking if it was already taken, even if it has since
@@ -365,27 +444,49 @@ impl<T> Queue<T> {
         Owner(self.0.clone(), PhantomData)
     }
 
-    /// Whether a snapshot shows no claim and at least [`STEALABLE`] values.
-    /// Concurrent changes can make this hint stale before a steal claims them.
-    pub fn is_stealable(&self) -> bool {
+    /// Whether the value at the 55-bit count `real` is the newest one pushed
+    /// marked. Read after an acquiring tail load that shows the value, so its
+    /// own mark is visible. A later marked push can replace it, which needs
+    /// the value to be no longer the newest one queued.
+    #[inline]
+    fn is_marked(&self, real: u64) -> bool {
+        self.0.marked.load(Ordering::Relaxed) == real
+    }
+
+    /// What a snapshot offers a thief: nothing while a claim is held or below
+    /// [`STEALABLE`] values, the 55-bit count of a lone value and whether it
+    /// was pushed marked, or more. Concurrent changes can make this hint stale
+    /// before a steal claims them.
+    pub fn backlog(&self) -> Backlog {
         // Shared head updates release the tail they observed. Acquire the
         // head first so the tail cannot lag behind it and turn the wrapping
         // distance into a false backlog.
         let (real, gap) = unpack(self.0.head.load(Ordering::Acquire));
         let tail = self.0.tail.load(Ordering::Acquire);
-        gap == 0 && tail.wrapping_sub(real as u32) >= STEALABLE as u32
+        let available = tail.wrapping_sub(real as u32);
+        if gap != 0 || available < self.stealable() {
+            Backlog::None
+        } else if available == 1 {
+            Backlog::Lone(real, self.is_marked(real))
+        } else {
+            Backlog::More
+        }
     }
 
-    /// Move half the unclaimed backlog, rounded down, into `into`, returning
-    /// how many values moved.
+    /// Move half the unclaimed backlog, rounded up, into `into`, returning
+    /// how many values moved. A backlog of exactly one value is claimed only
+    /// if `lone` accepts its 55-bit count and whether it was pushed marked.
     ///
-    /// Moves none when the backlog holds fewer than [`STEALABLE`] values, while
-    /// another thief holds a claim, or when `into` has fewer than half its
-    /// slots free. The claim is released before the values are published in
-    /// `into` with one tail store. Panics if `into` belongs to this queue or
-    /// this queue is exclusive.
+    /// Moves none when the backlog is empty, while another thief holds a
+    /// claim, when `into` has fewer than half its slots free, or when `lone`
+    /// refuses. `lone` is called only for a lone value, on the head snapshot
+    /// the claim's exchange compares, so a successful lone claim takes the
+    /// value at the count it accepted. A retried claim calls it again with
+    /// the count it sees then. The claim is released before the values are
+    /// published in `into` with one tail store. Panics if `into` belongs to
+    /// this queue or this queue is exclusive.
     #[must_use]
-    pub fn steal_into(&self, into: &mut Owner<T>) -> usize {
+    pub fn steal_into_if(&self, into: &mut Owner<T>, lone: impl FnMut(u64, bool) -> bool) -> usize {
         assert!(!self.0.exclusive, "steal source must be a shared queue");
         assert!(
             !Arc::ptr_eq(&into.0, &self.0),
@@ -400,7 +501,7 @@ impl<T> Queue<T> {
             return 0;
         }
 
-        let Some((first, count)) = self.claim() else {
+        let Some((first, count)) = self.claim(lone) else {
             return 0;
         };
         for offset in 0..count {
@@ -419,12 +520,13 @@ impl<T> Queue<T> {
         Widen::widen(count)
     }
 
-    /// Claim half the published backlog, rounded down, returning the first
+    /// Claim half the published backlog, rounded up, returning the first
     /// claimed position as a 55-bit count and the count claimed, or `None`
-    /// while another claim is held or fewer than [`STEALABLE`] values are
-    /// published. Every bound is checked before the exchange, so the caller
-    /// can move and release the claimed values without further bound checks.
-    fn claim(&self) -> Option<(u64, u32)> {
+    /// while another claim is held or no value is published, or when `lone`
+    /// refuses the count of a lone value. Every bound is checked before the
+    /// exchange, so the caller can move and release the claimed values
+    /// without further bound checks.
+    fn claim(&self, mut lone: impl FnMut(u64, bool) -> bool) -> Option<(u64, u32)> {
         let mut head = self.0.head.load(Ordering::Acquire);
         loop {
             let (real, gap) = unpack(head);
@@ -444,8 +546,17 @@ impl<T> Queue<T> {
                 continue;
             }
 
-            let count = available / 2;
+            // At most `CAPACITY` values are available here, so rounding up
+            // claims at most half the queue as well.
+            let count = self.claim_count(available);
             if count == 0 {
+                return None;
+            }
+
+            // The exchange below compares this head, so a lone claim takes
+            // the value at the count the caller accepted, or none. The tail
+            // load above shows that value, so its mark is visible as well.
+            if available == 1 && !lone(real, self.is_marked(real)) {
                 return None;
             }
             assert!(count <= HALF, "claim must not exceed half the queue");
@@ -515,12 +626,21 @@ impl<T> Owner<T> {
     /// Every attempt decides from one head snapshot. A failed overflow
     /// exchange retries publication, since a released claim can make room.
     pub fn push(&mut self, value: T) -> Push<'_, T> {
-        self.push_with(value, || {})
+        self.push_with(value, false, || {})
     }
 
-    /// Publish as [`Self::push`] does, running `after_snapshot` after each
-    /// attempt's head snapshot, where a test pauses the owner.
-    fn push_with(&mut self, value: T, mut after_snapshot: impl FnMut()) -> Push<'_, T> {
+    /// Publish a value marked, as [`Self::push`] does otherwise. While it is
+    /// the only value queued, [`Queue::backlog`] and the decision of
+    /// [`Queue::steal_into_if`] report it marked. A value handed back is not
+    /// marked.
+    pub fn push_marked(&mut self, value: T) -> Push<'_, T> {
+        self.push_with(value, true, || {})
+    }
+
+    /// Publish as [`Self::push`] does, marked if `mark` is set, running
+    /// `after_snapshot` after each attempt's head snapshot, where a test
+    /// pauses the owner.
+    fn push_with(&mut self, value: T, mark: bool, mut after_snapshot: impl FnMut()) -> Push<'_, T> {
         loop {
             // Acquire completed claim reads before writing a freed slot.
             let head = self.0.head.load(Ordering::Acquire);
@@ -532,6 +652,13 @@ impl<T> Owner<T> {
                 // SAFETY: the acquired head excludes pending readers, and the
                 // unpublished tail slot is free.
                 unsafe { self.0.write(tail, value) };
+
+                // Before the tail store, so a thief that sees the value sees
+                // its mark. The count is the full 55-bit one, so a stale mark
+                // matches a later value only once the head's count repeats.
+                if mark {
+                    self.0.marked.store(count_at(real, tail), Ordering::Relaxed);
+                }
 
                 let tail = tail.wrapping_add(1);
                 self.0.tail.store(tail, Ordering::Release);
@@ -611,20 +738,6 @@ impl<T> Owner<T> {
             let tail = self.0.tail.load(Ordering::Relaxed);
             if position == tail {
                 return None;
-            }
-
-            // No claim is held, and none can take a lone value, so a store
-            // pops it. Release orders this head after the tail stores before
-            // it, as the exchange does, so a thief that acquires it loads a
-            // tail past the popped position.
-            if gap == 0 && tail.wrapping_sub(position) == 1 {
-                self.0
-                    .head
-                    .store(pack(real.wrapping_add(1), 0), Ordering::Release);
-
-                // SAFETY: no claim holds or can take this initialized slot,
-                // and the mutable borrow excludes writes.
-                return Some(unsafe { self.0.read(position) });
             }
 
             // A held claim keeps `steal` in place, so the gap grows with
@@ -778,8 +891,52 @@ pub mod tests {
         sync::{Barrier, atomic::AtomicUsize, mpsc},
     };
 
-    /// Claims held by a test in place of a paused thief.
+    /// Queues built for models, and claims held by a test in place of a
+    /// paused thief.
     impl<T> Queue<T> {
+        /// Whether a snapshot shows no claim and at least [`STEALABLE`]
+        /// values.
+        pub fn is_stealable(&self) -> bool {
+            self.backlog() != Backlog::None
+        }
+
+        /// Steal as [`Self::steal_into_if`] does, taking a lone value too.
+        #[must_use]
+        pub fn steal_into(&self, into: &mut Owner<T>) -> usize {
+            self.steal_into_if(into, |_, _| true)
+        }
+
+        /// Move an empty, unclaimed queue's head and tail to the 55-bit count
+        /// `real`, as if values had been pushed and popped up to it.
+        pub(crate) fn skip_to(&self, real: u64) {
+            let (_, gap) = unpack(self.0.head.load(Ordering::Acquire));
+            assert_eq!(gap, 0);
+            assert_eq!(self.backlog(), Backlog::None);
+            self.0.head.store(pack(real, 0), Ordering::Release);
+            self.0.tail.store(real as u32, Ordering::Release);
+        }
+
+        /// An empty shared queue whose claims take half the backlog rounded
+        /// down, so a lone value is never claimed or reported stealable. Its
+        /// owner pops as every shared owner does. Without lone claims, broad
+        /// models of the idle protocol have far fewer interleavings and stay
+        /// within their preemption bounds, while focused models cover lone
+        /// claims on ordinary queues.
+        #[cfg(feature = "loom")]
+        pub(crate) fn shared_rounding_down() -> Self {
+            Self(Arc::new(CachePadded::new(Inner {
+                head: AtomicU64::new(pack(0, 0)),
+                tail: AtomicU32::new(0),
+                marked: AtomicU64::new(UNMARKED),
+                owned: AtomicBool::new(false),
+                exclusive: false,
+                round_down: true,
+                slots: (0..CAPACITY)
+                    .map(|_| UnsafeCell::new(MaybeUninit::uninit()))
+                    .collect(),
+            })))
+        }
+
         /// Claim the oldest `count` values as a thief paused after its claim
         /// exchange would hold them. Panics unless no claim is held and `count`
         /// is positive, at most [`HALF`], and within the available values, or if
@@ -954,25 +1111,99 @@ pub mod tests {
         }
     }
 
-    /// A shared owner pops a lone value with a store, here at zero and across
-    /// both wraps, leaving the queue empty and unclaimed.
+    /// A lone value in a shared queue is stealable, and its owner pops it with
+    /// the exchange, here at zero and across the maximum, leaving the queue
+    /// empty and unclaimed. A pop after a steal took the lone value finds
+    /// nothing.
     #[test]
-    fn test_lone_value_pops_across_the_maximum() {
+    fn test_lone_value_pops_or_is_stolen_across_the_maximum() {
         for start in [0, u64::from(u32::MAX), REAL_MASK] {
             let queue = Queue::at(start, false);
             let mut owner = queue.owner();
 
-            // A lone value is not stealable, since a steal takes half rounded down.
+            // A steal takes half rounded up, so a lone value is stealable.
             push(&mut owner, 7);
-            assert!(!queue.is_stealable());
+            assert!(queue.is_stealable());
 
-            // The pop advances the head's count with a zero gap, so no claim
-            // appears held.
+            // The pop moves steal and real together, so no claim appears held.
             assert_eq!(owner.pop(), Some(7));
             let next = (start + 1) & REAL_MASK;
             assert_eq!(unpack(queue.0.head.load(Ordering::Acquire)), (next, 0));
             assert!(!queue.is_stealable());
             assert!(owner.pop().is_none());
+
+            // A steal takes the next lone value, leaving the owner nothing.
+            push(&mut owner, 8);
+            let destination = Queue::shared();
+            let mut into = destination.owner();
+            assert_eq!(queue.steal_into(&mut into), 1);
+            assert!(owner.pop().is_none());
+            assert!(owner.is_empty());
+            assert!(!queue.is_stealable());
+            assert_eq!(drain(&mut into), [8]);
+        }
+    }
+
+    /// A held claim of a lone value leaves the owner nothing to pop and blocks
+    /// every other steal, even of a value pushed behind it, and its release
+    /// hands the claimed value to the thief only.
+    #[test]
+    fn test_held_claim_of_a_lone_value_excludes_the_owner_and_thieves() {
+        for start in [0, u64::from(u32::MAX), REAL_MASK] {
+            let queue = Queue::at(start, false);
+            let destination = Queue::shared();
+            let mut owner = queue.owner();
+            let mut into = destination.owner();
+            push(&mut owner, 7);
+
+            // The claim takes the only value, so the owner finds the queue empty.
+            let claim = queue.hold_claim(1);
+            assert!(owner.pop().is_none());
+            assert!(owner.is_empty());
+            assert!(!queue.is_stealable());
+            assert_eq!(queue.steal_into(&mut into), 0);
+
+            // A push behind the claim is the owner's alone until the release.
+            push(&mut owner, 8);
+            assert!(!queue.is_stealable());
+            assert_eq!(queue.steal_into(&mut into), 0);
+            assert_eq!(queue.finish_claim(claim), [7]);
+
+            // The release exposes the owner's lone value, which a steal takes.
+            assert!(queue.is_stealable());
+            assert_eq!(queue.steal_into(&mut into), 1);
+            assert!(owner.pop().is_none());
+            assert_eq!(drain(&mut into), [8]);
+        }
+    }
+
+    /// A held claim of part of an odd backlog lets the owner pop the rest,
+    /// including a lone value past the claim, which the release then skips.
+    #[test]
+    fn test_owner_pops_past_a_held_claim() {
+        for start in [0, u64::from(u32::MAX), REAL_MASK] {
+            let queue = Queue::at(start, false);
+            let destination = Queue::shared();
+            let mut owner = queue.owner();
+            let mut into = destination.owner();
+            owner.push_batch(0..3);
+
+            // A claim of the oldest value leaves two, so the owner pops both with
+            // the exchange, the second one lone and past the claim.
+            let claim = queue.hold_claim(1);
+            assert_eq!(queue.steal_into(&mut into), 0);
+            assert_eq!(owner.pop(), Some(1));
+            assert_eq!(owner.pop(), Some(2));
+            assert!(owner.pop().is_none());
+
+            // The release lifts steal past the owner's pops, leaving the queue empty.
+            assert_eq!(queue.finish_claim(claim), [0]);
+            assert!(!queue.is_stealable());
+            assert_eq!(queue.steal_into(&mut into), 0);
+            let (real, gap) = unpack(queue.0.head.load(Ordering::Acquire));
+            assert_eq!(gap, 0);
+            assert_eq!(real, (start + 3) & REAL_MASK);
+            assert_eq!(real as u32, queue.0.tail.load(Ordering::Acquire));
         }
     }
 
@@ -1084,8 +1315,8 @@ pub mod tests {
             REAL_MASK,
         ] {
             for exclusive in [false, true] {
-                // Two values exercise an exchange or exclusive pop, then a
-                // lone-value or exclusive store.
+                // Two values exercise shared exchanges or exclusive stores,
+                // the second pop taking a lone value.
                 let queue = Queue::at(start, exclusive);
                 let mut owner = queue.owner();
                 owner.push_batch(0..2);
@@ -1125,7 +1356,9 @@ pub mod tests {
                 let queue = Queue::at(start, false);
                 let mut owner = queue.owner();
                 owner.push_batch(0..CAPACITY);
-                let claim = queue.claim().expect("full queue must be claimable");
+                let claim = queue
+                    .claim(|_, _| true)
+                    .expect("full queue must be claimable");
                 assert_eq!(claim, (start, HALF));
                 assert_head(&queue, start + u64::from(HALF), HALF);
 
@@ -1177,10 +1410,109 @@ pub mod tests {
         assert_eq!(head(3 + REAL_MASK + 1), stale);
     }
 
-    /// A steal takes half the backlog rounded down, so a lone value is never
-    /// stolen, and `is_stealable` agrees.
+    /// A lone value reports its 55-bit count and whether it was pushed marked,
+    /// to the backlog hint and to the steal's decision, here at zero and
+    /// across both wraps. A fresh queue's first value is unmarked, an unmarked
+    /// push behind a marked value leaves only the newest value's mark to
+    /// report once it is alone, and a marked value handed back by a full queue
+    /// marks nothing.
     #[test]
-    fn test_steal_takes_half_rounded_down() {
+    fn test_lone_value_reports_its_mark() {
+        for start in [0, u64::from(u32::MAX), REAL_MASK] {
+            let queue = Queue::at(start, false);
+            let mut owner = queue.owner();
+            let count = |offset: u64| (start + offset) & REAL_MASK;
+
+            // The first value of a fresh queue is not marked.
+            push(&mut owner, 0);
+            assert_eq!(queue.backlog(), Backlog::Lone(count(0), false));
+            assert_eq!(owner.pop(), Some(0));
+
+            // A marked value is reported marked while alone, and an unmarked
+            // one behind it is not once it is alone.
+            assert!(matches!(owner.push_marked(1), Push::Pushed(1)));
+            assert_eq!(queue.backlog(), Backlog::Lone(count(1), true));
+            push(&mut owner, 2);
+            assert_eq!(queue.backlog(), Backlog::More);
+            assert_eq!(owner.pop(), Some(1));
+            assert_eq!(queue.backlog(), Backlog::Lone(count(2), false));
+
+            // The steal's decision sees the same mark it is refused for, then
+            // the mark of the next marked value it accepts.
+            let destination = Queue::shared();
+            let mut into = destination.owner();
+            let mut asked = Vec::new();
+            let mut decide = |real, marked| {
+                asked.push((real, marked));
+                marked
+            };
+            assert_eq!(queue.steal_into_if(&mut into, &mut decide), 0);
+            assert_eq!(owner.pop(), Some(2));
+            assert!(matches!(owner.push_marked(3), Push::Pushed(1)));
+            assert_eq!(queue.steal_into_if(&mut into, &mut decide), 1);
+            assert_eq!(asked, [(count(2), false), (count(3), true)]);
+            assert_eq!(drain(&mut into), [3]);
+
+            // A marked push into a full queue hands the value back, and the
+            // value left alone after the drain is not marked.
+            owner.push_batch(0..CAPACITY);
+            match owner.push_marked(CAPACITY) {
+                Push::Overflow(batch, value) => {
+                    assert_eq!(batch.count(), CAPACITY / 2);
+                    assert_eq!(value, CAPACITY);
+                }
+                _ => panic!("a full queue overflows"),
+            }
+            for _ in 1..CAPACITY / 2 {
+                assert!(owner.pop().is_some());
+            }
+            assert!(matches!(queue.backlog(), Backlog::Lone(_, false)));
+            assert!(owner.pop().is_some());
+        }
+    }
+
+    /// The mark keeps the full 55-bit count, so an unmarked lone value whose
+    /// count shares the marked one's low 24 bits, or its `u32` position, is
+    /// not reported marked, to the backlog hint or to the steal's decision.
+    /// Only a full period of the head's count brings the marked count back.
+    #[test]
+    fn test_stale_mark_matches_only_after_a_full_period() {
+        let start = 5;
+        for (advance, marked) in [
+            (1 << 24, false),
+            (1 << 32, false),
+            (1 << 54, false),
+            (REAL_MASK, false),
+            (REAL_MASK + 1, true),
+        ] {
+            let queue = Queue::at(start, false);
+            let mut owner = queue.owner();
+            assert!(matches!(owner.push_marked(0), Push::Pushed(1)));
+            assert_eq!(queue.backlog(), Backlog::Lone(start, true));
+            assert_eq!(owner.pop(), Some(0));
+
+            // Move on without marking, then queue an unmarked value alone.
+            let later = (start + advance) & REAL_MASK;
+            queue.skip_to(later);
+            push(&mut owner, 1);
+            assert_eq!(queue.backlog(), Backlog::Lone(later, marked));
+            let destination = Queue::shared();
+            let mut into = destination.owner();
+            let mut asked = None;
+            let stolen = queue.steal_into_if(&mut into, |real, marked| {
+                asked = Some((real, marked));
+                false
+            });
+            assert_eq!(stolen, 0);
+            assert_eq!(asked, Some((later, marked)));
+            assert_eq!(owner.pop(), Some(1));
+        }
+    }
+
+    /// A steal takes half the backlog rounded up, so a lone value is stolen,
+    /// and `is_stealable` agrees.
+    #[test]
+    fn test_steal_takes_half_rounded_up() {
         for available in [1usize, 2, 3, 7, 8, 255, 256] {
             let source = Queue::shared();
             let destination = Queue::shared();
@@ -1188,8 +1520,8 @@ pub mod tests {
             let mut into = destination.owner();
             owner.push_batch(0..available);
 
-            // The hint agrees with the steal, which takes half the backlog rounded down.
-            let count = available / 2;
+            // The hint agrees with the steal, which takes half the backlog rounded up.
+            let count = available.div_ceil(2);
             assert_eq!(source.is_stealable(), count != 0);
             assert_eq!(source.steal_into(&mut into), count);
 
@@ -1310,14 +1642,16 @@ pub mod tests {
 
         // The claim takes the oldest half and leaves the owner the newest half
         // with no room, since the claim still holds its slots.
-        let claim = queue.claim().expect("full queue must be claimable");
+        let claim = queue
+            .claim(|_, _| true)
+            .expect("full queue must be claimable");
         assert_eq!(claim, (0, HALF));
         assert_eq!(owner.len(), CAPACITY / 2);
         assert_eq!(owner.room(), 0);
 
         // While the claim is held, a second claim backs off, the hint agrees,
         // and a push hands back only the new value.
-        assert!(queue.claim().is_none());
+        assert!(queue.claim(|_, _| true).is_none());
         assert!(!queue.is_stealable());
         assert!(matches!(owner.push(CAPACITY), Push::Claimed(value) if value == CAPACITY));
 
@@ -1360,7 +1694,7 @@ pub mod tests {
         // exchange fails and the retry sees the claim.
         let mut claim = None;
         let mut attempts = 0;
-        match owner.push_with(CAPACITY, || {
+        match owner.push_with(CAPACITY, false, || {
             attempts += 1;
             if claim.is_none() {
                 claim = Some(queue.hold_claim(HALF));
@@ -1405,7 +1739,7 @@ pub mod tests {
 
         // Pause the first attempt after its snapshot until the steal completes.
         let mut first = true;
-        let result = owner.push_with(CAPACITY, || {
+        let result = owner.push_with(CAPACITY, false, || {
             if first {
                 first = false;
                 start_tx.send(()).unwrap();
@@ -1626,6 +1960,78 @@ pub mod tests {
         assert_eq!(drops.load(Ordering::Relaxed), total);
     }
 
+    /// An owner that pops almost every value as it pushes it keeps its queue
+    /// a value or two deep, so steals contend with its pops for lone values.
+    /// Every value is handed out once and dropped once.
+    #[test]
+    fn test_lone_values_race_two_thieves_for_every_value_once() {
+        let total = if cfg!(miri) { 64 } else { 20_000 };
+        let queue = Arc::new(Queue::<Counted>::shared());
+        let mut owner = queue.owner();
+        let done = Arc::new(AtomicBool::new(false));
+        let barrier = Arc::new(Barrier::new(3));
+        let drops = Arc::new(AtomicUsize::new(0));
+
+        let thieves: Vec<_> = (0..2)
+            .map(|_| {
+                let queue = queue.clone();
+                let done = done.clone();
+                let barrier = barrier.clone();
+
+                thread::spawn(move || {
+                    let destination = Queue::shared();
+                    let mut into = destination.owner();
+                    let mut seen = Vec::new();
+                    barrier.wait();
+
+                    // Steal until a steal finds nothing after the owner is done.
+                    loop {
+                        if queue.steal_into(&mut into) > 0 {
+                            seen.extend(drain(&mut into).into_iter().map(|value| value.0));
+                        } else if done.load(Ordering::Acquire) {
+                            break;
+                        } else {
+                            thread::yield_now();
+                        }
+                    }
+                    seen
+                })
+            })
+            .collect();
+
+        let mut seen = Vec::new();
+        barrier.wait();
+
+        // Pop after all but every fourth push, so the queue stays a value or
+        // two deep and most steals contend for a lone value.
+        for value in 0..total {
+            match owner.push(Counted(value, drops.clone())) {
+                Push::Pushed(_) => {}
+                Push::Claimed(value) => seen.push(value.0),
+                Push::Overflow(batch, value) => {
+                    seen.extend(batch.map(|value| value.0));
+                    seen.push(value.0);
+                }
+            }
+            if value % 4 != 0
+                && let Some(value) = owner.pop()
+            {
+                seen.push(value.0);
+            }
+        }
+        done.store(true, Ordering::Release);
+
+        for thief in thieves {
+            seen.extend(thief.join().unwrap());
+        }
+        seen.extend(drain(&mut owner).into_iter().map(|value| value.0));
+
+        // Every value is handed out once and dropped once.
+        seen.sort_unstable();
+        assert_eq!(seen, (0..total).collect::<Vec<_>>());
+        assert_eq!(drops.load(Ordering::Relaxed), total);
+    }
+
     /// Queues and owners move between threads, queues are shared, and owners
     /// are not.
     #[test]
@@ -1710,7 +2116,7 @@ mod loom_tests {
                     seen
                 });
 
-                // Push and pop two lone values, which no steal can take.
+                // Push and pop two lone values, which a steal can take first.
                 let mut seen = Vec::new();
                 for value in 0..2 {
                     collect_push(&mut owner, value, &mut seen);
@@ -1818,8 +2224,9 @@ mod loom_tests {
         });
     }
 
-    /// A thief racing the owner's push and pop of a lone value never sees a
-    /// stealable backlog and takes nothing, while the pop stores the head.
+    /// A thief racing the owner's push and pop of a lone value: the pop's
+    /// exchange and the claim's arbitrate, so exactly one of them takes the
+    /// value, and nothing remains.
     #[test]
     fn test_lone_value_pop_against_a_thief() {
         let mut builder = loom::model::Builder::new();
@@ -1828,22 +2235,125 @@ mod loom_tests {
             let queue = Queue::shared();
             let mut owner = queue.owner();
 
-            // The thief checks and steals twice, and never finds a backlog.
+            // The thief steals twice, taking the lone value at most once.
             let thief = thread::spawn(move || {
-                for _ in 0..2 {
-                    assert!(!queue.is_stealable());
-                    assert!(steal_once(&queue).is_empty());
-                }
+                let mut seen = steal_once(&queue);
+                seen.extend(steal_once(&queue));
+                seen
             });
 
             // The owner pushes and pops one value, so the queue never holds two.
             assert!(matches!(owner.push(7), Push::Pushed(1)));
-            assert_eq!(owner.pop(), Some(7));
+            let mut seen: Vec<_> = owner.pop().into_iter().collect();
 
-            // The pop took the value, so nothing remains once the thief finishes.
-            thief.join().unwrap();
+            // The value came out once, from the owner or from the thief.
+            seen.extend(thief.join().unwrap());
+            assert_eq!(seen, [7]);
             assert!(owner.is_empty());
         });
+    }
+
+    /// A thief that accepts only the lone value at the queue's first count
+    /// races the owner, which pops that value and then pushes another, alone
+    /// at the next count, here at zero and at the 55-bit maximum. The claim
+    /// and the pop arbitrate the first value, so it comes out once, and the
+    /// thief never takes the second, whose count it refuses whether its claim
+    /// sees it first or after a failed exchange.
+    #[test]
+    fn test_lone_claim_takes_only_an_accepted_count() {
+        for start in [0, REAL_MASK] {
+            loom::model(move || {
+                let queue = Queue::at(start, false);
+                let mut owner = queue.owner();
+                assert!(matches!(owner.push(0), Push::Pushed(1)));
+
+                let thief = thread::spawn(move || {
+                    let destination = Queue::shared();
+                    let mut into = destination.owner();
+                    let moved = queue.steal_into_if(&mut into, |real, _| real == start);
+                    let seen = drain(&mut into);
+                    assert_eq!(seen.len(), moved);
+                    seen
+                });
+
+                let mut seen: Vec<_> = owner.pop().into_iter().collect();
+                assert!(matches!(owner.push(1), Push::Pushed(_)));
+                let stolen = thief.join().unwrap();
+                assert!(!stolen.contains(&1), "a refused lone value was claimed");
+                seen.extend(stolen);
+                seen.extend(drain(&mut owner));
+                seen.sort_unstable();
+                assert_eq!(seen, [0, 1]);
+            });
+        }
+    }
+
+    /// A thief that accepts only marked lone values races its owner, which
+    /// pops a marked value and then pushes an unmarked one, alone at the next
+    /// count. The mark names only the count it was pushed at, so the thief
+    /// never takes the second value, whether its claim sees it first or after
+    /// a failed exchange, and the claim and the pop arbitrate the first.
+    #[test]
+    fn test_marked_lone_claim_takes_only_the_marked_value() {
+        loom::model(|| {
+            let queue = Queue::shared();
+            let mut owner = queue.owner();
+            assert!(matches!(owner.push_marked(0), Push::Pushed(1)));
+
+            let thief = thread::spawn(move || {
+                let destination = Queue::shared();
+                let mut into = destination.owner();
+                let moved = queue.steal_into_if(&mut into, |_, marked| marked);
+                let seen = drain(&mut into);
+                assert_eq!(seen.len(), moved);
+                seen
+            });
+
+            let mut seen: Vec<_> = owner.pop().into_iter().collect();
+            assert!(matches!(owner.push(1), Push::Pushed(_)));
+            let stolen = thief.join().unwrap();
+            assert!(!stolen.contains(&1), "an unmarked lone value was claimed");
+            seen.extend(stolen);
+            seen.extend(drain(&mut owner));
+            seen.sort_unstable();
+            assert_eq!(seen, [0, 1]);
+        });
+    }
+
+    /// A thief that sees a marked value through the tail sees its mark as
+    /// well, in the backlog hint and in the claim's decision, since the owner
+    /// stores the mark before the tail store that publishes the value. Here at
+    /// zero and at the 55-bit maximum, where the mark's count wraps.
+    #[test]
+    fn test_marked_value_is_published_with_its_mark() {
+        for start in [0, REAL_MASK] {
+            loom::model(move || {
+                let queue = Queue::at(start, false);
+                let mut owner = queue.owner();
+
+                let thief = thread::spawn(move || {
+                    if let Backlog::Lone(real, marked) = queue.backlog() {
+                        assert_eq!(real, start);
+                        assert!(marked, "the backlog showed the value without its mark");
+                    }
+                    let destination = Queue::shared();
+                    let mut into = destination.owner();
+                    let moved = queue.steal_into_if(&mut into, |real, marked| {
+                        assert_eq!(real, start);
+                        assert!(marked, "the claim saw the value without its mark");
+                        true
+                    });
+                    let seen = drain(&mut into);
+                    assert_eq!(seen.len(), moved);
+                    seen
+                });
+
+                assert!(matches!(owner.push_marked(0), Push::Pushed(1)));
+                let mut seen = thief.join().unwrap();
+                seen.extend(drain(&mut owner));
+                assert_eq!(seen, [0]);
+            });
+        }
     }
 
     /// A push into a full queue racing a steal overflows, retries, or moves
@@ -1861,7 +2371,7 @@ mod loom_tests {
             // The push yields after each snapshot, so the steal can complete
             // before the push decides.
             let mut seen = Vec::new();
-            match owner.push_with(CAPACITY, thread::yield_now) {
+            match owner.push_with(CAPACITY, false, thread::yield_now) {
                 Push::Pushed(_) => {}
                 Push::Claimed(value) => seen.push(value),
                 Push::Overflow(batch, value) => {
