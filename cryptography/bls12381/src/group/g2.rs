@@ -41,8 +41,8 @@ impl Group for G2 {
     const COMPONENTS: usize = 4;
     const COMPONENT_BITS: u32 = 65;
 
-    fn components(scalar: &Scalar) -> [u128; MAX_COMPONENTS] {
-        scalar.split_quarters().map(u128::from)
+    fn components(scalar: &Scalar) -> [[u64; 2]; MAX_COMPONENTS] {
+        scalar.split_quarters().map(|quarter| [quarter, 0])
     }
 
     fn coordinates(&self) -> &Coordinates {

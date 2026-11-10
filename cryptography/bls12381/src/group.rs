@@ -385,10 +385,12 @@ pub mod fuzz {
                     let mut sum = Scalar::ZERO;
                     let mut power = Scalar::ONE;
                     for (c, component) in G::components(&scalar).into_iter().enumerate() {
-                        assert!(bound.is_none_or(|bound| component < bound));
-                        assert!(c < G::COMPONENTS || component == 0);
-                        let words = [component as u64, (component >> 64) as u64, 0, 0];
-                        let component = Scalar::from_words(words).expect("below the order");
+                        let [low, high] = component;
+                        let wide = u128::from(low) | u128::from(high) << 64;
+                        assert!(bound.is_none_or(|bound| wide < bound));
+                        assert!(c < G::COMPONENTS || wide == 0);
+                        let component =
+                            Scalar::from_words([low, high, 0, 0]).expect("below the order");
                         sum += &(component * &power);
                         power *= &-eigenvalue;
                     }
