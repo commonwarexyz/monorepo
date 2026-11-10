@@ -848,8 +848,7 @@ impl<S: X86V4C> Rns<S> {
         rhs.bound.assert_le(LIMIT);
         let mut bound = self.bound;
         bound.mul(rhs.bound);
-        bound.div_ceil(M_OVER_P);
-        bound.add(DebugCounter::new(LIFT));
+        let bound = Self::reduced_bound(bound);
         bound.assert_le(LIMIT);
 
         let zero = simd.u64_splat(0);
@@ -886,6 +885,15 @@ impl<S: X86V4C> Rns<S> {
             n,
             bound,
         }
+    }
+
+    /// Returns the integer bound, in units of `p`, of a reduction of a product or sum bounded by
+    /// `bound * p^2`: `ceil(bound / floor(M / p)) + LIFT`.
+    #[inline(always)]
+    const fn reduced_bound(mut bound: DebugCounter) -> DebugCounter {
+        bound.div_ceil(M_OVER_P);
+        bound.add(DebugCounter::new(LIFT));
+        bound
     }
 
     /// Returns `self * self`.
@@ -993,9 +1001,7 @@ impl<S: X86V4C> Rns<S> {
                     |i| {
                         let sum = sums[i];
                         sum.bound.assert_le(BUDGET);
-                        let mut bound = sum.bound;
-                        bound.div_ceil(M_OVER_P);
-                        bound.add(DebugCounter::new(LIFT));
+                        let bound = Self::reduced_bound(sum.bound);
                         bound.assert_le(LIMIT);
                         bounds[i] = bound;
                         let reduced = reduce(simd, sum.m, modulus, inverse);
@@ -1329,9 +1335,7 @@ impl<S: X86V4C> Field<S> for Rns<S> {
             #[inline(always)]
             move |simd: S| {
                 product.bound.assert_le(BUDGET);
-                let mut bound = product.bound;
-                bound.div_ceil(M_OVER_P);
-                bound.add(DebugCounter::new(LIFT));
+                let bound = Self::reduced_bound(product.bound);
                 let modulus = constant(simd, &M.moduli);
                 let reduced = reduce(simd, product.m, modulus, constant(simd, &M.inverse));
                 let quotient = fold(simd, reduced, constant(simd, &M.complement));
