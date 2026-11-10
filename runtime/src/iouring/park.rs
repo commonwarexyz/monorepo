@@ -1,4 +1,4 @@
-//! One worker's eventcount: a futex word that every notification advances.
+//! Futex parking for io_uring workers.
 //!
 //! [`Parker::new`] creates the word with its only [`Parker`], which the worker
 //! keeps to wait, and [`Parker::unparker`] hands out [`Unparker`]s, with which
@@ -58,11 +58,6 @@
 //! after it finds the waiter bit, or finds it already taken by an earlier
 //! notification whose wake is still to come, so the queued wait is woken.
 //!
-//! The word's padded cache lines also hold the mail flag of the worker's
-//! mailbox (see [`super::mailbox`]). A turn reads one line for its observation
-//! and its mail checks, and a send that starts a batch writes one line for the
-//! flag and its notification.
-//!
 //! The types bound who waits. A word has one [`Parker`], which is neither
 //! [`Clone`] nor [`Sync`], so one thread at a time can arm it or wait on it, and a
 //! ring wait can be installed only under a live [`ArmGuard`]. [`Unparker`]s can
@@ -72,7 +67,6 @@
 
 use super::waiter::UserData;
 use crossbeam_utils::CachePadded;
-use io_uring::squeue::SubmissionQueue;
 use std::{
     cell::Cell,
     marker::PhantomData,
@@ -81,16 +75,13 @@ use std::{
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "loom")] {
-        use loom::sync::{
-            Arc, Condvar, Mutex,
-            atomic::{AtomicBool, AtomicU32, Ordering},
-        };
-        use std::collections::VecDeque;
+        use loom::sync::{Arc, atomic::Ordering};
+        use model::Inner;
     } else {
-        use io_uring::opcode::FutexWait;
+        use io_uring::{opcode::FutexWait, squeue::SubmissionQueue};
         use std::sync::{
             Arc,
-            atomic::{AtomicBool, AtomicU32, Ordering},
+            atomic::{AtomicU32, Ordering},
         };
         use tracing::warn;
     }
@@ -170,14 +161,6 @@ impl ArmGuard<'_> {
                 .expect("reserved ring futex wait SQ slot");
         }
     }
-
-    /// Model ring wait installation as a no-op.
-    ///
-    /// The loom tests in this module model a queued ring wait directly instead
-    /// of through the `io_uring` submission queue. Keeping this method present
-    /// lets the crate compile with `loom`.
-    #[cfg(feature = "loom")]
-    pub const fn install(&self, _submission_queue: &mut SubmissionQueue<'_>) {}
 }
 
 impl Drop for ArmGuard<'_> {
@@ -191,67 +174,27 @@ impl Drop for ArmGuard<'_> {
     }
 }
 
-/// A wait queued on the word in the loom model of the kernel's futex queue.
-#[cfg(feature = "loom")]
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Waiter {
-    /// A ring wait, whose wake posts a completion that the driver reaps later.
-    /// Only the persistent ring wait models queue one.
-    #[cfg_attr(not(test), allow(dead_code))]
-    Ring,
-    /// A wait that blocks its caller until a wake releases it, identified by
-    /// its ticket.
-    Thread(u64),
-}
-
-/// The loom model of the kernel's futex queue for the word.
-#[cfg(feature = "loom")]
-struct FutexQueue {
-    /// Queued waits, oldest first, the order in which a wake releases them.
-    waiters: VecDeque<Waiter>,
-    /// Ticket of the next blocking wait.
-    next_ticket: u64,
-    /// Whether a ring wait was released or refused and its completion waits
-    /// for the driver to reap it.
-    ring_completed: bool,
-    /// Waits one wake releases. A negative control lowers it.
-    wake_count: u32,
-    /// Wake calls so far.
-    #[cfg_attr(not(test), allow(dead_code))]
-    wakes: u32,
-    /// Whether every thread that could wake the word has finished, so a wait
-    /// still queued is never released. A model sets it to fail a stranded wait
-    /// directly, since loom cannot unwind a deadlocked model through the loom
-    /// objects its threads hold.
-    abandoned: bool,
-}
-
-/// The futex word shared by the worker and its producers, beside the mail flag
-/// of the worker's mailbox.
+/// The futex word shared by the worker and its producers.
 ///
 /// The handles share it padded to its own cache lines. Every notification
-/// writes the word, and the worker loads the word and the flag on every turn
-/// and the word on every spin iteration, so a neighboring allocation, such as
-/// another worker's word or this allocation's reference counts, would turn
-/// those writes into misses for unrelated threads.
-///
-/// Loom cannot observe real futexes or io_uring CQEs, so its build replaces the
-/// futex with a modeled wait queue under a mutex standing in for the kernel's
-/// bucket lock, and a condvar on which modeled waits block. It models the
-/// producer and worker atomic protocol, and releases waits oldest first, not
-/// CQE delivery, `io_uring_enter`, or syscall errors.
+/// writes the word, and the worker loads it on every turn and spin iteration,
+/// so a neighboring allocation, such as another worker's word or this
+/// allocation's reference counts, would turn those writes into misses for
+/// unrelated threads.
+#[cfg(not(feature = "loom"))]
 struct Inner {
     /// Waiter bit and notification sequence.
     state: AtomicU32,
-    /// Whether the worker's mailbox holds a batch. Written only under the
-    /// mailbox's inbox lock and read by the worker without it.
-    mail: AtomicBool,
-    /// Modeled futex queue, under a mutex standing in for the bucket lock.
-    #[cfg(feature = "loom")]
-    futex: Mutex<FutexQueue>,
-    /// Condvar on which modeled waits block until a wake releases them.
-    #[cfg(feature = "loom")]
-    futex_waiters: Condvar,
+}
+
+#[cfg(not(feature = "loom"))]
+impl Inner {
+    /// A word with no notifications.
+    const fn new() -> Self {
+        Self {
+            state: AtomicU32::new(0),
+        }
+    }
 }
 
 /// The worker's handle on its word: the only one that can observe, arm, and
@@ -287,21 +230,7 @@ impl Parker {
     /// Create a word with no notifications and return its only parker.
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(CachePadded::new(Inner {
-                state: AtomicU32::new(0),
-                mail: AtomicBool::new(false),
-                #[cfg(feature = "loom")]
-                futex: Mutex::new(FutexQueue {
-                    waiters: VecDeque::new(),
-                    next_ticket: 0,
-                    ring_completed: false,
-                    wake_count: WAKE_COUNT,
-                    wakes: 0,
-                    abandoned: false,
-                }),
-                #[cfg(feature = "loom")]
-                futex_waiters: Condvar::new(),
-            })),
+            inner: Arc::new(CachePadded::new(Inner::new())),
             _not_sync: PhantomData,
         }
     }
@@ -324,17 +253,6 @@ impl Parker {
     #[inline]
     pub fn moved(&self, seen: u32) -> bool {
         self.observe() != seen
-    }
-
-    /// Whether the worker's mailbox holds a batch, read without its lock.
-    ///
-    /// Read it after [`Self::observe`]. A batch whose notification that
-    /// observation included is reported until the worker takes it, and a
-    /// batch whose flag this load misses notifies after the observation. See
-    /// [`super::mailbox`].
-    #[inline]
-    pub fn has_mail(&self) -> bool {
-        self.inner.mail.load(Ordering::Relaxed)
     }
 
     /// Announce that the worker may block, comparing against `seen`.
@@ -438,41 +356,6 @@ impl Parker {
             }
         }
     }
-
-    /// Model `FUTEX_WAIT` on the futex word.
-    ///
-    /// The wait compares and queues under the modeled bucket lock, then blocks
-    /// until a wake releases it, so loom can explore the same lost-wake
-    /// boundary that the kernel's atomic futex wait protects in production.
-    #[cfg(feature = "loom")]
-    fn futex_wait(&self, snapshot: u32, deadline: Option<Instant>) -> bool {
-        // Loom models notification races, not the kernel's timer queue. An
-        // already due deadline exercises the no-sleep transition, and a deadline
-        // still ahead is ignored, so the wait compares and queues as an untimed
-        // wait does.
-        if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
-            return false;
-        }
-
-        // The bucket lock orders this compare against every wake, as in the
-        // kernel, so the load needs no ordering of its own.
-        let mut queue = self.inner.futex.lock().unwrap();
-        if self.inner.state.load(Ordering::Relaxed) != snapshot {
-            return false;
-        }
-
-        let waiter = Waiter::Thread(queue.next_ticket);
-        queue.next_ticket += 1;
-        queue.waiters.push_back(waiter);
-        while queue.waiters.contains(&waiter) {
-            assert!(
-                !queue.abandoned,
-                "a futex wait was stranded with no waker left"
-            );
-            queue = self.inner.futex_waiters.wait(queue).unwrap();
-        }
-        true
-    }
 }
 
 impl Unparker {
@@ -504,16 +387,6 @@ impl Unparker {
         {
             self.futex_wake();
         }
-    }
-
-    /// Record whether the worker's mailbox holds a batch.
-    ///
-    /// Only the mailbox calls it, under its inbox lock, which orders every
-    /// store. The send that starts a batch sets it before notifying, so the
-    /// notification's release publishes it to the worker's observation, and
-    /// the worker's take or close clears it.
-    pub fn set_mail(&self, mail: bool) {
-        self.inner.mail.store(mail, Ordering::Relaxed);
     }
 
     /// Whether this handle notifies the word of `parker`.
@@ -559,24 +432,149 @@ impl Unparker {
             }
         }
     }
+}
 
-    /// Model `FUTEX_WAKE` for the futex word.
-    ///
-    /// The modeled bucket lock serializes compare-and-queue against wake.
-    /// Releasing the oldest waits first exercises a stale ring wait absorbing
-    /// a wake before the thread wait. A released ring wait posts its completion.
-    #[cfg(feature = "loom")]
-    fn futex_wake(&self) {
-        let mut queue = self.inner.futex.lock().unwrap();
-        queue.wakes += 1;
-        for _ in 0..queue.wake_count {
-            match queue.waiters.pop_front() {
-                Some(Waiter::Ring) => queue.ring_completed = true,
-                Some(Waiter::Thread(_)) => {}
-                None => break,
+/// The loom build's model of the kernel futex behind the word.
+///
+/// Loom cannot observe real futexes or io_uring CQEs, so this build replaces
+/// the futex with a modeled wait queue under a mutex standing in for the
+/// kernel's bucket lock, and a condvar on which modeled waits block. It models
+/// the producer and worker atomic protocol, and releases waits oldest first,
+/// not CQE delivery, `io_uring_enter`, or syscall errors.
+#[cfg(feature = "loom")]
+mod model {
+    use super::{ArmGuard, Parker, Unparker, WAKE_COUNT};
+    use io_uring::squeue::SubmissionQueue;
+    use loom::sync::{
+        Condvar, Mutex,
+        atomic::{AtomicU32, Ordering},
+    };
+    use std::{collections::VecDeque, time::Instant};
+
+    /// A wait queued on the word in the loom model of the kernel's futex queue.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Waiter {
+        /// A ring wait, whose wake posts a completion that the driver reaps later.
+        /// Only the persistent ring wait models queue one.
+        #[cfg_attr(not(test), allow(dead_code))]
+        Ring,
+        /// A wait that blocks its caller until a wake releases it, identified by
+        /// its ticket.
+        Thread(u64),
+    }
+
+    /// The loom model of the kernel's futex queue for the word.
+    pub(super) struct FutexQueue {
+        /// Queued waits, oldest first, the order in which a wake releases them.
+        pub(super) waiters: VecDeque<Waiter>,
+        /// Ticket of the next blocking wait.
+        pub(super) next_ticket: u64,
+        /// Whether a ring wait was released or refused and its completion waits
+        /// for the driver to reap it.
+        pub(super) ring_completed: bool,
+        /// Waits one wake releases. A negative control lowers it.
+        pub(super) wake_count: u32,
+        /// Wake calls so far.
+        #[cfg_attr(not(test), allow(dead_code))]
+        pub(super) wakes: u32,
+        /// Whether every thread that could wake the word has finished, so a wait
+        /// still queued is never released. A model sets it to fail a stranded wait
+        /// directly, since loom cannot unwind a deadlocked model through the loom
+        /// objects its threads hold.
+        pub(super) abandoned: bool,
+    }
+
+    /// The futex word, beside its modeled futex queue.
+    pub(super) struct Inner {
+        /// Waiter bit and notification sequence.
+        pub(super) state: AtomicU32,
+        /// Modeled futex queue, under a mutex standing in for the bucket lock.
+        pub(super) futex: Mutex<FutexQueue>,
+        /// Condvar on which modeled waits block until a wake releases them.
+        pub(super) futex_waiters: Condvar,
+    }
+
+    impl Inner {
+        /// A word with no notifications and an empty futex queue.
+        pub(super) fn new() -> Self {
+            Self {
+                state: AtomicU32::new(0),
+                futex: Mutex::new(FutexQueue {
+                    waiters: VecDeque::new(),
+                    next_ticket: 0,
+                    ring_completed: false,
+                    wake_count: WAKE_COUNT,
+                    wakes: 0,
+                    abandoned: false,
+                }),
+                futex_waiters: Condvar::new(),
             }
         }
-        self.inner.futex_waiters.notify_all();
+    }
+
+    impl ArmGuard<'_> {
+        /// Model ring wait installation as a no-op.
+        ///
+        /// The loom tests in this module model a queued ring wait directly instead
+        /// of through the `io_uring` submission queue. Keeping this method present
+        /// lets the crate compile with `loom`.
+        pub const fn install(&self, _submission_queue: &mut SubmissionQueue<'_>) {}
+    }
+
+    impl Parker {
+        /// Model `FUTEX_WAIT` on the futex word.
+        ///
+        /// The wait compares and queues under the modeled bucket lock, then blocks
+        /// until a wake releases it, so loom can explore the same lost-wake
+        /// boundary that the kernel's atomic futex wait protects in production.
+        pub(super) fn futex_wait(&self, snapshot: u32, deadline: Option<Instant>) -> bool {
+            // Loom models notification races, not the kernel's timer queue. An
+            // already due deadline exercises the no-sleep transition, and a deadline
+            // still ahead is ignored, so the wait compares and queues as an untimed
+            // wait does.
+            if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
+                return false;
+            }
+
+            // The bucket lock orders this compare against every wake, as in the
+            // kernel, so the load needs no ordering of its own.
+            let mut queue = self.inner.futex.lock().unwrap();
+            if self.inner.state.load(Ordering::Relaxed) != snapshot {
+                return false;
+            }
+
+            let waiter = Waiter::Thread(queue.next_ticket);
+            queue.next_ticket += 1;
+            queue.waiters.push_back(waiter);
+            while queue.waiters.contains(&waiter) {
+                assert!(
+                    !queue.abandoned,
+                    "a futex wait was stranded with no waker left"
+                );
+                queue = self.inner.futex_waiters.wait(queue).unwrap();
+            }
+            true
+        }
+    }
+
+    impl Unparker {
+        /// Model `FUTEX_WAKE` for the futex word.
+        ///
+        /// The modeled bucket lock serializes compare-and-queue against wake.
+        /// Releasing the oldest waits first exercises a stale ring wait absorbing
+        /// a wake before the thread wait. A released ring wait posts its completion.
+        pub(super) fn futex_wake(&self) {
+            let mut queue = self.inner.futex.lock().unwrap();
+            queue.wakes += 1;
+            for _ in 0..queue.wake_count {
+                match queue.waiters.pop_front() {
+                    Some(Waiter::Ring) => queue.ring_completed = true,
+                    Some(Waiter::Thread(_)) => {}
+                    None => break,
+                }
+            }
+            self.inner.futex_waiters.notify_all();
+        }
     }
 }
 
@@ -584,22 +582,9 @@ impl Unparker {
 pub mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
-    #[cfg(not(feature = "loom"))]
-    use {
-        crate::iouring::{
-            RingConfig,
-            driver::{Driver, tests::hold_ring},
-        },
-        io_uring::IoUring,
-        std::path::{Path, PathBuf},
-    };
 
     /// Bound real-thread rendezvous and notification waits.
     const TEST_TIMEOUT: Duration = Duration::from_secs(10);
-
-    /// How long the idle wait must stay asleep after the single wake.
-    #[cfg(not(feature = "loom"))]
-    const STRANDED: Duration = Duration::from_millis(200);
 
     /// Wait until the owner arms, failing by the deadline if it never parks.
     pub fn wait_until_armed(unparker: &Unparker, deadline: Instant) {
@@ -631,102 +616,10 @@ pub mod tests {
         word(unparker) / INCREMENT
     }
 
-    /// Read the mail flag beside the word without the mailbox's lock.
-    pub fn has_mail(unparker: &Unparker) -> bool {
-        unparker.inner.mail.load(Ordering::Relaxed)
-    }
-
-    /// Number of live handles on the word, which stays allocated while any
-    /// remains.
-    #[cfg(not(feature = "loom"))]
-    pub fn handles(parker: &Parker) -> usize {
-        Arc::strong_count(&parker.inner)
-    }
-
     /// Forget an unarmed word's notifications, so a test can count new ones.
     pub fn reset(parker: &Parker) {
         assert_eq!(parker.inner.state.load(Ordering::Relaxed) & WAITER, 0);
         parker.inner.state.store(0, Ordering::Relaxed);
-    }
-
-    /// Build a ring with the driver's flags. With deferred task work, a ring
-    /// wait's completion waits for the owner's next enter instead of
-    /// interrupting the owner's thread futex wait, as in production.
-    #[cfg(not(feature = "loom"))]
-    fn ring() -> IoUring {
-        IoUring::builder()
-            .setup_single_issuer()
-            .setup_defer_taskrun()
-            .build(8)
-            .unwrap()
-    }
-
-    /// Queue a ring wait against the armed snapshot of a fresh observation,
-    /// then disarm, leaving the wait queued as a park that ends without its
-    /// completion does.
-    #[cfg(not(feature = "loom"))]
-    fn queue_ring_wait(parker: &Parker, ring: &mut IoUring) {
-        let arm = parker.arm(parker.observe());
-        assert!(arm.still_idle());
-        arm.install(&mut ring.submission());
-        ring.submit().unwrap();
-        drop(arm);
-
-        // A wait whose compare failed would have completed during the submit.
-        assert!(ring.completion().is_empty());
-    }
-
-    /// Wake up to `count` waiters on the word directly, returning how many woke.
-    #[cfg(not(feature = "loom"))]
-    fn wake(unparker: &Unparker, count: u32) -> libc::c_long {
-        // SAFETY: `unparker` retains the aligned atomic word for the call.
-        unsafe {
-            libc::syscall(
-                libc::SYS_futex,
-                unparker.inner.state.as_ptr(),
-                libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG,
-                count,
-            )
-        }
-    }
-
-    /// The procfs directory of the calling thread.
-    #[cfg(not(feature = "loom"))]
-    fn current_task() -> PathBuf {
-        Path::new("/proc").join(std::fs::read_link("/proc/thread-self").unwrap())
-    }
-
-    /// Whether the thread at `task` sleeps in a futex call on the word.
-    ///
-    /// The kernel reports another thread's syscall only once that thread is
-    /// descheduled in a sleep, which a futex wait reaches only after it queued
-    /// itself.
-    #[cfg(not(feature = "loom"))]
-    fn sleeps_on_word(unparker: &Unparker, task: &Path) -> bool {
-        let report = std::fs::read_to_string(task.join("syscall")).expect(
-            "reading another thread's syscall file needs this process to be dumpable, since procfs gives a non-dumpable process's files to root",
-        );
-        let mut fields = report.split_whitespace();
-        let number = fields.next().and_then(|field| field.parse().ok());
-        let address = fields
-            .next()
-            .and_then(|field| field.strip_prefix("0x"))
-            .and_then(|field| usize::from_str_radix(field, 16).ok());
-        number == Some(libc::SYS_futex) && address == Some(unparker.inner.state.as_ptr() as usize)
-    }
-
-    /// Wait until the thread at `task` sleeps in a futex call on the word,
-    /// failing by the test timeout.
-    #[cfg(not(feature = "loom"))]
-    fn wait_until_sleeping_on_word(unparker: &Unparker, task: &Path) {
-        let deadline = Instant::now() + TEST_TIMEOUT;
-        while !sleeps_on_word(unparker, task) {
-            assert!(
-                Instant::now() < deadline,
-                "the owner never slept on the word"
-            );
-            std::thread::yield_now();
-        }
     }
 
     /// Restore the previous signal handler after the notifier has joined.
@@ -748,236 +641,6 @@ pub mod tests {
 
     /// Interrupt a futex wait without changing any shared state.
     extern "C" fn interrupt_wait(_: libc::c_int) {}
-
-    /// A notification between the arm and the kernel's compare fails the new
-    /// ring wait at once, so the enter that follows does not block.
-    #[cfg(not(feature = "loom"))]
-    #[test]
-    fn test_ring_wait_rejects_a_wake_before_enter() {
-        // Arm against a fresh observation.
-        let parker = Parker::new();
-        let unparker = parker.unparker();
-        let mut ring = ring();
-        let seen = parker.observe();
-        let arm = parker.arm(seen);
-        assert!(arm.still_idle());
-
-        // Notify before the wait reaches the kernel, then submit it.
-        unparker.unpark();
-        arm.install(&mut ring.submission());
-        ring.submit_and_wait(1).unwrap();
-
-        // The kernel's compare failed, so the wait completed with EAGAIN.
-        let cqe = ring.completion().next().unwrap();
-        assert_eq!(cqe.user_data(), RING_WAIT_USER_DATA);
-        assert_eq!(cqe.result(), -libc::EAGAIN);
-        assert!(!io_uring::cqueue::more(cqe.flags()));
-        drop(arm);
-        assert!(parker.moved(seen));
-    }
-
-    /// A notification before the arm refuses the wait without a syscall, and
-    /// one after the arm reaches a ring wait that an earlier park left queued,
-    /// which the next park reuses without installing another.
-    #[cfg(not(feature = "loom"))]
-    #[test]
-    fn test_reused_ring_wait_receives_a_later_wake() {
-        // A park installs its wait, and an unrelated completion ends the park
-        // with the wait still queued.
-        let parker = Parker::new();
-        let unparker = parker.unparker();
-        let mut ring = ring();
-        let seen = parker.observe();
-        queue_ring_wait(&parker, &mut ring);
-
-        // A notification while running only advances the sequence, so the
-        // next arm against the older observation is refused.
-        unparker.unpark();
-        assert!(!parker.arm(seen).still_idle());
-
-        // A fresh observation arms, and a producer finds the waiter bit and
-        // wakes the queued wait while the owner waits in the ring.
-        let seen = parker.observe();
-        let arm = parker.arm(seen);
-        assert!(arm.still_idle());
-        let producer = std::thread::spawn(move || unparker.unpark());
-        ring.submit_and_wait(1).unwrap();
-        producer.join().unwrap();
-
-        // The queued wait's completion ended this park.
-        let cqe = ring.completion().next().unwrap();
-        assert_eq!(cqe.user_data(), RING_WAIT_USER_DATA);
-        assert_eq!(cqe.result(), 0);
-        drop(arm);
-        assert!(parker.moved(seen));
-    }
-
-    /// A ring wait that an earlier park left queued sits ahead of the owner's
-    /// idle wait, and one notification releases both.
-    #[cfg(not(feature = "loom"))]
-    #[test]
-    fn test_stale_ring_wait_cannot_absorb_idle_wake() {
-        // Leave a ring wait queued, as a park that ended without its
-        // completion does.
-        let parker = Parker::new();
-        let unparker = parker.unparker();
-        let mut ring = ring();
-        queue_ring_wait(&parker, &mut ring);
-
-        // Park idle, and notify once the owner sleeps behind the ring wait.
-        let owner = current_task();
-        let producer = std::thread::spawn(move || {
-            wait_until_sleeping_on_word(&unparker, &owner);
-            unparker.unpark();
-        });
-        let deadline = Instant::now() + TEST_TIMEOUT;
-        let woken = parker.park(0, Some(deadline));
-        producer.join().unwrap();
-
-        // The notification released the idle wait and the ring wait alike.
-        assert!(woken.is_some(), "stale ring wait absorbed the idle wake");
-        ring.submit_and_wait(1).unwrap();
-        let cqe = ring.completion().next().unwrap();
-        assert_eq!(cqe.user_data(), RING_WAIT_USER_DATA);
-        assert_eq!(cqe.result(), 0);
-    }
-
-    /// Waking one waiter releases only the ring wait queued ahead of the
-    /// owner's idle wait, which stays asleep. This is why a notification wakes
-    /// two, and it shows the test above would catch a notification that woke
-    /// one.
-    #[cfg(not(feature = "loom"))]
-    #[test]
-    fn test_waking_one_strands_idle_wait_behind_stale_ring_wait() {
-        // Leave a ring wait queued, as a park that ended without its
-        // completion does.
-        let parker = Parker::new();
-        let unparker = parker.unparker();
-        let mut ring = ring();
-        queue_ring_wait(&parker, &mut ring);
-
-        // Park idle. Once the owner sleeps behind the ring wait, wake one
-        // waiter, check that the owner still sleeps, then release it with a
-        // notification.
-        let owner = current_task();
-        let returned = Arc::new(AtomicBool::new(false));
-        let producer = std::thread::spawn({
-            let returned = returned.clone();
-            move || {
-                wait_until_sleeping_on_word(&unparker, &owner);
-                let woken = wake(&unparker, 1);
-                std::thread::sleep(STRANDED);
-                let stranded =
-                    !returned.load(Ordering::Acquire) && sleeps_on_word(&unparker, &owner);
-                unparker.unpark();
-                (woken, stranded)
-            }
-        });
-        let deadline = Instant::now() + TEST_TIMEOUT;
-        let released = parker.park(0, Some(deadline));
-        returned.store(true, Ordering::Release);
-        let (woken, stranded) = producer.join().unwrap();
-
-        // The single wake took the ring wait and left the idle wait asleep
-        // until the notification.
-        assert_eq!(woken, 1);
-        assert!(stranded, "a single wake reached the idle wait");
-        assert!(released.is_some());
-        ring.submit_and_wait(1).unwrap();
-        let cqe = ring.completion().next().unwrap();
-        assert_eq!(cqe.user_data(), RING_WAIT_USER_DATA);
-        assert_eq!(cqe.result(), 0);
-    }
-
-    /// Dropping a driver cancels its submitted ring wait, so no waiter remains
-    /// on a futex word whose address can be reused, and then releases its
-    /// handles on the word. A wait that a wake already took is not found by
-    /// the cancel, which also lets the word go.
-    #[cfg(not(feature = "loom"))]
-    #[test]
-    fn test_driver_drop_cancels_ring_wait() {
-        // Create the word shared by both cancellation cases.
-        let parker = Parker::new();
-        let unparker = parker.unparker();
-        let handles_without_driver = handles(&parker);
-        for cancel in [false, true] {
-            // A park with a short deadline leaves its ring wait queued.
-            let mut driver = Driver::new(
-                &RingConfig::default(),
-                Duration::from_secs(60),
-                unparker.clone(),
-                Instant::now(),
-            )
-            .unwrap();
-            assert!(
-                driver
-                    .park(&parker, 0, Some(Instant::now() + Duration::from_millis(2)))
-                    .unwrap()
-            );
-
-            if cancel {
-                // A duplicate descriptor keeps the ring alive across the drop,
-                // so its teardown, which also removes the wait, cannot run
-                // before the check.
-                let ring = hold_ring(&driver);
-
-                // Cancel the live wait by dropping its owner.
-                drop(driver);
-
-                // No wait remains while the duplicate keeps the ring alive, so
-                // only the drop's synchronous cancel removed it.
-                assert_eq!(wake(&unparker, 2), 0, "driver left its ring wait queued");
-                drop(ring);
-            } else {
-                // Release the wait directly to prove the park queued it. The
-                // driver has not reaped its completion, so the drop's cancel
-                // finds no wait.
-                let woken = wake(&unparker, 2);
-
-                // Exactly the driver's ring wait was present.
-                assert_eq!(woken, 1, "park did not queue its ring wait");
-                drop(driver);
-            }
-
-            // The drop kept no handle, so the word can be freed.
-            assert_eq!(handles(&parker), handles_without_driver);
-        }
-    }
-
-    /// A driver dropped off its owner thread cannot cancel its ring wait,
-    /// since the ring accepts the cancel only from the thread that created it.
-    /// The drop then keeps the word allocated under the wait it leaves queued.
-    #[cfg(not(feature = "loom"))]
-    #[test]
-    fn test_driver_drop_off_its_owner_leaks_the_word() {
-        // A park with a short deadline leaves its ring wait queued.
-        let parker = Parker::new();
-        let unparker = parker.unparker();
-        let handles_without_driver = handles(&parker);
-        let mut driver = Driver::new(
-            &RingConfig::default(),
-            Duration::from_secs(60),
-            unparker.clone(),
-            Instant::now(),
-        )
-        .unwrap();
-        assert!(
-            driver
-                .park(&parker, 0, Some(Instant::now() + Duration::from_millis(2)))
-                .unwrap()
-        );
-
-        // Drop the driver on another thread, while a duplicate descriptor
-        // keeps the ring, and so any wait its cancel missed, alive.
-        let ring = hold_ring(&driver);
-        std::thread::spawn(move || drop(driver)).join().unwrap();
-
-        // The cancel failed, so the drop kept one handle and the wait is
-        // still queued.
-        assert_eq!(handles(&parker), handles_without_driver + 1);
-        assert_eq!(wake(&unparker, 2), 1, "the ring wait was cancelled");
-        drop(ring);
-    }
 
     /// Neither an elapsed deadline nor a kernel timeout counts as a
     /// notification.
@@ -1258,12 +921,240 @@ pub mod tests {
         assert_eq!(notifications(&unparker), 1);
         assert!(!waiting(&unparker));
     }
+
+    #[cfg(not(feature = "loom"))]
+    pub mod native {
+        use super::*;
+        use io_uring::IoUring;
+        use std::path::{Path, PathBuf};
+
+        /// How long the idle wait must stay asleep after the single wake.
+        const STRANDED: Duration = Duration::from_millis(200);
+
+        /// Number of live handles on the word, which stays allocated while any
+        /// remains.
+        pub fn handles(parker: &Parker) -> usize {
+            Arc::strong_count(&parker.inner)
+        }
+
+        /// Build a ring with the driver's flags. With deferred task work, a ring
+        /// wait's completion waits for the owner's next enter instead of
+        /// interrupting the owner's thread futex wait, as in production.
+        fn ring() -> IoUring {
+            IoUring::builder()
+                .setup_single_issuer()
+                .setup_defer_taskrun()
+                .build(8)
+                .unwrap()
+        }
+
+        /// Queue a ring wait against the armed snapshot of a fresh observation,
+        /// then disarm, leaving the wait queued as a park that ends without its
+        /// completion does.
+        fn queue_ring_wait(parker: &Parker, ring: &mut IoUring) {
+            let arm = parker.arm(parker.observe());
+            assert!(arm.still_idle());
+            arm.install(&mut ring.submission());
+            ring.submit().unwrap();
+            drop(arm);
+
+            // A wait whose compare failed would have completed during the submit.
+            assert!(ring.completion().is_empty());
+        }
+
+        /// Wake up to `count` waiters on the word directly, returning how many woke.
+        pub fn wake(unparker: &Unparker, count: u32) -> libc::c_long {
+            // SAFETY: `unparker` retains the aligned atomic word for the call.
+            unsafe {
+                libc::syscall(
+                    libc::SYS_futex,
+                    unparker.inner.state.as_ptr(),
+                    libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG,
+                    count,
+                )
+            }
+        }
+
+        /// The procfs directory of the calling thread.
+        fn current_task() -> PathBuf {
+            Path::new("/proc").join(std::fs::read_link("/proc/thread-self").unwrap())
+        }
+
+        /// Whether the thread at `task` sleeps in a futex call on the word.
+        ///
+        /// The kernel reports another thread's syscall only once that thread is
+        /// descheduled in a sleep, which a futex wait reaches only after it queued
+        /// itself.
+        fn sleeps_on_word(unparker: &Unparker, task: &Path) -> bool {
+            let report = std::fs::read_to_string(task.join("syscall")).expect(
+                "reading another thread's syscall file needs this process to be dumpable, since procfs gives a non-dumpable process's files to root",
+            );
+            let mut fields = report.split_whitespace();
+            let number = fields.next().and_then(|field| field.parse().ok());
+            let address = fields
+                .next()
+                .and_then(|field| field.strip_prefix("0x"))
+                .and_then(|field| usize::from_str_radix(field, 16).ok());
+            number == Some(libc::SYS_futex)
+                && address == Some(unparker.inner.state.as_ptr() as usize)
+        }
+
+        /// Wait until the thread at `task` sleeps in a futex call on the word,
+        /// failing by the test timeout.
+        fn wait_until_sleeping_on_word(unparker: &Unparker, task: &Path) {
+            let deadline = Instant::now() + TEST_TIMEOUT;
+            while !sleeps_on_word(unparker, task) {
+                assert!(
+                    Instant::now() < deadline,
+                    "the owner never slept on the word"
+                );
+                std::thread::yield_now();
+            }
+        }
+
+        /// A notification between the arm and the kernel's compare fails the new
+        /// ring wait at once, so the enter that follows does not block.
+        #[test]
+        fn test_ring_wait_rejects_a_wake_before_enter() {
+            // Arm against a fresh observation.
+            let parker = Parker::new();
+            let unparker = parker.unparker();
+            let mut ring = ring();
+            let seen = parker.observe();
+            let arm = parker.arm(seen);
+            assert!(arm.still_idle());
+
+            // Notify before the wait reaches the kernel, then submit it.
+            unparker.unpark();
+            arm.install(&mut ring.submission());
+            ring.submit_and_wait(1).unwrap();
+
+            // The kernel's compare failed, so the wait completed with EAGAIN.
+            let cqe = ring.completion().next().unwrap();
+            assert_eq!(cqe.user_data(), RING_WAIT_USER_DATA);
+            assert_eq!(cqe.result(), -libc::EAGAIN);
+            assert!(!io_uring::cqueue::more(cqe.flags()));
+            drop(arm);
+            assert!(parker.moved(seen));
+        }
+
+        /// A notification before the arm refuses the wait without a syscall, and
+        /// one after the arm reaches a ring wait that an earlier park left queued,
+        /// which the next park reuses without installing another.
+        #[test]
+        fn test_reused_ring_wait_receives_a_later_wake() {
+            // A park installs its wait, and an unrelated completion ends the park
+            // with the wait still queued.
+            let parker = Parker::new();
+            let unparker = parker.unparker();
+            let mut ring = ring();
+            let seen = parker.observe();
+            queue_ring_wait(&parker, &mut ring);
+
+            // A notification while running only advances the sequence, so the
+            // next arm against the older observation is refused.
+            unparker.unpark();
+            assert!(!parker.arm(seen).still_idle());
+
+            // A fresh observation arms, and a producer finds the waiter bit and
+            // wakes the queued wait while the owner waits in the ring.
+            let seen = parker.observe();
+            let arm = parker.arm(seen);
+            assert!(arm.still_idle());
+            let producer = std::thread::spawn(move || unparker.unpark());
+            ring.submit_and_wait(1).unwrap();
+            producer.join().unwrap();
+
+            // The queued wait's completion ended this park.
+            let cqe = ring.completion().next().unwrap();
+            assert_eq!(cqe.user_data(), RING_WAIT_USER_DATA);
+            assert_eq!(cqe.result(), 0);
+            drop(arm);
+            assert!(parker.moved(seen));
+        }
+
+        /// A ring wait that an earlier park left queued sits ahead of the owner's
+        /// idle wait, and one notification releases both.
+        #[test]
+        fn test_stale_ring_wait_cannot_absorb_idle_wake() {
+            // Leave a ring wait queued, as a park that ended without its
+            // completion does.
+            let parker = Parker::new();
+            let unparker = parker.unparker();
+            let mut ring = ring();
+            queue_ring_wait(&parker, &mut ring);
+
+            // Park idle, and notify once the owner sleeps behind the ring wait.
+            let owner = current_task();
+            let producer = std::thread::spawn(move || {
+                wait_until_sleeping_on_word(&unparker, &owner);
+                unparker.unpark();
+            });
+            let deadline = Instant::now() + TEST_TIMEOUT;
+            let woken = parker.park(0, Some(deadline));
+            producer.join().unwrap();
+
+            // The notification released the idle wait and the ring wait alike.
+            assert!(woken.is_some(), "stale ring wait absorbed the idle wake");
+            ring.submit_and_wait(1).unwrap();
+            let cqe = ring.completion().next().unwrap();
+            assert_eq!(cqe.user_data(), RING_WAIT_USER_DATA);
+            assert_eq!(cqe.result(), 0);
+        }
+
+        /// Waking one waiter releases only the ring wait queued ahead of the
+        /// owner's idle wait, which stays asleep. This is why a notification wakes
+        /// two, and it shows the test above would catch a notification that woke
+        /// one.
+        #[test]
+        fn test_waking_one_strands_idle_wait_behind_stale_ring_wait() {
+            // Leave a ring wait queued, as a park that ended without its
+            // completion does.
+            let parker = Parker::new();
+            let unparker = parker.unparker();
+            let mut ring = ring();
+            queue_ring_wait(&parker, &mut ring);
+
+            // Park idle. Once the owner sleeps behind the ring wait, wake one
+            // waiter, check that the owner still sleeps, then release it with a
+            // notification.
+            let owner = current_task();
+            let returned = Arc::new(AtomicBool::new(false));
+            let producer = std::thread::spawn({
+                let returned = returned.clone();
+                move || {
+                    wait_until_sleeping_on_word(&unparker, &owner);
+                    let woken = wake(&unparker, 1);
+                    std::thread::sleep(STRANDED);
+                    let stranded =
+                        !returned.load(Ordering::Acquire) && sleeps_on_word(&unparker, &owner);
+                    unparker.unpark();
+                    (woken, stranded)
+                }
+            });
+            let deadline = Instant::now() + TEST_TIMEOUT;
+            let released = parker.park(0, Some(deadline));
+            returned.store(true, Ordering::Release);
+            let (woken, stranded) = producer.join().unwrap();
+
+            // The single wake took the ring wait and left the idle wait asleep
+            // until the notification.
+            assert_eq!(woken, 1);
+            assert!(stranded, "a single wake reached the idle wait");
+            assert!(released.is_some());
+            ring.submit_and_wait(1).unwrap();
+            let cqe = ring.completion().next().unwrap();
+            assert_eq!(cqe.user_data(), RING_WAIT_USER_DATA);
+            assert_eq!(cqe.result(), 0);
+        }
+    }
 }
 
 #[cfg(all(test, feature = "loom"))]
 mod loom_tests {
     use super::{
-        tests::{has_mail, notifications, waiting},
+        model::Waiter,
+        tests::{notifications, waiting},
         *,
     };
     use crate::iouring::{
@@ -1619,7 +1510,7 @@ mod loom_tests {
             let mut scratch = Vec::new();
             loop {
                 let seen = parker.observe();
-                if scratch.is_empty() && parker.has_mail() {
+                if scratch.is_empty() && mailbox.has_mail() {
                     assert!(mailbox.take(&mut scratch));
                 }
                 if !scratch.is_empty() {
@@ -1631,7 +1522,7 @@ mod loom_tests {
 
                 // The park decision of the same turn. The take above was
                 // skipped if the turn began with a message left in the scratch.
-                if !scratch.is_empty() || (check_mail && parker.has_mail()) || parker.moved(seen) {
+                if !scratch.is_empty() || (check_mail && mailbox.has_mail()) || parker.moved(seen) {
                     continue;
                 }
                 idle_park(&parker, seen);
@@ -1640,7 +1531,7 @@ mod loom_tests {
 
             // Every message arrived in order and the flag is clear.
             assert_eq!(received, [0, 1, 2]);
-            assert!(!has_mail(&mailbox.unparker));
+            assert!(!mailbox.has_mail());
             assert!(!waiting(&mailbox.unparker));
         });
     }
@@ -1673,7 +1564,7 @@ mod loom_tests {
             let mut scratch = Vec::new();
             while received.len() < 2 {
                 let seen = parker.observe();
-                if scratch.is_empty() && parker.has_mail() {
+                if scratch.is_empty() && mailbox.has_mail() {
                     assert!(mailbox.take(&mut scratch));
                 }
                 if scratch.is_empty() {
@@ -1688,7 +1579,7 @@ mod loom_tests {
             // notified, and the flag is clear.
             assert_eq!(received, [1, 2]);
             assert!((2..=3).contains(&notifications(&mailbox.unparker)));
-            assert!(!has_mail(&mailbox.unparker));
+            assert!(!mailbox.has_mail());
             assert!(!waiting(&mailbox.unparker));
         });
     }
@@ -1723,7 +1614,7 @@ mod loom_tests {
             assert!(mailbox.send(message(0)).is_ok());
             assert!(mailbox.send(message(1)).is_ok());
             let mut scratch = Vec::new();
-            assert!(has_mail(&mailbox.unparker));
+            assert!(mailbox.has_mail());
             assert!(mailbox.take(&mut scratch));
             let first = scratch.remove(0);
             let arm = parker.arm(parker.observe());
@@ -1745,7 +1636,7 @@ mod loom_tests {
                 notifications(&mailbox.unparker),
                 1 + u32::from(rejected.is_none())
             );
-            assert!(!has_mail(&mailbox.unparker));
+            assert!(!mailbox.has_mail());
             detached.push(first);
             detached.append(&mut scratch);
             let mut indices = detached.into_iter().map(index).collect::<Vec<_>>();
