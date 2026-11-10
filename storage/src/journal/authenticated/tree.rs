@@ -136,9 +136,9 @@ impl<D: Copy> Resident<D> {
         }
     }
 
-    /// Digests held.
-    fn len(&self) -> usize {
-        self.levels.iter().map(|level| level.nodes.len()).sum()
+    /// Digests the levels have room for, which growth can leave at up to twice the digests held.
+    fn capacity(&self) -> usize {
+        self.levels.iter().map(|level| level.nodes.capacity()).sum()
     }
 }
 
@@ -508,7 +508,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
     }
 
     fn update_metrics(&self) {
-        let bytes = self.resident.len().saturating_mul(size_of::<D>());
+        let bytes = self.resident.capacity().saturating_mul(size_of::<D>());
         let _ = self.metrics.resident_bytes.try_set(bytes);
     }
 
@@ -1194,6 +1194,11 @@ mod tests {
         mem
     }
 
+    /// Digests `resident` holds.
+    fn resident_len<D>(resident: &Resident<D>) -> usize {
+        resident.levels.iter().map(|level| level.nodes.len()).sum()
+    }
+
     fn config(resident_height: u32) -> Config<Sequential> {
         Config {
             metadata_partition: String::new(),
@@ -1271,7 +1276,11 @@ mod tests {
                 let resident = (*first..*expected.size())
                     .filter(|&p| F::pos_to_height(Position::new(p)) >= height)
                     .count();
-                assert_eq!(tree.resident.len(), resident, "pruned nodes retained");
+                assert_eq!(
+                    resident_len(&tree.resident),
+                    resident,
+                    "pruned nodes retained"
+                );
                 ops.bounds.start = *boundary;
                 let opened = Tree::new(boundary, pins, &config(height), Metrics::new(&context))
                     .unwrap()
@@ -1388,7 +1397,11 @@ mod tests {
                             batched.mem().pinned_nodes(),
                             "{case}"
                         );
-                        assert_eq!(subtrees.resident.len(), batched.resident.len(), "{case}");
+                        assert_eq!(
+                            resident_len(&subtrees.resident),
+                            resident_len(&batched.resident),
+                            "{case}"
+                        );
                         let first = *F::location_to_position(Location::new(boundary));
                         let positions: Vec<_> =
                             (first..*subtrees.size()).map(Position::new).collect();

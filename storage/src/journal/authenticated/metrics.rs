@@ -25,7 +25,7 @@ impl Metrics {
                 "replayed_leaves",
                 "Operations replayed to rebuild resident Merkle state",
             ),
-            resident_bytes: context.gauge("resident_bytes", "Bytes occupied by resident digests"),
+            resident_bytes: context.gauge("resident_bytes", "Bytes allocated for resident digests"),
         }
     }
 }
