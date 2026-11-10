@@ -3964,6 +3964,76 @@ pub mod tests {
         });
     }
 
+    /// Pruning an MMB database to an earlier generation's sync boundary leaves it and each later
+    /// generation initializable at its size with its recorded root and sync boundary.
+    #[test_traced("INFO")]
+    fn test_current_mmb_prune_keeps_retained_checkpoints_initializable() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let partition = "current-mmb-prune-retained-checkpoints";
+            let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                context.child("storage"),
+                variable_config::<OneCap>(partition),
+                None,
+            )
+            .await
+            .unwrap();
+
+            // Write the same keys in six synced generations and record each one's checkpoint.
+            let mut history = Vec::new();
+            for generation in 0..6u64 {
+                let mut batch = db.new_batch();
+                for i in 0..384 {
+                    batch = batch.write(key(i), Some(val(generation * 1_000 + i)));
+                }
+                let merkleized = batch.merkleize(&db).await.unwrap();
+                db = db.apply_batch(merkleized).await.unwrap();
+                db = db.sync().await.unwrap();
+                history.push((
+                    db.bounds().end,
+                    db.inactivity_floor(),
+                    db.sync_boundary(),
+                    db.root(),
+                ));
+            }
+
+            // Prune to the first sync boundary of at least one bitmap chunk that lags its floor's
+            // chunk. Only MMB's delayed merges cause that lag, and this prune moves the bitmap.
+            let oldest = history
+                .iter()
+                .position(|(_, floor, boundary, _)| {
+                    **boundary >= CHUNK_BITS && **boundary < **floor / CHUNK_BITS * CHUNK_BITS
+                })
+                .expect("some generation's sync boundary must lag its floor's chunk");
+            assert!(
+                oldest + 1 < history.len(),
+                "a generation must follow the pruned one"
+            );
+            let prune_loc = history[oldest].2;
+            let db = db.prune(prune_loc).await.unwrap();
+            assert_eq!(db.pruned_bits(), *prune_loc);
+            let db = db.sync().await.unwrap();
+            drop(db);
+
+            // Reopen each retained generation bounded at its size, newest first.
+            let labels = ["gen0", "gen1", "gen2", "gen3", "gen4", "gen5"];
+            for index in (oldest..history.len()).rev() {
+                let (size, _, boundary, root) = history[index];
+                let db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                    context.child(labels[index]),
+                    variable_config::<OneCap>(partition),
+                    Some(size),
+                )
+                .await
+                .unwrap();
+                assert_eq!(db.bounds().end, size);
+                assert_eq!(db.root(), root);
+                assert_eq!(db.sync_boundary(), boundary);
+                assert_eq!(db.pruned_bits(), *prune_loc);
+            }
+        });
+    }
+
     /// Verify that the speculative canonical root from a merkleized batch matches the root
     /// recomputed from committed state after sync + reopen.
     ///
