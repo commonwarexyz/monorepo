@@ -192,7 +192,8 @@ enum AfterWake {
 ///
 /// Transitions exchange with acquire-release ordering, so writes made before a
 /// wake are visible to the poll it causes, and a poll's writes are visible to
-/// the next poll and to teardown.
+/// the next poll and to teardown. A sleep's poll that skips its timers' lock
+/// relies on the former (see [`super::sleep`]).
 struct State(
     /// Lifecycle, cancellation flag, and counted references packed into one word.
     AtomicUsize,

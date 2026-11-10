@@ -64,7 +64,11 @@
 //! consumption (see [`Task::is_waker`]), and hence after the epoch advance. A
 //! matching poll that misses an ending therefore belongs to the task that the
 //! ending wakes, whose poll scheduled by that wake reads the advanced epoch
-//! and takes the lock.
+//! and takes the lock. The wake itself, not the epoch's atomic ordering,
+//! orders that poll after the advance. A task's wake is a releasing exchange
+//! on its state, and each of its polls begins with an acquiring one (see
+//! [`super::task`]), so the poll observes everything that the waking thread
+//! wrote before the wake.
 //!
 //! A poll with any other waker locks and compares it with the stored one. An
 //! equivalent waker stays pending without a clone. A changed one is cloned
@@ -256,6 +260,10 @@ struct Registrations {
     /// Set once by the owner's cleanup, after which nothing registers and no
     /// party looks up a registration.
     closed: bool,
+    /// Number of critical sections in which a party other than a sleep ended
+    /// a waiting registration, advanced by [`Timers::end`]. A sleeper caches
+    /// it whenever it sees its registration waiting.
+    epoch: u64,
 }
 
 impl Registrations {
@@ -284,6 +292,7 @@ impl Registrations {
             entries,
             wheel,
             closed,
+            ..
         } = self;
         *closed = true;
 
@@ -337,11 +346,11 @@ pub struct Timers {
     /// zero before the first. Written only by the owner. Peers read it to
     /// leave an owner that is still serving its due registrations to itself.
     served: CachePadded<AtomicU64>,
-    /// Number of critical sections in which a party other than a sleep ended
-    /// a waiting registration. Advanced only under the lock, by
-    /// [`Self::end`], before the ended registrations' wakes run, so a
-    /// sleeper that saw its registration waiting at some epoch and reads the
-    /// same epoch later knows that it still waits.
+    /// The registrations' epoch as polls read it without the lock. Stored
+    /// only under the lock, by [`Self::end`], before the ended
+    /// registrations' wakes run, so a sleeper that saw its registration
+    /// waiting at some epoch and reads the same epoch later knows that it
+    /// still waits.
     epoch: CachePadded<AtomicU64>,
     /// The instant of the timers' creation, from which their wheel, bound and
     /// expiry times count nanoseconds.
@@ -362,6 +371,7 @@ impl Timers {
                 entries: Slab::default(),
                 wheel: Wheel::new(0),
                 closed: false,
+                epoch: 0,
             })),
             published: CachePadded::new(AtomicU64::new(u64::MAX)),
             served: CachePadded::new(AtomicU64::new(0)),
@@ -435,12 +445,12 @@ impl Timers {
         };
         pass(registrations, &mut ending);
         if ending.ended {
-            // Only lock holders write, so a plain increment cannot lose one.
             // The store precedes the deferred wakes, which run after the lock
             // is released, so a poll that one of them schedules reads the
-            // new epoch and takes the lock.
-            let epoch = self.epoch.load(Ordering::Relaxed);
-            self.epoch.store(epoch + 1, Ordering::Release);
+            // new epoch and takes the lock. Sleepers cache the count itself,
+            // which they can read only while they hold the lock.
+            registrations.epoch += 1;
+            self.epoch.store(registrations.epoch, Ordering::Release);
         }
     }
 
@@ -496,7 +506,7 @@ impl Timers {
         // with a matching task waker that reads this epoch may skip the lock,
         // since an ending that its load misses still wakes the stored waker
         // (see the module documentation).
-        let epoch = self.epoch.load(Ordering::Relaxed);
+        let epoch = registrations.epoch;
         drop(registrations);
 
         let sleeper = Sleeper {
@@ -574,6 +584,7 @@ impl Timers {
             entries,
             wheel,
             closed,
+            ..
         } = &mut *registrations;
         if *closed {
             return (None, false);
@@ -616,6 +627,7 @@ impl Timers {
                 entries,
                 wheel,
                 closed,
+                ..
             } = &mut *registrations;
             if *closed {
                 // Closed timers hold no registration to remove.
@@ -773,7 +785,6 @@ impl Sleeper {
                 release(clone);
                 return Poll::Ready(Outcome::Closed);
             }
-            let epoch = self.timers.epoch.load(Ordering::Relaxed);
             let current = match registrations.entries.get_mut(self.id) {
                 Some(Entry::Waiting(current)) => current,
                 Some(Entry::Fired) => {
@@ -807,7 +818,7 @@ impl Sleeper {
             // Cache the epoch read while the registration waits with an
             // equivalent waker. A later poll with a matching task waker that
             // reads this epoch may skip the lock.
-            self.epoch = epoch;
+            self.epoch = registrations.epoch;
             drop(registrations);
             release(displaced);
             return Poll::Pending;
@@ -1859,6 +1870,40 @@ pub mod tests {
             assert_eq!(locked, 0);
             drop(held);
             poller.join().unwrap().abandon();
+        });
+    }
+
+    #[test]
+    fn test_waker_of_another_kind_at_a_task_address_takes_the_lock() {
+        /// The vtable of a waker of no task, whose functions never use its
+        /// data.
+        static FORGED_VTABLE: RawWakerVTable =
+            RawWakerVTable::new(forged_clone, forged_ignore, forged_ignore, forged_ignore);
+
+        /// Clone a forged waker.
+        unsafe fn forged_clone(data: *const ()) -> RawWaker {
+            RawWaker::new(data, &FORGED_VTABLE)
+        }
+
+        /// Wake or drop a forged waker.
+        const unsafe fn forged_ignore(_: *const ()) {}
+
+        with_task_waker(|waker| {
+            // A registration with a task's waker, and a waker of another kind
+            // that carries the same data address.
+            let timers = Arc::new(Timers::new());
+            let mut sleeper = register(&timers, later(), waker);
+            // SAFETY: No function of the vtable dereferences the data.
+            let forged = unsafe { Waker::from_raw(RawWaker::new(waker.data(), &FORGED_VTABLE)) };
+
+            // The address alone matches nothing. The poll locks, finds that
+            // the waker differs, and stores its clone in a second critical
+            // section.
+            let before = locks();
+            assert!(poll_with(&mut sleeper, &forged).is_pending());
+            assert_eq!(locks() - before, 2);
+            assert!(timers.waits_with(sleeper.id, &forged));
+            sleeper.abandon();
         });
     }
 
@@ -3659,6 +3704,12 @@ pub mod tests {
 #[cfg(all(test, feature = "loom"))]
 mod loom_tests {
     use super::*;
+    use crate::iouring::{
+        mailbox::Mailbox,
+        pool::Pool,
+        task::{AfterPoll, Ready},
+        tasks::Tasks,
+    };
     use loom::{
         sync::atomic::{AtomicBool, AtomicUsize},
         thread,
@@ -3920,6 +3971,86 @@ mod loom_tests {
                 } else {
                     ending.join().unwrap();
                 }
+            });
+        }
+    }
+
+    /// Continue from `after`, the result of a poll of the model's only task,
+    /// as the pool's only worker does: poll again at once after a wake during
+    /// a poll, and otherwise only a runnable that a wake published to the
+    /// global queue. Returns whether the task completed.
+    fn work(pool: &Pool, set: &Tasks, ready: &mut Ready, mut after: AfterPoll) -> bool {
+        loop {
+            let runnable = match after {
+                AfterPoll::Done => match pool.take(ready) {
+                    Some(runnable) => runnable,
+                    None => return false,
+                },
+                AfterPoll::Requeue(runnable) => runnable,
+                AfterPoll::Retire(task) => {
+                    drop(set.remove(&task));
+                    return true;
+                }
+            };
+            after = runnable.poll(set.id());
+        }
+    }
+
+    #[test]
+    fn test_task_polls_racing_an_ending_observe_it() {
+        for (close, adopt) in [(false, false), (false, true), (true, false), (true, true)] {
+            loom::model(move || {
+                // A pool with no runner, so every wake that publishes a
+                // runnable pushes it to the global queue, which this thread
+                // serves as the pool's only worker.
+                let pool = Arc::new(Pool::new(vec![Arc::new(Mailbox::new().unwrap())]));
+                let set = Tasks::new(1);
+                let mut ready = pool.queue(0).owner();
+                let timers = Arc::new(Timers::new());
+
+                // With `adopt`, the registration holds a waker of no task,
+                // which the task's first poll replaces with its own under the
+                // lock. Otherwise that poll registers, and wakes the task so
+                // that a poll without the lock follows.
+                let mut sleeper =
+                    adopt.then(|| timers.register_alone(Waker::noop().clone(), later()).0);
+                let future = {
+                    let timers = timers.clone();
+                    std::future::poll_fn(move |cx| {
+                        if let Some(sleeper) = &mut sleeper {
+                            return sleeper.poll(cx).map(|_| ());
+                        }
+                        sleeper = Some(timers.register_alone(cx.waker().clone(), later()).0);
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    })
+                };
+                let (task, runnable) = Task::new(future, &set, Arc::downgrade(&pool));
+                assert!(set.insert(task).is_ok());
+
+                // The ending races every poll of the task, except that
+                // closure follows the poll that registers, since only an open
+                // owner registers and closure is that owner's own.
+                let (ending, after) = if close && !adopt {
+                    let after = runnable.poll(set.id());
+                    (end(&timers, close), after)
+                } else {
+                    (end(&timers, close), runnable.poll(set.id()))
+                };
+                let mut completed = work(&pool, &set, &mut ready, after);
+
+                // By its exit, the ending has woken the waker that it found.
+                ending.join().unwrap();
+                completed = completed || work(&pool, &set, &mut ready, AfterPoll::Done);
+
+                // An expiry that ran before the registration ended nothing,
+                // so a later pass ends it. After an ending that a poll
+                // missed, that pass ends nothing and wakes no one.
+                if !completed {
+                    end(&timers, close).join().unwrap();
+                    completed = work(&pool, &set, &mut ready, AfterPoll::Done);
+                }
+                assert!(completed, "the task missed the ending of its sleep");
             });
         }
     }
