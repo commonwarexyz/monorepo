@@ -450,7 +450,8 @@ def validate_bounds(tables: Tables) -> None:
         (2 * n[index]) * tables.expand.fraction[index] for index in range(LANES)
     ) >> FRACTION_BITS
     canonical_max += canonical_k * integer(tables.canonical_correction)
-    # The seven-word canonical accumulator stays below 2^64 * p.
+    # The seven-word canonical accumulator stays below 2^55 * p, which leaves room for the six
+    # word steps, each adding below 2^64 * p, to stay below 2^448.
     assert canonical_max < (1 << 55) * p
     assert 1 < p < (1 << 381) and p & 1
     # Ceil-fixed-point error is strictly below sum(inputs)/2^64 < 1/2.
