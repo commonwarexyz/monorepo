@@ -6,6 +6,7 @@ use commonware_clearing::bajillion::{
     PayoutProof, Queue, Summary, SummaryError,
 };
 use commonware_cryptography::{Digest, Digestible, Hasher, PublicKey, certificate::Verifier};
+use commonware_parallel::Sequential;
 use commonware_storage::merkle::{Location, mmr};
 use commonware_utils::Widen;
 use core::{hash::Hash, ops::Range};
@@ -284,6 +285,7 @@ where
             Widen::widen(persisted.required_deposits)..=Widen::widen(persisted.deposits.len()),
             Widen::widen(persisted.required_forced_withdrawals)
                 ..=Widen::widen(persisted.forced_withdrawals.len()),
+            &Sequential,
         )?;
 
         // The counts lie within the queues, and the certificate vouches that the payouts size

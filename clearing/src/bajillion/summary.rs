@@ -9,7 +9,7 @@ use commonware_cryptography::{
     Digest, Digestible, Hasher, PublicKey,
     certificate::{self, Verifier},
 };
-use commonware_parallel::Sequential;
+use commonware_parallel::Strategy;
 use commonware_storage::{
     merkle::{Location, mmr},
     qmdb::{chain::Commitment, keyless, value::FixedEncoding},
@@ -185,6 +185,7 @@ impl<H: Hasher> Summary<H> {
         parent: &H::Digest,
         deposits: RangeInclusive<u64>,
         forced_withdrawals: RangeInclusive<u64>,
+        strategy: &impl Strategy,
     ) -> Result<(), SummaryError>
     where
         V: for<'a> Verifier<Subject<'a, H::Digest> = &'a Self>,
@@ -204,7 +205,7 @@ impl<H: Hasher> Summary<H> {
         {
             return Err(SummaryError::InvalidCount);
         }
-        if !verifier.verify_certificate::<_, H::Digest>(rng, self, certificate, &Sequential) {
+        if !verifier.verify_certificate::<_, H::Digest>(rng, self, certificate, strategy) {
             return Err(SummaryError::InvalidCertificate);
         }
         Ok(())
@@ -337,6 +338,7 @@ mod tests {
         ed25519::{self, PublicKey},
         sha256::Digest,
     };
+    use commonware_parallel::Sequential;
     use commonware_storage::merkle::Family as _;
     use commonware_utils::test_rng;
 
@@ -562,6 +564,7 @@ mod tests {
                 parent,
                 deposits,
                 forced_withdrawals,
+                &Sequential,
             )
         };
 
