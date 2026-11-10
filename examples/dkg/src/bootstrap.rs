@@ -13,7 +13,9 @@ use crate::{
 use clap::Args;
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
-    ChaCha20Poly1305, bls12381::primitives::variant::MinSig, ed25519::PublicKey,
+    ChaCha20Poly1305,
+    bls12381::primitives::variant::MinSig,
+    ed25519::{PrivateKey, PublicKey},
 };
 use commonware_glue::dkg::{
     SecretStore as _, bootstrap,
@@ -63,7 +65,8 @@ pub async fn run(context: tokio::Context, args: Bootstrap) {
     let committee = participants.get(Epoch::zero());
     let committee_size =
         NZU32!(u32::try_from(committee.len()).expect("committee size must fit in u32"));
-    let payload = bootstrap::max_payload_size::<MinSig, Unit>(committee_size, MAX_SUPPORTED_MODE);
+    let payload =
+        bootstrap::max_payload_size::<MinSig, PrivateKey, Unit>(committee_size, MAX_SUPPORTED_MODE);
 
     let p2p_config = discovery::Config::local(
         Cups::<_, ChaCha20Poly1305>::new(
@@ -120,6 +123,9 @@ pub async fn run(context: tokio::Context, args: Bootstrap) {
             participants: committee,
             directory: Unit,
             blocks_per_epoch: BLOCKS_PER_EPOCH,
+            leader_timeout: Duration::from_secs(1),
+            certification_timeout: Duration::from_secs(2),
+            timeout_retry: Duration::from_millis(500),
         },
     );
 

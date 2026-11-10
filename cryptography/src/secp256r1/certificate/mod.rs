@@ -7,7 +7,7 @@
 pub mod mocks;
 
 use crate::{
-    Signer as _, Verifier as _,
+    Signer, Verifier as _,
     certificate::{AssemblyError, Attestation, Namespace, Scheme, Signers, Subject, Verification},
     secp256r1::standard::{PrivateKey, PublicKey, Signature as Secp256r1Signature},
 };
@@ -31,17 +31,29 @@ use std::collections::BTreeSet;
 /// This struct contains the core cryptographic operations without protocol-specific
 /// context types. It can be reused across different protocols (simplex, aggregation, etc.)
 /// by wrapping it with protocol-specific trait implementations via the macro.
+///
+/// Signatures are produced by `K`, any [`Signer`] of Secp256r1 signatures
+/// (an in-memory [`PrivateKey`] by default, or, for example, a key held by an external
+/// signing service). Verification only uses the participants' public keys.
 #[derive(Clone, Debug)]
-pub struct Generic<P: crate::PublicKey, N: Namespace> {
+pub struct Generic<P: crate::PublicKey, N: Namespace, K = PrivateKey>
+where
+    K: Signer<PublicKey = PublicKey, Signature = Secp256r1Signature>,
+{
     /// Participants in the committee.
     pub participants: BiMap<P, PublicKey>,
     /// Key used for generating signatures.
-    pub signer: Option<(Participant, PrivateKey)>,
+    pub signer: Option<(Participant, K)>,
     /// Pre-computed namespace(s) for this subject type.
     pub namespace: N,
 }
 
-impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
+impl<P, N, K> Generic<P, N, K>
+where
+    P: crate::PublicKey,
+    N: Namespace,
+    K: Signer<PublicKey = PublicKey, Signature = Secp256r1Signature>,
+{
     /// Creates a new scheme instance with the provided key material.
     ///
     /// Participants have both an identity key and a signing key. The identity key
@@ -53,7 +65,7 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
     pub fn signer(
         namespace: &[u8],
         participants: BiMap<P, PublicKey>,
-        private_key: PrivateKey,
+        private_key: K,
     ) -> Option<Self> {
         let public_key = private_key.public_key();
         let signer = participants
@@ -388,20 +400,41 @@ macro_rules! impl_certificate_secp256r1 {
         }
 
         /// Secp256r1 signing scheme wrapper.
+        ///
+        /// Signs with `K`, an in-memory private key by default. Any [`Signer`] of
+        /// Secp256r1 signatures can be used instead (for example, a key held by an external
+        /// signing service).
+        ///
+        /// [`Signer`]: commonware_cryptography::Signer
         #[derive(Clone, Debug)]
-        pub struct Scheme<P: $crate::PublicKey> {
+        pub struct Scheme<
+            P: $crate::PublicKey,
+            K = $crate::secp256r1::standard::PrivateKey,
+        > where
+            K: $crate::Signer<
+                PublicKey = $crate::secp256r1::standard::PublicKey,
+                Signature = $crate::secp256r1::standard::Signature,
+            >,
+        {
             /// Verification state, plus the signing material of a signer.
-            generic: $crate::secp256r1::certificate::Generic<P, $namespace>,
+            generic: $crate::secp256r1::certificate::Generic<P, $namespace, K>,
             /// Index of the local identity key for an instance built with [`Self::member`].
             member: Option<commonware_utils::Participant>,
         }
 
-        impl<P: $crate::PublicKey> Scheme<P> {
+        impl<P, K> Scheme<P, K>
+        where
+            P: $crate::PublicKey,
+            K: $crate::Signer<
+                PublicKey = $crate::secp256r1::standard::PublicKey,
+                Signature = $crate::secp256r1::standard::Signature,
+            >,
+        {
             /// Creates a new scheme instance with the provided key material.
             pub fn signer(
                 namespace: &[u8],
                 participants: commonware_utils::ordered::BiMap<P, $crate::secp256r1::standard::PublicKey>,
-                private_key: $crate::secp256r1::standard::PrivateKey,
+                private_key: K,
             ) -> Option<Self> {
                 Some(Self {
                     generic: $crate::secp256r1::certificate::Generic::signer(
@@ -456,7 +489,14 @@ macro_rules! impl_certificate_secp256r1 {
             }
         }
 
-        impl<P: $crate::PublicKey> $crate::certificate::Verifier for Scheme<P> {
+        impl<P, K> $crate::certificate::Verifier for Scheme<P, K>
+        where
+            P: $crate::PublicKey,
+            K: $crate::Signer<
+                PublicKey = $crate::secp256r1::standard::PublicKey,
+                Signature = $crate::secp256r1::standard::Signature,
+            > + core::fmt::Debug,
+        {
             type Subject<'a, D: $crate::Digest> = $subject;
             type Faults = $faults;
             type PublicKey = P;
@@ -500,11 +540,11 @@ macro_rules! impl_certificate_secp256r1 {
             }
 
             fn is_batchable() -> bool {
-                $crate::secp256r1::certificate::Generic::<P, $namespace>::is_batchable()
+                $crate::secp256r1::certificate::Generic::<P, $namespace, K>::is_batchable()
             }
 
             fn max_certificate_size(participants: u32) -> usize {
-                $crate::secp256r1::certificate::Generic::<P, $namespace>::max_certificate_size(participants)
+                $crate::secp256r1::certificate::Generic::<P, $namespace, K>::max_certificate_size(participants)
             }
 
             fn certificate_codec_config(
@@ -514,11 +554,18 @@ macro_rules! impl_certificate_secp256r1 {
             }
 
             fn certificate_codec_config_unbounded() -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                $crate::secp256r1::certificate::Generic::<P, $namespace>::certificate_codec_config_unbounded()
+                $crate::secp256r1::certificate::Generic::<P, $namespace, K>::certificate_codec_config_unbounded()
             }
         }
 
-        impl<P: $crate::PublicKey> $crate::certificate::Scheme for Scheme<P> {
+        impl<P, K> $crate::certificate::Scheme for Scheme<P, K>
+        where
+            P: $crate::PublicKey,
+            K: $crate::Signer<
+                PublicKey = $crate::secp256r1::standard::PublicKey,
+                Signature = $crate::secp256r1::standard::Signature,
+            > + core::fmt::Debug,
+        {
             type Signature = $crate::secp256r1::standard::Signature;
 
             fn me(&self) -> Option<$crate::certificate::Membership> {
@@ -606,7 +653,7 @@ macro_rules! impl_certificate_secp256r1 {
             }
 
             fn is_attributable() -> bool {
-                $crate::secp256r1::certificate::Generic::<P, $namespace>::is_attributable()
+                $crate::secp256r1::certificate::Generic::<P, $namespace, K>::is_attributable()
             }
         }
     };
@@ -675,7 +722,7 @@ mod tests {
             .map(|sk| Scheme::signer(NAMESPACE, participants.clone(), sk).unwrap())
             .collect();
 
-        let verifier = Scheme::verifier(NAMESPACE, participants);
+        let verifier = Scheme::<PublicKey>::verifier(NAMESPACE, participants);
 
         (signers, verifier)
     }
@@ -693,13 +740,13 @@ mod tests {
 
         // A key outside the committee yields no member.
         let outsider = PrivateKey::random(&mut rng).public_key();
-        assert!(Scheme::member(NAMESPACE, participants.clone(), &outsider).is_none());
+        assert!(Scheme::<PublicKey>::member(NAMESPACE, participants.clone(), &outsider).is_none());
 
         // A member reports its membership but cannot sign. Verifiers report no membership, and
         // each signer reports the index it signs at.
         let index = Participant::new(2);
         let key = participants.keys().key(index).unwrap().clone();
-        let member = Scheme::member(NAMESPACE, participants, &key).unwrap();
+        let member = Scheme::<PublicKey>::member(NAMESPACE, participants, &key).unwrap();
         assert_eq!(member.me(), Some(Membership::Member(index)));
         assert_eq!(member.me().unwrap().signer(), None);
         assert!(member.sign::<Sha256Digest>(subject.clone()).is_none());
@@ -750,7 +797,8 @@ mod tests {
 
         // Each identity key yields a member at its position.
         for (position, identity) in identities.iter().enumerate() {
-            let member = Scheme::member(NAMESPACE, participants.clone(), identity).unwrap();
+            let member =
+                Scheme::<PublicKey>::member(NAMESPACE, participants.clone(), identity).unwrap();
             assert_eq!(
                 member.me(),
                 Some(Membership::Member(Participant::from_usize(position)))
@@ -759,7 +807,9 @@ mod tests {
 
         // No signing key yields a member.
         for signing_key in &signing_keys {
-            assert!(Scheme::member(NAMESPACE, participants.clone(), signing_key).is_none());
+            assert!(
+                Scheme::<PublicKey>::member(NAMESPACE, participants.clone(), signing_key).is_none()
+            );
         }
     }
 
@@ -805,7 +855,7 @@ mod tests {
             .collect();
         schemes.sort_by_key(|scheme| scheme.me().unwrap().index());
         let quorum = N3f1::quorum(schemes.len()) as usize;
-        let verifier = Scheme::verifier(NAMESPACE, participants);
+        let verifier = Scheme::<PublicKey>::verifier(NAMESPACE, participants);
         let calls = Arc::new(AtomicUsize::new(0));
         let subject = CountingSubject {
             message: Bytes::from_static(MESSAGE),
@@ -934,6 +984,91 @@ mod tests {
                 message: Bytes::from_static(MESSAGE),
             },
             &attestation,
+            &Sequential,
+        ));
+    }
+
+    /// A signer whose key lives outside the scheme (for example, in a signing service), modeled
+    /// by a wrapped in-memory key.
+    #[derive(Clone, Debug)]
+    struct ExternalSigner(PrivateKey);
+
+    impl Random for ExternalSigner {
+        fn random(rng: impl CryptoRng) -> Self {
+            Self(PrivateKey::random(rng))
+        }
+    }
+
+    impl crate::Signer for ExternalSigner {
+        type Signature = Secp256r1Signature;
+        type PublicKey = PublicKey;
+
+        fn public_key(&self) -> PublicKey {
+            self.0.public_key()
+        }
+
+        fn sign(&self, namespace: &[u8], msg: &[u8]) -> Secp256r1Signature {
+            self.0.sign(namespace, msg)
+        }
+    }
+
+    /// A scheme signing through an external [`Signer`] produces the same attestations and
+    /// certificates as one holding the key, and they verify against the same participants.
+    #[test]
+    fn test_external_signer_matches_private_key() {
+        let mut rng = test_rng();
+        let (schemes, verifier) = setup_signers(&mut rng, 4);
+        let participants = verifier.generic.participants.clone();
+        let external: Vec<Scheme<PublicKey, ExternalSigner>> = schemes
+            .iter()
+            .map(|scheme| {
+                let (_, key) = scheme.generic.signer.clone().unwrap();
+                Scheme::signer(NAMESPACE, participants.clone(), ExternalSigner(key)).unwrap()
+            })
+            .collect();
+        let subject = TestSubject {
+            message: Bytes::from_static(MESSAGE),
+        };
+
+        // Each external signer signs at the same index with the same signature.
+        let quorum = N3f1::quorum(schemes.len()) as usize;
+        let mut attestations = Vec::new();
+        for (scheme, external) in schemes.iter().zip(&external).take(quorum) {
+            assert_eq!(scheme.me(), external.me());
+            let expected = scheme.sign::<Sha256Digest>(subject.clone()).unwrap();
+            let attestation = external.sign::<Sha256Digest>(subject.clone()).unwrap();
+            assert_eq!(attestation.signer, expected.signer);
+            assert_eq!(attestation.signature.encode(), expected.signature.encode());
+            assert!(external.verify_attestation::<_, Sha256Digest>(
+                &mut rng,
+                subject.clone(),
+                &attestation,
+                &Sequential,
+            ));
+            attestations.push((expected, attestation));
+        }
+
+        // Their certificate is the key holders' certificate, and verifies under either signer type.
+        let (expected, attestations): (Vec<_>, Vec<_>) = attestations.into_iter().unzip();
+        let expected = schemes[0]
+            .assemble(non_empty![@expected], &Sequential)
+            .unwrap();
+        let certificate = external[0]
+            .assemble(non_empty![@attestations], &Sequential)
+            .unwrap();
+        assert_eq!(certificate, expected);
+        assert!(verifier.verify_certificate::<_, Sha256Digest>(
+            &mut rng,
+            subject.clone(),
+            &certificate,
+            &Sequential,
+        ));
+        let external_verifier =
+            Scheme::<PublicKey, ExternalSigner>::verifier(NAMESPACE, participants);
+        assert!(external_verifier.verify_certificate::<_, Sha256Digest>(
+            &mut rng,
+            subject,
+            &certificate,
             &Sequential,
         ));
     }
@@ -1491,7 +1626,7 @@ mod tests {
         );
 
         // A verifier cannot produce votes
-        let verifier = Scheme::verifier(NAMESPACE, participants);
+        let verifier = Scheme::<PublicKey>::verifier(NAMESPACE, participants);
         assert!(
             verifier
                 .sign::<Sha256Digest>(TestSubject {

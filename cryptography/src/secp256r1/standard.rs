@@ -14,6 +14,7 @@ use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED, UnparsedPublicKey};
 use bytes::BufMut;
 use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
+use commonware_parallel::Strategy;
 use commonware_utils::{Array, Span, union_unique};
 use core::{
     fmt::{Debug, Display},
@@ -23,6 +24,7 @@ use core::{
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 use p256::ecdsa::signature::Verifier;
 use p256::{ecdsa::signature::Signer, elliptic_curve::scalar::IsHigh};
+use rand_core::CryptoRng;
 
 const SIGNATURE_LENGTH: usize = 64; // R || S
 
@@ -75,6 +77,41 @@ impl crate::Verifier for PublicKey {
 
     fn verify(&self, namespace: &[u8], msg: &[u8], sig: &Self::Signature) -> bool {
         self.verify_inner(Some(namespace), msg, sig)
+    }
+}
+
+/// Verifies each signature individually: ECDSA has no batch equation, so a batch costs the same
+/// as its signatures verified one by one (spread across `strategy`).
+impl crate::BatchVerifier for PublicKey {
+    fn verify_batch<'a, R, T, F>(
+        _rng: &mut R,
+        items: &'a [T],
+        project: F,
+        strategy: &impl Strategy,
+    ) -> bool
+    where
+        R: CryptoRng,
+        T: Sync,
+        F: Fn(usize, &'a T) -> crate::BatchEntry<'a, Self> + Sync,
+    {
+        if items.is_empty() {
+            return false;
+        }
+        strategy
+            .try_fold(
+                items.iter().enumerate(),
+                || (),
+                |(), (index, item)| {
+                    let entry = project(index, item);
+                    entry
+                        .public_key
+                        .verify_inner(Some(entry.namespace), entry.message, entry.signature)
+                        .then_some(())
+                        .ok_or(())
+                },
+                |(), ()| (),
+            )
+            .is_ok()
     }
 }
 
@@ -216,8 +253,13 @@ impl arbitrary::Arbitrary<'_> for Signature {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Signer as _, Verifier as _, secp256r1::common::tests::*};
+    use crate::{
+        BatchEntry, BatchVerifier as _, Signer as _, Verifier as _, secp256r1::common::tests::*,
+    };
     use commonware_codec::{Copying, DecodeExt, Encode};
+    use commonware_math::algebra::Random;
+    use commonware_parallel::Sequential;
+    use commonware_utils::test_rng;
     use p256::elliptic_curve::scalar::IsHigh;
     use rstest::rstest;
 
@@ -576,5 +618,65 @@ mod tests {
         commonware_conformance::conformance_tests! {
             CodecConformance<Signature> => 1024,
         }
+    }
+
+    /// Projects a signed record into a batch entry.
+    fn entry(_: usize, record: &(PublicKey, Vec<u8>, Signature)) -> BatchEntry<'_, PublicKey> {
+        let (public_key, message, signature) = record;
+        BatchEntry {
+            namespace: NAMESPACE,
+            message,
+            public_key,
+            signature,
+        }
+    }
+
+    /// Batch verification accepts a batch of valid signatures and rejects an empty batch or a
+    /// batch with any invalid entry.
+    #[test]
+    fn test_verify_batch() {
+        let mut rng = test_rng();
+        let records: Vec<_> = (0..8u8)
+            .map(|i| {
+                let key = PrivateKey::random(&mut rng);
+                let message = vec![i; 32];
+                let signature = key.sign(NAMESPACE, &message);
+                (key.public_key(), message, signature)
+            })
+            .collect();
+        assert!(PublicKey::verify_batch(
+            &mut rng,
+            &records,
+            entry,
+            &Sequential
+        ));
+        assert!(!PublicKey::verify_batch(
+            &mut rng,
+            &records[..0],
+            entry,
+            &Sequential
+        ));
+
+        // A signature over another message fails the whole batch, at any position.
+        for index in [0, 7] {
+            let mut tampered = records.clone();
+            tampered[index].1 = b"another message".to_vec();
+            assert!(!PublicKey::verify_batch(
+                &mut rng,
+                &tampered,
+                entry,
+                &Sequential
+            ));
+        }
+
+        // So does a signature by another key.
+        let mut tampered = records;
+        tampered[3].2 = PrivateKey::random(&mut rng).sign(NAMESPACE, &tampered[3].1);
+        assert!(!PublicKey::verify_batch(
+            &mut rng,
+            &tampered,
+            entry,
+            &Sequential
+        ));
     }
 }

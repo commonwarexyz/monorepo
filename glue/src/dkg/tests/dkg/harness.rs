@@ -1,7 +1,7 @@
 use super::properties::{DkgOutcome, ExpectedOutcome};
 use crate::{
     dkg::{
-        bootstrap,
+        bootstrap::{self, CeremonyIdentity},
         tests::{
             max_supported_mode,
             mocks::{FailingManager, FilteredReceiver, MemorySecretStore},
@@ -17,9 +17,9 @@ use crate::{
         tracker::ProgressTracker,
     },
 };
-use commonware_consensus::types::Epoch;
+use commonware_consensus::{simplex, types::Epoch};
 use commonware_cryptography::{
-    Signer as _,
+    PublicKey, Signer,
     bls12381::{
         dkg::feldman_desmedt::Reveal,
         primitives::{
@@ -28,7 +28,7 @@ use commonware_cryptography::{
             variant::MinPk,
         },
     },
-    ed25519,
+    ed25519, secp256r1,
 };
 use commonware_macros::select;
 use commonware_math::algebra::Random;
@@ -42,9 +42,15 @@ use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, reschedule, telemetry::metrics::count_running_tasks,
 };
 use commonware_utils::{
-    NZDuration, NZU16, NZU32, NZU64, NZUsize, Participant, channel::oneshot, ordered::Set,
-    probability, sequence::Unit, sync::Mutex, test_rng,
+    NZDuration, NZU16, NZU32, NZU64, NZUsize, Participant, TryCollect as _,
+    channel::oneshot,
+    ordered::{BiMap, Set},
+    probability,
+    sequence::Unit,
+    sync::Mutex,
+    test_rng,
 };
+use rand_core::CryptoRng;
 use std::{
     collections::{BTreeMap, HashSet},
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
@@ -61,6 +67,9 @@ const IO_BUFFER_SIZE: NonZeroUsize = NZUsize!(2048);
 const MAILBOX_SIZE: NonZeroUsize = NZUsize!(100);
 const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(10);
 const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_024));
+const LEADER_TIMEOUT: Duration = Duration::from_secs(1);
+const CERTIFICATION_TIMEOUT: Duration = Duration::from_secs(2);
+const TIMEOUT_RETRY: Duration = Duration::from_millis(500);
 
 /// Partition prefix of the single participant's storage, shared across its
 /// restarts.
@@ -73,24 +82,73 @@ const BACKFILL: u64 = 3;
 const BROADCAST: u64 = 4;
 const DKG: u64 = 5;
 
-#[derive(Default)]
-struct NodeStateInner {
+/// A Secp256r1 identity whose key is held outside the engine (for example, by an
+/// HSM or a key management service), modeled by a wrapped in-memory key.
+#[derive(Clone, Debug)]
+pub(super) struct ExternalSigner(secp256r1::standard::PrivateKey);
+
+impl Random for ExternalSigner {
+    fn random(rng: impl CryptoRng) -> Self {
+        Self(secp256r1::standard::PrivateKey::random(rng))
+    }
+}
+
+impl Signer for ExternalSigner {
+    type Signature = secp256r1::standard::Signature;
+    type PublicKey = secp256r1::standard::PublicKey;
+
+    fn public_key(&self) -> Self::PublicKey {
+        self.0.public_key()
+    }
+
+    fn sign(&self, namespace: &[u8], msg: &[u8]) -> Self::Signature {
+        self.0.sign(namespace, msg)
+    }
+}
+
+impl CeremonyIdentity for ExternalSigner {
+    type Scheme = simplex::scheme::secp256r1::Scheme<secp256r1::standard::PublicKey, Self>;
+
+    fn consensus_signer(
+        namespace: &[u8],
+        participants: Set<Self::PublicKey>,
+        signer: Self,
+    ) -> Option<Self::Scheme> {
+        let participants: BiMap<_, _> = participants
+            .into_iter()
+            .map(|participant| (participant.clone(), participant))
+            .try_collect()
+            .expect("participants are distinct");
+        Self::Scheme::signer(namespace, participants, signer)
+    }
+}
+
+struct NodeStateInner<P: PublicKey> {
     completed: bool,
-    info: Option<EpochInfo<MinPk, ed25519::PublicKey>>,
+    info: Option<EpochInfo<MinPk, P>>,
+}
+
+impl<P: PublicKey> Default for NodeStateInner<P> {
+    fn default() -> Self {
+        Self {
+            completed: false,
+            info: None,
+        }
+    }
 }
 
 #[derive(Clone)]
-pub(super) struct NodeState {
+pub(super) struct NodeState<P: PublicKey = ed25519::PublicKey> {
     store: MemorySecretStore,
-    inner: Arc<Mutex<NodeStateInner>>,
+    inner: Arc<Mutex<NodeStateInner<P>>>,
 }
 
-impl NodeState {
+impl<P: PublicKey> NodeState<P> {
     pub(super) fn completed(&self) -> bool {
         self.inner.lock().completed
     }
 
-    pub(super) fn info(&self) -> Option<EpochInfo<MinPk, ed25519::PublicKey>> {
+    pub(super) fn info(&self) -> Option<EpochInfo<MinPk, P>> {
         self.inner.lock().info.clone()
     }
 
@@ -99,33 +157,40 @@ impl NodeState {
     }
 }
 
-impl ProcessedHeight for NodeState {
+impl<P: PublicKey> ProcessedHeight for NodeState<P> {
     async fn processed_height(&self) -> u64 {
         self.inner.lock().completed as u64
     }
 }
 
-pub(super) struct StartedNode {
+pub(super) struct StartedNode<P: PublicKey> {
     context: deterministic::Context,
     handle: Handle<()>,
-    completion: oneshot::Receiver<bootstrap::Completion<MinPk>>,
-    state: NodeState,
+    completion: oneshot::Receiver<bootstrap::Completion<MinPk, P>>,
+    state: NodeState<P>,
 }
 
+/// Bootstrap ceremony among participants with identity `C`.
 #[derive(Clone)]
-pub(super) struct DkgEngine {
-    signers: Vec<ed25519::PrivateKey>,
-    filtered_dkg: Arc<HashSet<ed25519::PublicKey>>,
-    deaf: Arc<HashSet<ed25519::PublicKey>>,
-    stores: Arc<Mutex<BTreeMap<ed25519::PublicKey, MemorySecretStore>>>,
-    inits: Arc<Mutex<BTreeMap<ed25519::PublicKey, Vec<bool>>>>,
+pub(super) struct DkgEngine<C: CeremonyIdentity = ed25519::PrivateKey> {
+    signers: Vec<C>,
+    filtered_dkg: Arc<HashSet<C::PublicKey>>,
+    deaf: Arc<HashSet<C::PublicKey>>,
+    stores: Arc<Mutex<BTreeMap<C::PublicKey, MemorySecretStore>>>,
+    inits: Arc<Mutex<BTreeMap<C::PublicKey, Vec<bool>>>>,
 }
 
 impl DkgEngine {
+    /// Returns a ceremony among `total` Ed25519 participants.
     pub(super) fn new(total: u64) -> Self {
-        let mut signers = (0..total)
-            .map(ed25519::PrivateKey::from_seed)
-            .collect::<Vec<_>>();
+        Self::with_identities(total)
+    }
+}
+
+impl<C: CeremonyIdentity> DkgEngine<C> {
+    /// Returns a ceremony among `total` participants with identity `C`.
+    pub(super) fn with_identities(total: u64) -> Self {
+        let mut signers = (0..total).map(C::from_seed).collect::<Vec<_>>();
         signers.sort_by_key(|signer| signer.public_key());
         Self {
             signers,
@@ -138,7 +203,7 @@ impl DkgEngine {
 
     /// Returns whether each incarnation of `public_key` started with its
     /// epoch-zero share.
-    pub(super) fn inits(&self, public_key: &ed25519::PublicKey) -> Vec<bool> {
+    pub(super) fn inits(&self, public_key: &C::PublicKey) -> Vec<bool> {
         self.inits
             .lock()
             .get(public_key)
@@ -163,11 +228,11 @@ impl DkgEngine {
         self
     }
 
-    pub(super) fn participant(&self, index: usize) -> ed25519::PublicKey {
+    pub(super) fn participant(&self, index: usize) -> C::PublicKey {
         self.signers[index].public_key()
     }
 
-    fn signer(&self, public_key: &ed25519::PublicKey) -> ed25519::PrivateKey {
+    fn signer(&self, public_key: &C::PublicKey) -> C {
         self.signers
             .iter()
             .find(|signer| signer.public_key() == *public_key)
@@ -175,11 +240,11 @@ impl DkgEngine {
             .clone()
     }
 
-    fn participants_set(&self) -> Set<ed25519::PublicKey> {
+    fn participants_set(&self) -> Set<C::PublicKey> {
         Set::from_iter_dedup(self.signers.iter().map(|signer| signer.public_key()))
     }
 
-    fn store(&self, public_key: &ed25519::PublicKey) -> MemorySecretStore {
+    fn store(&self, public_key: &C::PublicKey) -> MemorySecretStore {
         self.stores
             .lock()
             .entry(public_key.clone())
@@ -188,10 +253,10 @@ impl DkgEngine {
     }
 }
 
-impl EngineDefinition for DkgEngine {
-    type PublicKey = ed25519::PublicKey;
-    type Engine = StartedNode;
-    type State = NodeState;
+impl<C: CeremonyIdentity> EngineDefinition for DkgEngine<C> {
+    type PublicKey = C::PublicKey;
+    type Engine = StartedNode<C::PublicKey>;
+    type State = NodeState<C::PublicKey>;
 
     fn participants(&self) -> Vec<Self::PublicKey> {
         self.signers
@@ -212,7 +277,7 @@ impl EngineDefinition for DkgEngine {
     }
 
     fn max_message_size(&self) -> u32 {
-        max_message_size([bootstrap::max_payload_size::<MinPk, Unit>(
+        max_message_size([bootstrap::max_payload_size::<MinPk, C, Unit>(
             max_participants(self.signers.len()),
             max_supported_mode(),
         )])
@@ -239,7 +304,7 @@ impl EngineDefinition for DkgEngine {
             store: store.clone(),
             inner: Arc::default(),
         };
-        let engine = bootstrap::Engine::<_, MinPk, _, _, _, _, _>::new(
+        let engine = bootstrap::Engine::<_, MinPk, _, _, _, _, _, _>::new(
             context.child("dkg"),
             bootstrap::Config {
                 signer: self.signer(public_key),
@@ -262,6 +327,9 @@ impl EngineDefinition for DkgEngine {
                 participants: self.participants_set(),
                 directory: Unit,
                 blocks_per_epoch: EPOCH_LENGTH,
+                leader_timeout: LEADER_TIMEOUT,
+                certification_timeout: CERTIFICATION_TIMEOUT,
+                timeout_retry: TIMEOUT_RETRY,
             },
         );
         let deaf = self.deaf.contains(public_key);
@@ -334,10 +402,10 @@ impl Drop for AbortOnDrop {
     }
 }
 
-pub(super) fn run_plan(
-    engine: DkgEngine,
+pub(super) fn run_plan<C: CeremonyIdentity>(
+    engine: DkgEngine<C>,
     link: Link,
-    crashes: Vec<Crash<ed25519::PublicKey>>,
+    crashes: Vec<Crash<C::PublicKey>>,
     expected: ExpectedOutcome,
     seeds: impl IntoIterator<Item = u64>,
 ) {
@@ -369,7 +437,10 @@ pub(super) fn run_plan(
 
 /// Runs `schedule` on `engine` for one seed, keeping its secret stores and
 /// init records so the caller can inspect them afterward.
-pub(super) fn run_schedule(engine: &DkgEngine, schedule: Schedule<ed25519::PublicKey>) {
+pub(super) fn run_schedule<C: CeremonyIdentity>(
+    engine: &DkgEngine<C>,
+    schedule: Schedule<C::PublicKey>,
+) {
     let property = DkgOutcome::new(engine.participants(), ExpectedOutcome::Success);
     PlanBuilder::new(engine.clone())
         .link(good_link())
@@ -385,11 +456,11 @@ pub(super) fn run_schedule(engine: &DkgEngine, schedule: Schedule<ed25519::Publi
 pub(super) fn run_restart_completion_state_is_fresh() {
     let engine = DkgEngine::new(1);
     let public_key = engine.participant(0);
-    let old_state = NodeState {
+    let old_state: NodeState = NodeState {
         store: engine.store(&public_key),
         inner: Arc::default(),
     };
-    let replacement_state = NodeState {
+    let replacement_state: NodeState = NodeState {
         store: engine.store(&public_key),
         inner: Arc::default(),
     };
@@ -743,12 +814,15 @@ fn boot<M>(
     prefix: &str,
     manager: M,
     mut channels: Vec<ChannelPair<ed25519::PublicKey>>,
-) -> (Handle<()>, oneshot::Receiver<bootstrap::Completion<MinPk>>)
+) -> (
+    Handle<()>,
+    oneshot::Receiver<bootstrap::Completion<MinPk, ed25519::PublicKey>>,
+)
 where
     M: crate::dkg::network::Manager<PublicKey = ed25519::PublicKey, Directory = Unit>,
 {
     let public_key = engine.participant(0);
-    let bootstrap = bootstrap::Engine::<_, MinPk, _, _, _, _, _>::new(
+    let bootstrap = bootstrap::Engine::<_, MinPk, _, _, _, _, _, _>::new(
         context.child("dkg"),
         bootstrap::Config {
             signer: engine.signer(&public_key),
@@ -771,6 +845,9 @@ where
             participants: engine.participants_set(),
             directory: Unit,
             blocks_per_epoch: EPOCH_LENGTH,
+            leader_timeout: LEADER_TIMEOUT,
+            certification_timeout: CERTIFICATION_TIMEOUT,
+            timeout_retry: TIMEOUT_RETRY,
         },
     );
     bootstrap.start(

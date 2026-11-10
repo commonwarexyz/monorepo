@@ -5,8 +5,8 @@ use crate::{
 };
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
+    PublicKey,
     bls12381::{dkg::feldman_desmedt::Output, primitives::variant::MinPk},
-    ed25519,
 };
 use commonware_utils::ordered::Set;
 use std::{future::Future, pin::Pin};
@@ -18,13 +18,13 @@ pub(super) enum ExpectedOutcome {
 }
 
 #[derive(Clone)]
-pub(super) struct DkgOutcome {
-    participants: Set<ed25519::PublicKey>,
+pub(super) struct DkgOutcome<P> {
+    participants: Set<P>,
     expected: ExpectedOutcome,
 }
 
-impl DkgOutcome {
-    pub(super) fn new(participants: Vec<ed25519::PublicKey>, expected: ExpectedOutcome) -> Self {
+impl<P: PublicKey> DkgOutcome<P> {
+    pub(super) fn new(participants: Vec<P>, expected: ExpectedOutcome) -> Self {
         Self {
             participants: Set::from_iter_dedup(participants),
             expected,
@@ -32,7 +32,7 @@ impl DkgOutcome {
     }
 }
 
-impl Property<ed25519::PublicKey, NodeState> for DkgOutcome {
+impl<P: PublicKey> Property<P, NodeState<P>> for DkgOutcome<P> {
     fn name(&self) -> &str {
         match self.expected {
             ExpectedOutcome::Success => "dkg_success",
@@ -42,8 +42,8 @@ impl Property<ed25519::PublicKey, NodeState> for DkgOutcome {
 
     fn check<'a>(
         &'a self,
-        _tracker: &'a ProgressTracker<ed25519::PublicKey>,
-        states: &'a [&'a NodeState],
+        _tracker: &'a ProgressTracker<P>,
+        states: &'a [&'a NodeState<P>],
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
         Box::pin(async move {
             if states.len() != self.participants.len() {
@@ -54,7 +54,7 @@ impl Property<ed25519::PublicKey, NodeState> for DkgOutcome {
                 ));
             }
 
-            let mut expected: Option<Output<MinPk, ed25519::PublicKey>> = None;
+            let mut expected: Option<Output<MinPk, P>> = None;
             for state in states {
                 if !state.completed() {
                     return Err("state did not complete".into());
