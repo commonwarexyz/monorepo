@@ -475,7 +475,7 @@ pub(crate) const CANONICAL_CORRECTION: [u64; WORDS] = [
     0x157979bd8c78997b,
 ];
 
-/// The residues of the integer `p` in each basis.
+/// The residues of `p` in each basis, times the basis's residue scale.
 pub(crate) const ENCODED_P: [[u64; MODULI]; 2] = [
     [
         0x0002b5cba6fe3392,
