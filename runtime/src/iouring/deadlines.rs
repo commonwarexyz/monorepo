@@ -44,7 +44,8 @@ pub struct Deadlines {
     epoch: Instant,
     /// Identities fired by the latest pass, kept for their allocation.
     fired: Vec<WaiterId>,
-    /// A firing time never later than the earliest resident's, lowered by
+    /// A time never later than the earliest resident's firing time, by
+    /// which the next expiry pass must run (see [`Wheel::bound`]), lowered by
     /// insertion and refreshed by an expiry pass that reaches it.
     next: Option<Instant>,
 }
@@ -67,16 +68,16 @@ impl Deadlines {
         // installs at most one deadline.
         let slot = id.0.index;
         let nanos = deadline.nanos_since(self.epoch);
-        self.wheel.insert(slot, nanos);
+        let reach = self.wheel.insert(slot, nanos);
 
         // The bound is the firing time rather than the deadline, so a worker
-        // parked on it wakes when the deadline fires, not up to a tick early.
+        // parked on it wakes when the deadline fires, not up to a tick early,
+        // or the earlier start of a wheel bucket that the deadline crowds.
         // The firing time is less than a tick after the deadline, so only a
         // deadline at the end of `Instant`'s range lacks one, and that
         // deadline bounds itself.
-        let fires = self.epoch.after_nanos(Wheel::<RESOLUTION>::rounded(nanos));
-        let fires = fires.unwrap_or(deadline);
-        self.next = Some(self.next.map_or(fires, |next| next.min(fires)));
+        let reach = self.epoch.after_nanos(reach).unwrap_or(deadline);
+        self.next = Some(self.next.map_or(reach, |next| next.min(reach)));
 
         // Record the generation that a later removal must match. The vector
         // grows to the highest waiter index and is never shrunk, like the
@@ -152,8 +153,9 @@ impl Deadlines {
     }
 
     /// A conservative bound on the earliest firing time, or `None` when empty.
-    /// New deadlines lower it to their firing time. Removing a deadline can
-    /// leave an early bound until the next expiry pass refreshes it.
+    /// New deadlines lower it to their firing time, or to the start of a wheel
+    /// bucket that they crowd. Removing a deadline can leave an early bound
+    /// until the next expiry pass refreshes it.
     pub const fn next_deadline(&self) -> Option<Instant> {
         self.next
     }
@@ -277,6 +279,31 @@ pub mod tests {
             deadlines.next_deadline(),
             Some(epoch + Duration::from_nanos(3 * RESOLUTION))
         );
+    }
+
+    #[test]
+    fn test_crowded_bucket_is_refiled_before_its_firing_time() {
+        // Eight budgets of requests share one deadline an hour ahead, and
+        // with it one high wheel bucket, which they crowd.
+        let epoch = Instant::now();
+        let mut deadlines = Deadlines::new(epoch);
+        let deadline = epoch + Duration::from_secs(3600);
+        for slot in 0..8 * BUDGET {
+            deadlines.insert(id(slot, 0), deadline);
+        }
+
+        // The bound falls to the bucket's start, and passes at the bounds
+        // that follow refile the bucket down the levels and fire nothing.
+        let fires = deadlines.fires_at(deadline);
+        assert!(deadlines.next_deadline().unwrap() < fires);
+        while let Some(bound) = deadlines.next_deadline().filter(|bound| *bound < fires) {
+            assert!(expire(&mut deadlines, bound).is_empty());
+        }
+
+        // So the first pass at the firing time spends its whole budget on
+        // firing.
+        assert_eq!(deadlines.next_deadline(), Some(fires));
+        assert_eq!(expire(&mut deadlines, fires).len(), BUDGET as usize);
     }
 
     #[test]
