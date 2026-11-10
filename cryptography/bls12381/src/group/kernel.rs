@@ -46,14 +46,14 @@ const MAX_WINDOWS: usize = 26;
 /// Signed digits of a scalar, by component then by window from the least significant.
 type Digits = [[i16; MAX_WINDOWS]; MAX_COMPONENTS];
 
-/// Window widths that [`Plan::choose`] considers for Straus's method.
+/// Window widths that [`Method::choose`] considers for Straus's method.
 const STRAUS_WIDTHS: core::ops::RangeInclusive<u32> = 2..=8;
 
-/// Window widths that [`Plan::choose`] considers for Pippenger's method. The widest bounds the
+/// Window widths that [`Method::choose`] considers for Pippenger's method. The widest bounds the
 /// buckets at `2^11` points per lane.
 const PIPPENGER_WIDTHS: core::ops::RangeInclusive<u32> = 2..=12;
 
-/// Estimated cost of an addition of points, in units of [`Plan::cost`].
+/// Estimated cost of an addition of points, in units of [`Method::cost`].
 const ADD_COST: usize = 10;
 
 /// Estimated cost of a doubling, which takes about two thirds of an addition's products.
@@ -326,7 +326,7 @@ fn multiply<S: Simd, P: Points<S>>(
 
 /// Loads each of up to [`Field::LANES`] elements into its own lane.
 #[inline(always)]
-fn lanes<S: Simd, F: Field<S>, G: Group>(simd: S, elements: &[G]) -> G::Points<S, F> {
+fn load_each<S: Simd, F: Field<S>, G: Group>(simd: S, elements: &[G]) -> G::Points<S, F> {
     const { assert!(F::LANES <= MAX_LANES) };
     debug_assert!(elements.len() <= F::LANES);
     let mut coordinates = [G::IDENTITY; MAX_LANES];
@@ -348,7 +348,7 @@ fn products<S: Simd, F: Field<S>, G: Group>(
     for (lane, scalar) in scalars.iter().enumerate().take(elements.len()) {
         digits[lane] = self::digits::<G>(scalar);
     }
-    let base = lanes::<S, F, G>(simd, elements);
+    let base = load_each::<S, F, G>(simd, elements);
     let windows = windows::<G>(WINDOW_BITS as u32);
     multiply(simd, base, identity, G::COMPONENTS, windows, |c, w| {
         digits.map(|digits| digits[c][w])
@@ -424,7 +424,7 @@ impl<G: Group> Kernel for Sum<'_, G> {
     fn run<S: Simd, F: Field<S>>(self, simd: S) -> G {
         let mut total = G::Points::<S, F>::load(simd, &[], &G::IDENTITY);
         for elements in self.0.chunks(F::LANES) {
-            total = total.add(simd, lanes::<S, F, G>(simd, elements));
+            total = total.add(simd, load_each::<S, F, G>(simd, elements));
         }
         sum_lanes::<S, F, G>(simd, total)
     }
@@ -470,7 +470,7 @@ type Raw<S, F, G> = <<G as Group>::Points<S, F> as Points<S>>::Raw;
 
 /// Method and signed window width of a multi-scalar multiplication.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Plan {
+pub enum Method {
     /// Straus's method: each lane multiplies its own elements through tables of their multiples,
     /// sharing one chain of doublings. With `split`, the scalars split into their components
     /// and the tables hold the images of every multiple, which halves the doublings at the cost
@@ -481,10 +481,10 @@ pub enum Plan {
     Pippenger(u32),
 }
 
-impl Plan {
-    /// Returns the plan of least estimated cost for `count` elements of `G` on `lanes` lanes.
+impl Method {
+    /// Returns the method of least estimated cost for `count` elements of `G` on `lanes` lanes.
     pub fn choose<G: Group>(count: usize, lanes: usize) -> Self {
-        let plans = STRAUS_WIDTHS
+        let methods = STRAUS_WIDTHS
             .flat_map(|width| [false, true].map(|split| Self::Straus { width, split }))
             .chain(PIPPENGER_WIDTHS.map(Self::Pippenger));
         let mut best = Self::Straus {
@@ -492,16 +492,16 @@ impl Plan {
             split: false,
         };
         let mut least = usize::MAX;
-        for plan in plans {
-            let cost = plan.cost::<G>(count, lanes);
+        for method in methods {
+            let cost = method.cost::<G>(count, lanes);
             if cost < least {
-                (best, least) = (plan, cost);
+                (best, least) = (method, cost);
             }
         }
         best
     }
 
-    /// Returns the estimated cost of the plan, counting the additions, doublings, negations, and
+    /// Returns the estimated cost of the method, counting the additions, doublings, negations, and
     /// endomorphisms of points on all lanes at once.
     const fn cost<G: Group>(self, count: usize, lanes: usize) -> usize {
         match self {
@@ -537,7 +537,7 @@ impl Plan {
 
 /// Returns `a + b` as its own kernel, so that the many additions of [`Msm`] share one copy.
 #[inline(always)]
-fn sum<S: Simd, P: Points<S>>(simd: S, a: P, b: P) -> P {
+fn outlined_add<S: Simd, P: Points<S>>(simd: S, a: P, b: P) -> P {
     simd.execute(
         #[inline(always)]
         move |simd: S| a.add(simd, b),
@@ -546,7 +546,7 @@ fn sum<S: Simd, P: Points<S>>(simd: S, a: P, b: P) -> P {
 
 /// Returns `2 * point` as its own kernel, so that the doublings of [`Msm`] share one copy.
 #[inline(always)]
-fn twice<S: Simd, P: Points<S>>(simd: S, point: P) -> P {
+fn outlined_double<S: Simd, P: Points<S>>(simd: S, point: P) -> P {
     simd.execute(
         #[inline(always)]
         move |simd: S| point.double(simd),
@@ -563,7 +563,10 @@ fn first_raw<S: Simd, F: Field<S>, G: Group>(simd: S, points: G::Points<S, F>) -
 
 /// Loads lane `i` from `points[i]`, for one entry per lane.
 #[inline(always)]
-fn load_lanes<S: Simd, F: Field<S>, G: Group>(simd: S, points: &[Raw<S, F, G>]) -> G::Points<S, F> {
+fn load_each_raw<S: Simd, F: Field<S>, G: Group>(
+    simd: S,
+    points: &[Raw<S, F, G>],
+) -> G::Points<S, F> {
     const { assert!(F::LANES <= MAX_LANES) };
     let mut lanes = [&points[0]; MAX_LANES];
     for (lane, point) in lanes.iter_mut().zip(points).take(F::LANES) {
@@ -613,7 +616,7 @@ fn prepare<S: Simd, F: Field<S>, G: Group>(
     let mut stored = [identity; MAX_LANES];
     let span = F::LANES * G::COMPONENTS;
     for (elements, prepared) in elements.chunks(F::LANES).zip(prepared.chunks_mut(span)) {
-        let mut points = lanes::<S, F, G>(simd, elements);
+        let mut points = load_each::<S, F, G>(simd, elements);
         for c in 0..G::COMPONENTS {
             if c > 0 {
                 points = points.endomorphism(simd);
@@ -663,15 +666,18 @@ fn straus<S: Simd, F: Field<S>, G: Group>(
     let span = 2 * entries * F::LANES * components;
     let mut tables = vec![zero; elements.len().div_ceil(F::LANES) * span];
     for (elements, table) in elements.chunks(F::LANES).zip(tables.chunks_exact_mut(span)) {
-        let base = lanes::<S, F, G>(simd, elements);
+        let base = load_each::<S, F, G>(simd, elements);
         let mut multiple = base;
         for k in 0..entries {
             if k % 2 == 1 {
                 // k + 1 is even, so double the multiple by (k + 1) / 2.
                 let half = (k - 1) / 2;
-                multiple = twice(simd, load_lanes::<S, F, G>(simd, &table[half * F::LANES..]));
+                multiple = outlined_double(
+                    simd,
+                    load_each_raw::<S, F, G>(simd, &table[half * F::LANES..]),
+                );
             } else if k > 0 {
-                multiple = sum(simd, multiple, base);
+                multiple = outlined_add(simd, multiple, base);
             }
             let mut image = multiple;
             for c in 0..components {
@@ -694,7 +700,7 @@ fn straus<S: Simd, F: Field<S>, G: Group>(
     for window in (0..windows).rev() {
         if started {
             for _ in 0..width {
-                total = twice(simd, total);
+                total = outlined_double(simd, total);
             }
         }
         for (group, table) in tables.chunks_exact(span).enumerate() {
@@ -714,7 +720,7 @@ fn straus<S: Simd, F: Field<S>, G: Group>(
                 }
                 if any {
                     let term = G::Points::<S, F>::load_raw(simd, &entries_used[..F::LANES]);
-                    total = sum(simd, total, term);
+                    total = outlined_add(simd, total, term);
                     started = true;
                 }
             }
@@ -773,7 +779,7 @@ fn pippenger<S: Simd, F: Field<S>, G: Group>(
             }
             let bucket = G::Points::<S, F>::load_raw(simd, &sums[..F::LANES]);
             let term = G::Points::<S, F>::load_raw(simd, &terms[..F::LANES]);
-            sum(simd, bucket, term).store_raw(simd, &mut stored[..F::LANES]);
+            outlined_add(simd, bucket, term).store_raw(simd, &mut stored[..F::LANES]);
             for (slot, stored) in slots.iter().zip(&stored) {
                 if let Some(slot) = slot {
                     buckets[*slot] = *stored;
@@ -784,25 +790,25 @@ fn pippenger<S: Simd, F: Field<S>, G: Group>(
         // The running sum adds each bucket once it is reached from the top, so the window sum
         // counts bucket b + 1 times.
         if used > 0 {
-            let mut running = load_lanes::<S, F, G>(simd, &buckets[(used - 1) * F::LANES..]);
+            let mut running = load_each_raw::<S, F, G>(simd, &buckets[(used - 1) * F::LANES..]);
             let mut window = running;
             for bucket in (0..used - 1).rev() {
-                let bucket = load_lanes::<S, F, G>(simd, &buckets[bucket * F::LANES..]);
-                running = sum(simd, running, bucket);
-                window = sum(simd, window, running);
+                let bucket = load_each_raw::<S, F, G>(simd, &buckets[bucket * F::LANES..]);
+                running = outlined_add(simd, running, bucket);
+                window = outlined_add(simd, window, running);
             }
             if started {
                 for _ in 0..width as usize * F::LANES {
-                    total = twice(simd, total);
+                    total = outlined_double(simd, total);
                 }
-                total = sum(simd, total, window);
+                total = outlined_add(simd, total, window);
             } else {
                 total = window;
                 started = true;
             }
         } else if started {
             for _ in 0..width as usize * F::LANES {
-                total = twice(simd, total);
+                total = outlined_double(simd, total);
             }
         }
     }
@@ -812,9 +818,9 @@ fn pippenger<S: Simd, F: Field<S>, G: Group>(
     let mut shifted = identity.select(simd, total, 1 << (F::LANES - 1));
     for lane in (0..F::LANES - 1).rev() {
         for _ in 0..width {
-            shifted = twice(simd, shifted);
+            shifted = outlined_double(simd, shifted);
         }
-        shifted = sum(simd, shifted, identity.select(simd, total, 1 << lane));
+        shifted = outlined_add(simd, shifted, identity.select(simd, total, 1 << lane));
     }
     sum_lanes::<S, F, G>(simd, shifted)
 }
@@ -831,8 +837,8 @@ pub struct Msm<'a, G> {
     pub elements: &'a [G],
     /// The scalars, one per element.
     pub scalars: &'a [Scalar],
-    /// The method, or `None` for [`Plan::choose`]'s.
-    pub plan: Option<Plan>,
+    /// The method, or `None` for [`Method::choose`]'s.
+    pub method: Option<Method>,
 }
 
 impl<G: Group> Kernel for Msm<'_, G> {
@@ -847,13 +853,13 @@ impl<G: Group> Kernel for Msm<'_, G> {
         }
         let (elements, scalars) = (&self.elements[..count], &self.scalars[..count]);
         match self
-            .plan
-            .unwrap_or_else(|| Plan::choose::<G>(count, F::LANES))
+            .method
+            .unwrap_or_else(|| Method::choose::<G>(count, F::LANES))
         {
-            Plan::Straus { width, split } => {
+            Method::Straus { width, split } => {
                 straus::<S, F, G>(simd, elements, scalars, width, split)
             }
-            Plan::Pippenger(width) => pippenger::<S, F, G>(simd, elements, scalars, width),
+            Method::Pippenger(width) => pippenger::<S, F, G>(simd, elements, scalars, width),
         }
     }
 }
