@@ -180,6 +180,7 @@ pub(crate) fn sign_close(
         withdrawals,
         deposits,
         forced_withdrawals,
+        &Sequential,
     )
 }
 
@@ -287,12 +288,12 @@ pub(crate) fn check(
     parent: &TestCheckpoint,
     queue: &TestQueue,
 ) -> Result<TestChecked, CheckError> {
-    close.check::<Sha256, _>(
+    close.check::<Sha256>(
         &namespace(),
         &operator_key().public_key(),
-        &Sequential,
         parent,
         queue,
+        &Sequential,
     )
 }
 
@@ -411,7 +412,7 @@ fn test_ledger_vector() {
             1,
             0,
         );
-        let matrix = close.matrix::<Sha256>();
+        let matrix = close.matrix::<Sha256>(&Sequential);
         let member = matrix.open(&account(0), &account(1));
         let absent = matrix.open(&account(0), &account(3));
         let root = matrix.root();

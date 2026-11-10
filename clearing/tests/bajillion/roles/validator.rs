@@ -166,7 +166,8 @@ where
         while let Some(record) = digest.and_then(|digest| persisted.attested.get(&digest)) {
             let summary = Self::summary_of(record);
             if summary.balances == root {
-                let matrix = Self::close_of(&config, record).matrix::<H>();
+                let matrix =
+                    Self::close_of(&config, record).matrix::<H>(&config.balances.merkle.strategy);
                 parent = Some(Checkpoint { summary, matrix });
                 break;
             }
@@ -266,7 +267,8 @@ where
     /// close applied, from the close the validator persisted (V6).
     pub fn open(&self, epoch: Epoch, sender: &P, receiver: &P) -> Option<Opening<P, H::Digest, A>> {
         let record = self.record(epoch)?;
-        let matrix = Self::close_of(&self.config, record).matrix::<H>();
+        let matrix =
+            Self::close_of(&self.config, record).matrix::<H>(&self.config.balances.merkle.strategy);
         Some(matrix.open(sender, receiver))
     }
 
@@ -330,12 +332,12 @@ where
     ) -> Result<Proposal<P, H, S, A>, Refusal> {
         let encoded = close.encode();
         let (deposited, forced) = (close.deposits(), close.forced_withdrawals());
-        let checked = close.check::<H, S>(
+        let checked = close.check::<H>(
             &self.config.namespace,
             &self.config.operator,
-            &self.config.balances.merkle.strategy,
             &self.parent,
             queue,
+            &self.config.balances.merkle.strategy,
         )?;
         let proposal = checked.settle(self.balances(), self.payout_log()).await?;
 

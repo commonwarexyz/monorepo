@@ -284,7 +284,7 @@ fn test_challenges_need_a_contradicted_receipt() {
         // The receipt's epoch has not closed.
         let queue = deployment.ledger.queue();
         let close = close_epoch(&mut deployment.operator, &queue, 0, 0);
-        let matrix = close.matrix::<Sha256>();
+        let matrix = close.matrix::<Sha256>(&Sequential);
         let challenge = Challenge {
             receipt: receipt.clone(),
             opening: matrix.open(&account(0), &account(1)),

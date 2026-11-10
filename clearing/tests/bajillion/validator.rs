@@ -30,7 +30,7 @@ fn test_validators_agree_on_closes() {
             .unwrap();
         let (close, second) = deployment.close(&mut context).await;
         assert_eq!(second.parent, first.digest());
-        assert_eq!(second.matrix, close.matrix::<Sha256>().root());
+        assert_eq!(second.matrix, close.matrix::<Sha256>(&Sequential).root());
         assert_eq!(deployment.ledger.parent(), &second.digest());
 
         // Every validator holds the operator's view of the balances and can prove it.

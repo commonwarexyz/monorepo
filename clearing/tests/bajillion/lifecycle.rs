@@ -85,7 +85,7 @@ fn test_epochs_settle_payments_and_withdrawals() {
             parent = summary;
 
             // Every receiver records the post and finds each payment it was promised.
-            let matrix = close.matrix::<Sha256>();
+            let matrix = close.matrix::<Sha256>(&Sequential);
             for receiver in &mut receivers {
                 receiver.posted(epoch);
                 let senders: Vec<_> = receiver
@@ -144,7 +144,9 @@ fn test_omitted_payment_halts_ledger() {
         bob.posted(2);
 
         // Bob finds the omission in the posted matrix and halts the ledger.
-        let opening = omitting.matrix::<Sha256>().open(&account(0), &account(1));
+        let opening = omitting
+            .matrix::<Sha256>(&Sequential)
+            .open(&account(0), &account(1));
         let challenge = bob
             .audit(2, &summary.matrix, &account(0), &opening)
             .unwrap()
@@ -236,7 +238,7 @@ fn test_late_challenge_halts_after_later_closes() {
         assert_ne!(latest.matrix, omitted.matrix);
 
         // A receipt the close of its epoch credits in full shows no contradiction.
-        let matrix = omitting.matrix::<Sha256>();
+        let matrix = omitting.matrix::<Sha256>(&Sequential);
         let settled = Challenge {
             receipt: credited,
             opening: matrix.open(&account(3), &account(1)),
@@ -305,7 +307,7 @@ fn test_partial_credit_halts_ledger() {
 
         // Bob is credited 5 of the 10 promised, so his challenge halts the ledger.
         let opening = underpaying
-            .matrix::<Sha256>()
+            .matrix::<Sha256>(&Sequential)
             .open(&account(0), &account(1));
         assert_eq!(
             opening
@@ -364,7 +366,9 @@ fn test_sender_keeps_its_epoch_anchor_after_a_conflicting_post() {
         );
         let proposals = deployment.verify(&current).await;
         let summary = deployment.post(&mut context, proposals).await;
-        let opening = current.matrix::<Sha256>().open(&account(0), &account(0));
+        let opening = current
+            .matrix::<Sha256>(&Sequential)
+            .open(&account(0), &account(0));
         assert_eq!(alice.posted(2, &summary.matrix, &opening).unwrap(), None);
 
         // A new payment to carol must not make bob's payment settle again in epoch 3.

@@ -11,7 +11,7 @@ use commonware_codec::Decode as _;
 
 /// Returns the close's matrix root and an opening of `sender`'s row in it.
 fn open_row(close: &TestClose, sender: u64) -> (Digest, Opening<PublicKey, Digest, u64>) {
-    let matrix = close.matrix::<Sha256>();
+    let matrix = close.matrix::<Sha256>(&Sequential);
     (
         matrix.root(),
         matrix.open(&account(sender), &account(sender)),
@@ -855,7 +855,7 @@ fn test_posted_close_needs_a_valid_opening() {
         0,
         0,
     )
-    .matrix::<Sha256>();
+    .matrix::<Sha256>(&Sequential);
     let empty = Matrix::<PublicKey, Sha256, u64>::empty();
     let opening = populated.open(&account(0), &account(1));
     assert!(matches!(

@@ -361,13 +361,13 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
     /// Checks the close as the successor of the posted close `parent` against the ledger's `queue`.
     /// It checks the operator's signature before any user's, and chains each queue's running hash
     /// from `parent`'s summary over the prefix of `queue` that the close's counts select.
-    pub fn check<H: Hasher, S: Strategy>(
+    pub fn check<H: Hasher>(
         self,
         namespace: &Namespace,
         operator: &O,
-        strategy: &S,
         parent: &Checkpoint<P, H, A>,
         queue: &Queue<P, A>,
+        strategy: &impl Strategy,
     ) -> Result<Checked<P, H, A>, CheckError> {
         if parent.matrix.root() != parent.summary.matrix {
             return Err(CheckError::InvalidCheckpoint);

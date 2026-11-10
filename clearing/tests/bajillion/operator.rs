@@ -62,6 +62,7 @@ fn test_assembly_matches_monolithic_close() {
         shards.iter().flat_map(|shard| shard.withdrawals().cloned()),
         1,
         1,
+        &Sequential,
     )
     .unwrap();
     assert_eq!(assembled.encode(), sharded.encode());

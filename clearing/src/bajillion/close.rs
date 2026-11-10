@@ -6,6 +6,7 @@ use commonware_codec::{
     Buf, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write, varint::UInt,
 };
 use commonware_cryptography::{Digest, Hasher, PublicKey, Signer};
+use commonware_parallel::Strategy;
 use thiserror::Error;
 
 /// Why rows and withdrawals do not assemble into a close.
@@ -420,7 +421,7 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
     /// `forced_withdrawals` forced withdrawals. Returns it with each touched account's flow.
     ///
     /// Assembly recomputes every root and checks neither signatures nor [Limits].
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn assemble<H, S>(
         signer: &S,
         namespace: &Namespace,
@@ -429,6 +430,7 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
         withdrawals: impl IntoIterator<Item = Withdrawal<P, A>>,
         deposits: u64,
         forced_withdrawals: u64,
+        strategy: &impl Strategy,
     ) -> Result<(Self, Vec<(P, Flow<A>)>), AssemblyError>
     where
         H: Hasher,
@@ -472,6 +474,7 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
             withdrawals,
             deposits,
             forced_withdrawals,
+            strategy,
         );
         Ok((close, flows.into_flows()))
     }
@@ -481,6 +484,7 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
     /// # Panics
     ///
     /// Panics unless the rows and withdrawals are strictly increasing.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn sign<H, S>(
         signer: &S,
         namespace: &Namespace,
@@ -489,6 +493,7 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
         withdrawals: Vec<Withdrawal<P, A>>,
         deposits: u64,
         forced_withdrawals: u64,
+        strategy: &impl Strategy,
     ) -> Self
     where
         H: Hasher,
@@ -498,7 +503,7 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
             Self::is_canonical(&rows, &withdrawals),
             "rows and withdrawals must be in canonical order"
         );
-        let roots: Vec<_> = rows.iter().map(|row| row.payments.root::<H>()).collect();
+        let roots = strategy.map_collect_vec(&rows, |row| row.payments.root::<H>());
         let root = matrix::root::<H, P>(rows.iter().map(|row| &row.account).zip(&roots));
         let signature = signer.sign(
             &namespace.close,
@@ -545,19 +550,14 @@ impl<P: PublicKey, O: PublicKey, A: Amount> Close<P, O, A> {
     }
 
     /// Returns the payment matrix the close settles.
-    pub fn matrix<H: Hasher>(&self) -> Matrix<P, H, A> {
-        Matrix::from_sorted(
-            self.rows
-                .iter()
-                .map(|row| {
-                    (
-                        row.account.clone(),
-                        row.payments.clone(),
-                        row.payments.root::<H>(),
-                    )
-                })
-                .collect(),
-        )
+    pub fn matrix<H: Hasher>(&self, strategy: &impl Strategy) -> Matrix<P, H, A> {
+        Matrix::from_sorted(strategy.map_collect_vec(&self.rows, |row| {
+            (
+                row.account.clone(),
+                row.payments.clone(),
+                row.payments.root::<H>(),
+            )
+        }))
     }
 }
 
@@ -647,6 +647,7 @@ mod tests {
         Sha256, Verifier as _,
         ed25519::{PrivateKey, PublicKey},
     };
+    use commonware_parallel::Sequential;
 
     const LIMITS: Limits = Limits {
         rows: 4,
@@ -878,8 +879,17 @@ mod tests {
             required_forced_withdrawals: 0,
         };
         let assemble = |rows: Vec<Row<PublicKey, u64>>, withdrawals: Vec<_>| {
-            TestClose::assemble::<Sha256, _>(&operator, &namespace, &queue, rows, withdrawals, 1, 0)
-                .unwrap()
+            TestClose::assemble::<Sha256, _>(
+                &operator,
+                &namespace,
+                &queue,
+                rows,
+                withdrawals,
+                1,
+                0,
+                &Sequential,
+            )
+            .unwrap()
         };
         let (close, flows) = assemble(rows.to_vec(), withdrawals.to_vec());
         let reversed = assemble(
@@ -892,7 +902,7 @@ mod tests {
 
         // The operator signs the epoch, the matrix root of the rows, the withdrawals, and both
         // counts as varints. The flows sum every account's part of the close.
-        let root = close.matrix::<Sha256>().root();
+        let root = close.matrix::<Sha256>(&Sequential).root();
         let message = TestClose::message(1, &root, close.withdrawals(), 1, 0);
         let mut signed = Vec::new();
         1u64.write(&mut signed);
@@ -950,6 +960,7 @@ mod tests {
                 withdrawals,
                 deposits,
                 0,
+                &Sequential,
             )
         };
 
@@ -990,7 +1001,16 @@ mod tests {
         let signers = users(3);
         let queue = queue(1, &[], &[]);
         let assemble = |rows: Vec<_>, withdrawals: Vec<_>| {
-            TestClose::assemble::<Sha256, _>(&operator, &namespace, &queue, rows, withdrawals, 0, 0)
+            TestClose::assemble::<Sha256, _>(
+                &operator,
+                &namespace,
+                &queue,
+                rows,
+                withdrawals,
+                0,
+                0,
+                &Sequential,
+            )
         };
 
         // Every row pays a receiver, and every soft withdrawal is for the close's epoch.

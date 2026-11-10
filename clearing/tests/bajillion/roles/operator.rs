@@ -6,6 +6,7 @@ use commonware_clearing::bajillion::{
 };
 use commonware_codec::Encode as _;
 use commonware_cryptography::{Digest, Hasher, PublicKey, Signer};
+use commonware_parallel::Sequential;
 use core::{
     hash::Hash,
     sync::atomic::{AtomicUsize, Ordering},
@@ -396,6 +397,7 @@ impl<P: PublicKey, K: Signer, H: Hasher, A: Amount> Operator<P, K, H, A> {
             self.withdrawals().cloned(),
             deposits,
             forced_withdrawals,
+            &Sequential,
         )?;
 
         // Every flow settles before anything changes, so a refusal leaves the operator unchanged.

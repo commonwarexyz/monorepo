@@ -216,6 +216,7 @@ fn forge(
         withdrawals,
         deposits,
         forced_withdrawals,
+        &Sequential,
     )
     .unwrap()
     .0
