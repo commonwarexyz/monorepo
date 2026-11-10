@@ -214,8 +214,8 @@ where
 
 /// The effects of a close.
 pub(crate) struct Settlement<P: PublicKey, A: Amount> {
-    /// The new balance of every account whose balance changes, in account order.
-    pub(crate) balances: Vec<(P, A)>,
+    /// The new balance of each account in [Flows::accounts] order, or `None` if it does not change.
+    pub(crate) balances: Vec<Option<A>>,
     /// Amount paid out to each withdrawing account.
     pub(crate) payouts: Amounts<P, A>,
 }
@@ -300,13 +300,11 @@ impl<P: PublicKey, A: Amount> Flows<P, A> {
         &self,
         balances: impl IntoIterator<Item = A>,
     ) -> Result<Settlement<P, A>, FlowError> {
-        let mut changed = Vec::new();
+        let mut changed = Vec::with_capacity(self.flows.len());
         let mut payouts = Vec::new();
         for ((account, flow), previous) in zip_eq(&self.flows, balances) {
             let Settled { balance, payout } = flow.settle(previous)?;
-            if balance != previous {
-                changed.push((account.clone(), balance));
-            }
+            changed.push((balance != previous).then_some(balance));
             if payout != A::ZERO {
                 payouts.push((account.clone(), payout));
             }

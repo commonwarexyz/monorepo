@@ -19,7 +19,7 @@ use commonware_storage::{
         self, ProofExt as _,
         any::unordered::{Update, fixed::Operation},
         current::{
-            batch::MerkleizedBatch,
+            batch::{MerkleizedBatch, Slot},
             unordered::{db::Db, proof::constant::KeyValueProof},
         },
         keyless,
@@ -500,18 +500,30 @@ impl<P: PublicKey, H: Hasher, A: Amount> Checked<P, H, A> {
         if balances.root() != self.parent.balances || log.root() != self.parent.payouts.root {
             return Err(SettleError::InvalidCheckpoint);
         }
+
+        // Staging the accounts keeps the location each balance was read from, so writing an
+        // account does not look it up again.
         let accounts: Vec<&P> = self.flows.accounts().collect();
-        let previous = balances.get_many(&accounts).await?;
+        let (staged, previous) = balances
+            .new_batch()
+            .with_metadata(A::ZERO)
+            .stage(&accounts, balances)
+            .await?;
         let settlement = self.flows.settle(
             previous
                 .into_iter()
                 .map(|balance| balance.unwrap_or(A::ZERO)),
         )?;
-        let mut batch = balances.new_batch().with_metadata(A::ZERO);
-        for (account, balance) in settlement.balances {
-            batch = batch.write(account, (balance != A::ZERO).then_some(balance));
-        }
-        let batch = batch.merkleize(balances).await?;
+        let slots = settlement
+            .balances
+            .into_iter()
+            .map(|balance| match balance {
+                None => Slot::Keep,
+                Some(balance) if balance == A::ZERO => Slot::Delete,
+                Some(balance) => Slot::Put(balance),
+            })
+            .collect();
+        let batch = staged.merkleize(slots, Vec::new(), balances).await?;
         let appends = Payout::stage(log, &settlement.payouts).await?;
         let summary = Summary {
             epoch: self.epoch,
