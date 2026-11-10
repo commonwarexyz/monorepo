@@ -433,8 +433,8 @@ fn test_posted_other_row_drops_request() {
 }
 
 /// A post of the epoch before a pending request's own does not drop it, even when the close
-/// settles another of the sender's maps than the one the request builds on. Its state for the
-/// epoch after its own builds on a row that has not posted, so it can still settle.
+/// settles a different map of the sender than the one the request builds on. The request's state
+/// for the epoch after its own builds on a row that has not posted, so it can still settle.
 #[test]
 fn test_post_before_request_epoch_keeps_it_pending() {
     let mut operator = operator();

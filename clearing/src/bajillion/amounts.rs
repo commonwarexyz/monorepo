@@ -241,8 +241,8 @@ mod tests {
 
     type TestAmounts = Amounts<PublicKey, u64>;
 
-    /// Collecting entries orders them by account, and each account reads back its amount or zero
-    /// and its position, if it has one.
+    /// Building amounts sorts the entries by account. An account reads back its amount and
+    /// position, or zero and no position when it has no amount.
     #[test]
     fn test_new_sorts_entries() {
         let keys = accounts(4);
@@ -313,7 +313,8 @@ mod tests {
         assert_eq!(overflowing.unwrap().total(), None);
     }
 
-    /// A leaf hashes the account and the amount's big-endian encoding at every width.
+    /// A leaf hashes the account and the amount's big-endian encoding, for primitive and wide
+    /// amounts alike.
     #[test]
     fn test_leaf_hashes_account_and_big_endian_amount() {
         let key = &accounts(1)[0];
@@ -381,7 +382,7 @@ mod tests {
         }
     }
 
-    /// Decoding refuses unsorted, repeated, zero, and over-limit entries.
+    /// Decoding refuses unsorted, repeated, and zero entries, and more entries than the limit.
     #[test]
     fn test_decode_rejects_non_canonical_entries() {
         let keys = accounts(2);

@@ -135,7 +135,7 @@ struct Case {
     operator: PublicKey,
     /// The accounts, in the order the amounts below index them.
     accounts: Vec<PublicKey>,
-    /// The countersigned state of each sender whose map pays anyone.
+    /// The countersigned state of each sender, or `None` if its map pays no one.
     states: Vec<Option<State<PublicKey, Digest>>>,
     /// The amount each sender promised each receiver, zero for none.
     promised: [[u64; ACCOUNTS]; ACCOUNTS],
@@ -156,7 +156,8 @@ impl Case {
             .expect("a verified proof must name an account of the case")
     }
 
-    /// Checks that `opening` verifies for a sender and receiver only as what the close credits
+    /// Checks that `opening` verifies for any of the case's senders only as that sender's posted
+    /// row, or as no row when it has none. For any pair, it verifies only as what the close credits
     /// that pair.
     fn check_opening(&self, opening: &TestOpening) {
         for (sender, account) in self.accounts.iter().enumerate() {
@@ -171,8 +172,9 @@ impl Case {
         }
     }
 
-    /// Returns whether `receipt` verifies, in which case it must carry both signatures over the
-    /// state its sender signed and state what that sender promised.
+    /// Returns whether `receipt` verifies. A receipt that verifies must carry its sender's
+    /// countersigned state, both signatures over that state, and the amount the sender promised its
+    /// receiver.
     fn check_receipt(&self, receipt: &TestReceipt) -> bool {
         if !receipt.verify::<Sha256>(&self.namespace, &self.operator) {
             return false;
@@ -319,7 +321,7 @@ fn payments(input: Payments) {
     }
 
     // A receipt the sender issued verifies. With the opening of its sender and receiver, it is a
-    // challenge exactly when the close credits less than it promises.
+    // challenge exactly when the close credits less than it promises, and only for its own epoch.
     let pick = |(sender, receiver): (u8, u8)| {
         let sender = usize::from(sender) % ACCOUNTS;
         let receiver = usize::from(receiver) % ACCOUNTS;

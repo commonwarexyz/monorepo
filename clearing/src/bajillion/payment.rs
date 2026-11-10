@@ -30,8 +30,8 @@ pub enum RequestError {
     /// The next epoch, an amount, or the payment map does not fit while deriving the states.
     #[error("arithmetic overflow")]
     Overflow,
-    /// The latest state does not commit to the map given with it. Its root is that of the map with
-    /// the batch added, so both states derived from the pair could settle.
+    /// The latest state's root is that of its map with the batch already added, so both states
+    /// derived from the pair could settle.
     #[error("latest state does not commit to its map")]
     InvalidLatest,
 }
@@ -731,7 +731,7 @@ mod tests {
     type TestStates = States<PublicKey, Digest, u64>;
 
     /// Returns alice's countersigned state of epoch 2 committing to `payments` on top of
-    /// `previous`, or `None` if she has paid nothing in the epoch.
+    /// `previous`, or `None` if `payments` is empty.
     fn latest(
         payments: &Amounts<PublicKey, u64>,
         previous: Digest,

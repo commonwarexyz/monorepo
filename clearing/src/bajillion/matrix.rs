@@ -282,7 +282,7 @@ mod tests {
     }
 
     /// Every sender and receiver pair opens to the amount paid, or zero, and every sender to the
-    /// root of its row.
+    /// root of its row, or to no row.
     #[test]
     fn test_opens_every_pair() {
         let keys = accounts(6);
@@ -328,8 +328,8 @@ mod tests {
         );
     }
 
-    /// An opening verifies only with an entry exactly when its sender has a row, under its own
-    /// root, and for its own pair.
+    /// An opening verifies with an entry from the sender's own row exactly when the sender has a
+    /// row, and an opening of a payment verifies only under its own root and for its own pair.
     #[test]
     fn test_rejects_inconsistent_openings() {
         let keys = accounts(4);
@@ -390,7 +390,7 @@ mod tests {
             Err(InvalidOpening)
         ));
 
-        // Openings verify only under their own root and for their own pair.
+        // An opening of a payment verifies only under its own root and for its own pair.
         let other_root = Matrix::<PublicKey, Sha256, u64>::empty().root();
         assert!(
             present

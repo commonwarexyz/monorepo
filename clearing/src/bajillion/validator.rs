@@ -575,7 +575,7 @@ impl<P: PublicKey, H: Hasher, S: Strategy, A: Amount> Proposal<P, H, S, A> {
 
     /// Returns the payouts the close appends to the payout log, in account order. With p the
     /// parent's payouts size and s this summary's, they take the indices [p, s - 1) before the
-    /// commit at s - 1, so an account's payout sits at p plus the account's [Amounts::position].
+    /// commit at s - 1, so an account's payout sits at p plus its [Amounts::position] in them.
     pub const fn payouts(&self) -> &Amounts<P, A> {
         &self.payouts
     }

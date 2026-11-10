@@ -328,8 +328,8 @@ mod tests {
         Commitment::new(Location::new(size), D::from([marker; 32]))
     }
 
-    /// A commitment encodes as its size's varint and its root, and decoding refuses a size beyond
-    /// the family's leaves.
+    /// A commitment encodes as its size's varint and its root, and decoding refuses a size above
+    /// the family's maximum leaf count.
     #[test]
     fn commitment_round_trips_and_refuses_a_size_beyond_the_family() {
         let commitment = state(14, 14);

@@ -356,8 +356,9 @@ fn test_ledger_vector() {
             "dc78896a8eab075c7672d704b58798ff2687447dc6132852a86f007847bf5af0"
         );
 
-        // The deposit queue's running hash after bob's deposit, chained from genesis. Alice's
-        // deposit follows it in the queue, beside the forced withdrawals of bob and carol.
+        // The deposit queue's running hash after bob's deposit, chained from genesis. The queues
+        // of epoch 1 also hold alice's deposit after bob's and the forced withdrawals of bob and
+        // carol.
         let queued = queue(1, &[(1, 5), (0, 20)], &[(1, 3), (2, 4)]);
         let deposits = genesis.deposits.next::<Sha256, _>(&queued.deposits[..1]);
         assert_eq!(

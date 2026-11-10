@@ -274,8 +274,8 @@ where
 
     /// Proves the payout the posted close of `epoch` owes `account` under the payouts root of the
     /// last close applied, or returns `None` if no applied close of `epoch` owes it one (V6). A
-    /// withdrawal names the epoch of [Self::summary]. The ledger keeps that epoch's payouts root
-    /// after later posts.
+    /// withdrawal with this proof names the epoch of [Self::summary], and the ledger keeps that
+    /// epoch's payouts root after later posts.
     ///
     /// The close's payouts sit in account order from its parent's payouts size up to its commit, so
     /// a binary search over them finds the account's.

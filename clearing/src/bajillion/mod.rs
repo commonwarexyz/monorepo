@@ -388,9 +388,9 @@
 //!
 //! With p the parent's payouts size and s the close's, the payouts of the close take the indices
 //! [p, s - 1) in account order and its commit takes s - 1 ([Proposal::payouts]). An account's
-//! payout sits at p plus the account's position in the close's payouts ([Amounts::position]), and a
-//! validator that does not keep them can binary search [p, s - 1). The log's proof of that one
-//! operation proves the payout ([PayoutProof]).
+//! payout sits at p plus its position in the close's payouts ([Amounts::position]). A validator
+//! that does not keep those payouts can find it by binary search over [p, s - 1). The log's proof
+//! of that one operation proves the payout ([PayoutProof]).
 //!
 //! ```text
 //!   Summary(e)
@@ -579,8 +579,8 @@
 //!   under the payouts root of the posted close the caller names by its epoch, and no claimed range
 //!   covers its index. Keep every posted payouts root. In one state change, add the index to the
 //!   claimed ranges and pay the payout to its account's destination (L10). Otherwise a payout is
-//!   paid twice, or is never paid because an operator that keeps posting leaves every proof
-//!   validators serve under a root the ledger discarded.
+//!   paid twice, or is never paid while the operator keeps posting, because each post discards the
+//!   root of every proof validators have served.
 //!
 //! - **L7.** Before a halt, halt on a challenge that [Challenge::verify] accepts against a posted
 //!   epoch and its matrix root, and keep every posted matrix root. Otherwise receivers lose their
@@ -639,11 +639,13 @@
 //! ```
 //!
 //! The proof shows that a payout exists, and the claimed ranges keep it from being paid twice. A
-//! replayed proof is refused even though it still verifies. A withdrawal names the posted close
-//! whose payouts root its proof is under, and the ledger keeps every posted payouts root, so the
-//! proof stays valid however many closes post after that one. The log only appends and a payout
-//! keeps its index, so every posted root that holds index i holds the same payout there, a commit
-//! never verifies as a payout, and the claimed ranges pay index i once whichever root proves it.
+//! replayed proof is refused even though it still verifies.
+//!
+//! A withdrawal names the posted close whose payouts root its proof is under, and the ledger keeps
+//! every posted payouts root, so the proof stays valid however many closes post after that one.
+//! The log only appends and an operation keeps its index, so every posted root that holds index i
+//! holds the same operation there, and the claimed ranges pay index i once whichever root proves
+//! it. A commit never verifies as a payout, because the log encodes it with another tag.
 //!
 //! ## Implementing a ledger
 //!

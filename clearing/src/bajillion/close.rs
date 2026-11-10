@@ -655,7 +655,7 @@ mod tests {
         withdrawals: 4,
     };
 
-    /// Returns a row of `signer` paying `receiver` 1, under a signature over no state.
+    /// Returns a row of `signer` paying `receiver` 1, with a placeholder signature.
     fn row(signer: &PrivateKey, receiver: &PrivateKey) -> Row<PublicKey, u64> {
         Row {
             account: signer.public_key(),

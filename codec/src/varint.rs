@@ -446,7 +446,8 @@ fn write<T: UPrim>(value: T, buf: &mut impl BufMut) {
 
     // Stage the encoded bytes on the stack so the buffer receives bulk writes. The stage holds the
     // longest primitive encoding, and only an integer whose encoding can be longer flushes a full
-    // stage. Whether a type can is a constant, so the primitives' loop carries no flush.
+    // stage. Whether a type's encoding can be longer is a constant, so the primitives' loop
+    // carries no flush.
     let mut bytes = [0u8; MAX_U128_VARINT_SIZE];
     let flushes = T::BITS.div_ceil(DATA_BITS_PER_BYTE) > bytes.len();
     let mut len = 0;
