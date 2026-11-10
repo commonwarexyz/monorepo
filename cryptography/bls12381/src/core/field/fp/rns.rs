@@ -695,11 +695,9 @@ impl<S: X86V4C> Rns<S> {
     #[inline(always)]
     pub fn to_residues(self, simd: S, bound: u64) -> [u64; RESIDUES] {
         self.bound.assert_le(bound);
-        let mut residues = [0; RESIDUES];
-        let (m, n) = residues.split_at_mut(MODULI);
-        simd.u64_store(self.m, m);
-        simd.u64_store(self.n, n);
-        residues
+        let mut residues = [[0; RESIDUES]];
+        Field::store_raw::<LIMIT>(self, simd, &mut residues);
+        residues[0]
     }
 
     /// Converts `input` through `conversion`, returning residues of `destination` at most twice
@@ -902,13 +900,6 @@ impl<S: X86V4C> Rns<S> {
         bound.div_ceil(M_OVER_P);
         bound.add(DebugCounter::new(LIFT));
         bound
-    }
-
-    /// Returns `self * self`.
-    #[cfg(any(test, feature = "fuzz"))]
-    #[inline(always)]
-    pub fn square(self, simd: S) -> Self {
-        self.mul(simd, self)
     }
 
     /// Returns the difference of a signed sum, as `Field::reduce_signed` subtracts it.
@@ -1741,7 +1732,10 @@ pub mod fuzz {
                     }
                     a.mul(simd, b)
                 }
-                Self::LooseSub => a.sub::<{ LIMIT - 2 }>(simd, b).square(simd),
+                Self::LooseSub => {
+                    let difference = a.sub::<{ LIMIT - 2 }>(simd, b);
+                    difference.mul(simd, difference)
+                }
                 Self::LooseNeg => a.neg::<LIMIT>(simd).mul(simd, b),
             }
         }
