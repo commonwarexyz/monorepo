@@ -60,7 +60,6 @@ struct ReadGateState {
     partition: String,
     armed: bool,
     blocked: usize,
-    /// Senders for [ReadGate::parked] receivers that no read has resolved yet, oldest first.
     parked: VecDeque<oneshot::Sender<()>>,
 }
 

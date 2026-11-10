@@ -2952,6 +2952,7 @@ mod tests {
     /// have released it, so the journal reopens at once.
     #[test_traced]
     fn test_finish_with_failed_read_releases_journal() {
+        // An authenticated journal over a context whose reads can be parked.
         type Gated = ReadGateContext<deterministic::Context>;
         type GatedJournal = Journal<
             mmr::Family,
@@ -2965,6 +2966,7 @@ mod tests {
         // once `finish_with` resumes, so cover several seeds.
         for seed in 0..8u64 {
             deterministic::Runner::seeded(seed).start(|context| async move {
+                // Write the operations the recovery replays.
                 let (merkle_cfg, journal_cfg) =
                     (merkle_config("failed-read"), journal_config("failed-read"));
                 let initial = context.child("initial");
@@ -3003,6 +3005,8 @@ mod tests {
                     result,
                     Err(Error::Merkle(merkle::Error::DataCorrupted(_)))
                 ));
+
+                // The journal reopens at once, so no subtree task still holds it.
                 TestJournal::<mmr::Family>::new(
                     context.child("reopened"),
                     merkle_cfg,

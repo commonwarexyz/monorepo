@@ -3970,6 +3970,7 @@ pub mod tests {
     fn test_current_mmb_prune_keeps_retained_checkpoints_initializable() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Write the same keys in six synced generations and record each one's checkpoint.
             let partition = "current-mmb-prune-retained-checkpoints";
             let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
                 context.child("storage"),
@@ -3978,8 +3979,6 @@ pub mod tests {
             )
             .await
             .unwrap();
-
-            // Write the same keys in six synced generations and record each one's checkpoint.
             let mut history = Vec::new();
             for generation in 0..6u64 {
                 let mut batch = db.new_batch();
