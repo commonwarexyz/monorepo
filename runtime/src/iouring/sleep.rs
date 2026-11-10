@@ -1416,7 +1416,7 @@ pub mod tests {
     }
 
     #[test]
-    fn test_elapsed_sleeps_are_ready_without_a_worker() {
+    fn test_sleep_without_a_worker_completes_only_once_elapsed() {
         let mut cx = Context::from_waker(Waker::noop());
 
         // The last case has a deadline that passed between creation and polling.
@@ -1428,6 +1428,16 @@ pub mod tests {
             assert!(sleep.poll_unpin(&mut cx).is_ready());
             assert!(matches!(sleep.state, State::Done));
         }
+
+        // A sleep whose deadline is ahead cannot register, and has no error
+        // output, so its poll panics.
+        let mut sleep = Sleep::new(Duration::from_secs(60));
+        let panic = catch_unwind(AssertUnwindSafe(|| sleep.poll_unpin(&mut cx)))
+            .expect_err("a sleep registered without a worker");
+        assert_eq!(
+            extract_panic_message(&*panic),
+            "io_uring sleep requires a current worker"
+        );
     }
 
     #[cfg(target_pointer_width = "64")]
@@ -1507,117 +1517,80 @@ pub mod tests {
     }
 
     #[test]
-    fn test_changed_waker_on_another_thread_is_woken() {
-        // Register with one waker, then poll on another thread with a second.
-        let timers = Arc::new(Timers::new());
-        let (first, first_waker) = counter();
-        let (second, second_waker) = counter();
-        let deadline = later();
-        let sleeper = register(&timers, deadline, &first_waker);
-        let mut sleeper = thread::spawn(move || {
-            let mut sleeper = sleeper;
-            assert!(poll_with(&mut sleeper, &second_waker).is_pending());
-
-            // An unchanged waker stays pending without a clone.
-            assert!(poll_with(&mut sleeper, &second_waker).is_pending());
-            sleeper
-        })
-        .join()
-        .unwrap();
-
-        // Off a worker, the displaced waker is released at once.
-        assert_eq!(Arc::strong_count(&first), 2);
-        let mut deferred = Deferred::default();
-        timers.expire(deadline + RESOLUTION, BUDGET, &mut deferred);
-        run(&mut deferred);
-        assert_eq!(first.get(), 0, "woke the displaced waker");
-        assert_eq!(second.get(), 1);
-        assert_eq!(
-            poll_with(&mut sleeper, &first_waker),
-            Poll::Ready(Outcome::Fired)
-        );
-    }
-
-    #[test]
     fn test_drop_on_another_thread_removes_and_releases() {
-        // An earlier registration keeps the timers nonempty, and the timers
-        // holds the only clone of the later one's waker.
+        // Two registrations, of which the timers hold the only clone of the
+        // earlier one's waker.
         let timers = Arc::new(Timers::new());
         let (count, waker) = counter();
         let deadline = later();
-        let early = register(&timers, deadline - 1, Waker::noop());
-        let sleeper = register(&timers, deadline, &waker);
+        let early = register(&timers, deadline, &waker);
+        let late = register(&timers, deadline + 1_000_000, Waker::noop());
         drop(waker);
 
-        // Dropping it on another thread removes the registration and releases
-        // its waker there.
-        thread::spawn(move || sleeper.abandon()).join().unwrap();
+        // Dropping the earlier one on another thread removes its registration
+        // and releases its waker there. A drop that leaves a registration
+        // keeps the published bound, which is then early.
+        thread::spawn(move || early.abandon()).join().unwrap();
         assert_eq!(Arc::strong_count(&count), 1, "kept the waker");
         assert_eq!(timers.live(), 1);
         assert_eq!(timers.resident(), 1);
+        assert_eq!(timers.published(), Wheel::<RESOLUTION>::rounded(deadline));
 
-        // Dropping the other here empties the timers, so expiry wakes nothing.
-        early.abandon();
+        // Dropping the other here empties the wheel, which then publishes no
+        // bound, so expiry wakes nothing.
+        late.abandon();
         assert_eq!(timers.live(), 0);
         assert_eq!(timers.bound(), u64::MAX);
+        assert_eq!(timers.published(), u64::MAX);
         let mut deferred = Deferred::default();
-        timers.expire(deadline + 4096, BUDGET, &mut deferred);
+        timers.expire(deadline + 1_000_000 + RESOLUTION, BUDGET, &mut deferred);
         assert!(deferred.is_empty());
         assert_eq!(count.get(), 0);
     }
 
     #[test]
     fn test_close_wakes_pending_and_reports_closed() {
-        // Fire one of two registrations, leaving the other pending.
+        // Fire one of four registrations, leaving the others pending.
         let timers = Arc::new(Timers::new());
         let (count, waker) = counter();
         let deadline = later();
         let mut pending = register(&timers, deadline + 1_000_000, &waker);
+        let abandoned = register(&timers, deadline + 1_000_000, &waker);
+        let queued = register(&timers, deadline + 1_000_000, &waker);
         let mut fired = register(&timers, deadline, &waker);
         let mut deferred = Deferred::default();
         timers.expire(deadline + RESOLUTION, BUDGET, &mut deferred);
         run(&mut deferred);
         assert_eq!(count.get(), 1);
+        let (slots, links) = timers.capacity();
+        assert!(slots >= 4, "the slab holds {slots} slots");
+        assert!(links >= 4, "the wheel holds {links} links");
 
-        // Closure appends to existing deferred work without invoking it, and
-        // repeating it changes nothing.
+        // Closure appends its wakes to existing deferred work without
+        // invoking it, and frees the storage of every registration, fired or
+        // pending. Repeating it changes nothing.
         deferred.wakes.push(Waker::noop().clone());
         timers.close(&mut deferred);
         timers.close(&mut deferred);
-        assert_eq!(deferred.wakes.len(), 2);
+        assert_eq!(deferred.wakes.len(), 4);
+        assert!(deferred.drops.is_empty());
+        assert_eq!(timers.capacity(), (0, 0), "closed timers kept storage");
         assert_eq!(count.get(), 1);
         run(&mut deferred);
-        assert_eq!(count.get(), 2);
+        assert_eq!(count.get(), 4);
         assert_eq!(timers.published(), u64::MAX);
         assert!(timers.is_closed());
 
-        // Closure discarded both registrations, fired or pending, and each
-        // reports closure.
+        // Closure discarded every registration, and each poll reports
+        // closure, however often.
         assert_eq!(timers.live(), 0);
         assert_eq!(poll_with(&mut fired, &waker), Poll::Ready(Outcome::Closed));
-        assert_eq!(
-            poll_with(&mut pending, &waker),
-            Poll::Ready(Outcome::Closed)
-        );
-        let rejected = catch_unwind(AssertUnwindSafe(|| register(&timers, deadline, &waker)));
-        assert!(rejected.is_err(), "closed timers accepted a registration");
-        assert_eq!(timers.live(), 0);
-        assert_eq!(Arc::strong_count(&count), 2);
-    }
-
-    #[test]
-    fn test_drop_after_close_is_harmless() {
-        // Closing the timers wakes the pending registrations.
-        let timers = Arc::new(Timers::new());
-        let (count, waker) = counter();
-        let abandoned = register(&timers, later(), &waker);
-        let queued = register(&timers, later(), &waker);
-        let mut repolled = register(&timers, later(), &waker);
-        assert!(poll_with(&mut repolled, &waker).is_pending());
-        let mut deferred = Deferred::default();
-        timers.close(&mut deferred);
-        run(&mut deferred);
-        assert_eq!(count.get(), 3);
+        for _ in 0..2 {
+            assert_eq!(
+                poll_with(&mut pending, &waker),
+                Poll::Ready(Outcome::Closed)
+            );
+        }
 
         // A drop on a thread without a worker and a removal of late or
         // repeated queued identities find nothing to remove.
@@ -1628,58 +1601,14 @@ pub mod tests {
         assert!(dropped.is_empty());
         assert!(deferred.is_empty());
 
-        // Repolls observe closure.
-        for _ in 0..2 {
-            assert_eq!(
-                poll_with(&mut repolled, &waker),
-                Poll::Ready(Outcome::Closed)
-            );
-        }
-
-        // Closure woke each waker once and released the timers' clones.
+        // Closed timers reject a registration. Closure woke each waker once
+        // and released the timers' clones, and nothing allocated since.
+        let rejected = catch_unwind(AssertUnwindSafe(|| register(&timers, deadline, &waker)));
+        assert!(rejected.is_err(), "closed timers accepted a registration");
         assert_eq!(timers.live(), 0);
-        assert_eq!(timers.published(), u64::MAX);
-        assert_eq!(count.get(), 3);
-        assert_eq!(Arc::strong_count(&count), 2);
-    }
-
-    #[test]
-    fn test_closure_frees_the_storage_of_every_registration() {
-        /// Registrations enough to grow the slab and the wheel's links.
-        const COUNT: usize = 100_000;
-
-        // One registration outlives the rest.
-        let timers = Arc::new(Timers::new());
-        let (count, waker) = counter();
-        let mut sleepers: Vec<_> = (0..COUNT)
-            .map(|_| register(&timers, later(), &waker))
-            .collect();
-        let mut escaped = sleepers.pop().unwrap();
-        for sleeper in sleepers {
-            sleeper.abandon();
-        }
-        let (slots, links) = timers.capacity();
-        assert!(slots >= COUNT, "the slab holds {slots} slots");
-        assert!(links >= COUNT, "the wheel holds {links} links");
-
-        // Closure ends the escaped registration with a deferred wake, and
-        // frees the storage of both.
-        let mut deferred = Deferred::default();
-        timers.close(&mut deferred);
-        assert_eq!(deferred.wakes.len(), 1);
-        assert!(deferred.drops.is_empty());
-        assert_eq!(timers.capacity(), (0, 0), "closed timers kept storage");
-        run(&mut deferred);
-        assert_eq!(count.get(), 1);
-
-        // The escaped sleeper observes closure, and its poll and drop
-        // allocate nothing.
-        assert_eq!(
-            poll_with(&mut escaped, &waker),
-            Poll::Ready(Outcome::Closed)
-        );
-        drop(escaped);
         assert_eq!(timers.capacity(), (0, 0));
+        assert_eq!(timers.published(), u64::MAX);
+        assert_eq!(count.get(), 4);
         assert_eq!(Arc::strong_count(&count), 2);
     }
 
@@ -1745,43 +1674,14 @@ pub mod tests {
         run(&mut deferred);
         assert_eq!(count.get(), 2);
 
-        // The first completes, and a repoll stays complete. The second has
-        // no error output, so its poll panics.
+        // The first completes, and a repoll stays complete.
         let mut cx = Context::from_waker(&waker);
         assert!(passed.poll_unpin(&mut cx).is_ready());
         assert!(passed.poll_unpin(&mut cx).is_ready());
-        let panic = catch_unwind(AssertUnwindSafe(|| ahead.poll_unpin(&mut cx)))
-            .expect_err("a closed sleep completed before its deadline");
-        assert!(
-            extract_panic_message(&*panic)
-                .starts_with("io_uring sleep polled after its worker closed")
-        );
 
-        // Neither drop finds anything left to release.
-        drop(passed);
-        drop(ahead);
-        assert_eq!(timers.live(), 0);
-        assert_eq!(Arc::strong_count(&count), 2);
-    }
-
-    #[test]
-    fn test_closed_sleep_ahead_of_its_deadline_never_completes() {
-        // No service pass ran on this thread, so polls take the lock.
-        assert!(turn().is_none());
-
-        // A pending registration whose deadline is ahead closes.
-        let timers = Arc::new(Timers::new());
-        let (count, waker) = counter();
-        let mut ahead = registered(&timers, Instant::now() + Duration::from_secs(60), &waker);
-        let mut deferred = Deferred::default();
-        timers.close(&mut deferred);
-        run(&mut deferred);
-        assert_eq!(count.get(), 1);
-
-        // The sleep has no error output, so every poll before its deadline
+        // The second has no error output, so every poll before its deadline
         // panics, including one that follows a caught panic, and each one
         // observes the closure under the lock.
-        let mut cx = Context::from_waker(&waker);
         for _ in 0..3 {
             let before = locks();
             let panic = catch_unwind(AssertUnwindSafe(|| ahead.poll_unpin(&mut cx)))
@@ -1794,7 +1694,8 @@ pub mod tests {
             assert!(matches!(ahead.state, State::Registered(_)));
         }
 
-        // Its drop finds nothing left to release.
+        // Neither drop finds anything left to release.
+        drop(passed);
         drop(ahead);
         assert_eq!(timers.live(), 0);
         assert_eq!(Arc::strong_count(&count), 2);
@@ -1835,9 +1736,10 @@ pub mod tests {
     }
 
     #[test]
-    fn test_rescue_selects_only_peers_overdue_by_the_threshold() {
-        // One registration on each of three workers' timers with one origin,
-        // all firing at `firing`.
+    fn test_rescue_selects_overdue_peers_whose_owner_has_not_served() {
+        // Three workers' timers with one origin hold registrations that all
+        // fire at `firing`. The caller's and one peer's hold one each, and
+        // another peer's holds four budgets.
         let threshold = RESCUE_THRESHOLD.as_nanos() as u64;
         let origin = Instant::now();
         let all: Vec<_> = (0..3)
@@ -1846,10 +1748,12 @@ pub mod tests {
         let (count, waker) = counter();
         let deadline = later();
         let firing = Wheel::<RESOLUTION>::rounded(deadline);
-        let _sleepers: Vec<_> = all
-            .iter()
-            .map(|timers| register(timers, deadline, &waker))
-            .collect();
+        let budget = BUDGET as usize;
+        for (timers, registrations) in all.iter().zip([1, 1, 4 * budget]) {
+            for _ in 0..registrations {
+                register(timers, deadline, &waker);
+            }
+        }
 
         // Overdue by less than the threshold, nobody is rescued.
         let mut deferred = Deferred::default();
@@ -1857,43 +1761,25 @@ pub mod tests {
         Timers::rescue_peers(&all, 0, at(firing + threshold - 1), &mut deferred);
         assert!(deferred.is_empty());
 
-        // At the threshold, every peer is, but never the caller's own timers.
+        // At the threshold, every peer is, with one budget each, but never
+        // the caller's own timers.
         Timers::rescue_peers(&all, 0, at(firing + threshold), &mut deferred);
         run(&mut deferred);
-        assert_eq!(count.get(), 2);
+        assert_eq!(count.get(), 1 + budget);
         assert_eq!(all[0].resident(), 1);
         assert_eq!(all[1].resident(), 0);
-        assert_eq!(all[2].resident(), 0);
-    }
+        assert_eq!(all[2].resident(), 3 * budget);
 
-    #[test]
-    fn test_rescue_leaves_a_backlog_to_an_owner_that_serves() {
-        // Three budgets of registrations on worker 1's timers, all firing at
-        // `firing`, of two workers' timers with one origin.
-        let threshold = RESCUE_THRESHOLD.as_nanos() as u64;
-        let origin = Instant::now();
-        let all: Vec<_> = (0..2)
-            .map(|_| Arc::new(Timers::with_origin(origin)))
-            .collect();
-        let (count, waker) = counter();
-        let deadline = later();
-        let firing = Wheel::<RESOLUTION>::rounded(deadline);
-        let budget = BUDGET as usize;
-        let _sleepers: Vec<_> = (0..3 * budget)
-            .map(|_| register(&all[1], deadline, &waker))
-            .collect();
-
-        // The owner's late pass fires one budget and leaves the rest due, with
-        // its bound at or before their firing time.
+        // The backlog's owner then runs a late pass, which fires one budget
+        // and leaves the rest due, with its bound at or before their firing
+        // time.
         let served = firing + 2 * threshold;
-        let mut deferred = Deferred::default();
-        assert!(all[1].expire(served, BUDGET, &mut deferred) <= firing);
+        assert!(all[2].expire(served, BUDGET, &mut deferred) <= firing);
         assert_eq!(deferred.wakes.len(), budget);
         run(&mut deferred);
 
         // The bound is overdue by more than the threshold, but while the
         // owner's pass is recent, peers leave the backlog to the owner.
-        let at = |nanos| all[0].instant(nanos).unwrap();
         Timers::rescue_peers(&all, 0, at(served + threshold - 1), &mut deferred);
         assert!(deferred.is_empty());
 
@@ -1902,10 +1788,10 @@ pub mod tests {
         // the next check, however soon, rescues the owner again.
         Timers::rescue_peers(&all, 0, at(served + threshold), &mut deferred);
         run(&mut deferred);
-        assert_eq!(count.get(), 2 * budget);
+        assert_eq!(count.get(), 1 + 3 * budget);
         Timers::rescue_peers(&all, 0, at(served + threshold), &mut deferred);
         run(&mut deferred);
-        assert_eq!(count.get(), 3 * budget);
+        assert_eq!(count.get(), 1 + 4 * budget);
     }
 
     #[test]
@@ -1933,31 +1819,6 @@ pub mod tests {
         assert!(deferred.is_empty());
         assert_eq!(count.get(), 0, "woke an early completion");
         assert_eq!(Arc::strong_count(&count), 2);
-    }
-
-    #[test]
-    fn test_reused_slot_belongs_to_the_new_registration() {
-        // A registration after a cancellation reuses its slot under a new
-        // generation, and the old identifier no longer resolves.
-        let timers = Arc::new(Timers::new());
-        let deadline = later();
-        let old = register(&timers, deadline, Waker::noop());
-        let old_id = old.id;
-        old.abandon();
-        let (count, waker) = counter();
-        let mut current = register(&timers, deadline + 1_000_000, &waker);
-        assert_eq!(old_id.index, current.id.index);
-        assert_ne!(old_id.generation, current.id.generation);
-        assert!(!timers.holds(old_id));
-
-        // The old deadline fires nothing, the new one at its own.
-        let mut deferred = Deferred::default();
-        timers.expire(deadline + RESOLUTION, BUDGET, &mut deferred);
-        assert!(deferred.is_empty());
-        timers.expire(deadline + 1_000_000 + RESOLUTION, BUDGET, &mut deferred);
-        run(&mut deferred);
-        assert_eq!(count.get(), 1);
-        assert_eq!(poll_with(&mut current, &waker), Poll::Ready(Outcome::Fired));
     }
 
     /// Run `test` inside a runtime task's poll, with that task's waker.
@@ -2184,107 +2045,6 @@ pub mod tests {
         });
     }
 
-    /// Wait without sleeping until both of two threads have called this for
-    /// `round`, counting arrivals in `arrived`, so their next steps overlap.
-    /// Returns false at once if `gone` reports that the other thread exited.
-    fn meet(arrived: &AtomicUsize, round: usize, gone: impl Fn() -> bool) -> bool {
-        arrived.fetch_add(1, Ordering::SeqCst);
-        while arrived.load(Ordering::SeqCst) < 2 * (round + 1) {
-            if gone() {
-                return false;
-            }
-            std::hint::spin_loop();
-        }
-        true
-    }
-
-    #[test]
-    fn test_lock_free_polls_race_expiry_without_losing_wakes() {
-        with_task_waker(|waker| {
-            // A thread polls each registration it receives with the
-            // registered task waker until it completes. `woken` counts the
-            // expiries whose wakes have run.
-            let timers = Arc::new(Timers::new());
-            let arrived = Arc::new(AtomicUsize::new(0));
-            let woken = Arc::new(AtomicUsize::new(0));
-            let (sender, receiver) = mpsc::channel::<Sleeper>();
-            let poller = thread::spawn({
-                let arrived = arrived.clone();
-                let woken = woken.clone();
-                let waker = waker.clone();
-                move || {
-                    for (round, mut sleeper) in receiver.into_iter().enumerate() {
-                        meet(&arrived, round, || false);
-
-                        // Poll spuriously while the expiry runs, then only
-                        // after a wake. A wake that ran before a poll began
-                        // must make that poll ready, since no later wake
-                        // comes.
-                        let mut polls = 0;
-                        loop {
-                            let seen = woken.load(Ordering::SeqCst);
-                            if let Poll::Ready(outcome) = poll_with(&mut sleeper, &waker) {
-                                assert_eq!(outcome, Outcome::Fired);
-                                break;
-                            }
-                            polls += 1;
-                            if polls < 256 {
-                                continue;
-                            }
-                            let start = Instant::now();
-                            while woken.load(Ordering::SeqCst) == seen {
-                                assert!(
-                                    start.elapsed() < Duration::from_secs(10),
-                                    "lost a wake in round {round}"
-                                );
-                                thread::yield_now();
-                            }
-                        }
-                    }
-                }
-            });
-
-            // Expire each registration at a varying point among the polls. A
-            // poller that exited early failed, which joining it reports.
-            for round in 0..2000 {
-                let deadline = later();
-                let sleeper = register(&timers, deadline, waker);
-                sender.send(sleeper).unwrap();
-                if !meet(&arrived, round, || poller.is_finished()) {
-                    break;
-                }
-                for _ in 0..round % 256 {
-                    std::hint::spin_loop();
-                }
-                let mut deferred = Deferred::default();
-                timers.expire(deadline + RESOLUTION, BUDGET, &mut deferred);
-                run(&mut deferred);
-                woken.fetch_add(1, Ordering::SeqCst);
-            }
-            drop(sender);
-            poller.join().unwrap();
-            assert_eq!(timers.live(), 0);
-        });
-    }
-
-    #[test]
-    fn test_emptying_drop_publishes_no_bound() {
-        // Two registrations, so dropping the earlier leaves the later one.
-        let timers = Arc::new(Timers::new());
-        let deadline = later();
-        let early = register(&timers, deadline, Waker::noop());
-        let late = register(&timers, deadline + 1_000_000, Waker::noop());
-
-        // A drop that leaves a registration keeps the published bound, which
-        // is then early.
-        early.abandon();
-        assert_eq!(timers.published(), Wheel::<RESOLUTION>::rounded(deadline));
-
-        // A drop that empties the wheel publishes none.
-        late.abandon();
-        assert_eq!(timers.published(), u64::MAX);
-    }
-
     #[test]
     fn test_crowded_bucket_is_refiled_before_its_firing_time() {
         // Eight budgets of sleeps share one deadline a minute ahead, and with
@@ -2502,35 +2262,6 @@ pub mod tests {
     }
 
     #[test]
-    fn test_drops_race_expiry() {
-        let timers = Arc::new(Timers::new());
-        for _ in 0..300 {
-            // Eight registrations, whose only waker clones the timers hold.
-            let deadline = later();
-            let (count, waker) = counter();
-            let sleepers: Vec<_> = (0..8)
-                .map(|_| register(&timers, deadline, &waker))
-                .collect();
-            drop(waker);
-
-            // Drop them on another thread while this one expires them.
-            let dropper = thread::spawn(move || {
-                for sleeper in sleepers {
-                    sleeper.abandon();
-                }
-            });
-            let mut deferred = Deferred::default();
-            timers.expire(deadline + RESOLUTION, BUDGET, &mut deferred);
-            run(&mut deferred);
-            dropper.join().unwrap();
-
-            // Either way, every registration is gone and every clone released.
-            assert_eq!(timers.live(), 0);
-            assert_eq!(Arc::strong_count(&count), 1, "leaked a waker");
-        }
-    }
-
-    #[test]
     fn test_waker_refresh_and_clone_panic_preserve_cancellation() {
         Runner::default().start(|_| async {
             // A first poll registers with the first waker.
@@ -2583,34 +2314,6 @@ pub mod tests {
     }
 
     #[test]
-    fn test_foreign_drop_removes_the_registration() {
-        for poll_first in [false, true] {
-            Runner::default().start(|_| async move {
-                // Register on the owner, then drop the sleep on another
-                // thread, optionally after polling it there.
-                let mut sleep = Sleep::new(Duration::from_secs(60));
-                assert!(poll!(&mut sleep).is_pending());
-                let (timers, id) = registration(&sleep);
-                thread::spawn(move || {
-                    if poll_first {
-                        assert!(
-                            sleep
-                                .poll_unpin(&mut Context::from_waker(Waker::noop()))
-                                .is_pending()
-                        );
-                    }
-                    drop(sleep);
-                })
-                .join()
-                .unwrap();
-
-                // The foreign drop removed the registration without the owner.
-                assert!(!timers.holds(id));
-            });
-        }
-    }
-
-    #[test]
     fn test_sleep_moves_between_threads() {
         for return_to_owner in [false, true] {
             Runner::default().start(|_| async move {
@@ -2656,37 +2359,6 @@ pub mod tests {
     }
 
     #[test]
-    fn test_foreign_poll_and_drop_free_the_slot_for_reuse() {
-        Runner::default().start(|_| async {
-            // Register, poll once on another thread, and drop the sleep on
-            // its worker, whose next service pass frees the slot.
-            let mut sleep = Sleep::new(Duration::from_secs(60));
-            assert!(poll!(&mut sleep).is_pending());
-            let (timers, old) = registration(&sleep);
-            let sleep = poll_on_foreign_thread(sleep, Waker::noop().clone());
-            drop(sleep);
-            reschedule().await;
-
-            // A replacement reuses the slot under a new generation.
-            let mut replacement = Sleep::new(Duration::from_secs(60));
-            assert!(poll!(&mut replacement).is_pending());
-            let (_, current) = registration(&replacement);
-            assert_eq!(old.index, current.index);
-            assert_ne!(old.generation, current.generation);
-
-            // After a worker turn, only the replacement is held, until it drops
-            // and the next service pass removes it.
-            reschedule().await;
-            assert!(poll!(&mut replacement).is_pending());
-            assert!(!timers.holds(old));
-            assert!(timers.holds(current));
-            drop(replacement);
-            reschedule().await;
-            assert!(!timers.holds(current));
-        });
-    }
-
-    #[test]
     fn test_closure_wakes_a_foreign_waker_and_rejects_the_sleep() {
         for foreign_waker in [false, true] {
             let local = Arc::new(Reentrant::default());
@@ -2728,104 +2400,6 @@ pub mod tests {
     }
 
     #[test]
-    fn test_closure_wakes_a_pending_poll_on_another_thread() {
-        // A foreign thread blocks on the sleep and signals after its first poll.
-        let (registered, ready) = mpsc::channel();
-        let poller = Runner::default().start(|_| async move {
-            let mut sleep = Box::pin(Sleep::new(Duration::from_secs(60)));
-            assert!(poll!(sleep.as_mut()).is_pending());
-            let poller = thread::spawn(move || {
-                let mut first = true;
-                let waiting = std::future::poll_fn(move |cx| {
-                    let result = sleep.as_mut().poll(cx);
-                    if mem::take(&mut first) {
-                        registered.send(()).unwrap();
-                    }
-                    result
-                });
-                catch_unwind(AssertUnwindSafe(|| futures::executor::block_on(waiting)))
-            });
-
-            // The foreign poll installed its waker before the runner closes.
-            ready.recv().unwrap();
-            poller
-        });
-
-        // Closure woke the poller, whose next poll rejects the unexpired sleep.
-        let panic = poller
-            .join()
-            .unwrap()
-            .expect_err("closure must reject the sleep");
-        assert!(
-            extract_panic_message(&*panic)
-                .starts_with("io_uring sleep polled after its worker closed")
-        );
-    }
-
-    #[test]
-    fn test_worker_closure_releases_escaped_sleep() {
-        // A sleep registered with a counting waker escapes its runner.
-        let counter = Arc::new(Count::default());
-        let (mut sleep,) = Runner::default().start(|_| async {
-            let mut sleep = Sleep::new(Duration::from_secs(60));
-            let waker = Waker::from(counter.clone());
-            assert!(
-                sleep
-                    .poll_unpin(&mut Context::from_waker(&waker))
-                    .is_pending()
-            );
-            (sleep,)
-        });
-
-        // Shutdown ends the registration and wakes its waker.
-        assert_eq!(Arc::strong_count(&counter), 1);
-        assert_eq!(counter.get(), 1);
-
-        // Sleep has no error output. Polling after closure must panic rather
-        // than report that an unelapsed deadline completed.
-        let panic = catch_unwind(AssertUnwindSafe(|| {
-            sleep.poll_unpin(&mut Context::from_waker(Waker::noop()))
-        }))
-        .expect_err("registered sleep must reject polling after closure");
-        assert!(
-            extract_panic_message(&*panic)
-                .starts_with("io_uring sleep polled after its worker closed")
-        );
-        drop(sleep);
-    }
-
-    #[test]
-    fn test_closed_sleep_past_its_deadline_completes() {
-        // A sleep registered with 30 ms left escapes its runner, which closes.
-        let (mut sleep,) = Runner::default().start(|_| async {
-            let mut sleep = Sleep::new(Duration::from_millis(30));
-            assert!(poll!(&mut sleep).is_pending());
-            (sleep,)
-        });
-
-        // Once the deadline passes, polling completes instead of panicking.
-        thread::sleep(Duration::from_millis(40));
-        assert!(
-            sleep
-                .poll_unpin(&mut Context::from_waker(Waker::noop()))
-                .is_ready()
-        );
-    }
-
-    #[test]
-    fn test_storm_beyond_one_budget_drains() {
-        Runner::default().start(|_| async {
-            // Four budgets of sleeps share one exact deadline.
-            let deadline = Instant::now() + Duration::from_millis(5);
-            let sleeps: Vec<_> = (0..4 * BUDGET).map(|_| Sleep::at(deadline)).collect();
-
-            // All of them complete, none before the deadline.
-            futures::future::join_all(sleeps).await;
-            assert!(Instant::now() >= deadline);
-        });
-    }
-
-    #[test]
     fn test_dedicated_worker_fires_a_full_budget_per_pass() {
         Runner::default().start(|context| async move {
             context
@@ -2853,35 +2427,6 @@ pub mod tests {
         });
     }
 
-    #[test]
-    fn test_exact_deadlines_share_one_firing_time() {
-        Runner::default().start(|context| async move {
-            // A dedicated worker's timers are private, so nothing else registers.
-            context
-                .dedicated()
-                .spawn(|_| async {
-                    let deadline = Instant::now() + Duration::from_secs(60);
-                    let mut first = Sleep::at(deadline);
-                    let mut second = Sleep::at(deadline);
-                    assert!(poll!(&mut first).is_pending());
-                    assert!(poll!(&mut second).is_pending());
-
-                    // Both are resident at one firing time, which the worker
-                    // caches as its next bound.
-                    let (timers, _) = registration(&first);
-                    assert_eq!(timers.resident(), 2);
-                    assert_eq!(
-                        timers.bound(),
-                        Wheel::<RESOLUTION>::rounded(timers.nanos(deadline))
-                    );
-                    let local = Local::current().unwrap();
-                    assert_eq!(local.borrow().timers_next, timers.bound());
-                })
-                .await
-                .unwrap();
-        });
-    }
-
     /// Spin until the clock reaches `deadline`, without yielding to the
     /// worker.
     fn spin_until(deadline: Instant) {
@@ -2891,34 +2436,7 @@ pub mod tests {
     }
 
     #[test]
-    fn test_first_poll_reads_the_clock_for_a_short_sleep() {
-        Runner::default().start(|context| async move {
-            context
-                .spawn(|_| async {
-                    // The worker has polled for longer than the unchecked
-                    // bound since its latest service pass.
-                    let served = turn().expect("a worker has a service time");
-                    spin_until(served + 2 * UNCHECKED_SLEEP);
-
-                    // A sleep shorter than the bound passes its deadline
-                    // during synchronous work, with no service pass since.
-                    let mut sleep = Sleep::new(UNCHECKED_SLEEP / 10);
-                    let (deadline, created) = sleep.unregistered();
-                    assert!(created.is_none());
-                    spin_until(deadline);
-                    assert_eq!(turn(), Some(served));
-
-                    // Its first poll reads the clock and completes it.
-                    assert!(poll!(&mut sleep).is_ready());
-                    assert!(matches!(sleep.state, State::Done));
-                })
-                .await
-                .unwrap();
-        });
-    }
-
-    #[test]
-    fn test_first_poll_reads_the_clock_after_a_service_pass() {
+    fn test_first_poll_of_a_short_or_earlier_sleep_reads_the_clock() {
         Runner::default().start(|context| async move {
             context
                 .spawn(|_| async {
@@ -2939,31 +2457,27 @@ pub mod tests {
                     // Its first poll reads the clock and completes it.
                     assert!(poll!(&mut sleep).is_ready());
                     assert!(matches!(sleep.state, State::Done));
-                })
-                .await
-                .unwrap();
-        });
-    }
 
-    #[test]
-    fn test_first_poll_on_a_new_worker_completes_a_passed_deadline() {
-        Runner::default().start(|context| async move {
-            // A sleep at least as long as the unchecked bound passes its
-            // deadline before a new worker polls it for the first time.
-            let mut sleep = Sleep::new(2 * UNCHECKED_SLEEP);
-            let (deadline, _) = sleep.unregistered();
-            spin_until(deadline);
-            let (started, ready) = context
-                .dedicated()
-                .spawn(move |_| async move {
-                    // The worker polls its root before its first service pass,
-                    // with the time of its start as its service time.
-                    (turn(), poll!(&mut sleep).is_ready())
+                    // The worker has polled for longer than the unchecked
+                    // bound since its latest service pass.
+                    let served = turn().expect("a worker has a service time");
+                    spin_until(served + 2 * UNCHECKED_SLEEP);
+
+                    // A sleep shorter than the bound keeps no creation time,
+                    // and passes its deadline during synchronous work, with
+                    // no service pass since.
+                    let mut sleep = Sleep::new(UNCHECKED_SLEEP / 10);
+                    let (deadline, created) = sleep.unregistered();
+                    assert!(created.is_none());
+                    spin_until(deadline);
+                    assert_eq!(turn(), Some(served));
+
+                    // Its first poll reads the clock and completes it.
+                    assert!(poll!(&mut sleep).is_ready());
+                    assert!(matches!(sleep.state, State::Done));
                 })
                 .await
                 .unwrap();
-            assert!(started.is_some_and(|started| started >= deadline));
-            assert!(ready);
         });
     }
 
@@ -2985,21 +2499,35 @@ pub mod tests {
     }
 
     #[test]
-    fn test_first_poll_after_an_idle_wait_completes_a_passed_deadline() {
+    fn test_only_a_first_poll_reads_the_clock_after_an_idle_wait() {
         let cfg = Config::default().with_worker_threads(2);
         Runner::new(cfg).start(|context| async move {
-            // A task waits for a sleep, and reports the result of the sleep's
-            // first poll and whether the root's worker made it.
+            // A task holds a registered sleep while it waits for another
+            // sleep. It reports the service time it finds when woken and
+            // after a repoll of the held sleep, the result of the received
+            // sleep's first poll, the service time after that poll, and
+            // whether the root's worker made these polls.
             let root = thread::current().id();
             let (waiting, waited) = oneshot::channel();
             let (sender, receiver) = oneshot::channel::<Sleep>();
-            let (polled, first) = mpsc::channel();
+            let (polled, report) = mpsc::channel();
             let task = context.spawn(move |_| async move {
+                let mut held = Sleep::new(Duration::from_secs(60));
+                assert!(poll!(&mut held).is_pending());
                 waiting.send(()).unwrap();
                 let mut sleep = receiver.await.unwrap();
+                let woken = TURN.get().unwrap();
+                assert!(poll!(&mut held).is_pending());
+                let repolled = TURN.get().unwrap();
                 let ready = poll!(&mut sleep).is_ready();
                 polled
-                    .send((thread::current().id() == root, ready))
+                    .send((
+                        thread::current().id() == root,
+                        woken,
+                        repolled,
+                        ready,
+                        TURN.get().unwrap(),
+                    ))
                     .unwrap();
             });
             waited.await.unwrap();
@@ -3022,62 +2550,7 @@ pub mod tests {
             thread::spawn(move || assert!(sender.send(sleep).is_ok()))
                 .join()
                 .unwrap();
-            let (on_root, ready) = first
-                .recv_timeout(Duration::from_secs(10))
-                .expect("the other worker did not poll the task");
-            assert!(!on_root);
-            assert!(
-                ready,
-                "a first poll after an idle wait missed a passed deadline"
-            );
-            task.await.unwrap();
-        });
-    }
-
-    #[test]
-    fn test_repoll_after_an_idle_wait_reads_no_clock() {
-        let cfg = Config::default().with_worker_threads(2);
-        Runner::new(cfg).start(|context| async move {
-            // A task holds a registered sleep while it waits for a message,
-            // and reports the service time it finds when woken, after a
-            // repoll of the held sleep, and after a first poll of a new one.
-            let root = thread::current().id();
-            let (waiting, waited) = oneshot::channel();
-            let (sender, receiver) = oneshot::channel::<()>();
-            let (polled, report) = mpsc::channel();
-            let task = context.spawn(move |_| async move {
-                let mut held = Sleep::new(Duration::from_secs(60));
-                assert!(poll!(&mut held).is_pending());
-                waiting.send(()).unwrap();
-                receiver.await.unwrap();
-                let woken = TURN.get().unwrap();
-                assert!(poll!(&mut held).is_pending());
-                let repolled = TURN.get().unwrap();
-                let mut new = Sleep::new(Duration::from_secs(60));
-                assert!(poll!(&mut new).is_pending());
-                polled
-                    .send((
-                        thread::current().id() == root,
-                        woken,
-                        repolled,
-                        TURN.get().unwrap(),
-                    ))
-                    .unwrap();
-            });
-            waited.await.unwrap();
-
-            // The root keeps its worker in one poll from here on, so only the
-            // other worker can run the task. That worker finds nothing to do
-            // meanwhile, and waits idle.
-            thread::sleep(Duration::from_millis(50));
-
-            // A wake from outside the pool queues the task in the global
-            // queue, which the other worker takes from as soon as it returns
-            // from its wait, before its next service pass.
-            thread::spawn(move || assert!(sender.send(()).is_ok()))
-                .join()
-                .unwrap();
-            let (on_root, woken, repolled, first) = report
+            let (on_root, woken, repolled, ready, first) = report
                 .recv_timeout(Duration::from_secs(10))
                 .expect("the other worker did not poll the task");
             assert!(!on_root);
@@ -3087,7 +2560,12 @@ pub mod tests {
             assert!(woken.stale);
             assert_eq!(repolled, woken);
 
-            // The first poll of the new sleep read the clock and recorded it.
+            // The first poll of the received sleep read the clock, recorded
+            // its time, and completed the passed deadline.
+            assert!(
+                ready,
+                "a first poll after an idle wait missed a passed deadline"
+            );
             assert!(!first.stale);
             assert!(first.time > woken.time);
             task.await.unwrap();
@@ -3323,138 +2801,6 @@ pub mod tests {
     }
 
     #[test]
-    fn test_waker_of_a_root_that_no_worker_drives_takes_the_lock() {
-        // Two roots' wakers with one vtable. This thread records the first
-        // as the one that its worker polls its root with, as that worker's
-        // drive loop would.
-        let driven = Waker::from(RootWaker::new(Weak::new()));
-        let other = Waker::from(RootWaker::new(Weak::new()));
-        assert!(std::ptr::eq(driven.vtable(), other.vtable()));
-        let _scope = RootWaker::install(&driven);
-        assert!(RootWaker::is_current(&driven));
-        assert!(!RootWaker::is_current(&other));
-
-        // The other's registration has no identity, so each of its polls
-        // locks and finds an equivalent waker.
-        let timers = Arc::new(Timers::new());
-        let mut sleeper = register(&timers, later(), &other);
-        let before = locks();
-        assert!(poll_with(&mut sleeper, &other).is_pending());
-        assert!(poll_with(&mut sleeper, &other).is_pending());
-        assert_eq!(locks() - before, 2);
-        sleeper.abandon();
-
-        // Nor does it match the driven root's identity, which the driven
-        // root's own polls match without the lock. Its poll locks, finds
-        // that the waker differs, and stores its clone in a second critical
-        // section.
-        let mut sleeper = register(&timers, later(), &driven);
-        let before = locks();
-        assert!(poll_with(&mut sleeper, &driven).is_pending());
-        assert_eq!(locks(), before);
-        assert!(poll_with(&mut sleeper, &other).is_pending());
-        assert_eq!(locks() - before, 2);
-        assert!(timers.waits_with(sleeper.id, &other));
-        assert!(poll_with(&mut sleeper, &other).is_pending());
-        assert_eq!(locks() - before, 3);
-        sleeper.abandon();
-    }
-
-    #[test]
-    fn test_root_polls_race_expiry_on_another_thread_without_losing_wakes() {
-        Runner::default().start(|_| async move {
-            // A thread without a worker expires each registration whose
-            // deadline it receives, which wakes the root through its worker's
-            // mailbox, and waits for the root to complete the sleep. If the
-            // root does not, it reports the wake lost and wakes the root.
-            let waker = current_waker().await;
-            let timers = Arc::new(Timers::new());
-            let arrived = Arc::new(AtomicUsize::new(0));
-            let returned = Arc::new(AtomicUsize::new(0));
-            let lost = Arc::new(AtomicBool::new(false));
-            let (deadlines, registered) = mpsc::channel::<u64>();
-            let (completions, completed) = mpsc::channel::<()>();
-            let expirer = thread::spawn({
-                let timers = timers.clone();
-                let arrived = arrived.clone();
-                let returned = returned.clone();
-                let lost = lost.clone();
-                let waker = waker.clone();
-                move || {
-                    for (round, deadline) in registered.into_iter().enumerate() {
-                        meet(&arrived, round, || false);
-                        if round % 2 == 0 {
-                            // Expire at a varying point among the root's
-                            // polls.
-                            for _ in 0..round % 256 {
-                                std::hint::spin_loop();
-                            }
-                        } else {
-                            // Expire once the root has returned pending, so
-                            // that only the wake leads to the poll that
-                            // completes the sleep. A root that reports no
-                            // return has stalled, which fails the test as a
-                            // lost wake does.
-                            let start = Instant::now();
-                            while returned.load(Ordering::SeqCst) != round + 1 {
-                                if start.elapsed() > Duration::from_secs(10) {
-                                    lost.store(true, Ordering::SeqCst);
-                                    waker.wake_by_ref();
-                                    return;
-                                }
-                                std::hint::spin_loop();
-                            }
-                        }
-                        let mut deferred = Deferred::default();
-                        timers.expire(deadline + RESOLUTION, BUDGET, &mut deferred);
-                        run(&mut deferred);
-                        if completed.recv_timeout(Duration::from_secs(10)).is_err() {
-                            lost.store(true, Ordering::SeqCst);
-                            waker.wake_by_ref();
-                            return;
-                        }
-                    }
-                }
-            });
-
-            for round in 0..2000 {
-                let deadline = far();
-                let mut sleeper = register(&timers, deadline, &waker);
-                deadlines.send(deadline).unwrap();
-                assert!(meet(&arrived, round, || expirer.is_finished()));
-
-                // The root polls without the lock while the expiry runs or
-                // waits, returns pending, and then polls only when its worker
-                // polls it again, for a wake. A wake that its worker applied
-                // before a poll must make that poll ready, since no later
-                // wake comes. The root reports each return, so that the
-                // expiry never waits for a poll that completed.
-                let mut polls = 0;
-                std::future::poll_fn(|cx| {
-                    assert!(!lost.load(Ordering::SeqCst), "lost a wake in round {round}");
-                    loop {
-                        if let Poll::Ready(outcome) = sleeper.poll(cx) {
-                            assert_eq!(outcome, Outcome::Fired);
-                            returned.store(round + 1, Ordering::SeqCst);
-                            return Poll::Ready(());
-                        }
-                        polls += 1;
-                        if polls >= 256 {
-                            returned.store(round + 1, Ordering::SeqCst);
-                            return Poll::Pending;
-                        }
-                    }
-                })
-                .await;
-                completions.send(()).unwrap();
-            }
-            drop(deadlines);
-            expirer.join().unwrap();
-            assert_eq!(timers.live(), 0);
-        });
-    }
-
-    #[test]
     fn test_early_completion_on_the_owner_queues_its_registration() {
         Runner::default().start(|context| async move {
             // A dedicated worker's timers are private, so nothing else
@@ -3587,56 +2933,47 @@ pub mod tests {
     }
 
     #[test]
-    fn test_first_poll_without_a_worker_rejects_a_deadline_ahead() {
-        // A sleep whose deadline is ahead, polled on a thread with no worker.
-        let mut sleep = Sleep::new(Duration::from_secs(60));
-
-        // It cannot register, and has no error output, so the poll panics.
-        let panic = catch_unwind(AssertUnwindSafe(|| {
-            sleep.poll_unpin(&mut Context::from_waker(Waker::noop()))
-        }))
-        .expect_err("a sleep registered without a worker");
-        assert_eq!(
-            extract_panic_message(&*panic),
-            "io_uring sleep requires a current worker"
-        );
-    }
-
-    #[test]
-    fn test_owner_drops_take_no_lock_until_the_next_service_pass() {
+    fn test_owner_drops_wait_for_the_next_service_pass() {
         Runner::default().start(|context| async move {
             // A dedicated worker's timers are private, so its service passes
-            // lock them only for these sleeps.
+            // lock them only for these sleeps, whose earliest firing time the
+            // worker caches and publishes.
             context
                 .dedicated()
                 .spawn(|_| async {
                     // Four registrations hold clones of one counting waker.
                     let (count, waker) = counter();
-                    let mut kept = Sleep::new(Duration::from_secs(120));
-                    pend(&mut kept, &waker);
                     let mut dropped: Vec<_> = (0..3)
                         .map(|_| Sleep::new(Duration::from_secs(60)))
                         .collect();
                     for sleep in &mut dropped {
                         pend(sleep, &waker);
                     }
+                    let mut kept = Sleep::new(Duration::from_secs(120));
+                    pend(&mut kept, &waker);
                     let (timers, _) = registration(&kept);
                     let ids: Vec<_> = dropped.iter().map(|sleep| registration(sleep).1).collect();
+                    let firing = timers.bound();
+                    assert_eq!(timers.published(), firing);
+                    assert_eq!(timers_next(), firing);
                     assert_eq!(Arc::strong_count(&count), 6);
 
-                    // Dropping three of them on their worker takes no lock and
-                    // leaves their registrations, and the timers' clones, in
-                    // place.
+                    // Dropping the three earlier ones on their worker takes no
+                    // lock and leaves their registrations, the timers' clones
+                    // and both bounds in place.
                     let before = locks();
                     drop(dropped);
                     assert_eq!(locks(), before);
                     assert!(ids.iter().all(|&id| timers.holds(id)));
                     assert_eq!(timers.resident(), 4);
                     assert_eq!(Arc::strong_count(&count), 6);
+                    assert_eq!(timers.published(), firing);
+                    assert_eq!(timers_next(), firing);
 
                     // The next service pass removes all three in one critical
                     // section and releases their clones without waking them,
-                    // and the worker's queue keeps its capacity.
+                    // and the worker's queue keeps its capacity. Both bounds
+                    // stay, early, while a registration remains.
                     reschedule().await;
                     assert_eq!(locks() - before, 1);
                     assert!(ids.iter().all(|&id| !timers.holds(id)));
@@ -3644,6 +2981,15 @@ pub mod tests {
                     assert_eq!(Arc::strong_count(&count), 3);
                     assert_eq!(count.get(), 0);
                     assert!(Local::current().unwrap().borrow().timers_dropped.capacity() >= 3);
+                    assert_eq!(timers.published(), firing);
+                    assert_eq!(timers_next(), firing);
+
+                    // A pass whose removals empty the wheel leaves no firing
+                    // time, so the worker takes no timed wake for it.
+                    drop(kept);
+                    reschedule().await;
+                    assert_eq!(timers.published(), u64::MAX);
+                    assert_eq!(timers_next(), u64::MAX);
                 })
                 .await
                 .unwrap();
@@ -3716,6 +3062,7 @@ pub mod tests {
         assert_eq!(dropped.get(), 0, "closure woke a dropped sleep");
         assert_eq!(Arc::strong_count(&dropped), 2);
         assert_eq!(escaped.get(), 1);
+        assert_eq!(Arc::strong_count(&escaped), 2);
         drop(sleep);
     }
 
@@ -3725,23 +3072,40 @@ pub mod tests {
             context
                 .dedicated()
                 .spawn(|_| async {
-                    // Two sleeps register on their worker and are dropped
-                    // there, which queues both registrations.
+                    // Two sleeps on the worker's private timers hold clones
+                    // of a waker that checks that its callbacks run outside
+                    // the timers' lock and the worker borrow.
+                    let timers = Local::current().unwrap().borrow().timers.clone();
+                    let check = Arc::new(LockCheck {
+                        timers: timers.clone(),
+                        callbacks: AtomicUsize::new(0),
+                    });
+                    let waker = LockCheck::waker(&check);
                     let mut first = Sleep::new(Duration::from_secs(60));
-                    pend(&mut first, Waker::noop());
+                    pend(&mut first, &waker);
                     let mut second = Sleep::new(Duration::from_secs(60));
-                    pend(&mut second, Waker::noop());
-                    let (timers, first_id) = registration(&first);
+                    pend(&mut second, &waker);
+                    let (_, first_id) = registration(&first);
                     let (_, second_id) = registration(&second);
+                    assert_eq!(check.callbacks.load(Ordering::SeqCst), 2);
+
+                    // Dropping them on their worker queues both registrations
+                    // without a lock or a callback.
+                    let before = locks();
                     drop(first);
                     drop(second);
+                    assert_eq!(locks(), before);
                     assert_eq!(queued(), 2);
+                    assert!(timers.holds(first_id));
+                    assert!(timers.holds(second_id));
+                    assert_eq!(Arc::strong_count(&check), 4);
 
-                    // A registration removes the latest queued one in its
-                    // critical section and takes its slot under a new
-                    // generation, which the old identity does not resolve to.
+                    // The next registration removes the latest queued one in
+                    // its one critical section, before any service pass, and
+                    // takes its slot under a new generation, which the old
+                    // identity does not resolve to. It leaves the released
+                    // clone to the worker's callback batch.
                     let mut current = Sleep::new(Duration::from_secs(60));
-                    let before = locks();
                     pend(&mut current, Waker::noop());
                     assert_eq!(locks() - before, 1);
                     let (_, current_id) = registration(&current);
@@ -3749,14 +3113,20 @@ pub mod tests {
                     assert_ne!(current_id.generation, second_id.generation);
                     assert!(!timers.holds(second_id));
                     assert_eq!(queued(), 1);
+                    assert_eq!(check.callbacks.load(Ordering::SeqCst), 2);
+                    assert_eq!(Arc::strong_count(&check), 4);
 
                     // The next service pass removes the other one and leaves
-                    // the new registration waiting.
+                    // the new registration waiting. The batches destroy both
+                    // clones after the poll and the pass, outside the lock
+                    // and the borrow.
                     reschedule().await;
                     assert_eq!(queued(), 0);
                     assert!(!timers.holds(first_id));
                     assert!(timers.holds(current_id));
                     assert_eq!(timers.resident(), 1);
+                    assert_eq!(check.callbacks.load(Ordering::SeqCst), 4);
+                    assert_eq!(Arc::strong_count(&check), 2);
                 })
                 .await
                 .unwrap();
@@ -3871,72 +3241,33 @@ pub mod tests {
         assert!(!timers.holds(old));
 
         // A new registration reuses the slot. The stale identity reaches it
-        // neither through the owner's removal of queued identities, where a
-        // drop of the sleep on its worker would leave it, nor through a drop
-        // of the sleep anywhere else.
+        // neither through the owner's removal of queued identities nor
+        // through the owner's next registration, where a drop of the sleep on
+        // its worker would leave it, nor through a drop of the sleep anywhere
+        // else.
         let later = deadline + Duration::from_secs(60);
         let current = registered(&timers, later, &waker);
         let (_, current_id) = registration(&current);
         assert_eq!(current_id.index, old.index);
         let mut deferred = Deferred::default();
         assert!(!timers.drain(&mut vec![old], &mut deferred));
+        let mut dropped = vec![old];
+        let (next, _) = timers.register(waker.clone(), later, &mut dropped, &mut deferred);
+        assert!(dropped.is_empty());
         assert!(deferred.is_empty());
+        assert_ne!(next.id.index, old.index);
         drop(sleep);
         assert!(timers.holds(current_id));
-        assert_eq!(timers.resident(), 1);
+        assert_eq!(timers.resident(), 2);
 
-        // The new registration fires at its own time and wakes its waker,
-        // after which every reference to the waker is released.
+        // Both new registrations fire at their own time and wake their
+        // waker, after which every reference to the waker is released.
         timers.expire(timers.nanos(later) + RESOLUTION, BUDGET, &mut deferred);
-        assert_eq!(deferred.wakes.len(), 1);
+        assert_eq!(deferred.wakes.len(), 2);
         run(&mut deferred);
         drop(current);
         drop(waker);
         assert_eq!(Arc::strong_count(&check), 1);
-    }
-
-    #[test]
-    fn test_drained_drops_that_empty_the_wheel_clear_both_bounds() {
-        Runner::default().start(|context| async move {
-            // A dedicated worker's timers are private, so these are its only
-            // registrations, whose earliest firing time the worker caches and
-            // publishes.
-            context
-                .dedicated()
-                .spawn(|_| async {
-                    let mut sleeps: Vec<_> = (60..63)
-                        .map(|seconds| Sleep::new(Duration::from_secs(seconds)))
-                        .collect();
-                    for sleep in &mut sleeps {
-                        pend(sleep, Waker::noop());
-                    }
-                    let (timers, _) = registration(&sleeps[0]);
-                    let firing = timers.bound();
-                    assert_eq!(timers.published(), firing);
-                    assert_eq!(timers_next(), firing);
-
-                    // Drops on the worker keep both bounds until the next
-                    // service pass, whose batch keeps them, early, while a
-                    // registration remains.
-                    let last = sleeps.pop().unwrap();
-                    drop(sleeps);
-                    assert_eq!(timers.published(), firing);
-                    assert_eq!(timers_next(), firing);
-                    reschedule().await;
-                    assert_eq!(timers.resident(), 1);
-                    assert_eq!(timers.published(), firing);
-                    assert_eq!(timers_next(), firing);
-
-                    // A batch that empties the wheel leaves no firing time, so
-                    // the worker takes no timed wake for it.
-                    drop(last);
-                    reschedule().await;
-                    assert_eq!(timers.published(), u64::MAX);
-                    assert_eq!(timers_next(), u64::MAX);
-                })
-                .await
-                .unwrap();
-        });
     }
 
     #[test]
@@ -4018,93 +3349,6 @@ pub mod tests {
                 .await
                 .unwrap();
         });
-    }
-
-    #[test]
-    fn test_registration_releases_a_dropped_waker_outside_the_lock() {
-        Runner::default().start(|context| async move {
-            context
-                .dedicated()
-                .spawn(|_| async {
-                    // A sleep on the worker's private timers holds a clone of
-                    // a waker that checks that its callbacks run outside the
-                    // timers' lock and the worker borrow.
-                    let timers = Local::current().unwrap().borrow().timers.clone();
-                    let check = Arc::new(LockCheck {
-                        timers: timers.clone(),
-                        callbacks: AtomicUsize::new(0),
-                    });
-                    let waker = LockCheck::waker(&check);
-                    let mut dropped = Sleep::new(Duration::from_secs(60));
-                    pend(&mut dropped, &waker);
-                    let (_, dropped_id) = registration(&dropped);
-                    assert_eq!(check.callbacks.load(Ordering::SeqCst), 1);
-
-                    // Dropping it on its worker queues its registration
-                    // without a lock or a callback.
-                    let before = locks();
-                    drop(dropped);
-                    assert_eq!(locks(), before);
-                    assert!(timers.holds(dropped_id));
-                    assert_eq!(Arc::strong_count(&check), 3);
-
-                    // The next registration removes it in its one critical
-                    // section, before any service pass, and leaves the
-                    // released clone to the worker's callback batch.
-                    let mut next = Sleep::new(Duration::from_secs(60));
-                    pend(&mut next, Waker::noop());
-                    assert_eq!(locks() - before, 1);
-                    assert_eq!(queued(), 0);
-                    assert!(!timers.holds(dropped_id));
-                    assert_eq!(timers.live(), 1);
-                    assert_eq!(check.callbacks.load(Ordering::SeqCst), 1);
-                    assert_eq!(Arc::strong_count(&check), 3);
-
-                    // The batch destroys it after the poll, outside the lock
-                    // and the borrow.
-                    reschedule().await;
-                    assert_eq!(check.callbacks.load(Ordering::SeqCst), 2);
-                    assert_eq!(Arc::strong_count(&check), 2);
-                })
-                .await
-                .unwrap();
-        });
-    }
-
-    #[test]
-    fn test_registration_removes_the_latest_queued_registration() {
-        let timers = Arc::new(Timers::new());
-        let deadline = later();
-        let mut deferred = Deferred::default();
-
-        // A fired registration whose sleep was dropped on its worker left its
-        // slot free, and the next registration takes it.
-        let fired = register(&timers, deadline, Waker::noop());
-        timers.expire(deadline + RESOLUTION, BUDGET, &mut deferred);
-        run(&mut deferred);
-        let mut dropped = vec![fired.id];
-        let waker = Waker::noop().clone();
-        let at = timers.instant(deadline).unwrap();
-        let (next, _) = timers.register(waker.clone(), at, &mut dropped, &mut deferred);
-        assert!(dropped.is_empty());
-        assert!(deferred.drops.is_empty());
-        assert_eq!(next.id.index, fired.id.index);
-        assert!(!timers.holds(fired.id));
-
-        // A stale identity, whose slot that registration took, removes
-        // nothing.
-        dropped.push(fired.id);
-        let (other, _) = timers.register(waker.clone(), at, &mut dropped, &mut deferred);
-        assert!(timers.holds(next.id));
-        assert_ne!(other.id.index, next.id.index);
-
-        // A waiting one leaves the wheel and releases its waker to the batch.
-        dropped.push(next.id);
-        let (last, _) = timers.register(waker, at, &mut dropped, &mut deferred);
-        assert_eq!(deferred.drops.len(), 1);
-        assert_eq!(last.id.index, next.id.index);
-        assert!(!timers.holds(next.id));
-        assert_eq!(timers.resident(), 2);
     }
 
     #[test]
@@ -4328,45 +3572,6 @@ pub mod tests {
     }
 
     #[test]
-    fn test_sleep_completes_after_its_concluding_poll_unwound() {
-        // No service pass ran on this thread, so polls take the lock.
-        assert!(turn().is_none());
-
-        // A registration on timers of no worker.
-        let timers = Arc::new(Timers::new());
-        let deadline = Instant::now() + Duration::from_secs(60);
-        let mut sleep = registered(&timers, deadline, Waker::noop());
-
-        // A poll with a changed waker, on this thread without a worker, clones
-        // it after the lock, and a peer's rescue fires the registration
-        // meanwhile. The poll observes the firing, then unwinds from the
-        // destructor of the clone.
-        let check = Arc::new(FireOnClone {
-            at: timers.nanos(deadline) + RESOLUTION,
-            timers: timers.clone(),
-            armed: AtomicBool::new(false),
-        });
-        let waker = FireOnClone::waker(&check);
-        check.armed.store(true, Ordering::SeqCst);
-        let polled = catch_unwind(AssertUnwindSafe(|| {
-            sleep.poll_unpin(&mut Context::from_waker(&waker))
-        }));
-        check.armed.store(false, Ordering::SeqCst);
-        assert!(polled.is_err());
-        assert_eq!(timers.live(), 0);
-
-        // The sleep fired, so a later poll completes it.
-        assert!(
-            sleep
-                .poll_unpin(&mut Context::from_waker(Waker::noop()))
-                .is_ready()
-        );
-        drop(sleep);
-        drop(waker);
-        assert_eq!(Arc::strong_count(&check), 1);
-    }
-
-    #[test]
     fn test_busy_peer_rescues_a_stalled_owner() {
         let cfg = Config::default().with_worker_threads(2);
         Runner::new(cfg).start(|context| async move {
@@ -4585,8 +3790,30 @@ pub mod tests {
         assert_eq!(locks() - before, 1);
     }
 
+    /// Await `sleep`, registered on another worker, in the root that polls
+    /// the returned future. It repolls the sleep `repolls` times, then polls
+    /// it only for wakes, which reach the root through its worker's mailbox.
+    /// Returns the number of timers' locks that these polls took.
+    async fn adopt(mut sleep: Sleep, repolls: u64) -> usize {
+        let before = locks();
+        let mut polls = 0;
+        std::future::poll_fn(|cx| {
+            loop {
+                if sleep.poll_unpin(cx).is_ready() {
+                    return Poll::Ready(());
+                }
+                polls += 1;
+                if polls >= repolls {
+                    return Poll::Pending;
+                }
+            }
+        })
+        .await;
+        locks() - before
+    }
+
     #[test]
-    fn test_root_awaits_sleeps_registered_on_another_worker() {
+    fn test_roots_await_sleeps_registered_on_another_worker() {
         let cfg = Config::default().with_worker_threads(4);
         Runner::new(cfg).start(|context| async move {
             let root = thread::current().id();
@@ -4606,28 +3833,13 @@ pub mod tests {
                         })
                     })
                     .collect();
-                for task in tasks {
-                    let (mut sleep, thread) = task.await.unwrap();
-                    foreign += usize::from(thread != root);
 
-                    // The root adopts the sleep, repolls a varying number of
-                    // times, and then polls only for wakes, which reach it
-                    // through its worker's mailbox from another worker.
-                    let before = locks();
-                    let mut polls = 0u64;
-                    std::future::poll_fn(|cx| {
-                        loop {
-                            if sleep.poll_unpin(cx).is_ready() {
-                                return Poll::Ready(());
-                            }
-                            polls += 1;
-                            if polls >= round % 64 {
-                                return Poll::Pending;
-                            }
-                        }
-                    })
-                    .await;
-                    worst = worst.max(locks() - before);
+                // The runner's root adopts each sleep, whose expiry on
+                // another worker wakes it.
+                for task in tasks {
+                    let (sleep, thread) = task.await.unwrap();
+                    foreign += usize::from(thread != root);
+                    worst = worst.max(adopt(sleep, round % 64).await);
                 }
             }
             assert!(foreign > 0, "no sleep registered on another worker");
@@ -4636,36 +3848,16 @@ pub mod tests {
             // one more for each ending of another registration on the same
             // timers or expiry pass of this worker, far fewer than the polls.
             assert!(worst <= 16, "{worst} locks in one adoption");
-        });
-    }
 
-    #[test]
-    fn test_dedicated_root_awaits_a_sleep_registered_on_the_pool() {
-        Runner::default().start(|context| async move {
             for round in 0..200u64 {
-                // The dedicated worker's root adopts a sleep registered on
-                // this worker, whose expiry wakes it through its mailbox.
+                // The root of a dedicated worker adopts a sleep registered on
+                // this worker, whose expiry wakes it.
                 let mut sleep = Sleep::new(Duration::from_micros(300 + (round % 8) * 150));
                 let _ = poll!(&mut sleep);
                 let dedicated = context
                     .child("dedicated")
                     .dedicated()
-                    .spawn(move |_| async move {
-                        let mut sleep = sleep;
-                        let mut polls = 0u64;
-                        std::future::poll_fn(|cx| {
-                            loop {
-                                if sleep.poll_unpin(cx).is_ready() {
-                                    return Poll::Ready(());
-                                }
-                                polls += 1;
-                                if polls >= round % 64 {
-                                    return Poll::Pending;
-                                }
-                            }
-                        })
-                        .await;
-                    });
+                    .spawn(move |_| adopt(sleep, round % 64));
                 dedicated.await.unwrap();
             }
         });
