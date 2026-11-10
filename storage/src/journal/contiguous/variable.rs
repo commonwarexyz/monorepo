@@ -11,15 +11,16 @@
 //! interior fsync holes (skipping any wholly covered by the acknowledged floor), and the
 //! offsets journal only advances after the data it indexes is durable.
 
+#[commonware_macros::stability(ALPHA)]
+use super::checkpoint::Checkpoint;
 use super::{
     Batch, Contiguous, Decoded, Many, Mutable, blob_first_position,
     blobs::{Blob, Blobs, Partition, Replay as BlobReplay, Writable},
     fixed,
     metrics::Metrics,
     position_to_blob,
+    scratch::Scratch,
 };
-#[commonware_macros::stability(ALPHA)]
-use super::{checkpoint::Checkpoint, scratch::Scratch};
 #[commonware_macros::stability(ALPHA)]
 use crate::journal::authenticated;
 use crate::{
