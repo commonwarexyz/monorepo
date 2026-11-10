@@ -58,6 +58,7 @@
 //! frame.
 
 use super::{
+    MAX_LANES,
     arithmetic::{Field, Signed, TIGHT, unroll},
     fp::{self, BYTES as FP_BYTES, WORDS},
 };
@@ -81,9 +82,6 @@ pub(crate) const fn encode(c0: [u64; WORDS], c1: [u64; WORDS]) -> [u8; BYTES] {
 
 /// Signed sums of products of elements in the representation `F` on backend `S`.
 pub type Product<F, S> = Fp2<Signed<<F as Field<S>>::Product>>;
-
-/// Largest number of elements in a value, the widest representation's lane count.
-const MAX_LANES: usize = 16;
 
 /// Elements `c0 + c1 * i`, one per lane of the components.
 ///

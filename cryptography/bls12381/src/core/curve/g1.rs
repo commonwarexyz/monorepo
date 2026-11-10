@@ -25,6 +25,7 @@
 use crate::core::{
     curve::Points,
     field::{
+        MAX_LANES,
         arithmetic::Field,
         fp::{BYTES, MINUS_ONE, ONE, encode},
     },
@@ -71,9 +72,6 @@ const REDUCED: u64 = 17;
 /// Covers each negative sum of products, which stays below `64p` in the positional
 /// representations.
 const PRODUCT_BIAS: u64 = 64;
-
-/// Largest number of points in a value, the widest representation's lane count.
-const MAX_LANES: usize = 16;
 
 /// A cube root of unity `beta` such that `(x, y) -> (beta x, y)` multiplies every point of the
 /// prime-order subgroup by `-x^2`, for the curve parameter `x`: a cube root of unity modulo the

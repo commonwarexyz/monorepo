@@ -29,6 +29,7 @@
 //! Lines multiply with the same contract for their coefficients, but within [`LINE_BOUND`].
 
 use super::{
+    MAX_LANES,
     arithmetic::{Field, TIGHT, unroll},
     fp::{BYTES as FP_BYTES, WORDS},
     fp2::{BYTES as FP2_BYTES, Fp2, encode},
@@ -57,9 +58,6 @@ pub const ONE: [u8; BYTES] = {
 /// Covers every negative sum of the operations on elements within [`BOUND`] and lines within
 /// [`LINE_BOUND`], and leaves room below the value limit for their positive sums.
 const BIAS: u64 = 512;
-
-/// Largest number of elements in a value, the widest representation's lane count.
-const MAX_LANES: usize = 16;
 
 /// `gamma_j = (1 + i)^(j (p - 1) / 6)` for `j` from `1` to `5`, as extension encodings.
 ///

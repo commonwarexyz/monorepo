@@ -48,6 +48,7 @@
 //! builds check these rules; release builds do not, and results are unspecified when a formula
 //! violates them.
 
+pub use super::super::MAX_LANES;
 use super::{
     super::arithmetic::Field, BYTES, MODULUS, WORDS, bytes_from_words, power_of_two,
     words_from_bytes,
@@ -58,9 +59,6 @@ use core::hint::black_box;
 
 /// Number of limbs in a field element.
 pub const LIMBS: usize = 14;
-
-/// Largest number of elements in a value, the widest backend's `S::U32_LANES`.
-pub const MAX_LANES: usize = 16;
 
 /// Bits per carried limb.
 const LIMB_BITS: u32 = 28;

@@ -30,6 +30,7 @@
 //! [`TIGHT`] and returns tight components.
 
 use super::{
+    MAX_LANES,
     arithmetic::{Field, Signed, TIGHT},
     fp2::{self, BYTES as FP2_BYTES, Fp2},
 };
@@ -50,9 +51,6 @@ const BIAS: u64 = 512;
 
 /// Signed sums of products of elements in the representation `F` on backend `S`.
 pub type Product<F, S> = Fp6<Signed<<F as Field<S>>::Product>>;
-
-/// Largest number of elements in a value, the widest representation's lane count.
-const MAX_LANES: usize = 16;
 
 /// Elements `c0 + c1 * v + c2 * v^2`, one per lane of the coefficients.
 ///
