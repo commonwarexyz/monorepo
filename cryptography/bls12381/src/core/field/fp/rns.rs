@@ -505,7 +505,6 @@ const _: () = {
     // determine it.
     assert!(BUDGET.div_ceil(M_OVER_P) + LIFT == REDUCED);
     assert!(REDUCED <= LIMIT);
-    assert!(SUB_BIAS == 295_936);
     // The default Karatsuba cross of factors summing two reduced values subtracts twice and fits.
     assert!((2 * REDUCED) * (2 * REDUCED) + 2 * SUB_BIAS <= BUDGET);
     // The declared product count fits both budgets for factors of at most two reduced values,
@@ -1983,6 +1982,14 @@ pub mod fuzz {
         use commonware_invariants::minifuzz;
         use std::panic::catch_unwind;
 
+        /// Largest factor bound whose square is within the integer budget.
+        const BUDGET_FACTOR: u64 = BUDGET.isqrt();
+
+        /// Factor bound whose square is the subtraction bias.
+        const SUB_FACTOR: u64 = 2 * REDUCED * (SUM_PRODUCTS as u64).isqrt();
+
+        const _: () = assert!(SUB_FACTOR * SUB_FACTOR == SUB_BIAS);
+
         #[test]
         fn minifuzz_formulas() {
             minifuzz::test(|u| Plan::Formulas.run(u));
@@ -2056,8 +2063,9 @@ pub mod fuzz {
             let multiple =
                 |count: u64| (0..count).fold(reference::ZERO, |sum, _| reference::add(sum, square));
 
-            // Every term at once: TERMS * 25^2 is within the budget.
-            let factor = loose(simd, largest, 25, 1);
+            // Every term at once, with the largest equal factors whose TERMS squares fit the
+            // budget.
+            let factor = loose(simd, largest, (BUDGET / TERMS).isqrt(), 1);
             let product = factor.product(simd, factor);
             let mut sum = product;
             for _ in 1..TERMS {
@@ -2079,9 +2087,9 @@ pub mod fuzz {
                 reference::sub(square, multiple(SUB_TERMS)),
             );
 
-            // A subtraction of the largest subtrahend, 544^2 = SUB_BIAS, filling the term budget.
+            // A subtraction of the largest subtrahend, SUB_FACTOR^2 = SUB_BIAS, filling the term
+            // budget.
             const PRODUCTS: u64 = TERMS - SUB_TERMS - 1;
-            const { assert!(544 * 544 == SUB_BIAS) };
             const { assert!(PRODUCTS + SUB_BIAS <= BUDGET) };
             let small = loose(simd, largest, 1, 1);
             let small = small.product(simd, small);
@@ -2089,7 +2097,7 @@ pub mod fuzz {
             for _ in 1..PRODUCTS {
                 sum = Rns::accumulate(simd, sum, small);
             }
-            let factor = loose(simd, largest, 544, 2);
+            let factor = loose(simd, largest, SUB_FACTOR, 2);
             let subtrahend = factor.product(simd, factor);
             let sum = Rns::product_sub::<64>(simd, sum, subtrahend);
             let expected = reference::sub(multiple(PRODUCTS), square);
@@ -2101,7 +2109,7 @@ pub mod fuzz {
             assert_reduced(simd, Rns::reduce(simd, difference), reference::neg(square));
 
             // A single product at the integer budget, and a lift at the integer limit.
-            let factor = loose(simd, largest, 803, 1);
+            let factor = loose(simd, largest, BUDGET_FACTOR, 1);
             let product = Rns::reduce(simd, factor.product(simd, factor));
             assert_reduced(simd, product, square);
             let top = loose(simd, largest, LIMIT, 1);
@@ -2122,14 +2130,16 @@ pub mod fuzz {
             let largest = largest();
             let at = |bound| loose(simd, largest, bound, 0);
             let product = |a, b| at(a).product(simd, at(b));
-            assert!(catch_unwind(|| Rns::reduce(simd, product(803, 803))).is_ok());
-            assert!(catch_unwind(|| Rns::reduce(simd, product(804, 803))).is_err());
+            let (top, over) = (BUDGET_FACTOR, BUDGET_FACTOR + 1);
+            assert!(catch_unwind(|| Rns::reduce(simd, product(top, top))).is_ok());
+            assert!(catch_unwind(|| Rns::reduce(simd, product(over, top))).is_err());
+            let (bias, over) = (SUB_FACTOR, SUB_FACTOR + 1);
             assert!(
-                catch_unwind(|| Rns::product_sub::<64>(simd, product(1, 1), product(544, 544)))
+                catch_unwind(|| Rns::product_sub::<64>(simd, product(1, 1), product(bias, bias)))
                     .is_ok()
             );
             assert!(
-                catch_unwind(|| Rns::product_sub::<64>(simd, product(1, 1), product(545, 544)))
+                catch_unwind(|| Rns::product_sub::<64>(simd, product(1, 1), product(over, bias)))
                     .is_err()
             );
             let one = product(1, 1);
@@ -2148,7 +2158,8 @@ pub mod fuzz {
                 catch_unwind(|| Rns::product_sub::<64>(simd, sum(TERMS - SUB_TERMS), one)).is_err()
             );
             assert!(catch_unwind(|| Field::mul(at(REDUCED), simd, at(REDUCED))).is_ok());
-            assert!(catch_unwind(|| Field::mul(at(803), simd, at(804))).is_err());
+            let (top, over) = (BUDGET_FACTOR, BUDGET_FACTOR + 1);
+            assert!(catch_unwind(|| Field::mul(at(top), simd, at(over))).is_err());
         }
 
         #[test]
