@@ -38,7 +38,7 @@ use commonware_consensus::{
     Block as ConsensusBlock, BoundedBlock, CertifiableBlock, Heightable, Reporters,
     marshal::{
         self,
-        blocks::Blocks,
+        blocks::{Ancestry, Blocks},
         core::{Actor as MarshalActor, Mailbox as MarshalMailbox},
         resolver::p2p as marshal_resolver,
         standard::{Deferred, Standard},
@@ -505,11 +505,11 @@ impl<E: Spawner + Metrics + Clock + Storage> Application<E> for App {
     async fn propose(
         &mut self,
         context: (E, Self::Context),
-        parent: Digested<Self::Block>,
-        _blocks: Blocks<Self::Block>,
+        ancestry: Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
+        let parent = ancestry.parent;
         let height = Height::new(parent.height().get() + 1);
         // The reshare::Application wrapper selected and fetched the payload.
         let payload = input.upstream.payload;

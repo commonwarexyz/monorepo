@@ -439,7 +439,7 @@ stability_scope!(ALPHA {
     pub mod aggregation;
 });
 stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
-    use crate::marshal::blocks::Blocks;
+    use crate::marshal::blocks::Ancestry;
     use commonware_cryptography::certificate::Scheme;
 
     /// Application is a minimal interface for standard implementations that operate over a stream
@@ -467,7 +467,7 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// [`Handoff::Wait`].
         ///
         /// The marshal calls this in place of [`Self::propose`] for a term-start proposal whose
-        /// parent is uncertified, with the same `parent` and `blocks` and after the same checks. It
+        /// parent is uncertified, with the same `ancestry` and after the same checks. It
         /// re-proposes the epoch boundary block and declines a parent it cannot build on with
         /// [`Handoff::Wait`], in both cases without calling this method. The default declines.
         ///
@@ -507,19 +507,18 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         fn prepare(
             &mut self,
             _context: (E, Self::Context),
-            _parent: Digested<Self::Block>,
-            _blocks: Blocks<Self::Block>,
+            _ancestry: Ancestry<Self::Block>,
             _input: Self::Input,
         ) -> impl Future<Output = Handoff<Digested<Self::Block>>> + Send {
             async { Handoff::Wait }
         }
 
-        /// Build a new block on top of `parent`. If the build job fails,
+        /// Build a new block on top of the provided parent ancestry. If the build job fails,
         /// or the proposer's slot should be skipped, the implementor should return [None].
         ///
-        /// `blocks` supplies forward ranges of the selected parent branch, including
-        /// finalized history. It ends at `parent` (`blocks.tip() == parent.height()`). Select
-        /// only the history needed to build the block.
+        /// `ancestry` holds the parent and supplies forward ranges of the selected parent
+        /// branch, including finalized history. Select only the history needed to build the
+        /// block.
         ///
         /// `input` is the per-proposal input for this build.
         ///
@@ -528,23 +527,20 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         fn propose(
             &mut self,
             context: (E, Self::Context),
-            parent: Digested<Self::Block>,
-            blocks: Blocks<Self::Block>,
+            ancestry: Ancestry<Self::Block>,
             input: Self::Input,
         ) -> impl Future<Output = Option<Digested<Self::Block>>> + Send;
 
-        /// Verify `block` produced by the application's proposer against `parent`.
+        /// Verify `block` produced by the application's proposer, relative to its ancestry.
         ///
-        /// `block` already names `parent`'s digest as its parent and sits one height above it.
-        ///
-        /// `blocks` supplies forward ranges of the selected parent branch, including
-        /// finalized history. It ends at `parent` (`blocks.tip() == parent.height()`) and
-        /// excludes the candidate block.
+        /// `block` already names `ancestry.parent`'s digest as its parent and sits one height
+        /// above it. `ancestry` supplies forward ranges of the selected parent branch, including
+        /// finalized history, and excludes `block`.
         ///
         /// This future should not resolve until the implementation can produce a stable verdict.
         /// Return `false` only when the block is permanently invalid for the supplied context and
-        /// selected history. If validity may still change as additional information becomes
-        /// available, continue waiting instead of returning `false`.
+        /// ancestry. If validity may still change as additional information becomes available,
+        /// continue waiting instead of returning `false`.
         ///
         /// In other words, to abstain from voting, do not resolve this future yet. Keep it
         /// pending until the implementation can either prove the block valid, prove it invalid,
@@ -557,8 +553,7 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
             &mut self,
             context: (E, Self::Context),
             block: Digested<Self::Block>,
-            parent: Digested<Self::Block>,
-            blocks: Blocks<Self::Block>,
+            ancestry: Ancestry<Self::Block>,
         ) -> impl Future<Output = bool> + Send;
     }
 });

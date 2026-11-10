@@ -301,8 +301,10 @@ mod tests {
         },
     };
     use commonware_consensus::{
-        Application as _, CertifiableBlock as _, Handoff, Heightable as _, Reporter as _,
-        marshal::Update, simplex::mocks::scheme as scheme_mocks, types::Height,
+        Application as _, CertifiableBlock as _, Handoff, Reporter as _,
+        marshal::{Update, blocks::Ancestry},
+        simplex::mocks::scheme as scheme_mocks,
+        types::Height,
     };
     use commonware_cryptography::{Digestible as _, sha256::Digest as Sha256Digest};
     use commonware_macros::select;
@@ -438,8 +440,7 @@ mod tests {
                 mailbox
                     .prepare(
                         (context.child("wait"), child.context()),
-                        digested_shared(&genesis),
-                        fixtures::blocks(genesis.height(), std::slice::from_ref(&genesis)),
+                        fixtures::ancestry(&genesis),
                         (),
                     )
                     .await
@@ -464,8 +465,7 @@ mod tests {
                 let prepared = mailbox
                     .prepare(
                         (context.child("build"), child.context()),
-                        digested_shared(&genesis),
-                        fixtures::blocks(genesis.height(), std::slice::from_ref(&genesis)),
+                        fixtures::ancestry(&genesis),
                         (),
                     )
                     .await;
@@ -522,8 +522,10 @@ mod tests {
             select! {
                 result = mailbox.propose(
                     (context.child("proposal"), TestBlock::new(1, 1).context()),
-                    digested(TestBlock::new(0, 0)),
-                    fixtures::blocks(Height::zero(), &[]),
+                    Ancestry {
+                        parent: digested(TestBlock::new(0, 0)),
+                        blocks: fixtures::blocks(Height::zero(), &[]),
+                    },
                     (),
                 ) => {
                     assert!(result.is_none());
@@ -602,8 +604,7 @@ mod tests {
             let mut first = Box::pin(first_mailbox.verify(
                 (context.child("verify_first"), owners[0].context()),
                 digested_shared(&owners[0]),
-                digested_shared(&parents[0]),
-                fixtures::blocks(parents[0].height(), std::slice::from_ref(&parents[0])),
+                fixtures::ancestry(&parents[0]),
             ));
             assert!(poll!(&mut first).is_pending());
 
@@ -611,8 +612,7 @@ mod tests {
             let mut second = Box::pin(second_mailbox.verify(
                 (context.child("verify_second"), owners[1].context()),
                 digested_shared(&owners[1]),
-                digested_shared(&parents[1]),
-                fixtures::blocks(parents[1].height(), std::slice::from_ref(&parents[1])),
+                fixtures::ancestry(&parents[1]),
             ));
             assert!(poll!(&mut second).is_pending());
 
@@ -620,8 +620,7 @@ mod tests {
             let mut third = Box::pin(third_mailbox.verify(
                 (context.child("verify_third"), owners[2].context()),
                 digested_shared(&owners[2]),
-                digested_shared(&parents[2]),
-                fixtures::blocks(parents[2].height(), std::slice::from_ref(&parents[2])),
+                fixtures::ancestry(&parents[2]),
             ));
             assert!(poll!(&mut third).is_pending());
 

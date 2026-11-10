@@ -144,6 +144,17 @@ impl<B: Block> Clone for Blocks<B> {
     }
 }
 
+/// The parent of a block and the selected branch that ends at it.
+///
+/// Marshal supplies one for each block an [`Application`](crate::Application) builds or verifies.
+pub struct Ancestry<B: Block> {
+    /// The parent block.
+    pub parent: Digested<B>,
+    /// Access to the selected branch ending at [`Self::parent`], including finalized history.
+    /// Its [`tip`](Blocks::tip) is the parent's height.
+    pub blocks: Blocks<B>,
+}
+
 /// Returns the height of the first entry of a suffix of `len` commitments ending at
 /// `tip`, or `None` when the suffix cannot fit below `tip`.
 fn suffix_start(tip: Height, len: usize) -> Option<u64> {

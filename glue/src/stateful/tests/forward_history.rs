@@ -36,7 +36,7 @@ use commonware_consensus::{
     Automaton, CertifiableAutomaton, Heightable as _, History, Relay, Reporter, Viewable as _,
     marshal::{
         self,
-        blocks::Blocks,
+        blocks::{Ancestry, Blocks},
         core::Actor as MarshalActor,
         resolver::{handler::Key, p2p as marshal_resolver},
         standard::{Deferred, Standard},
@@ -349,16 +349,14 @@ impl Application<deterministic::Context> for InstrumentedApp {
     async fn propose(
         &mut self,
         context: (deterministic::Context, Self::Context),
-        parent: Digested<Self::Block>,
-        blocks: Blocks<Self::Block>,
+        ancestry: Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, deterministic::Context>> {
         let proposed = <App as Application<deterministic::Context>>::propose(
             &mut self.inner,
             context,
-            parent,
-            blocks,
+            ancestry,
             batches,
             input,
         )

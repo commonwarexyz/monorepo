@@ -126,7 +126,8 @@
 //! [`coding::Marshaled`]: commonware_consensus::marshal::coding::Marshaled
 
 use commonware_consensus::{
-    CertifiableBlock, Epochable, Handoff, Viewable, marshal::blocks::Blocks,
+    CertifiableBlock, Epochable, Handoff, Viewable,
+    marshal::blocks::{Ancestry, Blocks},
 };
 use commonware_cryptography::{Digested, certificate::Scheme};
 use db::DatabaseSet;
@@ -215,28 +216,25 @@ pub trait Application<E>: Clone + Send + 'static {
     /// Returns the block used to initialize the consensus engine in the first epoch.
     fn genesis(&mut self) -> impl Future<Output = Self::Block> + Send;
 
-    /// Builds a block on top of `parent` before `parent` certifies, or declines with
-    /// [`Handoff::Wait`].
+    /// Builds a block on top of the provided parent ancestry before the parent certifies, or
+    /// declines with [`Handoff::Wait`].
     ///
-    /// Like [`propose`](Self::propose), including its requirements on `blocks`, on the merkleized
-    /// state, and on cancellation. With [`Handoff::Vote`] or [`Handoff::Stage`], the block's state
-    /// is cached and the block reaches consensus under that decision. See
+    /// Like [`propose`](Self::propose), including its requirements on the merkleized state and
+    /// on cancellation. With [`Handoff::Vote`] or [`Handoff::Stage`], the block's state is cached
+    /// and the block reaches consensus under that decision. See
     /// [`commonware_consensus::Application::prepare`] for the contract, including the trust an
     /// early vote places in the outgoing leader. The default declines.
     fn prepare(
         &mut self,
         _context: (E, Self::Context),
-        _parent: Digested<Self::Block>,
-        _blocks: Blocks<Self::Block>,
+        _ancestry: Ancestry<Self::Block>,
         _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: Input<Self::Input, Self::Provider>,
     ) -> impl Future<Output = Handoff<Proposed<Self, E>>> + Send {
         async { Handoff::Wait }
     }
 
-    /// Builds a block on top of `parent`.
-    ///
-    /// `blocks` is the selected branch ending at `parent` (`blocks.tip() == parent.height()`).
+    /// Builds a block on top of the provided parent ancestry.
     ///
     /// Returns the block and its merkleized state, or [`None`] if no block is built.
     ///
@@ -251,8 +249,7 @@ pub trait Application<E>: Clone + Send + 'static {
     fn propose(
         &mut self,
         context: (E, Self::Context),
-        parent: Digested<Self::Block>,
-        blocks: Blocks<Self::Block>,
+        ancestry: Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
     ) -> impl Future<Output = Option<Proposed<Self, E>>> + Send;

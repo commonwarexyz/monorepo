@@ -96,6 +96,7 @@ use crate::{
                 is_valid_reproposal_at_verify,
             },
         },
+        blocks::Ancestry,
         coding::{
             Coding, shards,
             types::{CodedBlock, coding_config_for_participants, hash_context},
@@ -440,8 +441,10 @@ where
                                 consensus_context.clone(),
                             ),
                             block.inner_digested(),
-                            parent.inner_digested(),
-                            blocks,
+                            Ancestry {
+                                parent: parent.inner_digested(),
+                                blocks,
+                            },
                         )
                         .instrument(info_span!(
                             "marshal.coding.application.verify",
@@ -697,8 +700,10 @@ where
 
             let blocks = marshal.blocks_with_parent(parent.height(), parent_commitment, history);
             Resolved::Build(
-                parent.inner_digested(),
-                blocks,
+                Ancestry {
+                    parent: parent.inner_digested(),
+                    blocks,
+                },
                 build_duration.timer(&*context),
                 coding_config,
             )

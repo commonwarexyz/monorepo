@@ -152,6 +152,14 @@ pub(crate) fn blocks(
     )
 }
 
+/// Pairs `parent` with a branch that ends at it and holds no other block.
+pub(crate) fn ancestry(parent: Digested<TestBlock>) -> marshal::blocks::Ancestry<TestBlock> {
+    marshal::blocks::Ancestry {
+        blocks: blocks([parent.clone()]),
+        parent,
+    }
+}
+
 #[derive(Clone, Copy, Debug, thiserror::Error)]
 #[error("peer set unavailable")]
 pub(crate) struct TrackFailed;

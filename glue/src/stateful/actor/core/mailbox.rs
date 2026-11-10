@@ -7,7 +7,10 @@ use commonware_actor::{
 };
 use commonware_consensus::{
     Application as ConsensusApplication, CertifiableBlock, Epochable, Handoff, Reporter, Viewable,
-    marshal::{Update, blocks::Blocks},
+    marshal::{
+        Update,
+        blocks::{Ancestry, Blocks},
+    },
 };
 use commonware_cryptography::{Digested, Digestible};
 use commonware_runtime::telemetry::traces::TracedExt as _;
@@ -289,8 +292,7 @@ where
     async fn prepare(
         &mut self,
         context: (E, Self::Context),
-        parent: Digested<Self::Block>,
-        blocks: Blocks<Self::Block>,
+        Ancestry { parent, blocks }: Ancestry<Self::Block>,
         upstream: Self::Input,
     ) -> Handoff<Digested<Self::Block>> {
         // The actor holds only a weak parent reference, so dropping this future releases the
@@ -317,8 +319,7 @@ where
     async fn propose(
         &mut self,
         context: (E, Self::Context),
-        parent: Digested<Self::Block>,
-        blocks: Blocks<Self::Block>,
+        Ancestry { parent, blocks }: Ancestry<Self::Block>,
         upstream: Self::Input,
     ) -> Option<Digested<Self::Block>> {
         // The actor holds only a weak parent reference, so dropping this future releases the
@@ -346,8 +347,7 @@ where
         &mut self,
         context: (E, Self::Context),
         block: Digested<Self::Block>,
-        parent: Digested<Self::Block>,
-        blocks: Blocks<Self::Block>,
+        Ancestry { parent, blocks }: Ancestry<Self::Block>,
     ) -> bool {
         // The actor holds only weak body references, so dropping this future releases the bodies
         // even while the request is queued.

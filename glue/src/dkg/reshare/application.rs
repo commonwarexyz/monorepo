@@ -6,7 +6,7 @@ use crate::dkg::{
 };
 use commonware_consensus::{
     Application as ConsensusApplication, CertifiableBlock, Handoff, Heightable,
-    marshal::blocks::Blocks,
+    marshal::blocks::Ancestry,
     types::{EpochPhase, Epocher as _, FixedEpocher, Height},
 };
 use commonware_cryptography::{Digested, Signer, bls12381::primitives::variant::Variant};
@@ -146,11 +146,10 @@ where
     async fn prepare(
         &mut self,
         context: (E, Self::Context),
-        parent: Digested<Self::Block>,
-        blocks: Blocks<Self::Block>,
+        ancestry: Ancestry<Self::Block>,
         input: Self::Input,
     ) -> Handoff<Digested<Self::Block>> {
-        let height = parent.height().next();
+        let height = ancestry.parent.height().next();
         if self.final_block(height) {
             return Handoff::Wait;
         }
@@ -168,8 +167,7 @@ where
         self.inner
             .prepare(
                 context,
-                parent,
-                blocks,
+                ancestry,
                 Input {
                     upstream: input,
                     payload: None,
@@ -178,7 +176,7 @@ where
             .await
     }
 
-    /// Selects the reshare payload for the block that extends `parent`, with the dealer-log
+    /// Selects the reshare payload for the block that extends `ancestry`, with the dealer-log
     /// reservation it was taken from, and asks the inner application to build on it.
     ///
     /// Returns `None` without asking the inner application when the final block's epoch info
@@ -196,18 +194,17 @@ where
     async fn propose(
         &mut self,
         context: (E, Self::Context),
-        parent: Digested<Self::Block>,
-        blocks: Blocks<Self::Block>,
+        ancestry: Ancestry<Self::Block>,
         input: Self::Input,
     ) -> Option<Digested<Self::Block>> {
-        let height = parent.height().next();
+        let height = ancestry.parent.height().next();
         let phase = self.phase(height);
         let span = tracing::Span::current();
         span.record("height", height.traced());
         span.record("phase", field::debug(phase));
 
         let (payload, log_reservation) = if self.final_block(height) {
-            match self.reshare.epoch_info(blocks.clone()).await {
+            match self.reshare.epoch_info(ancestry.blocks.clone()).await {
                 EpochInfoResponse::Available(payload) => (payload, None),
                 EpochInfoResponse::Unavailable => {
                     debug!("proposal skipped: final block epoch info is unavailable");
@@ -228,8 +225,7 @@ where
             .inner
             .propose(
                 context,
-                parent,
-                blocks,
+                ancestry,
                 Input {
                     upstream: input,
                     payload,
@@ -258,8 +254,7 @@ where
         &mut self,
         context: (E, Self::Context),
         tip: Digested<Self::Block>,
-        parent: Digested<Self::Block>,
-        blocks: Blocks<Self::Block>,
+        ancestry: Ancestry<Self::Block>,
     ) -> bool {
         let height = tip.height();
         let phase = self.phase(height);
@@ -270,7 +265,7 @@ where
         span.record("has_payload", tip_payload.is_some());
 
         if self.final_block(height) {
-            match self.reshare.epoch_info(blocks.clone()).await {
+            match self.reshare.epoch_info(ancestry.blocks.clone()).await {
                 EpochInfoResponse::Available(derived) => {
                     if derived != tip_payload {
                         debug!("verification rejected: final block payload mismatch");
@@ -301,7 +296,7 @@ where
                 return false;
             }
         }
-        self.inner.verify(context, tip, parent, blocks).await
+        self.inner.verify(context, tip, ancestry).await
     }
 }
 
@@ -416,15 +411,14 @@ mod tests {
         async fn prepare(
             &mut self,
             context: (E, Self::Context),
-            parent: Digested<Self::Block>,
-            blocks: Blocks<Self::Block>,
+            ancestry: Ancestry<Self::Block>,
             input: Self::Input,
         ) -> Handoff<Digested<Self::Block>> {
             if self.handoff.is_wait() {
                 return Handoff::Wait;
             }
             let decision = self.handoff;
-            self.propose(context, parent, blocks, input)
+            self.propose(context, ancestry, input)
                 .await
                 .map_or(Handoff::Wait, |block| decision.map(|()| block))
         }
@@ -432,10 +426,10 @@ mod tests {
         async fn propose(
             &mut self,
             (_, context): (E, Self::Context),
-            parent: Digested<Self::Block>,
-            _blocks: Blocks<Self::Block>,
+            ancestry: Ancestry<Self::Block>,
             input: Self::Input,
         ) -> Option<Digested<Self::Block>> {
+            let parent = ancestry.parent;
             self.proposed.lock().push(input.payload.clone());
             if let Some(entered) = self.proposal_entered.lock().take() {
                 let _ = entered.send(());
@@ -464,8 +458,7 @@ mod tests {
             &mut self,
             _: (E, Self::Context),
             _: Digested<Self::Block>,
-            _: Digested<Self::Block>,
-            _: Blocks<Self::Block>,
+            _: Ancestry<Self::Block>,
         ) -> bool {
             *self.verify_count.lock() += 1;
             self.verify_result
@@ -635,8 +628,7 @@ mod tests {
                 let prepared = app
                     .prepare(
                         (context.child("app"), block_context(&midpoint, 2)),
-                        mocks::ready(midpoint.clone()),
-                        mocks::blocks([mocks::ready(midpoint.clone())]),
+                        mocks::ancestry(mocks::ready(midpoint.clone())),
                         (),
                     )
                     .await;
@@ -654,8 +646,7 @@ mod tests {
                 let proposed = app
                     .propose(
                         (context.child("propose"), block_context(&midpoint, 2)),
-                        mocks::ready(midpoint.clone()),
-                        mocks::blocks([mocks::ready(midpoint.clone())]),
+                        mocks::ancestry(mocks::ready(midpoint.clone())),
                         (),
                     )
                     .await
@@ -667,8 +658,7 @@ mod tests {
                 let prepared = app
                     .prepare(
                         (context.child("early"), block_context(&genesis, 1)),
-                        mocks::ready(genesis.clone()),
-                        mocks::blocks([mocks::ready(genesis.clone())]),
+                        mocks::ancestry(mocks::ready(genesis.clone())),
                         (),
                     )
                     .await;
@@ -730,8 +720,7 @@ mod tests {
                 let prepared = app
                     .prepare(
                         (context.child("app"), block_context(&parent, 1)),
-                        mocks::ready(parent.clone()),
-                        mocks::blocks([mocks::ready(parent.clone())]),
+                        mocks::ancestry(mocks::ready(parent.clone())),
                         (),
                     )
                     .await;
@@ -749,8 +738,7 @@ mod tests {
                 let proposed = app
                     .propose(
                         (context.child("propose"), block_context(&parent, 1)),
-                        mocks::ready(parent.clone()),
-                        mocks::blocks([mocks::ready(parent.clone())]),
+                        mocks::ancestry(mocks::ready(parent.clone())),
                         (),
                     )
                     .await
@@ -774,8 +762,7 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app"), block_context(&parent, 2)),
-                    mocks::ready(parent.clone()),
-                    mocks::blocks([mocks::ready(parent.clone())]),
+                    mocks::ancestry(mocks::ready(parent.clone())),
                     (),
                 )
                 .await;
@@ -788,8 +775,7 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app_retry"), block_context(&parent, 3)),
-                    mocks::ready(parent.clone()),
-                    mocks::blocks([mocks::ready(parent)]),
+                    mocks::ancestry(mocks::ready(parent)),
                     (),
                 )
                 .await;
@@ -817,8 +803,7 @@ mod tests {
 
             let mut propose = Box::pin(app.propose(
                 (context.child("app"), block_context(&parent, 2)),
-                mocks::ready(parent.clone()),
-                mocks::blocks([mocks::ready(parent)]),
+                mocks::ancestry(mocks::ready(parent)),
                 (),
             ));
             assert!(propose.as_mut().now_or_never().is_none());
@@ -871,8 +856,7 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app"), block_context(&parent, 2)),
-                    mocks::ready(parent.clone()),
-                    mocks::blocks([mocks::ready(parent)]),
+                    mocks::ancestry(mocks::ready(parent)),
                     (),
                 )
                 .await
@@ -905,8 +889,7 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app"), block_context(&parent, 1)),
-                    mocks::ready(parent.clone()),
-                    mocks::blocks([mocks::ready(parent)]),
+                    mocks::ancestry(mocks::ready(parent)),
                     (),
                 )
                 .await;
@@ -930,8 +913,7 @@ mod tests {
                 let proposed = app
                     .propose(
                         (context.child("app"), block_context(&parent, 1)),
-                        mocks::ready(parent.clone()),
-                        mocks::blocks([mocks::ready(parent)]),
+                        mocks::ancestry(mocks::ready(parent)),
                         (),
                     )
                     .await
@@ -961,8 +943,7 @@ mod tests {
             let mut verify = Box::pin(app.verify(
                 (context.child("app"), block_context(&parent, 1)),
                 tip,
-                parent.clone(),
-                mocks::blocks([parent.clone()]),
+                mocks::ancestry(parent.clone()),
             ));
 
             // Verification requests final epoch info over the branch ending at the parent,
@@ -1016,8 +997,7 @@ mod tests {
                     .verify(
                         (context.child("app"), block_context(&parent, 1)),
                         tip,
-                        parent.clone(),
-                        mocks::blocks([parent.clone()]),
+                        mocks::ancestry(parent.clone()),
                     )
                     .await;
 
@@ -1042,8 +1022,7 @@ mod tests {
                 .verify(
                     (context.child("app"), block_context(&parent, 1)),
                     tip,
-                    parent.clone(),
-                    mocks::blocks([parent.clone()]),
+                    mocks::ancestry(parent.clone()),
                 )
                 .await;
 
@@ -1077,13 +1056,11 @@ mod tests {
                 assert_eq!(app.phase(tip.height()), Some(phase));
                 assert!(!app.final_block(tip.height()));
 
-                let parent_block = Arc::new(parent);
                 let verified = app
                     .verify(
-                        (context.child("app"), block_context(&parent_block, tip.height().get())),
+                        (context.child("app"), block_context(&parent, tip.height().get())),
                         mocks::ready(tip.clone()),
-                        mocks::ready(parent_block.clone()),
-                        mocks::blocks([mocks::ready(parent_block)]),
+                        mocks::ancestry(mocks::ready(parent)),
                     )
                     .await;
                 assert!(!verified, "{phase:?} block carried epoch info");
@@ -1142,13 +1119,11 @@ mod tests {
                 assert!(!app.final_block(tip.height()));
 
                 let consulted = inner.verify_count();
-                let parent_block = Arc::new(parent);
                 let verified = app
                     .verify(
-                        (context.child("app"), block_context(&parent_block, tip.height().get())),
+                        (context.child("app"), block_context(&parent, tip.height().get())),
                         mocks::ready(tip.clone()),
-                        mocks::ready(parent_block.clone()),
-                        mocks::blocks([mocks::ready(parent_block)]),
+                        mocks::ancestry(mocks::ready(parent)),
                     )
                     .await;
                 assert_eq!(verified, accepted, "{phase:?} block carried a dealer log");

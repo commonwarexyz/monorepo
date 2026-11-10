@@ -2,6 +2,7 @@ use crate::{
     Application, Block, Epochable, Heightable, History,
     marshal::{
         application::validation::{is_block_in_expected_epoch, is_valid_reproposal_at_verify},
+        blocks::Ancestry,
         core::Mailbox,
         standard::Standard,
     },
@@ -172,7 +173,7 @@ where
     Some(ParentCheck::Valid(parent))
 }
 
-/// Runs application verification with the validated candidate, parent, and block range.
+/// Runs application verification with the validated candidate and its ancestry.
 ///
 /// The block must already have passed [`await_and_validate_parent`]. Returns `None` when
 /// work should stop early (receiver dropped). The store is intentionally separate so callers
@@ -201,8 +202,7 @@ where
         .verify(
             (runtime_context.child("app_verify"), context.clone()),
             block.clone(),
-            parent,
-            blocks,
+            Ancestry { parent, blocks },
         )
         .instrument(info_span!(
             "marshal.standard.application.verify",

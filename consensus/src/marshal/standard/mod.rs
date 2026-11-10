@@ -82,7 +82,7 @@ mod tests {
                 gates::{GateOutcome, Gates},
                 relay,
             },
-            blocks::Blocks,
+            blocks::Ancestry,
             config::{Config, Start},
             core::{Actor, Cutoff, Mailbox, Processed, cache, durability::Durable as _},
             mocks::{
@@ -12168,12 +12168,11 @@ mod tests {
         async fn prepare(
             &mut self,
             context: (Runtime, Ctx),
-            parent: Digested<B>,
-            blocks: Blocks<B>,
+            ancestry: Ancestry<B>,
             input: (),
         ) -> Handoff<Digested<B>> {
             self.prepares.fetch_add(1, Ordering::SeqCst);
-            self.propose(context, parent, blocks, input)
+            self.propose(context, ancestry, input)
                 .await
                 .map_or(Handoff::Wait, Handoff::Stage)
         }
@@ -12181,8 +12180,7 @@ mod tests {
         async fn propose(
             &mut self,
             (_, context): (Runtime, Ctx),
-            _: Digested<B>,
-            _: Blocks<B>,
+            _: Ancestry<B>,
             _: (),
         ) -> Option<Digested<B>> {
             self.build_started
@@ -12196,13 +12194,7 @@ mod tests {
             Some(ready(self.block.clone()))
         }
 
-        async fn verify(
-            &mut self,
-            _: (Runtime, Ctx),
-            _: Digested<B>,
-            _: Digested<B>,
-            _: Blocks<B>,
-        ) -> bool {
+        async fn verify(&mut self, _: (Runtime, Ctx), _: Digested<B>, _: Ancestry<B>) -> bool {
             let started = self.verify_started.lock().take();
             if let Some(started) = started {
                 let release = self.verify_release.lock().take().unwrap();

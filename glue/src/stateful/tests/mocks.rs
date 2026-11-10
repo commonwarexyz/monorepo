@@ -5,7 +5,10 @@ use crate::stateful::{
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Handoff, Heightable,
-    marshal::{blocks::Blocks, standard::Standard},
+    marshal::{
+        blocks::{Ancestry, Blocks},
+        standard::Standard,
+    },
     simplex::{mocks::scheme as scheme_mocks, types::Context as SimplexContext},
     types::{Epoch, Height, View},
 };
@@ -383,8 +386,7 @@ impl<E: Send + Sync> Application<E> for TestApp {
     async fn prepare(
         &mut self,
         context: (E, Self::Context),
-        parent: Digested<Self::Block>,
-        blocks: Blocks<Self::Block>,
+        ancestry: Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
     ) -> Handoff<Proposed<Self, E>> {
@@ -392,7 +394,7 @@ impl<E: Send + Sync> Application<E> for TestApp {
         if decision.is_wait() {
             return Handoff::Wait;
         }
-        self.propose(context, parent, blocks, batches, input)
+        self.propose(context, ancestry, batches, input)
             .await
             .map_or(Handoff::Wait, |proposed| decision.map(|()| proposed))
     }
@@ -400,8 +402,7 @@ impl<E: Send + Sync> Application<E> for TestApp {
     async fn propose(
         &mut self,
         _context: (E, Self::Context),
-        _parent: Digested<Self::Block>,
-        _blocks: Blocks<Self::Block>,
+        _ancestry: Ancestry<Self::Block>,
         _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {

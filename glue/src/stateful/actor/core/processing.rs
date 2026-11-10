@@ -12,7 +12,10 @@ use crate::stateful::{
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
     Heightable,
-    marshal::core::{Mailbox as MarshalMailbox, Variant},
+    marshal::{
+        blocks::Ancestry,
+        core::{Mailbox as MarshalMailbox, Variant},
+    },
     types::Height,
 };
 use commonware_macros::{select, select_loop};
@@ -347,8 +350,7 @@ where
                         .propose(
                             actor_context,
                             context,
-                            parent,
-                            blocks,
+                            Ancestry { parent, blocks },
                             input,
                             proposal,
                         )
@@ -521,7 +523,7 @@ mod tests {
         CertifiableBlock as _, Handoff, Heightable as _, History, Reporter as _, Reporters,
         marshal::{
             Update,
-            blocks::Blocks,
+            blocks::{Ancestry, Blocks},
             core::{Mailbox as MarshalMailbox, Processed},
             standard::Deferred,
         },
@@ -579,17 +581,17 @@ mod tests {
         )
     }
 
-    /// Splits parent-first `ancestry` into the parent and the selected branch ending at it.
+    /// Pairs the parent of parent-first `ancestry` with the selected branch ending at it.
     fn parent_branch(
         ancestry: impl IntoIterator<Item = Digested<TestBlock>>,
-    ) -> (Digested<TestBlock>, Blocks<TestBlock>) {
+    ) -> Ancestry<TestBlock> {
         let mut ancestry = ancestry.into_iter();
         let parent = ancestry.next().expect("request must name a parent");
         let blocks = branch(
             parent.height(),
             std::iter::once(parent.clone()).chain(ancestry),
         );
-        (parent, blocks)
+        Ancestry { parent, blocks }
     }
 
     /// Verifies the first block of candidate-first `ancestry` on the second, with the second and
@@ -605,8 +607,7 @@ mod tests {
     {
         let mut ancestry = ancestry.into_iter();
         let block = ancestry.next().expect("verification must name its block");
-        let (parent, blocks) = parent_branch(ancestry);
-        mailbox.verify(context, block, parent, blocks)
+        mailbox.verify(context, block, parent_branch(ancestry))
     }
 
     /// Proposes on the first block of parent-first `ancestry`, with all of `ancestry` as the
@@ -621,8 +622,7 @@ mod tests {
         A: Application<deterministic::Context, Block = TestBlock>,
         I: IntoIterator<Item = Digested<TestBlock>>,
     {
-        let (parent, blocks) = parent_branch(ancestry);
-        mailbox.propose(context, parent, blocks, input)
+        mailbox.propose(context, parent_branch(ancestry), input)
     }
 
     /// Prepares on the first block of parent-first `ancestry`, with all of `ancestry` as the
@@ -637,8 +637,7 @@ mod tests {
         A: Application<deterministic::Context, Block = TestBlock>,
         I: IntoIterator<Item = Digested<TestBlock>>,
     {
-        let (parent, blocks) = parent_branch(ancestry);
-        mailbox.prepare(context, parent, blocks, input)
+        mailbox.prepare(context, parent_branch(ancestry), input)
     }
 
     /// Signals from acquisitions that never complete: the first acquisition, and the first time
@@ -732,8 +731,10 @@ mod tests {
                     .verify(
                         (context, block.context()),
                         digested(block),
-                        digested(parent),
-                        blocks,
+                        Ancestry {
+                            parent: digested(parent),
+                            blocks,
+                        },
                     )
                     .await
             });
@@ -830,8 +831,7 @@ mod tests {
         async fn prepare(
             &mut self,
             _context: (deterministic::Context, Self::Context),
-            _parent: Digested<Self::Block>,
-            _blocks: Blocks<Self::Block>,
+            _ancestry: Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
         ) -> Handoff<Proposed<Self, deterministic::Context>> {
@@ -842,8 +842,7 @@ mod tests {
         async fn propose(
             &mut self,
             _context: (deterministic::Context, Self::Context),
-            _parent: Digested<Self::Block>,
-            _blocks: Blocks<Self::Block>,
+            _ancestry: Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
         ) -> Option<Proposed<Self, deterministic::Context>> {
@@ -919,8 +918,7 @@ mod tests {
         async fn propose(
             &mut self,
             _context: (deterministic::Context, Self::Context),
-            _parent: Digested<Self::Block>,
-            _blocks: Blocks<Self::Block>,
+            _ancestry: Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
         ) -> Option<Proposed<Self, deterministic::Context>> {
@@ -1042,12 +1040,11 @@ mod tests {
         async fn prepare(
             &mut self,
             context: (deterministic::Context, Self::Context),
-            parent: Digested<Self::Block>,
-            blocks: Blocks<Self::Block>,
+            ancestry: Ancestry<Self::Block>,
             batches: TestUnmerkleized,
             input: Input<Self::Input, Self::Provider>,
         ) -> Handoff<Proposed<Self, deterministic::Context>> {
-            self.propose(context, parent, blocks, batches, input)
+            self.propose(context, ancestry, batches, input)
                 .await
                 .map_or(Handoff::Wait, Handoff::Vote)
         }
@@ -1055,8 +1052,7 @@ mod tests {
         async fn propose(
             &mut self,
             _context: (deterministic::Context, Self::Context),
-            parent: Digested<Self::Block>,
-            _blocks: Blocks<Self::Block>,
+            ancestry: Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
         ) -> Option<Proposed<Self, deterministic::Context>> {
@@ -1066,7 +1062,7 @@ mod tests {
                 let _ = (&mut gate.release).await;
             }
             Some(Proposed {
-                block: TestBlock::child(parent.inner(), 9),
+                block: TestBlock::child(ancestry.parent.inner(), 9),
                 merkleized: TestMerkleized,
             })
         }
@@ -2391,7 +2387,7 @@ mod tests {
                 .iter_mut()
                 .zip(requests)
                 .map(|(caller, (context, block, parent, blocks))| {
-                    Box::pin(caller.verify(context, block, parent, blocks))
+                    Box::pin(caller.verify(context, block, Ancestry { parent, blocks }))
                 })
                 .collect();
             for call in &mut calls {
@@ -2892,10 +2888,11 @@ mod tests {
                 let mut caller = mailbox.clone();
                 let request_context = (context.child("queued_verify"), queued_context.clone());
                 let (block, parent, blocks) = pending_history(admissions.clone(), false);
-                let mut request: PendingRequest =
-                    Box::pin(
-                        async move { caller.verify(request_context, block, parent, blocks).await },
-                    );
+                let mut request: PendingRequest = Box::pin(async move {
+                    caller
+                        .verify(request_context, block, Ancestry { parent, blocks })
+                        .await
+                });
                 assert!(poll!(&mut request).is_pending());
                 queued.push(request);
             }
@@ -3117,8 +3114,10 @@ mod tests {
                     context.child("propose"),
                     TestBlock::child(&parent, 3).context(),
                 ),
-                digested(parent),
-                blocks,
+                Ancestry {
+                    parent: digested(parent),
+                    blocks,
+                },
                 (),
             ));
             assert!(poll!(&mut proposal).is_pending());
@@ -5764,8 +5763,10 @@ mod tests {
             let mut verification = Box::pin(verifier.verify(
                 (context.child("verify"), block.context()),
                 block,
-                unavailable_parent,
-                blocks,
+                Ancestry {
+                    parent: unavailable_parent,
+                    blocks,
+                },
             ));
             assert!(poll!(&mut verification).is_pending());
 
@@ -5806,8 +5807,7 @@ mod tests {
             let mut verify = Box::pin(verifier.verify(
                 (context.child("verify"), block.context()),
                 block,
-                parent,
-                blocks,
+                Ancestry { parent, blocks },
             ));
             assert!(poll!(&mut verify).is_pending());
             drop(mailbox.subscribe_databases().await);
@@ -5862,8 +5862,10 @@ mod tests {
             let mut second = Box::pin(second_mailbox.verify(
                 (context.child("second"), block.context()),
                 digested(block),
-                digested(parent),
-                blocks,
+                Ancestry {
+                    parent: digested(parent),
+                    blocks,
+                },
             ));
             assert!(poll!(&mut second).is_pending());
             acquiring.await.expect("second acquisition must start");
@@ -6180,7 +6182,11 @@ mod tests {
             let request = (context, block.context());
             let (block, parent) = (digested(block.clone()), digested(parent.clone()));
             let mut mailbox = self.mailbox.clone();
-            Box::pin(async move { mailbox.verify(request, block, parent, blocks).await })
+            Box::pin(async move {
+                mailbox
+                    .verify(request, block, Ancestry { parent, blocks })
+                    .await
+            })
         }
 
         /// Reports `block`'s finalization to marshal.

@@ -407,7 +407,7 @@ mod tests {
             fixtures::{self, MarshalFixture},
             mocks::{
                 FlushControl, TestApp, TestBlock, TestDb, TestScheme, TestVariant, anchor,
-                digested, digested_shared, test_databases,
+                digested, test_databases,
             },
         },
     };
@@ -1176,11 +1176,7 @@ mod tests {
                     mailbox
                         .propose(
                             (context.child("queue_fence"), proposal.context()),
-                            digested_shared(&proposal_parent),
-                            fixtures::blocks(
-                                proposal_parent.height(),
-                                std::slice::from_ref(&proposal_parent),
-                            ),
+                            fixtures::ancestry(&proposal_parent),
                             (),
                         )
                         .await
@@ -1269,11 +1265,7 @@ mod tests {
                     mailbox
                         .propose(
                             (queue_context.child("queue_fence"), proposal.context()),
-                            digested_shared(&proposal_parent),
-                            fixtures::blocks(
-                                proposal_parent.height(),
-                                std::slice::from_ref(&proposal_parent),
-                            ),
+                            fixtures::ancestry(&proposal_parent),
                             (),
                         )
                         .await

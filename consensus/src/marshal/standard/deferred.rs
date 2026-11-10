@@ -90,6 +90,7 @@ use crate::{
             relay,
             validation::{Stage, is_inferred_reproposal_at_certify},
         },
+        blocks::Ancestry,
         core::Mailbox,
         standard::{
             Standard,
@@ -510,7 +511,11 @@ where
             }
 
             let blocks = marshal.blocks_with_parent(parent.height(), parent_commitment, history);
-            Resolved::Build(parent, blocks, build_duration.timer(&*context), ())
+            Resolved::Build(
+                Ancestry { parent, blocks },
+                build_duration.timer(&*context),
+                (),
+            )
         }
     }
 }
@@ -733,8 +738,8 @@ where
     /// Prepares a term-start proposal on an uncertified parent.
     ///
     /// Runs the same checks as [`Self::propose`], in the same order, and hands the application the
-    /// parent and selected history. When the checks find the epoch boundary block, the marshal
-    /// re-proposes it without the application and answers [`Handoff::Stage`].
+    /// fetched ancestry. When the checks find the epoch boundary block, the marshal re-proposes it
+    /// without the application and answers [`Handoff::Stage`].
     #[tracing::instrument(name = "marshal.deferred.prepare", level = "info", skip_all, fields(round = %consensus_context.round))]
     fn prepare(
         &mut self,

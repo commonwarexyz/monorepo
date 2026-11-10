@@ -80,7 +80,7 @@ mod tests {
         Automaton, Block, CertifiableAutomaton, CertifiableBlock, Handoff, Heightable, History,
         Relay, Reporter,
         marshal::{
-            blocks::Blocks,
+            blocks::Ancestry,
             coding::{
                 Coding, Marshaled, MarshaledConfig, shards,
                 types::{
@@ -229,8 +229,7 @@ mod tests {
         async fn propose(
             &mut self,
             _context: (deterministic::Context, CodingCtx),
-            _parent: Digested<CodingB>,
-            _blocks: Blocks<CodingB>,
+            _ancestry: Ancestry<CodingB>,
             _input: (),
         ) -> Option<Digested<CodingB>> {
             None
@@ -240,8 +239,7 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, CodingCtx),
             candidate: Digested<CodingB>,
-            parent: Digested<CodingB>,
-            blocks: Blocks<CodingB>,
+            Ancestry { parent, blocks }: Ancestry<CodingB>,
         ) -> bool {
             let mut range = blocks.range(Height::zero()..=parent.height());
             let mut last = None;

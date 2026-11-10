@@ -59,6 +59,7 @@ use crate::{
             gates::{GateOutcome, Gates},
             relay,
         },
+        blocks::Ancestry,
         core::Mailbox,
         standard::{
             Standard,
@@ -268,7 +269,11 @@ where
             }
 
             let blocks = marshal.blocks_with_parent(parent.height(), parent_commitment, history);
-            Resolved::Build(parent, blocks, build_duration.timer(&*context), ())
+            Resolved::Build(
+                Ancestry { parent, blocks },
+                build_duration.timer(&*context),
+                (),
+            )
         }
     }
 }
@@ -336,7 +341,7 @@ where
     /// 1. Waits for the candidate block to arrive locally (certification fetches it from peers)
     /// 2. Enforces epoch/re-proposal rules
     /// 3. Fetches and validates the parent relationship
-    /// 4. Runs application verification with the candidate, parent, and block range
+    /// 4. Runs application verification over ancestry
     ///
     /// The notarize vote is cast as soon as application verification completes. The block's
     /// durable sync is deferred (it runs concurrently with consensus voting) and its
@@ -506,8 +511,8 @@ where
     /// Prepares a term-start proposal on an uncertified parent.
     ///
     /// Runs the same checks as [`Self::propose`], in the same order, and hands the application the
-    /// parent and selected history. When the checks find the epoch boundary block, the marshal
-    /// re-proposes it without the application and answers [`Handoff::Stage`].
+    /// fetched ancestry. When the checks find the epoch boundary block, the marshal re-proposes it
+    /// without the application and answers [`Handoff::Stage`].
     #[tracing::instrument(name = "marshal.inline.prepare", level = "info", skip_all, fields(round = %consensus_context.round))]
     fn prepare(
         &mut self,

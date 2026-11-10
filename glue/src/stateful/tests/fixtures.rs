@@ -1,12 +1,12 @@
 //! Shared marshal fixtures for stateful actor tests.
 
-use super::mocks::{TestBlock, TestScheme, TestVariant, digested};
+use super::mocks::{TestBlock, TestScheme, TestVariant, digested, digested_shared};
 use commonware_actor::Feedback;
 use commonware_consensus::{
     Block, Heightable as _, Reporter,
     marshal::{
         self, Update,
-        blocks::Blocks,
+        blocks::{Ancestry, Blocks},
         core::{Actor as MarshalActor, Floor, Mailbox as MarshalMailbox},
         resolver::handler,
     },
@@ -63,6 +63,15 @@ pub(crate) fn blocks<B: Block>(tip: Height, bodies: &[Arc<B>]) -> Blocks<B> {
             async move { block }
         },
     )
+}
+
+/// Pairs `parent` with a source through its height that acquires only `parent`, while the caller
+/// keeps it alive.
+pub(crate) fn ancestry<B: Block>(parent: &Arc<B>) -> Ancestry<B> {
+    Ancestry {
+        parent: digested_shared(parent),
+        blocks: blocks(parent.height(), std::slice::from_ref(parent)),
+    }
 }
 
 /// Builds a source through `tip` whose acquisitions never complete.

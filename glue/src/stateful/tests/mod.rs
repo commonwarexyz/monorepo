@@ -28,7 +28,7 @@ use commonware_consensus::{
     Application as _, CertifiableAutomaton as _, History, Reporter,
     marshal::{
         self,
-        blocks::Blocks,
+        blocks::{Ancestry, Blocks},
         core::Actor as MarshalActor,
         resolver::handler,
         standard::{Deferred, Standard},
@@ -982,8 +982,7 @@ impl Application<deterministic::Context> for GatedMultiApp {
     async fn propose(
         &mut self,
         context: (deterministic::Context, Self::Context),
-        parent: Digested<Self::Block>,
-        blocks: Blocks<Self::Block>,
+        ancestry: Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, deterministic::Context>> {
@@ -995,8 +994,7 @@ impl Application<deterministic::Context> for GatedMultiApp {
         let proposed = <MultiApp as Application<deterministic::Context>>::propose(
             &mut self.inner,
             context,
-            parent,
-            blocks,
+            ancestry,
             batches,
             input,
         )
@@ -1441,8 +1439,10 @@ fn finalizations_and_certifications_complete_during_proposal_parent_lookup_on_qm
         let mut proposer = stateful_mailbox.clone();
         let mut proposal = Box::pin(proposer.propose(
             (context.child("propose"), blocks[5].context.clone()),
-            digested(blocks[4].clone()),
-            fixtures::pending_blocks(blocks[4].height),
+            Ancestry {
+                parent: digested(blocks[4].clone()),
+                blocks: fixtures::pending_blocks(blocks[4].height),
+            },
             (),
         ));
         assert!(futures::poll!(&mut proposal).is_pending());
@@ -2081,8 +2081,10 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
         let mut proposer = stateful_mailbox.clone();
         let mut proposal = Box::pin(proposer.propose(
             (context.child("propose"), blocks[3].context.clone()),
-            digested(blocks[2].clone()),
-            fixtures::pending_blocks(blocks[2].height),
+            Ancestry {
+                parent: digested(blocks[2].clone()),
+                blocks: fixtures::pending_blocks(blocks[2].height),
+            },
             (),
         ));
         assert!(futures::poll!(&mut proposal).is_pending());

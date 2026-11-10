@@ -31,7 +31,7 @@ use crate::stateful::{
 use commonware_consensus::{
     Block, CertifiableBlock, Handoff, Heightable, Roundable,
     marshal::{
-        blocks::{BlockRange, Blocks, Error as BlocksError},
+        blocks::{Ancestry, BlockRange, Blocks, Error as BlocksError},
         core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
     },
     types::{Height, Round},
@@ -610,27 +610,25 @@ where
         let _ = self.execution.metrics.pending_blocks.try_set(0);
     }
 
-    /// Builds a proposal on `parent` and answers `proposal`.
+    /// Builds a proposal on the parent of `ancestry` and answers `proposal`.
     ///
-    /// `blocks` is the selected branch ending at `parent`. The caller must recover the parent's
-    /// state and run no finalization until this call returns. A built block's state is cached
-    /// before the response is sent. Declines if the application builds nothing or the parent is
-    /// neither cached nor the branch anchor, and returns without answering if `proposal` is
-    /// cancelled first.
+    /// The caller must recover the parent's state and run no finalization until this call
+    /// returns. A built block's state is cached before the response is sent. Declines if the
+    /// application builds nothing or the parent is neither cached nor the branch anchor, and
+    /// returns without answering if `proposal` is cancelled first.
     ///
     /// Panics if the application proposes state that does not match the block's commitments.
     pub(super) async fn propose(
         &mut self,
         context: &E,
         (runtime_context, consensus_context): (E, A::Context),
-        parent: Digested<A::Block>,
-        blocks: Blocks<A::Block>,
+        ancestry: Ancestry<A::Block>,
         input: Input<A::Input, A::Provider>,
         mut proposal: Proposal<Digested<A::Block>>,
     ) {
         let timer = self.execution.metrics.propose_duration.timer(context);
 
-        let parent_digest = parent.digest();
+        let parent_digest = ancestry.parent.digest();
 
         let round = consensus_context.round();
         let batches = match await_or_cancel(
@@ -664,7 +662,7 @@ where
                 let Some(prepared) = await_or_cancel(
                     response.closed(),
                     self.app
-                        .prepare(application_context, parent, blocks, batches, input),
+                        .prepare(application_context, ancestry, batches, input),
                 )
                 .await
                 else {
@@ -689,7 +687,7 @@ where
                 let Some(proposed) = await_or_cancel(
                     response.closed(),
                     self.app
-                        .propose(application_context, parent, blocks, batches, input),
+                        .propose(application_context, ancestry, batches, input),
                 )
                 .await
                 else {
@@ -1292,7 +1290,7 @@ mod tests {
     use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
     use commonware_consensus::{
         Block as ConsensusBlock, CertifiableBlock, Heightable,
-        marshal::blocks::Blocks,
+        marshal::blocks::{Ancestry, Blocks},
         simplex::{mocks::scheme::Scheme as MockScheme, types::Context as ConsensusContext},
         types::{Epoch, Height, Round, View},
     };
@@ -1678,11 +1676,11 @@ mod tests {
         async fn propose(
             &mut self,
             context: (deterministic::Context, Self::Context),
-            parent: Digested<Self::Block>,
-            _blocks: Blocks<Self::Block>,
+            ancestry: Ancestry<Self::Block>,
             batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
             _input: Input<Self::Input, Self::Provider>,
         ) -> Option<Proposed<Self, deterministic::Context>> {
+            let parent = ancestry.parent;
             let context = context.1.clone();
             let view = context.round.view();
             let height = parent.height().next();

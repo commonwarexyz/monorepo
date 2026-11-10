@@ -221,7 +221,7 @@ mod tests {
     use commonware_consensus::{
         Heightable as _, Reporter as _,
         marshal::{
-            blocks::Blocks,
+            blocks::{Ancestry, Blocks},
             core::{Cutoff, Processed},
         },
         simplex::{
@@ -354,8 +354,7 @@ mod tests {
         async fn propose(
             &mut self,
             _context: (deterministic::Context, Self::Context),
-            _parent: Digested<Self::Block>,
-            _blocks: Blocks<Self::Block>,
+            _ancestry: Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
         ) -> Option<Proposed<Self, deterministic::Context>> {

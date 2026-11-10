@@ -4,7 +4,7 @@
 //! `Application` trait, suitable for testing the `Marshaled` wrapper in
 //! both standard and coding variants.
 
-use crate::{CertifiableBlock, Epochable, Handoff, marshal::blocks::Blocks};
+use crate::{CertifiableBlock, Epochable, Handoff, marshal::blocks::Ancestry};
 use commonware_cryptography::Digested;
 use commonware_parallel::Sequential;
 use commonware_runtime::deterministic;
@@ -109,15 +109,14 @@ where
     async fn prepare(
         &mut self,
         context: (deterministic::Context, Self::Context),
-        parent: Digested<Self::Block>,
-        blocks: Blocks<Self::Block>,
+        ancestry: Ancestry<Self::Block>,
         input: Self::Input,
     ) -> Handoff<Digested<Self::Block>> {
         if self.handoff.is_wait() {
             return Handoff::Wait;
         }
         let decision = self.handoff;
-        self.propose(context, parent, blocks, input)
+        self.propose(context, ancestry, input)
             .await
             .map_or(Handoff::Wait, |block| decision.map(|()| block))
     }
@@ -125,8 +124,7 @@ where
     async fn propose(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _parent: Digested<Self::Block>,
-        _blocks: Blocks<Self::Block>,
+        _ancestry: Ancestry<Self::Block>,
         _input: Self::Input,
     ) -> Option<Digested<Self::Block>> {
         let gate = self.proposal_gate.lock().take();
@@ -146,8 +144,7 @@ where
         &mut self,
         _context: (deterministic::Context, Self::Context),
         block: Digested<Self::Block>,
-        _parent: Digested<Self::Block>,
-        _blocks: Blocks<Self::Block>,
+        _ancestry: Ancestry<Self::Block>,
     ) -> bool {
         if self.reject.is_some_and(|reject| reject(block.inner())) {
             return false;
@@ -198,8 +195,7 @@ where
     async fn propose(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _parent: Digested<Self::Block>,
-        _blocks: Blocks<Self::Block>,
+        _ancestry: Ancestry<Self::Block>,
         _input: Self::Input,
     ) -> Option<Digested<Self::Block>> {
         None
@@ -209,8 +205,7 @@ where
         &mut self,
         _context: (deterministic::Context, Self::Context),
         _block: Digested<Self::Block>,
-        _parent: Digested<Self::Block>,
-        _blocks: Blocks<Self::Block>,
+        _ancestry: Ancestry<Self::Block>,
     ) -> bool {
         if let Some(started) = self.started.lock().take() {
             started.send_lossy(());

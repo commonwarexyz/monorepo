@@ -2,7 +2,10 @@
 
 use crate::types::{Block, Database, Scheme};
 use commonware_consensus::{
-    Heightable as _, marshal::blocks::Blocks, simplex::types::Context, types::Height,
+    Heightable as _,
+    marshal::blocks::{Ancestry, Blocks},
+    simplex::types::Context,
+    types::Height,
 };
 use commonware_cryptography::{
     Digested, Digestible as _, bls12381::primitives::variant::MinSig, ed25519, sha256,
@@ -63,13 +66,13 @@ where
     async fn propose(
         &mut self,
         context: (E, Self::Context),
-        parent: Digested<Self::Block>,
-        _blocks: Blocks<Self::Block>,
+        ancestry: Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
         // The `reshare::Application` wrapper selected and fetched the payload.
         let payload = input.upstream.payload;
+        let parent = ancestry.parent;
         let height = parent.height().next();
         let merkleized = Self::execute(height, batches).await;
         let bounds = merkleized.bounds();

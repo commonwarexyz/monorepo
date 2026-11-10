@@ -23,7 +23,7 @@ use commonware_consensus::{
     Block as ConsensusBlock, BoundedBlock, CertifiableBlock, Heightable,
     marshal::{
         self,
-        blocks::Blocks,
+        blocks::{Ancestry, Blocks},
         core::Actor as MarshalActor,
         resolver::p2p as marshal_resolver,
         standard::{Deferred, Standard},
@@ -314,11 +314,11 @@ impl<E: Spawner + StorageContext> Application<E> for App {
     async fn propose(
         &mut self,
         context: (E, Self::Context),
-        parent: Digested<Self::Block>,
-        _blocks: Blocks<Self::Block>,
+        ancestry: Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
+        let parent = ancestry.parent;
         let height = Height::new(parent.height().get() + 1);
         let (merkleized_a, merkleized_b) = Self::execute(height, batches).await;
         let bounds_a = merkleized_a.bounds();
