@@ -137,6 +137,7 @@ use super::{
     Batch, Decoded,
     blobs::{Blob, Blobs, Partition, Replay as BlobReplay, Writable},
     checkpoint::Checkpoint,
+    scratch::Scratch,
 };
 #[commonware_macros::stability(ALPHA)]
 use crate::journal::authenticated;
@@ -154,7 +155,7 @@ use commonware_runtime::{
     Blob as RBlob, Buf, Handle, IoBuf, ReadOptions,
     buffer::paged::{CacheRef, Recovery as PagedRecovery},
 };
-use commonware_utils::{Cached, futures::try_join_all};
+use commonware_utils::futures::try_join_all;
 use futures::{FutureExt as _, Stream};
 use std::{
     collections::{BTreeMap, btree_map::Entry},
@@ -167,8 +168,9 @@ use std::{
 use tracing::warn;
 
 // Reusable scratch for the synchronous read paths ([`Reader::try_read_sync`] and
-// [`Reader::probe_items`]), grown to the largest probe served on the thread. Both run on the
-// hot read path, where a fresh zeroed allocation per call contends under the pool's fan-out.
+// [`Reader::probe_items`]), grown to the largest probe served on the thread up to a limit (see
+// [`Scratch`]). Both run on the hot read path, where a fresh zeroed allocation per call contends
+// under the pool's fan-out.
 commonware_utils::thread_local_cache!(static PROBE_SCRATCH: Vec<u8>);
 
 /// Items encoded for a deferred append, created by [`Journal::prepare_append`] and consumed by
@@ -1939,8 +1941,7 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         // Serve the probe from the per-thread scratch buffer. Stale bytes from a previous probe
         // are harmless: slots the cache cannot serve are reported as misses and never decoded.
         let items_per_blob = self.items_per_blob.get();
-        let mut scratch =
-            Cached::take(&PROBE_SCRATCH, || Ok::<_, ()>(Vec::new()), |_| Ok(())).unwrap();
+        let mut scratch = Scratch::take(&PROBE_SCRATCH, |_| {});
         let need = valid.len() * A::SIZE;
         if scratch.len() < need {
             scratch.resize(need, 0);
@@ -2012,8 +2013,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
 
     fn try_read_sync(&self, pos: u64) -> Option<A> {
         let (blob, offset) = self.locate(pos).ok()?;
-        let mut scratch =
-            Cached::take(&PROBE_SCRATCH, || Ok::<_, ()>(Vec::new()), |_| Ok(())).unwrap();
+        let mut scratch = Scratch::take(&PROBE_SCRATCH, |_| {});
         if scratch.len() < A::SIZE {
             scratch.resize(A::SIZE, 0);
         }

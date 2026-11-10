@@ -11,8 +11,6 @@
 //! interior fsync holes (skipping any wholly covered by the acknowledged floor), and the
 //! offsets journal only advances after the data it indexes is durable.
 
-#[commonware_macros::stability(ALPHA)]
-use super::checkpoint::Checkpoint;
 use super::{
     Batch, Contiguous, Decoded, Many, Mutable, blob_first_position,
     blobs::{Blob, Blobs, Partition, Replay as BlobReplay, Writable},
@@ -20,6 +18,8 @@ use super::{
     metrics::Metrics,
     position_to_blob,
 };
+#[commonware_macros::stability(ALPHA)]
+use super::{checkpoint::Checkpoint, scratch::Scratch};
 #[commonware_macros::stability(ALPHA)]
 use crate::journal::authenticated;
 use crate::{
@@ -40,7 +40,7 @@ use commonware_runtime::{
     Blob as RBlob, Buf as _, Handle, IoBuf, ReadOptions,
     buffer::paged::{CacheRef, Recovery as PagedRecovery, Replay},
 };
-use commonware_utils::{Cached, MAX_ALLOCATION_BYTES, futures::try_join_all};
+use commonware_utils::{MAX_ALLOCATION_BYTES, futures::try_join_all};
 use futures::{FutureExt as _, Stream, future::try_join};
 #[cfg(test)]
 use std::future::pending;
@@ -77,29 +77,11 @@ pub struct PreparedAppend<V> {
     _marker: PhantomData<V>,
 }
 
-// Per-thread scratch for synchronous probes, reused across calls (see [scratch]).
+// Per-thread scratch for synchronous probes, reused across calls (see [Scratch]).
 commonware_utils::thread_local_cache!(static PROBE_LOOKUPS: Vec<u64>);
 commonware_utils::thread_local_cache!(static PROBE_EXTENTS: Vec<(usize, u64, usize)>);
 commonware_utils::thread_local_cache!(static PROBE_RANGES: Vec<(u64, usize)>);
 commonware_utils::thread_local_cache!(static PROBE_BUFFER: BytesMut);
-
-/// Take this thread's scratch value from `cache`, prepared by `reset`, or a new one. The value
-/// returns to the thread when the guard drops, so later probes on the thread reuse its
-/// allocation.
-fn scratch<T: Default>(
-    cache: &'static std::thread::LocalKey<std::cell::RefCell<(bool, Option<T>)>>,
-    reset: impl FnOnce(&mut T),
-) -> Cached<T> {
-    Cached::take(
-        cache,
-        || Ok::<_, ()>(T::default()),
-        |value| {
-            reset(value);
-            Ok(())
-        },
-    )
-    .expect("scratch preparation does not fail")
-}
 
 /// Provides an owned buffer for reading and reclaims the scratch unless retained fields share it.
 fn with_bytes<T>(scratch: &mut BytesMut, f: impl FnOnce(&Bytes) -> T) -> T {
@@ -689,7 +671,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         // into one strictly increasing lookup list, so one batched probe of the offsets journal
         // looks up every offset these extents need.
         let items_per_blob = self.items_per_blob.get();
-        let mut lookups = scratch(&PROBE_LOOKUPS, Vec::clear);
+        let mut lookups = Scratch::take(&PROBE_LOOKUPS, Vec::clear);
         lookups.reserve(positions.len() * 2);
         for &position in positions {
             if lookups.last() != Some(&position) {
@@ -703,7 +685,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         // cached start but no cached successor can use their length prefix instead. If any
         // resolved extent is empty, unsorted, overlapping, or out of bounds, serve nothing
         // from the batch so completion can validate all requested extents together.
-        let mut extents = scratch(&PROBE_EXTENTS, Vec::clear);
+        let mut extents = Scratch::take(&PROBE_EXTENTS, Vec::clear);
         extents.reserve(positions.len());
         let mut singles = Vec::new();
         let mut lookup_idx = 0;
@@ -755,10 +737,10 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
             extents.push((idx, offset, len));
         }
 
-        // The buffer keeps its length between probes and only grows, so a probe does not
-        // zero bytes the read overwrites. Bytes past a read's ranges are never decoded.
-        let mut buf = scratch(&PROBE_BUFFER, |_| {});
-        let mut ranges = scratch(&PROBE_RANGES, Vec::clear);
+        // The buffer keeps its length between probes, so a probe does not zero bytes the read
+        // overwrites. Bytes past a read's ranges are never decoded.
+        let mut buf = Scratch::take(&PROBE_BUFFER, |_| {});
+        let mut ranges = Scratch::take(&PROBE_RANGES, Vec::clear);
         let mut hits = 0u64;
 
         // Serve the resolved extents with one batched cache read per data blob.

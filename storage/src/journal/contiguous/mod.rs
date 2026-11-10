@@ -20,6 +20,7 @@ mod blobs;
 mod checkpoint;
 pub mod fixed;
 mod metrics;
+mod scratch;
 pub mod variable;
 
 #[cfg(test)]
