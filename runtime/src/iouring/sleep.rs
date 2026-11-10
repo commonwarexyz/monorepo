@@ -23,13 +23,21 @@
 //! A [`Sleep`] fixes its deadline as an [`Instant`] when it is created, at
 //! most [`MAX_TIMEOUT`] ahead, and registers on the worker of its first
 //! pending poll, which keeps the registration for life. Every poll first
-//! compares the deadline with this thread's latest worker service time
-//! instead of reading the clock. A deadline at or before that time has passed,
-//! so the poll completes the sleep at once, wherever it was registered. A
-//! later deadline that has passed since then registers, and fires at its
-//! firing time in a later service pass. Only a first poll that finds no open
-//! worker, or a poll that observes closure, reads the clock, to complete a
-//! deadline that has passed.
+//! compares the deadline with this thread's latest worker service time: the
+//! time at which its worker last started, ran a service pass, or returned from
+//! an idle wait, each of which polls can follow before the next service pass.
+//! A deadline at or before that time has passed, so the poll completes the
+//! sleep at once, wherever it was registered.
+//!
+//! A first poll otherwise reads the clock and completes a deadline that has
+//! passed. One case spares the common timeout that read. A sleep of at least
+//! [`UNCHECKED_SLEEP`], on a thread whose service time is not later than the
+//! sleep's creation, registers unchecked. That thread's worker has taken no
+//! service time since the sleep was created, so the deadline has passed only
+//! if the thread has polled for longer than the sleep without serving its
+//! timers. The registration then fires at the worker's next service pass, or
+//! at a peer's rescue. A poll that observes closure reads the clock as well,
+//! to complete a deadline that has passed.
 //!
 //! Polls on any thread act on the registering worker's timers directly. So
 //! does a drop on any thread but the registering worker's, or on that worker
@@ -212,14 +220,23 @@ pub const RESCUE_INTERVAL: Duration = Duration::from_micros(250);
 /// registrations took their slots.
 pub const DROPPED_CAPACITY: usize = 16 * BUDGET as usize;
 
+/// Shortest sleep whose first poll may register without reading the clock.
+/// Such a poll trusts that the deadline is still ahead when its thread's
+/// worker has taken no service time since the sleep was created. It is wrong
+/// only on a thread that has polled for the whole sleep, so for at least this
+/// long, without serving its timers, whose registered sleeps are as late until
+/// a peer rescues them (see [`RESCUE_THRESHOLD`]). A shorter sleep, or one
+/// created before the service time, reads the clock.
+const UNCHECKED_SLEEP: Duration = Duration::from_millis(1);
+
 thread_local! {
-    /// Time of this thread's latest worker service pass, `None` on a thread
-    /// that never ran one.
+    /// Time at which this thread's worker last started, ran a service pass, or
+    /// returned from an idle wait, `None` on a thread that never ran a worker.
     static TURN: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 
-/// Record the time of this worker's service pass, which sleeps polled on this
-/// thread compare their deadlines with.
+/// Record the time of this worker's start, service pass, or return from an
+/// idle wait, which sleeps polled on this thread compare their deadlines with.
 #[inline]
 pub fn set_turn(now: Instant) {
     TURN.set(Some(now));
@@ -878,8 +895,14 @@ fn release(waker: Option<Waker>) {
 
 /// Ownership held by a sleep between polls.
 enum State {
-    /// Sleep that has not needed a registration yet, with its deadline.
-    Unregistered(Instant),
+    /// Sleep that has not needed a registration yet.
+    Unregistered {
+        /// When the sleep completes.
+        deadline: Instant,
+        /// When the sleep was created, kept only by a sleep of at least
+        /// [`UNCHECKED_SLEEP`], whose first poll may register unchecked.
+        created: Option<Instant>,
+    },
     /// Registration in the timers of the worker of the first pending poll.
     Registered(Sleeper),
     /// Immediate or completed sleep, requiring no worker access.
@@ -900,8 +923,13 @@ impl Sleep {
         if duration.is_zero() {
             return Self { state: State::Done };
         }
+        let created = Instant::now();
+        let duration = duration.min(MAX_TIMEOUT);
         Self {
-            state: State::Unregistered(Instant::now() + duration.min(MAX_TIMEOUT)),
+            state: State::Unregistered {
+                deadline: created + duration,
+                created: (duration >= UNCHECKED_SLEEP).then_some(created),
+            },
         }
     }
 
@@ -913,6 +941,15 @@ impl Sleep {
             .unwrap_or_default();
 
         Self::new(duration)
+    }
+
+    /// Whether the first poll of a sleep may take its deadline to be ahead
+    /// without reading the clock. It may if the sleep kept `created`, its
+    /// creation time, and this thread's latest worker service time is not
+    /// later.
+    #[inline]
+    fn unchecked(created: Option<Instant>) -> bool {
+        created.is_some_and(|created| TURN.get().is_some_and(|turn| turn <= created))
     }
 }
 
@@ -939,20 +976,21 @@ impl Future for Sleep {
                 this.state = State::Done;
                 Poll::Ready(())
             }
-            State::Unregistered(deadline) => {
-                let deadline = *deadline;
+            State::Unregistered { deadline, created } => {
+                let (deadline, created) = (*deadline, *created);
 
                 // The latest service time on this thread never runs ahead of
                 // the clock, so a deadline at or before it has passed, and the
-                // sleep needs neither a worker nor a registration.
-                if reached(deadline) {
+                // sleep needs neither a worker nor a registration. Otherwise
+                // the clock decides, unless the sleep may register unchecked.
+                if reached(deadline) || (!Self::unchecked(created) && deadline <= Instant::now()) {
                     this.state = State::Done;
                     return Poll::Ready(());
                 }
 
-                // A running worker registers without reading the clock. A
-                // deadline that passed after its service time fires at the
-                // worker's next service pass that reaches its firing time.
+                // A running worker registers the sleep. An unchecked deadline
+                // that has passed fires at the worker's next service pass that
+                // reaches its firing time, or at a peer's rescue.
                 let owner = match Local::current() {
                     Some(owner) if !owner.borrow().closing => owner,
                     owner => {
@@ -1028,11 +1066,25 @@ pub mod tests {
     };
 
     impl Sleep {
-        /// Sleep until one exact monotonic deadline.
-        const fn at(deadline: Instant) -> Self {
+        /// Sleep until one exact monotonic deadline, created now.
+        fn at(deadline: Instant) -> Self {
+            let created = Instant::now();
+            let duration = deadline.saturating_duration_since(created);
             Self {
-                state: State::Unregistered(deadline),
+                state: State::Unregistered {
+                    deadline,
+                    created: (duration >= UNCHECKED_SLEEP).then_some(created),
+                },
             }
+        }
+
+        /// The deadline of a sleep that has not registered, and its creation
+        /// time if it kept one.
+        fn unregistered(&self) -> (Instant, Option<Instant>) {
+            let State::Unregistered { deadline, created } = self.state else {
+                panic!("sleep is not unregistered");
+            };
+            (deadline, created)
         }
     }
 
@@ -1221,9 +1273,7 @@ pub mod tests {
         for mut sleep in [
             Sleep::new(Duration::ZERO),
             Sleep::until(SystemTime::UNIX_EPOCH),
-            Sleep {
-                state: State::Unregistered(Instant::now()),
-            },
+            Sleep::at(Instant::now()),
         ] {
             assert!(sleep.poll_unpin(&mut cx).is_ready());
             assert!(matches!(sleep.state, State::Done));
@@ -1253,9 +1303,8 @@ pub mod tests {
             let before = Instant::now();
             let sleep = Sleep::new(duration);
             let after = Instant::now();
-            let State::Unregistered(deadline) = sleep.state else {
-                panic!("positive sleep must retain a deadline");
-            };
+            let (deadline, created) = sleep.unregistered();
+            assert!(created.is_some_and(|created| created >= before && created <= after));
             assert!(deadline >= before + expected);
             assert!(deadline <= after + expected);
 
@@ -2645,19 +2694,172 @@ pub mod tests {
         });
     }
 
+    /// Spin until the clock reaches `deadline`, without yielding to the
+    /// worker.
+    fn spin_until(deadline: Instant) {
+        while Instant::now() < deadline {
+            std::hint::spin_loop();
+        }
+    }
+
     #[test]
-    fn test_first_poll_compares_with_the_service_time() {
+    fn test_first_poll_reads_the_clock_for_a_short_sleep() {
         Runner::default().start(|context| async move {
             context
                 .spawn(|_| async {
-                    // A deadline after the worker's latest service time
-                    // passes during synchronous work before the first poll.
-                    let deadline = Instant::now() + Duration::from_millis(1);
-                    let mut sleep = Sleep::at(deadline);
-                    assert!(deadline > turn().unwrap());
-                    while Instant::now() < deadline {
-                        std::hint::spin_loop();
+                    // The worker has polled for longer than the unchecked
+                    // bound since its latest service pass.
+                    let served = turn().expect("a worker has a service time");
+                    spin_until(served + 2 * UNCHECKED_SLEEP);
+
+                    // A sleep shorter than the bound passes its deadline
+                    // during synchronous work, with no service pass since.
+                    let mut sleep = Sleep::new(UNCHECKED_SLEEP / 10);
+                    let (deadline, created) = sleep.unregistered();
+                    assert!(created.is_none());
+                    spin_until(deadline);
+                    assert_eq!(turn(), Some(served));
+
+                    // Its first poll reads the clock and completes it.
+                    assert!(poll!(&mut sleep).is_ready());
+                    assert!(matches!(sleep.state, State::Done));
+                })
+                .await
+                .unwrap();
+        });
+    }
+
+    #[test]
+    fn test_first_poll_reads_the_clock_after_a_service_pass() {
+        Runner::default().start(|context| async move {
+            context
+                .spawn(|_| async {
+                    // A sleep at least as long as the unchecked bound, which a
+                    // service pass follows before its first poll.
+                    let mut sleep = Sleep::new(5 * UNCHECKED_SLEEP);
+                    let (deadline, created) = sleep.unregistered();
+                    assert!(Sleep::unchecked(created));
+                    while turn().unwrap() <= created.unwrap() {
+                        reschedule().await;
                     }
+                    assert!(!Sleep::unchecked(created));
+
+                    // Its deadline passes during synchronous work, after the
+                    // worker's latest service time unless the host stalled.
+                    spin_until(deadline);
+
+                    // Its first poll reads the clock and completes it.
+                    assert!(poll!(&mut sleep).is_ready());
+                    assert!(matches!(sleep.state, State::Done));
+                })
+                .await
+                .unwrap();
+        });
+    }
+
+    #[test]
+    fn test_first_poll_on_a_new_worker_completes_a_passed_deadline() {
+        Runner::default().start(|context| async move {
+            // A sleep at least as long as the unchecked bound passes its
+            // deadline before a new worker polls it for the first time.
+            let mut sleep = Sleep::new(2 * UNCHECKED_SLEEP);
+            let (deadline, _) = sleep.unregistered();
+            spin_until(deadline);
+            let (started, ready) = context
+                .dedicated()
+                .spawn(move |_| async move {
+                    // The worker polls its root before its first service pass,
+                    // with the time of its start as its service time.
+                    (turn(), poll!(&mut sleep).is_ready())
+                })
+                .await
+                .unwrap();
+            assert!(started.is_some_and(|started| started >= deadline));
+            assert!(ready);
+        });
+    }
+
+    #[test]
+    fn test_first_poll_in_a_later_runner_completes_a_passed_deadline() {
+        // A runner leaves its latest service time on this thread.
+        Runner::default().start(|_| reschedule());
+        let left = turn().expect("the runner ran no service pass");
+
+        // A sleep at least as long as the unchecked bound, created after that
+        // time, passes its deadline before the root of a second runner on this
+        // thread polls it, ahead of that runner's first service pass.
+        let mut sleep = Sleep::new(2 * UNCHECKED_SLEEP);
+        let (deadline, created) = sleep.unregistered();
+        assert!(created.is_some_and(|created| left <= created));
+        spin_until(deadline);
+        let ready = Runner::default().start(move |_| async move { poll!(&mut sleep).is_ready() });
+        assert!(ready);
+    }
+
+    #[test]
+    fn test_first_poll_after_an_idle_wait_completes_a_passed_deadline() {
+        let cfg = Config::default().with_worker_threads(2);
+        Runner::new(cfg).start(|context| async move {
+            // A task waits for a sleep, and reports the result of the sleep's
+            // first poll and whether the root's worker made it.
+            let root = thread::current().id();
+            let (waiting, waited) = oneshot::channel();
+            let (sender, receiver) = oneshot::channel::<Sleep>();
+            let (polled, first) = mpsc::channel();
+            let task = context.spawn(move |_| async move {
+                waiting.send(()).unwrap();
+                let mut sleep = receiver.await.unwrap();
+                let ready = poll!(&mut sleep).is_ready();
+                polled
+                    .send((thread::current().id() == root, ready))
+                    .unwrap();
+            });
+            waited.await.unwrap();
+
+            // The root keeps its worker in one poll from here on, so only the
+            // other worker can run the task. That worker finds nothing to do
+            // meanwhile, and waits idle.
+            thread::sleep(Duration::from_millis(50));
+
+            // A sleep at least as long as the unchecked bound is created after
+            // the other worker's latest service pass, and passes its deadline
+            // while that worker still waits.
+            let sleep = Sleep::new(2 * UNCHECKED_SLEEP);
+            let (deadline, _) = sleep.unregistered();
+            spin_until(deadline + UNCHECKED_SLEEP);
+
+            // A wake from outside the pool queues the task in the global
+            // queue, which the other worker takes from as soon as it returns
+            // from its wait, before its next service pass.
+            thread::spawn(move || assert!(sender.send(sleep).is_ok()))
+                .join()
+                .unwrap();
+            let (on_root, ready) = first
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the other worker did not poll the task");
+            assert!(!on_root);
+            assert!(
+                ready,
+                "a first poll after an idle wait missed a passed deadline"
+            );
+            task.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_unchecked_first_poll_registers_without_reading_the_clock() {
+        Runner::default().start(|context| async move {
+            context
+                .spawn(|_| async {
+                    // A sleep as long as the unchecked bound, created after
+                    // the worker's latest service time, passes its deadline
+                    // during synchronous work as long as itself.
+                    let served = turn().expect("a worker has a service time");
+                    let mut sleep = Sleep::new(UNCHECKED_SLEEP);
+                    let (deadline, created) = sleep.unregistered();
+                    assert!(Sleep::unchecked(created));
+                    spin_until(deadline);
+                    assert_eq!(turn(), Some(served));
 
                     // The first poll registers without reading the clock, and
                     // the worker's cached bound covers the registration.
@@ -2684,7 +2886,7 @@ pub mod tests {
 
                     // A deadline that a service pass has reached completes at
                     // the first poll, without registering.
-                    let deadline = Instant::now() + Duration::from_micros(100);
+                    let deadline = Instant::now() + 2 * UNCHECKED_SLEEP;
                     let mut sleep = Sleep::at(deadline);
                     while turn().unwrap() < deadline {
                         reschedule().await;
@@ -2750,7 +2952,7 @@ pub mod tests {
                 .spawn(|_| async {
                     // A sleep registers on its worker, whose service time then
                     // reaches its deadline.
-                    let deadline = Instant::now() + Duration::from_micros(100);
+                    let deadline = Instant::now() + 5 * UNCHECKED_SLEEP;
                     let mut sleep = Sleep::at(deadline);
                     pend(&mut sleep, Waker::noop());
                     let (timers, id) = registration(&sleep);
