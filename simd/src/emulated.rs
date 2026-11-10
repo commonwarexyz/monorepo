@@ -961,8 +961,18 @@ mod test_utils {
             )*};
         }
         lanes!(0 1 2 3);
-        assert!(catch_unwind(AssertUnwindSafe(|| simd.u32_widen_mul_first_lane::<4>(a, lanes))).is_err());
-        assert!(catch_unwind(AssertUnwindSafe(|| simd.u32_widen_mul_second_lane::<4>(a, lanes))).is_err());
+        assert!(
+            catch_unwind(AssertUnwindSafe(
+                || simd.u32_widen_mul_first_lane::<4>(a, lanes)
+            ))
+            .is_err()
+        );
+        assert!(
+            catch_unwind(AssertUnwindSafe(
+                || simd.u32_widen_mul_second_lane::<4>(a, lanes)
+            ))
+            .is_err()
+        );
     }
 }
 
