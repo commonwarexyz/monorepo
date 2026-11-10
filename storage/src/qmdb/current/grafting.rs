@@ -105,11 +105,13 @@ pub fn graftable_chunks<F: Graftable>(ops_leaves: u64, grafting_height: u32) -> 
 }
 
 /// Returns the grafted leaf digest for a bitmap `chunk` and the root of the ops subtree it covers.
-fn grafted_leaf<H: Hasher>(
+fn grafted_leaf_digest<H: Hasher>(
     hasher: &merkle::hasher::Standard<H>,
     chunk: &[u8],
     ops_subtree_root: H::Digest,
 ) -> H::Digest {
+    // An all-zero chunk grafts to the ops subtree root itself (the zero-chunk identity). Any other
+    // chunk grafts to `hash(chunk || ops_subtree_root)`.
     if chunk.iter().all(|&b| b == 0) {
         ops_subtree_root
     } else {
@@ -118,7 +120,7 @@ fn grafted_leaf<H: Hasher>(
 }
 
 /// Compute the grafted leaf digest of each resolved `(chunk_idx, chunk_ops_digest, chunk)` triple.
-pub(super) fn graft_chunk_digests<H: Hasher, S: Strategy, const N: usize>(
+pub(super) fn grafted_leaf_digests<H: Hasher, S: Strategy, const N: usize>(
     strategy: &S,
     inputs: Vec<(usize, H::Digest, [u8; N])>,
 ) -> Vec<(usize, H::Digest)> {
@@ -126,7 +128,7 @@ pub(super) fn graft_chunk_digests<H: Hasher, S: Strategy, const N: usize>(
         inputs,
         || qmdb::hasher::<H>(),
         |h, (chunk_idx, chunk_ops_digest, chunk)| {
-            (chunk_idx, grafted_leaf(h, &chunk, chunk_ops_digest))
+            (chunk_idx, grafted_leaf_digest(h, &chunk, chunk_ops_digest))
         },
     )
 }
@@ -392,7 +394,7 @@ impl<F: Graftable, H: Hasher> HasherTrait<F> for Verifier<'_, F, H> {
                     return ops_subtree_root;
                 };
 
-                grafted_leaf(&self.hasher, self.chunks[local], ops_subtree_root)
+                grafted_leaf_digest(&self.hasher, self.chunks[local], ops_subtree_root)
             }
         }
     }

@@ -855,7 +855,7 @@ where
     strategy
         .clone()
         .spawn(graft_inputs.len(), move |strategy| {
-            let new_leaves = grafting::graft_chunk_digests::<H, _, N>(&strategy, graft_inputs);
+            let new_leaves = grafting::grafted_leaf_digests::<H, _, N>(&strategy, graft_inputs);
             for (chunk_idx, digest) in new_leaves {
                 if chunk_idx < old_grafted_leaves {
                     grafted_batch = grafted_batch
