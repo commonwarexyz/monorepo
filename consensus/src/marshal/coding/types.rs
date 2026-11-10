@@ -33,9 +33,6 @@ use std::{
 /// so a decoder reads the config and the body length from the end. A block that keeps the
 /// defaults codes as its canonical encoding with an empty body.
 ///
-/// The body and tail together must be exactly as long as the canonical encoding, so the coded
-/// payload is bounded by the block's encoded size and the body's length follows from the tail's.
-///
 /// ```text
 /// canonical encoding    [ header ][ count ][ tx ][ tx ] ... [ tx ]
 /// (storage, digest)        ^ carries commitments to the executed state, known only after it exists
@@ -45,6 +42,38 @@ use std::{
 ///                        final before the      final when the block
 ///                        block is sealed       is sealed
 /// ```
+///
+/// # Requirements
+///
+/// The body and tail together must be exactly as long as the canonical encoding. This bounds the
+/// payload by the block's encoded size plus the trailer and lets the streaming encoder derive the
+/// body's length from the tail's.
+///
+/// The body and tail must depend only on the canonical encoding, and [`Self::read_coded`] must
+/// accept no other pair for the block. A node holds a block without its shards after
+/// reconstruction, a certified backfill or a restart. It codes the block again to send it and must
+/// reach the same coding root.
+///
+/// # Verification
+///
+/// A commitment holds the block's digest and the coding root of its payload. A validator checks the
+/// shards it decodes against the root, and the block it reads from them against the digest.
+///
+/// ```text
+/// leader       block --write_body, write_tail--> payload --code--> shards
+///                |                                                   |
+///                v                                                   v
+/// commitment   digest                                           coding root
+///                |                                                   |
+///              checks                                              checks
+///                v                                                   v
+/// validator    block <--------read_coded-------- payload <-decode- shards
+/// ```
+///
+/// A block fetched under a certified commitment is checked against the digest and not the root, so
+/// bytes the digest does not cover are the decoder's to check. When the digest is a hash of the
+/// block's header, the block's decoder must reject transactions that do not match the roots in that
+/// header.
 pub trait CodedLayout: Codec + Sized {
     /// Writes the bytes that are final before the block is sealed (for example its
     /// transactions).
@@ -58,7 +87,9 @@ pub trait CodedLayout: Codec + Sized {
     /// Reads a block from its body and tail.
     ///
     /// It must be the strict inverse of [`Self::write_body`] and [`Self::write_tail`], so every
-    /// block has exactly one accepted `(body, tail)` pair.
+    /// block has exactly one accepted `(body, tail)` pair. It must also reject every block the
+    /// canonical decoder rejects under `cfg`, since storage and backfill read blocks with that
+    /// decoder.
     fn read_coded(body: Bytes, tail: Bytes, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         if !body.is_empty() {
             return Err(CodecError::Invalid("CodedLayout", "unexpected body"));
@@ -1239,6 +1270,151 @@ mod test {
         let at = payload.len() - CODED_TRAILER;
         payload[at..at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(read_coded_payload::<TestBlock>(payload, &()).is_err());
+    }
+
+    /// A block whose digest is the hash of its header. The header commits to the transactions by
+    /// their hash, and the coded layout puts them ahead of it.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct HeaderBlock {
+        parent: Sha256Digest,
+        root: Sha256Digest,
+        txs: Vec<u64>,
+    }
+
+    impl HeaderBlock {
+        fn new(parent: Sha256Digest, txs: Vec<u64>) -> Self {
+            Self {
+                parent,
+                root: Sha256::hash(&[txs.encode().as_ref()]),
+                txs,
+            }
+        }
+    }
+
+    impl Write for HeaderBlock {
+        fn write(&self, buf: &mut impl BufMut) {
+            self.parent.write(buf);
+            self.root.write(buf);
+            self.txs.write(buf);
+        }
+    }
+
+    impl EncodeSize for HeaderBlock {
+        fn encode_size(&self) -> usize {
+            self.parent.encode_size() + self.root.encode_size() + self.txs.encode_size()
+        }
+    }
+
+    impl Read for HeaderBlock {
+        type Cfg = ();
+
+        fn read_cfg(buf: &mut impl commonware_codec::Buf, _: &Self::Cfg) -> Result<Self, Error> {
+            let parent = Sha256Digest::read(buf)?;
+            let root = Sha256Digest::read(buf)?;
+            let txs = Vec::read_cfg(buf, &(RangeCfg::new(..), ()))?;
+            let block = Self::new(parent, txs);
+            if block.root != root {
+                return Err(Error::Invalid(
+                    "HeaderBlock",
+                    "transactions do not match the header",
+                ));
+            }
+            Ok(block)
+        }
+    }
+
+    impl Digestible for HeaderBlock {
+        type Digest = Sha256Digest;
+
+        fn digest(&self) -> Self::Digest {
+            Sha256::hash(&[self.parent.as_ref(), self.root.as_ref()])
+        }
+    }
+
+    impl CodedLayout for HeaderBlock {
+        fn write_body(&self, buf: &mut impl BufMut) {
+            for tx in &self.txs {
+                tx.write(buf);
+            }
+        }
+
+        fn write_tail(&self, buf: &mut impl BufMut) {
+            self.parent.write(buf);
+            self.root.write(buf);
+            self.txs.len().write(buf);
+        }
+
+        fn read_coded(body: Bytes, tail: Bytes, cfg: &Self::Cfg) -> Result<Self, Error> {
+            // The tail followed by the body is the canonical encoding. Its decoder checks the
+            // transactions against the header.
+            let block = Self::decode_cfg([tail.as_ref(), body.as_ref()].concat(), cfg)?;
+
+            // Every cut of the encoding concatenates back to it, so only a body of exactly the
+            // transactions is the layout.
+            if body.len() != block.txs.len() * u64::SIZE {
+                return Err(Error::Invalid(
+                    "HeaderBlock",
+                    "body is not the transactions",
+                ));
+            }
+            Ok(block)
+        }
+    }
+
+    /// A block whose digest covers only its header codes as a reordering of its canonical encoding,
+    /// and no other cut of that encoding reads back. Its decoder rejects transactions the header
+    /// does not commit to, since the digest cannot tell them apart.
+    #[test]
+    fn test_coded_payload_reordered_roundtrip() {
+        let block = HeaderBlock::new(Sha256::hash(&[b"parent"]), vec![1, 2, 3]);
+        let config = coding_config_for_participants(4);
+
+        // The transactions move ahead of the header and the count, and no byte is added.
+        let canonical = block.encode();
+        let (payload, body_len) = coded_payload(&block, config);
+        let layout_len = payload.len() - CODED_TRAILER;
+        assert_eq!(layout_len, canonical.len());
+        assert_eq!(body_len, 3 * u64::SIZE);
+        let header_len = canonical.len() - body_len;
+        assert_eq!(payload[..body_len], canonical[header_len..]);
+        assert_eq!(payload[body_len..layout_len], canonical[..header_len]);
+
+        // A block decoded from the canonical encoding codes to the same payload, and the payload
+        // reads back as the block.
+        let decoded = HeaderBlock::decode_cfg(canonical.clone(), &()).unwrap();
+        assert_eq!(coded_payload(&decoded, config).0, payload);
+        let (read, read_config) = read_coded_payload::<HeaderBlock>(payload, &()).unwrap();
+        assert_eq!(read, block);
+        assert_eq!(read_config, config);
+
+        // The canonical encoding cut anywhere else holds the same bytes, but it must not read back.
+        for split in (0..=canonical.len()).filter(|split| *split != body_len) {
+            let cut = canonical.len() - split;
+            let mut payload = [&canonical[cut..], &canonical[..cut]].concat();
+            write_coded_trailer(split, config, &mut payload);
+            assert!(matches!(
+                read_coded_payload::<HeaderBlock>(payload, &()),
+                Err(Error::Invalid(
+                    "HeaderBlock",
+                    "body is not the transactions"
+                ))
+            ));
+        }
+
+        // Other transactions under the same header keep the digest, and its root rejects them.
+        let forged = HeaderBlock {
+            txs: vec![1, 2, 4],
+            ..block
+        };
+        assert_eq!(forged.digest(), block.digest());
+        let (payload, _) = coded_payload(&forged, config);
+        assert!(matches!(
+            read_coded_payload::<HeaderBlock>(payload, &()),
+            Err(Error::Invalid(
+                "HeaderBlock",
+                "transactions do not match the header"
+            ))
+        ));
     }
 
     #[test]
