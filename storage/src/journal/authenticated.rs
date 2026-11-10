@@ -3057,12 +3057,13 @@ mod tests {
         });
     }
 
-    /// A failed read returns only once the replay has released the journal, so it reopens at once.
+    /// A read that fails while the replay's subtree tasks hold the journal returns only once they
+    /// have released it, so the journal reopens at once.
     #[test_traced]
     fn test_finish_with_failed_read_releases_journal() {
         deterministic::Runner::default().start(|context| async move {
             type F = mmr::Family;
-            drop(create_journal_with_ops::<F>(context.child("initial"), "failed-read", 50).await);
+            drop(create_journal_with_ops::<F>(context.child("initial"), "failed-read", 200).await);
             let recovery = TestJournal::<F>::prepare(
                 context.child("failed"),
                 merkle_config("failed-read"),
@@ -3074,7 +3075,18 @@ mod tests {
             .await
             .unwrap();
             let result: Result<(_, ()), Error<F>> = recovery
-                .finish_with(|_| async { Err(Error::Merkle(merkle::Error::DataCorrupted("read"))) })
+                .finish_with(|journal| async move {
+                    // The caller, this reader and the replay task hold three references. Fail
+                    // only once a subtree task holds one too.
+                    let mut yields = 0;
+                    while Arc::strong_count(&journal) <= 3 {
+                        yields += 1;
+                        assert!(yields < 1_000, "no subtree task ever held the journal");
+                        reschedule().await;
+                    }
+                    drop(journal);
+                    Err(Error::Merkle(merkle::Error::DataCorrupted("read")))
+                })
                 .await;
             assert!(matches!(
                 result,

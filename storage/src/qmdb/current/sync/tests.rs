@@ -928,8 +928,8 @@ fn test_current_sync_interrupted_between_writes_reopens_at_target() {
         .unwrap();
         assert_eq!(SyncDatabase::ops_root(&db), target.root);
 
-        // Persist only the first of the two writes, then stop. The local frontier keeps its
-        // anchors, which describe operations the sync did not change.
+        // Persist only the first of the two writes, then stop. Building the database already
+        // dropped the local anchors.
         drop(db.reset_metadata().await.unwrap());
 
         // The database reopens at the target. The frontier is still the local one, so the
