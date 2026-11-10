@@ -39,7 +39,7 @@ use super::{
     MAX_LANES,
     arithmetic::{Field, TIGHT, unroll},
     fp::{self, BYTES as FP_BYTES, WORDS},
-    fp2::{BYTES as FP2_BYTES, Fp2, encode},
+    fp2::{self, BYTES as FP2_BYTES, Fp2, encode},
     fp6::{self, BYTES as FP6_BYTES, Fp6},
 };
 use commonware_simd::Simd;
@@ -734,19 +734,16 @@ fn doubled<S: Simd, F: Field<S>>(simd: S, a: Fp2<F>) -> Fp2<F> {
 #[inline(always)]
 fn acc<S: Simd, F: Field<S>>(
     simd: S,
-    sum: super::fp2::Product<F, S>,
+    sum: fp2::Product<F, S>,
     x: Fp2<F>,
     y: Fp2<F>,
-) -> super::fp2::Product<F, S> {
+) -> fp2::Product<F, S> {
     Fp2::<F>::accumulate_product(simd, sum, x, y)
 }
 
 /// Returns `3 part`, accumulated.
 #[inline(always)]
-fn tripled<S: Simd, F: Field<S>>(
-    simd: S,
-    part: super::fp2::Product<F, S>,
-) -> super::fp2::Product<F, S> {
+fn tripled<S: Simd, F: Field<S>>(simd: S, part: fp2::Product<F, S>) -> fp2::Product<F, S> {
     Fp2::<F>::accumulate(simd, part, Fp2::<F>::accumulate(simd, part, part))
 }
 
@@ -761,7 +758,7 @@ fn cyclotomic_real<S: Simd, F: Field<S>>(
     x: Fp2<F>,
     y: Fp2<F>,
     c: Fp2<F>,
-) -> super::fp2::Product<F, S> {
+) -> fp2::Product<F, S> {
     let square = x.square_product::<{ BOUND + 1 }, S>(simd);
     let sum = acc(simd, square, nonresidue::<{ BOUND + 1 }, S, F>(simd, y), y);
     let negated = doubled(simd, c).neg::<{ 2 * BOUND + 1 }, S>(simd);
@@ -776,7 +773,7 @@ fn cyclotomic_imaginary<S: Simd, F: Field<S>>(
     x2: Fp2<F>,
     y: Fp2<F>,
     c: Fp2<F>,
-) -> super::fp2::Product<F, S> {
+) -> fp2::Product<F, S> {
     let product = x2.product(simd, y);
     Fp2::<F>::accumulate_lift(simd, tripled::<S, F>(simd, product), doubled(simd, c))
 }
@@ -788,7 +785,7 @@ fn square_pair<S: Simd, F: Field<S>>(
     simd: S,
     x: Fp2<F>,
     y: Fp2<F>,
-) -> (super::fp2::Product<F, S>, super::fp2::Product<F, S>) {
+) -> (fp2::Product<F, S>, fp2::Product<F, S>) {
     let xx = x.square_product::<{ BOUND + 1 }, S>(simd);
     let yy = y.square_product::<{ BOUND + 1 }, S>(simd);
     let sum = x.add(simd, y).carry(simd);
@@ -807,9 +804,9 @@ fn square_pair<S: Simd, F: Field<S>>(
 #[cfg_attr(not(debug_assertions), inline(always))]
 fn three_times<S: Simd, F: Field<S>, const ADD: bool>(
     simd: S,
-    part: super::fp2::Product<F, S>,
+    part: fp2::Product<F, S>,
     a: Fp2<F>,
-) -> super::fp2::Product<F, S> {
+) -> fp2::Product<F, S> {
     let tripled = tripled::<S, F>(simd, part);
     let doubled = a.double(simd).lift(simd);
     if ADD {
