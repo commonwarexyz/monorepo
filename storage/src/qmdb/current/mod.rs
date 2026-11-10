@@ -2689,6 +2689,60 @@ pub mod tests {
         });
     }
 
+    /// A restart bounded below a grafted anchor drops it, so a history that diverges after the
+    /// bound and moves its floor past that anchor's boundary reopens at its own root.
+    #[test_traced("INFO")]
+    fn test_current_bounded_restart_drops_later_grafted_anchors() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let partition = "current-bounded-drops-anchors";
+            let (db, history) = build_generations(&context, partition, 6).await;
+            let last = history.last().unwrap();
+            let db = db.sync().await.unwrap();
+            drop(db);
+
+            // Restart at an earlier retained commit whose floor precedes the anchor.
+            let earlier = history
+                .iter()
+                .find(|generation| generation.floor < last.sync_boundary)
+                .unwrap();
+            let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.child("bounded"),
+                variable_config::<OneCap>(partition),
+                Some(earlier.size),
+            )
+            .await
+            .unwrap();
+            assert_eq!(db.root(), earlier.root);
+
+            // Write other values until the floor passes the anchor's boundary, committing without
+            // a sync so that no newer anchor is recorded.
+            let mut generation = 100u64;
+            while db.inactivity_floor() < last.sync_boundary {
+                assert!(generation < 120, "the floor stopped moving");
+                db = commit_writes_with_metadata(
+                    db,
+                    (0..384).map(|i| (key(i), Some(val(generation * 1_000 + i)))),
+                    None,
+                )
+                .await;
+                generation += 1;
+            }
+            let root = db.root();
+            drop(db);
+
+            let db: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.child("reopen"),
+                variable_config::<OneCap>(partition),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(db.root(), root);
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// A grafted anchor whose chunk count is a valid location but overflows the operations it
     /// stands for is reported as corruption.
     #[test_traced("INFO")]

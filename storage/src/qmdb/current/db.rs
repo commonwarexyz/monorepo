@@ -255,6 +255,8 @@ pub struct Db<
     /// Persists:
     /// - The number of pruned bitmap chunks at key [PRUNED_CHUNKS_PREFIX]
     /// - The grafted tree pinned nodes at key [NODE_PREFIX]
+    /// - The anchors `sync` records, each keyed by its chunk count under [ANCHOR_PREFIX] and
+    ///   holding the grafted tree's pinned nodes there
     pub(super) metadata: Metadata<E, U64, Vec<u8>>,
 
     /// Strategy used to parallelize batch operations across the ops tree, the grafted tree,
@@ -1269,16 +1271,6 @@ pub(super) async fn build_grafted_tree<
     Ok((grafted_tree, graft_roots))
 }
 
-/// Load the metadata and recover the pruning state persisted by previous runs.
-///
-/// The metadata store holds two kinds of entries (keyed by prefix):
-/// - **Pruned chunks count** ([PRUNED_CHUNKS_PREFIX]): the number of bitmap chunks that have been
-///   pruned. This tells us where the active portion of the bitmap begins.
-/// - **Pinned node digests** ([NODE_PREFIX]): grafted tree digests at peak positions whose
-///   underlying data has been pruned. These are needed to recompute the grafted tree root without
-///   the pruned chunks.
-///
-/// Returns `(metadata_handle, pruned_chunks, pinned_node_digests)`.
 /// A chunk count recorded in the grafted metadata, with the grafted tree's pinned digests there.
 pub(super) type GraftedBoundary<D> = (usize, Vec<D>);
 

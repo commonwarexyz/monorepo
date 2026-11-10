@@ -7,9 +7,11 @@
 //!
 //! # Persistence
 //!
-//! Only the operations and the frontier are durable. The frontier is one metadata record holding
-//! the pruning boundary and the digests pinned there. Startup replays the retained operations to
-//! rebuild the Merkle digests kept in memory.
+//! Only the operations and the frontier are durable. The frontier is a metadata store holding the
+//! pruning boundary and the digests pinned there, and up to four anchors, each a later location
+//! with its own pinned digests. Startup replays the retained operations from the boundary, or from
+//! the newest anchor at or before its limit, to rebuild the Merkle digests kept in memory.
+//! Operations before that anchor stay readable but cannot be proven until a prune passes it.
 //!
 //! The frontier's boundary is also the earliest readable item. Older bytes retained in a backing
 //! blob are outside the authenticated journal's range.
@@ -18,8 +20,9 @@
 //! needed from the operations in its aligned region of leaves.
 //!
 //! A prune commits the operations, writes the frontier at the new boundary, then deletes
-//! operation blobs. A state sync writes its boundary only after its root is verified, and deletes
-//! the operations before it after that. Startup finishes a deletion that a crash interrupted.
+//! operation blobs. A state sync drops the anchors when it builds the journal, writes its boundary
+//! only after its root is verified, and deletes the operations before it after that. Startup
+//! finishes a deletion that a crash interrupted.
 //!
 //! # Ownership
 //!
