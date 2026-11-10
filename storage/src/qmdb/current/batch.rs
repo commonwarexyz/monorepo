@@ -1391,6 +1391,15 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
+    /// Create a new speculative batch of operations with this database as its parent.
+    pub fn new_batch(&self) -> UnmerkleizedBatch<F, H, U, N, S> {
+        UnmerkleizedBatch::new(
+            self.any.new_batch(),
+            self.grafted_snapshot(),
+            BitmapBatch::Base(Arc::clone(&self.any.bitmap)),
+        )
+    }
+
     /// Create a [`MerkleizedBatch`] with no operations at the DB's current state.
     ///
     /// Once the DB moves to another state, reads through it return [`Error::StaleRead`] and

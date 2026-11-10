@@ -488,11 +488,6 @@ where
         }
     }
 
-    /// Create a new speculative batch of operations with this database as its parent.
-    pub fn new_batch(&self) -> batch::UnmerkleizedBatch<F, H, V, S> {
-        batch::UnmerkleizedBatch::new(self)
-    }
-
     /// Check that `batch` can be applied to the database in its current state, without
     /// applying it.
     ///

@@ -631,6 +631,11 @@ where
     T: Translator,
     S: Strategy,
 {
+    /// Create a new speculative batch of operations with this database as its parent.
+    pub fn new_batch(&self) -> UnmerkleizedBatch<F, H, K, V, S> {
+        UnmerkleizedBatch::new(self)
+    }
+
     /// Create an initial [`MerkleizedBatch`] from the DB's current state.
     pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, K, V, S>> {
         Arc::new(MerkleizedBatch {
