@@ -210,25 +210,24 @@ const WIDE_BIAS_LOW: u64 = SUB_TERMS * MASK;
 /// A product of residues `x * s` and `y * s` of integers `x` and `y` carries the factor `s^2`,
 /// so the residue of `p^2` at that scale is the square of [`ENCODED_P`]. The word covers the high
 /// accumulator of a subtrahend of [`SUB_TERMS`] terms and adds less than `(SUB_TERMS + 1) q`.
-const WIDE_BIAS_HIGH: [[u64; MODULI]; 2] = {
-    let moduli = [M.moduli, N.moduli];
-    let inverses = [M.inverse, N.inverse];
-    let mut bias = [[0; MODULI]; 2];
-    let mut half = 0;
-    while half < 2 {
-        let mut i = 0;
-        while i < MODULI {
-            let q = moduli[half][i];
-            let p = ENCODED_P[half][i] % q;
-            let target = mul_mod(SUB_BIAS % q, mul_mod(p, p, q), q);
-            let high = (target + q - WIDE_BIAS_LOW % q) % q;
-            bias[half][i] = SUB_TERMS * q + mul_mod(high, radix_inverse(q, inverses[half][i]), q);
-            i += 1;
-        }
-        half += 1;
+const WIDE_BIAS_HIGH: [[u64; MODULI]; 2] = [
+    wide_bias_high_inner(&M, &ENCODED_P[0]),
+    wide_bias_high_inner(&N, &ENCODED_P[1]),
+];
+
+/// Returns the high words of [`WIDE_BIAS_HIGH`] for one basis, given its residues of `p`.
+const fn wide_bias_high_inner(basis: &Basis, encoded_p: &[u64; MODULI]) -> [u64; MODULI] {
+    let mut bias = [0; MODULI];
+    let mut i = 0;
+    while i < MODULI {
+        let (q, p) = (basis.moduli[i], encoded_p[i]);
+        let target = mul_mod(SUB_BIAS % q, mul_mod(p, p, q), q);
+        let high = (target + q - WIDE_BIAS_LOW % q) % q;
+        bias[i] = SUB_TERMS * q + mul_mod(high, radix_inverse(q, basis.inverse[i]), q);
+        i += 1;
     }
     bias
-};
+}
 
 /// Residues below each modulus of the integer `M mod p`, which represents one and is below `p`.
 ///
@@ -262,17 +261,20 @@ const ONE: [u64; RESIDUES] = {
 /// Subtracting residues at most `2q` from these leaves residues below `3q` that represent
 /// `k * p` minus the subtrahend's integer.
 const fn bias(k: u64) -> [[u64; MODULI]; 2] {
-    let mut bias = [TWICE_M, TWICE_N];
-    let moduli = [M.moduli, N.moduli];
-    let mut half = 0;
-    while half < 2 {
-        let mut i = 0;
-        while i < MODULI {
-            let residue = ENCODED_P[half][i] as u128 * k as u128;
-            bias[half][i] += (residue % moduli[half][i] as u128) as u64;
-            i += 1;
-        }
-        half += 1;
+    [
+        bias_inner(&M, &ENCODED_P[0], k),
+        bias_inner(&N, &ENCODED_P[1], k),
+    ]
+}
+
+/// Returns [`bias`] for one basis, given its residues of `p`.
+const fn bias_inner(basis: &Basis, encoded_p: &[u64; MODULI], k: u64) -> [u64; MODULI] {
+    let mut bias = [0; MODULI];
+    let mut i = 0;
+    while i < MODULI {
+        let q = basis.moduli[i];
+        bias[i] = 2 * q + mul_mod(encoded_p[i], k, q);
+        i += 1;
     }
     bias
 }
