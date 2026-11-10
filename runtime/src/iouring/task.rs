@@ -1048,6 +1048,13 @@ unsafe fn waker_drop(ptr: *const ()) {
     drop(unsafe { task(ptr) });
 }
 
+thread_local! {
+    /// The data and vtable of the waker that this thread's worker polls its
+    /// root with, `None` while no worker drives a root on this thread.
+    static ROOT: std::cell::Cell<Option<(*const (), &'static RawWakerVTable)>> =
+        const { std::cell::Cell::new(None) };
+}
+
 /// Waker for the root future, which the worker pins on its stack.
 ///
 /// A wake must run without a `Local` borrow. It borrows the current worker's
@@ -1062,6 +1069,63 @@ impl RootWaker {
     /// Allocate a waker that notifies the root of the worker behind `mailbox`.
     pub fn new(mailbox: Weak<Mailbox>) -> Arc<Self> {
         Arc::new(Self { mailbox })
+    }
+
+    /// Record `waker` as the one that this thread's worker polls its root
+    /// with, until the returned scope drops. `waker` must be built from that
+    /// worker's [`RootWaker`], and the worker must poll its root only inside
+    /// the scope. Panics if this thread already holds a record.
+    pub fn install(waker: &Waker) -> RootScope<'_> {
+        assert!(ROOT.get().is_none(), "nested io_uring root scope");
+        ROOT.set(Some((waker.data(), waker.vtable())));
+        RootScope(PhantomData)
+    }
+
+    /// Whether `waker` is the one that this thread's worker polls its root
+    /// with, which holds only inside that worker's [`RootScope`], for the
+    /// recorded waker and its clones.
+    ///
+    /// Sleeps use this, as they use [`Task::is_waker`], to match a waker's
+    /// identity by its address without the lock that guards their stored
+    /// waker (see [`super::sleep`]). A root waker's data is the shared
+    /// allocation of its [`RootWaker`], which serves one root for life and
+    /// which every clone keeps alive. That allocation is freed only after its
+    /// last reference is released, by a thread that has acquired every
+    /// earlier release, and the allocator orders a free before any later
+    /// allocation at the same address. So another waker can share a consumed
+    /// clone's identity only after everything that preceded the consumption.
+    ///
+    /// A wake of this waker also orders the root poll that it schedules after
+    /// itself, as a task's wake does through its state, although a root has
+    /// none. The scope's thread alone polls the root and marks it ready. A
+    /// wake on that thread sets the root's flag in [`Local`]. A wake on any
+    /// other thread sends [`Message::WakeRoot`] under the lock of the
+    /// worker's mailbox, and the scope's thread takes the message under the
+    /// same lock before it sets the flag. A poll on that thread with this
+    /// waker therefore either follows the take, and observes everything that
+    /// the waking thread wrote before the wake, or precedes it, and the
+    /// worker polls the root again afterwards unless it stops driving the
+    /// root first. A worker that has stopped ignores or discards the wake,
+    /// and its scope has ended, so no poll matches this waker any more.
+    #[inline]
+    pub fn is_current(waker: &Waker) -> bool {
+        ROOT.get().is_some_and(|(data, vtable)| {
+            ptr::eq(waker.data(), data) && ptr::eq(waker.vtable(), vtable)
+        })
+    }
+}
+
+/// The record of a thread's root waker (see [`RootWaker::install`]), cleared
+/// on drop.
+pub struct RootScope<'a>(
+    /// Borrows the waker, so that its allocation outlives the record, and
+    /// keeps the scope on the thread that holds the record.
+    PhantomData<(&'a Waker, *const ())>,
+);
+
+impl Drop for RootScope<'_> {
+    fn drop(&mut self) {
+        ROOT.set(None);
     }
 }
 

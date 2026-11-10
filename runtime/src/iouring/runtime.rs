@@ -2181,6 +2181,12 @@ impl Worker {
         // with a time that an earlier worker left on this thread.
         Sleep::set_turn(Instant::now());
 
+        // A sleep polled with the root's waker on this thread may skip its
+        // timers' lock, as with a task's waker (see [`super::sleep`]). The
+        // record ends with this loop, on return or unwind, since only this
+        // loop polls the root for the wakes that such a poll relies on.
+        let _root = RootWaker::install(root_waker);
+
         loop {
             if self.panics.first.is_some() {
                 return None;
