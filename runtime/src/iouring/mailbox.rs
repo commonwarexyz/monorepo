@@ -12,8 +12,9 @@
 //! for pool claims and permit grants, which carry no message. So the mailbox
 //! keeps a mail flag beside the word, set by the send that starts a batch and
 //! cleared by the take or close that empties the inbox, both under the lock.
-//! The worker checks the flag through its [`Parker`] without locking and takes
-//! only when it is set, so a notification without mail costs no lock.
+//! The worker checks the flag through its [`Parker`](super::park::Parker)
+//! without locking and takes only when it is set, so a notification without
+//! mail costs no lock.
 //!
 //! A relaxed load of the flag suffices once the worker has observed the word.
 //! The send stores the flag before it unlocks and notifies with release
@@ -30,17 +31,12 @@
 //! reads the flag again after it applies messages and blocks only while the
 //! flag is clear.
 //!
-//! [`Mailbox::new`] returns the word's only [`Parker`] beside the mailbox, for
-//! the worker that drains it. The pool's idle state unparks a selected worker
-//! through its mailbox's [`Unparker`], without a message. See [`super::idle`]
-//! for parking order.
+//! A mailbox notifies its worker through an [`Unparker`] of the worker's word,
+//! whose [`Parker`](super::park::Parker) the worker owns. The pool's idle state
+//! unparks a selected worker through the same unparker, without a message. See
+//! [`super::idle`] for parking order.
 
-use super::{
-    park::{Parker, Unparker},
-    request::RequestOutput,
-    sleep::TimerId,
-    waiter::WaiterId,
-};
+use super::{park::Unparker, request::RequestOutput, sleep::TimerId, waiter::WaiterId};
 use crate::Error;
 use commonware_utils::channel::oneshot;
 use std::mem;
@@ -99,26 +95,20 @@ pub struct Mailbox {
     pub unparker: Unparker,
     /// Pending messages. No user code runs under this mutex.
     inbox: Mutex<Inbox>,
-    /// Calls to [`Self::take`], each of which locks the inbox.
-    #[cfg(test)]
-    takes: std::sync::atomic::AtomicUsize,
 }
 
 impl Mailbox {
-    /// Create an open mailbox with a fresh word, and return it with the word's
-    /// only parker, which belongs to the worker that drains the mailbox.
-    pub fn new() -> (Self, Parker) {
-        let parker = Parker::new();
-        let mailbox = Self {
-            unparker: parker.unparker(),
+    /// Create an open mailbox that notifies its worker through `unparker`.
+    // Loom's mutex has no const constructor.
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn new(unparker: Unparker) -> Self {
+        Self {
+            unparker,
             inbox: Mutex::new(Inbox {
                 open: true,
                 messages: Vec::new(),
             }),
-            #[cfg(test)]
-            takes: std::sync::atomic::AtomicUsize::new(0),
-        };
-        (mailbox, parker)
+        }
     }
 
     /// Lock the inbox.
@@ -169,9 +159,6 @@ impl Mailbox {
             scratch.is_empty(),
             "mailbox scratch must be drained before transfer"
         );
-        #[cfg(test)]
-        self.takes
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let mut inbox = self.lock();
         if inbox.messages.is_empty() {
@@ -197,19 +184,16 @@ impl Mailbox {
     pub fn is_open(&self) -> bool {
         self.lock().open
     }
-
-    /// Calls to [`Self::take`] so far.
-    #[cfg(test)]
-    pub fn takes(&self) -> usize {
-        self.takes.load(std::sync::atomic::Ordering::Relaxed)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::iouring::{
-        park::tests::{has_mail, notifications, wait_until_armed},
+        park::{
+            Parker,
+            tests::{has_mail, notifications, wait_until_armed},
+        },
         slab::Id,
     };
     use futures::task::{ArcWake, waker};
@@ -224,6 +208,14 @@ mod tests {
         thread,
         time::{Duration, Instant},
     };
+
+    impl Mailbox {
+        /// Hold the inbox lock, so that any take, send or close waits until
+        /// the returned guard drops.
+        pub(crate) fn lock_inbox(&self) -> impl Sized + '_ {
+            self.lock()
+        }
+    }
 
     /// Waker state that records a wake and fails if the wake runs under the
     /// inbox lock, since a waker can run user code.
@@ -291,7 +283,7 @@ mod tests {
     #[test]
     fn test_messages_notify_once_per_batch() {
         // A fresh mailbox has no batch, no notification, and no mail.
-        let (mailbox, _parker) = Mailbox::new();
+        let mailbox = Mailbox::new(Parker::new().unparker());
         let mut scratch = Vec::new();
         assert!(mailbox.is_open());
         assert!(!mailbox.take(&mut scratch));
@@ -331,7 +323,8 @@ mod tests {
     #[test]
     fn test_notification_without_message_is_not_mail() {
         // A pool claim or a permit grant unparks the worker without a message.
-        let (mailbox, parker) = Mailbox::new();
+        let parker = Parker::new();
+        let mailbox = Mailbox::new(parker.unparker());
         mailbox.unparker.unpark();
 
         // The word moved, but the worker's parker reports no mail, so the
@@ -349,7 +342,8 @@ mod tests {
     #[test]
     fn test_send_wakes_armed_worker() {
         // The worker parks on its word with a bounded deadline.
-        let (mailbox, parker) = Mailbox::new();
+        let parker = Parker::new();
+        let mailbox = Mailbox::new(parker.unparker());
         let deadline = Instant::now() + Duration::from_secs(10);
         let parked = thread::spawn(move || parker.park(0, Some(deadline)));
 
@@ -367,7 +361,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "mailbox scratch must be drained before transfer")]
     fn test_take_requires_empty_scratch() {
-        let (mailbox, _parker) = Mailbox::new();
+        let mailbox = Mailbox::new(Parker::new().unparker());
         let mut scratch = vec![Message::WakeRoot];
 
         mailbox.take(&mut scratch);
@@ -375,7 +369,7 @@ mod tests {
 
     #[test]
     fn test_close_returns_messages_and_rejects_new_ones() {
-        let mailbox = Arc::new(Mailbox::new().0);
+        let mailbox = Arc::new(Mailbox::new(Parker::new().unparker()));
         let (message, _receiver, reentrant) = forward_message(&mailbox);
         assert!(mailbox.send(message).is_ok());
 
@@ -408,7 +402,7 @@ mod tests {
 
     #[test]
     fn test_send_racing_close_preserves_payload_ownership() {
-        let mailbox = Arc::new(Mailbox::new().0);
+        let mailbox = Arc::new(Mailbox::new(Parker::new().unparker()));
         let gate = Arc::new(Barrier::new(2));
         let (message, _receiver, reentrant) = forward_message(&mailbox);
 

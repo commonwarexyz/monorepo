@@ -1244,7 +1244,7 @@ pub mod tests {
     /// A pool of one worker that never runs, so every wake takes the global
     /// queue path.
     pub fn pool() -> Arc<Pool> {
-        Arc::new(Pool::new(vec![Arc::new(Mailbox::new().0)]))
+        Arc::new(Pool::new(1).0)
     }
 
     impl Ready {
@@ -2002,8 +2002,7 @@ pub mod tests {
 #[cfg(all(test, feature = "loom"))]
 mod loom_tests {
     use super::{
-        AfterPending, AfterPoll, Mailbox, Panics, Pool, REF_ONE, REFS, Ready, Runnable, State,
-        Task, Tasks,
+        AfterPending, AfterPoll, Panics, Pool, REF_ONE, REFS, Ready, Runnable, State, Task, Tasks,
     };
     use crate::iouring::{
         idle::{Park, Searcher},
@@ -2031,13 +2030,8 @@ mod loom_tests {
     /// worker's mailbox. Task headers hold a standard `Weak` to the pool, and
     /// every wake takes the global queue path.
     fn pool(workers: usize) -> (std::sync::Arc<Pool>, Vec<Parker>) {
-        let (mailboxes, parkers) = (0..workers)
-            .map(|_| {
-                let (mailbox, parker) = Mailbox::new();
-                (std::sync::Arc::new(mailbox), parker)
-            })
-            .unzip();
-        (std::sync::Arc::new(Pool::new(mailboxes)), parkers)
+        let (pool, parkers) = Pool::new(workers);
+        (std::sync::Arc::new(pool), parkers)
     }
 
     /// The parkers of a pool of `N` workers, in worker order.

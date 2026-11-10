@@ -33,7 +33,7 @@
 //!   |     |     `-- ready queue, deadlines, cancellations (IDs)
 //!   |     +-- Mailbox (messages and the unparker of the worker's word)
 //!   |     `-- Deferred (callbacks and retired owners)
-//!   +-- parker (the worker's word and mail flag, returned beside its Mailbox)
+//!   +-- parker (the worker's word and mail flag)
 //!   +-- inbox (batch taken from Mailbox)
 //!   +-- deferred (batch detached from Local)
 //!   `-- panics (first failure retained through cleanup)
@@ -111,9 +111,8 @@
 //!
 //! Before parking, the worker checks readiness again because polls and
 //! callbacks can produce more work. Pool workers coordinate through
-//! [`Searcher`], and every worker waits through the [`Parker`] that
-//! [`Mailbox::new`] returned beside its mailbox. See [`super::idle`] for
-//! parking order.
+//! [`Searcher`], and every worker waits through the [`Parker`] it starts
+//! with. See [`super::idle`] for parking order.
 //!
 //! A held search count suppresses kicks, so a worker returns it before user
 //! code and before another turn without parking. Every drive-loop exit,
@@ -1053,25 +1052,6 @@ impl Role {
     }
 }
 
-/// How a worker thread starts.
-pub enum Start {
-    /// Pool worker at this index, with the parker that [`Mailbox::new`]
-    /// returned beside the pool's mailbox at that index.
-    Pool(u32, Parker),
-    /// A worker with a thread, an io_uring ring, and a mailbox of its own.
-    Dedicated,
-}
-
-impl Start {
-    /// The role of the worker this starts.
-    const fn role(&self) -> Role {
-        match self {
-            Self::Pool(index, _) => Role::Pool(*index),
-            Self::Dedicated => Role::Dedicated,
-        }
-    }
-}
-
 /// A pool worker's seat in the pool: its index, the task set whose tasks it
 /// polls, and its run queue. Dedicated workers have no seat.
 struct Seat {
@@ -1119,36 +1099,33 @@ pub struct Local {
 
 impl Local {
     /// Construct an io_uring ring on the thread that will own all its
-    /// submissions. A pool worker uses the mailbox the pool created for it,
-    /// with the parker it was started with, and takes the owner's end of its
-    /// run queue. It panics if its index is out of range, if the parker
-    /// belongs to another word, or if that end was already taken. A dedicated
-    /// worker creates its own mailbox and has no run queue. An I/O error at
-    /// startup returns before the run queue's owner is taken.
-    fn new(shared: Arc<Shared>, start: Start) -> std::io::Result<(Self, Parker)> {
+    /// submissions, for a worker that waits through `parker`. A pool worker
+    /// uses the mailbox the pool created for its word and takes the owner's
+    /// end of its run queue. It panics if its index is out of range, if
+    /// `parker` is not the parker the pool created for it, or if that end was
+    /// already taken. A dedicated worker creates a mailbox for its word and
+    /// has no run queue. An I/O error at startup returns before the run
+    /// queue's owner is taken.
+    fn new(shared: Arc<Shared>, role: Role, parker: &Parker) -> std::io::Result<Self> {
         #[cfg(test)]
         tests::before_startup(&shared.workers)?;
 
-        let role = start.role();
-        let (mailbox, parker) = match start {
-            Start::Pool(index, parker) => {
+        let mailbox = match role {
+            Role::Pool(index) => {
                 let mailbox = shared.pool.mailbox(index).clone();
                 assert!(
-                    mailbox.unparker.unparks(&parker),
-                    "a pool worker must start with the parker of its mailbox"
+                    mailbox.unparker.unparks(parker),
+                    "a pool worker must start with the parker the pool created for it"
                 );
-                (mailbox, parker)
+                mailbox
             }
-            Start::Dedicated => {
-                let (mailbox, parker) = Mailbox::new();
-                (Arc::new(mailbox), parker)
-            }
+            Role::Dedicated => Arc::new(Mailbox::new(parker.unparker())),
         };
         let now = Instant::now();
         let driver = Driver::new(
             &shared.cfg.ring_config,
             shared.cfg.max_timeout(),
-            mailbox.unparker.clone(),
+            parker.unparker(),
             now,
         )?;
 
@@ -1174,7 +1151,7 @@ impl Local {
             shared,
             reported_pending: 0,
         };
-        Ok((local, parker))
+        Ok(local)
     }
 
     /// Return the worker installed on this thread, including during cleanup.
@@ -1588,7 +1565,8 @@ impl Worker {
     /// can cancel accepted tasks and clean up with TLS still installed.
     pub fn run<F, Fut>(
         shared: Arc<Shared>,
-        start: Start,
+        role: Role,
+        parker: Parker,
         build: F,
         service: Option<BoxedTask>,
     ) -> Result<(Self, Option<Fut::Output>), Panic>
@@ -1602,8 +1580,7 @@ impl Worker {
         // a task panic, so the hook reports it exactly once. Returning the
         // payload instead of unwinding drops `build` and `service` outside any
         // unwind, since their destructors may panic.
-        let role = start.role();
-        let (local, parker) = Local::new(shared.clone(), start).map_err(|error| {
+        let local = Local::new(shared.clone(), role, &parker).map_err(|error| {
             catch_unwind(AssertUnwindSafe(|| {
                 panic!(
                     "failed to create native io_uring worker (the runtime targets Linux 7.0 or newer): {error}"
@@ -1660,7 +1637,13 @@ impl Worker {
             // Startup may reject the builder without invoking it. Its captured
             // root keeps the same disposal boundary as an executing spawned task.
             let root = TaskRoot { task: Some(task) };
-            let (mut worker, output) = Self::run(shared.clone(), Start::Dedicated, || root, None)?;
+            let (mut worker, output) = Self::run(
+                shared.clone(),
+                Role::Dedicated,
+                Parker::new(),
+                || root,
+                None,
+            )?;
             worker.cleanup();
             worker.result(output)
         }));
@@ -2412,20 +2395,15 @@ impl crate::Runner for Runner {
 
         // Every pool worker's mailbox exists before any worker starts, so a
         // push can wake any of them from the first spawn on. Each worker
-        // starts with the parker returned beside its mailbox.
-        let (mailboxes, parkers): (Vec<_>, Vec<_>) = (0..self.cfg.worker_threads)
-            .map(|_| {
-                let (mailbox, parker) = Mailbox::new();
-                (Arc::new(mailbox), parker)
-            })
-            .unzip();
-        let workers = mailboxes.len();
+        // starts with the parker the pool created for it.
+        let (pool, parkers) = Pool::new(self.cfg.worker_threads);
+        let workers = pool.workers();
         let mut parkers = parkers.into_iter();
         let parker = parkers.next().expect("the pool must have worker zero");
 
         let shared = Arc::new(Shared {
             cfg: self.cfg,
-            pool: Arc::new(Pool::new(mailboxes)),
+            pool: Arc::new(pool),
             registry,
             metrics,
             pending_operations,
@@ -2460,9 +2438,12 @@ impl crate::Runner for Runner {
         // destroyed.
         let output = Worker::run(
             shared.clone(),
-            Start::Pool(0, parker),
+            Role::Pool(0),
+            parker,
             || {
-                threads.start(&shared, &pool_panicker, parkers.collect());
+                for (index, parker) in (1..).zip(parkers) {
+                    threads.start(&shared, &pool_panicker, index, parker);
+                }
                 let root = tasks.interrupt(f(Context {
                     name: label.name().to_string(),
                     attributes: Vec::new(),
