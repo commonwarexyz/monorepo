@@ -1,10 +1,9 @@
 //! The group G1.
 
 use super::{
-    MSM_BATCH, Scalar,
-    kernel::{
-        Add, Double, Group, Kernel, MAX_COMPONENTS, MAX_LANES, Msm, Multiply, MultiplyEach, Sum,
-    },
+    Scalar, fmt_coordinates,
+    kernel::{Add, Double, Group, Kernel, MAX_COMPONENTS, MAX_LANES, Multiply, MultiplyEach, Sum},
+    msm,
 };
 use crate::core::{
     curve::g1::{Coordinates, GENERATOR, IDENTITY, Point},
@@ -13,7 +12,6 @@ use crate::core::{
         fp::{self, BYTES},
     },
 };
-use commonware_formatting::Hex;
 use commonware_math::algebra::{Additive, CryptoGroup, Object, Space};
 use commonware_parallel::Strategy;
 use commonware_simd::Simd;
@@ -59,12 +57,7 @@ impl Group for G1 {
 
 impl fmt::Debug for G1 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let [x, y, z] = &self.0;
-        f.debug_struct("G1")
-            .field("x", &Hex(x))
-            .field("y", &Hex(y))
-            .field("z", &Hex(z))
-            .finish()
+        fmt_coordinates("G1", &self.0, f)
     }
 }
 
@@ -160,26 +153,9 @@ impl Space<Scalar> for G1 {
     ///
     /// The scalars must be public, as Lagrange coefficients and batch-verification weights are:
     /// the running time and memory accesses depend on them. A sequential strategy runs one kernel
-    /// over all points, and a parallel one splits them into batches of at least 256 points.
+    /// over all points, and a parallel one splits them into batches of a few hundred points.
     fn msm(points: &[Self], scalars: &[Scalar], strategy: &impl Strategy) -> Self {
-        let count = points.len().min(scalars.len());
-        let (points, scalars) = (&points[..count], &scalars[..count]);
-        strategy.run_batches(count, MSM_BATCH, 1, |batches| {
-            batches
-                .map_collect_vec(
-                    |ranges| ranges,
-                    |range| {
-                        Msm {
-                            elements: &points[range.clone()],
-                            scalars: &scalars[range],
-                            plan: None,
-                        }
-                        .dispatch()
-                    },
-                )
-                .iter()
-                .fold(Self::zero(), |sum, batch| sum + batch)
-        })
+        msm(points, scalars, strategy)
     }
 }
 
