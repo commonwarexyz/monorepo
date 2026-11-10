@@ -16,7 +16,8 @@
 //! it in O(1) by clearing its occupancy bit. The bucket keeps its list, so
 //! removals still find their slots, and passes drain it, firing due slots and
 //! refiling the others onto lower levels. The base moves to the detached
-//! bucket's start, so a new insertion lands in that bucket only at its own
+//! bucket's start, so a new insertion never joins a detached bucket above
+//! level zero, and joins a detached level zero bucket only at that bucket's
 //! tick, which is due. A detached bucket drains before any other level
 //! bucket, including the lower buckets its refiles land in, so a detached
 //! bucket of N later slots holds back due slots in other level buckets for
@@ -45,17 +46,22 @@
 //! sleep timers ([`super::sleep::Timers`], 1024 ns ticks) and each
 //! driver's request deadlines ([`super::deadlines::Deadlines`], 2^20 ns ticks)
 //! own an instance. Each owner counts nanoseconds from an [`Instant`] of its
-//! own, its creation, and converts with [`InstantExt`]: an instant before
-//! that origin counts as zero, so a deadline there is due at once, and a
-//! firing time converts back to an instant at or after its deadline.
+//! own, its creation, at which its wheel's base starts, and converts with
+//! [`InstantExt`]: an instant before that origin counts as zero, so a
+//! deadline there is due at once, and a firing time converts back to an
+//! instant at or after its deadline.
 
 use std::time::{Duration, Instant};
 
-/// Budget units per expiry pass, by every owner: one per slot fired, one per
-/// [`REFILES_PER_UNIT`] slots refiled. It bounds the expiry work between two
-/// task polls, so a storm of simultaneous deadlines delays other tasks by
-/// about one budget of wakes or cancellations, and a backlog drains one
-/// budget per pass.
+/// Most budget units per expiry pass of one wheel: one per slot fired, one
+/// per [`REFILES_PER_UNIT`] slots refiled. It bounds the work of one pass, so
+/// a storm of simultaneous deadlines keeps its worker from polling tasks for
+/// about one budget of wakes or cancellations at a time, and a backlog drains
+/// at most one budget per pass. A pool worker gives the pass over its own
+/// sleeps no more units than its run queue has room for (see
+/// [`super::sleep`]). A worker's service runs one pass over its sleeps and
+/// one over its request deadlines, and a pool worker runs one more over each
+/// stalled peer's sleeps that it expires.
 pub const BUDGET: u32 = 256;
 
 /// Refiles that cost one unit of an expiry budget. A refile only moves a slot
@@ -139,7 +145,8 @@ const EMPTY: Bucket = Bucket {
     count: 0,
 };
 
-/// Conversions between instants and a wheel's nanoseconds since an origin.
+/// Conversions between instants and a wheel's nanoseconds since its owner's
+/// origin.
 pub trait InstantExt {
     /// Nanoseconds from `origin` to this instant: zero for an instant before
     /// `origin`, and `u64::MAX` for one more than about 584 years after it.
@@ -180,7 +187,8 @@ pub struct Wheel<const RESOLUTION: u64> {
     len: usize,
     /// Reference tick for placement, never later than a time passed to
     /// [`Self::expire`] or [`Self::new`]. Every slot in a level bucket has a
-    /// tick of at least `base`, and every due slot's is below it.
+    /// tick of at least `base`, and every slot in the due list has a tick
+    /// below it.
     base: u64,
     /// Occupied bucket bitmap per level.
     occupied: [u64; LEVELS],
@@ -552,7 +560,7 @@ impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
             return u64::MAX;
         }
 
-        // Ticks stay below 2^54, and their firing times at most MAX.
+        // Ticks stay below 2^54, so no firing time overflows.
         tick * RESOLUTION
     }
 

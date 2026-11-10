@@ -109,12 +109,12 @@
 //! long poll (see [`super::sleep`]).
 //!
 //! A pool worker takes a share of the global queue every
-//! [`Config::with_global_queue_interval`] takes and whenever its own run
-//! queue is empty. A take returns one runnable to poll next and queues the
-//! rest of its share in the run queue, no more than it has room for and no
-//! more than would fill it to half. A pool worker that finds both queues
-//! empty after a service pass tries to steal before parking, or relies on
-//! workers already holding search counts when the search cap refuses it.
+//! [`Config::with_global_queue_interval`] takes and whenever its own run queue
+//! is empty. Taking a share returns one runnable to poll next and queues the
+//! rest in the run queue, no more than it has room for and no more than would
+//! fill it to half. A pool worker that finds both queues empty after a service
+//! pass tries to steal before parking, or relies on workers already holding
+//! search counts when the search cap refuses it.
 //!
 //! Before parking, the worker checks readiness again because polls and
 //! callbacks can produce more work. Pool workers coordinate through

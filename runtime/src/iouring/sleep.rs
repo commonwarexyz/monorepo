@@ -57,9 +57,11 @@
 //! A pending poll at an unchanged epoch takes no lock if its waker is a
 //! runtime task's waker with the stored waker's identity. Only the sleep
 //! writes its registration's waker, and every other party that ends a waiting
-//! registration (expiry, rescue, closure) advances the timers' epoch inside
-//! its critical section, before it runs the deferred wake that consumes the
-//! stored waker. A sleeper caches the epoch at which it last saw its
+//! registration whose sleep can still poll it (expiry, rescue, closure)
+//! advances the timers' epoch inside its critical section, before it runs the
+//! deferred wake that consumes the stored waker. The owner's removal of a
+//! registration that its sleep dropped or completed early advances nothing
+//! (see below). A sleeper caches the epoch at which it last saw its
 //! registration waiting.
 //!
 //! Matching the stored waker's identity alone is not enough. Once an ending
@@ -105,28 +107,32 @@
 //! A poll that does not return freezes its worker's service, timers included.
 //! A pool worker that is not closing therefore checks its peers' published
 //! bounds in its service pass, at most once per [`RESCUE_INTERVAL`]. It
-//! expires, with a full budget and its own callback batch, the due
+//! expires, with one full budget per peer and its own callback batch, the due
 //! registrations of a peer whose bound is overdue by [`RESCUE_THRESHOLD`] and
 //! whose owner has run no expiry pass for as long, skipping timers whose lock
 //! is held. An owner that is still draining a backlog keeps it, since a
 //! rescuer's wakes join the rescuer's run queue, and a run queue they overflow
 //! moves its newest runnables, such as a task that has just requeued itself,
-//! behind the backlog in the global queue. A parked worker, or one spinning
-//! idle before it parks, runs no service pass and checks nothing, so a frozen
-//! worker's timers wait for some peer's service pass. A dedicated worker's
-//! timers are private, so no peer checks them. The published bound of a
-//! crowded bucket is its start, so a peer also takes up the refiling that an
-//! owner has left for that long, one budget per check.
+//! behind the backlog in the global queue. The published bound of a crowded
+//! bucket is its start, so a peer also takes up the refiling that an owner has
+//! left for that long, one budget per check. A dedicated worker's timers are
+//! private, so no peer checks them.
+//!
+//! A parked worker, or one spinning idle before it parks, runs no service pass
+//! and checks nothing, and its timed wake covers only its own timers and
+//! request deadlines. A frozen worker's timers therefore wait for the next
+//! service pass of some peer, whatever wakes that peer, and while every peer
+//! stays parked, for the frozen poll to return.
 //!
 //! # Drops on the Owner
 //!
 //! The owner's service pass removes the queued registrations before its
 //! expiry, so the owner never fires one. It locks once per [`BUDGET`] of
 //! them, as cleanup does, so no critical section removes more than one
-//! budget. A queued registration keeps its slot until then, unless
-//! the owner registers first: each registration on the owner removes the most
-//! recently queued one in the critical section that it takes anyway, and so
-//! frees that slot for itself. Serial registrations and drops within one task
+//! budget. A queued registration keeps its slot until then, unless the owner
+//! registers first: each registration on the owner removes the most recently
+//! queued one in the critical section that it takes anyway, and so frees that
+//! slot for itself. Serial registrations and drops within one task
 //! poll therefore reuse one slot however many there are. A registration takes
 //! a new slot only when none is free, so the timers' slots stay within the
 //! most registrations that waited at once. Each service pass leaves the queue
@@ -136,7 +142,7 @@
 //!
 //! An identity queued after its registration fired, by an early completion or
 //! by the drop of a sleep whose poll observed the firing and then unwound, is
-//! stale: it no longer matches its slot's generation, so its removal never
+//! stale. It no longer matches its slot's generation, so its removal never
 //! reaches a later registration in that slot. A peer's rescue can also fire a
 //! queued registration first and wake its sleep's waker once, a spurious wake
 //! that the future contract allows, and the removal then finds nothing. No
@@ -153,14 +159,17 @@
 //! bounds early but never late. An early bound costs spurious expiry passes or
 //! lock attempts until expiry has drained the wheel bucket whose minimum was
 //! removed (see [`Wheel`]). A removal that empties the wheel publishes no
-//! bound, and the owner's removal of queued registrations then also clears its
-//! cached bound, so an idle worker takes no timed wake for a cancelled sleep.
-//! A queued registration keeps both bounds until its removal. A registration
-//! that crowds a wheel bucket lowers the owner's cached bound to the bucket's
-//! start, which may have passed, and the published one only to its own firing
-//! time. The owner refiles the bucket from its next pass on, and until that
-//! pass publishes the wheel's bound, peers see no overdue time that it has had
-//! no pass to serve.
+//! bound. When the owner's service pass removes its queued registrations and
+//! that empties the wheel, it also clears the owner's cached bound, so a
+//! worker whose sleeps were all dropped on it parks without a timed wake. A
+//! removal on another thread, or one that leaves other registrations, can
+//! leave the cached bound early, and an idle owner then takes a timed wake at
+//! the removed firing time. A queued registration keeps both bounds until its
+//! removal. A registration that crowds a wheel bucket lowers the owner's
+//! cached bound to the bucket's start, which may have passed, and the
+//! published one only to its own firing time. The owner refiles the bucket
+//! from its next pass on, and until that pass publishes the wheel's bound,
+//! peers see no overdue time that it has had no pass to serve.
 //!
 //! # Closure
 //!
@@ -227,7 +236,9 @@ const RESCUE_THRESHOLD: Duration = Duration::from_millis(1);
 /// pass, so a stalled worker's timers fire within about 1.25 ms of their
 /// deadline, or of the worker's latest expiry pass if that is later, while
 /// some peer runs short turns, and later when every peer's turns are long, the
-/// timers' lock is held, or a backlog needs several budgeted passes.
+/// timers' lock is held, or a backlog needs several budgeted passes. While
+/// every peer is parked, none checks, and the timers wait for a peer's next
+/// wake or for their owner.
 pub const RESCUE_INTERVAL: Duration = Duration::from_micros(250);
 
 /// Capacity that a worker's service pass leaves its emptied queue of dropped
@@ -274,9 +285,11 @@ struct Registrations {
     /// Set once by the owner's cleanup, after which nothing registers and no
     /// identity resolves.
     closed: bool,
-    /// Number of critical sections in which a party other than a sleep ended
-    /// a waiting registration, advanced by [`Timers::end`]. A sleeper caches
-    /// it whenever it sees its registration waiting.
+    /// Number of critical sections in which expiry, rescue or closure ended a
+    /// waiting registration, advanced by [`Timers::end`]. The owner's removal
+    /// of a registration that its sleep dropped or completed early leaves it
+    /// alone, since no sleeper remains to read it for that registration. A
+    /// sleeper caches it whenever it sees its registration waiting.
     epoch: u64,
 }
 
@@ -342,8 +355,10 @@ impl Ending<'_> {
     }
 }
 
-/// One worker's sleep registrations, locked briefly by every access but a
-/// lock-free poll (see the module documentation).
+/// One worker's sleep registrations. Every access to the registrations
+/// locks them briefly. The bound, the pass time and the epoch beside them are
+/// atomics, which a peer's rescue check and a lock-free poll read without the
+/// lock (see the module documentation).
 pub struct Timers {
     /// Registrations and their wheel.
     registrations: CachePadded<Mutex<Registrations>>,
@@ -359,8 +374,8 @@ pub struct Timers {
     /// The registrations' epoch as polls read it without the lock. Stored
     /// only under the lock, by [`Self::end`], before the ended
     /// registrations' wakes run, so a sleeper that saw its registration
-    /// waiting at some epoch and reads the same epoch later knows that it
-    /// still waits.
+    /// waiting at some epoch and reads the same epoch later either still
+    /// waits or is woken afterwards by the ending that its read missed.
     epoch: CachePadded<AtomicU64>,
     /// The instant of the timers' creation, from which their wheel, bound and
     /// expiry times count nanoseconds.
@@ -434,9 +449,10 @@ impl Timers {
 
     /// Run `pass` on `registrations`, which the caller holds locked, with
     /// wakes deferred to `deferred`, and advance the epoch before the lock is
-    /// released if the pass ended any waiting registration. Every party but
-    /// the sleep itself ends a waiting registration only through the
-    /// [`Ending`] of such a pass.
+    /// released if the pass ended any waiting registration. Expiry, rescue
+    /// and closure end waiting registrations only through the [`Ending`] of
+    /// such a pass. Only a sleep itself, or the owner for a sleep dropped or
+    /// completed early on it, removes one any other way.
     fn end(
         &self,
         registrations: &mut Registrations,
@@ -732,10 +748,12 @@ impl Sleeper {
     ///
     /// A poll at an unchanged epoch returns pending without the lock if its
     /// waker matches [`TaskIdentity`], a task waker with the stored waker's
-    /// address. The registration then still waits with an equivalent waker:
-    /// only this sleeper writes its waker, every other ending advances the
-    /// epoch before its wake, and that identity cannot recur before the wake
-    /// (see the module documentation). Any other poll locks.
+    /// address. The registration then still waits with an equivalent waker,
+    /// or an ending that the epoch read missed wakes the stored waker
+    /// afterwards. Only this sleeper writes its waker. Expiry, rescue and
+    /// closure advance the epoch under the lock before their wakes, and the
+    /// stored waker's identity cannot recur before its wake (see the module
+    /// documentation). Any other poll locks.
     fn poll(&mut self, cx: &Context<'_>) -> Poll<Outcome> {
         if Sleep::reached(self.deadline) {
             self.abandon();
@@ -4253,9 +4271,9 @@ mod loom_tests {
     }
 
     /// Continue from `after`, the result of a poll of the model's only task,
-    /// as the pool's only worker does: poll again at once after a wake during
-    /// a poll, and otherwise only a runnable that a wake published to the
-    /// global queue. Returns whether the task completed.
+    /// as the pool's only worker does. That worker polls again at once after a
+    /// wake during a poll, and otherwise only a runnable that a wake published
+    /// to the global queue. Returns whether the task completed.
     fn work(pool: &Pool, set: &Tasks, ready: &mut Ready, mut after: AfterPoll) -> bool {
         loop {
             let runnable = match after {
