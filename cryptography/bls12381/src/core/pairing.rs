@@ -136,8 +136,8 @@ fn shared_miller_loop<S: Simd, F: Field<S>>(simd: S, pairs: &[Pair<F>]) -> Fp12<
     }
     let mut f = Fp12::one(simd);
     // The bits of |z| below the leading one. The first square of one is skipped.
-    for bit in (0..63).rev() {
-        if bit != 62 {
+    for bit in (0..Z.ilog2()).rev() {
+        if bit != Z.ilog2() - 1 {
             f.square(simd);
         }
         for (point, pair) in points.iter_mut().zip(pairs) {
@@ -310,7 +310,7 @@ fn raise_to_half_z<S: Simd, F: Field<S>>(simd: S, a: Fp12<F>) -> Fp12<F> {
     // Square and multiply over the bits of |z| / 2 below its leading one, then conjugate for the
     // sign of z.
     let mut result = a;
-    for bit in (0..62).rev() {
+    for bit in (0..HALF_Z.ilog2()).rev() {
         result.cyclotomic_square(simd);
         if (HALF_Z >> bit) & 1 == 1 {
             result.mul(simd, &a);
