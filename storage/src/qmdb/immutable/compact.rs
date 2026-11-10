@@ -247,7 +247,7 @@ where
     S: Strategy,
     Operation<F, K, V>: EncodeShared,
 {
-    pub(super) fn new<E>(db: &Db<F, E, K, V, H, S>, base: chain::Commitment<F, H::Digest>) -> Self
+    pub(super) fn new<E>(db: &Db<F, E, K, V, H, S>) -> Self
     where
         E: Context,
         Operation<F, K, V>: Read,
@@ -258,7 +258,7 @@ where
             parent: None,
             metadata: None,
             inactivity_floor: db.inactivity_floor_loc,
-            base,
+            base: db.commitment(),
         }
     }
 
@@ -519,7 +519,7 @@ where
 
     /// Create a new speculative batch of operations with this database as its parent.
     pub fn new_batch(&self) -> UnmerkleizedBatch<F, H, K, V, S> {
-        UnmerkleizedBatch::new(self, self.commitment())
+        UnmerkleizedBatch::new(self)
     }
 
     /// Create an owned merkleized batch representing the current applied state.
