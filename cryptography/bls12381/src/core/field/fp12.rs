@@ -169,11 +169,11 @@ impl<F> Fp12<F> {
         let mut coefficients = [[[0; FP6_BYTES]; MAX_LANES]; 2];
         let lanes = elements.len().min(F::LANES);
         for (lane, element) in elements[..lanes].iter().enumerate() {
-            let (c1, c0) = split(element);
+            let [c0, c1] = split(element);
             coefficients[0][lane] = *c0;
             coefficients[1][lane] = *c1;
         }
-        let (fill1, fill0) = split(fill);
+        let [fill0, fill1] = split(fill);
         simd.execute(
             #[inline(always)]
             move |simd: S| Self {
@@ -833,13 +833,11 @@ fn three_times<S: Simd, F: Field<S>, const ADD: bool>(
     }
 }
 
-/// Splits an element's encoding into its `c1` and `c0` encodings.
+/// Splits an element's encoding into its `c0` and `c1` encodings.
 #[inline(always)]
-fn split(element: &[u8; BYTES]) -> (&[u8; FP6_BYTES], &[u8; FP6_BYTES]) {
-    let (c1, c0) = element
-        .split_first_chunk::<FP6_BYTES>()
-        .expect("two coefficients");
-    (c1, c0.try_into().expect("two coefficients"))
+const fn split(element: &[u8; BYTES]) -> [&[u8; FP6_BYTES]; 2] {
+    let (chunks, _) = element.as_chunks::<FP6_BYTES>();
+    [&chunks[1], &chunks[0]]
 }
 
 /// Reference arithmetic on elements with canonical components, by definition, for testing.
