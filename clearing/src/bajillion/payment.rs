@@ -1173,14 +1173,13 @@ mod tests {
             .unwrap();
         assert_eq!(Challenge::decode(valid.encode()).unwrap(), valid);
 
-        // Another epoch's close is never the receipt's.
-        assert!(matches!(
-            valid.verify::<Sha256>(&namespace, &operator, 3, &underpaying.root()),
-            Err(ChallengeError::WrongEpoch {
-                expected: 3,
-                found: 2
-            })
-        ));
+        // Neither an earlier nor a later epoch's close is the receipt's.
+        for other in [0, 1, 3, Epoch::MAX] {
+            assert!(matches!(
+                valid.verify::<Sha256>(&namespace, &operator, other, &underpaying.root()),
+                Err(ChallengeError::WrongEpoch { expected, found: 2 }) if expected == other
+            ));
+        }
 
         // A receipt whose signatures do not verify is refused only once its opening verifies and
         // the close contradicts it.

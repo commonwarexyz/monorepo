@@ -345,10 +345,12 @@ fn payments(input: Payments) {
             |epoch| challenge.verify::<Sha256>(&case.namespace, &case.operator, epoch, &case.root);
         let contradicted = case.posted[sender][receiver] < case.promised[sender][receiver];
         assert_eq!(verify(EPOCH).is_ok(), contradicted);
-        assert!(matches!(
-            verify(EPOCH + 1),
-            Err(ChallengeError::WrongEpoch { .. })
-        ));
+        for other in [EPOCH - 1, EPOCH + 1] {
+            assert!(matches!(
+                verify(other),
+                Err(ChallengeError::WrongEpoch { .. })
+            ));
+        }
     }
 
     // Proofs spliced from the parts of two honest ones verify only as the case holds.
