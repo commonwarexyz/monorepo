@@ -205,10 +205,10 @@ impl<B: Digestible, C: Scheme, H: Hasher> Read for Shard<B, C, H> {
         let commitment = Commitment::<B, C, H>::read(buf)?;
         let index = u16::read(buf)?;
 
-        // A coded payload is the block followed by its coding config. The claimed config is
-        // untrusted until consensus confirms the commitment, so the data width it admits may be
+        // A coded payload is the block's coded layout followed by its trailer. The claimed config
+        // is untrusted until consensus confirms the commitment, so the data width it admits may be
         // the scheme's widest for a payload at this bound.
-        let maximum = max_block_size.saturating_add(CodingConfig::SIZE);
+        let maximum = max_block_size.saturating_add(CODED_TRAILER);
         let inner = C::Shard::read_cfg(buf, &(commitment.config(), maximum))?;
 
         Ok(Self {
@@ -1094,8 +1094,8 @@ mod test {
             RShard::new(commitment, 0, shards[0].clone()).encode()
         };
 
-        // A maximum block and its coding config produce the widest admitted shard.
-        let widest = MAX + CodingConfig::SIZE;
+        // A maximum block and the trailer of its coded payload produce the widest admitted shard.
+        let widest = MAX + CODED_TRAILER;
         assert!(RShard::decode_cfg(encode(widest, CONFIG), &MAX).is_ok());
 
         // One more byte widens the shard past the bound.
@@ -1107,6 +1107,21 @@ mod test {
             extra_shards: NZU16!(2),
         };
         assert!(RShard::decode_cfg(encode(widest, claimed), &MAX).is_err());
+    }
+
+    /// A shard of a block whose encoding is exactly at the bound decodes.
+    #[test]
+    fn test_shard_of_block_at_bound_decodes() {
+        const CONFIG: CodingConfig = CodingConfig {
+            minimum_shards: NZU16!(1),
+            extra_shards: NZU16!(2),
+        };
+
+        let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+        let bound = block.encode_size();
+        let coded = encode_block::<TestBlock, RS, H>(block, CONFIG);
+        let shard = coded.shard(0).unwrap();
+        assert!(RShard::decode_cfg(shard.encode(), &bound).is_ok());
     }
 
     #[test]

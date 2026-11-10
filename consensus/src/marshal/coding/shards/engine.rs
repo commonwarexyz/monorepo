@@ -353,7 +353,7 @@ where
     )
     .map_err(Error::Coding)?;
 
-    // The blob is the block in its coded layout followed by its coding config.
+    // The blob is the block's coded layout followed by its trailer.
     let (inner, config) = read_coded_payload::<B>(blob, cfg)?;
     match validate_reconstruction(&inner, config, commitment, strategy) {
         Ok(()) => Ok(inner),
@@ -2441,7 +2441,7 @@ mod tests {
     /// produces for the largest [`B`] its codec decodes, in committees of 4 to `participants`
     /// members.
     fn stream_bound<S: Segmentable>(participants: usize) -> usize {
-        let payload = CodedBlock::<B, S, H>::max_encode_size(B::max_encode_size(&()));
+        let payload = CodedBlock::<B, S, H>::max_coded_size(B::max_encode_size(&()));
         (4..=u16::try_from(participants).unwrap())
             .map(|n| {
                 ShardMessage::<B, S, H>::max_encode_size(
