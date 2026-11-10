@@ -104,9 +104,22 @@ pub fn graftable_chunks<F: Graftable>(ops_leaves: u64, grafting_height: u32) -> 
     (ops_leaves - birth_chunk_0) / chunk_size + 1
 }
 
-/// Compute grafted leaf digests for resolved `(chunk_idx, chunk_ops_digest, chunk)` triples:
-/// each leaf is `hash(chunk || chunk_ops_digest)`, except all-zero chunks preserve
-/// `chunk_ops_digest` directly (zero-chunk identity).
+/// Returns the grafted leaf for a bitmap `chunk` and the root of the ops subtree it covers:
+/// `hash(chunk || ops_subtree_root)`, except that an all-zero chunk grafts to `ops_subtree_root`
+/// itself (the zero-chunk identity).
+fn grafted_leaf<H: Hasher>(
+    hasher: &merkle::hasher::Standard<H>,
+    chunk: &[u8],
+    ops_subtree_root: H::Digest,
+) -> H::Digest {
+    if chunk.iter().all(|&b| b == 0) {
+        ops_subtree_root
+    } else {
+        hasher.hash(&[chunk, ops_subtree_root.as_ref()])
+    }
+}
+
+/// Compute the [grafted_leaf] of each resolved `(chunk_idx, chunk_ops_digest, chunk)` triple.
 pub(super) fn graft_chunk_digests<H: Hasher, S: Strategy, const N: usize>(
     strategy: &S,
     inputs: Vec<(usize, H::Digest, [u8; N])>,
@@ -115,14 +128,7 @@ pub(super) fn graft_chunk_digests<H: Hasher, S: Strategy, const N: usize>(
         inputs,
         || qmdb::hasher::<H>(),
         |h, (chunk_idx, chunk_ops_digest, chunk)| {
-            if chunk == BitMap::<N>::EMPTY_CHUNK {
-                (chunk_idx, chunk_ops_digest)
-            } else {
-                (
-                    chunk_idx,
-                    h.hash(&[chunk.as_slice(), chunk_ops_digest.as_ref()]),
-                )
-            }
+            (chunk_idx, grafted_leaf(h, &chunk, chunk_ops_digest))
         },
     )
 }
@@ -388,14 +394,7 @@ impl<F: Graftable, H: Hasher> HasherTrait<F> for Verifier<'_, F, H> {
                     return ops_subtree_root;
                 };
 
-                // For all-zero chunks, the grafted leaf is the ops subtree root (identity).
-                // For non-zero chunks: grafted_leaf = hash(chunk || ops_subtree_root).
-                let chunk = self.chunks[local];
-                if chunk.iter().all(|&b| b == 0) {
-                    ops_subtree_root
-                } else {
-                    self.hash(&[chunk, ops_subtree_root.as_ref()])
-                }
+                grafted_leaf(&self.hasher, self.chunks[local], ops_subtree_root)
             }
         }
     }
