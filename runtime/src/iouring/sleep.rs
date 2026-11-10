@@ -97,6 +97,10 @@
 //! bound at or below its time, so the worker serves again before it parks,
 //! and a pool worker serves again after a short slice of task polls rather
 //! than a full batch, once its run queue has room (see [`super::runtime`]).
+//! So does a pass that leaves a wheel bucket partly refiled. The wheel bounds
+//! a crowded bucket by its start (see [`Wheel::bound`]), so the owner, parked
+//! or not, starts to refile it then, in such consecutive passes, rather than
+//! at its first deadline.
 //!
 //! A poll that does not return freezes its worker's service, timers included.
 //! A pool worker that is not closing therefore checks its peers' published
@@ -110,7 +114,9 @@
 //! behind the backlog in the global queue. A parked worker, or one spinning
 //! idle before it parks, runs no service pass and checks nothing, so a frozen
 //! worker's timers wait for some peer's service pass. A dedicated worker's
-//! timers are private, so no peer checks them.
+//! timers are private, so no peer checks them. The published bound of a
+//! crowded bucket is its start, so a peer also takes up the refiling that an
+//! owner has left for that long, one budget per check.
 //!
 //! # Drops on the Owner
 //!
@@ -149,7 +155,12 @@
 //! removed (see [`Wheel`]). A removal that empties the wheel publishes no
 //! bound, and on the owner it also clears the owner's cached bound, so an idle
 //! worker takes no timed wake for a cancelled sleep. A queued registration
-//! keeps both bounds until its removal.
+//! keeps both bounds until its removal. A registration that crowds a wheel
+//! bucket lowers the owner's cached bound to the bucket's start, which may
+//! have passed, and the published one only to its own firing time. The owner
+//! refiles the bucket from its next pass on, and until that pass publishes
+//! the wheel's bound, peers see no overdue time that it has had no pass to
+//! serve.
 //!
 //! # Closure
 //!
@@ -472,8 +483,10 @@ impl Timers {
     /// it queued in `dropped`. The latest of them leaves first, in the same
     /// critical section, as the owner's service pass would remove it, moving
     /// its waker to `deferred` if it still waits, so that the new registration
-    /// can take its slot. Returns the registration and the time at which it
-    /// fires, in nanoseconds since the origin, for the owner's cached bound.
+    /// can take its slot. Returns the registration and the time by which the
+    /// owner's next expiry pass must reach it, in nanoseconds since the origin,
+    /// for the owner's cached bound: its firing time, or the earlier start of a
+    /// wheel bucket that it crowds (see [`Wheel::insert`]).
     fn register(
         self: &Arc<Self>,
         waker: Waker,
@@ -505,13 +518,16 @@ impl Timers {
             deferred.drops.push(released);
         }
         let id = entries.insert(waker);
-        wheel.insert(id.index, nanos);
+        let at = wheel.insert(id.index, nanos);
 
-        // Every write of the published bound holds the lock, so lowering it
-        // with a plain load and store loses no other update.
-        let at = Wheel::<RESOLUTION>::rounded(nanos);
-        if at < self.published.load(Ordering::Relaxed) {
-            self.published.store(at, Ordering::Relaxed);
+        // Peers act on overdue times, so the published bound takes the firing
+        // time and not the start of a crowded bucket, which may have passed
+        // before the owner had a pass to refile it. Every write of the
+        // published bound holds the lock, so lowering it with a plain load
+        // and store loses no other update.
+        let fires = Wheel::<RESOLUTION>::rounded(nanos);
+        if fires < self.published.load(Ordering::Relaxed) {
+            self.published.store(fires, Ordering::Relaxed);
         }
 
         // Cache the epoch read while the registration waits. A later poll
@@ -1775,10 +1791,10 @@ pub mod tests {
             .collect();
 
         // The owner's late pass fires at most one budget and leaves the rest
-        // due, with its bound still at their firing time.
+        // due, with its bound at or before their firing time.
         let served = firing + 2 * threshold;
         let mut deferred = Deferred::default();
-        assert_eq!(all[1].expire(served, BUDGET, &mut deferred), firing);
+        assert!(all[1].expire(served, BUDGET, &mut deferred) <= firing);
         run(&mut deferred);
         let fired = count.get();
         assert!(fired < 2 * BUDGET as usize);
@@ -2170,6 +2186,46 @@ pub mod tests {
         // A drop that empties the wheel publishes none.
         late.abandon();
         assert_eq!(timers.published(), u64::MAX);
+    }
+
+    #[test]
+    fn test_crowded_bucket_is_refiled_before_its_firing_time() {
+        // Eight budgets of sleeps share one deadline a minute ahead, and with
+        // it one high wheel bucket, which they crowd.
+        let timers = Arc::new(Timers::new());
+        let deadline = 60_000_000_000;
+        let firing = Wheel::<RESOLUTION>::rounded(deadline);
+        let mut cached = u64::MAX;
+        let sleepers: Vec<_> = (0..8 * BUDGET)
+            .map(|_| {
+                let (sleeper, at) = timers.register_alone(Waker::noop().clone(), deadline);
+                cached = cached.min(at);
+                sleeper
+            })
+            .collect();
+
+        // The owner's cached bound falls to the bucket's start, the wheel's
+        // bound, while peers still read the firing time.
+        assert!(cached < firing);
+        assert_eq!(cached, timers.bound());
+        assert_eq!(timers.published(), firing);
+
+        // Passes at the bounds they return refile the bucket down the levels
+        // and fire nothing, each publishing its bound.
+        let mut deferred = Deferred::default();
+        let mut bound = cached;
+        while bound < firing {
+            bound = timers.expire(bound, BUDGET, &mut deferred);
+            assert!(deferred.is_empty());
+            assert_eq!(timers.published(), bound);
+        }
+        assert_eq!(bound, firing);
+
+        // So the first pass at the firing time spends its whole budget on
+        // firing.
+        assert!(timers.expire(firing, BUDGET, &mut deferred) <= firing);
+        assert_eq!(deferred.wakes.len(), BUDGET as usize);
+        assert_eq!(timers.resident(), sleepers.len() - BUDGET as usize);
     }
 
     /// A waker that fails if its clone, wake, or drop runs while its timers

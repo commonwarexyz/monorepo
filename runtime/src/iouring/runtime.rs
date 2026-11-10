@@ -1114,8 +1114,12 @@ pub struct Local {
     /// from it, so neither locks the timers just to learn that nothing is due.
     /// Only this worker registers, and it lowers the cache with every
     /// registration, so the cache is never later than the earliest firing
-    /// time. Removals and peer expiry can leave it early, which costs
-    /// spurious expiry passes, never a late timer.
+    /// time. It is earlier while a crowded wheel bucket waits to be refiled
+    /// from its start (see [`Wheel::bound`]). Removals and peer expiry can
+    /// also leave it early, which costs spurious expiry passes, never a late
+    /// timer.
+    ///
+    /// [`Wheel::bound`]: super::wheel::Wheel::bound
     pub timers_next: u64,
     /// Pending removals from `timers`: the registrations whose sleeps were
     /// dropped, or completed early by a poll, on this worker while it was not
@@ -1570,9 +1574,9 @@ pub struct Worker {
     /// worker stays behind while it fires sleeps only as fast as that queue
     /// takes them, in deadline order. Request deadlines keep a full budget.
     /// Cleared by a pass that reaches every due deadline. A pass that runs
-    /// out of budget while draining a detached wheel bucket can leave its
-    /// bound at or below its time with only later deadlines left to refile
-    /// (see [`Wheel::bound`]), which sets this for a few more passes.
+    /// out of budget while draining a detached wheel bucket leaves its bound
+    /// at or below its time, even with only later deadlines left to refile
+    /// (see [`Wheel::bound`]), which sets this until the bucket is drained.
     ///
     /// [`Wheel::bound`]: super::wheel::Wheel::bound
     backlog: bool,
