@@ -67,6 +67,7 @@
 
 use super::waiter::UserData;
 use crossbeam_utils::CachePadded;
+use io_uring::squeue::SubmissionQueue;
 use std::{
     cell::Cell,
     marker::PhantomData,
@@ -81,7 +82,7 @@ cfg_if::cfg_if! {
         };
         use std::{collections::VecDeque, ops::Deref};
     } else {
-        use io_uring::{opcode::FutexWait, squeue::SubmissionQueue};
+        use io_uring::opcode::FutexWait;
         use std::sync::{
             Arc,
             atomic::{AtomicU32, Ordering},
