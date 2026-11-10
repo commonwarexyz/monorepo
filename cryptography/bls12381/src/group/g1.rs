@@ -55,15 +55,6 @@ impl Group for G1 {
     fn from_coordinates(coordinates: Coordinates) -> Self {
         Self(coordinates)
     }
-
-    fn negate(&self) -> Self {
-        let [x, y, z] = self.0;
-        Self([x, fp::neg(&y), z])
-    }
-
-    fn is_identity(&self) -> bool {
-        self.0[2] == [0; BYTES]
-    }
 }
 
 impl fmt::Debug for G1 {
@@ -79,7 +70,7 @@ impl fmt::Debug for G1 {
 
 impl PartialEq for G1 {
     fn eq(&self, other: &Self) -> bool {
-        Add(*self, other.negate()).dispatch().is_identity()
+        Add(*self, -*other).dispatch().is_identity()
     }
 }
 
@@ -104,7 +95,7 @@ impl<'a> ops::Add<&'a Self> for G1 {
 
 impl<'a> SubAssign<&'a Self> for G1 {
     fn sub_assign(&mut self, rhs: &'a Self) {
-        *self += &rhs.negate();
+        *self += &-*rhs;
     }
 }
 
@@ -121,7 +112,8 @@ impl Neg for G1 {
     type Output = Self;
 
     fn neg(self) -> Self {
-        self.negate()
+        let [x, y, z] = self.0;
+        Self([x, fp::neg(&y), z])
     }
 }
 
@@ -200,6 +192,11 @@ impl CryptoGroup for G1 {
 }
 
 impl G1 {
+    /// Returns whether this is the identity.
+    pub(crate) fn is_identity(&self) -> bool {
+        self.0[2] == [0; BYTES]
+    }
+
     /// Returns the sum of the elements, as when aggregating keys or signatures.
     ///
     /// Adds one element per lane, so it costs far less than adding them one at a time.

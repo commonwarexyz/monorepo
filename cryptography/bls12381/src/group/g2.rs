@@ -52,18 +52,6 @@ impl Group for G2 {
     fn from_coordinates(coordinates: Coordinates) -> Self {
         Self(coordinates)
     }
-
-    fn negate(&self) -> Self {
-        let [x, mut y, z] = self.0;
-        for component in y.as_chunks_mut::<FP_BYTES>().0 {
-            *component = fp::neg(component);
-        }
-        Self([x, y, z])
-    }
-
-    fn is_identity(&self) -> bool {
-        self.0[2] == [0; BYTES]
-    }
 }
 
 impl fmt::Debug for G2 {
@@ -79,7 +67,7 @@ impl fmt::Debug for G2 {
 
 impl PartialEq for G2 {
     fn eq(&self, other: &Self) -> bool {
-        Add(*self, other.negate()).dispatch().is_identity()
+        Add(*self, -*other).dispatch().is_identity()
     }
 }
 
@@ -104,7 +92,7 @@ impl<'a> ops::Add<&'a Self> for G2 {
 
 impl<'a> SubAssign<&'a Self> for G2 {
     fn sub_assign(&mut self, rhs: &'a Self) {
-        *self += &rhs.negate();
+        *self += &-*rhs;
     }
 }
 
@@ -121,7 +109,11 @@ impl Neg for G2 {
     type Output = Self;
 
     fn neg(self) -> Self {
-        self.negate()
+        let [x, mut y, z] = self.0;
+        for component in y.as_chunks_mut::<FP_BYTES>().0 {
+            *component = fp::neg(component);
+        }
+        Self([x, y, z])
     }
 }
 
@@ -200,6 +192,11 @@ impl CryptoGroup for G2 {
 }
 
 impl G2 {
+    /// Returns whether this is the identity.
+    pub(crate) fn is_identity(&self) -> bool {
+        self.0[2] == [0; BYTES]
+    }
+
     /// Returns the sum of the elements, as when aggregating keys or signatures.
     ///
     /// Adds one element per lane, so it costs far less than adding them one at a time.
