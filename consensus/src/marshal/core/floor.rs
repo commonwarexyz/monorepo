@@ -1,7 +1,7 @@
 use crate::{
     marshal::resolver::handler::{Annotation, Key, Request},
     simplex::types::Finalization,
-    types::{Epoch, Epocher, Height, Round},
+    types::{Epoch, EpochDelta, Epocher, Height, HeightDelta, Round, ViewDelta},
 };
 use commonware_cryptography::{Digest, certificate::Scheme};
 use commonware_resolver::{Resolver, TargetedResolver};
@@ -140,6 +140,33 @@ pub(super) fn closed_epoch<E: Epocher>(epocher: &E, anchor: Height) -> Option<Ep
     } else {
         info.epoch().previous()
     }
+}
+
+/// Returns the lowest round whose view-indexed cache data must stay to keep `retention` views
+/// behind `witnessed`.
+///
+/// Views restart with each epoch, so the views the window lacks in `witnessed`'s epoch are counted
+/// one per height below that epoch, and the epoch containing the lowest such height is kept whole.
+/// Where `epocher` cannot place those heights, each earlier epoch counts for one view.
+///
+/// Verification requires each block to be proposed in a round of its own epoch, at a later view
+/// than its parent. Every epoch therefore spans at least as many views as it has heights above
+/// genesis, so counting heights keeps at least the window.
+pub(super) fn retained_from<E: Epocher>(
+    epocher: &E,
+    witnessed: Round,
+    retention: ViewDelta,
+) -> Round {
+    let view = witnessed.view().saturating_sub(retention);
+    let owed = retention.get().saturating_sub(witnessed.view().get());
+    let epoch = epocher
+        .first(witnessed.epoch())
+        .and_then(|first| epocher.containing(first.saturating_sub(HeightDelta::new(owed))))
+        .map_or_else(
+            || witnessed.epoch().saturating_sub(EpochDelta::new(owed)),
+            |info| info.epoch(),
+        );
+    Round::new(epoch, view)
 }
 
 /// A floor finalization awaiting its anchor block.
@@ -375,7 +402,7 @@ mod tests {
     use commonware_math::algebra::Random as _;
     use commonware_resolver::Fetch;
     use commonware_utils::{NZU64, sync::Mutex};
-    use std::sync::Arc;
+    use std::{num::NonZeroU64, sync::Arc};
 
     type TestDigest = <Sha256 as commonware_cryptography::Hasher>::Digest;
     type TestScheme = simplex_ed25519::Scheme;
@@ -584,6 +611,68 @@ mod tests {
 
         // Heights the epocher cannot place close nothing.
         assert_eq!(closed_epoch(&epocher, Height::new(u64::MAX)), None);
+    }
+
+    #[test]
+    fn retained_from_counts_views_below_an_epoch_in_heights() {
+        let epocher = FixedEpocher::new(NZU64!(3));
+        let at = |epoch, view| Round::new(Epoch::new(epoch), View::new(view));
+        let retained = |epoch, view| retained_from(&epocher, at(epoch, view), ViewDelta::new(10));
+
+        // The window fits in the witnessed epoch once that round is ten views in.
+        assert_eq!(retained(3, 15), at(3, 5));
+        assert_eq!(retained(3, 10), at(3, 0));
+
+        // Epoch 8 holds three of the ten views. The seven heights below its first height reach
+        // down to height 17, in epoch 5.
+        assert_eq!(retained(8, 3), at(5, 0));
+
+        // The owed heights run out at genesis.
+        assert_eq!(retained(2, 1), at(0, 0));
+        assert_eq!(retained(0, 0), at(0, 0));
+
+        // The epocher cannot place the heights of the last epoch, so each of the seven epochs
+        // below it stands in for one view.
+        assert_eq!(retained(u64::MAX, 3), at(u64::MAX - 7, 0));
+    }
+
+    #[test]
+    fn retained_from_keeps_the_window_without_a_spare_epoch() {
+        for length in 2..=6 {
+            let epocher = FixedEpocher::new(NonZeroU64::new(length).unwrap());
+            for retention in 1..=13 {
+                for epoch in 0..=8 {
+                    for view in 0..=15 {
+                        let witnessed = Round::new(Epoch::new(epoch), View::new(view));
+                        let retained =
+                            retained_from(&epocher, witnessed, ViewDelta::new(retention));
+
+                        // Within the witnessed epoch, exactly the window stays.
+                        if view >= retention {
+                            let expected =
+                                Round::new(witnessed.epoch(), View::new(view - retention));
+                            assert_eq!(retained, expected);
+                            continue;
+                        }
+
+                        // Below it, whole epochs stay. Each spans at least `length` views, so
+                        // they cover the rest of the window unless they reach genesis, and they
+                        // would not cover it without the lowest.
+                        assert_eq!(retained.view(), View::zero());
+                        let earlier = epoch - retained.epoch().get();
+                        let window = format!("{retention} views behind {witnessed}");
+                        assert!(
+                            retained.epoch().is_zero() || earlier * length + view >= retention,
+                            "epochs of {length} heights must span {window}"
+                        );
+                        assert!(
+                            earlier == 0 || (earlier - 1) * length + view < retention,
+                            "the lowest kept {length}-height epoch must be needed for {window}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     fn floor() -> State<TestScheme, TestDigest> {

@@ -5,7 +5,7 @@ use super::{
     certified::Certified,
     delivery::PendingVerification,
     durability::{DispatchGate, Durable as _},
-    floor::{Cutoff, Floor, Processed, State as FloorState, closed_epoch},
+    floor::{Cutoff, Floor, Processed, State as FloorState, closed_epoch, retained_from},
     mailbox::{CommitmentFallback, Mailbox, Message},
     staged::Staged,
     stream::Stream,
@@ -23,7 +23,7 @@ use crate::{
         scheme::Scheme,
         types::{Finalization, Notarization, Subject, verify_certificates},
     },
-    types::{Epoch, EpochDelta, Epocher, Height, Round, ViewDelta},
+    types::{Epoch, Epocher, Height, Round, ViewDelta},
 };
 use bytes::Bytes;
 use commonware_actor::mailbox;
@@ -2632,27 +2632,13 @@ where
             return self;
         }
 
-        // Retain view-indexed cache data for `view_retention` views behind the previously
-        // witnessed finalization round.
+        // Keep view-indexed cache data for at least `view_retention` views behind the previously
+        // witnessed finalization round. The caches of earlier epochs are destroyed and the retained
+        // round's epoch is pruned below its view. Pruning removes whole sections, so some entries
+        // just below that view can remain.
         if let Some(previous) = self.floor.witness(round) {
-            // Views restart with each epoch and the number of views earlier epochs spanned is
-            // unknown here, so the window is measured within the previous round's epoch and
-            // stops at its first view. The views it could not cover there are owed by whole
-            // earlier epochs, one per view, because every epoch spans at least one view; this
-            // keeps at least the window and usually more. With a window of ten views, (3, 15)
-            // prunes behind (3, 5), while (8, 3) takes three views from epoch 8, owes seven to
-            // epochs 7 through 1, and prunes behind (1, 0).
-            let view = previous.view().saturating_sub(self.view_retention);
-            let owed = self
-                .view_retention
-                .get()
-                .saturating_sub(previous.view().get());
-            let epoch = previous.epoch().saturating_sub(EpochDelta::new(owed));
-
-            // Destroy the caches of every epoch below `epoch` and prune the view-indexed archives
-            // of `epoch` below `view`. Pruning removes whole sections, so entries below `view` in
-            // the section that contains it can remain.
-            self.cache = self.cache.prune_by_view(Round::new(epoch, view)).await;
+            let retained = retained_from(&self.epocher, previous, self.view_retention);
+            self.cache = self.cache.prune_by_view(retained).await;
         }
 
         // The round floor covers the witnessed round, which retires round-bound requests at or
