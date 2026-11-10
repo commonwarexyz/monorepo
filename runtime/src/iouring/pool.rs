@@ -5,14 +5,14 @@
 //! state, and the shutdown barrier. The runner creates it before any worker
 //! starts, every worker reaches it through the runner's shared services, and
 //! every task's header holds a weak reference to it, so a wake from any thread
-//! can find the task's pool without keeping the pool alive.
-//! [`Threads`] starts the workers after worker zero, each on a thread of its
-//! own, and joins them at shutdown.
+//! can find the task's pool without keeping the pool alive. [`Threads`] starts
+//! the workers after worker zero, each on a thread of its own, and joins them
+//! at shutdown.
 //!
 //! [`Idle`] tracks idle publications and search responsibility, and selects
 //! pool workers to wake. The unparkers in their mailboxes deliver the
-//! notifications.
-//! [`super::idle`] describes the parking sequence and wake policy.
+//! notifications. [`super::idle`] describes the parking sequence and wake
+//! policy.
 //!
 //! # Placement
 //!

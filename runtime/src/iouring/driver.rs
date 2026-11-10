@@ -29,11 +29,10 @@
 //! win a race with expiry. Partial progress after expiry cannot issue another SQE.
 //! Queued requests expire even while all operation slots are occupied.
 //!
-//! The ring uses SINGLE_ISSUER, DEFER_TASKRUN, and IORING_OP_FUTEX_WAIT. The
-//! runtime targets Linux 7.0 or newer (see [`super`]). Unfinished requests
-//! need a GETEVENTS enter even when tasks keep the worker busy. An idle turn
-//! may defer that enter to [`Driver::park`]. Control SQEs carry no request
-//! resources and may remain until later I/O service or ring teardown.
+//! The ring uses SINGLE_ISSUER and DEFER_TASKRUN. Unfinished requests need a
+//! GETEVENTS enter even when tasks keep the worker busy. An idle turn may defer
+//! that enter to [`Driver::park`]. Control SQEs carry no request resources and
+//! may remain until later I/O service or ring teardown.
 //!
 //! Parking arms the worker's [`Parker`] and blocks only while its word
 //! still carries the sequence the worker observed before checking its sources.
@@ -121,8 +120,6 @@ struct State {
     unparker: Unparker,
     /// Whether no ring futex wait is live, so the next blocking park queues one.
     ring_wait_needed: bool,
-    /// Ring futex waits that failed because the kernel could not allocate them.
-    ring_wait_allocation_failures: u64,
 }
 
 /// What [`Driver::enter`] asks of the kernel after submitting queued SQEs.
@@ -176,7 +173,6 @@ impl Driver {
                 timeout_wheel: TimeoutWheel::new(max_timeout, cfg.timeout_wheel_tick, now),
                 unparker,
                 ring_wait_needed: true,
-                ring_wait_allocation_failures: 0,
             },
         })
     }
@@ -381,10 +377,12 @@ impl Driver {
         if !arm.still_idle() {
             return Ok(false);
         }
+
         if self.state.ring_wait_needed {
             arm.install(&mut self.ring.submission());
             self.state.ring_wait_needed = false;
         }
+
         Self::enter(&mut self.ring, Enter::Wait { deadline })?;
         Ok(true)
     }
@@ -712,6 +710,7 @@ impl State {
         if self.stage_cancellations(&mut submission_queue) {
             return true;
         }
+
         self.stage_ready_requests(&mut submission_queue)
     }
 
@@ -731,31 +730,15 @@ impl State {
         // wait, and the next blocking park queues another, even after
         // service's final reap.
         if user_data == RING_WAIT_USER_DATA {
-            if result == -libc::ENOMEM {
-                // The kernel allocates the wait without blocking and fails it
-                // when memory is short. The enter that submitted the wait
-                // posts this completion itself, so that park returned instead
-                // of sleeping without a wake source, and the next blocking
-                // park installs the wait again. While the kernel keeps failing
-                // the allocation, a worker with requests in flight retries on
-                // every park without sleeping until memory recovers, which is
-                // accepted. Warn at powers of two to report persistent
-                // pressure without flooding the log.
-                self.ring_wait_allocation_failures += 1;
-                if self.ring_wait_allocation_failures.is_power_of_two() {
-                    warn!(
-                        failures = self.ring_wait_allocation_failures,
-                        "ring futex wait allocation failed, retrying at the next park"
-                    );
-                }
-            } else {
-                // Anything else breaks an invariant, such as EINVAL from a
-                // kernel without IORING_OP_FUTEX_WAIT.
-                assert!(
-                    matches!(-result, 0 | libc::EAGAIN | libc::ECANCELED),
-                    "ring futex wait failed: {result}"
-                );
-            }
+            // The kernel allocates the wait without blocking, so memory
+            // pressure can fail it with ENOMEM. That ends the wait like the
+            // others, and the next blocking park installs another. Anything
+            // else breaks an invariant, such as EINVAL from a kernel without
+            // IORING_OP_FUTEX_WAIT.
+            assert!(
+                matches!(-result, 0 | libc::EAGAIN | libc::ECANCELED | libc::ENOMEM),
+                "ring futex wait failed: {result}"
+            );
             self.ring_wait_needed = true;
             return;
         }
@@ -804,8 +787,6 @@ pub mod tests {
     };
     use commonware_utils::channel::oneshot;
     use io_uring::opcode::Nop;
-    #[cfg(not(feature = "loom"))]
-    use std::os::fd::{FromRawFd, OwnedFd};
     use std::{
         cell::Cell,
         fs::{self, OpenOptions},
@@ -917,22 +898,6 @@ pub mod tests {
     pub fn on_service_while_acquiring(hook: impl FnOnce() + 'static) {
         let previous = WHILE_ACQUIRING.replace(Some(Box::new(hook)));
         assert!(previous.is_none(), "service hook already installed");
-    }
-
-    /// Duplicate the driver's ring descriptor, so the kernel keeps the ring
-    /// until the duplicate closes, even after the driver drops.
-    #[cfg(not(feature = "loom"))]
-    pub fn hold_ring(driver: &Driver) -> OwnedFd {
-        // SAFETY: `dup` only reads the driver's open ring descriptor.
-        let fd = unsafe { libc::dup(driver.ring.as_raw_fd()) };
-        assert!(
-            fd >= 0,
-            "failed to duplicate the ring descriptor: {}",
-            io::Error::last_os_error()
-        );
-
-        // SAFETY: `fd` is a new open descriptor that nothing else owns.
-        unsafe { OwnedFd::from_raw_fd(fd) }
     }
 
     /// Destination of a result collected by the harness.
@@ -2416,27 +2381,28 @@ pub mod tests {
         assert!(harness.park(0, Some(Instant::now())).unwrap());
         assert!(!harness.driver.state.ring_wait_needed);
 
-        // Cancel that wait, so none is queued, and hand its completion to the
-        // driver as the allocation failure of a wait that never queued.
+        // Cancel that wait, so none is queued.
         harness
             .driver
             .ring
             .submitter()
             .register_sync_cancel(None, CancelBuilder::user_data(RING_WAIT_USER_DATA))
             .unwrap();
+
+        // Reap the cancellation's completion directly, so the driver never sees
+        // it.
         Driver::enter(&mut harness.driver.ring, Enter::TaskWork).unwrap();
         let cqe = harness.driver.ring.completion().next().unwrap();
         assert_eq!(cqe.user_data(), RING_WAIT_USER_DATA);
         assert_eq!(cqe.result(), -libc::ECANCELED);
-        for failures in 1..=2 {
-            harness.driver.state.handle_cqe(
-                RING_WAIT_USER_DATA,
-                -libc::ENOMEM,
-                &mut harness.deferred,
-            );
-            assert!(harness.driver.state.ring_wait_needed);
-            assert_eq!(harness.driver.state.ring_wait_allocation_failures, failures);
-        }
+
+        // Hand the driver an allocation failure of a wait that never queued,
+        // which ends the wait like any other.
+        harness
+            .driver
+            .state
+            .handle_cqe(RING_WAIT_USER_DATA, -libc::ENOMEM, &mut harness.deferred);
+        assert!(harness.driver.state.ring_wait_needed);
 
         // The next park installs a new wait, and a notification after arming
         // ends it.
@@ -3145,5 +3111,115 @@ pub mod tests {
         for result in results {
             assert_eq!(result.unwrap_err().raw_os_error(), Some(libc::EBADF));
         }
+    }
+}
+
+#[cfg(all(test, not(feature = "loom")))]
+mod ring_wait_tests {
+    use super::*;
+    use crate::iouring::park::tests::native::{handles, wake};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    /// Duplicate the driver's ring descriptor, so the kernel keeps the ring
+    /// until the duplicate closes, even after the driver drops.
+    fn hold_ring(driver: &Driver) -> OwnedFd {
+        // SAFETY: `dup` only reads the driver's open ring descriptor.
+        let fd = unsafe { libc::dup(driver.ring.as_raw_fd()) };
+        assert!(
+            fd >= 0,
+            "failed to duplicate the ring descriptor: {}",
+            io::Error::last_os_error()
+        );
+
+        // SAFETY: `fd` is a new open descriptor that nothing else owns.
+        unsafe { OwnedFd::from_raw_fd(fd) }
+    }
+
+    /// Dropping a driver cancels its submitted ring wait, so no waiter remains
+    /// on a futex word whose address can be reused, and then releases its
+    /// handles on the word. A wait that a wake already took is not found by
+    /// the cancel, which also lets the word go.
+    #[test]
+    fn test_driver_drop_cancels_ring_wait() {
+        // Create the word shared by both cancellation cases.
+        let parker = Parker::new();
+        let unparker = parker.unparker();
+        let handles_without_driver = handles(&parker);
+        for cancel in [false, true] {
+            // A park with a short deadline leaves its ring wait queued.
+            let mut driver = Driver::new(
+                &RingConfig::default(),
+                Duration::from_secs(60),
+                unparker.clone(),
+                Instant::now(),
+            )
+            .unwrap();
+            assert!(
+                driver
+                    .park(&parker, 0, Some(Instant::now() + Duration::from_millis(2)))
+                    .unwrap()
+            );
+
+            if cancel {
+                // A duplicate descriptor keeps the ring alive across the drop,
+                // so its teardown, which also removes the wait, cannot run
+                // before the check.
+                let ring = hold_ring(&driver);
+
+                // Cancel the live wait by dropping its owner.
+                drop(driver);
+
+                // No wait remains while the duplicate keeps the ring alive, so
+                // only the drop's synchronous cancel removed it.
+                assert_eq!(wake(&unparker, 2), 0, "driver left its ring wait queued");
+                drop(ring);
+            } else {
+                // Release the wait directly to prove the park queued it. The
+                // driver has not reaped its completion, so the drop's cancel
+                // finds no wait.
+                let woken = wake(&unparker, 2);
+
+                // Exactly the driver's ring wait was present.
+                assert_eq!(woken, 1, "park did not queue its ring wait");
+                drop(driver);
+            }
+
+            // The drop kept no handle, so the word can be freed.
+            assert_eq!(handles(&parker), handles_without_driver);
+        }
+    }
+
+    /// A driver dropped off its owner thread cannot cancel its ring wait,
+    /// since the ring accepts the cancel only from the thread that created it.
+    /// The drop then keeps the word allocated under the wait it leaves queued.
+    #[test]
+    fn test_driver_drop_off_its_owner_leaks_the_word() {
+        // A park with a short deadline leaves its ring wait queued.
+        let parker = Parker::new();
+        let unparker = parker.unparker();
+        let handles_without_driver = handles(&parker);
+        let mut driver = Driver::new(
+            &RingConfig::default(),
+            Duration::from_secs(60),
+            unparker.clone(),
+            Instant::now(),
+        )
+        .unwrap();
+        assert!(
+            driver
+                .park(&parker, 0, Some(Instant::now() + Duration::from_millis(2)))
+                .unwrap()
+        );
+
+        // Drop the driver on another thread, while a duplicate descriptor
+        // keeps the ring, and so any wait its cancel missed, alive.
+        let ring = hold_ring(&driver);
+        std::thread::spawn(move || drop(driver)).join().unwrap();
+
+        // The cancel failed, so the drop kept one handle and the wait is
+        // still queued.
+        assert_eq!(handles(&parker), handles_without_driver + 1);
+        assert_eq!(wake(&unparker, 2), 1, "the ring wait was cancelled");
+        drop(ring);
     }
 }

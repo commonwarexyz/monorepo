@@ -51,11 +51,10 @@
 //!
 //! The runtime targets Linux 7.0 or newer. Older kernels may work, but they
 //! are untested and nothing is guaranteed on them. Each worker's ring uses
-//! single-issuer mode with deferred task work and parks on
-//! `IORING_OP_FUTEX_WAIT`. Task polls must return so their worker can service
-//! I/O and deadlines. I/O and sleeps stay registered on the worker that first
-//! polled them, so a poll that blocks one worker also delays their results for
-//! tasks that have moved elsewhere.
+//! single-issuer mode with deferred task work. Task polls must return so their
+//! worker can service I/O and deadlines. I/O and sleeps stay registered on the
+//! worker that first polled them, so a poll that blocks one worker also delays
+//! their results for tasks that have moved elsewhere.
 //!
 //! Each worker limits in-flight I/O according to [`RingConfig::size`]. A receive
 //! can occupy the last slot while a send needed to satisfy it waits to be

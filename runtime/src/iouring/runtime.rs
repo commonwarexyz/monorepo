@@ -1886,7 +1886,7 @@ impl Worker {
     fn messages(&mut self, mailbox: &Arc<Mailbox>) {
         // Reversing allows bounded FIFO processing without shifting the
         // remainder.
-        if self.inbox.is_empty() && self.parker.has_mail() && mailbox.take(&mut self.inbox) {
+        if self.inbox.is_empty() && mailbox.has_mail() && mailbox.take(&mut self.inbox) {
             self.inbox.reverse();
         }
 
@@ -2122,8 +2122,9 @@ impl Worker {
             // still finds the work a claim or grant announces, and every path
             // that runs again instead of parking catches up a deferred enter.
             let defer =
-                !self.local.borrow().is_ready() && self.inbox.is_empty() && !self.parker.has_mail();
+                !self.local.borrow().is_ready() && self.inbox.is_empty() && !mailbox.has_mail();
             let kernel_deferred = self.service(defer);
+
             #[cfg(test)]
             tests::record_kernel_service(defer, kernel_deferred);
 
@@ -2165,7 +2166,7 @@ impl Worker {
             if ready
                 || pending_submissions
                 || !self.inbox.is_empty()
-                || self.parker.has_mail()
+                || mailbox.has_mail()
                 || self.parker.moved(self.seen_seq)
             {
                 if let Some(searcher) = &mut searcher {

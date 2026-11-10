@@ -7,10 +7,7 @@ use super::{
         driver::tests::{fail_after_completion, make_file, on_service_while_acquiring},
         idle::tests::{WakePoint, on_wake_point},
         operation::{Operation, start_sync},
-        park::{
-            Unparker,
-            tests::{has_mail, waiting},
-        },
+        park::{Unparker, tests::waiting},
         queue::CAPACITY,
         request::{RecvRequest, Request, SyncRequest},
         slab::Id,
@@ -1081,7 +1078,7 @@ fn claim_then_mail() -> [Turn; 2] {
                         offered,
                         deferred,
                         blocked,
-                        mail: has_mail(&hooked.mailbox(1).unparker),
+                        mail: hooked.mailbox(1).has_mail(),
                     };
                     sender.send(turn).unwrap();
                 });
@@ -4615,10 +4612,7 @@ fn test_batch_started_during_a_long_batch_is_taken_before_parking() {
                 let pool = pool.clone();
                 move || {
                     let mailbox = pool.mailbox(1);
-                    assert!(
-                        !has_mail(&mailbox.unparker),
-                        "the first batch must be taken"
-                    );
+                    assert!(!mailbox.has_mail(), "the first batch must be taken");
                     assert!(
                         mailbox
                             .send(Message::Forward(Forward::Waiter(stale, sender)))
@@ -4636,7 +4630,7 @@ fn test_batch_started_during_a_long_batch_is_taken_before_parking() {
             // mailbox, the pool's stop included, so notify it before failing.
             pool.mailbox(1).unparker.unpark();
             spin_until(
-                || !has_mail(&pool.mailbox(1).unparker),
+                || !pool.mailbox(1).has_mail(),
                 "worker one must take the second batch once notified",
             );
             assert!(answered, "worker one parked with a batch in its mailbox");
