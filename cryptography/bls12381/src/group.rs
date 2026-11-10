@@ -342,7 +342,8 @@ pub mod fuzz {
                     let words = (0..count)
                         .map(|_| u.arbitrary())
                         .collect::<arbitrary::Result<Vec<u64>>>()?;
-                    assert_eq!(p.scale(&words), p * &Scalar::from_words_wide(&words));
+                    let integer = Scalar::from_words_wide(&words);
+                    assert_eq!(p.scale(&words), generator * &(a * &integer));
                 }
                 Self::Msm => {
                     let method = method(u)?;
