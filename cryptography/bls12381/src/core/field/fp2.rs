@@ -380,28 +380,19 @@ impl<F> Fp2<F> {
         F::kernel(
             simd,
             #[inline(always)]
-            move |simd: S| self.product_schoolbook_body(simd, rhs),
-        )
-    }
-
-    /// Body of [`Self::product_schoolbook`].
-    #[inline(always)]
-    fn product_schoolbook_body<S: Simd>(self, simd: S, rhs: Self) -> Product<F, S>
-    where
-        F: Field<S>,
-    {
-        Fp2 {
-            c0: Signed {
-                pos: self.c0.product(simd, rhs.c0),
-                neg: Some(self.c1.product(simd, rhs.c1)),
+            move |simd: S| Fp2 {
+                c0: Signed {
+                    pos: self.c0.product(simd, rhs.c0),
+                    neg: Some(self.c1.product(simd, rhs.c1)),
+                },
+                c1: Signed::positive(F::accumulate_product(
+                    simd,
+                    self.c0.product(simd, rhs.c1),
+                    self.c1,
+                    rhs.c0,
+                )),
             },
-            c1: Signed::positive(F::accumulate_product(
-                simd,
-                self.c0.product(simd, rhs.c1),
-                self.c1,
-                rhs.c0,
-            )),
-        }
+        )
     }
 
     /// Forms the product `self * self` with two base field products.
@@ -418,23 +409,16 @@ impl<F> Fp2<F> {
         F::kernel(
             simd,
             #[inline(always)]
-            move |simd: S| self.square_product_body::<K, S>(simd),
+            move |simd: S| {
+                let sum = self.c0.add(simd, self.c1).ready::<2>(simd);
+                let difference = self.c0.sub::<K>(simd, self.c1).ready::<4>(simd);
+                let c0 = self.c0.double(simd).ready::<2>(simd);
+                Fp2 {
+                    c0: Signed::positive(sum.product(simd, difference)),
+                    c1: Signed::positive(c0.product(simd, self.c1)),
+                }
+            },
         )
-    }
-
-    /// Body of [`Self::square_product`].
-    #[inline(always)]
-    fn square_product_body<const K: u64, S: Simd>(self, simd: S) -> Product<F, S>
-    where
-        F: Field<S>,
-    {
-        let sum = self.c0.add(simd, self.c1).ready::<2>(simd);
-        let difference = self.c0.sub::<K>(simd, self.c1).ready::<4>(simd);
-        let c0 = self.c0.double(simd).ready::<2>(simd);
-        Fp2 {
-            c0: Signed::positive(sum.product(simd, difference)),
-            c1: Signed::positive(c0.product(simd, self.c1)),
-        }
     }
 
     /// Returns `self * self`, under the requirements of [`Self::square_product`].
@@ -562,23 +546,16 @@ impl<F> Fp2<F> {
         F::kernel(
             simd,
             #[inline(always)]
-            move |simd: S| Self::reduce_body::<K, S>(simd, product),
+            move |simd: S| {
+                let sums = [product.c0, product.c1];
+                let [c0, c1] = F::reduce_each_signed::<2, K>(
+                    simd,
+                    #[inline(always)]
+                    |i| sums[i],
+                );
+                Self { c0, c1 }
+            },
         )
-    }
-
-    /// Body of [`Self::reduce`].
-    #[inline(always)]
-    fn reduce_body<const K: u64, S: Simd>(simd: S, product: Product<F, S>) -> Self
-    where
-        F: Field<S>,
-    {
-        let sums = [product.c0, product.c1];
-        let [c0, c1] = F::reduce_each_signed::<2, K>(
-            simd,
-            #[inline(always)]
-            |i| sums[i],
-        );
-        Self { c0, c1 }
     }
 
     /// Reduces both components of a product without negative sums.

@@ -126,7 +126,21 @@ impl<S: Simd, F: Field<S>> Points<S> for Point<F> {
     fn load(simd: S, points: &[Coordinates], fill: &Coordinates) -> Self {
         simd.execute(
             #[inline(always)]
-            move |simd: S| Self::read(simd, points, fill),
+            move |simd: S| {
+                const { assert!(F::LANES <= MAX_LANES) };
+                let mut coordinates = [[[0; BYTES]; MAX_LANES]; 3];
+                let lanes = points.len().min(F::LANES);
+                for (i, coordinate) in coordinates.iter_mut().enumerate() {
+                    for (lane, point) in coordinate.iter_mut().zip(&points[..lanes]) {
+                        *lane = point[i];
+                    }
+                }
+                Self {
+                    x: Fp2::load(simd, &coordinates[0][..lanes], &fill[0]),
+                    y: Fp2::load(simd, &coordinates[1][..lanes], &fill[1]),
+                    z: Fp2::load(simd, &coordinates[2][..lanes], &fill[2]),
+                }
+            },
         )
     }
 
@@ -137,7 +151,21 @@ impl<S: Simd, F: Field<S>> Points<S> for Point<F> {
     fn store(self, simd: S, points: &mut [Coordinates]) {
         simd.execute(
             #[inline(always)]
-            move |simd: S| self.write(simd, points),
+            move |simd: S| {
+                const { assert!(F::LANES <= MAX_LANES) };
+                let mut coordinates = [[[0; BYTES]; MAX_LANES]; 3];
+                let lanes = points.len().min(F::LANES);
+                self.x.store(simd, &mut coordinates[0][..lanes]);
+                self.y.store(simd, &mut coordinates[1][..lanes]);
+                self.z.store(simd, &mut coordinates[2][..lanes]);
+                for (lane, point) in points[..lanes].iter_mut().enumerate() {
+                    *point = [
+                        coordinates[0][lane],
+                        coordinates[1][lane],
+                        coordinates[2][lane],
+                    ];
+                }
+            },
         )
     }
 
@@ -328,48 +356,6 @@ impl<S: Simd, F: Field<S>> Points<S> for Point<F> {
 }
 
 impl<F> Point<F> {
-    /// Body of [`Self::load`].
-    #[inline(always)]
-    fn read<S: Simd>(simd: S, points: &[Coordinates], fill: &Coordinates) -> Self
-    where
-        F: Field<S>,
-    {
-        const { assert!(F::LANES <= MAX_LANES) };
-        let mut coordinates = [[[0; BYTES]; MAX_LANES]; 3];
-        let lanes = points.len().min(F::LANES);
-        for (i, coordinate) in coordinates.iter_mut().enumerate() {
-            for (lane, point) in coordinate.iter_mut().zip(&points[..lanes]) {
-                *lane = point[i];
-            }
-        }
-        Self {
-            x: Fp2::load(simd, &coordinates[0][..lanes], &fill[0]),
-            y: Fp2::load(simd, &coordinates[1][..lanes], &fill[1]),
-            z: Fp2::load(simd, &coordinates[2][..lanes], &fill[2]),
-        }
-    }
-
-    /// Body of [`Self::store`].
-    #[inline(always)]
-    fn write<S: Simd>(self, simd: S, points: &mut [Coordinates])
-    where
-        F: Field<S>,
-    {
-        const { assert!(F::LANES <= MAX_LANES) };
-        let mut coordinates = [[[0; BYTES]; MAX_LANES]; 3];
-        let lanes = points.len().min(F::LANES);
-        self.x.store(simd, &mut coordinates[0][..lanes]);
-        self.y.store(simd, &mut coordinates[1][..lanes]);
-        self.z.store(simd, &mut coordinates[2][..lanes]);
-        for (lane, point) in points[..lanes].iter_mut().enumerate() {
-            *point = [
-                coordinates[0][lane],
-                coordinates[1][lane],
-                coordinates[2][lane],
-            ];
-        }
-    }
-
     /// Returns the `k`th of the four values of the first stage of a doubling, as a sum of
     /// products to reduce: `Y^2`, `X Y`, `Y Z`, and `3b Z^2`.
     ///
