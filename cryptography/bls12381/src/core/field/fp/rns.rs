@@ -62,7 +62,7 @@
 //! `SUB_BIAS`, which the result's bound gains. Accumulators hold at most `TERMS` terms, a product
 //! or lift counting one and a subtraction `SUB_TERMS + 1`.
 
-pub(crate) mod parameters;
+mod parameters;
 
 use super::{BYTES, MODULUS, WORDS, bytes_from_words, limbs_from_words, words_from_bytes};
 use crate::{
@@ -111,14 +111,14 @@ const MODULUS_N0: u64 = montgomery::negated_inverse(MODULUS[0]);
 const LIFT: u64 = 2 * MODULI as u64;
 
 /// Largest integer bound, in units of `p^2`, of a sum of products that `Field::reduce` accepts.
-pub(crate) const BUDGET: u64 = M_OVER_P;
+pub const BUDGET: u64 = M_OVER_P;
 
 /// Integer bound, in units of `p`, of a value reduced from a sum within [`BUDGET`].
-pub(crate) const REDUCED: u64 = 1 + LIFT;
+pub const REDUCED: u64 = 1 + LIFT;
 
 /// Bias of `Field::product_sub`, in units of `p^2`: the largest bound of a subtrahend, which covers
 /// [`SUM_PRODUCTS`] products of factors summing at most two reduced values.
-pub(crate) const SUB_BIAS: u64 = SUM_PRODUCTS as u64 * (2 * REDUCED) * (2 * REDUCED);
+pub const SUB_BIAS: u64 = SUM_PRODUCTS as u64 * (2 * REDUCED) * (2 * REDUCED);
 
 /// Most terms a sum of products may hold.
 const TERMS: u64 = 1 << 10;
@@ -149,13 +149,13 @@ const CHAINS: usize = 4;
 const _: () = assert!(BATCH <= 2 * PASS);
 
 /// The moduli of one basis and the constants of their residue reductions.
-pub(crate) struct Basis {
+struct Basis {
     /// The moduli `q`.
-    pub(crate) moduli: [u64; MODULI],
+    moduli: [u64; MODULI],
     /// `2^50 - q`, the residue of `2^50`.
-    pub(crate) complement: [u64; MODULI],
+    complement: [u64; MODULI],
     /// `q^(-1) mod 2^52`.
-    pub(crate) inverse: [u64; MODULI],
+    inverse: [u64; MODULI],
 }
 
 /// A base conversion that estimates its quotient.
@@ -164,11 +164,11 @@ pub(crate) struct Basis {
 /// plus `k * correction[j]` for the estimated quotient
 /// `k = floor(sum(input[i] * fraction[i]) / 2^64)`. The quotient has two 52-bit digits;
 /// `correction_shift` is `correction` times `2^52`.
-pub(crate) struct Conversion {
-    pub(crate) matrix: [[u64; MODULI]; MODULI],
-    pub(crate) fraction: [u64; MODULI],
-    pub(crate) correction: [u64; MODULI],
-    pub(crate) correction_shift: [u64; MODULI],
+struct Conversion {
+    matrix: [[u64; MODULI]; MODULI],
+    fraction: [u64; MODULI],
+    correction: [u64; MODULI],
+    correction_shift: [u64; MODULI],
 }
 
 /// Returns each modulus times `factor`.
