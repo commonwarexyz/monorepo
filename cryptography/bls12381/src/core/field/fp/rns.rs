@@ -648,6 +648,17 @@ fn scalars<S: X86V4C>(simd: S, residues: S::U64) -> [u64; MODULI] {
 }
 
 impl<S: X86V4C> Rns<S> {
+    /// Returns zero residues with a zero bound.
+    #[inline(always)]
+    fn zero(simd: S) -> Self {
+        let zero = simd.u64_splat(0);
+        Self {
+            m: zero,
+            n: zero,
+            bound: DebugCounter::new(0),
+        }
+    }
+
     /// Loads the first element, or `fill` when there is none.
     ///
     /// The integer's 50-bit digits convert into the second basis with floor fractions, which
@@ -926,12 +937,7 @@ impl<S: X86V4C> Rns<S> {
         mut sums: impl FnMut(usize) -> Wide<S>,
     ) -> [Self; SUMS] {
         const { assert!(0 < SUMS && SUMS <= BATCH) };
-        let zero = simd.u64_splat(0);
-        let mut reduced = [Self {
-            m: zero,
-            n: zero,
-            bound: DebugCounter::new(0),
-        }; SUMS];
+        let mut reduced = [Self::zero(simd); SUMS];
         // Each pass size is a constant of its own kernel.
         macro_rules! passes {
             ($($sums:literal => $first:literal $(+ $second:literal)?;)*) => {
@@ -1078,11 +1084,7 @@ impl<S: X86V4C> Rns<S> {
 
                 let (modulus, inverse) = (constant(simd, &M.moduli), constant(simd, &M.inverse));
                 let complement = constant(simd, &M.complement);
-                let mut reduced = [Self {
-                    m: zero,
-                    n: zero,
-                    bound: DebugCounter::new(0),
-                }; SUMS];
+                let mut reduced = [Self::zero(simd); SUMS];
                 unroll::<SUMS>(
                     #[inline(always)]
                     |i| {
