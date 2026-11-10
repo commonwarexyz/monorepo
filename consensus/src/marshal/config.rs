@@ -30,13 +30,12 @@ pub enum Start<S: Scheme, C: Digest, B> {
 ///
 /// # Epocher and Provider Coverage
 ///
-/// The [epocher](Self::epocher) and [provider](Self::provider) must cover the
-/// heights and epochs used for consensus and floor installation. Exact body
-/// acquisition validates commitments independently of this coverage; caching
-/// certified bodies additionally requires a known epoch for their height.
+/// The [epocher](Self::epocher) and [provider](Self::provider) must cover the heights and epochs
+/// used for consensus and floor installation. Exact body acquisition validates commitments
+/// without this coverage, but caching a certified body requires a known epoch for its height.
 ///
 /// If either returns `None` for a requested finalized height, responses to resolver requests for
-/// it are ignored: the request is retired without validating the response, attributing it to the
+/// it are ignored. The request is retired without validating the response, attributing it to the
 /// serving peer, or retrying. If the data is no longer needed (say a duplicate request for a
 /// height we've long since processed), this is harmless. However, failing to provide either the
 /// epocher or the provider for a height we still require to process the canonical chain will lead

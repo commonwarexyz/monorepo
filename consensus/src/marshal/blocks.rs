@@ -22,8 +22,10 @@ use thiserror::Error;
 
 /// Metadata and acquisition for one selected branch.
 trait Source<B: Block>: Send + Sync {
+    /// Returns the resident digest selected at `height`.
     fn digest(&self, height: Height) -> Option<B::Digest>;
 
+    /// Acquires the selected block at `height` and checks it against the resident digest.
     fn fetch(self: Arc<Self>, height: Height) -> BoxFuture<'static, Result<Digested<B>, Error>>;
 
     /// Returns the digest selected at `height`, discovering it when the source can.
@@ -77,7 +79,7 @@ where
     }
 }
 
-/// Checks identity after acquisition, when more metadata may have become resident.
+/// Checks an acquired block's height, and its digest when one is resident after acquisition.
 fn check_block<B: Block>(
     source: &impl Source<B>,
     height: Height,
@@ -111,7 +113,7 @@ pub enum Error {
     InvalidDigest,
 }
 
-/// Access to blocks on one selected branch, ending at the proposal's parent.
+/// Access to blocks on one selected branch, ending at [`Self::tip`].
 ///
 /// Clones share commitment metadata and the acquisition service, and start no requests. Each
 /// [`range`](Self::range) owns its cursor and bounds both pending acquisitions and completed
@@ -120,18 +122,9 @@ pub enum Error {
 /// A source that [`Mailbox::blocks_with_parent`] builds over a [`History`] suffix discovers the
 /// commitments below it by following parent links through block bodies. Every clone and range of
 /// the source shares one such walk. It advances only while a caller waits on it and acquires one
-/// body at a time. Dropping every waiter cancels that acquisition, and the commitments discovered
-/// so far stay with the source.
-///
-/// The walk reads a body to learn the commitment under it: each body below the suffix, and the
-/// body of the suffix's lowest commitment once a reader asks below it. Such a body has one
-/// acquirer, the walk. A range waits for the read and takes the body from the walk, so the walk
-/// learns one commitment below the lowest height a range reads.
-///
-/// The walk retains the lowest bodies it read, at most a range's window of them, until a range
-/// takes them or the source drops. A range acquires such a body itself only when the walk no
-/// longer holds it. When the walk reads no more bodies than a window holds, each body is
-/// therefore acquired once.
+/// body at a time. Dropping every waiter cancels the step in flight, and the commitments
+/// discovered so far stay with the source. The walk retains at most a range's window of the
+/// lowest bodies it read, and a range takes a retained body without acquiring it again.
 ///
 /// Later finalization or pruning does not redirect an acquisition that is already pending. It
 /// stays pending until the body arrives, every waiter drops, or marshal shuts down.
@@ -171,7 +164,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Provides forward access to the selected branch that ends at a request's parent.
     ///
     /// `parent` is the exact commitment bound by the request's context at `parent_height`. The
-    /// caller has acquired and validated that block. Neither this call nor the clones of its
+    /// caller must have acquired and validated that block. Neither this call nor the clones of its
     /// result start a request.
     ///
     /// `history` supplies the consensus-selected commitments in increasing height order, ending
@@ -204,11 +197,16 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         parent: V::Commitment,
         history: History<V::Commitment>,
     ) -> Blocks<V::ApplicationBlock> {
+        // The commitments must end at the bound parent. An empty history selects the parent
+        // alone, and a history that ends elsewhere selects nothing.
         let commitments = match history.commitments().last() {
             None => Arc::from([parent]),
             Some(last) if *last == parent => history.commitments().clone(),
             Some(_) => Arc::from([]),
         };
+
+        // Below an anchored history lies finalized storage, and below a suffix a walk from its
+        // first commitment. Commitments that do not fit below the parent identify no height.
         let first = suffix_start(parent_height, commitments.len());
         let below = match (first, commitments.first()) {
             (Some(_), Some(_)) if history.is_anchored() => Below::Canonical,
@@ -229,6 +227,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         self.source(tip, Arc::from([]), Below::Canonical)
     }
 
+    /// Wraps the selected commitments in a source whose ranges use the repair window.
     fn source(
         &self,
         tip: Height,
@@ -250,10 +249,13 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 
 /// Consensus-selected commitments and the mailbox that serves their bodies.
 struct SelectedSource<S: Scheme, V: Variant> {
+    /// Height of the branch's tip.
     parent_height: Height,
     /// Commitments consensus selected, ending at `parent_height`.
     commitments: Arc<[V::Commitment]>,
+    /// How heights below `commitments` are read.
     below: Below<V>,
+    /// Serves block bodies and finalized storage.
     marshal: Mailbox<S, V>,
 }
 
@@ -291,6 +293,7 @@ enum End {
 }
 
 impl<V: Variant> Walk<V> {
+    /// Returns a walk that knows only `commitment`, the suffix's first commitment at `start`.
     fn new(start: Height, commitment: V::Commitment) -> Self {
         Self {
             start,
@@ -325,6 +328,9 @@ impl<V: Variant> Walk<V> {
     /// Takes one step from the lowest known commitment. The outcome is recorded before the
     /// step completes, so progress never depends on which caller observes it.
     async fn step<S: Scheme>(walk: Arc<Mutex<Self>>, marshal: Mailbox<S, V>) {
+        // A finalized block stored at the lowest known height ends the walk, as a junction when
+        // it matches and a conflict otherwise. Without one, the step acquires the body to learn
+        // its parent.
         let (height, commitment) = walk.lock().lowest();
         let outcome = match marshal.get_info(height).await {
             Some((_, digest)) if digest == V::commitment_to_inner(commitment) => Err(End::Junction),
@@ -335,6 +341,8 @@ impl<V: Variant> Walk<V> {
                 Err(_) => Err(End::Failed(Error::Unavailable)),
             },
         };
+
+        // Record the outcome and clear the finished step.
         let mut walk = walk.lock();
         walk.step = None;
         match outcome {
@@ -346,6 +354,9 @@ impl<V: Variant> Walk<V> {
                 // descendants waits on it. A walk through it therefore wastes work without
                 // producing a verdict that can finalize.
                 walk.known.push(V::parent_commitment(&block));
+
+                // Keep the body for a range to take, retaining at most a window of the lowest
+                // bodies.
                 walk.bodies.insert(height, block);
                 if walk.bodies.len() > marshal.max_repair.get() {
                     walk.bodies.pop_last();
@@ -360,6 +371,8 @@ impl<S: Scheme, V: Variant> SelectedSource<S, V> {
     /// Returns the commitment selected at `height`, or `None` when the height is canonical
     /// finalized history, walking parent links until the height is reached.
     async fn discover(&self, height: Height) -> Result<Option<V::Commitment>, Error> {
+        // Supplied commitments answer directly. Below them, canonical history needs no
+        // commitment, and a branch with no usable commitments is unavailable.
         if let Some(commitment) = suffix_at(self.parent_height, &self.commitments, height) {
             return Ok(Some(commitment));
         }
@@ -368,6 +381,7 @@ impl<S: Scheme, V: Variant> SelectedSource<S, V> {
             Below::Walked(walk) => walk,
             Below::Unknown => return Err(Error::Unavailable),
         };
+
         loop {
             // Every caller awaits the same step and then checks its own height, so a caller
             // finishes as soon as its height is known, whatever deeper callers wait for.
@@ -428,6 +442,8 @@ impl<S: Scheme, V: Variant> Source<V::ApplicationBlock> for SelectedSource<S, V>
         height: Height,
     ) -> BoxFuture<'static, Result<Digested<V::ApplicationBlock>, Error>> {
         Box::pin(async move {
+            // A selected commitment identifies the body, and a canonical height comes from
+            // finalized storage.
             let block = match self.discover(height).await? {
                 Some(commitment) => {
                     // Where the walk reads this body to learn the commitment under it, waiting
@@ -447,6 +463,8 @@ impl<S: Scheme, V: Variant> Source<V::ApplicationBlock> for SelectedSource<S, V>
                 None => self.marshal.finalized(height).await,
             }
             .map_err(|_| Error::Unavailable)?;
+
+            // Metadata may have become resident while the body was acquired.
             check_block(self.as_ref(), height, V::into_shared(block))
         })
     }
@@ -463,6 +481,8 @@ impl<S: Scheme, V: Variant> Source<V::ApplicationBlock> for SelectedSource<S, V>
     }
 
     fn prefetch(&self, heights: RangeInclusive<Height>) -> Option<oneshot::Receiver<()>> {
+        // Demand covers only the requested heights the supplied commitments select, as indices
+        // into them.
         let first = suffix_start(self.parent_height, self.commitments.len())?;
         let start = heights.start().get().max(first);
         let end = heights.end().get().min(self.parent_height.get());
@@ -506,7 +526,7 @@ impl<B: Block> Blocks<B> {
         }
     }
 
-    /// Returns the height of the selected parent.
+    /// Returns the height of the highest block on this branch.
     pub const fn tip(&self) -> Height {
         self.tip
     }
@@ -517,7 +537,7 @@ impl<B: Block> Blocks<B> {
     ///
     /// Panics if `tip` is above this source's tip.
     pub fn ending_at(&self, tip: Height) -> Self {
-        assert!(tip <= self.tip, "cannot extend a selected branch");
+        assert!(tip <= self.tip, "tip must not exceed the branch's tip");
         Self {
             tip,
             source: self.source.clone(),
@@ -543,13 +563,13 @@ impl<B: Block> Blocks<B> {
     ///
     /// Canonical finalized history returns `None`: every height of
     /// [`Mailbox::finalized_blocks`], and for [`Mailbox::blocks_with_parent`] the heights below
-    /// an anchored history or below the finalized block its walk reached. For any other height
-    /// the lookup acquires the bodies above that height to follow their parent links, and the
-    /// digest stays resident afterwards.
+    /// an anchored history or below the finalized block its walk reached. Below a history
+    /// suffix, the lookup acquires the bodies from the lowest known commitment down to the one
+    /// above `height` and follows their parent links. The digests it discovers stay resident.
     ///
     /// It returns [`Error::Unavailable`] if the branch conflicts with finalized history, its
-    /// history did not end at the bound parent, or marshal shuts down, and
-    /// [`Error::InvalidHeight`] if a body is not at the height its child implies.
+    /// history did not end at the bound parent or did not fit below it, or marshal shuts down,
+    /// and [`Error::InvalidHeight`] if a walked body is not at its commitment's height.
     ///
     /// Dropping this lookup leaves the commitments discovered so far with the source, where
     /// other clones and later lookups continue from them.
@@ -562,15 +582,13 @@ impl<B: Block> Blocks<B> {
 
     /// Acquires an inclusive range in increasing height order.
     ///
-    /// Acquisition starts when the stream is polled. Consuming a block releases
-    /// the stream's ownership of it and permits the next request. An empty range
-    /// performs no work. A range extending above [`Self::tip`] yields
-    /// [`Error::InvalidHeight`]. Any error terminates the range and cancels its
-    /// remaining requests.
+    /// Acquisition starts when the stream is polled. Consuming a block releases the stream's
+    /// ownership of it and permits the next request. An empty range performs no work. A range
+    /// extending above [`Self::tip`] yields [`Error::InvalidHeight`]. Any error terminates the
+    /// range and cancels its remaining requests.
     ///
-    /// Blocks are checked against resident commitments and preceding blocks.
-    /// Consumers must also check linkage to their application state when the
-    /// preceding commitment is not resident.
+    /// Blocks are checked against resident commitments and preceding blocks. Consumers must also
+    /// check linkage to their application state when the preceding commitment is not resident.
     pub fn range(&self, heights: RangeInclusive<Height>) -> BlockRange<B> {
         let start = *heights.start();
         let end = *heights.end();
@@ -587,18 +605,27 @@ impl<B: Block> Blocks<B> {
 
 /// A bounded stream of selected blocks in increasing height order.
 pub struct BlockRange<B: Block> {
+    /// The branch this range reads.
     blocks: Blocks<B>,
+    /// The next height to request, or `None` once every height is requested or the range failed.
     next: Option<Height>,
+    /// The last height of the range.
     end: Height,
+    /// Digest of the last yielded block. The next block must name it as its parent.
     previous: Option<B::Digest>,
+    /// Acquisitions in flight or completed but not yet yielded, in height order.
     pending: FuturesOrdered<BoxFuture<'static, Result<Digested<B>, Error>>>,
+    /// Forward demand registered for the remaining heights.
     lease: Lease,
 }
 
 /// Forward demand held by a range. Dropping an active lease cancels it.
 enum Lease {
+    /// The range has not registered demand.
     Idle,
+    /// Demand is registered with the source.
     Active { _lease: oneshot::Receiver<()> },
+    /// The range finished or failed, or its source serves no demand.
     Released,
 }
 
@@ -609,10 +636,14 @@ impl<B: Block> Stream for BlockRange<B> {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
+
+        // A range above the tip fails once and then ends.
         if this.next.is_some() && this.end > this.blocks.tip {
             this.next = None;
             return Poll::Ready(Some(Err(Error::InvalidHeight)));
         }
+
+        // The first poll registers forward demand for the remaining heights.
         if matches!(this.lease, Lease::Idle)
             && let Some(height) = this.next
         {
@@ -622,6 +653,8 @@ impl<B: Block> Stream for BlockRange<B> {
                 .prefetch(height..=this.end)
                 .map_or(Lease::Released, |lease| Lease::Active { _lease: lease });
         }
+
+        // Keep up to a window of acquisitions pending, in height order.
         while this.pending.len() < this.blocks.window {
             let Some(height) = this.next else {
                 break;
@@ -631,6 +664,8 @@ impl<B: Block> Stream for BlockRange<B> {
             this.next = (height < this.end).then(|| height.next());
         }
 
+        // Yield the next block. Its parent must be the preceding digest when that digest is
+        // known.
         let Some(result) = ready!(Pin::new(&mut this.pending).poll_next(cx)) else {
             return Poll::Ready(None);
         };
@@ -648,6 +683,9 @@ impl<B: Block> Stream for BlockRange<B> {
             this.previous = Some(block.digest());
             Ok(block)
         });
+
+        // An error ends the range and cancels its outstanding acquisitions, and a finished
+        // range releases its demand.
         if result.is_err() {
             this.next = None;
             this.pending.clear();
@@ -680,12 +718,14 @@ mod tests {
     type TestMailbox = Mailbox<harness::S, Standard<TestBlock>>;
     type Requests = Arc<Mutex<BTreeMap<Height, oneshot::Sender<Digested<TestBlock>>>>>;
 
+    /// Wraps `block` with its precomputed digest.
     fn digested(block: impl Into<Arc<TestBlock>>) -> Digested<TestBlock> {
         let block = block.into();
         let digest = block.digest();
         Digested::precomputed(block, digest)
     }
 
+    /// Returns `count` linked blocks starting at height 0.
     fn chain(count: u64) -> Vec<TestBlock> {
         let mut parent = Sha256::fill(0);
         (0..count)
@@ -697,10 +737,13 @@ mod tests {
             .collect()
     }
 
+    /// Returns the digests of `blocks` in order.
     fn digests(blocks: &[TestBlock]) -> Arc<[Sha256Digest]> {
         blocks.iter().map(Digestible::digest).collect()
     }
 
+    /// Returns a source whose fetches stay pending until the test answers them through
+    /// `requests`.
     fn pending_source<D>(
         tip: Height,
         window: NonZeroUsize,
@@ -813,7 +856,7 @@ mod tests {
                 if let Some(output) = future.as_mut().now_or_never() {
                     return output;
                 }
-                assert!(self.answer(receiver) > 0, "pending without a request");
+                assert!(self.answer(receiver) > 0, "the future must send a request");
             }
         }
 
@@ -850,9 +893,13 @@ mod tests {
         }
     }
 
+    /// A range sends no request before its first poll and keeps at most its window of acquisitions
+    /// pending or buffered. A consumed body is held only by its consumer, and dropping the range
+    /// releases buffered bodies and cancels open requests.
     #[test]
     fn range_fetches_window_and_releases_consumed() {
         deterministic::Runner::default().start(|_| async move {
+            // Creating a range starts no request, and its first poll opens a window of three.
             let blocks = chain(12);
             let requests = Requests::default();
             let digests: Arc<[_]> = blocks.iter().map(Digestible::digest).collect();
@@ -868,6 +915,7 @@ mod tests {
             assert!(range.next().now_or_never().is_none());
             assert_eq!(requests.lock().len(), 3);
 
+            // Bodies that arrive ahead of height 0 stay buffered and keep their window slots.
             let mut retained = Vec::new();
             for height in [2, 1] {
                 let block = Arc::new(blocks[height].clone());
@@ -883,6 +931,7 @@ mod tests {
             assert_eq!(requests.lock().len(), 1);
             assert!(retained.iter().all(|block| block.upgrade().is_some()));
 
+            // The range yields height 0 once it arrives, and dropping it releases the body.
             let first = Arc::new(blocks[0].clone());
             let first_weak = Arc::downgrade(&first);
             requests
@@ -897,12 +946,15 @@ mod tests {
             drop(first);
             assert!(first_weak.upgrade().is_none());
 
+            // Each consumed block frees a slot for the next request.
             let second = range.next().await.unwrap().unwrap();
             assert_eq!(second.height(), Height::new(1));
             assert_eq!(requests.lock().len(), 1);
             drop(second);
             assert!(retained[1].upgrade().is_none());
 
+            // Dropping the range releases buffered bodies and cancels open requests, and clones
+            // keep the metadata.
             drop(range);
             assert!(retained.iter().all(|block| block.upgrade().is_none()));
             assert!(requests.lock().values().all(oneshot::Sender::is_closed));
@@ -913,9 +965,12 @@ mod tests {
         });
     }
 
+    /// A range's first poll registers demand only for its heights that the history supplies, and
+    /// dropping the range closes that lease.
     #[test]
     fn range_scopes_prefetch_to_its_lifetime() {
         deterministic::Runner::default().start(|context| async move {
+            // A source over an anchored history of heights 4 through 9.
             type TestMessage = Message<harness::S, Standard<TestBlock>>;
             let (sender, mut receiver) =
                 commonware_actor::mailbox::new::<TestMessage>(context, NZUsize!(16));
@@ -928,6 +983,8 @@ mod tests {
                 History::anchored(commitments.clone()),
             );
             let source_clone = source.clone();
+
+            // The first poll registers demand for heights 4 through 7 of the range.
             let mut range = source.range(Height::new(2)..=Height::new(7));
             assert!(receiver.recv().now_or_never().is_none());
             assert!(range.next().now_or_never().is_none());
@@ -943,6 +1000,8 @@ mod tests {
             assert!(Arc::ptr_eq(&commitments, &observed));
             assert_eq!(selected, 0..4);
             assert!(!lease.is_closed());
+
+            // Dropping the range releases the demand, and clones keep the metadata.
             drop(range);
             assert!(lease.is_closed());
             assert_eq!(
@@ -952,9 +1011,13 @@ mod tests {
         });
     }
 
+    /// Reading heights a suffix supplies, including its lowest commitment, sends only demand and
+    /// acquisitions and never starts the walk. Bodies that arrive out of order are yielded in
+    /// height order.
     #[test]
     fn resident_range_reads_without_walking() {
         deterministic::Runner::default().start(|context| async move {
+            // A suffix of heights 7 through 9, and a helper that collects marshal requests.
             let (marshal, mut receiver) = marshal(context, 8);
             let blocks = chain(10);
             let resident = digests(&blocks[7..]);
@@ -966,6 +1029,7 @@ mod tests {
                 messages
             };
 
+            // Building the source and reading supplied digests sends no request.
             let source = marshal.blocks_with_parent(
                 Height::new(9),
                 blocks[9].digest(),
@@ -974,6 +1038,8 @@ mod tests {
             assert_eq!(source.digest(Height::new(8)), Some(blocks[8].digest()));
             assert_eq!(source.digest(Height::new(6)), None);
             assert!(drain(&mut receiver).is_empty());
+
+            // Polling a range over heights 8 and 9 registers their demand and acquires each body.
             let mut range = source.range(Height::new(8)..=Height::new(9));
             assert!(range.next().now_or_never().is_none());
             let mut lease = None;
@@ -997,7 +1063,7 @@ mod tests {
                         assert!(fetch);
                         responses.insert(commitment, response);
                     }
-                    _ => panic!("unexpected message for a resident range"),
+                    _ => panic!("a resident range must only prefetch and acquire"),
                 }
             }
             let lease = lease.expect("resident range must register demand");
@@ -1031,15 +1097,19 @@ mod tests {
                         message,
                         TestMessage::Prefetch { .. } | TestMessage::Acquire { .. }
                     ),
-                    "unexpected message for a resident range"
+                    "a resident range must only prefetch and acquire"
                 );
             }
         });
     }
 
+    /// With nothing finalized, a range below a suffix discovers each commitment by walking parent
+    /// links. Every body is acquired once, demand covers only the supplied commitments, and no read
+    /// waits on finalized storage.
     #[test]
     fn range_below_suffix_walks_parent_links() {
         deterministic::Runner::default().start(|context| async move {
+            // A suffix of heights 7 through 9 over a served chain with nothing finalized.
             let (marshal, mut receiver) = marshal(context, 8);
             let blocks = chain(10);
             let mut scripted = Scripted::default();
@@ -1050,6 +1120,7 @@ mod tests {
                 History::suffix(digests(&blocks[7..])),
             );
 
+            // Read heights 3 through 9, below and through the suffix.
             let mut range = source.range(Height::new(3)..=Height::new(9));
             scripted.read(&mut receiver, &mut range, &blocks[3..]);
 
@@ -1061,8 +1132,8 @@ mod tests {
             assert_eq!(scripted.infos, [7, 6, 5, 4, 3].map(Height::new));
             assert!(scripted.awaited.is_empty());
 
-            // Every body was acquired once: by the walk from the lowest commitment down, and
-            // by the range above it. The range took each body the walk read.
+            // Every body was acquired once, by the walk from the lowest commitment down or by
+            // the range above it. The range took each body the walk read.
             for block in &blocks[3..] {
                 assert_eq!(scripted.acquisitions(block), 1);
             }
@@ -1077,9 +1148,12 @@ mod tests {
         });
     }
 
+    /// When a walk reads no more bodies than the window holds, a later range takes every body the
+    /// walk retained and acquires none of them again.
     #[test]
     fn gap_within_window_is_acquired_once() {
         deterministic::Runner::default().start(|context| async move {
+            // A suffix holding only the parent, with a window of four.
             let (marshal, mut receiver) = marshal(context, 4);
             let blocks = chain(10);
             let mut scripted = Scripted::default();
@@ -1106,9 +1180,12 @@ mod tests {
         });
     }
 
+    /// A walk deeper than its window never holds more than its window of bodies and ends holding
+    /// the lowest ones. A later range takes those and acquires each evicted body a second time.
     #[test]
     fn gap_beyond_window_keeps_lowest_bodies() {
         deterministic::Runner::default().start(|context| async move {
+            // A suffix holding only the parent, with a window of two.
             let (marshal, mut receiver) = marshal(context, 2);
             let blocks = chain(10);
             let mut scripted = Scripted::default();
@@ -1144,9 +1221,12 @@ mod tests {
         });
     }
 
+    /// A body delivered for a commitment the walk discovered must match that commitment, so a range
+    /// rejects another block at the same height with `InvalidDigest`.
     #[test]
     fn discovered_commitment_binds_its_body() {
         deterministic::Runner::default().start(|context| async move {
+            // Discover the commitment at height 7 below a suffix holding only the parent.
             let (marshal, mut receiver) = marshal(context, 1);
             let blocks = chain(10);
             let mut scripted = Scripted::default();
@@ -1170,9 +1250,13 @@ mod tests {
         });
     }
 
+    /// A walk that reaches a finalized block matching its commitment samples no lower height.
+    /// Heights below that block come from finalized storage, and the block itself is acquired by
+    /// its commitment.
     #[test]
     fn walk_ends_at_matching_finalized_block() {
         deterministic::Runner::default().start(|context| async move {
+            // Heights 0 through 6 are finalized below a suffix of heights 8 and 9.
             let (marshal, mut receiver) = marshal(context, 8);
             let blocks = chain(10);
             let mut scripted = Scripted::default();
@@ -1184,10 +1268,11 @@ mod tests {
                 History::suffix(digests(&blocks[8..])),
             );
 
+            // Read heights 3 through 9 across the finalized boundary.
             let mut range = source.range(Height::new(3)..=Height::new(9));
             scripted.read(&mut receiver, &mut range, &blocks[3..]);
 
-            // The walk read bodies down to the first finalized height and sampled nothing
+            // The walk sampled finalized storage down to the first finalized height and nothing
             // below it.
             assert_eq!(scripted.infos, [8, 7, 6].map(Height::new));
 
@@ -1202,9 +1287,13 @@ mod tests {
         });
     }
 
+    /// A finalized block that conflicts with a walked commitment fails a range reading through it
+    /// and makes lower heights unavailable. The commitments discovered down to the conflict stay
+    /// readable by exact commitment.
     #[test]
     fn walk_fails_at_conflicting_finalized_block() {
         deterministic::Runner::default().start(|context| async move {
+            // Marshal serves every body of a ten-block chain.
             let (marshal, mut receiver) = marshal(context, 8);
             let blocks = chain(10);
             let mut scripted = Scripted::default();
@@ -1219,6 +1308,8 @@ mod tests {
                 History::suffix(digests(&blocks[8..])),
             );
 
+            // Reading through the conflict fails and ends the range, and lower digests are
+            // unavailable.
             let mut range = source.range(Height::new(5)..=Height::new(9));
             let read = scripted.drive(&mut receiver, range.next());
             assert!(matches!(read, Some(Err(Error::Unavailable))));
@@ -1226,7 +1317,7 @@ mod tests {
             let below = scripted.drive(&mut receiver, source.resolve_digest(Height::new(5)));
             assert_eq!(below, Err(Error::Unavailable));
 
-            // The commitments above the conflict stay readable by exact commitment.
+            // The commitments down to the conflicting height stay readable by exact commitment.
             assert_eq!(source.digest(Height::new(6)), Some(blocks[6].digest()));
             let mut range = source.range(Height::new(6)..=Height::new(9));
             scripted.read(&mut receiver, &mut range, &blocks[6..]);
@@ -1234,9 +1325,15 @@ mod tests {
         });
     }
 
+    /// A walk first samples finalized storage at the source's lowest commitment, whether the
+    /// history supplied it or the request only bound it. A matching block makes lower heights
+    /// canonical and a conflicting one makes them unavailable, while the held commitments stay
+    /// readable.
     #[test]
     fn lowest_commitment_must_match_finalized_block() {
         deterministic::Runner::default().start(|context| async move {
+            // Each case pairs a supplied or bound lowest commitment with a matching or
+            // conflicting finalized block, on its own marshal.
             for (resident, matches) in [(true, true), (true, false), (false, true), (false, false)]
             {
                 let (marshal, mut receiver) = marshal(
@@ -1265,6 +1362,9 @@ mod tests {
                         3,
                     )
                 };
+
+                // Heights below the lowest commitment are finalized, and the finalized block at
+                // it matches or conflicts.
                 let mut scripted = Scripted::default();
                 scripted.serve(&blocks);
                 scripted.finalize(&blocks[..lowest]);
@@ -1289,6 +1389,8 @@ mod tests {
                 assert_eq!(scripted.infos, [Height::new(lowest as u64)]);
                 assert!(scripted.acquired.is_empty());
 
+                // A range through the lowest commitment reads canonical history below a match
+                // and fails at a conflict.
                 let mut range = source.range(Height::new(1)..=Height::new(lowest as u64));
                 if matches {
                     // Heights below the matching block come from finalized storage, and the
@@ -1315,9 +1417,13 @@ mod tests {
         });
     }
 
+    /// Finalized history reads every height from finalized storage. A bound parent with an empty
+    /// history is read by its commitment, and lower heights come from finalized storage when the
+    /// history is anchored or from its parent links when it is a suffix.
     #[test]
     fn empty_history_reads_canonical_or_follows_parent() {
         deterministic::Runner::default().start(|context| async move {
+            // Every block of a four-block chain is finalized.
             let (marshal, mut receiver) = marshal(context, 8);
             let blocks = chain(4);
             let mut scripted = Scripted::default();
@@ -1331,6 +1437,8 @@ mod tests {
                 let mut range = canonical.range(Height::zero()..=Height::new(tip));
                 scripted.read(&mut receiver, &mut range, &blocks[..=tip as usize]);
             }
+
+            // Canonical reads only wait on finalized storage.
             scripted.awaited.sort_unstable();
             assert_eq!(scripted.awaited, [0, 0, 1, 2, 3].map(Height::new));
             assert!(scripted.infos.is_empty());
@@ -1365,9 +1473,13 @@ mod tests {
         });
     }
 
+    /// `resolve_digest` answers resident heights, heights above the tip, and heights below an
+    /// anchored history without a request. Below a suffix it discovers digests down to a finalized
+    /// block, and a misplaced body or a stopped marshal ends discovery with an error.
     #[test]
     fn resolve_digest_distinguishes_heights() {
         deterministic::Runner::default().start(|context| async move {
+            // Heights 7 through 9 are supplied as an anchored history and as a suffix.
             let (marshal, mut receiver) = marshal(context, 8);
             let blocks = chain(10);
             let resident = digests(&blocks[7..]);
@@ -1432,15 +1544,23 @@ mod tests {
         });
     }
 
+    /// A history that ends at another commitment or holds more commitments than the branch has
+    /// heights leaves the tip without a digest and makes reads below it unavailable, anchored or
+    /// suffix, without contacting marshal.
     #[test]
     fn bound_parent_rejects_malformed_history() {
         deterministic::Runner::default().start(|context| async move {
+            // One history ends at another commitment, and the other holds more commitments than
+            // the branch has heights.
             let (marshal, mut receiver) = marshal(context, 1);
             let blocks = chain(5);
             let commitments: [Arc<[_]>; 2] = [
                 Arc::from([blocks[2].digest()]),
                 Arc::from([blocks[3].digest(); 5]),
             ];
+
+            // Both leave the tip without a digest and make reads below it unavailable, under
+            // either anchoring and without contacting marshal.
             for commitments in commitments {
                 for history in [
                     History::anchored(commitments.clone()),
@@ -1462,9 +1582,13 @@ mod tests {
         });
     }
 
+    /// Dropping the range that drives a walk cancels the pending step with the range's acquisitions
+    /// and demand, even while an idle clone of the source remains. A later lookup starts the step
+    /// again.
     #[test]
     fn walk_cancels_without_waiters() {
         deterministic::Runner::default().start(|context| async move {
+            // A ten-block chain read with a window of four.
             let (marshal, mut receiver) = marshal(context, 4);
             let blocks = chain(10);
 
@@ -1505,9 +1629,12 @@ mod tests {
         });
     }
 
+    /// Concurrent lookups share one walk step, and each finishes once its own height is known. A
+    /// pending step survives the lookup that started it while another lookup awaits it.
     #[test]
     fn walk_shares_pending_step() {
         deterministic::Runner::default().start(|context| async move {
+            // A ten-block chain read with a window of four.
             let (marshal, mut receiver) = marshal(context, 4);
             let blocks = chain(10);
 
@@ -1560,9 +1687,13 @@ mod tests {
         });
     }
 
+    /// A block finalized while a step's acquisition is pending does not redirect that acquisition.
+    /// The next step samples finalized storage and ends the walk at a match or fails it at a
+    /// conflict.
     #[test]
     fn walk_sees_finalization_at_next_step() {
         deterministic::Runner::default().start(|context| async move {
+            // Each case uses its own marshal and a suffix holding only the parent.
             for matches in [true, false] {
                 let name = if matches { "matching" } else { "conflicting" };
                 let (marshal, mut receiver) = marshal(context.child(name), 4);
@@ -1609,9 +1740,13 @@ mod tests {
         });
     }
 
+    /// Any error a range yields, whether height, digest, parent, or availability, closes its
+    /// demand, cancels its outstanding acquisitions, and releases its buffered bodies before the
+    /// range drops.
     #[test]
     fn range_error_releases_prefetch_and_bodies() {
         deterministic::Runner::default().start(|context| async move {
+            // Each error case uses its own marshal and fails the range at height 1.
             type TestMessage = Message<harness::S, Standard<TestBlock>>;
             for expected in [
                 Error::InvalidHeight,
@@ -1640,6 +1775,9 @@ mod tests {
                     }
                     Error::Unavailable => blocks[1].clone(),
                 };
+
+                // A range over an anchored history of the chain registers demand and acquires
+                // every body.
                 let commitments: Vec<_> = blocks.iter().map(Digestible::digest).collect();
                 let source = marshal.blocks_with_parent(
                     Height::new(5),
@@ -1665,7 +1803,7 @@ mod tests {
                         ..
                     } = receiver.recv().await.unwrap()
                     else {
-                        panic!("expected body acquisition");
+                        panic!("the range must acquire every body");
                     };
                     responses.insert(commitment, response);
                 }
@@ -1683,6 +1821,7 @@ mod tests {
                 assert!(!lease.is_closed());
                 assert!(responses.values().all(|response| !response.is_closed()));
 
+                // Height 1 fails when its acquisition closes or its replacement arrives.
                 let response = responses.remove(&blocks[1].digest()).unwrap();
                 if expected == Error::Unavailable {
                     drop(response);
@@ -1690,6 +1829,7 @@ mod tests {
                     response.send(digested(replacement)).unwrap();
                 }
                 assert_eq!(range.next().await.unwrap().unwrap_err(), expected);
+
                 // Terminal errors cancel demand while the range itself remains alive.
                 assert!(lease.is_closed());
                 assert_eq!(responses.len(), 3);
@@ -1701,14 +1841,20 @@ mod tests {
         });
     }
 
+    /// With no resident digests, each block after a range's first must name the block yielded
+    /// before it as its parent. A mismatch fails with `InvalidParent` and cancels the remaining
+    /// requests.
     #[test]
     fn range_checks_parent_against_yielded_block() {
         deterministic::Runner::default().start(|_| async move {
+            // A source with no resident digests and a window of four.
             let blocks = chain(5);
             let requests = Requests::default();
             let source = pending_source(Height::new(4), NZUsize!(4), requests.clone(), |_| None);
             let mut range = source.range(Height::zero()..=Height::new(4));
             assert!(range.next().now_or_never().is_none());
+
+            // Height 2 arrives first, naming a parent outside the chain.
             let detached = TestBlock::new(Sha256::fill(7), Height::new(2), 2);
             requests
                 .lock()
@@ -1717,6 +1863,8 @@ mod tests {
                 .send(digested(detached))
                 .unwrap();
             assert!(range.next().now_or_never().is_none());
+
+            // Heights 0 and 1 are yielded in order.
             for height in 0..2 {
                 requests
                     .lock()
@@ -1729,6 +1877,8 @@ mod tests {
                     blocks[height as usize].digest()
                 );
             }
+
+            // Height 2 fails linkage, ends the range, and cancels the remaining requests.
             assert_eq!(
                 range.next().await.unwrap().unwrap_err(),
                 Error::InvalidParent
@@ -1739,9 +1889,12 @@ mod tests {
         });
     }
 
+    /// A digest that becomes resident while its body is acquired is enforced when the body arrives,
+    /// so a mismatched body fails the range with `InvalidDigest`.
     #[test]
     fn range_rechecks_digest_metadata() {
         deterministic::Runner::default().start(|_| async move {
+            // Resident digests start empty and the test adds them as it goes.
             let blocks = chain(3);
             let resident = Arc::new(Mutex::new(BTreeMap::new()));
             let metadata = resident.clone();
@@ -1753,6 +1906,8 @@ mod tests {
                 move |height| metadata.lock().get(&height).copied(),
             );
             let mut range = source.range(Height::zero()..=Height::new(2));
+
+            // Height 0 is yielded with no resident digest.
             assert!(range.next().now_or_never().is_none());
             requests
                 .lock()
@@ -1764,6 +1919,9 @@ mod tests {
                 range.next().await.unwrap().unwrap().digest(),
                 blocks[0].digest()
             );
+
+            // Height 1's digest becomes resident before a mismatched body arrives. The mismatch
+            // ends the range and cancels the last request.
             assert_eq!(source.digest(Height::new(1)), None);
             resident.lock().insert(Height::new(1), blocks[1].digest());
             let mismatch = TestBlock::new(blocks[0].digest(), Height::new(1), 99);
@@ -1783,9 +1941,13 @@ mod tests {
         });
     }
 
+    /// A parent digest that becomes resident while a block is acquired is checked against that
+    /// block, though the range yielded no block before it.
     #[test]
     fn range_rechecks_parent_metadata() {
         deterministic::Runner::default().start(|_| async move {
+            // The fetch makes both digests resident before delivering a block detached from
+            // height 0.
             let blocks = chain(2);
             let detached = TestBlock::new(Sha256::fill(7), Height::new(1), 1);
             let commitments = [blocks[0].digest(), detached.digest()];
@@ -1809,6 +1971,8 @@ mod tests {
                     }
                 },
             );
+
+            // No digest is resident at first, and the range then rejects the block's parent.
             assert_eq!(source.digest(Height::zero()), None);
             let mut range = source.range(Height::new(1)..=Height::new(1));
             assert_eq!(
@@ -1819,9 +1983,12 @@ mod tests {
         });
     }
 
+    /// An empty range ends without a request, a range at the maximum height reads one block without
+    /// overflowing, and a range above the tip fails with `InvalidHeight` before any request.
     #[test]
     fn range_bounds_are_checked() {
         deterministic::Runner::default().start(|_| async move {
+            // A source whose tip is the maximum height counts its requests.
             let requests = Arc::new(Mutex::new(0));
             let observed = requests.clone();
             let source = Blocks::new(
@@ -1833,15 +2000,19 @@ mod tests {
                     async move { Some(digested(TestBlock::new(Sha256::fill(0), height, 0))) }
                 },
             );
+
+            // An empty range ends without a request.
             let mut empty = source.range(Height::new(2)..=Height::new(1));
             assert!(empty.next().await.is_none());
             assert_eq!(*requests.lock(), 0);
 
+            // A range at the maximum height reads one block and ends without overflow.
             let mut last = source.range(Height::new(u64::MAX)..=Height::new(u64::MAX));
             assert_eq!(last.next().await.unwrap().unwrap().height().get(), u64::MAX);
             assert!(last.next().await.is_none());
             assert_eq!(*requests.lock(), 1);
 
+            // A range above the tip fails before any request.
             let requests = Requests::default();
             let source = pending_source(Height::new(1), NZUsize!(8), requests.clone(), |_| None);
             let mut outside = source.range(Height::zero()..=Height::new(u64::MAX));

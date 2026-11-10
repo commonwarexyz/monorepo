@@ -25,7 +25,7 @@ impl<D: Digest> History<D> {
     /// Creates a history whose first commitment is a finalized or genesis anchor.
     ///
     /// The caller asserts that every block below the first commitment is canonical. With no
-    /// commitments, it asserts that of every block the history is read against.
+    /// commitments, it asserts that every block the history is read against is canonical.
     pub fn anchored(commitments: impl Into<Arc<[D]>>) -> Self {
         Self {
             commitments: commitments.into(),

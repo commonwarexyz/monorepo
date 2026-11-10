@@ -2778,10 +2778,12 @@ mod tests {
             // Parent availability determines subscription lifetime.
             assert!(matches!(first.try_recv(), Err(TryRecvError::Empty)));
             assert!(matches!(second.try_recv(), Err(TryRecvError::Empty)));
+
             // A new caller joins acquisition even after progress passed its height.
             let mut late_first = mailbox.acquire(missing_digest);
             let _ = mailbox.get_processed().await;
             assert!(matches!(late_first.try_recv(), Err(TryRecvError::Empty)));
+
             // Later local availability satisfies every registered caller.
             let _ = buffer.broadcast(Recipients::All, ready(missing.clone()));
             assert_eq!(first.await.unwrap().digest(), missing_digest);
@@ -3534,8 +3536,8 @@ mod tests {
             }
             context.sleep(Duration::from_millis(250)).await;
 
-            // The selected parent certificate reaches Simplex after rejection of
-            // the conflicting header. Its body is already available in Marshal.
+            // The selected parent's notarization reaches the victim after it rejects the
+            // conflicting header. Marshal already holds the parent's body.
             let parent_notarization = StandardHarness::make_notarization(
                 Proposal::new(skipped_round, View::new(1), skipped_digest),
                 &schemes,
@@ -4180,8 +4182,9 @@ mod tests {
         }
     }
 
-    /// Certification acquires and persists a recovered consensus commitment when
-    /// its local gate and durable body are absent after an unclean shutdown.
+    /// Certification fetches and persists a candidate when marshal has neither its verification
+    /// gate nor a stored body. Simplex can recover a notarized candidate in that state after an
+    /// unclean shutdown.
     #[test_traced("WARN")]
     fn test_standard_certify_missing_candidate_fetches_by_commitment() {
         for kind in wrapper_kinds() {
@@ -4213,6 +4216,8 @@ mod tests {
                 let mut wrapper =
                     Wrapper::new(kind, context.child("wrapper"), mock_app, marshal.clone());
 
+                // Marshal has no gate or stored body for the candidate, and the resolver serves the
+                // body to the first fetch.
                 let round = Round::new(Epoch::zero(), View::new(1));
                 let block_context = Ctx {
                     round,
@@ -4224,6 +4229,8 @@ mod tests {
                 resolver.respond_to_next_fetch(block.encode());
                 let certify = wrapper.certify(round, digest, History::anchored([genesis.digest()]));
 
+                // Certification fetches the exact commitment, also waits for it locally, and
+                // succeeds on the delivered body.
                 let result = certify.await.expect("certify result missing");
                 assert!(
                     result,
@@ -4231,13 +4238,12 @@ mod tests {
                 );
                 assert!(
                     resolver.wait_for_delivery_response().await,
-                    "{kind:?}: block delivery should validate"
+                    "{kind:?}: block delivery must validate"
                 );
                 assert!(
                     resolver.subscriptions(digest) > 0,
-                    "{kind:?}: certify should fetch the candidate commitment"
+                    "{kind:?}: certify must fetch the candidate commitment"
                 );
-
                 assert!(
                     buffer.commitment_subscription_count() > 0,
                     "{kind:?}: unavailable candidate certification must register a local wait"
@@ -4319,6 +4325,8 @@ mod tests {
                 let round = case.block_context.round;
                 let digest = case.block.digest();
 
+                // Verification waits for the candidate locally, and the resolver holds its body for
+                // the first fetch.
                 case.resolver.respond_to_next_fetch(case.block.encode());
                 let block_context = case.block_context.clone();
                 let commitments: Arc<[D]> = Arc::from([block_context.parent.1]);
@@ -4334,10 +4342,12 @@ mod tests {
                     case.resolver.fetches().is_empty(),
                     "{kind:?}: verification must wait for the candidate without fetching it"
                 );
+
+                // Certification fetches the exact candidate, and its delivery completes both the
+                // verification gate and certification.
                 let certify_rx =
                     case.wrapper
                         .certify(round, digest, History::anchored(commitments));
-
                 select! {
                     result = verify_rx => {
                         assert!(
@@ -4355,14 +4365,13 @@ mod tests {
                     result = certify_rx => {
                         assert!(
                             result.expect("certify resolves"),
-                            "{kind:?}: certify should succeed via the verification gate"
+                            "{kind:?}: certify must succeed via the verification gate"
                         );
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
                         panic!("{kind:?}: certify must resolve once it fetches the candidate");
                     },
                 }
-
                 assert!(
                     case.resolver.subscriptions(digest) > 0,
                     "{kind:?}: certification must fetch the exact candidate"
@@ -4501,7 +4510,7 @@ mod tests {
             }
             assert!(
                 resolver.wait_for_delivery_response().await,
-                "block delivery should validate"
+                "block delivery must validate"
             );
             assert!(
                 resolver.subscriptions(digest) > 0,
@@ -4510,6 +4519,8 @@ mod tests {
         });
     }
 
+    /// A child that claims a height beyond its parent's makes verification fetch the parent by its
+    /// exact commitment. The height gap then fails inline verification or deferred certification.
     #[test_traced("WARN")]
     fn test_standard_verify_height_lie_parent_fetch_uses_commitment() {
         for kind in wrapper_kinds() {
@@ -4540,6 +4551,7 @@ mod tests {
                 let mut wrapper =
                     Wrapper::new(kind, context.child("wrapper"), mock_app, marshal.clone());
 
+                // The stored child names a missing parent at height 1 but claims height 3.
                 let parent_round = Round::new(Epoch::zero(), View::new(1));
                 let parent_context = Ctx {
                     round: parent_round,
@@ -4549,7 +4561,6 @@ mod tests {
                 let parent =
                     B::new::<Sha256>(parent_context, genesis.digest(), Height::new(1), 100);
                 let parent_digest = parent.digest();
-
                 let child_round = Round::new(Epoch::zero(), View::new(2));
                 let child_context = Ctx {
                     round: child_round,
@@ -4561,6 +4572,8 @@ mod tests {
                 let child_digest = child.digest();
                 assert!(marshal.verified(child_round, ready(child)).await);
 
+                // Verification requests only the parent's exact commitment, never a height derived
+                // from the child's claim.
                 let verify = wrapper.verify(
                     child_context,
                     child_digest,
@@ -4573,7 +4586,6 @@ mod tests {
                     || resolver.subscriptions(parent_digest) > 0,
                 )
                 .await;
-
                 assert!(
                     resolver.fetches().iter().all(|fetch| {
                         fetch.key == handler::Key::Block(parent_digest)
@@ -4582,6 +4594,8 @@ mod tests {
                     "{kind:?}: malicious child height must not select a different parent"
                 );
 
+                // Once the parent arrives, the height gap fails inline verification, or deferred
+                // certification after optimistic verification passes.
                 assert!(marshal.verified(parent_round, ready(parent)).await);
                 let verify_result = verify.await.expect("verify result missing");
                 if kind == WrapperKind::Inline {
@@ -6199,7 +6213,7 @@ mod tests {
             );
         }
 
-        /// Returns whether an automatic delivery was made.
+        /// Returns whether an automatic delivery awaits [`Self::wait_for_delivery_response`].
         fn delivered(&self) -> bool {
             !self.delivery_responses.lock().is_empty()
         }
@@ -7187,14 +7201,14 @@ mod tests {
                 floor_block.digest()
             );
 
-            // The unacknowledged anchor owns the dispatch floor at height 4.
+            // The floor records height 4 as processed while its anchor awaits acknowledgement. A
+            // stale ack for height 1 must leave that position unchanged.
             assert_eq!(
                 mailbox.get_processed().await,
                 Some(Processed::Absent(Height::new(4)))
             );
             assert_eq!(application.acknowledge_next(), Some(Height::new(1)));
             context.sleep(Duration::from_millis(100)).await;
-
             assert_eq!(
                 mailbox.get_processed().await,
                 Some(Processed::Absent(Height::new(4))),
@@ -7267,14 +7281,14 @@ mod tests {
                 "local floor anchor must not be fetched"
             );
 
-            // The unacknowledged anchor owns the dispatch floor at height 4.
+            // The floor records height 4 as processed while its anchor awaits acknowledgement. A
+            // stale ack for height 1 must leave that position unchanged.
             assert_eq!(
                 mailbox.get_processed().await,
                 Some(Processed::Absent(Height::new(4)))
             );
             assert_eq!(application.acknowledge_next(), Some(Height::new(1)));
             context.sleep(Duration::from_millis(100)).await;
-
             assert_eq!(
                 mailbox.get_processed().await,
                 Some(Processed::Absent(Height::new(4))),
@@ -8409,9 +8423,9 @@ mod tests {
         });
     }
 
-    /// A delivered finalized block is dispatched and is durable with its finalization. The
-    /// finalization arrives with the block, or `body_only` delivers the block alone for a
-    /// finalization that was reported first.
+    /// A finalized block delivered under a verify-only scope is dispatched and survives restart
+    /// with its finalization. The finalization arrives with the block, or `body_only` delivers
+    /// the block alone for a finalization that was reported first.
     fn finalized_delivery_survives_recovery(body_only: bool) {
         const PARTITION_PREFIX: &str = "finalized-delivery-verify-only";
 
@@ -8438,6 +8452,7 @@ mod tests {
             )
             .await;
 
+            // Marshal accepts the block in the form `body_only` selects and dispatches it.
             let (key, value) = if body_only {
                 let mut reporter = mailbox.clone();
                 StandardHarness::report_finalization(&mut reporter, finalization.clone()).await;
@@ -8475,6 +8490,7 @@ mod tests {
                 block.digest()
             );
 
+            // Stop the actor without a clean shutdown.
             actor_handle.abort();
             let _ = actor_handle.await;
             drop(mailbox);
@@ -8482,6 +8498,7 @@ mod tests {
         });
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
+            // Restart marshal on the same storage.
             let (verifier, block, finalization) = fixture;
             let (mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
                 context.child("recovered"),
@@ -8493,6 +8510,7 @@ mod tests {
             )
             .await;
 
+            // The restarted actor serves the block and its finalization from storage.
             let recovered_block = mailbox
                 .get_block(Height::new(1))
                 .await
@@ -9005,6 +9023,8 @@ mod tests {
         });
     }
 
+    /// A stale finalization at the processed round requests nothing, while a live acquire of a
+    /// commitment from that round still fetches it and local ingress satisfies it.
     #[test_traced("WARN")]
     fn test_standard_processed_round_skips_stale_fetch_and_serves_acquisition() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -9030,12 +9050,12 @@ mod tests {
             let mut mailbox = mailbox;
             assert_eq!(application.acknowledged().await, Height::zero());
 
+            // Processing finalized block 1 prunes round-bound requests through its round.
             assert!(
                 mailbox.verified(round, ready(block.clone())).await,
                 "verified block should persist before finalization"
             );
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
-
             let retain_floor = resolver.retain_count() + 2;
             assert_eq!(
                 application.acknowledged().await,
@@ -9050,6 +9070,7 @@ mod tests {
             )
             .await;
 
+            // A later finalization at the processed round is stale and requests nothing.
             let fetches_before = resolver.fetches().len();
             report_finalized(
                 &mut mailbox.clone(),
@@ -9065,12 +9086,13 @@ mod tests {
                 fetches_before,
                 "processed round must suppress stale finalization acquisition"
             );
+
+            // A live caller still acquires a commitment from that round. The barrier verification
+            // orders the check after the acquire.
             let missing = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 101);
             let missing_digest = missing.digest();
             let mut subscription = mailbox.acquire(missing_digest);
-
             let barrier = make_raw_block(block.digest(), Height::new(2), 200);
-
             assert!(
                 mailbox
                     .verified(Round::new(Epoch::zero(), View::new(2)), ready(barrier))
@@ -9084,6 +9106,7 @@ mod tests {
             );
             assert!(matches!(subscription.try_recv(), Err(TryRecvError::Empty)));
 
+            // Local ingress satisfies the acquisition.
             buffer
                 .commitment_subscriptions
                 .lock()
@@ -9274,6 +9297,8 @@ mod tests {
             .await;
             let buffer = buffer.expect("buffer was provided");
 
+            // Restored progress makes a finalization at the processed round stale, while a live
+            // caller still acquires a commitment from that round.
             let fetches_before = resolver.fetches().len();
             report_finalized(
                 &mut mailbox.clone(),
@@ -9292,9 +9317,7 @@ mod tests {
             let missing = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 101);
             let missing_digest = missing.digest();
             let mut subscription = mailbox.acquire(missing_digest);
-
             let barrier = make_raw_block(block.digest(), Height::new(2), 200);
-
             assert!(
                 mailbox
                     .verified(Round::new(Epoch::zero(), View::new(2)), ready(barrier))
@@ -9400,7 +9423,7 @@ mod tests {
             assert_eq!(
                 response_rx.await.expect("delivery response missing"),
                 Outcome::Resolved(Resolution::Complete),
-                "block delivery should validate"
+                "block delivery must validate"
             );
             select! {
                 result = subscription => {
@@ -9478,6 +9501,8 @@ mod tests {
             )
             .await;
 
+            // The restored floor makes a finalization at its round stale, while a live caller still
+            // acquires a commitment.
             let fetches_before = resolver.fetches().len();
             report_finalized(
                 &mut mailbox.clone(),
@@ -9491,7 +9516,6 @@ mod tests {
             assert_eq!(resolver.fetches().len(), fetches_before);
             let mut subscription = mailbox.acquire(Sha256::hash(&[b"missing-before-anchor-ack"]));
             let barrier = make_raw_block(floor_block.digest(), Height::new(6), 600);
-
             assert!(
                 mailbox
                     .verified(Round::new(Epoch::zero(), View::new(6)), ready(barrier))
@@ -10434,6 +10458,7 @@ mod tests {
                 })
                 .expect("anchor fetch missing");
 
+            // Finalizations of heights 2 and 3 start round-bound requests for their bodies.
             let next = make_raw_block(block.digest(), Height::new(2), 200);
             let above = make_raw_block(next.digest(), Height::new(3), 300);
             for block in [&next, &above] {
@@ -13965,7 +13990,7 @@ mod tests {
             assert_eq!(application.pending_ack_heights(), vec![Height::new(21)]);
 
             // Acknowledging block 21 closes epoch one, so the round floor covers every round of
-            // that epoch and round-bound work for a later view of it is canceled. The test
+            // that epoch and a round-bound request for a later view of it is canceled. The test
             // stops before block 22 is acknowledged.
             let covered = Round::new(Epoch::new(1), View::new(60));
             resolver.record_fetch(
@@ -14032,6 +14057,9 @@ mod tests {
             let buffer = RecordingBuffer::default();
             buffer.insert(boundary.block.clone());
             let application = Application::<B>::manual_ack();
+
+            // Marshal starts with a round-bound request active for a later view of epoch zero, and
+            // dispatches floor block 10.
             let covered = Round::new(Epoch::zero(), View::new(60));
             resolver.record_fetch(
                 handler::Request::new(
@@ -14062,7 +14090,7 @@ mod tests {
                 Some(Processed::Block(Height::new(10)))
             );
 
-            // Epoch zero is covered, so round-bound work for a later view of it is canceled.
+            // Epoch zero is covered, so a round-bound request for a later view of it is canceled.
             assert_eq!(
                 mailbox.get_processed().await,
                 Some(Processed::Block(Height::new(10)))
@@ -14233,7 +14261,8 @@ mod tests {
             );
             assert!(mailbox.get_finalization(Height::new(21)).await.is_none());
 
-            // Epoch one ended at block 21, so round-bound work for a later view of it is canceled.
+            // Epoch one ended at block 21, so a round-bound request for a later view of it is
+            // canceled.
             assert_eq!(
                 mailbox.get_processed().await,
                 Some(Processed::Block(Height::new(21)))
@@ -14290,6 +14319,8 @@ mod tests {
         });
     }
 
+    /// Local gap repair of a prefetched parent retires its speculative request and frees the only
+    /// slot for the next leased commitment.
     #[test_traced("WARN")]
     fn test_standard_local_gap_repair_retires_speculative_fetch() {
         const PARTITION: &str = "local-gap-repair-retires-prefetch";
@@ -14306,6 +14337,8 @@ mod tests {
             )
             .await;
 
+            // A lease on the parent and a later commitment fills the only slot with the parent's
+            // request.
             let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
             let parent = make_raw_block(genesis.digest(), Height::new(1), 100);
             let child = make_raw_block(parent.digest(), Height::new(2), 101);
@@ -14320,8 +14353,8 @@ mod tests {
             .await;
             assert_eq!(buffer.commitment_subscription_count(), 0);
 
-            // Speculation has no buffer waiter. Canonical repair must retire its
-            // resolver request when the parent becomes available locally.
+            // Speculation registers no buffer wait, so canonical repair must retire its resolver
+            // request when the parent becomes available locally.
             buffer.insert(parent.clone());
             buffer.insert(child.clone());
             let finalized_parent = mailbox.finalized(parent.height());
@@ -14334,6 +14367,8 @@ mod tests {
             )
             .await;
             assert_eq!(finalized_parent.await.unwrap().digest(), parent.digest());
+
+            // The freed slot goes to the next commitment, and the lease stays open.
             wait_until(
                 &context,
                 Duration::from_secs(1),
@@ -14343,12 +14378,14 @@ mod tests {
             .await;
             assert!(
                 resolver.active_subscription(parent.digest()).is_none(),
-                "locally repaired parent still has an unresolved speculative fetch",
+                "local repair must retire the parent's speculative request",
             );
             assert!(matches!(lease.try_recv(), Err(TryRecvError::Empty)));
         });
     }
 
+    /// Verifies a chain of one block per view from `genesis` through `tip` and returns its
+    /// commitments, starting with genesis.
     async fn verified_chain(
         marshal: &Mailbox<S, Standard<B>>,
         genesis: &B,
@@ -14374,6 +14411,7 @@ mod tests {
         commitments.into()
     }
 
+    /// Delivers `block` in response to `fetch` and asserts that marshal accepts it.
     async fn deliver_acquisition_test_block(
         resolver: &RecordingResolver,
         fetch: FetchRecord,
@@ -14396,11 +14434,13 @@ mod tests {
         assert_eq!(
             response_rx
                 .await
-                .expect("exact block delivery response missing"),
+                .expect("exact block delivery must receive a verdict"),
             Outcome::Resolved(Resolution::Complete)
         );
     }
 
+    /// Callers for one commitment share a single request that lasts until the last caller drops
+    /// its receiver. Cancellation alone must wake cleanup while the actor is otherwise idle.
     #[test_traced("WARN")]
     fn test_standard_acquire_coalesces_and_cancels_last_caller_while_idle() {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
@@ -14416,11 +14456,15 @@ mod tests {
             )
             .await;
             let buffer = buffer.unwrap();
+
+            // Marshal finishes processing genesis, so no other work is pending.
             context.sleep(Duration::from_millis(100)).await;
             assert_eq!(
                 mailbox.get_processed().await,
                 Some(Processed::Block(Height::zero()))
             );
+
+            // Two callers for a missing commitment share one buffer wait and one resolver request.
             let commitment = Sha256::hash(&[b"shared-acquisition"]);
             let first = mailbox.acquire(commitment);
             let mut second = mailbox.acquire(commitment);
@@ -14428,13 +14472,16 @@ mod tests {
             assert_eq!(buffer.commitment_subscription_count(), 1);
             assert_eq!(resolver.subscriptions(commitment), 1);
 
-            // Only cancellation can wake cleanup after this point: neither mailbox
-            // traffic nor a block arrival can hide a missing cancellation wakeup.
+            // From here on only cancellation can wake cleanup, so no mailbox traffic or block
+            // arrival can mask a missing cancellation wakeup. Dropping the first caller keeps the
+            // request for the second.
             drop(first);
             context.sleep(Duration::from_millis(100)).await;
             assert!(matches!(second.try_recv(), Err(TryRecvError::Empty)));
             assert!(resolver.active_subscription(commitment).is_some());
             assert!(!buffer.commitment_subscription_closed(0));
+
+            // Dropping the last caller cancels the resolver request and the buffer wait.
             drop(second);
             wait_until(
                 &context,
@@ -14450,6 +14497,8 @@ mod tests {
         });
     }
 
+    /// An acquire takes over an active speculative request, and a lease never keeps a dropped
+    /// direct caller's request alive. Only a request's current owner can cancel it.
     #[test_traced("WARN")]
     fn test_standard_prefetch_direct_transfer_preserves_cancellation_ownership() {
         const PARTITION: &str = "prefetch-direct-transfer";
@@ -14467,6 +14516,7 @@ mod tests {
             .await;
             let _ = mailbox.get_processed().await;
 
+            // With one slot, a two-body lease activates its first commitment and queues the second.
             let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
             let first = make_raw_block(genesis.digest(), Height::new(1), 100);
             let first_key = handler::Key::Block(first.digest());
@@ -14492,6 +14542,8 @@ mod tests {
                     .any(|fetch| fetch.key == second_key)
             );
 
+            // Dropping a lease whose demand is only queued releases it without scanning resolver
+            // requests.
             let queued = mailbox.prefetch(
                 Arc::from([
                     Sha256::hash(&[b"unused queued prefetch one"]),
@@ -14509,6 +14561,8 @@ mod tests {
                 "discarding queued metadata must not scan active resolver requests",
             );
 
+            // A direct acquire takes over the first request and frees the slot for the second.
+            // A later lease on the first commitment issues no new request.
             let mut direct = mailbox.acquire(first.digest());
             wait_until(
                 &context,
@@ -14533,8 +14587,8 @@ mod tests {
                 1
             );
 
-            // Both lease closures are the only actor inputs until the second
-            // request is retired; the first request now belongs to its caller.
+            // Closing both leases is the only actor input before the second request retires. The
+            // first request belongs to the direct caller and stays active.
             drop(old);
             drop(duplicate);
             wait_until(
@@ -14551,20 +14605,23 @@ mod tests {
             .await;
             assert!(matches!(direct.try_recv(), Err(TryRecvError::Empty)));
             assert!(!buffer.commitment_subscription_closed(0));
+
+            // The direct caller receives the body through the request it took over.
             let fetch = resolver
                 .active_fetches()
                 .into_iter()
                 .find(|fetch| fetch.key == first_key)
-                .expect("direct request canceled by old lease");
+                .expect("old leases must not cancel the direct request");
             assert_eq!(fetch.subscriber, handler::Annotation::Subscription);
             deliver_acquisition_test_block(&resolver, fetch, &first).await;
             select! {
                 result = direct => assert_eq!(result.unwrap().digest(), first.digest()),
                 _ = context.sleep(Duration::from_secs(1)) => {
-                    panic!("direct caller did not receive its block");
+                    panic!("direct caller must receive its block");
                 },
             }
 
+            // A lease on a commitment that a direct caller already fetches issues no new request.
             let inverse = Sha256::hash(&[b"direct before speculative lease"]);
             let inverse_key = handler::Key::Block(inverse);
             let direct = mailbox.acquire(inverse);
@@ -14612,6 +14669,8 @@ mod tests {
             )
             .await;
 
+            // A later lease requests the commitment again and owns its cancellation. Dropping the
+            // older lease leaves the renewed request active.
             let mut renewed = mailbox.prefetch(Arc::from([inverse]), 0..1);
             wait_until(
                 &context,
@@ -14658,6 +14717,8 @@ mod tests {
         });
     }
 
+    /// A finalized-height waiter survives cancellation of a sibling waiter and wakes when gap
+    /// repair stores its block, while the application still holds an earlier acknowledgement.
     #[test_traced("WARN")]
     fn test_standard_finalized_waiter_survives_sibling_cancel_and_gap_repair() {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
@@ -14675,6 +14736,8 @@ mod tests {
             )
             .await;
             assert_eq!(application.acknowledged().await, Height::zero());
+
+            // The application holds the acknowledgement for finalized height 1.
             let first_round = Round::new(Epoch::zero(), View::new(1));
             let first = make_raw_block(genesis.digest(), Height::new(1), 100);
             assert!(mailbox.verified(first_round, ready(first.clone())).await);
@@ -14693,6 +14756,9 @@ mod tests {
                 || application.pending_ack_heights() == vec![Height::new(1)],
             )
             .await;
+
+            // Two waiters for the missing height 2 request nothing, and dropping one leaves the
+            // other pending.
             let missing = make_raw_block(first.digest(), Height::new(2), 200);
             let upper = make_raw_block(missing.digest(), Height::new(3), 300);
             let fetches_before = resolver.fetches().len();
@@ -14704,6 +14770,7 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
             assert!(matches!(survivor.try_recv(), Err(TryRecvError::Empty)));
 
+            // Finalizing height 3 opens a gap at height 2, and repair requests its block.
             let upper_round = Round::new(Epoch::zero(), View::new(3));
             assert!(mailbox.verified(upper_round, ready(upper.clone())).await);
             report_finalized(
@@ -14728,6 +14795,9 @@ mod tests {
             assert!(matches!(survivor.try_recv(), Err(TryRecvError::Empty)));
             assert!(mailbox.get_block(Height::new(2)).await.is_none());
             assert_eq!(application.pending_ack_heights(), vec![Height::new(1)]);
+
+            // The repaired block wakes the survivor and is stored, but the held acknowledgement
+            // keeps it from dispatch.
             let fetch = resolver
                 .active_fetches()
                 .into_iter()
@@ -14736,11 +14806,11 @@ mod tests {
             deliver_acquisition_test_block(&resolver, fetch, &missing).await;
             select! {
                 result = survivor => {
-                    let block = result.expect("finalized sibling canceled survivor");
+                    let block = result.expect("sibling cancellation must not close the survivor");
                     assert_eq!(block.digest(), missing.digest());
                 },
                 _ = context.sleep(Duration::from_secs(1)) => {
-                    panic!("gap repair did not wake preregistered finalized-height waiter");
+                    panic!("gap repair must wake the preregistered finalized-height waiter");
                 },
             }
             assert_eq!(
@@ -14756,6 +14826,8 @@ mod tests {
         });
     }
 
+    /// Dropping the only caller for a commitment cancels its exact request and buffer wait. A
+    /// finalization's request for the same commitment survives and still delivers the block.
     #[test_traced("WARN")]
     fn test_standard_acquire_cancellation_preserves_shared_finality_request() {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
@@ -14774,6 +14846,9 @@ mod tests {
             .await;
             let buffer = buffer.unwrap();
             assert_eq!(application.acknowledged().await, Height::zero());
+
+            // An acquire and a finalization each request the same commitment and share one buffer
+            // wait.
             let block = make_raw_block(genesis.digest(), Height::new(1), 100);
             let commitment = block.digest();
             let round = Round::new(Epoch::zero(), View::new(1));
@@ -14797,6 +14872,8 @@ mod tests {
             assert_eq!(buffer.commitment_subscription_count(), 1);
             assert!(!buffer.commitment_subscription_closed(0));
 
+            // Dropping the caller retires its request and the buffer wait, but not the
+            // finalization's request.
             drop(acquisition);
             wait_until(
                 &context,
@@ -14809,6 +14886,8 @@ mod tests {
                 },
             )
             .await;
+
+            // The finalization's request still delivers the block, and marshal dispatches it.
             let fetch = resolver
                 .active_fetches()
                 .into_iter()
@@ -14853,8 +14932,8 @@ mod tests {
             )
             .await;
 
-            // The resolver must still hold the demand when the delivery verdict resolves, so the
-            // verdict reaches the resolver and retires it.
+            // An exact delivery leaves the caller's request active for the resolver to retire on
+            // the delivery verdict.
             let delivered = make_raw_block(genesis.digest(), Height::new(1), 100);
             let acquisition = mailbox.acquire(delivered.digest());
             wait_until(
@@ -14984,6 +15063,8 @@ mod tests {
                 reschedule().await;
             }
 
+            // A canonical wait, a range read, and an exact caller all wait for the missing parent
+            // of a future floor anchor.
             let missing_height = Height::new(4);
             let missing = make_raw_block(Sha256::hash(&[b"missing-parent"]), missing_height, 400);
             let anchor = make_raw_block(missing.digest(), Height::new(5), 500);
@@ -15007,8 +15088,9 @@ mod tests {
             assert!(matches!(exact.try_recv(), Err(TryRecvError::Empty)));
             let fetch = resolver
                 .active_subscription(missing.digest())
-                .expect("exact predecessor demand missing");
+                .expect("the exact caller must request the predecessor");
 
+            // A floor at the anchor skips the missing height without storing it.
             let round = Round::new(Epoch::zero(), View::new(5));
             assert!(mailbox.verified(round, ready(anchor.clone())).await);
             mailbox.set_floor(StandardHarness::make_finalization(
@@ -15030,10 +15112,11 @@ mod tests {
             assert_eq!(application.pending_ack_heights(), vec![anchor.height()]);
             assert!(mailbox.get_block(missing_height).await.is_none());
 
+            // The skip closes the canonical waits but keeps the exact caller's request.
             select! {
                 result = finalized => assert!(result.is_err(), "skipped predecessor must close"),
                 _ = context.sleep(Duration::from_secs(1)) => {
-                    panic!("floor stranded the pre-existing missing-predecessor waiter");
+                    panic!("floor must close the pre-existing missing-predecessor waiter");
                 },
             }
             select! {
@@ -15041,7 +15124,7 @@ mod tests {
                     result, Some(Err(crate::marshal::blocks::Error::Unavailable))
                 )),
                 _ = context.sleep(Duration::from_secs(1)) => {
-                    panic!("floor stranded the canonical range at its missing predecessor");
+                    panic!("floor must end the canonical range at its missing predecessor");
                 },
             }
             assert!(range.next().await.is_none());
@@ -15059,7 +15142,7 @@ mod tests {
             deliver_acquisition_test_block(&resolver, fetch, &missing).await;
             select! {
                 result = exact => assert_eq!(result.unwrap().digest(), missing.digest()),
-                _ = context.sleep(Duration::from_secs(1)) => panic!("floor canceled exact demand"),
+                _ = context.sleep(Duration::from_secs(1)) => panic!("floor must keep exact demand"),
             }
             assert_eq!(
                 mailbox.get_processed().await,
@@ -15083,6 +15166,8 @@ mod tests {
                 reschedule().await;
             }
 
+            // A lease fills the only slot with a future floor anchor and queues the next height. A
+            // second lease on a lower block queues behind it.
             let anchor = make_raw_block(Sha256::hash(&[b"floor-predecessor"]), Height::new(5), 500);
             let next = make_raw_block(anchor.digest(), Height::new(6), 600);
             let parked = make_raw_block(Sha256::hash(&[b"parked-parent"]), Height::new(3), 300);
@@ -15111,6 +15196,7 @@ mod tests {
                     .any(|fetch| fetch.key == next_key || fetch.key == parked_key)
             );
 
+            // The floor waits until the anchor's speculative delivery installs it.
             let round = Round::new(Epoch::zero(), View::new(5));
             mailbox.set_floor(StandardHarness::make_finalization(
                 Proposal::new(round, View::new(4), anchor.digest()),
@@ -15134,10 +15220,12 @@ mod tests {
                 Some((Processed::Absent(Height::new(4)), anchor.digest())),
             );
             assert_eq!(application.pending_ack_heights(), vec![anchor.height()]);
+
+            // Storing the anchor wakes its waiter and frees the slot for the next height.
             select! {
                 result = finalized => assert_eq!(result.unwrap().digest(), anchor.digest()),
                 _ = context.sleep(Duration::from_secs(1)) => {
-                    panic!("floor did not notify the anchor waiter");
+                    panic!("floor must notify the anchor waiter");
                 },
             }
             wait_until(
@@ -15173,6 +15261,8 @@ mod tests {
             .await;
             assert!(matches!(parked_lease.try_recv(), Err(TryRecvError::Empty)));
             assert_eq!(application.pending_ack_heights(), vec![anchor.height()]);
+
+            // Dropping the leases cancels the lower lease's request.
             drop(parked_lease);
             drop(lease);
             wait_until(
@@ -15190,6 +15280,8 @@ mod tests {
         });
     }
 
+    /// A finalized-height delivery retires the exact acquisition it satisfies. Every other request,
+    /// including the delivery's own, stays active.
     #[test_traced("WARN")]
     fn test_standard_finalized_delivery_retires_only_exact_acquisition() {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
@@ -15208,6 +15300,9 @@ mod tests {
                 Start::Genesis(genesis.clone()),
             )
             .await;
+
+            // Exact callers for two blocks at height 1 and a finalized-height hint each issue a
+            // request.
             let height = Height::new(1);
             let block = make_raw_block(genesis.digest(), height, 100);
             let commitment = block.digest();
@@ -15233,6 +15328,9 @@ mod tests {
                 handler::Key::Finalized { height },
                 handler::Annotation::Height(height)
             ));
+
+            // The resolver also holds requests for the same commitment under height and round
+            // annotations.
             let retained_round = Round::new(Epoch::zero(), View::new(10));
             resolver.fetch(handler::Request::new(
                 commitment,
@@ -15242,10 +15340,13 @@ mod tests {
                 commitment,
                 handler::Annotation::Round(retained_round),
             ));
+
+            // The finalized delivery satisfies the exact caller for its block.
             deliver_finalized_test_block(&resolver, finalization, &block).await;
             let _ = mailbox.get_processed().await;
             assert_eq!(acquisition.await.unwrap().digest(), block.digest());
 
+            // Only the satisfied exact request retires, and every other request stays active.
             assert!(
                 !is_active(
                     handler::Key::Block(commitment),
@@ -15275,6 +15376,9 @@ mod tests {
         });
     }
 
+    /// A finalized-height response is rejected when its block is at another height, it carries
+    /// trailing bytes, or its certificate is truncated. A rejected response publishes nothing and
+    /// leaves its waiters for a valid response.
     #[test_traced("WARN")]
     fn test_standard_finalized_delivery_rejects_unbound_response() {
         for case in ["height", "trailing", "truncated-certificate"] {
@@ -15288,6 +15392,8 @@ mod tests {
                     NAMESPACE,
                     NUM_VALIDATORS,
                 );
+
+                // Each case builds a response for height 1 that marshal must reject.
                 let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
                 let height = Height::new(1);
                 let valid = make_raw_block(genesis.digest(), height, 100);
@@ -15313,11 +15419,15 @@ mod tests {
                 )
                 .await;
                 assert_eq!(application.acknowledged().await, Height::zero());
+
+                // An exact caller for the offered block and a canonical waiter for the height wait
+                // while a hint requests the height from a peer.
                 let mut exact = mailbox.acquire(offered.digest());
                 let mut canonical = mailbox.finalized(height);
                 mailbox.hint_finalized(height, NonEmptyVec::new(participants[1].clone()));
                 assert!(mailbox.get_block(height).await.is_none());
 
+                // Marshal rejects the unbound response.
                 let mut value = if case == "truncated-certificate" {
                     let mut encoded = certificate.encode().to_vec();
                     encoded.pop().unwrap();
@@ -15344,7 +15454,7 @@ mod tests {
                         })
                         .accepted()
                 );
-                let verdict = response_rx.await.expect("finalized response missing");
+                let verdict = response_rx.await.expect("delivery must receive a verdict");
                 assert_eq!(verdict, Outcome::Invalid, "{case}");
 
                 // A rejected response publishes nothing.
@@ -15364,6 +15474,8 @@ mod tests {
                 );
                 assert!(!application.blocks().contains_key(&height), "{case}");
 
+                // A valid response then satisfies the height, and the exact caller only when it
+                // asked for the valid block.
                 let valid_exact = mailbox.acquire(valid.digest());
                 deliver_finalized_test_block(&resolver, finalization.clone(), &valid).await;
                 assert_eq!(valid_exact.await.unwrap().digest(), valid.digest());
@@ -15416,6 +15528,8 @@ mod tests {
         (mailbox, resolver, buffer, application, handle)
     }
 
+    /// Finalization uses a ready prefetched body without fetching it again, and storing the body
+    /// frees its speculative slot.
     #[test_traced("WARN")]
     fn test_standard_finalization_reuses_ready_prefetch_without_refetch() {
         const PARTITION: &str = "finalization-reuses-ready-prefetch";
@@ -15429,6 +15543,8 @@ mod tests {
             let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
             let block = make_raw_block(genesis.digest(), Height::new(1), 100);
             let commitment = block.digest();
+
+            // A lease fetches the body, and the body then waits in the only slot.
             resolver.respond_to_next_fetch(block.encode());
             let mut lease = mailbox.prefetch(Arc::from([commitment]), 0..1);
             wait_until(
@@ -15455,14 +15571,15 @@ mod tests {
             );
             select! {
                 result = finalized => {
-                    assert_eq!(result.expect("finalized waiter canceled").digest(), commitment);
+                    assert_eq!(result.expect("finalized waiter must wake").digest(), commitment);
                 },
                 _ = context.sleep(Duration::from_secs(1)) => {
-                    panic!("finalization could not find the completed prefetched body");
+                    panic!("finalization must find the completed prefetched body");
                 },
             }
             assert!(matches!(lease.try_recv(), Err(TryRecvError::Empty)));
 
+            // Canonical storage of the body frees its slot for a new lease.
             let next = Sha256::hash(&[b"next speculative commitment"]);
             let mut next_lease = mailbox.prefetch(Arc::from([next]), 0..1);
             wait_until(
@@ -15482,6 +15599,8 @@ mod tests {
         });
     }
 
+    /// A wait-only subscriber receives a ready prefetched body without consuming it, so a later
+    /// acquire needs no fetch. The subscriber registers before or after the body arrives.
     #[test_traced("WARN")]
     fn test_standard_wait_only_subscriber_preserves_prefetch() {
         const PARTITION: &str = "wait-only-subscriber-prefetch";
@@ -15501,7 +15620,8 @@ mod tests {
                     let block = make_raw_block(genesis.digest(), Height::new(1), 100);
                     let commitment = block.digest();
 
-                    // A wait-only caller and a prefetch range want the same body.
+                    // A wait-only subscriber receives the prefetched body whether it registers
+                    // before or after the delivery.
                     let waiter = subscribe_first.then(|| mailbox.subscribe(commitment));
                     resolver.respond_to_next_fetch(block.encode());
                     let _lease = mailbox.prefetch(Arc::from([commitment]), 0..1);
@@ -15514,23 +15634,23 @@ mod tests {
                     .await;
                     assert!(resolver.wait_for_delivery_response().await);
                     let waiter = waiter.unwrap_or_else(|| mailbox.subscribe(commitment));
-                    assert_eq!(waiter.await.expect("waiter").digest(), commitment);
+                    assert_eq!(waiter.await.expect("waiter must wake").digest(), commitment);
                     assert_eq!(resolver.fetches().len(), 1);
 
-                    // The range's forward reader now acquires the same commitment.
+                    // A later acquire finds the same body without another fetch.
                     let acquired = mailbox.acquire(commitment);
                     let _ = mailbox.get_processed().await;
                     assert_eq!(
                         resolver.fetches().len(),
                         1,
-                        "prefetched body was dropped; acquire fetched it again"
+                        "acquire must reuse the prefetched body without another fetch"
                     );
                     select! {
                         result = acquired => {
-                            assert_eq!(result.expect("acquire canceled").digest(), commitment);
+                            assert_eq!(result.expect("acquire must resolve").digest(), commitment);
                         },
                         _ = context.sleep(Duration::from_secs(1)) => {
-                            panic!("acquire did not find the prefetched body");
+                            panic!("acquire must find the prefetched body");
                         },
                     }
                 },
@@ -15565,18 +15685,19 @@ mod tests {
             )
             .await;
 
+            // An acquire takes the body from its slot without a peer fetch.
             let acquired = mailbox.acquire(commitment);
             let _ = mailbox.get_processed().await;
             assert!(
                 resolver.fetches().is_empty(),
-                "prefetch dropped a buffered body; acquire fetched it from peers"
+                "acquire must reuse the buffered prefetch without a peer fetch"
             );
             select! {
                 result = acquired => {
-                    assert_eq!(result.expect("acquire canceled").digest(), commitment);
+                    assert_eq!(result.expect("acquire must resolve").digest(), commitment);
                 },
                 _ = context.sleep(Duration::from_secs(1)) => {
-                    panic!("acquire did not find the prefetched body");
+                    panic!("acquire must find the prefetched body");
                 },
             }
         });
@@ -15630,6 +15751,9 @@ mod tests {
                         .await;
                     }
                 }
+
+                // A lease on a body and its missing child holds the only slot. The body is already
+                // stored, or the buffer serves it once.
                 let stored = make_raw_block(genesis.digest(), Height::new(3), 100);
                 let missing = make_raw_block(stored.digest(), Height::new(4), 200);
                 let round = Round::new(Epoch::zero(), View::new(1));
@@ -15640,6 +15764,9 @@ mod tests {
                     buffer.insert_transient(stored.clone());
                 }
                 let _lease = mailbox.prefetch(Arc::from([stored.digest(), missing.digest()]), 0..2);
+
+                // After the lease consumes the buffered body, the writer under test hands it to
+                // marshal.
                 if writer != "stored" {
                     wait_until(
                         &context,
@@ -15671,15 +15798,18 @@ mod tests {
                         _ => unreachable!(),
                     }
                 }
+
+                // A pruned write stores nothing, so the ready body keeps its slot and serves the
+                // acquire. Any other write frees the slot for the missing child.
                 if pruned {
                     assert!(
                         mailbox.get_block(&stored.digest()).await.is_none(),
-                        "pruned write stored a body"
+                        "a pruned write must not store the body"
                     );
                     context.sleep(Duration::from_millis(100)).await;
                     assert!(
                         resolver.fetches().is_empty(),
-                        "pruned write released the only Ready body"
+                        "a pruned write must keep the only ready body"
                     );
                     let acquired = mailbox.acquire(stored.digest());
                     let _ = mailbox.get_processed().await;
@@ -15688,12 +15818,12 @@ mod tests {
                             .fetches()
                             .iter()
                             .any(|fetch| fetch.key == handler::Key::Block(stored.digest())),
-                        "acquire fetched the retained body externally"
+                        "acquire must not fetch the retained body from peers"
                     );
                     select! {
                         result = acquired => assert_eq!(result.unwrap().digest(), stored.digest()),
                         _ = context.sleep(Duration::from_secs(1)) => {
-                            panic!("Ready body lost after pruned {writer}");
+                            panic!("the ready body must survive a pruned {writer} write");
                         },
                     }
                 } else {
@@ -15705,12 +15835,14 @@ mod tests {
                     )
                     .await;
                 }
+
+                // No path fetches the local body from peers.
                 assert!(
                     !resolver
                         .fetches()
                         .iter()
                         .any(|fetch| fetch.key == handler::Key::Block(stored.digest())),
-                    "local body was fetched from peers ({writer}, pruned={pruned})"
+                    "a local body must not be fetched from peers ({writer}, pruned={pruned})"
                 );
             });
         }
@@ -15782,13 +15914,25 @@ mod tests {
             let retains = resolver.retain_count();
             let fetch = active_fetch(ready_key).unwrap();
             deliver_acquisition_test_block(&resolver, fetch, &completed).await;
-            assert_eq!(resolver.retain_count(), retains, "resolver delivery");
+            assert_eq!(
+                resolver.retain_count(),
+                retains,
+                "a resolver delivery must not cancel requests"
+            );
             let round = Round::new(Epoch::zero(), View::new(3));
             assert!(mailbox.verified(round, ready(queued.clone())).await);
-            assert_eq!(resolver.retain_count(), retains, "queued demand");
+            assert_eq!(
+                resolver.retain_count(),
+                retains,
+                "a local body for queued demand must not cancel requests"
+            );
             let round = Round::new(Epoch::zero(), View::new(2));
             assert!(mailbox.verified(round, ready(completed.clone())).await);
-            assert_eq!(resolver.retain_count(), retains, "completed body re-ingest");
+            assert_eq!(
+                resolver.retain_count(),
+                retains,
+                "re-ingesting a completed body must not cancel requests"
+            );
             assert_eq!(
                 mailbox.acquire(completed.digest()).await.unwrap().digest(),
                 completed.digest()
@@ -15796,7 +15940,7 @@ mod tests {
             assert_eq!(
                 resolver.retain_count(),
                 retains,
-                "completed body consumption"
+                "consuming a completed body must not cancel requests"
             );
             assert!(
                 !resolver
@@ -15851,6 +15995,7 @@ mod tests {
         });
     }
 
+    /// Builds `block`'s finalization in the view equal to its height, parented by the view below.
     fn finalize_test_block(schemes: &[S], block: &B) -> Finalization<S, D> {
         StandardHarness::make_finalization(
             Proposal::new(
@@ -15863,7 +16008,7 @@ mod tests {
         )
     }
 
-    /// Reports the finalization of `payload` at `round`, whose proposal names the view `parent`.
+    /// Reports a finalization of `payload` at `round` with `parent` as the proposal's parent view.
     async fn report_finalized(
         mailbox: &mut Mailbox<S, Standard<B>>,
         schemes: &[S],
@@ -15876,6 +16021,8 @@ mod tests {
         StandardHarness::report_finalization(mailbox, finalization).await;
     }
 
+    /// Delivers `block` with `finalization` for its finalized-height request and asserts that
+    /// marshal accepts it.
     async fn deliver_finalized_test_block(
         resolver: &RecordingResolver,
         finalization: Finalization<S, D>,
@@ -15902,11 +16049,14 @@ mod tests {
         assert_eq!(
             response_rx
                 .await
-                .expect("finalized delivery verdict missing"),
+                .expect("finalized delivery must receive a verdict"),
             Outcome::Resolved(Resolution::Complete)
         );
     }
 
+    /// A finalized delivery satisfies speculative demand in every phase. It cancels an active
+    /// request, retires queued demand without the resolver, and frees a ready body's slot once
+    /// canonical storage holds the body.
     #[test_traced("WARN")]
     fn test_standard_finalized_delivery_satisfies_prefetch_demand() {
         const PARTITION: &str = "finalized-prefetch-demand";
@@ -15922,6 +16072,8 @@ mod tests {
             let finalization = |block: &B| finalize_test_block(&schemes, block);
             let active = |block: &B| resolver.active_subscription(block.digest());
             let fetched = |block: &B| resolver.subscriptions(block.digest()) > 0;
+
+            // A lease over three heights activates the first in the only slot and queues the rest.
             let anchor = make_raw_block(Sha256::hash(&[b"predecessor"]), Height::new(5), 500);
             let next = make_raw_block(anchor.digest(), Height::new(6), 600);
             let queued = make_raw_block(next.digest(), Height::new(7), 700);
@@ -15936,6 +16088,9 @@ mod tests {
                 || active(&anchor).is_some(),
             )
             .await;
+
+            // A finalized delivery of the first body as the floor anchor cancels its active request
+            // and frees the slot.
             let canonical = mailbox.finalized(anchor.height());
             mailbox.set_floor(finalization(&anchor));
             mailbox.hint_finalized(anchor.height(), NonEmptyVec::new(participants[1].clone()));
@@ -15965,15 +16120,21 @@ mod tests {
             )
             .await;
 
-            // Queued demand owns no request; a finalized body retires it locally.
+            // Queued demand owns no resolver request, so a finalized body retires it locally.
             assert!(!fetched(&queued));
             mailbox.hint_finalized(queued.height(), NonEmptyVec::new(participants[1].clone()));
             let _ = mailbox.get_processed().await;
             let retains = resolver.retain_count();
             deliver_finalized_test_block(&resolver, finalization(&queued), &queued).await;
             let _ = mailbox.get_processed().await;
-            assert_eq!(resolver.retain_count(), retains, "queued finalized demand");
+            assert_eq!(
+                resolver.retain_count(),
+                retains,
+                "a finalized body for queued demand must not cancel requests"
+            );
             assert!(!fetched(&queued));
+
+            // Closing the lease cancels the next height's request.
             drop(lease);
             wait_until(&context, Duration::from_secs(1), "old lease closes", || {
                 active(&next).is_none()
@@ -16004,7 +16165,11 @@ mod tests {
             let retains = resolver.retain_count();
             deliver_finalized_test_block(&resolver, finalization(&completed), &completed).await;
             let _ = mailbox.get_processed().await;
-            assert_eq!(resolver.retain_count(), retains, "ready finalized demand");
+            assert_eq!(
+                resolver.retain_count(),
+                retains,
+                "a finalized body for ready demand must not cancel requests"
+            );
             wait_until(
                 &context,
                 Duration::from_secs(1),
@@ -16021,6 +16186,9 @@ mod tests {
         });
     }
 
+    /// An acquisition completes while the request for a withheld commitment stays parked. That
+    /// request comes from a lease holding the only speculative slot when `speculative` is set,
+    /// and from a direct caller otherwise.
     fn independent_acquisition_with_parked_request(speculative: bool) {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
             let Fixture { schemes, .. } =
@@ -16030,6 +16198,7 @@ mod tests {
                 start_capped_actor(&context, &partition, &schemes, NZUsize!(1)).await;
             assert_eq!(application.acknowledged().await, Height::zero());
 
+            // A request for a body that no peer serves stays pending.
             let withheld = Sha256::hash(&[b"indefinitely withheld"]);
             let mut lease = speculative.then(|| mailbox.prefetch(Arc::from([withheld]), 0..1));
             let mut caller = (!speculative).then(|| mailbox.acquire(withheld));
@@ -16046,17 +16215,18 @@ mod tests {
             )
             .await;
 
+            // An acquisition of a served body completes, and the withheld request stays open.
             let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
             let available = make_raw_block(genesis.digest(), Height::new(1), 100);
             resolver.respond_to_next_fetch(available.encode());
             let independent = mailbox.acquire(available.digest());
             select! {
                 result = independent => {
-                    let block = result.expect("independent acquisition canceled");
+                    let block = result.expect("independent acquisition must not close");
                     assert_eq!(block.digest(), available.digest());
                 },
                 _ = context.sleep(Duration::from_secs(1)) => {
-                    panic!("parked request blocked an independent acquisition ({speculative})");
+                    panic!("parked request must not block acquisition ({speculative})");
                 },
             }
             assert!(resolver.wait_for_delivery_response().await);
@@ -16085,6 +16255,9 @@ mod tests {
         independent_acquisition_with_parked_request(false);
     }
 
+    /// A forward range fetches through its own window of `max_repair` bodies while an unrelated
+    /// lease fills the shared speculative capacity, and the window advances only as its head is
+    /// consumed.
     #[test_traced("WARN")]
     fn test_standard_ranges_use_max_repair_with_parked_leases() {
         const LENGTH: u64 = 10;
@@ -16115,8 +16288,8 @@ mod tests {
                 assert_eq!(started.await.unwrap(), Height::zero());
                 let _ = mailbox.get_processed().await;
 
-                // An unrelated lease occupies the shared speculative capacity.
-                // The selected range must use its own window of max_repair bodies.
+                // An unrelated lease fills the shared speculative capacity. The selected range must
+                // still fetch through its own window of `max_repair` bodies.
                 let parked: Arc<[_]> = (0..max_repair.get())
                     .map(|index| Sha256::hash(&[b"parked dependency", &index.to_be_bytes()]))
                     .collect();
@@ -16127,6 +16300,8 @@ mod tests {
                 })
                 .await;
 
+                // A range over an anchored history of unstored blocks requests the lowest
+                // `max_repair` bodies.
                 let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
                 let mut selected = vec![genesis.digest()];
                 let blocks: Vec<_> = (1..=LENGTH)
@@ -16145,7 +16320,6 @@ mod tests {
                 let mut range = source.range(Height::new(1)..=Height::new(LENGTH));
                 assert!(range.next().now_or_never().is_none());
                 let _ = mailbox.get_processed().await;
-
                 let fetched_keys = || {
                     resolver
                         .fetches()
@@ -16176,30 +16350,30 @@ mod tests {
                         .active_fetches()
                         .into_iter()
                         .find(|fetch| fetch.key == handler::Key::Block(block.digest()))
-                        .expect("selected request missing");
+                        .expect("selected request must exist");
                     deliver_acquisition_test_block(&resolver, fetch.clone(), block).await;
                     resolver.complete(&fetch);
                     assert!(range.next().now_or_never().is_none());
                     let _ = mailbox.get_processed().await;
                     assert_eq!(fetched_keys(), expected);
                 }
-
                 assert!(range.next().now_or_never().is_none());
                 let _ = mailbox.get_processed().await;
                 assert_eq!(fetched_keys(), expected);
 
+                // Delivering the head lets the range yield the whole window. The window then
+                // advances by `max_repair` bodies.
                 let head = &blocks[0];
                 let fetch = resolver
                     .active_fetches()
                     .into_iter()
                     .find(|fetch| fetch.key == handler::Key::Block(head.digest()))
-                    .expect("head request missing");
+                    .expect("head request must exist");
                 deliver_acquisition_test_block(&resolver, fetch.clone(), head).await;
                 resolver.complete(&fetch);
                 assert_eq!(range.next().await.unwrap().unwrap().digest(), head.digest());
                 let _ = mailbox.get_processed().await;
                 assert_eq!(fetched_keys(), expected);
-
                 for block in &blocks[1..max_repair.get()] {
                     assert_eq!(
                         range
@@ -16234,6 +16408,7 @@ mod tests {
                 );
                 assert_eq!(fetched_keys(), expected);
 
+                // Dropping the range cancels its own requests but not the parked lease's.
                 drop(range);
                 wait_until(
                     &context,
@@ -16265,6 +16440,8 @@ mod tests {
         }
     }
 
+    /// A range over locally stored blocks that its consumer stops polling decodes at most a window
+    /// of bodies, so a stalled application cannot make marshal read the whole range.
     #[test_traced("WARN")]
     fn test_standard_parked_local_range_bounds_body_reads() {
         const PARTITION: &str = "parked-local-range-body-reads";
@@ -16273,6 +16450,8 @@ mod tests {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            // The finalized archive holds a 64-block chain and records every body read.
             let (finalizations, mut stored) = prunable_finalized_stores(&context, PARTITION).await;
             let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
             let mut selected = vec![genesis.digest()];
@@ -16316,6 +16495,7 @@ mod tests {
             let _ = mailbox.get_processed().await;
             operations.lock().clear();
 
+            // The application takes the first body of a range over the whole chain.
             let expected = selected[1];
             let source = mailbox.blocks_with_parent(
                 Height::new(LENGTH),
@@ -16326,8 +16506,8 @@ mod tests {
             let first = range.next().await.unwrap().unwrap();
             assert_eq!(first.digest(), expected);
 
-            // Keep the range alive without polling again. Speculative scheduling
-            // must use metadata while the application holds its first body.
+            // Keep the range alive without polling it again. Marshal decodes at most one window of
+            // stored bodies ahead of the consumer and fetches none from peers.
             context.sleep(Duration::from_millis(100)).await;
             let reads = operations
                 .lock()
@@ -16336,7 +16516,7 @@ mod tests {
                 .count();
             assert!(
                 reads <= BODY_WINDOW,
-                "parked range decoded {reads} stored bodies for a {BODY_WINDOW}-body window"
+                "a parked range must decode at most {BODY_WINDOW} stored bodies, decoded {reads}"
             );
             assert!(
                 reads > 0,
@@ -16369,6 +16549,9 @@ mod tests {
                 while mailbox.get_processed().await != Some(Processed::Block(Height::zero())) {
                     reschedule().await;
                 }
+
+                // Each forward repair batch must request the lowest missing heights between the
+                // processed height and the newest finalized block, at most `max_repair` at a time.
                 let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
                 let mut chain = vec![genesis.inner().clone()];
                 for height in 1..=9 {
@@ -16390,11 +16573,11 @@ mod tests {
                         );
                         return;
                     }
-                    assert!(!observed.is_empty(), "missing forward repair batch");
+                    assert!(!observed.is_empty(), "forward repair must issue a batch");
                     for batch in observed {
                         assert!(
                             batch.len() <= max_repair,
-                            "forward repair exceeded its per-pass bound"
+                            "forward repair must respect its per-pass bound"
                         );
                         let heights: Vec<_> = batch
                             .iter()
@@ -16414,6 +16597,8 @@ mod tests {
                     }
                 };
 
+                // A floor at height 5 sets the processed height to 4. Without a floor, finalizing
+                // height 4 makes repair request heights 1 through 3.
                 if floor {
                     buffer.insert(chain[5].clone());
                     mailbox.set_floor(finalize(&chain[5]));
@@ -16429,12 +16614,15 @@ mod tests {
                     assert_batches(offset, &[1, 2, 3], 4);
                 }
 
+                // Finalizing height 9 makes repair request the lowest missing heights below it.
                 let offset = resolver.fetch_batches.lock().len();
                 buffer.insert(chain[9].clone());
                 StandardHarness::report_finalization(&mut mailbox, finalize(&chain[9])).await;
                 assert!(mailbox.get_block(Height::new(9)).await.is_some());
                 assert_batches(offset, if floor { &[6, 7, 8] } else { &[1, 2, 3, 5] }, 9);
 
+                // Each delivery stores its height, and the next batch requests the lowest heights
+                // still missing.
                 let deliveries: Vec<(usize, &[u64])> = if floor {
                     vec![(6, &[7, 8]), (7, &[8]), (8, &[])]
                 } else {
@@ -16471,6 +16659,8 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            // Marshal runs on a finalized block archive that records every read.
             let (finalizations_by_height, finalized_blocks) =
                 prunable_finalized_stores(&context, PARTITION_PREFIX).await;
             let finalized_blocks =
@@ -16595,10 +16785,10 @@ mod tests {
                 .count();
             assert!(
                 reads <= 1,
-                "boundary read {reads} times for unrelated deliveries"
+                "unrelated deliveries must read the boundary at most once, read {reads} times"
             );
 
-            // The requested gap parent is still archived, so repair advances to its parent.
+            // The delivered gap parent is stored, and repair advances to its parent.
             let fetch = resolver
                 .active_fetches()
                 .into_iter()
@@ -16624,6 +16814,9 @@ mod tests {
         });
     }
 
+    /// A prune above the processed height that arrives through mailbox overflow is ignored, so it
+    /// neither closes finalized-height waiters nor ends canonical reads, whether it is sent before
+    /// or after they register.
     #[test_traced("WARN")]
     fn test_standard_rejected_overflow_prune_preserves_canonical_waiters() {
         for prune_first in [true, false] {
@@ -16635,6 +16828,8 @@ mod tests {
                         NAMESPACE,
                         NUM_VALIDATORS,
                     );
+
+                    // A one-message mailbox makes later messages overflow until the actor starts.
                     let (finalizations, blocks) = prunable_finalized_stores(&context, PREFIX).await;
                     let mut config = test_config(
                         PREFIX,
@@ -16650,7 +16845,6 @@ mod tests {
                     )
                     .await;
                     assert_eq!(floor.processed(), None);
-
                     let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
                     let height = Height::new(1);
                     let round = Round::new(Epoch::zero(), View::new(1));
@@ -16661,7 +16855,8 @@ mod tests {
                         QUORUM,
                     );
 
-                    // The actor has not started, so this live request fills ready capacity.
+                    // Before the actor starts, this acquire fills the mailbox, and canonical
+                    // waiters for height 1 register around a prune to height 10.
                     let pending = mailbox.acquire(genesis.digest());
                     if prune_first {
                         mailbox.prune(Height::new(10));
@@ -16677,7 +16872,6 @@ mod tests {
                     if !prune_first {
                         mailbox.prune(Height::new(10));
                     }
-
                     let (resolver_rx, resolver) =
                         RecordingResolver::holding(context.child("resolver"));
                     let _actor = actor
@@ -16696,6 +16890,7 @@ mod tests {
                     let direct_before = direct.try_recv();
                     let canonical_before = early.or_else(|| read.as_mut().now_or_never());
 
+                    // Finalization stores the verified block at height 1.
                     assert!(mailbox.verified(round, ready(block.clone())).await);
                     assert!(mailbox.get_block(height).await.is_none());
                     StandardHarness::report_finalization(&mut mailbox, finalization).await;
@@ -16714,13 +16909,14 @@ mod tests {
                     );
                     assert_eq!(mailbox.get_processed().await, None);
 
+                    // The canonical waiters stayed open through the prune and receive the block.
                     assert!(
                         canonical_before.is_none(),
-                        "canonical read ended early ({prune_first}): {canonical_before:?}",
+                        "canonical read must stay pending ({prune_first}): {canonical_before:?}",
                     );
                     assert!(
                         matches!(direct_before, Err(TryRecvError::Empty)),
-                        "finalized waiter closed early (prune_first={prune_first})",
+                        "finalized waiter must stay open (prune_first={prune_first})",
                     );
                     assert_eq!(direct.await.unwrap().digest(), block.digest());
                     assert_eq!(read.await.unwrap().unwrap().digest(), block.digest());
@@ -16730,6 +16926,8 @@ mod tests {
         }
     }
 
+    /// A validator that learns only the tip finalization repairs a 64-block gap from one peer
+    /// within ten round trips. Gap repair must keep many heights in flight to meet that bound.
     #[test_traced("WARN")]
     fn test_standard_catch_up_gap_latency() {
         const HEIGHTS: u64 = 64;
@@ -16741,6 +16939,8 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            // A peer finalizes and processes a 64-block chain before any network link exists.
             let peers = vec![participants[0].clone(), participants[1].clone()];
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
@@ -16800,6 +17000,7 @@ mod tests {
                 tip_finalization = Some(finalization);
             }
 
+            // The victim starts at genesis, then links with one-way `LATENCY` join it to the peer.
             let victim = StandardHarness::setup_validator(
                 context.child("victim"),
                 &mut oracle,
@@ -16820,6 +17021,7 @@ mod tests {
             };
             setup_network_links(&mut oracle, &peers, link).await;
 
+            // Reporting only the tip finalization makes the victim repair the whole gap.
             let started = context.current();
             StandardHarness::report_finalization(&mut victim_mailbox, tip_finalization.unwrap())
                 .await;
@@ -16828,6 +17030,8 @@ mod tests {
                 context.sleep(SAMPLE).await;
             }
             let elapsed = context.current().duration_since(started).unwrap();
+
+            // The victim dispatches every height within ten round trips.
             assert_eq!(victim.application.blocks().len(), HEIGHTS as usize + 1);
             for height in 0..=HEIGHTS {
                 assert!(
@@ -16839,14 +17043,14 @@ mod tests {
             }
             assert!(
                 elapsed < Duration::from_secs(2),
-                "cold gap repair exceeded ten response waves: {elapsed:?}"
+                "cold gap repair must finish within ten round trips: {elapsed:?}"
             );
         });
     }
 
-    /// A range below a history suffix requests each missing body once, although the walk and
-    /// the range both read it. Marshal stores no body that nothing certifies, so a second
-    /// reader would download the body again.
+    /// A range below a history suffix requests each missing body once, although the walk and the
+    /// range both read it. Nothing notarizes these bodies, so marshal does not store them and a
+    /// second reader would download them again.
     #[test_traced("WARN")]
     fn test_standard_range_requests_walked_body_once() {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
@@ -16890,6 +17094,7 @@ mod tests {
                 assert!(mailbox.get_block(&block.digest()).await.is_none());
             }
 
+            // The range yields every block in height order without another request.
             for block in [&one, &two, &three] {
                 assert_eq!(
                     range.next().await.unwrap().unwrap().digest(),

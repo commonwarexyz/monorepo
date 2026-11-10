@@ -22,6 +22,7 @@ struct BlockSubscription<V: Variant> {
     fetching: Vec<Subscriber<V>>,
     /// Callers that wait without requesting the block from peers.
     waiting: Vec<Subscriber<V>>,
+    /// Aborts the backing buffer waiter when the subscription drops.
     _aborter: Option<Aborter>,
 }
 
@@ -38,6 +39,7 @@ fn deliver<V: Variant>(subscriber: Subscriber<V>, block: &V::Block) {
     subscriber.sender.send_lossy(block.clone());
 }
 
+/// Local callers waiting for blocks by exact commitment.
 pub(super) struct Subscriptions<V: Variant> {
     entries: BTreeMap<V::Commitment, BlockSubscription<V>>,
 }
@@ -63,6 +65,7 @@ impl<V: Variant> Subscriptions<V> {
     fn retain_open(&mut self) -> Vec<V::Commitment> {
         let mut ended = Vec::new();
         self.entries.retain(|commitment, subscription| {
+            // Report the commitment only when its last fetching caller closed here.
             let fetching = !subscription.fetching.is_empty();
             subscription
                 .fetching
@@ -83,6 +86,7 @@ impl<V: Variant> Subscriptions<V> {
     /// Canceled callers that only wait are removed without being reported.
     pub(super) async fn closed(&mut self) -> Vec<V::Commitment> {
         poll_fn(|cx| {
+            // Register a wake for every caller so any cancellation reruns cleanup.
             for subscription in self.entries.values_mut() {
                 for subscriber in subscription
                     .fetching
@@ -131,6 +135,9 @@ impl<V: Variant> Subscriptions<V> {
             span,
             sender: response,
         };
+
+        // The first caller for a commitment opens the buffer waiter that later callers share, if
+        // the buffer provides one.
         let subscription = match self.entries.entry(commitment) {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
@@ -144,6 +151,8 @@ impl<V: Variant> Subscriptions<V> {
                 })
             }
         };
+
+        // Callers that fetch are tracked apart so their cancellation can end peer demand.
         if fetch {
             subscription.fetching.push(subscriber);
         } else {
@@ -164,6 +173,7 @@ impl<V: Variant> Finalized<V> {
         }
     }
 
+    /// Registers a caller for the finalized block at `height`.
     pub(super) fn insert(
         &mut self,
         span: Span,
@@ -187,6 +197,7 @@ impl<V: Variant> Finalized<V> {
         true
     }
 
+    /// Drops waiters below `min`, closing their receivers.
     pub(super) fn prune(&mut self, min: Height) {
         self.entries = self.entries.split_off(&min);
     }
@@ -375,8 +386,11 @@ mod tests {
         assert!(subscriptions.entries.is_empty());
     }
 
+    /// Pruning closes finalized waiters below the prune height and keeps those at it. One delivery
+    /// answers every waiter at the block's height and removes them.
     #[test]
     fn finalized_waiters_share_delivery_and_close_below_prune() {
+        // Two waiters at the block's height and one below it.
         let mut subscriptions = Finalized::<TestVariant>::new();
         let block = block(5, 50);
         let (stale_sender, mut stale_receiver) = oneshot::channel();
@@ -385,20 +399,27 @@ mod tests {
         subscriptions.insert(Span::none(), Height::new(4), stale_sender);
         subscriptions.insert(Span::none(), block.height(), first_sender);
         subscriptions.insert(Span::none(), block.height(), second_sender);
+
+        // Pruning to the block's height closes only the waiter below it.
         subscriptions.prune(block.height());
         assert!(matches!(
             stale_receiver.try_recv(),
             Err(oneshot::error::TryRecvError::Closed)
         ));
+
+        // One notification answers both remaining waiters and leaves nothing to notify.
         assert!(subscriptions.notify(&block));
         assert_receives(first_receiver, &block);
         assert_receives(second_receiver, &block);
         assert!(!subscriptions.notify(&block));
     }
 
+    /// A canceled finalized waiter wakes cleanup that is already waiting, though no block arrives,
+    /// and cleanup removes it.
     #[test]
     fn finalized_cancellation_wakes_without_block_delivery() {
         deterministic::Runner::default().start(|context| async move {
+            // One waiter is registered and later canceled while cleanup waits.
             let mut subscriptions = Finalized::<TestVariant>::new();
             let (response, receiver) = oneshot::channel();
             subscriptions.insert(Span::none(), Height::new(5), response);
@@ -413,6 +434,8 @@ mod tests {
                     panic!("cancellation must wake finalized waiter cleanup");
                 },
             }
+
+            // Cleanup removed the canceled waiter.
             assert!(subscriptions.entries.is_empty());
         });
     }
@@ -483,20 +506,26 @@ mod tests {
         assert!(subscriptions.entries.is_empty());
     }
 
+    /// Fetching callers that share a commitment keep its subscription and buffer waiter until the
+    /// last of them cancels. That cancellation wakes cleanup, and cleanup reports the commitment
+    /// and aborts the buffer waiter.
     #[test]
     fn shared_cancellation_wakes_when_last_caller_closes() {
         deterministic::Runner::default().start(|context| async move {
+            // Two fetching callers share one buffer waiter.
             let mut fixture = Fixture::new();
             let commitment = block(6, 60).digest();
             let first_receiver = fixture.subscribe(commitment, true);
             let second_receiver = fixture.subscribe(commitment, true);
             assert_eq!(fixture.buffer.commitment_subscription_count(), 1);
 
+            // Canceling one caller reports nothing and keeps the buffer waiter open.
             drop(first_receiver);
             assert!(fixture.subscriptions.closed().now_or_never().is_none());
             assert!(fixture.subscriptions.entries.contains_key(&commitment));
             assert!(!fixture.buffer.commitment_subscribers.lock()[0].is_closed());
 
+            // Canceling the last caller wakes cleanup with the commitment.
             select! {
                 removed = fixture.subscriptions.closed() => {
                     assert_eq!(removed, vec![commitment]);
@@ -510,6 +539,8 @@ mod tests {
                     panic!("last cancellation must wake subscription cleanup");
                 },
             }
+
+            // The subscription is gone and its buffer waiter was aborted.
             assert!(!fixture.subscriptions.entries.contains_key(&commitment));
             assert!(fixture.waiters.next_completed().await.is_err());
             assert!(fixture.buffer.commitment_subscribers.lock()[0].is_closed());
@@ -517,9 +548,13 @@ mod tests {
         });
     }
 
+    /// Cleanup reports a commitment when its last fetching caller cancels, while a remaining
+    /// waiting caller keeps the subscription and buffer waiter. A waiting caller's cancellation is
+    /// never reported.
     #[test]
     fn closed_reports_only_the_last_fetching_caller() {
         deterministic::Runner::default().start(|context| async move {
+            // One waiting and one fetching caller share a buffer waiter.
             let mut fixture = Fixture::new();
             let commitment = block(8, 80).digest();
             let waiting_receiver = fixture.subscribe(commitment, false);
@@ -555,21 +590,25 @@ mod tests {
         });
     }
 
+    /// A buffer that closes its waiter answers no caller and leaves the subscription registered. A
+    /// caller that remains after another cancels receives a later delivery.
     #[test]
     fn buffer_closure_keeps_shared_subscription_until_delivery_or_cancellation() {
         deterministic::Runner::default().start(|_| async move {
+            // Two fetching callers share a buffer waiter.
             let mut fixture = Fixture::new();
             let block = block(7, 70);
             let commitment = block.digest();
             let mut first_receiver = fixture.subscribe(commitment, true);
             let mut second_receiver = fixture.subscribe(commitment, true);
 
+            // Closing the buffer completes the waiter with nothing and answers neither caller.
             fixture.buffer.commitment_subscribers.lock().clear();
             let closed = fixture
                 .waiters
                 .next_completed()
                 .await
-                .expect("waiter was not aborted");
+                .expect("buffer closure must complete the waiter without aborting it");
             assert!(closed.is_none());
             assert!(matches!(
                 first_receiver.try_recv(),
@@ -579,6 +618,8 @@ mod tests {
                 second_receiver.try_recv(),
                 Err(oneshot::error::TryRecvError::Empty)
             ));
+
+            // After one caller cancels, the other still receives a later delivery.
             drop(first_receiver);
             assert!(fixture.subscriptions.retain_open().is_empty());
             assert!(fixture.subscriptions.entries.contains_key(&commitment));

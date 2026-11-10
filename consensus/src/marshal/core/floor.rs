@@ -552,6 +552,7 @@ mod tests {
         let floor = floor();
         let mut resolver = TestResolver::default();
 
+        // Requests at or below the processed height or the round cutoff are denied.
         for retention in [
             Annotation::Height(Height::new(4)),
             Annotation::Height(Height::new(5)),
@@ -562,6 +563,7 @@ mod tests {
         }
         assert!(resolver.fetches().is_empty());
 
+        // Requests above both floors and subscriptions are issued unchanged.
         let retained = [
             Annotation::Height(Height::new(6)),
             Annotation::Round(round(6)),

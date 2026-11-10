@@ -123,7 +123,8 @@ where
     epocher: ES,
     // Minimum number of views to retain temporary data after the application processes a block
     view_retention: ViewDelta,
-    // Speculative body capacity and per-turn prefetch work
+    // Bounds speculative body capacity, prefetch dispatches per turn, resolver messages per
+    // batch, and finalized heights requested per repair pass
     max_repair: NonZeroUsize,
     // Codec configuration for block type
     block_codec_config: <V::ApplicationBlock as Read>::Cfg,
@@ -140,9 +141,10 @@ where
     tip: Height,
     // Outstanding subscriptions for blocks
     block_subscriptions: Subscriptions<V>,
-    // Metadata leases share bounded speculative fetches and ready bodies.
+    // Speculative demand from range leases, sharing one bound on active fetches and ready bodies
     prefetch: Prefetches<V>,
-    // Local consumers of the canonical prefix, independent of application acknowledgements.
+    // Local waiters for finalized blocks by height, served independently of application
+    // acknowledgements
     finalized_subscriptions: FinalizedSubscriptions<V>,
     // Commitments known certified above the finalized tip
     certified: Certified<V::Commitment>,
@@ -476,6 +478,7 @@ where
                     "stream must be synced before the actor handles its next event"
                 );
 
+                // Arm the prefetch branch only while queued demand has a free slot.
                 let prefetch_ready = if self.prefetch.ready() {
                     Either::Left(ready(()))
                 } else {
@@ -495,6 +498,8 @@ where
                     self = self.try_dispatch_blocks(&mut application).await;
                 }
             },
+            // Ingest blocks that buffer subscriptions deliver. A closed buffer subscription
+            // yields nothing and leaves its callers waiting for other sources.
             Ok(completion) = waiters.next_completed() else continue => {
                 if let Some(block) = completion {
                     (self, _) = self
@@ -502,12 +507,14 @@ where
                         .await;
                 }
             },
+            // Cancel exact-body requests whose last fetching caller or prefetch lease closed.
             closed = self.block_subscriptions.closed() => {
                 Self::cancel_subscription_requests(&mut resolver, closed);
             },
             closed = self.prefetch.closed() => {
                 Self::cancel_subscription_requests(&mut resolver, closed);
             },
+            // Drop finalized-height waiters whose receivers closed.
             () = self.finalized_subscriptions.closed() => {},
             // Handle application acknowledgements (drain all ready acks, sync once)
             result = self.pending_acks.current() => {
@@ -565,6 +572,7 @@ where
                     )
                     .await;
             },
+            // Start speculative fetches only after every other ready event.
             () = prefetch_ready => {
                 self.dispatch_prefetch(&buffer, &mut resolver).await;
             },
@@ -932,6 +940,9 @@ where
                 height,
                 response,
             } => {
+                // A stored finalized block answers at once. A missing height above the processed
+                // height waits for finalization. A missing height at or below it is not awaited,
+                // so its response closes.
                 if let Some(stored) = self.get_finalized_block(height).await {
                     response.send_lossy(V::restore_across(stored, &self.strategy).await);
                 } else if height > self.floor.processed_height() {
@@ -944,6 +955,8 @@ where
                 lease,
                 ..
             } => {
+                // Lease the selected commitments, then retire speculative demand for any that a
+                // fetching caller already owns, so the two never share a request.
                 self.prefetch
                     .lease(commitments.clone(), range.clone(), lease);
                 if let Some(selected) = commitments.get(range) {
@@ -1063,6 +1076,7 @@ where
             return self;
         }
 
+        // Batch verify and process all certificate-bearing deliveries.
         self = self
             .verify_delivered(delivers, buffer, application, resolver)
             .await;
@@ -1138,9 +1152,9 @@ where
 
     /// Cancels exact-body requests after their fetch owner releases them.
     ///
-    /// Explicit fetching callers and speculative demand never own the same commitment.
-    /// An explicit acquire transfers demand to its caller; prefetch skips fetching callers.
-    /// Either owner can cancel the shared resolver subscription without affecting the other.
+    /// Fetching callers and speculative demand never own the same commitment, because an acquire
+    /// takes over speculative demand and a prefetch lease skips commitments a caller is fetching.
+    /// Canceling one owner's request therefore never strands the other.
     fn cancel_subscription_requests(
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
         commitments: Vec<V::Commitment>,
@@ -1156,19 +1170,21 @@ where
     }
 
     /// Starts speculative fetches for queued demand while capacity allows.
-    ///
-    /// Durable bodies release their slot. A body held only by the buffer, which may evict
-    /// it, is retained in the slot reserved for its fetch.
     async fn dispatch_prefetch<Buf: Buffer<V>>(
         &mut self,
         buffer: &Buf,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) {
+        // Bound the dispatches of one turn, so queued demand cannot starve other events.
         for _ in 0..self.max_repair.get() {
             let Some(commitment) = self.prefetch.next() else {
                 break;
             };
             let digest = V::commitment_to_inner(commitment);
+
+            // A body already in storage releases its slot. A body found only in the buffer keeps
+            // the slot reserved for its fetch, because the buffer may evict it. Any other body is
+            // requested from peers.
             if self.cache.has_block(digest).await
                 || self
                     .finalized_blocks
@@ -1185,6 +1201,9 @@ where
         }
     }
 
+    /// Answers a local caller with the block for `commitment` or registers it until delivery.
+    ///
+    /// A caller with `fetch` set owns the peer request for the commitment.
     #[allow(clippy::too_many_arguments)]
     async fn handle_acquire<Buf: Buffer<V>>(
         &mut self,
@@ -1196,6 +1215,10 @@ where
         waiters: &mut AbortablePool<'_, Option<V::Block>>,
         buffer: &mut Buf,
     ) {
+        // A locally available block answers at once. A certified block's digest binds its parent
+        // commitment, so certification extends to the parent. The block also answers earlier
+        // callers and speculative demand, and any subscription request still outstanding for it
+        // is canceled.
         if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
             if self.certified.contains(block.height(), &commitment)
                 && let Some(parent) = block.height().previous()
@@ -1336,13 +1359,16 @@ where
 
     /// Hands a validated block to its direct callers and speculative demand.
     ///
-    /// Returns whether a resolver request for the block may still be outstanding: a
-    /// fetching caller was waiting, or speculative demand was still fetching it. Queued and
+    /// Returns true when a resolver request for the block may still be outstanding, because a
+    /// fetching caller was waiting or speculative demand was still fetching it. Queued and
     /// completed speculative demand own no request.
     fn satisfy_demand(&mut self, block: &V::Block) -> bool {
         let commitment = V::commitment(block);
         let fetching = self.block_subscriptions.fetching(&commitment);
         self.block_subscriptions.notify(block);
+
+        // A fetching caller owns the request, so speculative demand retires. Otherwise the
+        // body fills a slot only if speculative demand reserved one.
         if fetching {
             self.prefetch.retire(commitment);
             return true;
@@ -1352,15 +1378,13 @@ where
 
     /// Notifies subscribers of a validated block and applies any pending floor transition.
     ///
-    /// Local ingress and verified height finalizations cancel exact-body demand when a
-    /// direct caller was consumed or a speculative fetch was active. A height delivery
-    /// retains its finalized-height request for the resolver's verdict.
+    /// Cancels the block's [`Annotation::Subscription`] requests when a fetching caller or an
+    /// active speculative fetch was waiting for it.
     ///
-    /// Subscribers are notified before the block is persisted and may hold a
-    /// block that marshal never durably stores. Subscriptions make no durability promise. Durable
-    /// height-ordered delivery is provided by application dispatch, which
-    /// only sends blocks once the finalized archives are durable (see
-    /// [`Self::try_dispatch_blocks`]).
+    /// Subscribers are notified before the block is persisted and may hold a block that marshal
+    /// never durably stores. Subscriptions make no durability promise. Durable height-ordered
+    /// delivery is provided by application dispatch, which only sends blocks once the finalized
+    /// archives are durable (see [`Self::try_dispatch_blocks`]).
     ///
     /// Returns true if the block was consumed as the floor anchor.
     async fn ingest<Buf: Buffer<V>>(
@@ -1444,6 +1468,8 @@ where
         )
         .expect("failed to store floor anchor");
         self = self.sync_finalized().await;
+
+        // The durable anchor retires its speculative demand and answers waiters at its height.
         self.prefetch.retire(V::commitment(&block));
         self.finalized_subscriptions.notify(&block);
         self.advance_tip(round, height, digest, application);
@@ -1479,7 +1505,8 @@ where
         // Keep the processed block so the application can restart from it.
         self = self.prune_after_floor(dispatch_floor).await;
 
-        // Canonical heights below the anchor are skipped, including an absent predecessor.
+        // Heights below the anchor are skipped and may never be stored, so their waiters are
+        // dropped.
         self.finalized_subscriptions.prune(height);
 
         // Resume gap repair and dispatch above the new floor.
@@ -1491,7 +1518,11 @@ where
         self.try_dispatch_blocks(application).await
     }
 
-    /// Admits finalized certificates and decodes exact bodies using local evidence.
+    /// Admits a resolver delivery.
+    ///
+    /// A finalized-height response is checked against the request and queued for batch
+    /// certificate verification. An exact body is decoded and handed to its waiters, and it is
+    /// stored only when local evidence backs its commitment.
     async fn handle_deliver<Buf: Buffer<V>>(
         mut self: Box<Self>,
         message: ResolverDelivery<V>,
@@ -1525,6 +1556,7 @@ where
             let mut value = value;
             let certificate_codec_config = scoped.certificate_codec_config();
 
+            // Decode the certificate under the bounds of the height's epoch.
             let Ok(finalization) = Finalization::read_cfg(&mut value, &certificate_codec_config)
             else {
                 response.send_lossy(Outcome::Invalid);
@@ -1537,14 +1569,16 @@ where
                 return self;
             }
 
+            // Decode the block carried with the finalization.
             let Ok(block) = V::ApplicationBlock::decode_cfg(&mut value, &self.block_codec_config)
             else {
                 response.send_lossy(Outcome::Invalid);
                 return self;
             };
 
-            // A verified finalization authenticates the commitment; admission binds
-            // its application block to the requested height and committed digest.
+            // Once the certificate verifies, the finalization authenticates the application block,
+            // so only the height and digest are checked here. The working block is then rebuilt
+            // from the finalized commitment.
             let commitment = finalization.proposal.payload;
             if block.height() != height {
                 response.send_lossy(Outcome::Invalid);
@@ -1563,10 +1597,15 @@ where
             });
             return self;
         }
+
+        // Marshal requests only finalized heights and exact bodies, so any other key is invalid.
         let Key::Block(commitment) = delivery.key else {
             response.send_lossy(Outcome::Invalid);
             return self;
         };
+
+        // Local finality, gap-repair, or certification evidence for the commitment lets decoding
+        // trust it. Without such evidence, decoding recomputes the commitment.
         let digest = V::commitment_to_inner(commitment);
         let finalization = self
             .cache
@@ -1586,6 +1625,9 @@ where
             response.send_lossy(Outcome::Invalid);
             return self;
         };
+
+        // A fetched floor anchor whose parent digest disagrees with its parent commitment is
+        // invalid, since applying the floor asserts that they agree.
         if self.floor.matches_pending_anchor(commitment)
             && block.height() > Height::zero()
             && block.parent() != V::commitment_to_inner(V::parent_commitment(&block))
@@ -1593,13 +1635,15 @@ where
             response.send_lossy(Outcome::Invalid);
             return self;
         }
+
+        // A certified block's digest binds its parent commitment, so certification extends to
+        // the parent.
         let height = block.height();
         if certified && let Some(parent) = height.previous() {
             self.certified.insert(parent, V::parent_commitment(&block));
         }
 
-        // The resolver retires the delivered demand when it receives this
-        // delivery's verdict.
+        // The resolver retires the delivered demand when it receives this delivery's verdict.
         self.satisfy_demand(&block);
 
         // Apply the pending floor transition this block anchors.
@@ -1610,6 +1654,8 @@ where
             response.send_lossy(Outcome::Resolved(Resolution::Complete));
             return self;
         }
+
+        // Witness the round and sync the round floor before archiving the block.
         if let Some(certificate) = &finalization {
             self = self
                 .witness_round(height, certificate.round(), buffer, application, resolver)
@@ -1620,6 +1666,10 @@ where
                 .await
                 .expect("round floor sync must succeed");
         }
+
+        // Store the block under the strongest local evidence for its commitment: finality (a
+        // cached finalization, the repair walk, or the finalized archives), certification above
+        // the processed height, or a held notarization that names it. Otherwise it is not stored.
         if finalization.is_some()
             || repairing
             || self.finalized_commitment(height).await == Some(commitment)
@@ -1642,10 +1692,9 @@ where
             .await
             .filter(|notarization| notarization.proposal.payload == commitment)
         {
-            // A notarization marshal already holds backs this block, so store it under that
-            // round as a locally available notarized block is. Its finalization and later
-            // readers then find it in storage. No caller awaits this write, so the pool
-            // observes its sync.
+            // Storing under the notarization's round lets the block's later finalization and
+            // readers find it, as for a locally available notarized block. No caller awaits this
+            // write, so the sync pool observes its durability.
             let round = notarization.round();
             let handle;
             (self.cache, handle) = self.cache.put_notarized(round, digest, &block).await;
@@ -1659,7 +1708,7 @@ where
         self
     }
 
-    /// Verifies finalizations under each epoch's captured admission scope.
+    /// Batch verify pending certificates and process valid items.
     #[tracing::instrument(name = "marshal.actor.verify_delivered", level = "info", skip_all, fields(count = delivers.len().traced()))]
     async fn verify_delivered<Buf: Buffer<V>>(
         mut self: Box<Self>,
@@ -1668,10 +1717,13 @@ where
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> Box<Self> {
+        // Skip deliveries whose request the resolver has already retired.
         delivers.retain(|item| !item.response.is_closed());
         if delivers.is_empty() {
             return self;
         }
+
+        // Extract (subject, certificate) pairs for batch verification.
         let certs: Vec<_> = delivers
             .iter()
             .map(|item| {
@@ -1683,6 +1735,8 @@ where
                 )
             })
             .collect();
+
+        // Group indices by epoch.
         let mut by_epoch: BTreeMap<Epoch, Vec<usize>> = BTreeMap::new();
         for (i, item) in delivers.iter().enumerate() {
             by_epoch
@@ -1691,7 +1745,8 @@ where
                 .push(i);
         }
 
-        // Captured scopes remain authoritative after provider retirement.
+        // Verify each epoch group under the scope captured at admission, so a
+        // provider that has since retired the epoch cannot fail the delivery.
         let mut verified = vec![false; delivers.len()];
         for indices in by_epoch.values() {
             let scoped = &delivers[indices[0]].scoped;
@@ -1702,6 +1757,8 @@ where
                 verified[idx] = results[j];
             }
         }
+
+        // Process each verified item, rejecting unverified ones.
         for (index, item) in delivers.into_iter().enumerate() {
             let PendingVerification {
                 finalization,
@@ -1728,6 +1785,7 @@ where
                 continue;
             }
 
+            // Witness the round and sync the round floor before archiving the block.
             self = self
                 .witness_round(height, round, buffer, application, resolver)
                 .await;
@@ -1743,6 +1801,8 @@ where
         self
     }
 
+    /// Returns the commitment finalized at `height` from its finalization, its stored block, or
+    /// the parent link of the stored block above it.
     async fn finalized_commitment(&self, height: Height) -> Option<V::Commitment> {
         if let Some(finalization) = self.get_finalization_by_height(height).await {
             return Some(finalization.proposal.payload);
@@ -2078,6 +2138,8 @@ where
         )
         .unwrap_or_else(|e| panic!("failed to finalize: {e}"));
 
+        // An archived block retires its speculative demand, canceling an active fetch, and
+        // answers waiters at its height.
         let commitment = V::commitment(block);
         if self.prefetch.retire(commitment) {
             Self::cancel_subscription_requests(resolver, vec![commitment]);
@@ -2195,7 +2257,8 @@ where
 
     /// Looks for a block anywhere in local storage using the full commitment.
     ///
-    /// Every stored result must match the requested commitment in full.
+    /// This is used when we have a full commitment (from notarizations/finalizations).
+    /// Having the full commitment may enable additional retrieval mechanisms.
     async fn find_block_by_commitment<Buf: Buffer<V>>(
         &self,
         buffer: &Buf,
@@ -2210,7 +2273,11 @@ where
         self.find_block_in_storage_by_commitment(commitment).await
     }
 
-    /// Repair finalized archive gaps from their authenticated upper boundaries.
+    /// Attempt to repair any identified gaps in the finalized blocks archive. Gaps are walked back
+    /// from their ends, lowest first, through locally available blocks; the first block a walk
+    /// cannot find is requested by commitment, which ends the walk for this pass. Up to
+    /// `self.max_repair` of the lowest missing heights, possibly spanning several gaps, are
+    /// requested by finalization.
     ///
     /// This also handles the "trailing" case where finalizations exist beyond
     /// the last stored block (the block data was lost before a crash). The
@@ -2330,8 +2397,11 @@ where
             }
         }
 
-        // Fetch the lowest missing heights in parallel when peers retain their
-        // finalizations. Exact parent acquisition also repairs sparse histories.
+        // Request any finalizations for missing items in the archive, up to
+        // the `max_repair` quota. This may help shrink the size of the gap
+        // closest to the application's processed height if finalizations
+        // for the requests' heights exist. If not, we rely on the recursive
+        // digest fetches above.
         let missing = self
             .finalized_blocks
             .missing_items(start, self.max_repair.get());

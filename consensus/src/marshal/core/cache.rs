@@ -659,6 +659,7 @@ where
     ///
     /// Presence alone does not establish certification or a full commitment match.
     pub(crate) async fn has_block(&self, digest: <V::Block as Digestible>::Digest) -> bool {
+        // A block in any archive of any retained epoch is available.
         for cache in self.caches.values().rev() {
             for archive in [
                 &cache.verified_blocks,

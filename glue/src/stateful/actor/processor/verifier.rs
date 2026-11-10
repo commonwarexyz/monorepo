@@ -79,8 +79,8 @@ where
     /// Finds the missing path from cached or applied state to `parent` on the selected branch
     /// `blocks`, without borrowing the application or forking database batches.
     ///
-    /// `block` is the verification's own block, which extends `parent`, or `None` for a
-    /// proposal's parent recovery. The request holds both bodies, so neither is acquired.
+    /// `block` is the verification's own block and must extend `parent`. It is `None` when
+    /// recovering a proposal's parent. The request holds both bodies, so neither is acquired.
     ///
     /// A verification of a cached block, or of a block at or below the branch anchor's height,
     /// needs no execution and is answered from the cache or the canonical block at that height.
@@ -176,8 +176,7 @@ where
     /// Returns the next action: acquiring or processing each block on the missing path in height
     /// order, then processing the block itself when verifying.
     ///
-    /// The held recovery target is selected without I/O once every block below it has been
-    /// acquired. Returns [`PrepareBatchesError::Invalid`] if it is no longer the selected block
+    /// Returns [`PrepareBatchesError::Invalid`] if the recovery target is not the selected block
     /// at its height or does not extend the acquired path.
     pub(in crate::stateful::actor) fn next(
         &self,
@@ -202,8 +201,8 @@ where
             },
         };
 
-        // The step identifies the block for admission decisions while the block travels with
-        // the execution.
+        // The step identifies the block for admission decisions, and the block and its branch
+        // travel with the execution.
         let step = ExecutionStep {
             digest: block.digest(),
             parent: block.parent(),
@@ -229,7 +228,7 @@ where
         let path = prepared
             .replay
             .as_mut()
-            .expect("acquisition requires a replay path");
+            .expect("an acquiring request must have a replay path");
         match path.acquire().await {
             Ok(()) => Ok(prepared),
             Err(PrepareBatchesError::Incomplete) if verify => {

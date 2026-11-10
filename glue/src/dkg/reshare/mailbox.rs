@@ -247,8 +247,8 @@ where
     /// `blocks` selects the branch through the final block's parent and must
     /// extend the actor's finalized tip. The actor reads the inclusion range
     /// lazily, so queued requests retain no block bodies. A participating actor
-    /// answers once it has applied every block before the midpoint; earlier
-    /// requests wait until then.
+    /// answers once it has applied every block before the midpoint, and a
+    /// request made earlier waits until then.
     ///
     /// Returns [`EpochInfoResponse::Unavailable`] if the range does not extend
     /// the finalized tip or cannot be acquired, when the actor follows without
@@ -346,15 +346,17 @@ mod tests {
     fn epoch_info_forwards_delayed_parent_without_polling() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // The request's branch names its parent, and no body ever arrives.
             let (sender, mut receiver) = mailbox::new::<TestMessage>(context, NZUsize!(1));
             let mut mailbox = Mailbox::<TestBlock, TestBlsVariant, PrivateKey, Exact>::new(sender);
             let parent = mocks::ready(mocks::genesis_block(PrivateKey::from_seed(0).public_key()));
             let mut request = Box::pin(mailbox.epoch_info(pending_blocks(&parent)));
 
+            // The request reaches the actor with its branch before any body is acquired.
             assert!(request.as_mut().now_or_never().is_none());
             let message = receiver
                 .try_recv()
-                .expect("request should reach the actor without acquiring blocks");
+                .expect("request must reach the actor without acquiring blocks");
             let Message::EpochInfo {
                 blocks, response, ..
             } = message
@@ -362,6 +364,8 @@ mod tests {
                 panic!("expected epoch info request");
             };
             assert_eq!(blocks.digest(parent.height()), Some(parent.digest()));
+
+            // The actor's answer completes the request.
             assert!(response.send(EpochInfoResponse::Available(None)).is_ok());
             assert!(matches!(request.await, EpochInfoResponse::Available(None)));
         });
@@ -371,20 +375,23 @@ mod tests {
     fn canceled_epoch_info_closes_forwarded_response_without_acquiring_blocks() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // The request's branch names its parent, and no body ever arrives.
             let (sender, mut receiver) = mailbox::new::<TestMessage>(context, NZUsize!(1));
             let mut mailbox = Mailbox::<TestBlock, TestBlsVariant, PrivateKey, Exact>::new(sender);
             let parent = mocks::ready(mocks::genesis_block(PrivateKey::from_seed(0).public_key()));
             let mut request = Box::pin(mailbox.epoch_info(pending_blocks(&parent)));
 
+            // The request reaches the actor before any body is acquired.
             assert!(request.as_mut().now_or_never().is_none());
             let Message::EpochInfo { response, .. } = receiver
                 .try_recv()
-                .expect("request should reach the actor without acquiring blocks")
+                .expect("request must reach the actor without acquiring blocks")
             else {
                 panic!("expected epoch info request");
             };
-            drop(request);
 
+            // Cancelling the request closes the response the actor holds.
+            drop(request);
             assert!(response.is_closed());
         });
     }

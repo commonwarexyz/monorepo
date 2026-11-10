@@ -64,7 +64,7 @@ impl<C: Ord + Copy> Certified<C> {
             .first()
             .is_some_and(|(height, _)| *height < min)
         {
-            let (height, commitment) = self.by_height.pop_first().expect("expired pair exists");
+            let (height, commitment) = self.by_height.pop_first().expect("expired pair must exist");
             self.by_commitment.remove(&(commitment, height));
         }
     }
@@ -82,9 +82,11 @@ mod tests {
     }
 
     thread_local! {
+        /// Comparisons `Counted` keys have made since the last reset.
         static COMPARISONS: Cell<usize> = const { Cell::new(0) };
     }
 
+    /// A commitment key that counts its comparisons.
     #[derive(Clone, Copy, Debug, Eq)]
     struct Counted(u64);
 
@@ -108,18 +110,23 @@ mod tests {
         }
     }
 
+    /// Returns the comparisons made by `size` absent and `size` present lookups over `size`
+    /// entries.
     fn lookup_comparisons(size: u64) -> [usize; 2] {
+        // Insert one commitment per height.
         let mut certified = Certified::new();
         for key in 0..size {
             certified.insert(Height::new(key + 1), Counted(key));
         }
 
+        // Count lookups of keys that were never inserted.
         COMPARISONS.with(|count| count.set(0));
         for key in size..2 * size {
             assert!(!certified.contains_commitment(&Counted(key)));
         }
         let absent = COMPARISONS.with(Cell::get);
 
+        // Count lookups of every inserted key, in a scattered order.
         COMPARISONS.with(|count| count.set(0));
         for index in 0..size {
             // An odd stride visits every key in these power-of-two populations.
@@ -129,28 +136,42 @@ mod tests {
         [absent, COMPARISONS.with(Cell::get)]
     }
 
+    /// A lookup by commitment, absent or present, does not scan every retained height. Doubling
+    /// the population at most triples the total comparisons, where a scan would quadruple them.
     #[test]
     fn exact_lookup_does_not_scan_retained_heights() {
+        // Count comparisons at two population sizes.
         let small = lookup_comparisons(1024);
         let large = lookup_comparisons(2048);
+
+        // Lookups average at most 64 comparisons each.
         for (size, counts) in [(1024, small), (2048, large)] {
             for (kind, comparisons) in ["absent", "present"].into_iter().zip(counts) {
                 assert!(
                     comparisons <= 64 * size,
-                    "{kind} lookups over {size} entries made {comparisons} comparisons",
+                    "{kind} lookups over {size} entries must average at most 64 comparisons, \
+                     made {comparisons}",
                 );
             }
         }
+
+        // Doubling the population, and so the lookups, at most triples total comparisons. A scan
+        // of every height would quadruple them.
         for (small, large) in small.into_iter().zip(large) {
             assert!(
                 large <= 3 * small,
-                "doubling population: {small} -> {large}"
+                "doubling the population must at most triple total comparisons: \
+                 {small} -> {large}"
             );
         }
     }
 
+    /// After every change, both indexes hold the same pairs as a model of certified commitments and
+    /// lookups by height or commitment agree with it. The retention minimum never decreases.
     #[test]
     fn relation_preserves_forks_and_monotone_retention() {
+        // Check both indexes against a reference model through inserts on forks, duplicate
+        // inserts, inserts below the floor, and stale retains that must not lower it.
         let mut certified = Certified::new();
         let mut reference = BTreeMap::<Height, BTreeSet<u64>>::new();
         let mut min = Height::new(1);
@@ -173,6 +194,8 @@ mod tests {
             Insert(u64::MAX - 1, 0),
             Insert(u64::MAX, 0),
         ] {
+            // Apply the change to both the index and the model. The model ignores inserts
+            // below the floor and never lowers the floor.
             match change {
                 Insert(height, key) => {
                     let height = Height::new(height);
@@ -188,6 +211,7 @@ mod tests {
                 }
             }
 
+            // Both indexes hold exactly the model's pairs.
             let pairs: BTreeSet<_> = reference
                 .iter()
                 .flat_map(|(height, keys)| keys.iter().map(move |key| (*height, *key)))
@@ -198,6 +222,7 @@ mod tests {
                 pairs.iter().map(|(height, key)| (*key, *height)).collect(),
             );
 
+            // Lookups agree with the model at every probed height and key.
             for key in [0, 1, 2, 3, u64::MAX - 2, u64::MAX - 1, u64::MAX] {
                 let expected = reference.values().any(|keys| keys.contains(&key));
                 assert_eq!(certified.contains_commitment(&key), expected, "key={key}");

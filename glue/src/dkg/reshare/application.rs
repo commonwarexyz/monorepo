@@ -947,6 +947,7 @@ mod tests {
     fn verification_stays_pending_without_final_epoch_info() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // The test answers the verification's epoch-info request in place of the actor.
             let parent = mocks::genesis_block(leader().public_key());
             let parent = mocks::ready(parent.clone());
             let tip = final_block(&parent, Some(epoch_payload(1)));
@@ -964,6 +965,8 @@ mod tests {
                 mocks::blocks([parent.clone()]),
             ));
 
+            // Verification requests final epoch info over the branch ending at the parent,
+            // without the candidate.
             assert!(verify.as_mut().now_or_never().is_none());
             let Some(Message::EpochInfo {
                 blocks,
@@ -976,12 +979,17 @@ mod tests {
             assert_eq!(blocks.tip(), Height::zero());
             assert_eq!(blocks.digest(Height::zero()), Some(expected_parent));
             assert_eq!(blocks.digest(Height::new(1)), None);
+
+            // Unavailable epoch info leaves the verification pending, without consulting the
+            // inner application.
             assert!(reply.send(EpochInfoResponse::Unavailable).is_ok());
             assert!(
                 verify.as_mut().now_or_never().is_none(),
                 "verification resolved without final epoch info"
             );
             assert_eq!(inner.verify_count(), 0);
+
+            // The pending verification holds the candidate until it is dropped.
             assert!(retained_tip.upgrade().is_some());
             drop(verify);
             assert!(

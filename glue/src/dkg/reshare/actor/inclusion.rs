@@ -475,7 +475,7 @@ fn validate_future_participants<P: PublicKey>(participants: &Set<P>, max_partici
 /// Returns the valid dealer logs in the selected range above the finalized
 /// tip, keeping each dealer's earliest.
 ///
-/// Returns `None` if the runtime stops, if the range is unavailable, or if the
+/// Returns `None` if the runtime stops, if acquiring the range fails, or if the
 /// selected branch does not extend the finalized tip.
 async fn pending_logs<B, V, P>(
     scan: PendingLogScan<'_, V, P, B::Digest>,
@@ -498,8 +498,10 @@ where
         .filter(|tip| tip.height >= midpoint)
         .map_or(midpoint, |tip| tip.height.next());
 
-    // Finalization can select a different branch after request admission. The
-    // actor's durable prefix must match even when the pending range is empty.
+    // Finalization can select a different branch after the request was
+    // admitted. A finalized tip directly below the pending range anchors it, so
+    // a resident digest at the tip's height must match, even when nothing is
+    // pending.
     let anchor = scan
         .finalized_tip
         .filter(|tip| tip.height.next() == first_pending);
@@ -512,10 +514,15 @@ where
         return None;
     }
 
+    // A final block at genesis has no pending heights.
     let mut logs = BTreeMap::new();
     let Some(last_pending) = scan.final_height.previous() else {
         return Some(logs);
     };
+
+    // With no pending block, the branch must still end at the anchor. A
+    // resident digest settles that without I/O, and otherwise the anchor's body
+    // is read.
     if first_pending > last_pending {
         let tip = anchor?;
         if blocks.digest(tip.height) == Some(tip.digest) {
@@ -528,6 +535,9 @@ where
         };
         return (block.digest() == tip.digest).then_some(logs);
     }
+
+    // Read the pending heights in ascending order. The first must extend the
+    // anchor.
     let mut range = blocks.range(first_pending..=last_pending);
     loop {
         let block = select! {
@@ -556,6 +566,7 @@ where
             warn!(epoch = ?scan.epoch, ?height, "ignoring invalid pending dealer log");
             continue;
         };
+
         // Ascending range order matches durable storage's first-valid-log rule.
         logs.entry(dealer).or_insert(log);
     }
@@ -1473,6 +1484,7 @@ mod tests {
         public_key: PublicKey,
     }
 
+    /// Returns a branch through height 8 whose acquisitions never complete.
     fn stalled_blocks() -> Blocks<TestBlock> {
         Blocks::new(
             Height::new(8),
@@ -1482,6 +1494,8 @@ mod tests {
         )
     }
 
+    /// Returns a branch over `blocks` with no resident digests whose acquisitions wait for
+    /// `gate`, and a receiver that fires when the first acquisition starts.
     fn gated_blocks(
         blocks: impl IntoIterator<Item = Digested<TestBlock>>,
         gate: oneshot::Receiver<()>,
@@ -1541,6 +1555,7 @@ mod tests {
         .expect("valid info")
     }
 
+    /// Returns a branch with no blocks and a tip at height zero.
     fn empty_blocks() -> Blocks<TestBlock> {
         mocks::blocks([])
     }
@@ -1798,8 +1813,8 @@ mod tests {
     ///
     /// A final-block request made while the actor is still applying the dealing window is
     /// answered once the actor has applied every block before the midpoint. Dealer logs from
-    /// the midpoint on are read from the request's selected range, so a verifier that fell behind
-    /// still receives the epoch info from its original request.
+    /// the midpoint on are read from the request's selected range, so a verifier that fell
+    /// behind still receives the epoch info from its original request.
     #[test]
     fn pr_5263_regression() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
@@ -2337,8 +2352,8 @@ mod tests {
                 (result, store)
             });
 
-            // A verification candidate without its parent is truncated before
-            // the actor can reconstruct the boundary view.
+            // A source holding only the verification candidate cannot supply
+            // its parent, so the actor cannot reconstruct the boundary view.
             let mut malformed_mailbox = mailbox.clone();
             let malformed = malformed_mailbox.epoch_info(mocks::blocks([final_block.clone()]));
             futures::pin_mut!(malformed);
@@ -2347,7 +2362,7 @@ mod tests {
             context.sleep(Duration::from_millis(1)).await;
             assert!(
                 detached.as_mut().now_or_never().is_none(),
-                "unanchored range completed before the canonical prefix arrived"
+                "unanchored range must wait for the canonical prefix"
             );
 
             // Finalizing the canonical midpoint establishes the conflicting
@@ -2390,11 +2405,11 @@ mod tests {
 
             // Once the range yields the canonical parent, the actor can
             // answer from the finalized state without walking any farther.
-            release.send(()).expect("range should still be waiting");
+            release.send(()).expect("range must still be waiting");
             let response = select! {
                 response = canonical.as_mut() => response,
                 _ = context.sleep(Duration::from_secs(1)) => {
-                    panic!("delayed range did not resume");
+                    panic!("delayed range must resume");
                 },
             };
             assert!(matches!(response, EpochInfoResponse::Available(None)));
@@ -2411,7 +2426,7 @@ mod tests {
             assert!(terminal.as_mut().now_or_never().is_none());
             terminal_started
                 .await
-                .expect("terminal range scan should start");
+                .expect("terminal range scan must start");
 
             let (final_ack, final_waiter) = Exact::handle();
             assert_eq!(
@@ -2727,13 +2742,14 @@ mod tests {
     fn pending_logs_selects_only_inclusion_range_and_first_valid_log() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // One dealer signs an invalid log, then two valid logs.
             let info = info();
             let signer = signers()[0].clone();
             let public_key = signer.public_key();
             let log = |info, seed| {
                 let (dealer, _, _) =
                     CryptoDealer::start::<N3f1>(TestRng::new(seed), info, signer.clone(), None)
-                        .expect("dealer should start");
+                        .expect("dealer must start");
                 dealer.finalize::<N3f1>()
             };
             let wrong_info = Info::new::<N3f1>(
@@ -2745,14 +2761,15 @@ mod tests {
                 players(),
                 players(),
             )
-            .expect("valid info");
+            .expect("info must be valid");
             let invalid = log(wrong_info, 10);
             assert!(invalid.clone().check(&info).is_none());
             let first = log(info.clone(), 11);
-            let expected = first.clone().check(&info).expect("first valid log").1;
+            let expected = first.clone().check(&info).expect("log must be valid").1;
             let later = log(info.clone(), 12);
-            assert!(later.clone().check(&info).expect("later valid log").1 != expected);
+            assert!(later.clone().check(&info).expect("log must be valid").1 != expected);
 
+            // Heights 4 through 6 carry the three logs above a finalized tip at height 3.
             let genesis = mocks::genesis_block(public_key.clone());
             let anchor = TestBlock::new::<Sha256>(
                 genesis.context().clone(),
@@ -2776,6 +2793,8 @@ mod tests {
                 parent = Arc::new(block);
                 chain.push(parent.clone());
             }
+
+            // The branch records every height it acquires.
             let source = mocks::blocks(chain.into_iter().map(mocks::ready));
             let metadata = source.clone();
             let acquired = Arc::new(Mutex::new(Vec::new()));
@@ -2790,6 +2809,8 @@ mod tests {
                     async move { source.range(height..=height).next().await?.ok() }
                 },
             );
+
+            // The scan acquires only heights 4 through 6 and keeps the first valid log.
             let scan = PendingLogScan {
                 epoch: Epoch::zero(),
                 info: &info,
@@ -2802,7 +2823,7 @@ mod tests {
             };
             let logs = pending_logs(scan, blocks, context.stopped())
                 .await
-                .expect("valid range");
+                .expect("range must yield logs");
             assert_eq!(logs.len(), 1);
             assert!(logs.get(&public_key) == Some(&expected));
             assert_eq!(

@@ -480,13 +480,17 @@ where
         self.waiter = None;
     }
 
-    /// Enqueues a key with FIFO ordering among equal priorities.
+    /// Enqueues `key` as a fresh request or a retry due at `deadline`.
     fn add_pending(&mut self, key: Key, retry: bool, deadline: SystemTime) {
         assert!(!self.pending.contains(&key));
+
+        // Each key takes the next sequence number, so keys of the same class and deadline are
+        // tried in arrival order.
         let sequence = self.pending_sequence;
         self.pending_sequence = sequence
             .checked_add(1)
-            .expect("pending sequence overflowed");
+            .expect("pending sequence must not overflow");
+
         // A previous pending key may have pushed the waiter far into the future
         // because no eligible peer could serve it. A newly queued key can still
         // be fetchable, so wake pending processing immediately.
@@ -1733,19 +1737,24 @@ mod tests {
         });
     }
 
+    /// Retries due at the same instant are fetched in the order they were queued.
     #[test]
     fn test_equal_deadline_retries_preserve_arrival_order() {
         let runner = Runner::default();
         runner.start(|context| async move {
+            // One peer accepts every request.
             let mut fetcher = create_test_fetcher(context.child("fetcher"));
             let peer = PrivateKey::from_seed(1).public_key();
             fetcher.reconcile(&[peer]);
             let mut sender = WrappedSender::new(SuccessMockSender::default());
 
+            // Queue three retries out of key order, then wait until they are due.
             for key in [3, 1, 2] {
                 fetcher.add_retry(MockKey(key));
             }
             context.sleep(Duration::from_millis(100)).await;
+
+            // Each fetch sends the earliest queued retry.
             for (index, key) in [3, 1, 2].into_iter().enumerate() {
                 fetcher.fetch(&mut sender);
                 assert_eq!(fetcher.len_active(), index + 1);
@@ -2434,10 +2443,12 @@ mod tests {
         });
     }
 
+    /// Fresh requests queued at one instant behind a rate-limited peer are sent in arrival order.
     #[test]
     fn test_rate_limited_pending_preserves_arrival_order() {
         let runner = Runner::default();
         runner.start(|context| async move {
+            // One peer accepts one request per second.
             let mut fetcher = create_test_fetcher(context.child("fetcher"));
             let peer = PrivateKey::from_seed(1).public_key();
             fetcher.reconcile(&[peer]);
@@ -2462,11 +2473,13 @@ mod tests {
                 Some(context.current() + Duration::from_secs(1))
             );
 
+            // Nothing is sent before the peer's next token.
             context.sleep(Duration::from_millis(999)).await;
             fetcher.fetch(&mut sender);
             assert_eq!(fetcher.len_active(), 1);
             assert_eq!(fetcher.len_pending(), 3);
 
+            // The next token sends the earliest queued key and keeps the others pending.
             context.sleep(Duration::from_millis(1)).await;
             fetcher.fetch(&mut sender);
             assert_eq!(fetcher.len_active(), 2);

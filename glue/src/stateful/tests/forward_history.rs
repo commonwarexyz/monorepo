@@ -123,26 +123,31 @@ const CERTIFICATION_TIMEOUT: Duration = Duration::from_secs(400);
 enum Kind {
     /// Every selected body is buffered locally before the input event.
     Local,
-    /// Only the parent `BD` (and the candidate) are local; peers answer immediately.
+    /// Only the parent `BD` and the candidate are local, and peers answer immediately.
     Cold,
-    /// Odd heights and the parent are local; the remaining bodies are fetched.
+    /// Odd heights and the parent are local, and the remaining bodies are fetched.
     Mixed,
-    /// As `Cold`, but the lowest missing body is held until a higher body was answered.
+    /// As `Cold`, but the lowest missing body is held until a higher body has been answered.
     OutOfOrder,
-    /// As `Cold`, but the missing body at index `window` (or the last one) is held until the
-    /// application executes a block, so only a forward prefix can execute before it arrives.
+    /// As `Cold`, but the missing body at index [`WINDOW`] of the missing heights, or the last
+    /// one, is held until the application executes a block below it, so only a forward prefix
+    /// can execute before it arrives.
     Tail,
 }
 
+/// Body placement and notarization shape of one run.
 #[derive(Clone, Copy, Debug)]
 struct Scenario {
+    /// Which bodies are local and how peers order their responses.
     kind: Kind,
+
     /// Whether the voter receives a notarization for the parent `BD` alone. Otherwise it
     /// receives one for each of `B1..BD`.
     sparse: bool,
 }
 
 impl Scenario {
+    /// Returns the scenario with a notarization for each of `B1..BD`.
     const fn new(kind: Kind) -> Self {
         Self {
             kind,
@@ -183,6 +188,7 @@ struct Request {
     height: u64,
 }
 
+/// Everything a run observes at the application, the gate, and the scripted peers.
 #[derive(Default)]
 struct Observations {
     t0: Option<SystemTime>,
@@ -207,16 +213,27 @@ type Shared = Arc<Mutex<Observations>>;
 struct Outcome<'a> {
     /// Executions of `B1..BD` in observed order.
     replay: Vec<&'a Execution>,
+    /// Heights of `B1..BD` in execution order.
     apply_order: Vec<u64>,
+    /// Whether the candidate's execution matched its state root.
     correct_root: bool,
+    /// Executions that ended by the time a peer first received the node's finalize vote for the
+    /// candidate.
     executions_before_completion: usize,
+    /// Heights of every body request, in arrival order at the peers.
     requested: Vec<u64>,
+    /// Distinct requested heights.
     distinct: BTreeSet<u64>,
+    /// Requests estimated to have left the node before the first response reached it.
     inflight_before_first_arrival: usize,
 }
 
 impl<'a> Outcome<'a> {
+    /// Derives the outcome of a finished run, panicking if the candidate was never executed or no
+    /// peer observed the node's finalize vote for it.
     fn derive(observations: &'a Observations) -> Self {
+        // Replay order, candidate result, and execution progress when a peer first received the
+        // finalize vote.
         let replay = observations
             .executions
             .iter()
@@ -230,14 +247,18 @@ impl<'a> Outcome<'a> {
             .executions
             .iter()
             .find(|execution| execution.height == DEPTH + 1)
-            .expect("candidate was not verified");
+            .expect("the candidate must be executed");
         let correct_root = candidate_execution.ok == Some(true);
-        let finalize_vote_at = observations.finalize_vote_at.expect("finalize vote");
+        let finalize_vote_at = observations
+            .finalize_vote_at
+            .expect("the node must vote to finalize the candidate");
         let executions_before_completion = observations
             .executions
             .iter()
             .filter(|execution| execution.end.is_some_and(|end| end <= finalize_vote_at))
             .count();
+
+        // Every request in arrival order, and the distinct heights requested.
         let requested = observations
             .requests
             .iter()
@@ -246,8 +267,8 @@ impl<'a> Outcome<'a> {
         let distinct = requested.iter().copied().collect::<BTreeSet<_>>();
 
         // Requests and producer answers are timestamped at the serving peer. With fixed latency
-        // and no jitter, each request left the node about one latency before it arrived; the
-        // earliest a response can reach the node is one latency after the producer answered.
+        // and no jitter, each request left the node about one latency before it arrived, and a
+        // response reaches the node no earlier than one latency after the producer answered.
         // These transport intervals are estimates, not node-side dispatch or delivery times.
         let mut answered = observations.responses.clone();
         let intervals = observations
@@ -289,6 +310,7 @@ struct InstrumentedApp {
 }
 
 impl InstrumentedApp {
+    /// Records the start of an execution at `height` and returns its index.
     fn begin(&self, height: u64) -> usize {
         let mut observations = self.observations.lock();
         if observations.t0.is_none() {
@@ -302,6 +324,7 @@ impl InstrumentedApp {
         observations.executions.len() - 1
     }
 
+    /// Records the end of execution `index` and whether its root matched the block.
     fn end(&self, context: &deterministic::Context, index: usize, ok: bool) {
         let mut observations = self.observations.lock();
         let execution = &mut observations.executions[index];
@@ -420,7 +443,7 @@ impl Application<deterministic::Context> for InstrumentedApp {
 /// Requests for the selected views `1..=D` are answered without reaching [`Deferred`], so no
 /// independent verification or certification job prepares application state before the input
 /// event. Requests for the candidate view are forwarded unchanged with the voter's history.
-/// Proposals are never produced.
+/// Activity below the candidate view is not forwarded, and proposals are never produced.
 #[derive(Clone)]
 struct Gate<A> {
     context: Arc<deterministic::Context>,
@@ -534,10 +557,12 @@ struct ScriptedProducer {
 }
 
 impl ScriptedProducer {
+    /// Records an answer for `height` at `at`.
     fn respond(observations: &mut Observations, at: SystemTime, height: u64) {
         observations.responses.push((at, height));
     }
 
+    /// Answers the held request, if any, and records why it was released.
     fn release(observations: &mut Observations, at: SystemTime, reason: &'static str) {
         if let Some((height, sender, body)) = observations.held.take() {
             let _ = sender.send(body);
@@ -546,6 +571,8 @@ impl ScriptedProducer {
         }
     }
 
+    /// Releases the held request once a `Tail` scenario has executed a block below the held
+    /// height, or once [`HOLD_LIMIT`] elapses.
     fn spawn_hold_limit(&self) {
         let observations = self.observations.clone();
         let kind = self.kind;
@@ -584,6 +611,7 @@ impl resolver_p2p::Producer for ScriptedProducer {
         let (sender, receiver) = oneshot::channel();
         let now = self.context.current();
         let mut observations = self.observations.lock();
+
         // Bodies by digest carry only the block. Notarized requests by round carry the
         // notarization followed by its block. Both share one availability and hold policy.
         let found = match key {
@@ -596,6 +624,9 @@ impl resolver_p2p::Producer for ScriptedProducer {
             return receiver;
         };
         observations.requests.push(Request { at: now, height });
+
+        // `OutOfOrder` holds the lowest missing body and `Tail` the body at its tail height,
+        // each once per run.
         let hold = observations.held.is_none()
             && observations.hold_release.is_none()
             && match self.kind {
@@ -609,6 +640,8 @@ impl resolver_p2p::Producer for ScriptedProducer {
             self.spawn_hold_limit();
             return receiver;
         }
+
+        // Answer at once, and release an `OutOfOrder` hold once a higher body has been answered.
         let _ = sender.send(body);
         Self::respond(&mut observations, now, height);
         if self.kind == Kind::OutOfOrder
@@ -649,10 +682,12 @@ fn leader(participants: &[P], view: u64) -> &P {
     &participants[(view as usize) % participants.len()]
 }
 
+/// Returns the proposal that names `block`'s round, parent view, and digest.
 fn proposal(block: &Block) -> Proposal<D> {
     Proposal::new(block.context.round, block.context.parent.0, block.digest())
 }
 
+/// Returns a notarization of `block` assembled from the votes of the validators at `signers`.
 fn notarization(schemes: &[S], signers: &[usize], block: &Block) -> Notarization<S, D> {
     let votes = signers
         .iter()
@@ -661,8 +696,11 @@ fn notarization(schemes: &[S], signers: &[usize], block: &Block) -> Notarization
     Notarization::from_notarizes(&schemes[signers[0]], non_empty![@&votes], &Sequential).unwrap()
 }
 
+/// Runs `scenario` against one production node and checks that the candidate verifies on a
+/// single forward replay of `B1..BD` that requests exactly the missing bodies.
 fn run(scenario: Scenario) {
     deterministic::Runner::timed(RUN_LIMIT).start(|context| async move {
+        // Four validators, with the candidate at the view after `B1..BD`.
         let depth = DEPTH;
         let target = View::new(depth + 1);
         let mut rng = context.child("fixture");
@@ -670,7 +708,7 @@ fn run(scenario: Scenario) {
         let participants = fixture.participants.clone();
         let schemes = fixture.schemes.clone();
 
-        // The measured node never leads the candidate view.
+        // The node under test never leads the candidate view.
         let me = ((depth + 2) as usize) % N;
         let peers = (0..N).filter(|&index| index != me).collect::<Vec<_>>();
         let candidate_leader = (depth + 1) as usize % N;
@@ -681,8 +719,11 @@ fn run(scenario: Scenario) {
             leader(&participants, view).clone()
         })
         .await;
-        let candidate = chain.last().expect("candidate missing").clone();
+        let candidate = chain.last().expect("chain must not be empty").clone();
         let selected = &chain[..depth as usize];
+
+        // Peers serve every body by digest and every notarization with its block by round. The
+        // scenario decides which selected bodies are already local.
         let local = scenario.local_heights();
         let missing = (1..=depth)
             .filter(|height| !local.contains(height))
@@ -1024,15 +1065,18 @@ fn run(scenario: Scenario) {
             }
         }
         context.sleep(SETTLE).await;
+
+        // Nothing requests a body, runs the application, or verifies the candidate before the
+        // input event.
         {
             let guard = observations.lock();
             assert!(
                 guard.requests.is_empty(),
-                "block requests before the input event"
+                "blocks must not be requested before the input event"
             );
             assert_eq!(
                 guard.inner_calls_before_t0, 0,
-                "application ran before the input event"
+                "the application must not run before the input event"
             );
             assert_eq!(guard.target_verifies, 0);
         }
@@ -1053,6 +1097,8 @@ fn run(scenario: Scenario) {
             certificate.encode(),
             true,
         );
+
+        // Wait for the node's finalize vote and the candidate's certification.
         loop {
             {
                 let guard = observations.lock();
@@ -1071,21 +1117,25 @@ fn run(scenario: Scenario) {
             .await
             .map_or(0, |processed| processed.height().get());
 
+        // The candidate verifies and certifies once, on one forward replay of `B1..BD` that
+        // requests exactly the missing bodies and finalizes nothing.
         let guard = observations.lock();
         let outcome = Outcome::derive(&guard);
-
-        assert!(outcome.correct_root, "candidate QMDB root mismatch");
+        assert!(
+            outcome.correct_root,
+            "candidate QMDB root must match its block"
+        );
         assert_eq!(
             processed_height, 0,
-            "scripted ancestors advanced the processed floor"
+            "scripted ancestors must not advance the processed floor"
         );
         assert_eq!(
             guard.finalized_reports, 0,
-            "finalized blocks reached the application"
+            "finalized blocks must not reach the application"
         );
         assert_eq!(
             guard.other_requests, 0,
-            "peers received unknown or unserved request keys"
+            "peers must receive only served request keys"
         );
         assert_eq!(
             guard.target_verifies, 1,
@@ -1098,7 +1148,7 @@ fn run(scenario: Scenario) {
         assert_eq!(
             guard.executions.len(),
             depth as usize + 1,
-            "application executed blocks other than one replay of B1..BD and the candidate"
+            "the application must execute only one replay of B1..BD and the candidate"
         );
         assert_eq!(
             outcome.executions_before_completion,
@@ -1110,16 +1160,16 @@ fn run(scenario: Scenario) {
                 .replay
                 .iter()
                 .all(|execution| execution.ok == Some(true)),
-            "replayed QMDB roots differ from the selected blocks"
+            "replayed QMDB roots must match the selected blocks"
         );
-        assert_eq!(guard.certified, Some(true), "candidate was not certified");
+        assert_eq!(guard.certified, Some(true), "the candidate must certify");
         assert!(
             outcome.distinct.is_disjoint(&local),
-            "local bodies were requested"
+            "local bodies must not be requested"
         );
         assert_eq!(
             outcome.distinct, missing,
-            "requested bodies differ from missing bodies"
+            "requested bodies must equal the missing bodies"
         );
         assert_eq!(
             outcome.apply_order,
@@ -1133,7 +1183,7 @@ fn run(scenario: Scenario) {
             assert_eq!(
                 outcome.requested.len(),
                 outcome.distinct.len(),
-                "duplicate requests would bypass the causal hold"
+                "each missing body must be requested once"
             );
         }
 
@@ -1143,14 +1193,16 @@ fn run(scenario: Scenario) {
         if missing.len() >= 2 && !scenario.sparse {
             assert!(
                 outcome.inflight_before_first_arrival >= 2,
-                "missing bodies were not requested concurrently"
+                "missing bodies must be requested concurrently"
             );
         }
+
+        // The held body is released by the event its scenario waits for.
         if scenario.kind == Kind::Tail {
             let reason = guard.hold_release.expect("tail body must be released");
             assert_eq!(
                 reason, "prefix_applied",
-                "replay did not start before the last missing body arrived"
+                "replay must start before the held body arrives"
             );
         }
         if scenario.kind == Kind::OutOfOrder {

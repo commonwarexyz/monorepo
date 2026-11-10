@@ -118,7 +118,8 @@ pub(crate) fn ready(block: impl Into<Arc<TestBlock>>) -> Digested<TestBlock> {
     Digested::precomputed(block, digest)
 }
 
-/// Provides encoded test storage with selected branch metadata and no retained bodies.
+/// Returns a branch ending at the highest of `blocks`, with each block's digest and its parent's
+/// resident. Each acquisition decodes a fresh body, so the branch retains none.
 pub(crate) fn blocks(
     blocks: impl IntoIterator<Item = Digested<TestBlock>>,
 ) -> marshal::blocks::Blocks<TestBlock> {
@@ -144,7 +145,7 @@ pub(crate) fn blocks(
             let encoded = encoded.get(&height).cloned();
             let digest = expected.get(&height).copied();
             async move {
-                let block = TestBlock::decode_cfg(encoded?, &()).expect("test block");
+                let block = TestBlock::decode_cfg(encoded?, &()).expect("test block must decode");
                 Some(Digested::precomputed(block, digest?))
             }
         },

@@ -789,10 +789,7 @@ where
         .run()
         .unwrap();
     for result in results {
-        assert!(
-            result.crashes >= 2,
-            "rapid recovery requires repeated crashes"
-        );
+        assert!(result.crashes >= 2, "each seed must crash at least twice");
     }
 }
 

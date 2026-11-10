@@ -360,6 +360,8 @@ where
                 // Acquire the exact parent concurrently with candidate reconstruction.
                 let parent_request = marshal.acquire(parent_commitment);
 
+                // Get the candidate block either from the caller or by waiting for local
+                // reconstruction.
                 let block = match candidate {
                     Either::Left(block) => block,
                     Either::Right(block_request) => select! {
@@ -616,8 +618,8 @@ where
     /// next: re-propose the epoch boundary block, decline a parent the marshal cannot build on,
     /// or build on the fetched parent.
     ///
-    /// `parent_fallback` decides how a parent missing locally is acquired. A propose request
-    /// fetches it by round. A prepare request builds on a parent that only our own shard vote may
+    /// `fetch_parent` decides whether a parent missing locally is acquired from peers. A propose
+    /// request acquires it. A prepare request builds on a parent that only our own shard vote may
     /// attest to, so it draws no peer fetch. Local reconstruction or the parent's certification,
     /// which acquires the block from peers, delivers it.
     ///
@@ -648,7 +650,8 @@ where
             // boundary block of the previous epoch is the genesis block of the
             // current epoch.
             //
-            // Consensus supplies the exact parent commitment.
+            // Consensus supplies the exact parent commitment. `fetch_parent` selects whether to
+            // acquire it from peers or await it locally.
             let (parent_view, parent_commitment) = consensus_context.parent;
             let parent_request = if fetch_parent {
                 marshal.acquire(parent_commitment)
@@ -746,6 +749,7 @@ where
         let erasure_encode_duration = self.erasure_encode_duration.clone();
         let clock = self.context.clone();
         let (parent_view, parent_commitment) = consensus_context.parent;
+
         // A certified proposal parent can be fetched from peers.
         let checks = self.checks(consensus_context.clone(), history, true);
         let span = info_span!(
@@ -1025,7 +1029,8 @@ where
         let erasure_encode_duration = self.erasure_encode_duration.clone();
         let clock = self.context.clone();
         let (parent_view, parent_commitment) = consensus_context.parent;
-        // An uncertified preparation parent must already be available locally.
+
+        // A preparation parent may be uncertified, so it is awaited locally without a peer fetch.
         let checks = self.checks(consensus_context.clone(), history, false);
         let span = info_span!(
             "marshal.coding.prepare.task",

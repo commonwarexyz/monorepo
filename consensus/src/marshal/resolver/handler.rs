@@ -178,13 +178,14 @@ impl<D: Digest> Producer for Handler<D> {
     }
 }
 
-/// Local retention metadata for a commitment lookup.
+/// Local retention metadata for a resolver request.
 ///
 /// Peers never see this metadata. Multiple retention reasons can share one
 /// commitment, and response validation is independent of these reasons.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Annotation {
-    /// Retain until the owning subscription is canceled or fulfilled.
+    /// Retain until the block arrives or the caller or prefetch lease that owns the request
+    /// releases it.
     Subscription,
     /// Retain until the processed round floor covers this round.
     Round(Round),
@@ -217,7 +218,8 @@ pub enum Key<D: Digest> {
     Block(D),
     /// Fetch a finalization and its block by height.
     Finalized { height: Height },
-    /// Served for peers; Marshal does not issue these requests.
+    /// Fetch a notarization and its block by round. Marshal serves these for peers but does
+    /// not issue them.
     Notarized { round: Round },
 }
 
@@ -626,6 +628,7 @@ mod tests {
         assert!(set.insert(r3)); // Should insert different value
     }
 
+    /// A block request carries its retention reason, and only a floor of the same kind prunes it.
     #[test]
     fn test_request_retention() {
         let commitment = Sha256::hash(&[b"block"]);
@@ -636,10 +639,13 @@ mod tests {
             Annotation::Height(height),
             Annotation::Round(round),
         ] {
+            // The fetch carries the commitment key and the retention reason unchanged.
             let request = Request::new(commitment, retention);
             let fetch = request.into_inner();
             assert_eq!(fetch.key, Key::Block(commitment));
             assert_eq!(fetch.subscriber, retention);
+
+            // A floor at the request's own height or round prunes it. Lower floors keep it.
             assert_eq!(
                 request.above_height_floor(height),
                 retention != Annotation::Height(height),
@@ -652,6 +658,8 @@ mod tests {
             assert!(
                 request.above_round_floor(Cutoff::Round(Round::new(Epoch::new(1), View::new(9))))
             );
+
+            // An epoch cutoff prunes only round retention.
             assert_eq!(
                 request.above_round_floor(Cutoff::Epoch(Epoch::new(1))),
                 !matches!(retention, Annotation::Round(_)),
@@ -661,6 +669,7 @@ mod tests {
 
     #[test]
     fn test_height_floor_predicate() {
+        // For every key kind, only height retention at or below the floor is pruned.
         let floor = Height::new(100);
         let predicate = above_height_floor(floor);
         for key in [
@@ -682,6 +691,7 @@ mod tests {
 
     #[test]
     fn test_round_floor_predicate() {
+        // For every key kind, only round retention at or below the floor is pruned.
         let floor = Round::new(Epoch::new(1), View::new(10));
         let predicate = above_round_floor(Cutoff::Round(floor));
         for key in [

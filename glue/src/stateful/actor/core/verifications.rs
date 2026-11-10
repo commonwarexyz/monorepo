@@ -265,7 +265,7 @@ where
         }
 
         // A verification recovers state for the block's parent, and a proposal for the parent it
-        // builds on. Both bodies are held by the caller and are never acquired.
+        // builds on. The caller holds every body the request names, so none is acquired.
         let (block, parent, blocks) = match request {
             Request::Verify(request) => (
                 Some(request.block.upgrade()?),
@@ -482,15 +482,17 @@ where
             return;
         }
 
-        // Each processing call owns an application clone, so different blocks can execute
-        // concurrently and a shared call can outlive the request that started it. A step joins
-        // the block's processing as it is admitted, so it stays alive for that step even if every
-        // other holder is dropped before the step is first polled.
+        // A recovery target that is not selected or does not extend its acquired path rejects
+        // the request.
         let Ok(next) = self.verifier.next(&self.context, &mut prepared) else {
             request.reject();
             return;
         };
         match next {
+            // Each processing call owns an application clone, so different blocks can execute
+            // concurrently and a shared call can outlive the request that started it. A step joins
+            // the block's processing as it is admitted, so it stays alive for that step even if
+            // every other holder is dropped before the step is first polled.
             Next::Process {
                 step,
                 block,
@@ -515,8 +517,8 @@ where
                 });
             }
             Next::Acquire => {
-                // Acquisition reads only the selected branch, so it runs under the current
-                // admission. Maintenance pauses it, and the request then restarts its search.
+                // Acquisition starts only while admission is open. Otherwise it stays paused
+                // until `Handler::resume` restarts the request's search.
                 let span = request.process_span();
                 let future = if matches!(self.admission, Admission::Open) {
                     Some(Verifier::<E, A>::acquire(prepared).instrument(span).boxed())

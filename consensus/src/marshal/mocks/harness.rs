@@ -4366,6 +4366,8 @@ pub fn subscribe_canceled_subscriptions<H: TestHarness>() {
             H::report_finalization(&mut handle.mailbox, finalization).await;
         }
 
+        // The surviving caller for the first block and the caller for the second still receive
+        // them.
         let received1 = surviving_rx.await.unwrap();
         assert_eq!(received1.digest(), H::digest(&block1));
         let received2 = sub2_rx.await.unwrap();
@@ -5153,7 +5155,8 @@ pub fn blocks_forward_range<H: TestHarness>() {
             extra: setup.extra,
         };
 
-        // The selected suffix starts at the finalized anchor and ends at height 7.
+        // Build seven blocks, finalize heights 1 through 5, and select heights 5 through 7 as an
+        // anchored history.
         let mut parent = Sha256::hash(&[b""]);
         let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
         let mut selected = Vec::new();
@@ -5191,6 +5194,8 @@ pub fn blocks_forward_range<H: TestHarness>() {
             parent_commitment = commitment;
         }
 
+        // The range reads heights below the anchor from finalized storage and the rest by
+        // commitment, yielding all seven blocks in height order.
         let blocks = handle.mailbox.blocks_with_parent(
             Height::new(7),
             parent_commitment,

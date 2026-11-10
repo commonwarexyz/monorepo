@@ -14,11 +14,11 @@
 //!   [`Finality::Candidate`]. The block is valid if the application accepts it and the result
 //!   matches its commitments. A cached state answers later verifications of its block.
 //! - Recovery: when a parent's state is not cached (for example after a restart), its missing
-//!   ancestors are acquired from the selected branch in forward order, starting above the nearest
-//!   cached ancestor or the branch anchor, and processed in height order as candidates, followed
-//!   by the parent the request holds. The held parent is never acquired. A recovered state is
-//!   cached only if it matches its block's commitments. Concurrent requests that need the same
-//!   block's state, including a verification of that block, share one processing call.
+//!   ancestors are acquired forward from the selected branch, starting above the nearest cached
+//!   ancestor or the branch anchor, and processed in height order as candidates. The parent comes
+//!   last and is never acquired, because the request holds it. A recovered state is cached only
+//!   if it matches its block's commitments. Concurrent requests that need the same block's state,
+//!   including a verification of that block, share one processing call.
 //! - Finalization: processing of the finalized block and of competing branches finishes before
 //!   the block's state is applied, while processing of its descendants may continue. The caller
 //!   coordinates durability, so one database barrier can cover several finalizations.
@@ -139,8 +139,8 @@ struct ReplayPath<B: Block> {
     /// acquired.
     range: Option<BlockRange<B>>,
 
-    /// The target, held by its request and processed last. It is never acquired: it is taken
-    /// once the range is exhausted.
+    /// The target. Its request holds it, so it is never acquired, and it is taken once every
+    /// block below it has been acquired.
     target: Option<Digested<B>>,
 
     /// Height and digest of the block that the next acquired block must extend.
@@ -165,8 +165,7 @@ impl<B: Block> ReplayPath<B> {
     ///
     /// Returns [`PrepareBatchesError::Invalid`] if the block does not extend the preceding one or
     /// if the range ends early or reports any error other than [`BlocksError::Unavailable`].
-    /// Returns [`PrepareBatchesError::Incomplete`] on [`BlocksError::Unavailable`], which is not
-    /// a verdict.
+    /// Returns [`PrepareBatchesError::Incomplete`] on [`BlocksError::Unavailable`].
     async fn acquire(&mut self) -> Result<(), PrepareBatchesError> {
         assert!(
             self.next.is_none(),
@@ -175,7 +174,10 @@ impl<B: Block> ReplayPath<B> {
         let range = self
             .range
             .as_mut()
-            .expect("acquisition requires missing blocks below the target");
+            .expect("a block below the target must remain to be acquired");
+
+        // The range yields every height through the target's parent unless it fails first, so
+        // an early end leaves the target without valid history.
         let Some(acquired) = range.next().await else {
             warn!(
                 expected_height = self.expected.0.get(),
@@ -183,6 +185,8 @@ impl<B: Block> ReplayPath<B> {
             );
             return Err(PrepareBatchesError::Invalid);
         };
+
+        // Unavailable history leaves the target undecided. Any other range error rejects it.
         let block = acquired.map_err(|error| match error {
             BlocksError::Unavailable => PrepareBatchesError::Incomplete,
             _ => PrepareBatchesError::Invalid,
@@ -224,12 +228,15 @@ impl<B: Block> ReplayPath<B> {
     /// with the selected branch ending at its parent. Returns `None` while the next block below
     /// the target remains to be acquired or once the path is exhausted.
     ///
-    /// Taking the target performs no I/O. Returns [`PrepareBatchesError::Invalid`] if the target
-    /// is no longer the selected block at its height or does not extend the preceding block.
+    /// Returns [`PrepareBatchesError::Invalid`] if the target is not the selected block at its
+    /// height or does not extend the preceding block.
     fn take(&mut self) -> Result<Option<ReplayStep<B>>, PrepareBatchesError> {
         let block = match self.next.take() {
             Some(block) => block,
             None if self.range.is_some() => return Ok(None),
+
+            // Every block below the target has been acquired, so the target comes next. Its
+            // selected digest may have become resident while the path was acquired.
             None => {
                 let Some(target) = self.target.take() else {
                     return Ok(None);
@@ -249,6 +256,9 @@ impl<B: Block> ReplayPath<B> {
                 target
             }
         };
+
+        // Each handed-out block counts toward the recovery depth and carries the branch ending at
+        // its parent.
         if let Some((_, depth)) = &mut self.measurement {
             *depth += 1;
         }
@@ -777,9 +787,9 @@ where
     /// `block`'s merkleized state is ready, and that state remains cached through the
     /// application's `finalized` hook.
     ///
-    /// An uncached `block` is processed as [`Finality::Finalized`] on the source that `blocks`
-    /// returns for the height of `block`'s parent. That source must be canonical finalized
-    /// history ending at the parent. `blocks` is called only for an uncached block.
+    /// `blocks` is called only when `block` is uncached, with the height of `block`'s parent, and
+    /// must return canonical finalized history ending at that parent. The block is then processed
+    /// on it as [`Finality::Finalized`].
     ///
     /// Panics if `block` does not have the next height and the branch anchor as its parent, if a
     /// request is still processing `block`, or if an uncached block fails to process or match its
@@ -1093,12 +1103,13 @@ where
         .ok_or(PrepareBatchesError::Invalid)
     }
 
-    /// Selects the nearest cached ancestor of `target` or the branch anchor using the resident
-    /// commitments in `blocks`, without reading bodies.
+    /// Finds where recovery of `target` starts from the resident commitments in `blocks`, without
+    /// reading bodies.
     ///
-    /// The search descends from `resume`, a height whose digest `blocks` discovered, or from
-    /// `target`'s parent when `resume` is `None`. `target`'s parent identifies the cached ancestor
-    /// one height below it even when its commitment is not resident.
+    /// The search descends from `resume`, a height whose digest `blocks` discovered, or else from
+    /// `target`'s parent. `target` names its parent's digest even when that commitment is not
+    /// resident. The search stops at the nearest cached ancestor, the branch anchor, or the first
+    /// height whose digest it cannot read.
     fn replay_start(
         &self,
         blocks: &Blocks<A::Block>,
@@ -1107,9 +1118,13 @@ where
     ) -> Result<ReplayStart<BlockDigest<A, E>>, PrepareBatchesError> {
         let (target_height, target_digest) = (target.height(), target.digest());
         let state = self.state.lock();
+
+        // A cached target or the branch anchor needs no recovery.
         if target_digest == state.branch.digest || state.pending.contains_key(&target_digest) {
             return Ok(ReplayStart::Known);
         }
+
+        // Recovery needs a target that `blocks` selects above the branch anchor.
         if target_height <= state.branch.height
             || target_height > blocks.tip()
             || blocks
@@ -1125,6 +1140,9 @@ where
             );
             return Err(PrepareBatchesError::Invalid);
         }
+
+        // Descend toward the anchor looking for a cached ancestor. With nothing cached, recovery
+        // starts above the anchor.
         let mut height = resume.unwrap_or_else(|| {
             target_height
                 .previous()
@@ -1137,6 +1155,9 @@ where
             else {
                 return Ok(ReplayStart::Missing(height));
             };
+
+            // A digest names one block, so a cached entry at another height means the selected
+            // history is inconsistent.
             if let Some(entry) = state.pending.get(&digest) {
                 if entry.height != height {
                     return Err(PrepareBatchesError::Invalid);
@@ -1155,18 +1176,19 @@ where
     }
 
     /// Returns the path of missing blocks through `target`, or [`None`] if `target`'s state is
-    /// cached or is the branch anchor, without forking database batches.
+    /// cached or is the branch anchor. Forks no database batches.
     ///
-    /// `blocks` is the selected branch ending at `target`, which the caller holds and which is
+    /// `blocks` is the selected branch ending at `target`. The caller holds `target`, so it is
     /// never acquired. When cached states exist and the search reaches a height whose commitment
-    /// is not resident, it asks `blocks` to discover that digest and continues from that height
+    /// is not resident, `blocks` discovers that digest and the search continues from that height
     /// against the current cache, so recovery starts above the nearest cached ancestor. When
-    /// `blocks` selects no digest at that height, recovery starts above the branch anchor.
+    /// `blocks` selects no digest there, recovery starts above the branch anchor.
     ///
-    /// Returns [`PrepareBatchesError::Invalid`] if `target` is at or below the branch anchor's
-    /// height, above the tip of `blocks`, or not the selected block at its height, or if a cached
-    /// ancestor has a different height. Returns [`PrepareBatchesError::Incomplete`] if the
-    /// selected history is unavailable.
+    /// For any other `target`, returns [`PrepareBatchesError::Invalid`] if it is at or below the
+    /// branch anchor's height, above the tip of `blocks`, or not the selected block at its
+    /// height, if a cached ancestor has a different height, or if discovery fails with an error
+    /// other than [`BlocksError::Unavailable`]. Returns [`PrepareBatchesError::Incomplete`] if
+    /// the selected history is unavailable.
     async fn prepare_replay(
         &self,
         context: &E,
@@ -1175,10 +1197,9 @@ where
     ) -> Result<Option<ReplayPath<A::Block>>, PrepareBatchesError> {
         let timer = self.metrics.rebuild_pending_duration.timer(context);
 
-        // The search continues from each height it discovers. Once `blocks` selects no digest at
-        // a height, the search has nothing left to match, and recovery starts above the branch
-        // anchor. Maintenance drops this future before it moves that anchor, so it is the anchor
-        // every search here observed.
+        // Each discovered height resumes the search against the current cache. Maintenance drops
+        // this future before it moves the branch anchor, so the anchor read when `blocks` selects
+        // no digest is the one every search here observed.
         let mut resume = None;
         let anchor = loop {
             match self.replay_start(blocks, &target, resume)? {
@@ -1197,6 +1218,9 @@ where
             .height()
             .previous()
             .expect("target above the branch anchor must have a parent");
+
+        // The range covers the heights above the start through the target's parent, so there is
+        // none when the start is the parent.
         Ok(Some(ReplayPath {
             range: (anchor.height < end).then(|| blocks.range(anchor.height.next()..=end)),
             blocks: blocks.clone(),
@@ -1226,6 +1250,8 @@ where
         let Some(mut path) = self.prepare_replay(context, &blocks, target).await? else {
             return Ok(());
         };
+
+        // Each block forks from its predecessor's state, so the path is processed in height order.
         while !path.exhausted() {
             let Some((block, selected)) = path.take()? else {
                 path.acquire().await?;
@@ -1682,6 +1708,7 @@ mod tests {
             batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
             finality: Finality,
         ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
+            // Record the block with the parent and grandparent that its branch delivers.
             if let Some(observations) = &self.process_ancestry {
                 let tip = blocks.tip();
                 let mut range = blocks.range(
@@ -1838,7 +1865,7 @@ mod tests {
             )
         }
 
-        /// Returns the selected branch ending at `target`, which the caller holds.
+        /// Inserts `target` and returns the selected branch ending at it.
         fn source(&self, target: &Block) -> Blocks<Block> {
             self.insert(target.clone());
             self.branch(target.height(), target.digest())
@@ -3323,8 +3350,8 @@ mod tests {
         });
     }
 
-    /// An unverified ancestor can claim any height, including `u64::MAX`, which has no
-    /// successor. An ancestor whose height is not contiguous with the cursor is rejected.
+    /// An unverified ancestor can claim any height, including `u64::MAX`, which has no successor.
+    /// An ancestor whose height is not contiguous with the preceding block is rejected.
     #[test]
     fn execution_rebuild_pending_rejects_parent_at_max_height() {
         deterministic::Runner::default().start(|context| async move {
@@ -3522,18 +3549,20 @@ mod tests {
     #[test]
     fn execution_rebuild_pending_returns_incomplete_when_range_source_ends() {
         deterministic::Runner::default().start(|context| async move {
+            // Finalize block1 and leave block2 and block3 uncached.
             let mut harness = Harness::new(context.child("harness")).await;
             let genesis = Block::genesis();
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
             assert!(harness.finalize(block1.clone()).await);
-
             let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
             let block3 = harness.stage_pending_child(&block2, View::new(3)).await;
             harness.processor.clear_pending();
 
+            // The source reports block2 unavailable.
             let provider = ScriptedSource::default();
             provider.push([None]);
 
+            // Unavailable history is not a verdict, so recovering block3 reports it as incomplete.
             let result = harness
                 .processor
                 .rebuild_pending(
@@ -3542,7 +3571,6 @@ mod tests {
                     digested(block3),
                 )
                 .await;
-
             assert_eq!(result, Err(PrepareBatchesError::Incomplete));
         });
     }
@@ -3550,18 +3578,20 @@ mod tests {
     #[test]
     fn execution_rebuild_pending_does_not_retry_closed_provider_forever() {
         deterministic::Runner::default().start(|context| async move {
+            // Finalize block1 and leave block2 and block3 uncached.
             let mut harness = Harness::new(context.child("harness")).await;
             let genesis = Block::genesis();
             let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
             assert!(harness.finalize(block1.clone()).await);
-
             let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
             let block3 = harness.stage_pending_child(&block2, View::new(3)).await;
             harness.processor.clear_pending();
 
+            // The source reports block2 unavailable once and would deliver it if asked again.
             let provider = ScriptedSource::default();
             provider.push([None, Some(block2.clone())]);
 
+            // Recovery stops at the first unavailable acquisition without asking again.
             let result = harness
                 .processor
                 .rebuild_pending(
@@ -3570,21 +3600,22 @@ mod tests {
                     digested(block3),
                 )
                 .await;
-
             assert_eq!(result, Err(PrepareBatchesError::Incomplete));
-            assert_eq!(provider.fetches(), 1, "closed range should not be retried");
+            assert_eq!(provider.fetches(), 1, "a closed range must not be retried");
         });
     }
 
+    /// A source that exposes no digests leaves recovery to start just above the finalized block,
+    /// acquiring each missing ancestor once and caching every block through the target.
     #[test]
     fn execution_rebuild_pending_starts_above_anchor_when_source_selects_no_digest() {
         deterministic::Runner::timed(std::time::Duration::from_secs(5)).start(
             |context| async move {
+                // Finalize block1 and leave block2 through block4 uncached.
                 let mut harness = Harness::new(context.child("harness")).await;
                 let genesis = Block::genesis();
                 let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
                 assert!(harness.finalize(block1.clone()).await);
-
                 let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
                 let block3 = harness.stage_pending_child(&block2, View::new(3)).await;
                 let block4 = harness.stage_pending_child(&block3, View::new(4)).await;
@@ -3613,6 +3644,8 @@ mod tests {
                     },
                 );
 
+                // Recovery acquires block2 and block3 once each and caches every block through
+                // the target.
                 let result = harness
                     .processor
                     .rebuild_pending(

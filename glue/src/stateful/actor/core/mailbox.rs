@@ -293,6 +293,8 @@ where
         blocks: Blocks<Self::Block>,
         upstream: Self::Input,
     ) -> Handoff<Digested<Self::Block>> {
+        // The actor holds only a weak parent reference, so dropping this future releases the
+        // parent's body even while the request is queued.
         let (response, receiver) = oneshot::channel();
         let span = info_span!(
             "stateful.mailbox.prepare",
@@ -319,6 +321,8 @@ where
         blocks: Blocks<Self::Block>,
         upstream: Self::Input,
     ) -> Option<Digested<Self::Block>> {
+        // The actor holds only a weak parent reference, so dropping this future releases the
+        // parent's body even while the request is queued.
         let (response, receiver) = oneshot::channel();
         let span = info_span!(
             "stateful.mailbox.propose",

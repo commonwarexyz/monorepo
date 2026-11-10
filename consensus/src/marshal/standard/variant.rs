@@ -93,7 +93,7 @@ where
         assert_eq!(
             block.digest(),
             commitment,
-            "commitment does not commit to block"
+            "commitment must commit to the block"
         );
         block
     }

@@ -641,7 +641,7 @@ mod tests {
             for (index, owner) in weak_owners.iter().enumerate() {
                 assert!(
                     owner.upgrade().is_none(),
-                    "cancelled startup verification {index} retained a block owner",
+                    "cancelled startup verifications must release block {index}",
                 );
             }
 

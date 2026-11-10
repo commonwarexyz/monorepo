@@ -7153,10 +7153,11 @@ mod tests {
         missed_notarization_is_fetched(ed25519::fixture);
     }
 
-    /// A request whose parent is certified above a missing certificate is dispatched with the
-    /// commitments consensus holds, and the voter requests no certificate on its behalf.
+    /// A request on a notarized parent above a missing certificate carries only the parent's
+    /// commitment as a suffix, and the voter does not fetch the missing certificate for it.
     fn application_history_holds_resident_suffix(local_index: usize, prepare: bool) {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            // Build a four-validator network.
             let epoch = Epoch::new(333);
             let Fixture {
                 participants,
@@ -7170,6 +7171,8 @@ mod tests {
             let oracle =
                 start_test_network_with_peers(context.child("network"), participants.clone(), true)
                     .await;
+
+            // The parent at view 2 builds on a proposal at view 1 that never gets a certificate.
             let missing = Proposal::new(
                 Round::new(epoch, View::new(1)),
                 View::zero(),
@@ -7180,9 +7183,14 @@ mod tests {
                 missing.view(),
                 Sha256::hash(&[b"parent"]),
             );
+
+            // The view 3 request must carry only the parent's commitment, as a suffix.
             let observed = Arc::new(Mutex::new(false));
             let observer = observed.clone();
             let expected = [parent.payload];
+
+            // With a two-view term, view 3 starts a term and its leader requests the proposal
+            // through prepare. Certification never completes, so the parent stays uncertified.
             let elector = RoundRobin::<Sha256>::default().with_term(
                 TermLength::new(NZU32!(if prepare { 2 } else { 5 })),
                 Duration::from_secs(30),
@@ -7210,9 +7218,13 @@ mod tests {
                 },
             )
             .await;
+
+            // A quorum of peers notarizes the parent.
             let peer_schemes = peers(&schemes, local_index);
             let (_, parent_certificate) = build_notarization(&peer_schemes, &parent, quorum(4));
             mailbox.recovered(Certificate::Notarization(parent_certificate));
+
+            // Validator 1 is not a view 3 leader, so it verifies the leader's proposal.
             if local_index == 1 {
                 let contents = (Round::new(epoch, View::new(3)), parent.payload, 1u64).encode();
                 let candidate = Proposal::new(
@@ -7227,6 +7239,8 @@ mod tests {
                 );
                 mailbox.proposal(candidate);
             }
+
+            // Matches a fetch of the missing certificate on behalf of the view 3 request.
             let history_request = |message: MailboxMessage<_, _>| {
                 matches!(
                     message,
@@ -7234,6 +7248,9 @@ mod tests {
                         if proposal == View::new(3) && view == missing.view()
                 )
             };
+
+            // Run until this node votes at view 3 after the observed request, and fail if that
+            // request fetches the missing certificate.
             loop {
                 select! {
                     message = resolver.recv() => {
@@ -7256,6 +7273,8 @@ mod tests {
                         panic!("a request missing an ancestor certificate must be answered"),
                 }
             }
+
+            // Fetches still queued after the vote must not request the missing certificate for it.
             while let Some(message) = resolver.recv().now_or_never().flatten() {
                 assert!(
                     !history_request(message),
@@ -7286,6 +7305,7 @@ mod tests {
     #[test_traced]
     fn test_application_history_anchored_on_complete_path() {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            // Build a four-validator network.
             let epoch = Epoch::new(333);
             let Fixture {
                 participants,
@@ -7299,6 +7319,8 @@ mod tests {
             let oracle =
                 start_test_network_with_peers(context.child("network"), participants.clone(), true)
                     .await;
+
+            // A proposal at view 1 links the parent at view 2 to genesis.
             let genesis = mocks::application::genesis::<Sha256>(epoch);
             let first = Proposal::new(
                 Round::new(epoch, View::new(1)),
@@ -7310,10 +7332,15 @@ mod tests {
                 first.view(),
                 Sha256::hash(&[b"parent"]),
             );
+
+            // Verifying the view 3 candidate must see the whole path from genesis, and certifying
+            // the parent must see the path below it.
             let verified = Arc::new(Mutex::new(false));
             let certified = Arc::new(Mutex::new(false));
             let (verify_observer, certify_observer) = (verified.clone(), certified.clone());
             let complete = [genesis, first.payload, parent.payload];
+
+            // Start validator 1 to verify the view 3 proposal and certify its parent.
             let elector = RoundRobin::<Sha256>::default().with_term(
                 TermLength::new(NZU32!(5)),
                 Duration::from_secs(30),
@@ -7347,11 +7374,15 @@ mod tests {
                 },
             )
             .await;
+
+            // A quorum of peers notarizes both proposals.
             let peer_schemes = peers(&schemes, 1);
             for proposal in [&first, &parent] {
                 let (_, certificate) = build_notarization(&peer_schemes, proposal, quorum(4));
                 mailbox.recovered(Certificate::Notarization(certificate));
             }
+
+            // The view 3 leader proposes on the parent.
             let contents = (Round::new(epoch, View::new(3)), parent.payload, 1u64).encode();
             let candidate = Proposal::new(
                 Round::new(epoch, View::new(3)),
@@ -7364,6 +7395,9 @@ mod tests {
                 (candidate.payload, contents),
             );
             mailbox.proposal(candidate);
+
+            // Run until the parent certifies and this node votes at view 3 after the observed
+            // verification.
             let mut voted = false;
             while !(voted && *certified.lock()) {
                 select! {
@@ -7384,10 +7418,11 @@ mod tests {
     }
 
     /// A term-start candidate whose parent in an earlier term has no certificate here is
-    /// certified on an empty history. The only request for that certificate is the targeted
-    /// one verification of the candidate makes.
+    /// certified on an empty suffix, and the voter sends no untargeted request for the parent's
+    /// certificate.
     fn certification_history_omits_uncertified_cross_term_parent(conflicting_local_parent: bool) {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            // Build a four-validator network.
             let epoch = Epoch::new(333);
             let Fixture {
                 participants,
@@ -7401,6 +7436,8 @@ mod tests {
             let oracle =
                 start_test_network_with_peers(context.child("network"), participants.clone(), true)
                     .await;
+
+            // The candidate at view 6 starts the second five-view term on a parent at view 1.
             let genesis = mocks::application::genesis::<Sha256>(epoch);
             let local_round = Round::new(epoch, View::new(1));
             let parent = Proposal::new(local_round, View::zero(), Sha256::hash(&[b"parent"]));
@@ -7409,10 +7446,14 @@ mod tests {
                 parent.view(),
                 Sha256::hash(&[b"candidate"]),
             );
+
+            // The candidate must be certified once on an empty suffix.
             let observed = Arc::new(Mutex::new(0usize));
             let call_observer = observed.clone();
             let candidate_view = candidate.view();
             let candidate_payload = candidate.payload;
+
+            // Start validator 1 with five-view terms.
             let elector = RoundRobin::<Sha256>::default().with_term(
                 TermLength::new(NZU32!(5)),
                 Duration::from_secs(30),
@@ -7440,6 +7481,9 @@ mod tests {
                 },
             )
             .await;
+
+            // With a conflicting local parent, this node first votes for a different proposal at
+            // the parent's view.
             if conflicting_local_parent {
                 let local_contents = (local_round, genesis, 0u64).encode();
                 let local =
@@ -7449,6 +7493,8 @@ mod tests {
                 let leader = participants[2].clone();
                 relay.broadcast(&leader, Recipients::All, (local.payload, local_contents));
                 mailbox.proposal(local.clone());
+
+                // Wait for this node's vote on the conflicting proposal.
                 loop {
                     select! {
                         message = batcher.recv() => {
@@ -7467,6 +7513,7 @@ mod tests {
                 }
             }
 
+            // The other validators nullify view 2 and notarize the candidate.
             let quorum_schemes = [schemes[0].clone(), schemes[2].clone(), schemes[3].clone()];
             let (_, skipped) =
                 build_nullification(&quorum_schemes, Round::new(epoch, View::new(2)), quorum(4));
@@ -7474,6 +7521,9 @@ mod tests {
                 build_notarization(&quorum_schemes, &candidate, quorum(4));
             mailbox.recovered(Certificate::Nullification(skipped));
             mailbox.recovered(Certificate::Notarization(candidate_certificate));
+
+            // Run until this node votes to finalize the certified candidate, and fail on an
+            // untargeted fetch of the parent's certificate.
             loop {
                 select! {
                     message = resolver.recv() => {
@@ -7501,6 +7551,9 @@ mod tests {
                         panic!("the candidate must certify without its parent certificate"),
                 }
             }
+
+            // Fetches still queued after the finalize vote must not request the parent's
+            // certificate untargeted.
             while let Some(message) = resolver.recv().now_or_never().flatten() {
                 if let MailboxMessage::Resolve {
                     view, target: None, ..

@@ -592,8 +592,8 @@ mod tests {
         (parent, blocks)
     }
 
-    /// Verifies the first block of candidate-first `ancestry` on the second, selecting the rest
-    /// as the parent's history.
+    /// Verifies the first block of candidate-first `ancestry` on the second, with the second and
+    /// every later block as the parent's selected history.
     fn verify_with<'a, A, I>(
         mailbox: &'a mut Mailbox<deterministic::Context, A>,
         context: (deterministic::Context, A::Context),
@@ -609,7 +609,8 @@ mod tests {
         mailbox.verify(context, block, parent, blocks)
     }
 
-    /// Proposes on the first block of parent-first `ancestry`, selecting it as history.
+    /// Proposes on the first block of parent-first `ancestry`, with all of `ancestry` as the
+    /// selected history.
     fn propose_with<'a, A, I>(
         mailbox: &'a mut Mailbox<deterministic::Context, A>,
         context: (deterministic::Context, A::Context),
@@ -624,7 +625,8 @@ mod tests {
         mailbox.propose(context, parent, blocks, input)
     }
 
-    /// Prepares on the first block of parent-first `ancestry`, selecting it as history.
+    /// Prepares on the first block of parent-first `ancestry`, with all of `ancestry` as the
+    /// selected history.
     fn prepare_with<'a, A, I>(
         mailbox: &'a mut Mailbox<deterministic::Context, A>,
         context: (deterministic::Context, A::Context),
@@ -1099,6 +1101,7 @@ mod tests {
                     Some(Ok(selected)) => {
                         let _ = read.digest.send(selected.digest());
                     }
+
                     // Unavailable history is not a verdict, so processing keeps waiting.
                     Some(Err(commonware_consensus::marshal::blocks::Error::Unavailable)) => {
                         drop(read);
@@ -3101,7 +3104,8 @@ mod tests {
             let genesis = TestBlock::new(0, 0);
             let outgoing = TestBlock::child(&genesis, 1);
             let parent = TestBlock::child(&outgoing, 2);
-            // The selected history names the parent's own parent, which marshal must acquire.
+
+            // The selected history names the parent's own parent, so marshal must acquire it.
             let blocks = marshal.mailbox.blocks_with_parent(
                 parent.height(),
                 parent.digest(),
@@ -5742,8 +5746,8 @@ mod tests {
         });
     }
 
-    /// A verification whose selected history never arrives keeps acquiring across a finalization
-    /// without delaying it.
+    /// A verification whose selected history never arrives stays pending across a finalization
+    /// without delaying it, and the finalization restarts its acquisition.
     #[rstest::rstest]
     #[case::never_resolves(false)]
     #[case::terminal(true)]
@@ -5753,7 +5757,7 @@ mod tests {
                 spawn_processing(&context, "unavailable-history", None).await;
             let parent = TestBlock::child(&TestBlock::new(0, 0), 1);
 
-            // The history never yields the missing blocks between the anchor and the parent.
+            // The verification's history never yields the missing blocks below its parent.
             let clones = Arc::new(AtomicUsize::new(0));
             let (block, unavailable_parent, blocks) = pending_history(clones.clone(), terminal);
             let mut verifier = mailbox.clone();
@@ -5764,10 +5768,12 @@ mod tests {
                 blocks,
             ));
             assert!(poll!(&mut verification).is_pending());
+
+            // Acquisition starts, and the verification abstains by staying pending even when the
+            // history is terminally unavailable.
             drop(mailbox.subscribe_databases().await);
             let acquisitions = clones.load(Ordering::SeqCst);
             assert!(acquisitions > 0);
-            // Terminal unavailability must abstain rather than vote false.
             assert!(poll!(&mut verification).is_pending());
 
             // Finalization pauses the acquisition, completes, and then restarts it.
@@ -5987,8 +5993,8 @@ mod tests {
         (blocks, release, acquiring)
     }
 
-    /// A verification whose acquisition a finalization pauses answers from the restarted
-    /// acquisition once the finalization completes.
+    /// A finalization pauses a verification's acquisition, and the verification answers from the
+    /// restarted acquisition once the finalization completes.
     #[test]
     fn paused_acquisition_restarts_after_finalization() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
@@ -6223,6 +6229,7 @@ mod tests {
             acquiring
         }
 
+        /// Aborts the actor and marshal, waiting for each to exit.
         async fn stop(self) {
             self.actor.abort();
             let _ = self.actor.await;
@@ -6251,10 +6258,10 @@ mod tests {
         Descendant,
     }
 
-    /// A shared processing that a descendant keeps after its own verification is dropped reads
-    /// below its suffix history once a finalization covers its block. The read finds the
-    /// validated parent finalized and comes from finalized storage, so the finalization waiting
-    /// for the processing is acknowledged and the descendant verifies.
+    /// A descendant keeps a block's shared processing alive after the block's own verification is
+    /// dropped. Once a finalization covers the block, that processing reads below its suffix
+    /// history. The read finds the validated parent finalized and comes from finalized storage, so
+    /// the finalization waiting for the processing is acknowledged and the descendant verifies.
     #[rstest::rstest]
     fn shared_processing_of_a_covered_block_reads_below_its_history(
         #[values(SuppliedHistory::Parent, SuppliedHistory::Empty)] supplied: SuppliedHistory,
@@ -6314,8 +6321,8 @@ mod tests {
             assert!(poll!(&mut verify_block).is_pending());
             started.await.expect("block processing must start");
 
-            // A descendant above the covering finalization stays live. Its recovery joins the
-            // block's processing instead of starting another.
+            // A descendant above the covering finalization stays live, and its recovery joins the
+            // block's processing.
             let (owner, owner_parent) = match covering {
                 Covering::Block => (&child, &block),
                 Covering::Descendant => (&grandchild, &child),
@@ -6383,19 +6390,20 @@ mod tests {
         });
     }
 
-    /// A shared processing started by a request on a branch that later loses reads below that
-    /// request's history after the winning sibling finalizes. The history's lowest commitment
-    /// is a canonical ancestor, and the read starts from it, so the winning finalization is
-    /// acknowledged and the request that joined the processing verifies.
+    /// A request on a branch that later loses starts a shared processing. After the winning
+    /// sibling finalizes, that processing reads below the request's history. The history's lowest
+    /// commitment is a canonical ancestor and the read starts from it, so the winning
+    /// finalization is acknowledged and the request that joined the processing verifies.
     #[test]
     fn shared_processing_started_on_a_losing_branch_reads_below_its_history() {
         // The runner budget is only a hang guard. A read that could not start from the history's
         // lowest commitment would hold the finalization forever.
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            // A canonical chain through `shared` forks into a losing and a winning branch. The
+            // siblings are proposed in distinct views, so each view has one notarization.
             let genesis = TestBlock::new(0, 0);
             let applied = TestBlock::child(&genesis, 1);
             let shared = TestBlock::child(&applied, 2);
-            // The siblings are proposed in distinct views, so each view has one notarization.
             let losing = TestBlock::child(&shared, 3).with_view(3);
             let stale = TestBlock::child(&losing, 5).with_view(4);
             let winning = TestBlock::child(&shared, 4).with_view(5);
@@ -6486,6 +6494,7 @@ mod tests {
         // The runner budget is only a hang guard. Recovery that waited for an ancestor to
         // finalize would never finish.
         deterministic::Runner::timed(Duration::from_secs(10)).start(move |context| async move {
+            // Marshal stores every block below the verified one and finalizes none of them.
             let genesis = TestBlock::new(0, 0);
             let chain = successors(&genesis, 5);
             let (parent, block) = (&chain[3], &chain[4]);
@@ -6493,6 +6502,7 @@ mod tests {
             let app = ReplayGatedApp::new(Height::zero(), []);
             let harness = HeldRead::with_app(&context, "suffix-recovery", app, &stored).await;
 
+            // The verification supplies a suffix holding at most the parent.
             let supplied: Arc<[_]> = match supplied {
                 SuppliedHistory::Parent => Arc::from([parent.digest()]),
                 SuppliedHistory::Empty => Arc::from([]),
@@ -6503,6 +6513,8 @@ mod tests {
                     .verification(context.child("verify"), block, parent, history)
                     .await
             );
+
+            // Every block is processed once, and marshal finalized nothing.
             for block in &chain {
                 assert_eq!(harness.process_calls.at(block.height()), 1);
             }
@@ -6521,6 +6533,7 @@ mod tests {
     fn suffix_history_recovers_from_the_nearest_cached_state() {
         // The runner budget is only a hang guard for that search.
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            // Marshal stores only the two blocks above the ones that become cached.
             let genesis = TestBlock::new(0, 0);
             let chain = successors(&genesis, 5);
             let (parent, block) = (&chain[3], &chain[4]);
@@ -6543,6 +6556,8 @@ mod tests {
                     .await
             );
 
+            // Recovery through a suffix holding the parent processes only the blocks above the
+            // cached ones, so every block is processed once.
             let history = History::suffix([parent.digest()]);
             assert!(
                 harness

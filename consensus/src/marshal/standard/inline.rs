@@ -841,7 +841,7 @@ mod tests {
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
             );
 
-            // Only the notarized candidate is available; its parent body is missing.
+            // Marshal stores the candidate, and its parent's body is missing.
             let parent_round = Round::new(Epoch::zero(), View::new(1));
             let parent_ctx = Ctx {
                 round: parent_round,

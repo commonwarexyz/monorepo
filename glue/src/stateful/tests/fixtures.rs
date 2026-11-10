@@ -41,8 +41,8 @@ use std::{
 
 /// Builds a source through `tip` whose bodies remain owned by the caller.
 ///
-/// Keep the supplied blocks alive while acquisition should succeed. Missing or
-/// dropped bodies are unavailable, while their supplied digests remain resident.
+/// Keep the supplied blocks alive while acquisition should succeed. Missing or dropped bodies
+/// are unavailable, and the digests of supplied bodies stay resident.
 pub(crate) fn blocks<B: Block>(tip: Height, bodies: &[Arc<B>]) -> Blocks<B> {
     let entries = Arc::new(
         bodies

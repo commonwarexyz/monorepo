@@ -89,7 +89,7 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// A channel to send the retrieved block.
         response: oneshot::Sender<V::Block>,
     },
-    /// A lease requesting forward prefetch of commitment metadata.
+    /// A lease requesting speculative fetches of the blocks for a range of commitments.
     Prefetch {
         /// The span carried with this request.
         span: Span,
@@ -601,11 +601,11 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 
     /// Discovers a finalization and its block from the supplied peers.
     ///
-    /// Hints at or below the processed height and locally stored finalizations are ignored.
-    /// The height must be covered by the epocher and the provider's verification scope. If the
-    /// epocher cannot map the height to an epoch, or the provider cannot supply a scheme for that
-    /// epoch, any response to the hinted fetch is ignored. Repeated hints add targets to the same
-    /// resolver request.
+    /// Hints at or below the processed height and locally stored finalizations are ignored. The
+    /// height must be covered by the epocher and the provider's verification scope. If the epocher
+    /// cannot map the height to an epoch, or the provider cannot supply a scheme for that epoch,
+    /// any response to the hinted fetch is ignored. Repeated hints add targets to the same resolver
+    /// request.
     pub fn hint_finalized(&self, height: Height, targets: NonEmptyVec<S::PublicKey>) {
         let _ = self.sender.enqueue(Message::HintFinalized {
             span: info_span!("marshal.mailbox.hint_finalized", height = height.traced()),
@@ -694,8 +694,9 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Callers for the same commitment share acquisition work. Drop the receiver to cancel
     /// this caller's interest. The receiver closes without delivery if marshal shuts down.
     ///
-    /// Acquisition ignores marshal's processed height and round floors: a request for a block no
-    /// peer serves stays live until the block arrives or every caller drops its receiver.
+    /// Acquisition ignores marshal's processed height and round floors. A request for a block no
+    /// peer serves stays live until the block arrives or every acquiring caller drops its
+    /// receiver.
     ///
     /// Delivery does not imply application validity or durability. Consumers that need durable,
     /// height-ordered delivery should use application dispatch.
@@ -728,15 +729,19 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 
     /// Registers best-effort forward prefetch demand for `range` within `commitments`.
     ///
-    /// Dropping the returned receiver releases the demand. Local availability or an explicit
-    /// acquisition also retires demand for that commitment. The receiver never delivers a value;
-    /// empty or invalid ranges return one that is already closed.
+    /// Dropping the returned receiver releases the demand. Marshal may retire the demand for a
+    /// commitment earlier, such as when it stores the block or an [`Self::acquire`] caller takes
+    /// over the fetch. The receiver never delivers a value. An empty or invalid range returns one
+    /// that is already closed.
     pub(crate) fn prefetch(
         &self,
         commitments: Arc<[V::Commitment]>,
         range: Range<usize>,
     ) -> oneshot::Receiver<()> {
         let (lease, receiver) = oneshot::channel();
+
+        // An empty or invalid range sends no request. Returning drops the sender and so closes
+        // the receiver.
         if !commitments
             .get(range.clone())
             .is_some_and(|selected| !selected.is_empty())
@@ -754,9 +759,9 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 
     /// Wait for the finalized block at `height` to become available locally.
     ///
-    /// This does not initiate a network request. Drop the receiver to cancel the wait.
-    /// The receiver closes without delivery if marshal shuts down or a floor update skips
-    /// the height.
+    /// This does not initiate a network request. Drop the receiver to cancel the wait. The
+    /// receiver closes without delivery if marshal shuts down, if a floor update skips the
+    /// height, or if the height is at or below the processed height and not stored.
     pub fn finalized(&self, height: Height) -> oneshot::Receiver<V::Block> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::AwaitFinalized {
@@ -1593,8 +1598,11 @@ mod tests {
         assert!(matches!(drained[1], TestMessage::Prune { .. }));
     }
 
+    /// Overflowed acquisitions are not stale under a prune, so they drain after it in arrival order
+    /// and unanswered. An acquisition whose caller canceled while queued is dropped.
     #[test]
     fn acquisition_fifo_survives_pruning_and_skips_canceled_callers() {
+        // Queue three acquisitions, cancel the middle one, then prune to height 10.
         let mut overflow = pending();
         let (first_response, mut first_receiver) = oneshot::channel();
         let (closed_response, closed_receiver) = oneshot::channel();
@@ -1616,6 +1624,8 @@ mod tests {
         }
         drop(closed_receiver);
         <TestMessage as Policy>::handle(&mut overflow, prune(10));
+
+        // The prune drains first, then the open acquisitions in order, still unanswered.
         let drained = drain(&mut overflow);
         assert_eq!(drained.len(), 3);
         assert!(matches!(drained[0], TestMessage::Prune { .. }));
@@ -1634,8 +1644,12 @@ mod tests {
         assert!(matches!(last_receiver.try_recv(), Err(TryRecvError::Empty)));
     }
 
+    /// Overflowed finalized-body waits survive a coalesced prune, including one below its height,
+    /// and drain after it unanswered, so the actor decides whether to answer or drop them. A wait
+    /// whose caller canceled is dropped.
     #[test]
     fn finalized_body_waits_preserve_actor_prune_decisions() {
+        // Queue waits at and below the prune height, one of them canceled.
         let mut overflow = pending();
         let (older_response, mut older_receiver) = oneshot::channel();
         let (closed_response, closed_receiver) = oneshot::channel();
@@ -1656,6 +1670,8 @@ mod tests {
         }
         drop(closed_receiver);
         <TestMessage as Policy>::handle(&mut overflow, prune(5));
+
+        // Both open waits stay unanswered and drain after the prune. The canceled one is gone.
         assert!(matches!(
             older_receiver.try_recv(),
             Err(TryRecvError::Empty)

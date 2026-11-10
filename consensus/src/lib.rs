@@ -176,11 +176,9 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// rather than rebuilding them from current local state. If consensus
         /// later abandons a dependency, it also abandons the proposal.
         ///
-        /// `history` holds the commitments consensus has on the selected parent branch at
-        /// dispatch, in forward order, ending at the parent. Consecutive re-proposals of one
-        /// payload contribute one commitment, so a payload that re-proposes its parent appears
-        /// as the parent's commitment. An anchored history begins at a finalized or genesis
-        /// anchor. A suffix, possibly empty, holds only the newest commitments.
+        /// `history` is the [`History`] consensus holds on the selected parent branch at
+        /// dispatch. It ends at the parent, and a payload that re-proposes its parent appears as
+        /// the parent's commitment.
         ///
         /// Closing the response declines this request, which consensus may
         /// treat as final for the context. Keep the response pending when
@@ -212,8 +210,9 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ///
         /// The future-context requirement on [`Self::propose`] applies here
         /// too: the context's dependencies may not be resolvable locally yet.
-        /// `history` has the same ordering and anchoring as [`Self::propose`]
-        /// and ends at `payload`'s parent.
+        ///
+        /// `history` is the selected parent branch as in [`Self::propose`], ending at
+        /// `payload`'s parent.
         fn verify(
             &mut self,
             context: Self::Context,
@@ -307,8 +306,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// certifying. The request then waits as if the application had returned
         /// [`Handoff::Wait`].
         ///
-        /// `history` has the same ordering and anchoring as
-        /// [`Automaton::propose`].
+        /// `history` is the selected parent branch as in [`Automaton::propose`].
         ///
         /// # Request Contract
         ///
@@ -334,10 +332,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// same payload may appear in multiple rounds, so implementations must key any state
         /// on `(round, payload)` rather than `payload` alone.
         ///
-        /// Certification may be requested without prior local verification.
-        /// `history` supplies the selected parent branch independently of
-        /// verification, with the same ordering and anchoring as
-        /// [`Automaton::propose`], and ends at `payload`'s parent.
+        /// Certification may be requested without prior local verification. `history` is the
+        /// selected parent branch as in [`Automaton::propose`], ending at `payload`'s parent.
         ///
         /// Like [`Automaton::verify`], payloads produced by [`Automaton::propose`] are certifiable-by-construction.
         /// Also like [`Automaton::verify`], certification is single-shot for the given
@@ -524,6 +520,7 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// `blocks` supplies forward ranges of the selected parent branch, including
         /// finalized history. It ends at `parent` (`blocks.tip() == parent.height()`). Select
         /// only the history needed to build the block.
+        ///
         /// `input` is the per-proposal input for this build.
         ///
         /// This future may be cancelled before it completes. Implementations must be
@@ -538,8 +535,7 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
 
         /// Verify `block` produced by the application's proposer against `parent`.
         ///
-        /// `block` already extends `parent`: its parent digest is `parent`'s digest and
-        /// its height is one above `parent`'s.
+        /// `block` already names `parent`'s digest as its parent and sits one height above it.
         ///
         /// `blocks` supplies forward ranges of the selected parent branch, including
         /// finalized history. It ends at `parent` (`blocks.tip() == parent.height()`) and

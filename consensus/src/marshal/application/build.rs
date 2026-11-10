@@ -25,10 +25,10 @@ pub(crate) enum Resolved<D, S, B: Block, M = ()> {
     Reuse(D, S),
     /// The marshal cannot build on this parent.
     Skip,
-    /// The parent is fetched and the application may build on it and the selected branch
-    /// ending at it. The timer measures the application's build from this point. The metadata
-    /// (the coding configuration, or unit for standard blocks) is passed to the sealing
-    /// callback with the built block.
+    /// The parent is fetched, and the application may build on it using the selected branch that
+    /// ends at it. The timer measures the application's build from this point. The metadata (the
+    /// coding configuration, or unit for standard blocks) is passed to the sealing callback with
+    /// the built block.
     Build(Digested<B>, Blocks<B>, Timer, M),
 }
 

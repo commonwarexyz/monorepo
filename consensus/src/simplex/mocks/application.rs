@@ -171,6 +171,7 @@ type VerifyObserver<H, P> =
 /// Observer invoked with the history of every proposal, prepare, and verification request.
 pub type HistoryObserver<D> = Box<dyn Fn(Round, &History<D>) + Send + 'static>;
 
+/// Predicate that receives a certification request's round, payload, and history.
 type HistoryCertifier<D> = Box<dyn Fn(Round, D, &History<D>) -> bool + Send + 'static>;
 
 /// Callback that receives a certification request's round, payload, and response sender.
@@ -351,10 +352,12 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
         self.verify_observer = Some(observer);
     }
 
+    /// Sets the observer called with the history of each propose, prepare, and verify request.
     pub fn set_history_observer(&mut self, observer: HistoryObserver<H::Digest>) {
         self.history_observer = Some(observer);
     }
 
+    /// Passes a request's round and history to the history observer, if one is set.
     fn observe_history(&self, round: Round, history: &History<H::Digest>) {
         if let Some(observer) = &self.history_observer {
             observer(round, history);

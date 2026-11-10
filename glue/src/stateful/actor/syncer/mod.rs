@@ -161,6 +161,7 @@ where
             V::into_shared(anchor)
         }
     } else {
+        // Acquire the floor block that the finalization names, fetching it from peers if needed.
         let selected = {
             let block = marshal
                 .acquire(finalization.proposal.payload)

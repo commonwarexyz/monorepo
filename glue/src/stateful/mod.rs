@@ -92,8 +92,8 @@
 //!
 //! # Lazy Recovery
 //!
-//! When a parent has no pending or applied state, [`Stateful`] uses the selected branch
-//! commitments to find the nearest known state, acquires the missing blocks in forward order,
+//! When a parent has no pending or applied state, [`Stateful`] uses the commitments of the
+//! selected branch to find the nearest known state, acquires the missing blocks in forward order,
 //! and processes them with [`Application::process`] as [`Finality::Candidate`] blocks. Each
 //! recovered state is retained once its processing completes, even if the request is later
 //! cancelled, and it answers the block's own verification.
@@ -234,7 +234,7 @@ pub trait Application<E>: Clone + Send + 'static {
         async { Handoff::Wait }
     }
 
-    /// Builds a block on top of `parent`, using the selected history in `blocks`.
+    /// Builds a block on top of `parent`.
     ///
     /// `blocks` is the selected branch ending at `parent` (`blocks.tip() == parent.height()`).
     ///
@@ -267,14 +267,15 @@ pub trait Application<E>: Clone + Send + 'static {
     /// context that [`Stateful`] owns, since one call can serve several requests.
     ///
     /// `blocks` is the branch ending at the block's parent (`blocks.tip().next() ==
-    /// block.height()`) and excludes `block`. Ranges acquire blocks only when polled, so the
-    /// parent is read as the range `blocks.tip()..=blocks.tip()`. For a [`Finality::Candidate`],
-    /// `blocks` is the consensus-selected branch. For a [`Finality::Finalized`] block, it is
-    /// canonical finalized history. Acquiring a range can fail with a
-    /// [`blocks::Error`](commonware_consensus::marshal::blocks::Error). `Unavailable` means the
-    /// history could not be acquired, which is not a verdict, so keep the call pending.
-    /// `InvalidParent`, `InvalidHeight`, and `InvalidDigest` mean the supplied history is
-    /// inconsistent, so a candidate is invalid under it.
+    /// block.height()`) and excludes `block`. For a [`Finality::Candidate`], it is the
+    /// consensus-selected branch, and for a [`Finality::Finalized`] block it is canonical finalized
+    /// history. Read the parent as the range `blocks.tip()..=blocks.tip()`. A range acquires blocks
+    /// only when polled.
+    ///
+    /// A range can fail with a [`blocks::Error`](commonware_consensus::marshal::blocks::Error).
+    /// `Unavailable` means the history could not be acquired and is not a verdict, so keep the
+    /// call pending. `InvalidParent`, `InvalidHeight`, and `InvalidDigest` mean the supplied
+    /// history is inconsistent, so a candidate is invalid under it.
     ///
     /// For a [`Finality::Candidate`], check every rule a vote depends on: signatures, the
     /// context, the selected history, and the parent's state. Return [`None`] only for permanent

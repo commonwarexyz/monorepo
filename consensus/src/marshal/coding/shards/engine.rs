@@ -6820,7 +6820,7 @@ mod tests {
                 );
                 assert!(
                     matches!(valid_sub.try_recv(), Err(TryRecvError::Empty)),
-                    "valid commitment subscription should survive failed reconstruction"
+                    "valid commitment subscription must survive failed reconstruction"
                 );
 
                 // Valid shards for the claimed block satisfy its exact commitment.
@@ -6858,7 +6858,7 @@ mod tests {
                 assert_eq!(reconstructed.commitment(), real_commitment1);
                 let valid_block = valid_sub
                     .await
-                    .expect("valid commitment should satisfy its subscription");
+                    .expect("valid commitment must satisfy its subscription");
                 assert_eq!(valid_block.commitment(), real_commitment1);
             },
         );
