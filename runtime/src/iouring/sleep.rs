@@ -54,31 +54,54 @@
 //!
 //! # Lock-Free Polls
 //!
-//! A pending poll at an unchanged epoch takes no lock if its waker is a
-//! runtime task's waker with the stored waker's identity. Only the sleep
-//! writes its registration's waker, and every other party that ends a waiting
-//! registration whose sleep can still poll it (expiry, rescue, closure)
-//! advances the timers' epoch inside its critical section, before it runs the
-//! deferred wake that consumes the stored waker. The owner's removal of a
-//! registration that its sleep dropped or completed early advances nothing
-//! (see below). A sleeper caches the epoch at which it last saw its
-//! registration waiting.
+//! A pending poll at an unchanged epoch takes no lock if its waker has the
+//! stored waker's identity and is of one of two kinds. One is a runtime
+//! task's waker. The other is the waker that the polling thread's worker
+//! polls its root with, which serves the runner's root future and the task of
+//! a dedicated worker. Only the sleep writes its registration's waker, and
+//! every other party that ends a waiting registration whose sleep can still
+//! poll it (expiry, rescue, closure) advances the timers' epoch inside its
+//! critical section, before it runs the deferred wake that consumes the
+//! stored waker. The owner's removal of a registration that its sleep
+//! dropped or completed early advances nothing (see below). A sleeper caches
+//! the epoch at which it last saw its registration waiting.
 //!
 //! Matching the stored waker's identity alone is not enough. Once an ending
 //! consumes that waker, a waker implementation may give its identity to
 //! another task without synchronizing with the consumption, and a poll from
 //! that task could read the old epoch. Keeping a clone of the waker does not
 //! prevent this, since an executor may keep a task's storage alive for its
-//! wakers and still give it to a new task once the old one finishes. A runtime
-//! task's waker carries its task header, whose address recurs only after the
-//! consumption (see [`Task::is_waker`]), and hence after the epoch advance. A
-//! matching poll that misses an ending therefore belongs to the task that the
-//! ending wakes, whose poll scheduled by that wake reads the advanced epoch
-//! and takes the lock. The wake itself, not the epoch's atomic ordering,
-//! orders that poll after the advance. A task's wake is a releasing exchange
-//! on its state, and each of its polls begins with an acquiring one (see
-//! [`super::task`]), so the poll observes everything that the waking thread
-//! wrote before the wake.
+//! wakers and still give it to a new task once the old one finishes. The
+//! identity of either kind is the address of an allocation that each of its
+//! wakers keeps alive, a task's header or the shared allocation of a root's
+//! [`RootWaker`], and a poll matches only with a waker whose allocation is
+//! alive. If that allocation is not the stored waker's, the stored waker's
+//! was freed before it was made at the same address. The free follows the
+//! consumption, and the later allocation follows the free (see
+//! [`Task::is_waker`] and [`RootWaker::is_current`]), whichever kind each of
+//! the two is of, so the poll follows the epoch advance and reads it. A
+//! matching poll that misses an ending therefore polls with a waker of the
+//! task or root that the ending wakes, whose poll scheduled by that wake
+//! reads the advanced epoch and takes the lock. The wake itself, not the
+//! epoch's atomic ordering, orders that poll after the advance.
+//!
+//! A task's wake is a releasing exchange on its state, and each of its polls
+//! begins with an acquiring one (see [`super::task`]), so the poll observes
+//! everything that the waking thread wrote before the wake.
+//!
+//! A root has no such state. One thread polls it, and its waker matches only
+//! on that thread, while the worker there drives it. An ending on that thread
+//! precedes every later poll there. An ending on any other thread wakes the
+//! root with a message, sent after the advance under the lock of its worker's
+//! [mailbox](super::mailbox). The root's thread takes the message under the
+//! same lock before it polls the root for that wake. A matching poll that
+//! follows the take observes the advance. One that precedes the take is
+//! followed by that root poll, whether the root or another future on its
+//! thread polled with its waker. A wake reaches no root poll only if the
+//! worker stops driving its root first. Such a wake finds the worker closing
+//! or its mailbox closed or gone, or leaves a message that the worker
+//! discards, and the waker matches nothing from then on. A clone of a root's
+//! waker that another thread polls with never matches.
 //!
 //! A poll with any other waker locks and compares it with the stored one. An
 //! equivalent waker stays pending without a clone. A changed one is cloned
@@ -202,7 +225,7 @@
 use super::{
     runtime::{Deferred, Local, MAX_TIMEOUT},
     slab::{Id, Slab},
-    task::Task,
+    task::{RootWaker, Task},
     wheel::{BUDGET, InstantExt as _, Wheel},
 };
 use crossbeam_utils::CachePadded;
@@ -388,7 +411,8 @@ pub struct Timers {
     /// only under the lock, by [`Self::end`], before the ended
     /// registrations' wakes run, so a sleeper that saw its registration
     /// waiting at some epoch and reads the same epoch later either still
-    /// waits or is woken afterwards by the ending that its read missed.
+    /// waits or is polled again for the wake of the ending that its read
+    /// missed.
     epoch: CachePadded<AtomicU64>,
     /// The instant of the timers' creation, from which their wheel, bound and
     /// expiry times count nanoseconds.
@@ -503,7 +527,7 @@ impl Timers {
         dropped: &mut Vec<Id>,
         deferred: &mut Deferred,
     ) -> (Sleeper, u64) {
-        let task = TaskIdentity::stored(&waker);
+        let identity = Identity::stored(&waker);
         let nanos = self.nanos(deadline);
         let recycled = dropped.pop();
         if recycled.is_some() {
@@ -540,7 +564,7 @@ impl Timers {
         }
 
         // Cache the epoch read while the registration waits. A later poll
-        // with a matching task waker that reads this epoch may skip the lock,
+        // with a matching waker that reads this epoch may skip the lock,
         // since an ending that its load misses still wakes the stored waker
         // (see the module documentation).
         let epoch = registrations.epoch;
@@ -550,7 +574,7 @@ impl Timers {
             timers: self.clone(),
             id,
             deadline,
-            task,
+            identity,
             epoch,
         };
         (sleeper, at)
@@ -709,20 +733,21 @@ impl Timers {
 }
 
 /// The identity that a pending poll's waker may match to skip the timers'
-/// lock: the stored waker's data address if it is a runtime task's waker,
-/// whose identity cannot recur before an ending is visible to the poll (see
-/// the module documentation), or `None` for a waker of any other kind, which
-/// nothing matches. The address is held as an integer so that a sleep stays
-/// `Send` and `Sync`.
+/// lock: the stored waker's data address if it is a runtime task's waker or
+/// the root waker of the thread that stored it, whose identity cannot recur
+/// before an ending is visible to the poll (see the module documentation), or
+/// `None` for a waker of any other kind, which nothing matches. The address
+/// is held as an integer so that a sleep stays `Send` and `Sync`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct TaskIdentity(Option<NonZeroUsize>);
+struct Identity(Option<NonZeroUsize>);
 
-impl TaskIdentity {
+impl Identity {
     /// The identity of a newly stored `waker`.
     fn stored(waker: &Waker) -> Self {
-        // A task waker's data is its task header, which is never null.
+        // A task waker's data is its task header and a root waker's is its
+        // shared allocation, neither of which is null.
         Self(
-            Task::is_waker(waker)
+            (Task::is_waker(waker) || RootWaker::is_current(waker))
                 .then(|| NonZeroUsize::new(waker.data().addr()))
                 .flatten(),
         )
@@ -731,10 +756,13 @@ impl TaskIdentity {
     /// Whether a poll with `waker` may skip the lock at an unchanged epoch.
     #[inline]
     fn matches(self, waker: &Waker) -> bool {
-        // The address proves the identity only for a task waker, since a
-        // waker of another kind may carry the same data address.
-        self.0
-            .is_some_and(|data| Task::is_waker(waker) && waker.data().addr() == data.get())
+        // The address proves the identity only for a task waker or this
+        // thread's root waker, since a waker of another kind may carry the
+        // same data address.
+        self.0.is_some_and(|data| {
+            waker.data().addr() == data.get()
+                && (Task::is_waker(waker) || RootWaker::is_current(waker))
+        })
     }
 }
 
@@ -747,10 +775,10 @@ struct Sleeper {
     /// The sleep's deadline, which polls compare with their thread's latest
     /// worker service time.
     deadline: Instant,
-    /// The stored waker's task identity, which a poll may match to skip the
+    /// The stored waker's identity, which a poll may match to skip the
     /// lock while the registration waits, updated whenever this sleeper
     /// stores a waker.
-    task: TaskIdentity,
+    identity: Identity,
     /// The timers' epoch, read under their lock when this sleeper last saw its
     /// registration waiting.
     epoch: u64,
@@ -764,10 +792,11 @@ impl Sleeper {
     /// one after closure finds nothing.
     ///
     /// A poll at an unchanged epoch returns pending without the lock if its
-    /// waker matches [`TaskIdentity`], a task waker with the stored waker's
-    /// address. The registration then still waits with an equivalent waker,
-    /// or an ending that the epoch read missed wakes the stored waker
-    /// afterwards. Only this sleeper writes its waker. Expiry, rescue and
+    /// waker matches [`Identity`], a task waker or this thread's root waker
+    /// with the stored waker's address. The registration then still waits
+    /// with an equivalent waker, or an ending that the epoch read missed
+    /// wakes the stored waker, and the poll that this wake schedules is still
+    /// to come. Only this sleeper writes its waker. Expiry, rescue and
     /// closure advance the epoch under the lock before their wakes, and the
     /// stored waker's identity cannot recur before its wake (see the module
     /// documentation). Any other poll locks.
@@ -777,10 +806,11 @@ impl Sleeper {
             return Poll::Ready(Outcome::Fired);
         }
 
-        // An ending that this load misses wakes the stored waker afterwards,
-        // and the poll that wake schedules reads the advanced epoch.
+        // An ending that this load misses wakes the stored waker, and the
+        // poll that this wake schedules follows this one and reads the
+        // advanced epoch.
         let waker = cx.waker();
-        let matched = self.task.matches(waker);
+        let matched = self.identity.matches(waker);
         if matched && self.timers.epoch.load(Ordering::Acquire) == self.epoch {
             return Poll::Pending;
         }
@@ -788,7 +818,7 @@ impl Sleeper {
     }
 
     /// The part of [`Self::poll`] that takes the lock, after its waker failed
-    /// to match [`TaskIdentity`] (`matched` is false) or matched at a moved
+    /// to match [`Identity`] (`matched` is false) or matched at a moved
     /// epoch. A waker's clone may reenter the runtime, so a changed waker is
     /// cloned outside the lock: a task waker that failed to match, which
     /// differs from the stored one, before locking, and any other waker once
@@ -819,14 +849,19 @@ impl Sleeper {
                 return Poll::Ready(Outcome::Fired);
             };
 
-            // Only this sleeper writes its waker, so its cached identity is
-            // the stored waker's.
-            debug_assert_eq!(self.task, TaskIdentity::stored(current));
+            // Only this sleeper writes its waker, so a cached identity is the
+            // stored waker's address, and a stored task waker has one. A root
+            // waker has one only if its own thread stored it, which a poll
+            // on another thread cannot check.
+            debug_assert!(self.identity.0.map_or_else(
+                || !Task::is_waker(current),
+                |data| current.data().addr() == data.get()
+            ));
             let displaced = match clone.take() {
                 // An equivalent waker needs no replacement, nor a clone.
                 unused if current.will_wake(waker) => unused,
                 Some(clone) => {
-                    self.task = TaskIdentity::stored(&clone);
+                    self.identity = Identity::stored(&clone);
                     Some(mem::replace(current, clone))
                 }
                 // Clone a changed waker of another kind after the lock, then
@@ -839,8 +874,8 @@ impl Sleeper {
             };
 
             // Cache the epoch read while the registration waits with an
-            // equivalent waker. A later poll with a matching task waker that
-            // reads this epoch may skip the lock.
+            // equivalent waker. A later poll with a matching waker that reads
+            // this epoch may skip the lock.
             self.epoch = registrations.epoch;
             drop(registrations);
             Self::release(displaced);
@@ -1089,7 +1124,7 @@ pub mod tests {
         cell::Cell,
         panic::{AssertUnwindSafe, catch_unwind},
         sync::{
-            Barrier, OnceLock,
+            Barrier, OnceLock, Weak,
             atomic::{AtomicBool, AtomicUsize},
             mpsc,
         },
@@ -1298,6 +1333,13 @@ pub mod tests {
         1_000_000_000
     }
 
+    /// A deadline one hour after the timers' origin, in nanoseconds, for a
+    /// test that keeps polling on a worker's thread, whose service time must
+    /// not reach the deadline and complete a poll early.
+    const fn far() -> u64 {
+        3_600_000_000_000
+    }
+
     /// The registration of a sleep that has registered.
     fn registration(sleep: &Sleep) -> (Arc<Timers>, Id) {
         let State::Registered(sleeper) = &sleep.state else {
@@ -1324,10 +1366,10 @@ pub mod tests {
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn test_lock_free_poll_state_is_one_word() {
-        // What a poll may match without the lock is a task waker's address,
-        // one word with a niche, and an unregistered sleep's deadline fits
-        // beside the niche in a registered sleep's deadline.
-        assert_eq!(size_of::<TaskIdentity>(), size_of::<usize>());
+        // What a poll may match without the lock is the address of a task's
+        // or root's waker, one word with a niche, and an unregistered sleep's
+        // deadline fits beside the niche in a registered sleep's deadline.
+        assert_eq!(size_of::<Identity>(), size_of::<usize>());
         assert_eq!(size_of::<Sleeper>(), 56);
         assert_eq!(size_of::<Sleep>(), 56);
     }
@@ -1856,13 +1898,35 @@ pub mod tests {
         Runner::default().start(|context| async move {
             context
                 .spawn(|_| async move {
-                    let waker = std::future::poll_fn(|cx| Poll::Ready(cx.waker().clone())).await;
+                    let waker = current_waker().await;
                     assert!(Task::is_waker(&waker));
                     test(&waker);
                 })
                 .await
                 .unwrap();
         });
+    }
+
+    /// A clone of the waker that the calling future is polled with.
+    async fn current_waker() -> Waker {
+        std::future::poll_fn(|cx| Poll::Ready(cx.waker().clone())).await
+    }
+
+    /// Run `test` inside the poll of a runner's root, with the root's waker.
+    fn with_root_waker(test: impl FnOnce(&Waker) + 'static) {
+        Runner::default().start(|_| async move {
+            let waker = current_waker().await;
+            assert!(RootWaker::is_current(&waker));
+            test(&waker);
+        });
+    }
+
+    /// Run `test` with each kind of waker whose polls may skip the lock: a
+    /// task's waker inside that task's poll, and a root's waker inside that
+    /// root's poll.
+    fn with_matching_wakers(test: impl FnOnce(&Waker) + Clone + Send + 'static) {
+        with_task_waker(test.clone());
+        with_root_waker(test);
     }
 
     #[test]
@@ -1897,9 +1961,9 @@ pub mod tests {
     }
 
     #[test]
-    fn test_waker_of_another_kind_at_a_task_address_takes_the_lock() {
-        /// The vtable of a waker of no task, whose functions never use its
-        /// data.
+    fn test_waker_of_another_kind_at_a_matching_address_takes_the_lock() {
+        /// The vtable of a waker of no task or root, whose functions never
+        /// use its data.
         static FORGED_VTABLE: RawWakerVTable =
             RawWakerVTable::new(forged_clone, forged_ignore, forged_ignore, forged_ignore);
 
@@ -1911,9 +1975,9 @@ pub mod tests {
         /// Wake or drop a forged waker.
         const unsafe fn forged_ignore(_: *const ()) {}
 
-        with_task_waker(|waker| {
-            // A registration with a task's waker, and a waker of another kind
-            // that carries the same data address.
+        with_matching_wakers(|waker| {
+            // A registration with a task's or root's waker, and a waker of
+            // another kind that carries the same data address.
             let timers = Arc::new(Timers::new());
             let mut sleeper = register(&timers, later(), waker);
             // SAFETY: No function of the vtable dereferences the data.
@@ -1975,7 +2039,7 @@ pub mod tests {
 
     #[test]
     fn test_endings_invalidate_lock_free_polls() {
-        with_task_waker(|waker| {
+        with_matching_wakers(|waker| {
             /// A party other than the sleep that ends a waiting registration
             /// at a given time.
             type End = fn(&Timers, u64, &mut Deferred);
@@ -1998,8 +2062,8 @@ pub mod tests {
                 ),
             ];
             for (end, outcome) in ends {
-                // A pending registration with a task's waker, polled without
-                // the lock.
+                // A pending registration with a task's or root's waker,
+                // polled without the lock.
                 let timers = Arc::new(Timers::new());
                 let deadline = later();
                 let mut sleeper = register(&timers, deadline, waker);
@@ -2029,9 +2093,9 @@ pub mod tests {
 
     #[test]
     fn test_epoch_change_costs_one_lock() {
-        with_task_waker(|waker| {
-            // A waiting registration with a task's waker, and an earlier one
-            // that fires.
+        with_matching_wakers(|waker| {
+            // A waiting registration with a task's or root's waker, and an
+            // earlier one that fires.
             let timers = Arc::new(Timers::new());
             let deadline = later();
             let mut waiting = register(&timers, deadline + 1_000_000, waker);
@@ -2957,18 +3021,18 @@ pub mod tests {
     }
 
     #[test]
-    fn test_only_task_wakers_poll_without_the_lock() {
+    fn test_root_and_task_wakers_poll_without_the_lock() {
         Runner::default().start(|context| async move {
-            // The root's waker is not a task waker, so each repoll locks once.
+            // The root's waker matches from the first repoll, so no repoll
+            // takes the lock.
             let mut sleep = Sleep::new(Duration::from_secs(60));
             assert!(poll!(&mut sleep).is_pending());
             let before = locks();
             assert!(poll!(&mut sleep).is_pending());
             assert!(poll!(&mut sleep).is_pending());
-            assert_eq!(locks() - before, 2);
+            assert_eq!(locks(), before);
 
-            // A task's waker matches from the first repoll, so no repoll
-            // takes the lock.
+            // Nor does any repoll with a task's waker.
             let (sleep,) = context
                 .child("first")
                 .spawn(|_| async {
@@ -2985,7 +3049,7 @@ pub mod tests {
 
             // Another task's waker is cloned before the lock and stored in one
             // critical section, after which its polls take no lock.
-            context
+            let (sleep,) = context
                 .child("second")
                 .spawn(|_| async move {
                     let mut sleep = sleep;
@@ -2993,9 +3057,273 @@ pub mod tests {
                     assert!(poll!(&mut sleep).is_pending());
                     assert!(poll!(&mut sleep).is_pending());
                     assert_eq!(locks() - before, 1);
+                    (sleep,)
                 })
                 .await
                 .unwrap();
+
+            // The root's waker is cloned after a critical section has found
+            // that it differs, and stored in a second one, after which its
+            // polls take no lock.
+            let mut sleep = sleep;
+            let before = locks();
+            assert!(poll!(&mut sleep).is_pending());
+            assert!(poll!(&mut sleep).is_pending());
+            assert_eq!(locks() - before, 2);
+        });
+    }
+
+    #[test]
+    fn test_root_waker_matches_only_on_its_thread() {
+        Runner::default().start(|context| async move {
+            // A registration with the root's waker, on timers of no worker,
+            // polled without the lock on the root's thread.
+            let waker = current_waker().await;
+            let timers = Arc::new(Timers::new());
+            let mut sleeper = register(&timers, far(), &waker);
+            let before = locks();
+            assert!(poll_with(&mut sleeper, &waker).is_pending());
+            assert_eq!(locks(), before);
+
+            // A clone of that waker matches nothing on a thread without a
+            // worker, where each poll locks and finds an equivalent waker.
+            let mut sleeper = thread::spawn({
+                let waker = waker.clone();
+                move || {
+                    let before = locks();
+                    assert!(poll_with(&mut sleeper, &waker).is_pending());
+                    assert!(poll_with(&mut sleeper, &waker).is_pending());
+                    assert_eq!(locks() - before, 2);
+                    sleeper
+                }
+            })
+            .join()
+            .unwrap();
+
+            // Nor does it on the thread of a dedicated worker, which drives a
+            // root of its own.
+            let dedicated = context.child("dedicated").dedicated().spawn({
+                let (waker, timers) = (waker.clone(), timers.clone());
+                move |_| async move {
+                    let before = locks();
+                    assert!(poll_with(&mut sleeper, &waker).is_pending());
+                    assert!(poll_with(&mut sleeper, &waker).is_pending());
+                    assert_eq!(locks() - before, 2);
+
+                    // That root's own waker differs from the stored one, so
+                    // its first poll stores it in a second critical section,
+                    // and its later polls take no lock.
+                    let own = current_waker().await;
+                    assert!(RootWaker::is_current(&own));
+                    assert!(!RootWaker::is_current(&waker));
+                    let before = locks();
+                    assert!(poll_with(&mut sleeper, &own).is_pending());
+                    assert_eq!(locks() - before, 2);
+                    assert!(timers.waits_with(sleeper.id, &own));
+                    assert!(poll_with(&mut sleeper, &own).is_pending());
+                    assert_eq!(locks() - before, 2);
+                    sleeper
+                }
+            });
+            let mut sleeper = dedicated.await.unwrap();
+
+            // The dedicated root's identity matches nothing on the first
+            // root's thread either.
+            let before = locks();
+            assert!(poll_with(&mut sleeper, &waker).is_pending());
+            assert_eq!(locks() - before, 2);
+            assert!(timers.waits_with(sleeper.id, &waker));
+            assert!(poll_with(&mut sleeper, &waker).is_pending());
+            assert_eq!(locks() - before, 2);
+            sleeper.abandon();
+        });
+    }
+
+    #[test]
+    fn test_root_waker_of_a_later_runner_takes_the_lock() {
+        // A runner's root registers on timers of no worker, which outlive the
+        // runner, and returns its sleeper pending.
+        let timers = Arc::new(Timers::new());
+        let mut sleeper = Runner::default().start({
+            let timers = timers.clone();
+            |_| async move {
+                let waker = current_waker().await;
+                let mut sleeper = register(&timers, far(), &waker);
+                let before = locks();
+                assert!(poll_with(&mut sleeper, &waker).is_pending());
+                assert_eq!(locks(), before);
+                sleeper
+            }
+        });
+
+        // The registration keeps that root's waker alive, so the root of a
+        // second runner on this thread polls with a waker at another address.
+        // Its first poll locks and stores that waker.
+        let (mut sleeper, waker) = Runner::default().start({
+            let timers = timers.clone();
+            |_| async move {
+                let waker = current_waker().await;
+                let before = locks();
+                assert!(poll_with(&mut sleeper, &waker).is_pending());
+                assert_eq!(locks() - before, 2);
+                assert!(timers.waits_with(sleeper.id, &waker));
+                assert!(poll_with(&mut sleeper, &waker).is_pending());
+                assert_eq!(locks() - before, 2);
+                (sleeper, waker)
+            }
+        });
+
+        // Once its worker has stopped driving the root, the stored waker
+        // matches nothing, on this thread either.
+        assert!(!RootWaker::is_current(&waker));
+        let before = locks();
+        assert!(poll_with(&mut sleeper, &waker).is_pending());
+        assert_eq!(locks() - before, 1);
+
+        // An expiry consumes the stored waker, after which a later root
+        // waker may take its address. Whatever the address of a third root's
+        // waker, its poll locks and observes the firing.
+        let mut deferred = Deferred::default();
+        timers.expire(far() + RESOLUTION, BUDGET, &mut deferred);
+        run(&mut deferred);
+        drop(waker);
+        Runner::default().start(|_| async move {
+            let waker = current_waker().await;
+            let before = locks();
+            assert_eq!(poll_with(&mut sleeper, &waker), Poll::Ready(Outcome::Fired));
+            assert_eq!(locks() - before, 1);
+        });
+    }
+
+    #[test]
+    fn test_waker_of_a_root_that_no_worker_drives_takes_the_lock() {
+        // Two roots' wakers with one vtable. This thread records the first
+        // as the one that its worker polls its root with, as that worker's
+        // drive loop would.
+        let driven = Waker::from(RootWaker::new(Weak::new()));
+        let other = Waker::from(RootWaker::new(Weak::new()));
+        assert!(std::ptr::eq(driven.vtable(), other.vtable()));
+        let _scope = RootWaker::install(&driven);
+        assert!(RootWaker::is_current(&driven));
+        assert!(!RootWaker::is_current(&other));
+
+        // The other's registration has no identity, so each of its polls
+        // locks and finds an equivalent waker.
+        let timers = Arc::new(Timers::new());
+        let mut sleeper = register(&timers, later(), &other);
+        let before = locks();
+        assert!(poll_with(&mut sleeper, &other).is_pending());
+        assert!(poll_with(&mut sleeper, &other).is_pending());
+        assert_eq!(locks() - before, 2);
+        sleeper.abandon();
+
+        // Nor does it match the driven root's identity, which the driven
+        // root's own polls match without the lock. Its poll locks, finds
+        // that the waker differs, and stores its clone in a second critical
+        // section.
+        let mut sleeper = register(&timers, later(), &driven);
+        let before = locks();
+        assert!(poll_with(&mut sleeper, &driven).is_pending());
+        assert_eq!(locks(), before);
+        assert!(poll_with(&mut sleeper, &other).is_pending());
+        assert_eq!(locks() - before, 2);
+        assert!(timers.waits_with(sleeper.id, &other));
+        assert!(poll_with(&mut sleeper, &other).is_pending());
+        assert_eq!(locks() - before, 3);
+        sleeper.abandon();
+    }
+
+    #[test]
+    fn test_root_polls_race_expiry_on_another_thread_without_losing_wakes() {
+        Runner::default().start(|_| async move {
+            // A thread without a worker expires each registration whose
+            // deadline it receives, which wakes the root through its worker's
+            // mailbox, and waits for the root to complete the sleep. If the
+            // root does not, it reports the wake lost and wakes the root.
+            let waker = current_waker().await;
+            let timers = Arc::new(Timers::new());
+            let arrived = Arc::new(AtomicUsize::new(0));
+            let returned = Arc::new(AtomicUsize::new(0));
+            let lost = Arc::new(AtomicBool::new(false));
+            let (deadlines, registered) = mpsc::channel::<u64>();
+            let (completions, completed) = mpsc::channel::<()>();
+            let expirer = thread::spawn({
+                let timers = timers.clone();
+                let arrived = arrived.clone();
+                let returned = returned.clone();
+                let lost = lost.clone();
+                let waker = waker.clone();
+                move || {
+                    for (round, deadline) in registered.into_iter().enumerate() {
+                        meet(&arrived, round, || false);
+                        if round % 2 == 0 {
+                            // Expire at a varying point among the root's
+                            // polls.
+                            for _ in 0..round % 256 {
+                                std::hint::spin_loop();
+                            }
+                        } else {
+                            // Expire once the root has returned pending, so
+                            // that only the wake leads to the poll that
+                            // completes the sleep. A root that reports no
+                            // return has stalled, which fails the test as a
+                            // lost wake does.
+                            let start = Instant::now();
+                            while returned.load(Ordering::SeqCst) != round + 1 {
+                                if start.elapsed() > Duration::from_secs(10) {
+                                    lost.store(true, Ordering::SeqCst);
+                                    waker.wake_by_ref();
+                                    return;
+                                }
+                                std::hint::spin_loop();
+                            }
+                        }
+                        let mut deferred = Deferred::default();
+                        timers.expire(deadline + RESOLUTION, BUDGET, &mut deferred);
+                        run(&mut deferred);
+                        if completed.recv_timeout(Duration::from_secs(10)).is_err() {
+                            lost.store(true, Ordering::SeqCst);
+                            waker.wake_by_ref();
+                            return;
+                        }
+                    }
+                }
+            });
+
+            for round in 0..2000 {
+                let deadline = far();
+                let mut sleeper = register(&timers, deadline, &waker);
+                deadlines.send(deadline).unwrap();
+                assert!(meet(&arrived, round, || expirer.is_finished()));
+
+                // The root polls without the lock while the expiry runs or
+                // waits, returns pending, and then polls only when its worker
+                // polls it again, for a wake. A wake that its worker applied
+                // before a poll must make that poll ready, since no later
+                // wake comes. The root reports each return, so that the
+                // expiry never waits for a poll that completed.
+                let mut polls = 0;
+                std::future::poll_fn(|cx| {
+                    assert!(!lost.load(Ordering::SeqCst), "lost a wake in round {round}");
+                    loop {
+                        if let Poll::Ready(outcome) = sleeper.poll(cx) {
+                            assert_eq!(outcome, Outcome::Fired);
+                            returned.store(round + 1, Ordering::SeqCst);
+                            return Poll::Ready(());
+                        }
+                        polls += 1;
+                        if polls >= 256 {
+                            returned.store(round + 1, Ordering::SeqCst);
+                            return Poll::Pending;
+                        }
+                    }
+                })
+                .await;
+                completions.send(()).unwrap();
+            }
+            drop(deadlines);
+            expirer.join().unwrap();
+            assert_eq!(timers.live(), 0);
         });
     }
 
@@ -4085,7 +4413,7 @@ pub mod tests {
 mod loom_tests {
     use super::*;
     use crate::iouring::{
-        mailbox::Mailbox,
+        mailbox::{Mailbox, Message},
         pool::Pool,
         task::{AfterPoll, Ready},
         tasks::Tasks,
@@ -4203,22 +4531,26 @@ mod loom_tests {
     static SLOT_VTABLE: RawWakerVTable =
         RawWakerVTable::new(Slot::clone, Slot::wake, Slot::wake_by_ref, Slot::drop);
 
-    /// End every registration of `timers` on another thread, by closure if
-    /// `close` is set and by expiry otherwise, and wake their wakers after the
-    /// lock, as a worker's callback batch does.
+    /// End every registration of `timers`, by closure if `close` is set and
+    /// by expiry otherwise, and wake their wakers after the lock, as a
+    /// worker's callback batch does.
+    fn end_here(timers: &Timers, close: bool) {
+        let mut deferred = Deferred::default();
+        if close {
+            timers.close(&mut deferred);
+        } else {
+            timers.expire(u64::MAX, BUDGET, &mut deferred);
+        }
+        for waker in deferred.wakes.drain(..) {
+            waker.wake();
+        }
+    }
+
+    /// End every registration of `timers` on another thread, as
+    /// [`end_here`] does.
     fn end(timers: &Arc<Timers>, close: bool) -> thread::JoinHandle<()> {
         let timers = timers.clone();
-        thread::spawn(move || {
-            let mut deferred = Deferred::default();
-            if close {
-                timers.close(&mut deferred);
-            } else {
-                timers.expire(u64::MAX, BUDGET, &mut deferred);
-            }
-            for waker in deferred.wakes.drain(..) {
-                waker.wake();
-            }
-        })
+        thread::spawn(move || end_here(&timers, close))
     }
 
     /// A deadline one second after new timers' origin, in nanoseconds.
@@ -4431,6 +4763,68 @@ mod loom_tests {
                     completed = work(&pool, &set, &mut ready, AfterPoll::Done);
                 }
                 assert!(completed, "the task missed the ending of its sleep");
+            });
+        }
+    }
+
+    #[test]
+    fn test_root_polls_racing_an_ending_observe_it() {
+        for (close, adopt) in [(false, false), (false, true), (true, false), (true, true)] {
+            loom::model(move || {
+                // A worker's mailbox and root waker. This thread stands for
+                // that worker. It alone polls with the waker, and after a
+                // pending poll it polls again only for a wake, which reaches
+                // it from another thread as a message.
+                let mailbox = Arc::new(Mailbox::new().unwrap());
+                let root = Waker::from(RootWaker::new(Arc::downgrade(&mailbox)));
+                let _scope = RootWaker::install(&root);
+                let cx = Context::from_waker(&root);
+                let timers = Arc::new(Timers::new());
+
+                // With `adopt`, the registration holds a waker of no root,
+                // which the root's first poll replaces with its own under the
+                // lock. Otherwise the root registered, and its polls take no
+                // lock until one observes the ending.
+                let stored = if adopt { Waker::noop() } else { &root };
+                let (mut sleeper, _) = timers.register_alone(stored.clone(), later());
+                assert_eq!(sleeper.identity.matches(&root), !adopt);
+
+                // The ending races the root's first poll, and sets `ended`
+                // once its wakes have run.
+                let ended = Arc::new(AtomicBool::new(false));
+                let ending = thread::spawn({
+                    let ended = ended.clone();
+                    move || {
+                        end_here(&timers, close);
+                        ended.store(true, Ordering::Release);
+                    }
+                });
+                let mut inbox = Vec::new();
+                let mut polled = sleeper.poll(&cx);
+                while polled.is_pending() {
+                    // A pending poll left the root's waker stored, so the
+                    // ending wakes the root. The poll that follows the take
+                    // of that wake's message must observe the ending. When
+                    // the take precedes the flag, the mailbox's lock is the
+                    // only edge from the ending to that poll. The flag is
+                    // read before the take, so that a message missing after
+                    // it means a missing wake.
+                    assert!(sleeper.identity.matches(&root));
+                    let ended = ended.load(Ordering::Acquire);
+                    if mailbox.take(&mut inbox) {
+                        assert!(matches!(inbox.as_slice(), [Message::WakeRoot]));
+                        inbox.clear();
+                        polled = sleeper.poll(&cx);
+                        assert!(
+                            polled.is_ready(),
+                            "a root poll that followed the wake missed the ending"
+                        );
+                    } else {
+                        assert!(!ended, "the ending woke no root");
+                        thread::yield_now();
+                    }
+                }
+                ending.join().unwrap();
             });
         }
     }
