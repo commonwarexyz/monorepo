@@ -1051,6 +1051,9 @@ unsafe fn waker_drop(ptr: *const ()) {
 thread_local! {
     /// The data and vtable of the waker that this thread's worker polls its
     /// root with, `None` while no worker drives a root on this thread.
+    /// Loom runs every modeled thread on one OS thread, so under the loom
+    /// feature the record is visible to all of them, and a model may poll
+    /// with the root's waker only on the thread that installed it.
     static ROOT: std::cell::Cell<Option<(*const (), &'static RawWakerVTable)>> =
         const { std::cell::Cell::new(None) };
 }
@@ -1117,6 +1120,7 @@ impl RootWaker {
 
 /// The record of a thread's root waker (see [`RootWaker::install`]), cleared
 /// on drop.
+#[must_use = "the record ends when the scope drops"]
 pub struct RootScope<'a>(
     /// Borrows the waker, so that its allocation outlives the record, and
     /// keeps the scope on the thread that holds the record.
@@ -1147,6 +1151,8 @@ impl Wake for RootWaker {
         }
 
         if let Some(mailbox) = self.mailbox.upgrade() {
+            // Sleeps rely on the inbox lock here to order the root's next
+            // poll after this thread's writes (see `RootWaker::is_current`).
             let _ = mailbox.send(Message::WakeRoot);
         }
     }
