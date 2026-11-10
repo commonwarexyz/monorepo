@@ -175,10 +175,11 @@
 //! private, so no peer checks them.
 //!
 //! A parked worker, or one spinning idle before it parks, runs no service pass
-//! and checks nothing, and its timed wake covers only its own timers and
-//! request deadlines. A frozen worker's timers therefore wait for the next
-//! service pass of some peer, whatever wakes that peer, and while every peer
-//! stays parked, for the frozen poll to return.
+//! and checks nothing. Its timed wake covers its own timers and request
+//! deadlines, and the re-look at a peer's young lone runnable (see
+//! [`super::idle`]), but never a peer's timers. A frozen worker's timers
+//! therefore wait for the next service pass of some peer, whatever wakes that
+//! peer, and while every peer stays parked, for the frozen poll to return.
 //!
 //! # Drops on the Owner
 //!
@@ -2575,7 +2576,7 @@ mod loom_tests {
                 // A pool with no runner, so every wake that publishes a
                 // runnable pushes it to the global queue, which this thread
                 // serves as the pool's only worker.
-                let pool = Arc::new(Pool::new(1).0);
+                let pool = Arc::new(Pool::new(1, Duration::ZERO).0);
                 let set = Tasks::new(1);
                 let mut ready = pool.queue(0).owner();
                 let timers = Arc::new(Timers::new(Instant::now()));
