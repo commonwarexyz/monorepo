@@ -5624,3 +5624,99 @@ fn test_direct_reads_outlive_their_origin_worker() {
     // The runner shut down before the handle was first polled, so it reports closure.
     assert!(matches!(block_on(unobserved), Err(Error::ReadFailed)));
 }
+
+/// A storm of sleeps due at once, each owned by a task of its own, beside a
+/// task that requeues itself, with short polls and with polls that outlast the
+/// backlog slice. An expiry pass fires no more sleeps than the run queue has
+/// room for, so the storm never overflows the queue, which would move its
+/// newest runnables, the requeued task among them, behind the storm in the
+/// global queue. The requeued task keeps its turn, so no more sleepers than
+/// the queue holds complete between two of its polls.
+#[test]
+fn test_expiry_storm_keeps_a_requeued_task_in_the_run_queue() {
+    /// Sleeping tasks, sixteen budgets' worth.
+    const SLEEPERS: usize = 16 * BUDGET as usize;
+
+    /// Time from the storm's setup to its deadline, by which every sleeper
+    /// must have registered, with ample room for a slow host.
+    const LEAD: Duration = Duration::from_millis(500);
+
+    for work in [Duration::ZERO, 2 * BACKLOG_SLICE] {
+        Runner::new(config()).start(move |context| async move {
+            // A task that requeues itself and records the most sleepers that
+            // completed between two of its polls.
+            let completed = Arc::new(AtomicUsize::new(0));
+            let stop = Arc::new(AtomicBool::new(false));
+            let spinner = context.child("spinner").spawn({
+                let completed = completed.clone();
+                let stop = stop.clone();
+                move |_| async move {
+                    let (mut seen, mut most) = (0, 0);
+                    while !stop.load(Ordering::Relaxed) {
+                        let now = completed.load(Ordering::Relaxed);
+                        most = most.max(now - seen);
+                        seen = now;
+                        let began = Instant::now();
+                        while began.elapsed() < work {
+                            std::hint::spin_loop();
+                        }
+                        reschedule().await;
+                    }
+                    most
+                }
+            });
+
+            // Every sleeper registers its sleep in its first poll.
+            let registered = Arc::new(AtomicUsize::new(0));
+            let deadline = SystemTime::now() + LEAD;
+            let sleepers: Vec<_> = (0..SLEEPERS)
+                .map(|_| {
+                    let completed = completed.clone();
+                    let registered = registered.clone();
+                    context.child("sleeper").spawn(move |context| async move {
+                        let mut sleep = pin!(context.sleep_until(deadline));
+                        let mut polled = false;
+                        poll_fn(|cx| {
+                            let result = sleep.as_mut().poll(cx);
+                            if !mem::replace(&mut polled, true) {
+                                registered.fetch_add(1, Ordering::Relaxed);
+                            }
+                            result
+                        })
+                        .await;
+                        completed.fetch_add(1, Ordering::Relaxed);
+                    })
+                })
+                .collect();
+
+            // Spawning the sleepers overflowed the run queue. Watch it from
+            // the moment every sleeper waits.
+            while registered.load(Ordering::Relaxed) < SLEEPERS {
+                reschedule().await;
+            }
+            assert!(
+                SystemTime::now() < deadline,
+                "the storm's setup outlasted its lead"
+            );
+            let overflowed = Arc::new(AtomicBool::new(false));
+            on_next_overflow(&context.shared.pool, {
+                let overflowed = overflowed.clone();
+                move || overflowed.store(true, Ordering::Relaxed)
+            });
+
+            for sleeper in sleepers {
+                sleeper.await.unwrap();
+            }
+            stop.store(true, Ordering::Relaxed);
+            let most = spinner.await.unwrap();
+            assert!(
+                most <= CAPACITY,
+                "the requeued task waited for {most} sleepers with polls of {work:?}"
+            );
+            assert!(
+                !overflowed.load(Ordering::Relaxed),
+                "the storm overflowed the run queue with polls of {work:?}"
+            );
+        });
+    }
+}

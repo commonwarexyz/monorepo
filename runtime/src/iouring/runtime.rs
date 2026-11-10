@@ -104,9 +104,9 @@
 //! services I/O and timers, and applies a bounded batch of mailbox messages.
 //! Deferred callbacks run between these phases. While the latest service pass
 //! left due sleeps or request deadlines behind, a pool worker ends its batch
-//! once it has polled for [`BACKLOG_SLICE`]. A pool worker's service also
-//! expires the due timers of a peer stalled in a long poll (see
-//! [`super::sleep`]).
+//! once it has polled for [`BACKLOG_SLICE`] and its run queue has room. A
+//! pool worker's service also expires the due timers of a peer stalled in a
+//! long poll (see [`super::sleep`]).
 //!
 //! A pool worker takes a share of the global queue every
 //! [`Config::with_global_queue_interval`] takes and whenever its own run
@@ -184,6 +184,7 @@ use super::{
     tasks::Tasks,
     waiter::WaiterId,
     waker::SUBMISSION_SEQ_MASK,
+    wheel::BUDGET,
 };
 #[cfg(feature = "external")]
 use crate::Pacer;
@@ -242,17 +243,27 @@ const BATCH_SIZE: usize = 64;
 /// Polling time after which a pool worker with an expiry backlog ends its
 /// batch of task polls.
 ///
-/// A service pass fires at most one [`BUDGET`](super::wheel::BUDGET) of due
-/// sleeps, and one of due request deadlines, so a larger burst leaves due
-/// timers for later passes, one per turn. Between two passes the worker polls
-/// a batch of up to [`BATCH_SIZE`] tasks, so with long polls a full batch
-/// would hold each further budget back by that many polls. While the latest
-/// pass left due timers behind (see [`Worker::backlog`]), the worker also
-/// checks the time after each poll and ends the batch once this slice has
-/// passed, so the next pass follows after about one slice and one poll, plus
-/// the root poll and callbacks of the turn. A budget's pass is short next to
-/// the slice, so tasks keep most of the worker while a backlog drains. A
-/// batch still ends earlier at [`BATCH_SIZE`] polls or an empty queue.
+/// A service pass fires at most one [`BUDGET`] of due request deadlines, and
+/// of due sleeps no more than the run queue has room for, at least one and at
+/// most one budget, so that their wakes never overflow the queue and move a
+/// task that has just requeued itself behind them in the global queue. A
+/// larger burst leaves due timers for later passes, one per turn. A saturated
+/// pool worker therefore fires sleeps only as fast as its run queue takes
+/// them, in deadline order, and the sleeps that one task multiplexes complete
+/// at that rate. Request deadlines, and a peer's rescue of a stalled worker's
+/// sleeps, keep a full budget per pass.
+///
+/// Between two passes the worker polls a batch of up to [`BATCH_SIZE`]
+/// tasks, so with long polls a full batch would hold each further budget back
+/// by that many polls. While the latest pass left due timers behind (see
+/// [`Worker::backlog`]), the worker also checks the time after each poll and
+/// ends the batch once this slice has passed and its run queue has room, so
+/// the next pass follows after about one slice and one poll, plus the root
+/// poll and callbacks of the turn. A pass into a full run queue could fire
+/// only one sleep, whose wake would overflow the queue. A budget's pass is
+/// short next to the slice, so tasks keep most of the worker while a backlog
+/// drains. A batch still ends earlier at [`BATCH_SIZE`] polls or an empty
+/// queue.
 const BACKLOG_SLICE: Duration = Duration::from_micros(50);
 
 /// Largest network timeout and sleep, 30 years of 365 days, which keeps every
@@ -1552,13 +1563,16 @@ pub struct Worker {
     rescue_at: Instant,
     /// Whether the latest service pass left due sleeps or request deadlines
     /// behind because its expiry ran out of budget. While set, the next
-    /// polling batch also ends once it has polled for [`BACKLOG_SLICE`], so
-    /// the remaining due timers get their next budgeted pass without waiting
-    /// for a full batch of long polls. Cleared by a pass that reaches every
-    /// due deadline. A pass that runs out of budget while draining a detached
-    /// wheel bucket can leave its bound at or below its time with only later
-    /// deadlines left to refile (see [`Wheel::bound`]), which sets this for a
-    /// few more passes.
+    /// polling batch also ends once it has polled for [`BACKLOG_SLICE`] and
+    /// the run queue has room, so the remaining due timers get their next
+    /// budgeted pass without waiting for a full batch of long polls. A pool
+    /// worker's sleep budget is the room in its run queue, so a saturated
+    /// worker stays behind while it fires sleeps only as fast as that queue
+    /// takes them, in deadline order. Request deadlines keep a full budget.
+    /// Cleared by a pass that reaches every due deadline. A pass that runs
+    /// out of budget while draining a detached wheel bucket can leave its
+    /// bound at or below its time with only later deadlines left to refile
+    /// (see [`Wheel::bound`]), which sets this for a few more passes.
     ///
     /// [`Wheel::bound`]: super::wheel::Wheel::bound
     backlog: bool,
@@ -2006,8 +2020,17 @@ impl Worker {
         // Expiry defers observer notifications until after this borrow ends.
         // The cached bound skips the timers until a registration may be due,
         // and a pass that leaves due ones behind keeps it at or below now.
+        // A pool worker fires no more sleeps than its run queue has room for,
+        // since the wakes of a larger burst would overflow the queue and move
+        // its newest runnables, such as a task that has just requeued itself,
+        // behind the burst in the global queue. It fires at least one, so a
+        // queue that stays full cannot hold expiry back for good.
         if *timers_next <= nanos {
-            *timers_next = timers.expire(nanos, deferred);
+            let room = seat
+                .as_ref()
+                .map_or(BUDGET as usize, |seat| seat.ready.room());
+            let budget = room.clamp(1, BUDGET as usize) as u32;
+            *timers_next = timers.expire(nanos, budget, deferred);
         }
 
         // A pass that ran out of budget leaves its bound at or before this
@@ -2182,7 +2205,11 @@ impl Worker {
                         AfterPoll::Retire(task) => drop(shared.tasks.remove(&task)),
                     }
 
-                    if slice_end.is_some_and(|end| Instant::now() >= end) {
+                    // A pass could only overflow a full run queue, so the
+                    // slice ends the batch once the queue has room.
+                    if slice_end.is_some_and(|end| Instant::now() >= end)
+                        && self.local.borrow().ready().room() > 0
+                    {
                         break;
                     }
                 }

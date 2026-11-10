@@ -87,24 +87,30 @@
 //! # Expiry and Rescue
 //!
 //! The owner expires due registrations in its service pass, at most
-//! [`BUDGET`] per pass. A pass that leaves due registrations behind keeps the
-//! published bound at or below its time, so the worker serves again before it
-//! parks, and a pool worker serves again after a short slice of task polls
-//! rather than a full batch (see [`super::runtime`]).
+//! [`BUDGET`] per pass. A pool worker fires no more than its run queue has
+//! room for, and at least one, since wakes that overflow the queue would move
+//! its newest runnables, such as a task that has just requeued itself, behind
+//! them in the global queue. A saturated pool worker therefore fires only what
+//! its run queue can take, in deadline order, and the sleeps that one task
+//! multiplexes complete at that rate, although their wakes reach a single
+//! task. A pass that leaves due registrations behind keeps the published
+//! bound at or below its time, so the worker serves again before it parks,
+//! and a pool worker serves again after a short slice of task polls rather
+//! than a full batch, once its run queue has room (see [`super::runtime`]).
 //!
 //! A poll that does not return freezes its worker's service, timers included.
 //! A pool worker that is not closing therefore checks its peers' published
 //! bounds in its service pass, at most once per [`RESCUE_INTERVAL`]. It
-//! expires, with its own budget and callback batch, the due registrations of a
-//! peer whose bound is overdue by [`RESCUE_THRESHOLD`] and whose owner has run
-//! no expiry pass for as long, skipping timers whose lock is held. An owner
-//! that is still draining a backlog keeps it, since a rescuer's wakes join the
-//! rescuer's run queue, and a run queue they overflow moves its newest
-//! runnables, such as a task that has just requeued itself, behind the
-//! backlog in the global queue. A parked worker, or one spinning idle before
-//! it parks, runs no service pass and checks nothing, so a frozen worker's
-//! timers wait for some peer's service pass. A dedicated worker's timers are
-//! private, so no peer checks them.
+//! expires, with a full budget and its own callback batch, the due
+//! registrations of a peer whose bound is overdue by [`RESCUE_THRESHOLD`] and
+//! whose owner has run no expiry pass for as long, skipping timers whose lock
+//! is held. An owner that is still draining a backlog keeps it, since a
+//! rescuer's wakes join the rescuer's run queue, and a run queue they overflow
+//! moves its newest runnables, such as a task that has just requeued itself,
+//! behind the backlog in the global queue. A parked worker, or one spinning
+//! idle before it parks, runs no service pass and checks nothing, so a frozen
+//! worker's timers wait for some peer's service pass. A dedicated worker's
+//! timers are private, so no peer checks them.
 //!
 //! # Drops on the Owner
 //!
@@ -278,10 +284,9 @@ struct Registrations {
 }
 
 impl Registrations {
-    /// Fire the registrations due at `now`, within one budget.
-    fn expire(&mut self, now: u64, ending: &mut Ending<'_>) {
+    /// Fire the registrations due at `now`, within `budget` units.
+    fn expire(&mut self, now: u64, mut budget: u32, ending: &mut Ending<'_>) {
         let Self { entries, wheel, .. } = self;
-        let mut budget = BUDGET;
         wheel.expire(now, &mut budget, &mut |index| {
             // A slot is resident exactly while its registration waits, and
             // firing removes the registration.
@@ -527,13 +532,15 @@ impl Timers {
     }
 
     /// The owner's expiry pass at `now`, in nanoseconds since the origin:
-    /// fire due registrations within one budget and publish the new bound,
-    /// which the owner caches. The bound stays at or below `now` while due
-    /// registrations remain.
-    pub fn expire(&self, now: u64, deferred: &mut Deferred) -> u64 {
+    /// fire due registrations within `budget` units, at most one [`BUDGET`],
+    /// and publish the new bound, which the owner caches. A pool worker passes
+    /// the room in its run queue, so a saturated worker fires only what that
+    /// queue can take, in deadline order. A peer's rescue keeps a full budget.
+    /// The bound stays at or below `now` while due registrations remain.
+    pub fn expire(&self, now: u64, budget: u32, deferred: &mut Deferred) -> u64 {
         let mut registrations = self.lock();
         self.end(&mut registrations, deferred, |registrations, ending| {
-            registrations.expire(now, ending);
+            registrations.expire(now, budget, ending);
         });
 
         // Peers read the bound to find due registrations, and the pass time
@@ -556,7 +563,7 @@ impl Timers {
             return false;
         }
         self.end(&mut registrations, deferred, |registrations, ending| {
-            registrations.expire(now, ending);
+            registrations.expire(now, BUDGET, ending);
         });
 
         // The pass time stays the owner's own, so a stalled owner stays
@@ -1334,13 +1341,13 @@ pub mod tests {
         // One nanosecond before the rounded deadline fires nothing.
         let mut deferred = Deferred::default();
         let firing = Wheel::<RESOLUTION>::rounded(deadline);
-        let bound = timers.expire(firing - 1, &mut deferred);
+        let bound = timers.expire(firing - 1, BUDGET, &mut deferred);
         assert_eq!(bound, firing);
         assert!(deferred.is_empty());
 
         // At the rounded deadline, the pass defers the wake to the caller, and
         // the next poll reports the firing.
-        assert_eq!(timers.expire(firing, &mut deferred), u64::MAX);
+        assert_eq!(timers.expire(firing, BUDGET, &mut deferred), u64::MAX);
         assert_eq!(timers.published(), u64::MAX);
         assert_eq!(count.get(), 0, "woken under the expiry pass");
         run(&mut deferred);
@@ -1350,7 +1357,7 @@ pub mod tests {
         assert_eq!(timers.live(), 0);
 
         // Repeating expiry cannot wake it twice, and both sides released it.
-        timers.expire(firing + 4096, &mut deferred);
+        timers.expire(firing + 4096, BUDGET, &mut deferred);
         run(&mut deferred);
         assert_eq!(count.get(), 1);
         assert_eq!(Arc::strong_count(&count), 2);
@@ -1378,7 +1385,7 @@ pub mod tests {
         // Off a worker, the displaced waker is released at once.
         assert_eq!(Arc::strong_count(&first), 2);
         let mut deferred = Deferred::default();
-        timers.expire(deadline + RESOLUTION, &mut deferred);
+        timers.expire(deadline + RESOLUTION, BUDGET, &mut deferred);
         run(&mut deferred);
         assert_eq!(first.get(), 0, "woke the displaced waker");
         assert_eq!(second.get(), 1);
@@ -1411,7 +1418,7 @@ pub mod tests {
         assert_eq!(timers.live(), 0);
         assert_eq!(timers.bound(), u64::MAX);
         let mut deferred = Deferred::default();
-        timers.expire(deadline + 4096, &mut deferred);
+        timers.expire(deadline + 4096, BUDGET, &mut deferred);
         assert!(deferred.is_empty());
         assert_eq!(count.get(), 0);
     }
@@ -1425,7 +1432,7 @@ pub mod tests {
         let mut pending = register(&timers, deadline + 1_000_000, &waker);
         let mut fired = register(&timers, deadline, &waker);
         let mut deferred = Deferred::default();
-        timers.expire(deadline + RESOLUTION, &mut deferred);
+        timers.expire(deadline + RESOLUTION, BUDGET, &mut deferred);
         run(&mut deferred);
         assert_eq!(count.get(), 1);
 
@@ -1556,7 +1563,7 @@ pub mod tests {
         let mut sleep = registered(&timers, deadline, &waker);
         let epoch = timers.epoch();
         let mut deferred = Deferred::default();
-        timers.expire(timers.nanos(deadline) + RESOLUTION, &mut deferred);
+        timers.expire(timers.nanos(deadline) + RESOLUTION, BUDGET, &mut deferred);
         assert_eq!(timers.epoch(), epoch + 1);
         run(&mut deferred);
         assert_eq!(count.get(), 1);
@@ -1665,7 +1672,7 @@ pub mod tests {
         let mut passes = 0;
         loop {
             let mut deferred = Deferred::default();
-            let bound = timers.expire(now, &mut deferred);
+            let bound = timers.expire(now, BUDGET, &mut deferred);
             passes += 1;
             assert!(deferred.wakes.len() <= BUDGET as usize);
             run(&mut deferred);
@@ -1771,7 +1778,7 @@ pub mod tests {
         // due, with its bound still at their firing time.
         let served = firing + 2 * threshold;
         let mut deferred = Deferred::default();
-        assert_eq!(all[1].expire(served, &mut deferred), firing);
+        assert_eq!(all[1].expire(served, BUDGET, &mut deferred), firing);
         run(&mut deferred);
         let fired = count.get();
         assert!(fired < 2 * BUDGET as usize);
@@ -1809,7 +1816,7 @@ pub mod tests {
         assert_eq!(timers.resident(), 0);
         assert_eq!(timers.live(), 0);
         let mut deferred = Deferred::default();
-        timers.expire(deadline + RESOLUTION, &mut deferred);
+        timers.expire(deadline + RESOLUTION, BUDGET, &mut deferred);
         assert!(deferred.is_empty());
         assert_eq!(count.get(), 0, "woke an early completion");
         assert_eq!(Arc::strong_count(&count), 2);
@@ -1832,9 +1839,9 @@ pub mod tests {
 
         // The old deadline fires nothing, the new one at its own.
         let mut deferred = Deferred::default();
-        timers.expire(deadline + RESOLUTION, &mut deferred);
+        timers.expire(deadline + RESOLUTION, BUDGET, &mut deferred);
         assert!(deferred.is_empty());
-        timers.expire(deadline + 1_000_000 + RESOLUTION, &mut deferred);
+        timers.expire(deadline + 1_000_000 + RESOLUTION, BUDGET, &mut deferred);
         run(&mut deferred);
         assert_eq!(count.get(), 1);
         assert_eq!(poll_with(&mut current, &waker), Poll::Ready(Outcome::Fired));
@@ -1971,7 +1978,7 @@ pub mod tests {
         // Once fired, a poll with a changed waker locks once and reports the
         // firing without a clone.
         let mut deferred = Deferred::default();
-        timers.expire(deadline + RESOLUTION, &mut deferred);
+        timers.expire(deadline + RESOLUTION, BUDGET, &mut deferred);
         run(&mut deferred);
         assert_eq!((first.get(), second.get()), (0, 1));
         let before = locks();
@@ -1995,7 +2002,7 @@ pub mod tests {
             let ends: [(End, Outcome); 3] = [
                 (
                     |timers, now, deferred| {
-                        timers.expire(now, deferred);
+                        timers.expire(now, BUDGET, deferred);
                     },
                     Outcome::Fired,
                 ),
@@ -2022,7 +2029,7 @@ pub mod tests {
                 // advances it before its wake runs.
                 let epoch = timers.epoch();
                 let mut deferred = Deferred::default();
-                timers.expire(deadline - RESOLUTION, &mut deferred);
+                timers.expire(deadline - RESOLUTION, BUDGET, &mut deferred);
                 assert_eq!(timers.epoch(), epoch);
                 end(&timers, deadline + RESOLUTION, &mut deferred);
                 assert_eq!(timers.epoch(), epoch + 1);
@@ -2048,7 +2055,7 @@ pub mod tests {
             let mut waiting = register(&timers, deadline + 1_000_000, waker);
             let _fired = register(&timers, deadline, Waker::noop());
             let mut deferred = Deferred::default();
-            timers.expire(deadline + RESOLUTION, &mut deferred);
+            timers.expire(deadline + RESOLUTION, BUDGET, &mut deferred);
             run(&mut deferred);
 
             // The firing advanced the epoch, so the waiting sleeper's next poll
@@ -2137,7 +2144,7 @@ pub mod tests {
                     std::hint::spin_loop();
                 }
                 let mut deferred = Deferred::default();
-                timers.expire(deadline + RESOLUTION, &mut deferred);
+                timers.expire(deadline + RESOLUTION, BUDGET, &mut deferred);
                 run(&mut deferred);
                 woken.fetch_add(1, Ordering::SeqCst);
             }
@@ -2257,7 +2264,7 @@ pub mod tests {
         assert!(poll_with(&mut fired, &wakers[1]).is_pending());
         assert!(poll_with(&mut fired, &wakers[1]).is_pending());
         let mut deferred = Deferred::default();
-        timers.expire(deadline + RESOLUTION, &mut deferred);
+        timers.expire(deadline + RESOLUTION, BUDGET, &mut deferred);
         run(&mut deferred);
         assert_eq!(
             poll_with(&mut fired, &wakers[1]),
@@ -2334,7 +2341,7 @@ pub mod tests {
             // Expire as the poller starts.
             barrier.wait();
             let mut deferred = Deferred::default();
-            timers.expire(deadline + RESOLUTION, &mut deferred);
+            timers.expire(deadline + RESOLUTION, BUDGET, &mut deferred);
             run(&mut deferred);
             poller.join().unwrap();
         }
@@ -2360,7 +2367,7 @@ pub mod tests {
                 }
             });
             let mut deferred = Deferred::default();
-            timers.expire(deadline + RESOLUTION, &mut deferred);
+            timers.expire(deadline + RESOLUTION, BUDGET, &mut deferred);
             run(&mut deferred);
             dropper.join().unwrap();
 
@@ -3531,7 +3538,7 @@ pub mod tests {
         // A fired registration whose sleep was dropped on its worker left its
         // slot free, and the next registration takes it.
         let fired = register(&timers, deadline, Waker::noop());
-        timers.expire(deadline + RESOLUTION, &mut deferred);
+        timers.expire(deadline + RESOLUTION, BUDGET, &mut deferred);
         run(&mut deferred);
         let mut dropped = vec![fired.id];
         let waker = Waker::noop().clone();
@@ -4057,7 +4064,7 @@ mod loom_tests {
             if close {
                 timers.close(&mut deferred);
             } else {
-                timers.expire(u64::MAX, &mut deferred);
+                timers.expire(u64::MAX, BUDGET, &mut deferred);
             }
             for waker in deferred.wakes.drain(..) {
                 waker.wake();
