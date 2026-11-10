@@ -28,6 +28,7 @@
 use crate::core::{
     curve::Points,
     field::{
+        MAX_LANES,
         arithmetic::{Field, Signed},
         fp::{self, MINUS_ONE, ONE},
         fp2::{BYTES, Fp2, Product, encode},
@@ -69,9 +70,6 @@ pub const GENERATOR: Coordinates = [
 /// The positional representations return at most `32` from the reduction of [`Point::add`]'s `Y`
 /// coordinate, and residues reduce to at most `17`.
 pub const BOUND: u64 = 32;
-
-/// Largest number of points in a value, the widest representation's lane count.
-const MAX_LANES: usize = 16;
 
 /// `c` such that `c i = (1 + i)^(-(p - 1) / 3)`, the coefficient of the untwisted Frobenius
 /// map on `X` (RFC 9380, Appendix G.3), which is purely imaginary.

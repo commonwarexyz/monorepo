@@ -33,6 +33,7 @@
 use crate::core::{
     curve::g2::{self, Addition, Point},
     field::{
+        MAX_LANES,
         arithmetic::Field,
         fp::BYTES as FP_BYTES,
         fp2::{BYTES as FP2_BYTES, Fp2},
@@ -55,9 +56,6 @@ const HALF_Z: u64 = Z / 2;
 
 /// Most pairs whose Miller loops share squarings, which bounds the points held at once.
 pub const SHARED: usize = 8;
-
-/// Largest number of pairs in a value, the widest representation's lane count.
-const MAX_LANES: usize = 16;
 
 /// Pairs of affine points, one per lane, prepared for the Miller loop.
 #[derive(Clone, Copy)]
