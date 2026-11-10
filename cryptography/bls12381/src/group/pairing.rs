@@ -8,7 +8,7 @@ use crate::core::{
     curve::{Points, g1, g2},
     field::{
         arithmetic::{Field, TIGHT},
-        fp::BYTES as FP_BYTES,
+        fp::{self, BYTES as FP_BYTES},
         fp2::{BYTES as FP2_BYTES, Fp2},
         fp12::{self, BYTES, Fp12},
     },
@@ -122,7 +122,6 @@ impl MultiPairing<'_> {
         const { assert!(F::LANES <= MAX_LANES) };
         // Pairs with an identity contribute one, so only the others are prepared. Unused lanes
         // hold the fill pair.
-        let fill = fill();
         let points: Vec<_> = self
             .0
             .iter()
@@ -130,12 +129,12 @@ impl MultiPairing<'_> {
             .map(|(p, q)| (*p.coordinates(), *q.coordinates()))
             .collect();
         let affine = to_affine::<S, F>(simd, &points);
-        let mut prepared = [Pair::<F>::load(simd, &[], &fill); SHARED];
+        let mut prepared = [Pair::<F>::load(simd, &[], &FILL); SHARED];
         let mut count = 0;
         let mut product: Option<Fp12<F>> = None;
         let mut groups = affine.chunks(F::LANES).peekable();
         while let Some(group) = groups.next() {
-            prepared[count] = Pair::load(simd, group, &fill);
+            prepared[count] = Pair::load(simd, group, &FILL);
             count += 1;
             if count == SHARED || groups.peek().is_none() {
                 let lines = miller_loop(simd, &prepared[..count]);
@@ -160,14 +159,24 @@ impl MultiPairing<'_> {
     }
 }
 
-/// Returns a pair that pairs to one and fills unused lanes: its G1 coordinates are zero, which
-/// the final exponentiation maps to one, and its G2 point is the generator, whose lines have
-/// nonzero constant terms.
-fn fill() -> (G1Affine, G2Affine) {
-    let generator = <G2 as commonware_math::algebra::CryptoGroup>::generator();
-    let [x, y, _] = *generator.coordinates();
-    ([[0; FP_BYTES]; 2], [x, y])
-}
+/// A pair that pairs to one and fills unused lanes: its G1 coordinates are zero, which the final
+/// exponentiation maps to one, and its G2 point is the generator, whose lines have nonzero
+/// constant terms.
+const FILL: (G1Affine, G2Affine) = ([[0; FP_BYTES]; 2], [g2::GENERATOR[0], g2::GENERATOR[1]]);
+
+/// The G1 point `(0 : 1 : 1)`, whose denominator is one.
+const P_FILL: g1::Coordinates = {
+    let mut fill = g1::IDENTITY;
+    fill[2] = fp::ONE;
+    fill
+};
+
+/// The G2 point `(0 : 1 : 1)`, whose denominator is one.
+const Q_FILL: g2::Coordinates = {
+    let mut fill = g2::IDENTITY;
+    fill[2][FP2_BYTES - 1] = 1;
+    fill
+};
 
 impl Kernel for MultiPairing<'_> {
     type Output = GT;
@@ -190,11 +199,8 @@ impl Kernel for Pairings<'_> {
     #[cfg_attr(not(debug_assertions), inline(always))]
     fn run<S: Simd, F: Field<S>>(self, simd: S) {
         const { assert!(F::LANES <= MAX_LANES) };
-        let fill = fill();
         // The fill pair in projective coordinates, which convert to its affine coordinates.
-        let mut filler = (g1::IDENTITY, g2::IDENTITY);
-        filler.0[2][FP_BYTES - 1] = 1;
-        filler.1 = *<G2 as commonware_math::algebra::CryptoGroup>::generator().coordinates();
+        let filler = (P_FILL, g2::GENERATOR);
         let count = self.0.len().min(self.1.len());
         // Pairs with an identity pair to one, so their lanes hold the fill pair, which the
         // conversion to affine coordinates accepts.
@@ -214,7 +220,7 @@ impl Kernel for Pairings<'_> {
             .zip(affine.chunks(F::LANES))
             .zip(self.1[..count].chunks_mut(F::LANES))
         {
-            let prepared = Pair::<F>::load(simd, affine, &fill);
+            let prepared = Pair::<F>::load(simd, affine, &FILL);
             let lines = miller_loop(simd, &[prepared]);
             let mut results = [fp12::ONE; MAX_LANES];
             final_exponentiation(simd, lines).store(simd, &mut results[..pairs.len()]);
@@ -244,11 +250,6 @@ fn to_affine<S: Simd, F: Field<S>>(
     if points.is_empty() {
         return Vec::new();
     }
-    // Unused lanes hold points with denominator one, which leave the products unchanged.
-    let mut p_fill = g1::IDENTITY;
-    p_fill[2][FP_BYTES - 1] = 1;
-    let mut q_fill = g2::IDENTITY;
-    q_fill[2][FP2_BYTES - 1] = 1;
     simd.execute(
         #[inline(always)]
         move |simd: S| {
@@ -258,14 +259,16 @@ fn to_affine<S: Simd, F: Field<S>>(
             // limb bound one, as inversion requires.
             let mut denominators = Vec::with_capacity(2 * groups);
             for group in points.chunks(F::LANES) {
-                let mut g1 = [p_fill; MAX_LANES];
-                let mut g2 = [q_fill; MAX_LANES];
+                // Unused lanes hold points with denominator one, which leave the products
+                // unchanged.
+                let mut g1 = [P_FILL; MAX_LANES];
+                let mut g2 = [Q_FILL; MAX_LANES];
                 for (lane, (p, q)) in group.iter().enumerate() {
                     g1[lane] = *p;
                     g2[lane] = *q;
                 }
-                let p = g1::Point::<F>::load(simd, &g1[..group.len()], &p_fill);
-                let q = g2::Point::<F>::load(simd, &g2[..group.len()], &q_fill);
+                let p = g1::Point::<F>::load(simd, &g1[..group.len()], &P_FILL);
+                let q = g2::Point::<F>::load(simd, &g2[..group.len()], &Q_FILL);
                 let norm =
                     F::accumulate_product(simd, q.z.c0.product(simd, q.z.c0), q.z.c1, q.z.c1);
                 denominators.push(p.z);
