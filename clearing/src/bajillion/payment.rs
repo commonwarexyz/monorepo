@@ -34,6 +34,9 @@ pub enum RequestError {
     /// derived from the pair could settle.
     #[error("latest state does not commit to its map")]
     InvalidLatest,
+    /// The request builds on a root other than the one its latest state builds on.
+    #[error("previous root is not the latest state's")]
+    InvalidPrevious,
 }
 
 /// Why a challenge is refused.
@@ -238,7 +241,8 @@ impl<P: PublicKey, D: Digest, A: Amount> Request<P, D, A> {
     /// countersigned state of `epoch` with the map that state commits to, or `None` if it has paid
     /// nothing in `epoch`. The state of `epoch` adds `batch` to that map, or to the empty map, on
     /// top of `previous`, and the state of the next epoch pays only `batch` on top of that map.
-    /// When extending a countersigned map, `previous` must remain the root its state builds on.
+    /// When `latest` is given, `previous` must be the root that state builds on (S1), and any other
+    /// root is refused.
     ///
     /// The latest state's root is taken as its map's root. A root that already holds the batch is
     /// refused, because both states derived from it could settle.
@@ -252,6 +256,12 @@ impl<P: PublicKey, D: Digest, A: Amount> Request<P, D, A> {
     ) -> Result<States<P, D, A>, RequestError> {
         if batch.is_empty() {
             return Err(RequestError::NoReceivers);
+        }
+
+        // Extending a countersigned map on another root could settle its payments again after a
+        // post that conflicts with its state.
+        if latest.is_some_and(|(state, _)| state.previous != *previous) {
+            return Err(RequestError::InvalidPrevious);
         }
 
         // The latest state holds the root of its map, and a map that starts with the batch has the
@@ -866,8 +876,9 @@ mod tests {
         );
     }
 
-    /// States do not derive from an empty batch, an epoch with no successor, an overflowing map, or
-    /// a latest state whose root already holds the batch.
+    /// States do not derive from an empty batch, an epoch with no successor, an overflowing map, a
+    /// previous root other than the latest state's, or a latest state whose root already holds the
+    /// batch.
     #[test]
     fn test_states_refuse_unpayable_batches() {
         assert!(matches!(
@@ -897,9 +908,23 @@ mod tests {
             Err(RequestError::Overflow)
         ));
 
+        // A request that extends a countersigned map on another root could settle that map's
+        // payments again.
+        let (paid, batch) = (amounts(&[(1, 2)]), amounts(&[(1, 3)]));
+        let state = latest(&paid, empty_root()).unwrap();
+        assert!(matches!(
+            TestRequest::states::<Sha256>(
+                2,
+                account(0),
+                batch.clone(),
+                Some((&state, &paid)),
+                &batch.root::<Sha256>(),
+            ),
+            Err(RequestError::InvalidPrevious)
+        ));
+
         // A state that commits to the map with the batch added, given with the map before it, would
         // make the next state build on the map the current state pays.
-        let (paid, batch) = (amounts(&[(1, 2)]), amounts(&[(1, 3)]));
         let state = latest(&paid.combine(&batch).unwrap(), empty_root()).unwrap();
         assert!(matches!(
             TestRequest::states::<Sha256>(
