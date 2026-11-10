@@ -693,11 +693,10 @@ impl Workload {
         let index = world.pending[user]?;
         let request = &world.sent[index].request.0;
         let epochs = request.epoch..=request.epoch + 1;
-        if epochs.contains(&epoch)
-            && self.state_of(world, index, epoch).0 == self.row_root_of(world, epoch, user)
-        {
+        let posted = self.row_root_of(world, epoch, user);
+        if epochs.contains(&epoch) && self.state_of(world, index, epoch).0 == posted {
             Some(Outcome::Settled)
-        } else if *epochs.end() <= epoch {
+        } else if *epochs.end() <= epoch || (request.epoch == epoch && request.latest != posted) {
             Some(Outcome::Dropped)
         } else {
             Some(Outcome::Pending)
@@ -1450,8 +1449,13 @@ impl Model for Workload {
                             );
                         }
                         Some(Outcome::Dropped) => {
-                            world.pending[user] = None;
+                            let index = world.pending[user].take().unwrap();
                             self.witness("a post drops a request");
+                            if world.sent[index].request.0.epoch == epoch {
+                                self.witness(
+                                    "a post drops a request whose next state builds on another row",
+                                );
+                            }
                         }
                         Some(Outcome::Pending) => {
                             self.witness("a post keeps a request pending");
@@ -1847,6 +1851,7 @@ fn test_model_rebuilds_on_the_posted_row() {
             "an omitted payment halts the ledger",
             "a payment builds on a row the close omitted",
             "a state builds on a map whose close awaits its post",
+            "a post drops a request whose next state builds on another row",
         ],
     );
 }

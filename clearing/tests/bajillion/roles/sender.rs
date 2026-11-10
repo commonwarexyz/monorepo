@@ -50,9 +50,9 @@ impl From<InvalidOpening> for Refusal {
 pub enum Outcome {
     /// The close settled one of its states.
     Settled,
-    /// The close settled none of its states, and none is for a later epoch.
+    /// The close settled none of its states, and none can settle in a later epoch.
     Dropped,
-    /// Its state for a later epoch may still settle.
+    /// Its state for a later epoch can still settle.
     Pending,
 }
 
@@ -363,22 +363,24 @@ impl<S: Signer, O: PublicKey, H: Hasher, A: Amount> Sender<S, O, H, A> {
             return Ok(None);
         }
 
-        // A state of this epoch with the posted row root settles the request, and it is dropped
-        // once none of its states is for a later epoch (S5).
+        // A state of this epoch with the posted row root settles the request. A state of the next
+        // epoch can still settle only if it builds on that root, and the request is dropped once
+        // none of its states can settle (S5).
         let proposed = self.proposed();
         let settled = proposed
             .iter()
             .find(|proposed| proposed.state.epoch == epoch && Some(proposed.state.payments) == row)
             .cloned();
-        let resolved = proposed
-            .iter()
-            .all(|proposed| proposed.state.epoch <= epoch);
+        let live = proposed.iter().any(|proposed| {
+            let state = &proposed.state;
+            state.epoch > epoch && (state.epoch - 1 > epoch || state.previous == posted)
+        });
         if let Some(countersigned) = settled {
             self.persisted.countersigned.insert(epoch, countersigned);
             self.persisted.pending = None;
             return Ok(Some(Outcome::Settled));
         }
-        if resolved {
+        if !live {
             self.persisted.pending = None;
             return Ok(Some(Outcome::Dropped));
         }

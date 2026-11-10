@@ -434,6 +434,71 @@ fn test_posted_earlier_map_does_not_settle_request() {
     assert_eq!(alice.payments(3), None);
 }
 
+/// A post drops a pending request once neither of its states can settle. When the close of the
+/// request's epoch settles a row other than the map its state for the next epoch builds on, the
+/// sender pays again in the next epoch without waiting for that epoch's close.
+#[test]
+fn test_posted_other_row_drops_request() {
+    let mut operator = operator();
+    fund(&mut operator, &[(0, 100)]);
+    let mut alice = sender(0);
+    let request = alice.send(2, amounts(&[(1, 5)])).unwrap();
+    alice
+        .acknowledged(&operator.accept(&request).unwrap())
+        .unwrap();
+
+    // The operator forgets her countersigned map, so the close of epoch 2 has no row of hers. Her
+    // pending request extends that map in epoch 2 and builds on it in epoch 3.
+    alice.send(2, amounts(&[(1, 5)])).unwrap();
+    operator.forget(&account(0));
+    let posted = close(&mut operator);
+    let (root, opening) = open_row(&posted, 0);
+    assert_eq!(
+        alice.posted(2, &root, &opening).unwrap(),
+        Some(Outcome::Dropped)
+    );
+    assert!(alice.pending().is_none());
+
+    // Her next request builds on the posted row, and the operator admits it.
+    let request = alice.send(3, amounts(&[(1, 5)])).unwrap();
+    alice
+        .acknowledged(&operator.accept(&request).unwrap())
+        .unwrap();
+    assert_eq!(alice.payments(3), Some(&amounts(&[(1, 5)])));
+}
+
+/// A post of the epoch before a pending request's own does not drop it, even when the close
+/// settles another of the sender's maps than the one the request builds on. Its state for the
+/// epoch after its own builds on a row that has not posted, so it can still settle.
+#[test]
+fn test_post_before_request_epoch_keeps_it_pending() {
+    let mut operator = operator();
+    fund(&mut operator, &[(0, 100)]);
+    let mut alice = sender(0);
+
+    // Alice holds two countersigned maps of epoch 2, the second extending the first. Before the
+    // close of epoch 2 posts, she sends a request of epoch 3 on top of the second.
+    for _ in 0..2 {
+        let request = alice.send(2, amounts(&[(1, 1)])).unwrap();
+        alice
+            .acknowledged(&operator.accept(&request).unwrap())
+            .unwrap();
+    }
+    let request = alice.send(3, amounts(&[(1, 1)])).unwrap();
+
+    // The posted close of epoch 2 settles her first map, so her state of epoch 3 cannot settle.
+    // Her state of epoch 4 builds on her row of epoch 3, and that row has not posted.
+    let first = row(2, 0, amounts(&[(1, 1)]), &Amounts::empty());
+    let queue = deposits(2, &[]);
+    let posted = forge(&operator_key(), &queue, vec![first], Vec::new(), 0, 0);
+    let (root, opening) = open_row(&posted, 0);
+    assert_eq!(
+        alice.posted(2, &root, &opening).unwrap(),
+        Some(Outcome::Pending)
+    );
+    assert_eq!(alice.pending(), Some(&request));
+}
+
 /// A refusal of a request in its own epoch does not retire its state for the next epoch (S4). Once
 /// the close settles the map that state builds on, a replayed copy is admitted if the sender can
 /// afford it. A request for another batch then fails, and a request for the same batch repeats the

@@ -192,9 +192,10 @@
 //!
 //! - **S5.** Resolve a pending request against each post from its epoch on, in epoch order, before
 //!   dropping it or building on a posted row root. The request settled in epoch `e` if it has a
-//!   state of `e` whose root equals the row root the post of `e` proves, and it is dropped once
-//!   none of its states is for a later epoch. Otherwise the sender drops a request a close settled,
-//!   or builds on the wrong root.
+//!   state of `e` whose root equals the row root the post of `e` proves. Its state of `e + 1` can
+//!   still settle only if it builds on that row root, and the request is dropped once none of its
+//!   states can settle. Otherwise the sender drops a request a close settled, or builds on the
+//!   wrong root.
 //!
 //! # Operator
 //!
