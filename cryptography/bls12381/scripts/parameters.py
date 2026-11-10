@@ -18,10 +18,6 @@ import re
 from typing import NamedTuple
 
 
-BASE_REDUNDANCY = 40
-MIN_RNS = -1932
-MAX_RNS = 2377
-COMBINED_MAX = (MAX_RNS - MIN_RNS) * BASE_REDUNDANCY**2
 FRACTION_BITS = 64
 U64_MAX = (1 << 64) - 1
 WORDS = 6
@@ -82,12 +78,6 @@ MODULI_N = (
 QR = int(
     "1764464526391023609719698959639504118661371030573300677125606932387184635588659624517358062862068369090674362610896848484"
 )
-
-# Bounds adopted by src/old/fp/rns.rs, in units of p: every element, every product, and the
-# multiple of p added by negation. src/core/field/fp/rns.rs adopts the same element bound.
-ELEMENT_BOUND = 1 << 11
-PRODUCT_BOUND = 1 << 5
-NEGATION_OFFSET = 1 << 9
 
 
 class Conversion(NamedTuple):
@@ -400,10 +390,11 @@ def fold_bound(value: int, modulus: int) -> int:
 
 
 def validate_kernel(tables: Tables) -> None:
-    """Checks the lane and integer bounds of the kernel in src/old/fp/rns.rs.
+    """Checks the lane bounds of the kernel in src/core/field/fp/rns.rs.
 
     Every element has lanes in [0, 2q]. A multiplication accumulates one lane product,
-    and each conversion accumulates one row product per lane plus its quotient correction.
+    and each conversion accumulates one row product per lane plus its quotient correction. The
+    integer bounds are asserted by rns.rs.
     """
     m = MODULI_M
     n = MODULI_N
@@ -445,24 +436,11 @@ def validate_kernel(tables: Tables) -> None:
         reduced = montgomery_lane_bound(total, modulus)
         assert fold_bound(reduced, modulus) <= 2 * modulus
 
-    # Products of elements stay within the validated reduction budget, the reduction output
-    # stays below the product bound, and every element expands and canonicalizes exactly.
-    p = P
-    assert ELEMENT_BOUND**2 <= COMBINED_MAX
-    reduction = ELEMENT_BOUND**2 * p * p // tables.big_m + (2 * LANES + 1) * p
-    assert reduction < PRODUCT_BOUND * p
-    assert 2 * ELEMENT_BOUND * p < tables.big_n
-    assert NEGATION_OFFSET <= ELEMENT_BOUND
-
 
 def validate_bounds(tables: Tables) -> None:
     p = P
     m = MODULI_M
     n = MODULI_N
-    assert tables.big_m > BASE_REDUNDANCY * p
-    assert tables.big_n > 6 * p
-    assert COMBINED_MAX * p * p < tables.big_m * tables.big_n
-    assert BASE_REDUNDANCY >= 2 * LANES + 4
     assert all(integer(coefficient) < p for coefficient in tables.to_canonical)
     assert integer(tables.canonical_correction) < p
     canonical_max = sum(
