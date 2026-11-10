@@ -1090,6 +1090,7 @@ mod tests {
                     first_mailbox
                         .verify(
                             (task_context, consensus_context),
+                            (),
                             ancestry::from_iter([digested(first_block), digested(first_genesis)]),
                         )
                         .await
@@ -1106,6 +1107,7 @@ mod tests {
                     mailbox
                         .verify(
                             (task_context, consensus_context),
+                            (),
                             ancestry::from_iter([digested(second_block), digested(genesis)]),
                         )
                         .await
@@ -1153,6 +1155,7 @@ mod tests {
                 .with_attribute("shard", 4);
             let mut verify = Box::pin(mailbox.verify(
                 (request_context, block_context),
+                (),
                 ancestry::from_iter([digested(block), digested(genesis)]),
             ));
             assert!(poll!(&mut verify).is_pending());
@@ -1196,6 +1199,7 @@ mod tests {
             let block_context = block.context();
             let mut verify = Box::pin(mailbox.verify(
                 (context.child("caller"), block_context),
+                (),
                 ancestry::from_iter([digested(block), digested(genesis)]),
             ));
             assert!(poll!(&mut verify).is_pending());
@@ -1212,9 +1216,11 @@ mod tests {
             let subscriber = mailbox.clone();
             let pending = TestBlock::new(2, 2);
             let (unavailable, _gate, released) = GatedAncestry::new([]);
-            let mut acquiring = Box::pin(
-                mailbox.verify((context.child("acquiring"), pending.context()), unavailable),
-            );
+            let mut acquiring = Box::pin(mailbox.verify(
+                (context.child("acquiring"), pending.context()),
+                (),
+                unavailable,
+            ));
             assert!(poll!(&mut acquiring).is_pending());
             drop(subscriber.subscribe_databases().await);
             drop(acquiring);
@@ -1247,6 +1253,7 @@ mod tests {
             let block1 = TestBlock::child(&genesis, 1);
             let mut incomplete = Box::pin(mailbox.verify(
                 (context.child("empty"), block1.context()),
+                (),
                 ancestry::from_iter([]),
             ));
             assert!(poll!(&mut incomplete).is_pending());
@@ -1255,6 +1262,7 @@ mod tests {
 
             let mut first = Box::pin(mailbox.verify(
                 (context.child("first"), block1.context()),
+                (),
                 ancestry::from_iter([digested(block1.clone()), digested(genesis)]),
             ));
             assert!(poll!(&mut first).is_pending());
@@ -1269,6 +1277,7 @@ mod tests {
             let block2 = TestBlock::child(&block1, 2);
             let mut incomplete = Box::pin(mailbox.verify(
                 (context.child("missing_parent"), block2.context()),
+                (),
                 ancestry::from_iter([digested(block2.clone())]),
             ));
             assert!(poll!(&mut incomplete).is_pending());
@@ -1277,6 +1286,7 @@ mod tests {
 
             let mut second = Box::pin(mailbox.verify(
                 (context.child("second"), block2.context()),
+                (),
                 ancestry::from_iter([digested(block2), digested(block1)]),
             ));
             assert!(poll!(&mut second).is_pending());
@@ -1308,6 +1318,7 @@ mod tests {
             let block = TestBlock::child(&genesis, 1);
             let mut verify = Box::pin(mailbox.verify(
                 (context.child("verify"), block.context()),
+                (),
                 ancestry::from_iter([digested(block), digested(genesis)]),
             ));
             assert!(poll!(&mut verify).is_pending());
@@ -1336,6 +1347,7 @@ mod tests {
                 mailbox
                     .verify(
                         (context.child("verify_child"), child.context()),
+                        (),
                         ancestry::from_iter([digested(child.clone()), digested(parent.clone())]),
                     )
                     .await
@@ -1349,6 +1361,7 @@ mod tests {
                     mailbox
                         .verify(
                             (context.child(label), parent.context()),
+                            (),
                             ancestry::from_iter([
                                 digested(parent.clone()),
                                 digested(genesis.clone())
@@ -1442,6 +1455,7 @@ mod tests {
             let mut verifier = mailbox.clone();
             let mut verify = Box::pin(verifier.verify(
                 (context.child("verify_child"), child.context()),
+                (),
                 ancestry::from_iter([digested(child), digested(parent.clone())]),
             ));
             assert!(poll!(&mut verify).is_pending());
@@ -1455,6 +1469,7 @@ mod tests {
                     context.child("propose"),
                     TestBlock::child(&parent, 3).context(),
                 ),
+                (),
                 ancestry::from_iter([digested(parent.clone()), digested(genesis)]),
                 (),
             ));
@@ -1498,6 +1513,7 @@ mod tests {
                     context.child("propose"),
                     TestBlock::child(&parent, 3).context(),
                 ),
+                (),
                 ancestry::from_iter([digested(parent.clone()), digested(genesis)]),
                 (),
             ));
@@ -1509,6 +1525,7 @@ mod tests {
             let mut verifier = mailbox.clone();
             let mut verify = Box::pin(verifier.verify(
                 (context.child("verify_child"), child.context()),
+                (),
                 ancestry::from_iter([digested(child), digested(parent.clone())]),
             ));
             assert!(poll!(&mut verify).is_pending());
@@ -1564,16 +1581,20 @@ mod tests {
         let mut mailbox = mailbox.clone();
         Box::pin(async move {
             match request {
-                Managed::Verify => mailbox.verify((runtime, block.context()), ancestry).await,
+                Managed::Verify => {
+                    mailbox
+                        .verify((runtime, block.context()), (), ancestry)
+                        .await
+                }
                 Managed::Prepare => match mailbox
-                    .prepare((runtime, build_context), ancestry, ())
+                    .prepare((runtime, build_context), (), ancestry, ())
                     .await
                 {
                     Handoff::Vote(built) => built.parent() == block.digest(),
                     _ => false,
                 },
                 Managed::Propose => mailbox
-                    .propose((runtime, build_context), ancestry, ())
+                    .propose((runtime, build_context), (), ancestry, ())
                     .await
                     .is_some_and(|built| built.parent() == block.digest()),
             }
@@ -1599,7 +1620,7 @@ mod tests {
         let verify_blocks = blocks.clone();
         let mut verify: PendingRequest = Box::pin(async move {
             verifier
-                .verify(verify_context, ancestry::from_iter(verify_blocks))
+                .verify(verify_context, (), ancestry::from_iter(verify_blocks))
                 .await
         });
         let mut proposer = mailbox.clone();
@@ -1609,7 +1630,7 @@ mod tests {
         );
         let mut prepare: PendingPrepare = Box::pin(async move {
             proposer
-                .prepare(prepare_context, ancestry::from_iter(blocks), ())
+                .prepare(prepare_context, (), ancestry::from_iter(blocks), ())
                 .await
         });
         if verify_first {
@@ -1817,6 +1838,7 @@ mod tests {
             let mut first_verifier = mailbox.clone();
             let mut first = Box::pin(first_verifier.verify(
                 (context.child("first"), block.context()),
+                (),
                 ancestry::from_iter(blocks.clone()),
             ));
             assert!(poll!(&mut first).is_pending());
@@ -1826,6 +1848,7 @@ mod tests {
             let mut second_verifier = mailbox.clone();
             let mut second = Box::pin(second_verifier.verify(
                 (context.child("second"), block.context()),
+                (),
                 ancestry::from_iter(blocks),
             ));
             assert!(poll!(&mut second).is_pending());
@@ -1870,6 +1893,7 @@ mod tests {
             let mut verifier = mailbox.clone();
             let mut verify = Box::pin(verifier.verify(
                 (context.child("verify"), block.context()),
+                (),
                 ancestry::from_iter([digested(block.clone()), digested(genesis)]),
             ));
             assert!(poll!(&mut verify).is_pending());
@@ -1882,10 +1906,11 @@ mod tests {
             // it, so the report shows the finalization has started waiting.
             let (unavailable, _, parked) = GatedAncestry::new([]);
             let mut acquiring_verifier = mailbox.clone();
-            let mut acquiring = Box::pin(
-                acquiring_verifier
-                    .verify((context.child("acquiring"), block.context()), unavailable),
-            );
+            let mut acquiring = Box::pin(acquiring_verifier.verify(
+                (context.child("acquiring"), block.context()),
+                (),
+                unavailable,
+            ));
             assert!(poll!(&mut acquiring).is_pending());
             let (acknowledgement, waiter) = Exact::handle();
             let mut waiter = Box::pin(waiter);
@@ -1941,6 +1966,7 @@ mod tests {
             let mut verifier = mailbox.clone();
             let mut verify = Box::pin(verifier.verify(
                 (context.child("verify"), child.context()),
+                (),
                 ancestry::from_iter([digested(child.clone()), digested(block.clone())]),
             ));
             assert!(poll!(&mut verify).is_pending());
@@ -1952,10 +1978,11 @@ mod tests {
             // it, so the report shows the finalization is waiting for the block's processing.
             let (unavailable, _, paused) = GatedAncestry::new([]);
             let mut acquiring_verifier = mailbox.clone();
-            let mut acquiring = Box::pin(
-                acquiring_verifier
-                    .verify((context.child("acquiring"), child.context()), unavailable),
-            );
+            let mut acquiring = Box::pin(acquiring_verifier.verify(
+                (context.child("acquiring"), child.context()),
+                (),
+                unavailable,
+            ));
             assert!(poll!(&mut acquiring).is_pending());
             let (acknowledgement, waiter) = Exact::handle();
             let _ = mailbox.report(Update::Block(digested(block.clone()), acknowledgement));
@@ -2029,6 +2056,7 @@ mod tests {
             let mut acquiring_verifier = mailbox.clone();
             let mut acquiring = Box::pin(acquiring_verifier.verify(
                 (context.child("acquiring"), competing.context()),
+                (),
                 unavailable,
             ));
             assert!(poll!(&mut acquiring).is_pending());
@@ -2097,6 +2125,7 @@ mod tests {
             let mut seeder = mailbox.clone();
             let mut seed = Box::pin(seeder.verify(
                 (context.child("parent"), parent.context()),
+                (),
                 ancestry::from_iter([digested(parent.clone()), digested(genesis.clone())]),
             ));
             assert!(poll!(seed.as_mut()).is_pending());
@@ -2151,7 +2180,7 @@ mod tests {
             let mut calls: Vec<_> = callers
                 .iter_mut()
                 .zip(requests)
-                .map(|(caller, (context, ancestry))| Box::pin(caller.verify(context, ancestry)))
+                .map(|(caller, (context, ancestry))| Box::pin(caller.verify(context, (), ancestry)))
                 .collect();
             for call in &mut calls {
                 assert!(poll!(call.as_mut()).is_pending());
@@ -2235,6 +2264,7 @@ mod tests {
                 first_verifier
                     .verify(
                         (context.child("verify_first"), first.context()),
+                        (),
                         ancestry::from_iter([digested(first.clone()), digested(genesis)]),
                     )
                     .await
@@ -2247,6 +2277,7 @@ mod tests {
             let mut losing_verifier = mailbox.clone();
             let mut verify_losing = Box::pin(losing_verifier.verify(
                 (context.child("verify_losing"), block.context()),
+                (),
                 ancestry::from_iter([digested(block), digested(parent)]),
             ));
             assert!(poll!(&mut verify_losing).is_pending());
@@ -2342,10 +2373,11 @@ mod tests {
             // which happens once the finalization has started waiting.
             let (unavailable, _, parked) = GatedAncestry::new([]);
             let mut acquiring_verifier = mailbox.clone();
-            let mut acquiring = Box::pin(
-                acquiring_verifier
-                    .verify((context.child("acquiring"), parent.context()), unavailable),
-            );
+            let mut acquiring = Box::pin(acquiring_verifier.verify(
+                (context.child("acquiring"), parent.context()),
+                (),
+                unavailable,
+            ));
             assert!(poll!(&mut acquiring).is_pending());
             let (acknowledgement, waiter) = Exact::handle();
             let _ = mailbox.report(Update::Block(digested(parent.clone()), acknowledgement));
@@ -2379,6 +2411,7 @@ mod tests {
                 mailbox
                     .verify(
                         (context.child("verify_built"), built.context()),
+                        (),
                         ancestry::from_iter([digested(built.clone()), digested(parent)]),
                     )
                     .await
@@ -2462,6 +2495,7 @@ mod tests {
                 !mailbox
                     .verify(
                         (context.child("verify_child"), child.context()),
+                        (),
                         ancestry::from_iter([digested(child.clone()), digested(parent.clone())]),
                     )
                     .await
@@ -2497,6 +2531,7 @@ mod tests {
                 !mailbox
                     .verify(
                         (context.child("verify"), conflicting.context()),
+                        (),
                         ancestry::from_iter([digested(conflicting), digested(genesis)]),
                     )
                     .await,
@@ -2563,6 +2598,7 @@ mod tests {
             let consensus_context = block.context();
             let mut verify = Box::pin(verifier.verify(
                 (context.child("verify"), consensus_context),
+                (),
                 ancestry::from_iter([digested(block), digested(verify_genesis)]),
             ));
             let subscriber = mailbox.clone();
@@ -2572,6 +2608,7 @@ mod tests {
             let proposal_context = TestBlock::child(&genesis, 2).context();
             let mut proposal = Box::pin(mailbox.propose(
                 (context.child("propose"), proposal_context),
+                (),
                 ancestry::from_iter([digested(genesis)]),
                 (),
             ));
@@ -2590,6 +2627,7 @@ mod tests {
                     context.child("acquiring"),
                     TestBlock::child(&TestBlock::new(0, 0), 3).context(),
                 ),
+                (),
                 acquiring_ancestry,
             ));
             assert!(poll!(&mut acquiring).is_pending());
@@ -2662,6 +2700,7 @@ mod tests {
                 verifier
                     .verify(
                         verification_context,
+                        (),
                         ancestry::from_iter([digested(block), digested(verify_genesis)]),
                     )
                     .await
@@ -2675,6 +2714,7 @@ mod tests {
             let mut proposer = mailbox.clone();
             let mut proposal = Box::pin(proposer.propose(
                 (context.child("propose"), proposal_context),
+                (),
                 ancestry::from_iter([digested(genesis)]),
                 (),
             ));
@@ -2689,7 +2729,7 @@ mod tests {
                 let request_context = (context.child("queued_verify"), queued_context.clone());
                 let ancestry = PendingAncestry(admissions.clone());
                 let mut request: PendingRequest =
-                    Box::pin(async move { caller.verify(request_context, ancestry).await });
+                    Box::pin(async move { caller.verify(request_context, (), ancestry).await });
                 assert!(poll!(&mut request).is_pending());
                 queued.push(request);
             }
@@ -2734,6 +2774,7 @@ mod tests {
             let mut proposer = mailbox.clone();
             let mut proposal = Box::pin(proposer.propose(
                 (context.child("propose"), proposal_context),
+                (),
                 ancestry::from_iter([digested(genesis.clone())]),
                 (),
             ));
@@ -2744,6 +2785,7 @@ mod tests {
             let consensus_context = block.context();
             let mut verify = Box::pin(mailbox.verify(
                 (context.child("verify"), consensus_context),
+                (),
                 ancestry::from_iter([digested(block), digested(genesis)]),
             ));
             assert!(poll!(&mut verify).is_pending());
@@ -2812,7 +2854,7 @@ mod tests {
             );
             let genesis = TestBlock::new(0, 0);
             let winner = TestBlock::child(&genesis, 1);
-            let proposal = deferred.prepare(winner.context()).await;
+            let proposal = deferred.prepare(winner.context(), ()).await;
             proposal_started.await.expect("proposal should start");
 
             // The finalization queues behind the held build. A later verification starts
@@ -2826,6 +2868,7 @@ mod tests {
                     context.child("acquiring"),
                     TestBlock::child(&genesis, 2).context(),
                 ),
+                (),
                 acquiring_ancestry,
             ));
             assert!(poll!(&mut acquiring).is_pending());
@@ -2905,6 +2948,7 @@ mod tests {
                     context.child("propose"),
                     TestBlock::child(&parent, 3).context(),
                 ),
+                (),
                 ancestry::from_iter([digested(parent)]),
                 (),
             ));
@@ -2992,6 +3036,7 @@ mod tests {
             let mut verifier = mailbox.clone();
             let mut verify_outgoing = Box::pin(verifier.verify(
                 (context.child("outgoing"), outgoing.context()),
+                (),
                 ancestry::from_iter([digested(outgoing.clone()), digested(genesis.clone())]),
             ));
             assert!(poll!(&mut verify_outgoing).is_pending());
@@ -3006,7 +3051,7 @@ mod tests {
             // The handoff build on the uncertified parent processes the parent and is then held,
             // and a finalization report queues behind it ahead of the parent's verification.
             let mut handoff = deferred
-                .prepare(TestBlock::child(&parent, 3).context())
+                .prepare(TestBlock::child(&parent, 3).context(), ())
                 .await;
             parent_started
                 .await
@@ -3019,10 +3064,10 @@ mod tests {
             let _ = mailbox.report(Update::Block(digested(outgoing.clone()), acknowledgement));
 
             // The parent verifies and certifies from its processed state while the build is held.
-            let optimistic = deferred.verify(parent.context(), parent.digest()).await;
+            let optimistic = deferred.verify(parent.context(), (), parent.digest()).await;
             assert_eq!(optimistic.await, Ok(true));
             let certify = deferred
-                .certify(parent.context().round, parent.digest())
+                .certify(parent.context().round, (), parent.digest())
                 .await;
             assert_eq!(certify.await, Ok(true));
             assert!(poll!(&mut handoff).is_pending());
@@ -3100,6 +3145,7 @@ mod tests {
                     context.child("propose"),
                     TestBlock::child(&genesis, 4).context(),
                 ),
+                (),
                 ancestry::from_iter([digested(genesis.clone())]),
                 (),
             ));
@@ -3122,6 +3168,7 @@ mod tests {
             let mut verifier = mailbox.clone();
             let mut verify = Box::pin(verifier.verify(
                 (context.child("verify"), other.context()),
+                (),
                 ancestry::from_iter([digested(other), digested(genesis)]),
             ));
             assert!(poll!(&mut verify).is_pending());
@@ -3233,6 +3280,7 @@ mod tests {
                     context.child("propose"),
                     TestBlock::child(&genesis, 5).context(),
                 ),
+                (),
                 ancestry::from_iter([digested(genesis.clone())]),
                 (),
             ));
@@ -3247,6 +3295,7 @@ mod tests {
             let mut winner_verifier = mailbox.clone();
             let mut verify_winner = Box::pin(winner_verifier.verify(
                 (context.child("verify_winner"), winner.context()),
+                (),
                 ancestry::from_iter([digested(winner.clone()), digested(genesis)]),
             ));
             assert!(poll!(&mut verify_winner).is_pending());
@@ -3256,12 +3305,14 @@ mod tests {
             let mut child_verifier = mailbox.clone();
             let mut verify_child = Box::pin(child_verifier.verify(
                 (context.child("verify_child"), child.context()),
+                (),
                 ancestry::from_iter([digested(child), digested(winner)]),
             ));
             assert!(poll!(&mut verify_child).is_pending());
             let mut losing_verifier = mailbox.clone();
             let mut verify_losing = Box::pin(losing_verifier.verify(
                 (context.child("verify_losing"), losing_child.context()),
+                (),
                 ancestry::from_iter([digested(losing_child), digested(losing)]),
             ));
             assert!(poll!(&mut verify_losing).is_pending());
@@ -3324,6 +3375,7 @@ mod tests {
             let mut parent_verifier = mailbox.clone();
             let mut verify_parent = Box::pin(parent_verifier.verify(
                 (context.child("verify_parent"), losing_parent.context()),
+                (),
                 ancestry::from_iter([digested(losing_parent.clone()), digested(genesis.clone())]),
             ));
             assert!(poll!(&mut verify_parent).is_pending());
@@ -3341,6 +3393,7 @@ mod tests {
                     context.child("propose"),
                     TestBlock::child(&genesis, 4).context(),
                 ),
+                (),
                 ancestry::from_iter([digested(genesis.clone())]),
                 (),
             ));
@@ -3350,6 +3403,7 @@ mod tests {
             let mut child_verifier = mailbox.clone();
             let mut verify_child = Box::pin(child_verifier.verify(
                 (context.child("verify_child"), losing_child.context()),
+                (),
                 ancestry::from_iter([digested(losing_child), digested(losing_parent)]),
             ));
             assert!(poll!(&mut verify_child).is_pending());
@@ -3366,6 +3420,7 @@ mod tests {
                 mailbox
                     .verify(
                         (context.child("verify_genesis"), genesis.context()),
+                        (),
                         ancestry::from_iter([digested(genesis)]),
                     )
                     .await,
@@ -3414,6 +3469,7 @@ mod tests {
             let parent_context = parent.context();
             let mut verify_parent = Box::pin(parent_verifier.verify(
                 (context.child("verify_parent"), parent_context),
+                (),
                 ancestry::from_iter([digested(parent.clone()), digested(parent_genesis)]),
             ));
             assert!(poll!(&mut verify_parent).is_pending());
@@ -3429,6 +3485,7 @@ mod tests {
             let mut child_verifier = mailbox.clone();
             let mut verify_child = Box::pin(child_verifier.verify(
                 (context.child("verify_child"), child_context),
+                (),
                 ancestry::from_iter([digested(child), digested(parent.clone())]),
             ));
             assert!(poll!(&mut verify_child).is_pending());
@@ -3470,6 +3527,7 @@ mod tests {
             let fork_context = losing_parent.context();
             let mut verify_fork = Box::pin(fork_verifier.verify(
                 (context.child("verify_fork"), fork_context),
+                (),
                 ancestry::from_iter([digested(losing_parent.clone()), digested(fork_genesis)]),
             ));
             assert!(poll!(&mut verify_fork).is_pending());
@@ -3483,6 +3541,7 @@ mod tests {
             let mut child_verifier = mailbox.clone();
             let mut verify_child = Box::pin(child_verifier.verify(
                 (context.child("verify_child"), child_context),
+                (),
                 ancestry::from_iter([digested(losing_child), digested(losing_parent)]),
             ));
             assert!(poll!(&mut verify_child).is_pending());
@@ -3494,9 +3553,11 @@ mod tests {
             // its acquisition.
             let (unavailable, _gate, parked) = GatedAncestry::new([]);
             let mut prober = mailbox.clone();
-            let mut acquiring = Box::pin(
-                prober.verify((context.child("acquiring"), winner.context()), unavailable),
-            );
+            let mut acquiring = Box::pin(prober.verify(
+                (context.child("acquiring"), winner.context()),
+                (),
+                unavailable,
+            ));
             assert!(poll!(&mut acquiring).is_pending());
 
             let (acknowledgement, mut waiter) = Exact::handle();
@@ -3547,6 +3608,7 @@ mod tests {
             let mut parent_verifier = mailbox.clone();
             let mut verify_parent = Box::pin(parent_verifier.verify(
                 (context.child("verify_parent"), losing_parent.context()),
+                (),
                 ancestry::from_iter([digested(losing_parent.clone()), digested(genesis.clone())]),
             ));
             assert!(poll!(&mut verify_parent).is_pending());
@@ -3561,6 +3623,7 @@ mod tests {
             let mut child_verifier = mailbox.clone();
             let mut verify_child = Box::pin(child_verifier.verify(
                 (context.child("verify_child"), losing_child.context()),
+                (),
                 ancestry::from_iter([digested(losing_child.clone()), digested(losing_parent)]),
             ));
             assert!(poll!(&mut verify_child).is_pending());
@@ -3578,6 +3641,7 @@ mod tests {
                     context.child("verify_grandchild"),
                     losing_grandchild.context(),
                 ),
+                (),
                 ancestry::from_iter([digested(losing_grandchild), digested(losing_child)]),
             ));
             assert!(poll!(&mut verify_grandchild).is_pending());
@@ -3589,9 +3653,11 @@ mod tests {
             // its acquisition.
             let (unavailable, _gate, parked) = GatedAncestry::new([]);
             let mut prober = mailbox.clone();
-            let mut acquiring = Box::pin(
-                prober.verify((context.child("acquiring"), winner.context()), unavailable),
-            );
+            let mut acquiring = Box::pin(prober.verify(
+                (context.child("acquiring"), winner.context()),
+                (),
+                unavailable,
+            ));
             assert!(poll!(&mut acquiring).is_pending());
 
             let (acknowledgement, mut waiter) = Exact::handle();
@@ -3667,6 +3733,7 @@ mod tests {
             let mut verifier = mailbox.clone();
             let mut verify_child = Box::pin(verifier.verify(
                 (context.child("verify_child"), child.context()),
+                (),
                 ancestry::from_iter([digested(child), digested(finalized.clone())]),
             ));
             assert!(poll!(&mut verify_child).is_pending());
@@ -3797,6 +3864,7 @@ mod tests {
                     mailbox
                         .verify(
                             (task_context, consensus_context),
+                            (),
                             ancestry::from_iter([digested(block), digested(genesis)]),
                         )
                         .await
@@ -3858,11 +3926,13 @@ mod tests {
             let mut first_verifier = mailbox.clone();
             let mut first = Box::pin(first_verifier.verify(
                 (context.child("first_verify"), consensus_context.clone()),
+                (),
                 ancestry::from_iter([digested(first_child), digested(parent.clone())]),
             ));
             let mut second_verifier = mailbox.clone();
             let mut second = Box::pin(second_verifier.verify(
                 (context.child("second_verify"), consensus_context),
+                (),
                 ancestry::from_iter([digested(second_child), digested(parent.clone())]),
             ));
             assert!(poll!(&mut first).is_pending());
@@ -3873,9 +3943,11 @@ mod tests {
             // its acquisition.
             let (unavailable, _gate, parked) = GatedAncestry::new([]);
             let mut prober = mailbox.clone();
-            let mut acquiring = Box::pin(
-                prober.verify((context.child("acquiring"), parent.context()), unavailable),
-            );
+            let mut acquiring = Box::pin(prober.verify(
+                (context.child("acquiring"), parent.context()),
+                (),
+                unavailable,
+            ));
             assert!(poll!(&mut acquiring).is_pending());
 
             // Once finalization pauses the acquisition, it waits for the shared parent execution to
@@ -3984,6 +4056,7 @@ mod tests {
             let mut first_verifier = mailbox.clone();
             let mut verify_first = Box::pin(first_verifier.verify(
                 (context.child("verify_first"), first.context()),
+                (),
                 ancestry::from_iter([digested(first.clone()), digested(genesis)]),
             ));
             assert!(poll!(&mut verify_first).is_pending());
@@ -4002,8 +4075,11 @@ mod tests {
             // its acquisition.
             let (unavailable, _gate, parked) = GatedAncestry::new([]);
             let mut prober = mailbox.clone();
-            let mut acquiring =
-                Box::pin(prober.verify((context.child("acquiring"), first.context()), unavailable));
+            let mut acquiring = Box::pin(prober.verify(
+                (context.child("acquiring"), first.context()),
+                (),
+                unavailable,
+            ));
             assert!(poll!(&mut acquiring).is_pending());
 
             // Once the first finalization pauses the acquisition, it waits for the shared execution
@@ -4247,6 +4323,7 @@ mod tests {
             let mut verifier = mailbox.clone();
             let mut verify = Box::pin(verifier.verify(
                 (context.child("verify"), losing.context()),
+                (),
                 ancestry::from_iter([digested(losing), digested(block2)]),
             ));
             assert!(poll!(&mut verify).is_pending());
@@ -4277,6 +4354,7 @@ mod tests {
             let mut proposer = mailbox.clone();
             let mut proposal = Box::pin(proposer.propose(
                 (context.child("propose"), proposal_context),
+                (),
                 ancestry::from_iter([digested(winner)]),
                 (),
             ));
@@ -4358,6 +4436,7 @@ mod tests {
             let mut verifier = mailbox.clone();
             let mut verify = Box::pin(verifier.verify(
                 (context.child("verify"), consensus_context),
+                (),
                 ancestry::from_iter([digested(block3), digested(block2)]),
             ));
             assert!(poll!(&mut verify).is_pending());
@@ -4665,6 +4744,7 @@ mod tests {
             let mut verifier = mailbox.clone();
             let mut verify_child = Box::pin(verifier.verify(
                 (context.child("verify_child"), child.context()),
+                (),
                 ancestry::from_iter([digested(child), digested(tip.clone())]),
             ));
             assert!(poll!(&mut verify_child).is_pending());
@@ -4904,6 +4984,7 @@ mod tests {
             let mut verifier = mailbox.clone();
             let mut verify = Box::pin(verifier.verify(
                 (context.child("verify"), consensus_context),
+                (),
                 ancestry::from_iter([digested(block3), digested(block2)]),
             ));
             assert!(poll!(&mut verify).is_pending());
@@ -4971,6 +5052,7 @@ mod tests {
             let mut verifier = mailbox.clone();
             let mut verification = Box::pin(verifier.verify(
                 (context.child("verify"), candidate.context()),
+                (),
                 ancestry::from_iter([digested(candidate), digested(block2)]),
             ));
             assert!(poll!(&mut verification).is_pending());
@@ -5082,6 +5164,7 @@ mod tests {
             {
                 let verified = verifier.verify(
                     (context.child("verify_winner"), winner.context()),
+                    (),
                     ancestry::from_iter([digested(winner.clone()), digested(genesis.clone())]),
                 );
                 select! {
@@ -5100,6 +5183,7 @@ mod tests {
                 .push_back(gate);
             let mut verification = Box::pin(verifier.verify(
                 (context.child("verify_candidate"), candidate.context()),
+                (),
                 ancestry::from_iter([digested(candidate), digested(genesis)]),
             ));
             assert!(poll!(&mut verification).is_pending());
@@ -5204,6 +5288,7 @@ mod tests {
             let mut verifier = mailbox.clone();
             let verify = verifier.verify(
                 (context.child("verify"), block3.context()),
+                (),
                 ancestry::from_iter([digested(block3), digested(block2)]),
             );
             futures::pin_mut!(verify);
@@ -5542,7 +5627,7 @@ mod tests {
             };
             let mut verifier = mailbox.clone();
             let mut verification =
-                Box::pin(verifier.verify((context.child("verify"), child.context()), ancestry));
+                Box::pin(verifier.verify((context.child("verify"), child.context()), (), ancestry));
             assert!(poll!(&mut verification).is_pending());
             drop(mailbox.subscribe_databases().await);
             let acquisitions = clones.load(Ordering::SeqCst);
@@ -5577,6 +5662,7 @@ mod tests {
             let mut verifier = mailbox.clone();
             let mut verify = Box::pin(verifier.verify(
                 (context.child("verify"), block.context()),
+                (),
                 PendingAncestry(clones.clone()),
             ));
             assert!(poll!(&mut verify).is_pending());
@@ -5707,6 +5793,7 @@ mod tests {
             let mut first_mailbox = mailbox.clone();
             let mut first = Box::pin(first_mailbox.verify(
                 (context.child("first"), block.context()),
+                (),
                 ancestry::from_iter([digested(block.clone()), digested(genesis.clone())]),
             ));
             assert!(poll!(&mut first).is_pending());
@@ -5715,9 +5802,11 @@ mod tests {
             let (ancestry, ancestry_gate, _parked) =
                 GatedAncestry::new([digested(block.clone()), digested(genesis)]);
             let mut second_mailbox = mailbox.clone();
-            let mut second = Box::pin(
-                second_mailbox.verify((context.child("second"), block.context()), ancestry),
-            );
+            let mut second = Box::pin(second_mailbox.verify(
+                (context.child("second"), block.context()),
+                (),
+                ancestry,
+            ));
             assert!(poll!(&mut second).is_pending());
             drop(mailbox.subscribe_databases().await);
             assert!(
@@ -5783,9 +5872,11 @@ mod tests {
                 .expect("losing request must execute its block");
             let (unavailable, _gate, parked) = GatedAncestry::new([]);
             let mut verifier = mailbox.clone();
-            let mut acquiring = Box::pin(
-                verifier.verify((context.child("acquiring"), winner.context()), unavailable),
-            );
+            let mut acquiring = Box::pin(verifier.verify(
+                (context.child("acquiring"), winner.context()),
+                (),
+                unavailable,
+            ));
             assert!(poll!(&mut acquiring).is_pending());
 
             // Finalizing the winner pauses the acquisition and waits for the losing execution.
@@ -5851,8 +5942,11 @@ mod tests {
             let (unavailable, gate, parked) =
                 GatedAncestry::new([digested(winner.clone()), digested(genesis)]);
             let mut verifier = mailbox.clone();
-            let mut verification =
-                Box::pin(verifier.verify((context.child("winner"), winner.context()), unavailable));
+            let mut verification = Box::pin(verifier.verify(
+                (context.child("winner"), winner.context()),
+                (),
+                unavailable,
+            ));
             assert!(poll!(&mut verification).is_pending());
 
             // Finalizing the winner pauses its verification's acquisition. The block arrives
@@ -5906,6 +6000,7 @@ mod tests {
                 verifier
                     .verify(
                         (context.child("verify_finalized"), finalized.context()),
+                        (),
                         ancestry::from_iter([
                             digested(finalized.clone()),
                             digested(genesis.clone())

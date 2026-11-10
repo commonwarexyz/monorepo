@@ -72,7 +72,7 @@ pub struct Engine<
     E: Clock + Spawner + Storage + Metrics + CryptoRng,
     P: Provider<Scope = Epoch>,
     D: Digest,
-    A: Automaton<Context = Height, Digest = D>,
+    A: Automaton<Context = Height, Digest = D, Seed = ()>,
     Z: Reporter<Activity = Activity<P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
     B: Blocker<PublicKey = <P::Scheme as Verifier>::PublicKey>,
@@ -150,7 +150,7 @@ impl<
     E: Clock + Spawner + Storage + Metrics + CryptoRng,
     P: Provider<Scope = Epoch, Scheme: scheme::Scheme<D>>,
     D: Digest,
-    A: Automaton<Context = Height, Digest = D>,
+    A: Automaton<Context = Height, Digest = D, Seed = ()>,
     Z: Reporter<Activity = Activity<P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
     B: Blocker<PublicKey = <P::Scheme as Verifier>::PublicKey>,
@@ -711,7 +711,7 @@ impl<
         let mut automaton = self.automaton.clone();
         let timer = self.metrics.digest_duration.timer(self.context.as_ref());
         self.digest_requests.push(async move {
-            let receiver = automaton.propose(height).await;
+            let receiver = automaton.propose(height, ()).await;
             let result = receiver.await.map_err(Error::AppProposeCanceled);
             DigestRequest {
                 height,

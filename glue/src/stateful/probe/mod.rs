@@ -196,6 +196,7 @@ mod test {
         },
         simplex::{
             mocks::scheme::{self as scheme_mocks, Scheme as MockScheme},
+            scheme::Seeded,
             types::{Activity, Context as SimplexContext, Finalization, Finalize, Proposal},
         },
         types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
@@ -446,6 +447,14 @@ mod test {
         fn certificate_codec_config_unbounded() -> <Self::Certificate as commonware_codec::Read>::Cfg
         {
             Scheme::certificate_codec_config_unbounded()
+        }
+    }
+
+    impl Seeded for MaybeEnumerableScheme {
+        type Seed = <Scheme as Seeded>::Seed;
+
+        fn seed(round: Round, certificate: Option<&Self::Certificate>) -> Self::Seed {
+            Scheme::seed(round, certificate)
         }
     }
 

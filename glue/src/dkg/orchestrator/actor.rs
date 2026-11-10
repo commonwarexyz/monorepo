@@ -15,7 +15,7 @@ use commonware_consensus::{
     simplex::{
         self, Floor, ForwardPolicy, Plan, SkipPolicy,
         elector::Config as Elector,
-        scheme,
+        scheme::{self, Seeded},
         types::{Activity, Context},
     },
     types::{Epoch, Epocher, FixedEpocher, Height, ViewDelta},
@@ -212,6 +212,7 @@ where
     A: CertifiableAutomaton<
             Context = Context<MV::Commitment, <P::Scheme as Verifier>::PublicKey>,
             Digest = MV::Commitment,
+            Seed = <P::Scheme as Seeded>::Seed,
         > + Relay<
             Digest = MV::Commitment,
             PublicKey = <P::Scheme as Verifier>::PublicKey,
@@ -259,6 +260,7 @@ where
     A: CertifiableAutomaton<
             Context = Context<MV::Commitment, <P::Scheme as Verifier>::PublicKey>,
             Digest = MV::Commitment,
+            Seed = <P::Scheme as Seeded>::Seed,
         > + Relay<
             Digest = MV::Commitment,
             PublicKey = <P::Scheme as Verifier>::PublicKey,

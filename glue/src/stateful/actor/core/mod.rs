@@ -443,6 +443,7 @@ mod tests {
                 mailbox
                     .prepare(
                         (context.child("wait"), child.context()),
+                        (),
                         ancestry::from_iter([digested(genesis)]),
                         (),
                     )
@@ -468,6 +469,7 @@ mod tests {
                 let prepared = mailbox
                     .prepare(
                         (context.child("build"), child.context()),
+                        (),
                         ancestry::from_iter([digested(genesis)]),
                         (),
                     )
@@ -525,6 +527,7 @@ mod tests {
             select! {
                 result = mailbox.propose(
                     (context.child("proposal"), TestBlock::new(1, 1).context()),
+                    (),
                     ancestry::from_iter([]),
                     (),
                 ) => {
@@ -597,6 +600,7 @@ mod tests {
             let mut first_mailbox = mailbox.clone();
             let mut first = Box::pin(first_mailbox.verify(
                 (context.child("verify_first"), owners[0].context()),
+                (),
                 ancestry::from_iter([owners[0].clone()]),
             ));
             assert!(poll!(&mut first).is_pending());
@@ -604,6 +608,7 @@ mod tests {
             let mut second_mailbox = mailbox.clone();
             let mut second = Box::pin(second_mailbox.verify(
                 (context.child("verify_second"), owners[1].context()),
+                (),
                 ancestry::from_iter([owners[1].clone()]),
             ));
             assert!(poll!(&mut second).is_pending());
@@ -611,6 +616,7 @@ mod tests {
             let mut third_mailbox = mailbox.clone();
             let mut third = Box::pin(third_mailbox.verify(
                 (context.child("verify_third"), owners[2].context()),
+                (),
                 ancestry::from_iter([owners[2].clone()]),
             ));
             assert!(poll!(&mut third).is_pending());

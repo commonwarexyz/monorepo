@@ -6,7 +6,7 @@ use crate::{
         core::Mailbox,
         standard::Standard,
     },
-    simplex::types::Context,
+    simplex::{scheme::Seeded, types::Context},
     types::Epocher,
 };
 use commonware_codec::Codec;
@@ -76,7 +76,7 @@ pub(super) async fn precheck_epoch_and_reproposal<ES, S, B>(
 ) -> Option<Decision<Digested<B>>>
 where
     ES: Epocher,
-    S: Scheme,
+    S: Scheme + Seeded,
     B: Block + Codec,
 {
     // Block heights must map to the expected epoch.
@@ -187,6 +187,7 @@ where
 pub(super) async fn run_app_verify<E, S, A, B, T>(
     runtime_context: E,
     context: Context<B::Digest, S::PublicKey>,
+    seed: S::Seed,
     block: Digested<B>,
     parent: Digested<B>,
     application: &mut A,
@@ -196,7 +197,7 @@ pub(super) async fn run_app_verify<E, S, A, B, T>(
 ) -> Option<bool>
 where
     E: Supervisor + Clock,
-    S: Scheme,
+    S: Scheme + Seeded,
     A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>>,
     B: Block + Codec,
 {
@@ -209,6 +210,7 @@ where
     let validity_request = application
         .verify(
             (runtime_context.child("app_verify"), context.clone()),
+            seed,
             ancestry_stream,
         )
         .instrument(info_span!(

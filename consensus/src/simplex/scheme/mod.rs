@@ -42,7 +42,7 @@
 //! by binding randomness requests in finalized blocks **before** the reveal occurs (e.g.,
 //! `draw(view+100)`). See [`bls12381_threshold::vrf`] for details.
 
-use crate::simplex::types::Subject;
+use crate::{simplex::types::Subject, types::Round};
 use bytes::Bytes;
 use commonware_codec::Encode;
 use commonware_cryptography::{
@@ -53,6 +53,7 @@ use commonware_cryptography::{
     },
 };
 use commonware_utils::{N3f1, union};
+use std::fmt::Debug;
 
 pub mod bls12381_multisig;
 pub mod bls12381_threshold;
@@ -130,14 +131,37 @@ impl<D: Digest, S> CertificateVerifier<D> for S where
 {
 }
 
+/// Per-round randomness that a scheme derives from its certificates.
+///
+/// Consensus hands the seed of a proposal's parent round to the automaton with every request
+/// (see [`Automaton::Seed`](crate::Automaton::Seed)), so a scheme without per-round randomness
+/// still implements this trait with `()`.
+pub trait Seeded: Verifier {
+    /// Seed derived from a certificate for a round.
+    ///
+    /// Every valid certificate for a round must yield the same value, whatever its subject
+    /// (notarization, nullification, or finalization), quorum subset, or encoding: honest
+    /// participants derive the seed from whichever certificate for the round they hold, and
+    /// decisions based on it must agree.
+    ///
+    /// A round's seed is public once its votes are cast, before any proposal that builds on the
+    /// round exists, so it is not a secret for the proposals that receive it (see
+    /// [`bls12381_threshold::vrf`]).
+    type Seed: Clone + Debug + PartialEq + Eq + Send + Sync + 'static;
+
+    /// Derives the seed for `round` from a verified certificate for it, or the value that
+    /// stands for a round without a certificate when `certificate` is `None`.
+    fn seed(round: Round, certificate: Option<&Self::Certificate>) -> Self::Seed;
+}
+
 /// Marker trait for signing schemes compatible with `simplex`.
 ///
 /// This trait binds a [`CertificateScheme`] to the [`Subject`] subject type and
-/// [`N3f1`] fault model used by the simplex protocol. It is automatically
-/// implemented for any compatible scheme.
-pub trait Scheme<D: Digest>: CertificateVerifier<D> + CertificateScheme {}
+/// [`N3f1`] fault model used by the simplex protocol, and requires the scheme to be
+/// [`Seeded`]. It is automatically implemented for any compatible scheme.
+pub trait Scheme<D: Digest>: CertificateVerifier<D> + CertificateScheme + Seeded {}
 
-impl<D: Digest, S> Scheme<D> for S where S: CertificateVerifier<D> + CertificateScheme {}
+impl<D: Digest, S> Scheme<D> for S where S: CertificateVerifier<D> + CertificateScheme + Seeded {}
 
 // Constants for domain separation in signature verification
 // These are used to prevent cross-protocol attacks and message-type confusion

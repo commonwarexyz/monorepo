@@ -106,7 +106,7 @@ use crate::{
     },
     simplex::{
         Plan,
-        scheme::Scheme,
+        scheme::{Scheme, Seeded},
         types::{Activity, Context},
     },
     types::{Epoch, Epocher, Round, View, coding::Commitment},
@@ -334,6 +334,7 @@ where
     fn deferred_verify(
         &self,
         consensus_context: Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
+        seed: <Z::Scheme as Seeded>::Seed,
         commitment: Commitment<B, C, H>,
         prefetched_block: Option<Arc<CodedBlock<B, C, H>>>,
         stage: Stage,
@@ -468,6 +469,7 @@ where
                                 runtime_context.child("app_verify"),
                                 consensus_context.clone(),
                             ),
+                            seed,
                             ancestry_stream,
                         )
                         .instrument(info_span!(
@@ -512,6 +514,7 @@ where
         &self,
         round: Round,
         payload: Commitment<B, C, H>,
+        seed: <Z::Scheme as Seeded>::Seed,
     ) -> oneshot::Receiver<bool> {
         // Certify may be reached without an earlier `verify`, so the shard
         // engine may not know the leader yet. A notarized commitment is still
@@ -605,6 +608,7 @@ where
                 // prefetched block to avoid fetching it again inside deferred_verify.
                 let verify_rx = marshaled.deferred_verify(
                     embedded_context,
+                    seed,
                     payload,
                     Some(block),
                     Stage::Certified,
@@ -627,6 +631,7 @@ where
         &self,
         round: Round,
         payload: Commitment<B, C, H>,
+        seed: <Z::Scheme as Seeded>::Seed,
         task: oneshot::Receiver<GateOutcome>,
     ) -> oneshot::Receiver<bool> {
         // `verify()` intentionally waits only for local candidate data. Once
@@ -647,7 +652,7 @@ where
             .with_attribute("round", round);
         context.spawn(move |_| {
             gates::drive(tx, task, round, payload, move || {
-                marshaled.certify_from_embedded_context(round, payload)
+                marshaled.certify_from_embedded_context(round, payload, seed)
             })
             .instrument(info_span!(
                 "marshal.coding.certify.existing",
@@ -771,6 +776,7 @@ where
 {
     type Digest = Commitment<B, C, H>;
     type Context = Context<Self::Digest, <Z::Scheme as Verifier>::PublicKey>;
+    type Seed = <Z::Scheme as Seeded>::Seed;
 
     /// Proposes a new block or re-proposes the epoch boundary block.
     ///
@@ -790,6 +796,7 @@ where
     async fn propose(
         &mut self,
         consensus_context: Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
+        seed: Self::Seed,
     ) -> oneshot::Receiver<Self::Digest> {
         let strategy = self.strategy.clone();
         let erasure_encode_duration = self.erasure_encode_duration.clone();
@@ -811,6 +818,7 @@ where
             &self.application,
             self.gates.clone(),
             consensus_context,
+            seed,
             checks,
             span,
             move || {
@@ -845,6 +853,7 @@ where
     async fn verify(
         &mut self,
         consensus_context: Context<Self::Digest, <Z::Scheme as Verifier>::PublicKey>,
+        seed: Self::Seed,
         payload: Self::Digest,
     ) -> oneshot::Receiver<bool> {
         // If there's no scheme for the current epoch, we cannot vote on the proposal.
@@ -1014,7 +1023,7 @@ where
         // drops the verify receiver without cancelling certification for it, so
         // deferred verification must survive that drop for certify to consume.
         let round = consensus_context.round;
-        let task = self.deferred_verify(consensus_context, payload, None, Stage::Verified);
+        let task = self.deferred_verify(consensus_context, seed, payload, None, Stage::Verified);
         self.gates.insert(round, payload, task);
 
         match scheme.me().and_then(|m| m.signer()) {
@@ -1083,6 +1092,7 @@ where
     async fn prepare(
         &mut self,
         consensus_context: Context<Self::Digest, <Z::Scheme as Verifier>::PublicKey>,
+        seed: Self::Seed,
     ) -> oneshot::Receiver<Handoff<Self::Digest>> {
         let strategy = self.strategy.clone();
         let erasure_encode_duration = self.erasure_encode_duration.clone();
@@ -1099,6 +1109,7 @@ where
             &self.application,
             self.gates.clone(),
             consensus_context,
+            seed,
             checks,
             span,
             move || {
@@ -1120,16 +1131,21 @@ where
 
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.coding.certify", level = "info", skip_all, fields(round = %round, commitment = %payload))]
-    async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
+    async fn certify(
+        &mut self,
+        round: Round,
+        seed: Self::Seed,
+        payload: Self::Digest,
+    ) -> oneshot::Receiver<bool> {
         // First, check for an in-progress certification gate task.
         let task = self.gates.claim(round, payload, |block, ack| {
             self.marshal.verified_deferred(round, block, ack)
         });
         if let Some(task) = task {
-            return self.certify_from_existing_task(round, payload, task);
+            return self.certify_from_existing_task(round, payload, seed, task);
         }
 
-        self.certify_from_embedded_context(round, payload)
+        self.certify_from_embedded_context(round, payload, seed)
     }
 }
 

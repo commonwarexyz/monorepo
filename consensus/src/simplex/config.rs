@@ -1,5 +1,6 @@
 use super::{
     elector,
+    scheme::Seeded,
     types::{Activity, Context, Finalization},
 };
 use crate::{
@@ -136,11 +137,11 @@ impl<S: Scheme, D: Digest> Floor<S, D> {
 /// Configuration for the consensus engine.
 pub struct Config<S, L, B, D, A, R, F, T>
 where
-    S: Scheme,
+    S: Scheme + Seeded,
     L: elector::Config<S>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
-    A: CertifiableAutomaton<Context = Context<D, S::PublicKey>>,
+    A: CertifiableAutomaton<Context = Context<D, S::PublicKey>, Seed = S::Seed>,
     R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
     T: Strategy,
@@ -264,11 +265,11 @@ where
 }
 
 impl<
-    S: Scheme,
+    S: Scheme + Seeded,
     L: elector::Config<S>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
-    A: CertifiableAutomaton<Context = Context<D, S::PublicKey>>,
+    A: CertifiableAutomaton<Context = Context<D, S::PublicKey>, Seed = S::Seed>,
     R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
     T: Strategy,

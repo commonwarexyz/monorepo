@@ -79,6 +79,8 @@ pub type Ctx = Context<D, K>;
 pub type B = Block<D, Ctx>;
 pub type V = MinPk;
 pub type S = bls12381_threshold_vrf::Scheme<K, V>;
+/// The seed of a parent's round under [`S`].
+pub type Seed = Option<bls12381_threshold_vrf::Seed<V>>;
 pub type P = ConstantProvider<S, Epoch>;
 
 // Coding variant type aliases (uses Commitment in context)

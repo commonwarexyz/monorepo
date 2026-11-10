@@ -127,6 +127,7 @@
 
 use commonware_consensus::{
     CertifiableBlock, Epochable, Handoff, Viewable, marshal::ancestry::Ancestry,
+    simplex::scheme::Seeded,
 };
 use commonware_cryptography::certificate::Scheme;
 use db::DatabaseSet;
@@ -179,7 +180,7 @@ pub struct Input<Upstream, Provider> {
 pub trait Application<E>: Clone + Send + 'static {
     /// The signing scheme used by the application and by the marshal supplied through
     /// [`Config::marshal`](crate::stateful::Config::marshal).
-    type SigningScheme: Scheme;
+    type SigningScheme: Scheme + Seeded;
 
     /// Consensus metadata for a block (for example its proposer, epoch, and view).
     type Context: Clone + Epochable + Viewable + Send;

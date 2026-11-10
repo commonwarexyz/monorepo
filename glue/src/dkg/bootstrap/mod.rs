@@ -737,6 +737,7 @@ where
     async fn propose(
         &mut self,
         (_, context): (E, Self::Context),
+        (): (),
         ancestry: impl Ancestry<Self::Block>,
         input: Self::Input,
     ) -> Option<Digested<Self::Block>> {
@@ -749,6 +750,7 @@ where
     async fn verify(
         &mut self,
         _: (E, Self::Context),
+        (): (),
         _ancestry: impl Ancestry<Self::Block>,
     ) -> bool {
         // reshare::Application already rejects a mismatched final block and an
