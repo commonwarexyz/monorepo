@@ -2411,9 +2411,11 @@ impl Worker {
             }
 
             // The wait may have lasted long, and the next polls precede the
-            // next service pass, so sleeps polled in between compare their
-            // deadlines with the time of this return.
-            Sleep::set_turn(Instant::now());
+            // next service pass, so a first poll in between must not take a
+            // sleep created before the wait to be ahead. Marking the service
+            // time stale leaves the clock read to such a poll, so a turn that
+            // only repolls registered sleeps reads no clock for them.
+            Sleep::stale_turn();
         }
     }
 }

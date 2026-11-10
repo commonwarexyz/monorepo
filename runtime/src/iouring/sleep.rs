@@ -24,20 +24,29 @@
 //! most [`MAX_TIMEOUT`] ahead, and registers on the worker of its first
 //! pending poll, which keeps the registration for life. Every poll first
 //! compares the deadline with this thread's latest worker service time: the
-//! time at which its worker last started, ran a service pass, or returned from
-//! an idle wait, each of which polls can follow before the next service pass.
-//! A deadline at or before that time has passed, so the poll completes the
-//! sleep at once, wherever it was registered.
+//! time at which its worker last started or ran a service pass, each of which
+//! polls can follow before the next service pass. A deadline at or before that
+//! time has passed, so the poll completes the sleep at once, wherever it was
+//! registered.
 //!
 //! A first poll otherwise reads the clock and completes a deadline that has
 //! passed. One case spares the common timeout that read. A sleep of at least
-//! [`UNCHECKED_SLEEP`], on a thread whose service time is not later than the
-//! sleep's creation, registers unchecked. That thread's worker has taken no
-//! service time since the sleep was created, so the deadline has passed only
-//! if the thread has polled for longer than the sleep without serving its
-//! timers. The registration then fires at the worker's next service pass, or
-//! at a peer's rescue. A poll that observes closure reads the clock as well,
-//! to complete a deadline that has passed.
+//! [`UNCHECKED_SLEEP`], on a thread whose current service time is not later
+//! than the sleep's creation, registers unchecked. That thread's worker has
+//! taken no service time since the sleep was created, so the deadline has
+//! passed only if the thread has polled for longer than the sleep without
+//! serving its timers. The registration then fires at the worker's next
+//! service pass, or at a peer's rescue. A poll that observes closure reads the
+//! clock as well, to complete a deadline that has passed.
+//!
+//! Polls can follow an idle wait before the next service pass as well. The
+//! wait marks the service time stale rather than reading the clock. The next
+//! first poll on the thread reads the clock instead, records that time as the
+//! current service time, and compares the deadline with it alone. Repolls of
+//! registered sleeps compare with the recorded time, stale or not, since the
+//! clock has reached it all the same. A stale time only lets such a sleep
+//! complete at its expiry rather than early, and a worker that wakes only to
+//! repoll held sleeps reads no clock for them.
 //!
 //! Polls on any thread act on the registering worker's timers directly. So
 //! does a drop on any thread but the registering worker's, or on that worker
@@ -291,9 +300,20 @@ pub const DROPPED_CAPACITY: usize = 16 * BUDGET as usize;
 const UNCHECKED_SLEEP: Duration = Duration::from_millis(1);
 
 thread_local! {
-    /// Time at which this thread's worker last started, ran a service pass, or
-    /// returned from an idle wait, `None` on a thread that never ran a worker.
-    static TURN: Cell<Option<Instant>> = const { Cell::new(None) };
+    /// This thread's latest worker service time, `None` on a thread that
+    /// never ran a worker.
+    static TURN: Cell<Option<Turn>> = const { Cell::new(None) };
+}
+
+/// A worker service time recorded on its thread.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Turn {
+    /// Time at which the worker last started or ran a service pass, or at
+    /// which a first poll read the clock after an idle wait.
+    time: Instant,
+    /// Whether the worker has waited idle since `time`, so that the next
+    /// first poll reads the clock before it compares a deadline.
+    stale: bool,
 }
 
 /// How a registration ended.
@@ -993,28 +1013,59 @@ impl Sleep {
         Self::new(duration)
     }
 
-    /// Record the time of this worker's start, service pass, or return from an
-    /// idle wait, which sleeps polled on this thread compare their deadlines
-    /// with.
+    /// Record the time of this worker's start or service pass, which sleeps
+    /// polled on this thread compare their deadlines with.
     #[inline]
     pub fn set_turn(now: Instant) {
-        TURN.set(Some(now));
+        TURN.set(Some(Turn {
+            time: now,
+            stale: false,
+        }));
     }
 
-    /// Whether `deadline` is at or before this thread's latest worker service
-    /// time, which never runs ahead of the clock, so that it has passed.
+    /// Mark this thread's latest worker service time stale after an idle
+    /// wait, so that the next first poll on the thread reads the clock.
+    /// Repolls of registered sleeps keep comparing with the recorded time.
+    #[inline]
+    pub fn stale_turn() {
+        if let Some(turn) = TURN.get() {
+            TURN.set(Some(Turn {
+                stale: true,
+                ..turn
+            }));
+        }
+    }
+
+    /// Whether `deadline` is at or before this thread's latest recorded worker
+    /// service time, stale or not, which never runs ahead of the clock, so that
+    /// it has passed.
     #[inline]
     fn reached(deadline: Instant) -> bool {
-        TURN.get().is_some_and(|turn| deadline <= turn)
+        TURN.get().is_some_and(|turn| deadline <= turn.time)
     }
 
-    /// Whether the first poll of a sleep may take its deadline to be ahead
-    /// without reading the clock. It may if the sleep kept `created`, its
-    /// creation time, and this thread's latest worker service time is not
-    /// later.
+    /// Whether the deadline of a sleep's first poll has passed, given
+    /// `created`, the sleep's creation time if it kept one. A current service
+    /// time on this thread at or after the deadline completes it. Otherwise
+    /// the clock decides, unless the sleep kept `created` and the service time
+    /// is not later, in which case the deadline is taken to be ahead. A stale
+    /// service time gives way to the clock, whose reading becomes the current
+    /// one.
     #[inline]
-    fn unchecked(created: Option<Instant>) -> bool {
-        created.is_some_and(|created| TURN.get().is_some_and(|turn| turn <= created))
+    fn passed(deadline: Instant, created: Option<Instant>) -> bool {
+        match TURN.get() {
+            Some(Turn { time, stale: false }) => {
+                deadline <= time
+                    || (!created.is_some_and(|created| time <= created)
+                        && deadline <= Instant::now())
+            }
+            Some(Turn { stale: true, .. }) => {
+                let now = Instant::now();
+                Self::set_turn(now);
+                deadline <= now
+            }
+            None => deadline <= Instant::now(),
+        }
     }
 }
 
@@ -1048,9 +1099,7 @@ impl Future for Sleep {
                 // the clock, so a deadline at or before it has passed, and the
                 // sleep needs neither a worker nor a registration. Otherwise
                 // the clock decides, unless the sleep may register unchecked.
-                if Self::reached(deadline)
-                    || (!Self::unchecked(created) && deadline <= Instant::now())
-                {
+                if Self::passed(deadline, created) {
                     this.state = State::Done;
                     return Poll::Ready(());
                 }
@@ -1152,6 +1201,14 @@ pub mod tests {
                 panic!("sleep is not unregistered");
             };
             (deadline, created)
+        }
+
+        /// Whether the first poll of a sleep may take its deadline to be ahead
+        /// without reading the clock, if this thread's recorded service time
+        /// is current. It may if the sleep kept `created`, its creation time,
+        /// and the recorded time is not later.
+        fn unchecked(created: Option<Instant>) -> bool {
+            created.is_some_and(|created| TURN.get().is_some_and(|turn| turn.time <= created))
         }
     }
 
@@ -1263,9 +1320,17 @@ pub mod tests {
         LOCKS.get()
     }
 
-    /// The time of this thread's latest worker service pass.
+    /// The service time that a first poll on this thread compares with,
+    /// which such a poll would read from the clock if an idle wait left the
+    /// recorded one stale.
     pub fn turn() -> Option<Instant> {
-        TURN.get()
+        let turn = TURN.get()?;
+        if !turn.stale {
+            return Some(turn.time);
+        }
+        let now = Instant::now();
+        Sleep::set_turn(now);
+        Some(now)
     }
 
     /// Counts wakes.
@@ -2963,6 +3028,66 @@ pub mod tests {
                 ready,
                 "a first poll after an idle wait missed a passed deadline"
             );
+            task.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_repoll_after_an_idle_wait_reads_no_clock() {
+        let cfg = Config::default().with_worker_threads(2);
+        Runner::new(cfg).start(|context| async move {
+            // A task holds a registered sleep while it waits for a message,
+            // and reports the service time it finds when woken, after a
+            // repoll of the held sleep, and after a first poll of a new one.
+            let root = thread::current().id();
+            let (waiting, waited) = oneshot::channel();
+            let (sender, receiver) = oneshot::channel::<()>();
+            let (polled, report) = mpsc::channel();
+            let task = context.spawn(move |_| async move {
+                let mut held = Sleep::new(Duration::from_secs(60));
+                assert!(poll!(&mut held).is_pending());
+                waiting.send(()).unwrap();
+                receiver.await.unwrap();
+                let woken = TURN.get().unwrap();
+                assert!(poll!(&mut held).is_pending());
+                let repolled = TURN.get().unwrap();
+                let mut new = Sleep::new(Duration::from_secs(60));
+                assert!(poll!(&mut new).is_pending());
+                polled
+                    .send((
+                        thread::current().id() == root,
+                        woken,
+                        repolled,
+                        TURN.get().unwrap(),
+                    ))
+                    .unwrap();
+            });
+            waited.await.unwrap();
+
+            // The root keeps its worker in one poll from here on, so only the
+            // other worker can run the task. That worker finds nothing to do
+            // meanwhile, and waits idle.
+            thread::sleep(Duration::from_millis(50));
+
+            // A wake from outside the pool queues the task in the global
+            // queue, which the other worker takes from as soon as it returns
+            // from its wait, before its next service pass.
+            thread::spawn(move || assert!(sender.send(()).is_ok()))
+                .join()
+                .unwrap();
+            let (on_root, woken, repolled, first) = report
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the other worker did not poll the task");
+            assert!(!on_root);
+
+            // The wait left the service time stale without reading the clock,
+            // and the repoll compared with it as recorded.
+            assert!(woken.stale);
+            assert_eq!(repolled, woken);
+
+            // The first poll of the new sleep read the clock and recorded it.
+            assert!(!first.stale);
+            assert!(first.time > woken.time);
             task.await.unwrap();
         });
     }
