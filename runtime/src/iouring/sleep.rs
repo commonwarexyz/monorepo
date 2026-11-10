@@ -2685,6 +2685,34 @@ pub mod tests {
     }
 
     #[test]
+    fn test_dedicated_worker_fires_a_full_budget_per_pass() {
+        Runner::default().start(|context| async move {
+            context
+                .dedicated()
+                .spawn(|_| async {
+                    // One more than a budget of sleeps share a deadline that
+                    // passes before the next service pass.
+                    let (count, waker) = counter();
+                    let deadline = Instant::now() + Duration::from_millis(2);
+                    let mut sleeps: Vec<_> = (0..=BUDGET).map(|_| Sleep::at(deadline)).collect();
+                    for sleep in &mut sleeps {
+                        pend(sleep, &waker);
+                    }
+                    let (timers, _) = registration(&sleeps[0]);
+                    thread::sleep(Duration::from_millis(3));
+
+                    // A dedicated worker has no run queue to cap its expiry,
+                    // so its next service pass fires a full budget.
+                    reschedule().await;
+                    assert_eq!(count.get(), BUDGET as usize);
+                    assert_eq!(timers.resident(), 1);
+                })
+                .await
+                .unwrap();
+        });
+    }
+
+    #[test]
     fn test_exact_deadlines_share_one_firing_time() {
         Runner::default().start(|context| async move {
             // A dedicated worker's timers are private, so nothing else registers.
@@ -3008,6 +3036,9 @@ pub mod tests {
         passed: bool,
         /// The panic message of a first poll of a deadline still ahead.
         ahead: String,
+        /// Whether a first poll that skips the clock completed a deadline
+        /// that passed after the worker's latest service time.
+        unchecked: bool,
     }
 
     /// A waker that, when woken, polls new sleeps for the first time.
@@ -3037,12 +3068,22 @@ pub mod tests {
             }))
             .expect_err("a sleep registered on a closing worker");
             let ahead = extract_panic_message(&*ahead);
+
+            // A sleep created after the latest service time skips the clock
+            // on its first poll. Its deadline has passed by then, so the
+            // closing worker completes it rather than registering it.
+            let mut sleep = Sleep::new(UNCHECKED_SLEEP);
+            assert!(sleep.unregistered().1.is_some());
+            std::thread::sleep(UNCHECKED_SLEEP);
+            let unchecked = catch_unwind(AssertUnwindSafe(|| sleep.poll_unpin(&mut cx).is_ready()))
+                .unwrap_or(false);
             assert!(
                 self.0
                     .set(FirstPoll {
                         closing,
                         passed,
-                        ahead
+                        ahead,
+                        unchecked
                     })
                     .is_ok()
             );
@@ -3072,10 +3113,12 @@ pub mod tests {
             closing,
             passed,
             ahead,
+            unchecked,
         } = polls.0.get().expect("closure did not wake the sleep");
         assert!(*closing);
         assert!(*passed);
         assert_eq!(ahead, "io_uring sleep polled after its worker closed");
+        assert!(*unchecked);
     }
 
     #[test]
@@ -3425,6 +3468,32 @@ pub mod tests {
                     reschedule().await;
                     assert_eq!(timers.published(), u64::MAX);
                     assert_eq!(timers_next(), u64::MAX);
+                })
+                .await
+                .unwrap();
+        });
+    }
+
+    #[test]
+    fn test_crowding_first_polls_lower_the_cached_bound_to_the_bucket_start() {
+        Runner::default().start(|context| async move {
+            context
+                .dedicated()
+                .spawn(|_| async {
+                    // Eight budgets of sleeps a minute ahead crowd one high
+                    // wheel bucket, each registered by its first poll.
+                    let mut sleeps: Vec<_> = (0..8 * BUDGET)
+                        .map(|_| Sleep::new(Duration::from_secs(60)))
+                        .collect();
+                    for sleep in &mut sleeps {
+                        pend(sleep, Waker::noop());
+                    }
+
+                    // The worker caches the wheel's bound, the bucket's start,
+                    // while peers read the earliest firing time.
+                    let (timers, _) = registration(&sleeps[0]);
+                    assert!(timers_next() < timers.published());
+                    assert_eq!(timers_next(), timers.bound());
                 })
                 .await
                 .unwrap();
@@ -3889,72 +3958,71 @@ pub mod tests {
 
     #[test]
     fn test_waking_peer_rescues_a_stalled_owner() {
-        /// Period of the other worker's own sleep, after which it wakes from
-        /// each park.
+        /// Period of the wakes that reach the pool from outside.
         const PERIOD: Duration = Duration::from_millis(10);
 
         let cfg = Config::default().with_worker_threads(2);
-        let fired = Runner::new(cfg).start(|context| async move {
-            // Two runnable tasks make a backlog that the other worker steals
-            // from. The one it polls sleeps there in a loop, so that worker
-            // parks and wakes for its own timer once per period. The other
-            // ends.
-            let root = thread::current().id();
+        Runner::new(cfg).start(|context| async move {
+            // A task that only waits for wakes from a thread outside the pool,
+            // one per period. Each wake queues it in the global queue, which
+            // only the other worker can take from while this one stalls, so
+            // that worker parks and wakes once per period. The task holds no
+            // sleep, which a rescue by this worker could move here.
             let stop = Arc::new(AtomicBool::new(false));
-            let moved = Arc::new(AtomicBool::new(false));
-            let tasks: Vec<_> = (0..2)
-                .map(|_| {
-                    let (stop, moved) = (stop.clone(), moved.clone());
-                    context.child("heartbeat").spawn(move |context| async move {
-                        while thread::current().id() == root {
-                            if moved.load(Ordering::Acquire) {
-                                return;
-                            }
-                            reschedule().await;
+            let (parked, wakers) = mpsc::channel::<Waker>();
+            let task = context.child("heartbeat").spawn({
+                let stop = stop.clone();
+                move |_| {
+                    std::future::poll_fn(move |cx| {
+                        // Hand the waker over before reading the flag, so the
+                        // wake that follows the flag finds it.
+                        parked.send(cx.waker().clone()).unwrap();
+                        if stop.load(Ordering::Acquire) {
+                            return Poll::Ready(());
                         }
-                        moved.store(true, Ordering::Release);
-                        while !stop.load(Ordering::Acquire) {
-                            context.sleep(PERIOD).await;
-                        }
+                        Poll::Pending
                     })
-                })
-                .collect();
-            let start = Instant::now();
-            while !moved.load(Ordering::Acquire) {
-                assert!(start.elapsed() < Duration::from_secs(10), "no task moved");
-                reschedule().await;
-            }
+                }
+            });
+            let clock = thread::spawn({
+                let stop = stop.clone();
+                move || {
+                    while !stop.load(Ordering::Acquire) {
+                        thread::sleep(PERIOD);
+                        if let Some(waker) = wakers.try_iter().last() {
+                            waker.wake();
+                        }
+                    }
+                    wakers
+                }
+            });
 
-            // Let the task left here end and the other worker settle.
-            context.sleep(Duration::from_millis(20)).await;
+            // Let the other worker settle into its park between wakes.
+            context.sleep(2 * PERIOD).await;
 
-            // Register on worker zero, then stall it inside this poll for up
-            // to 300 ms, until the sleep fires.
+            // Register on worker zero, then stall it inside this poll until
+            // the sleep fires, which only the peer can make happen meanwhile.
             let (count, waker) = counter();
             let mut sleep = Sleep::new(Duration::from_millis(5));
             pend(&mut sleep, &waker);
             let start = Instant::now();
-            while count.get() == 0 && start.elapsed() < Duration::from_millis(300) {
+            while count.get() == 0 {
+                assert!(
+                    start.elapsed() < Duration::from_secs(10),
+                    "the waking peer did not rescue the stalled owner's sleep"
+                );
                 std::hint::spin_loop();
             }
-            let fired = (count.get() > 0).then(|| start.elapsed());
 
-            // Finish the sleep and the tasks.
+            // Finish the sleep, the clock and the task.
             sleep.await;
             stop.store(true, Ordering::Release);
-            for task in tasks {
-                task.await.unwrap();
+            let wakers = clock.join().unwrap();
+            if let Some(waker) = wakers.try_iter().last() {
+                waker.wake();
             }
-            fired
+            task.await.unwrap();
         });
-
-        // The deadline, the threshold, and at most one period to the peer's
-        // next wake, with slack for a loaded host.
-        let fired = fired.expect("the waking peer did not rescue the stalled owner's sleep");
-        assert!(
-            fired < Duration::from_millis(6) + PERIOD + Duration::from_millis(40),
-            "rescued after {fired:?}"
-        );
     }
 
     #[test]
