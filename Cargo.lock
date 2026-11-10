@@ -1799,6 +1799,7 @@ dependencies = [
  "commonware-clearing",
  "commonware-codec",
  "commonware-cryptography",
+ "commonware-parallel",
  "libfuzzer-sys",
 ]
 
