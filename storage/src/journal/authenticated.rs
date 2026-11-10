@@ -3095,6 +3095,7 @@ mod tests {
         assert_eq!(journal.frontier.boundary(), (start, pins));
         // The boundary sits mid-blob, so a prune before it leaves the start there.
         assert_eq!(journal.prune_target(15), 20);
+
         assert_eq!(journal.prune_target(40), 35);
         let (journal, pruned) = journal.prune(Location::new(40)).await.unwrap();
         assert_eq!(pruned, Location::new(35));

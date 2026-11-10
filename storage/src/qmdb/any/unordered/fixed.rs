@@ -1841,7 +1841,11 @@ pub(crate) mod test {
             let db = rewrite(db, &mut rng).await;
             let (start, size, root) = (db.sync_boundary(), db.bounds().end, db.root());
             let db = rewrite(db, &mut rng).await;
-            assert!(db.sync_boundary() > start, "the floor did not move");
+            let per_blob = cfg.log.items_per_blob.get();
+            assert!(
+                *db.sync_boundary() / per_blob > *start / per_blob,
+                "the floor did not pass the target's blob"
+            );
 
             // Prune to the previous target, as a node does to the oldest target it serves.
             let db = db.prune(start).await.unwrap();
