@@ -27,7 +27,7 @@ use commonware_coding::{Config as CodingConfig, EncodedSegment, Scheme, Segmenta
 use commonware_cryptography::{Digested, Hasher, PublicKey};
 use commonware_macros::select;
 use commonware_parallel::Strategy;
-use commonware_runtime::Spawner;
+use commonware_runtime::{Handle, Spawner};
 use commonware_utils::channel::{fallible::OneshotExt, mpsc, oneshot};
 use tracing::{debug, warn};
 
@@ -49,7 +49,7 @@ struct Streamed<C: Segmentable> {
 pub(crate) struct BodyStream<C: Segmentable> {
     config: CodingConfig,
     finish: oneshot::Sender<()>,
-    streamed: oneshot::Receiver<Option<Streamed<C>>>,
+    streamed: Handle<Option<Streamed<C>>>,
 }
 
 impl<C: Segmentable> BodyStream<C> {
@@ -71,15 +71,11 @@ impl<C: Segmentable> BodyStream<C> {
         let encoder = C::encoder(config);
         let (sink, bytes) = BodySink::channel();
         let (finish, finish_rx) = oneshot::channel();
-        let (streamed_tx, streamed) = oneshot::channel();
-        context
+        let streamed = context
             .child("body_stream")
             .with_attribute("round", round)
-            .spawn(move |_| async move {
-                let streamed =
-                    stream::<B, C, H, P, S>(strategy, shards, round, encoder, bytes, finish_rx)
-                        .await;
-                streamed_tx.send_lossy(streamed);
+            .spawn(move |_| {
+                stream::<B, C, H, P, S>(strategy, shards, round, encoder, bytes, finish_rx)
             });
         (
             sink,
@@ -319,12 +315,13 @@ mod tests {
     }
 
     /// Runs one build that pushes `pushes` to the sink and seals `block`, and returns the sealed
-    /// block and the segments handed to the shards engine.
+    /// block, the segments handed to the shards engine, and how many of them it held before the
+    /// block was sealed.
     #[allow(clippy::type_complexity)]
     fn build(
         block: CodingB,
         pushes: Vec<Bytes>,
-    ) -> (CodedBlock<CodingB, SC, H>, Vec<StreamedSegment<SC>>) {
+    ) -> (CodedBlock<CodingB, SC, H>, Vec<StreamedSegment<SC>>, usize) {
         deterministic::Runner::default().start(|context| async move {
             // A shards mailbox whose receiver records what the build sends the engine.
             let (sender, mut receiver) = mailbox::new::<Message<CodingB, SC, H, K>>(
@@ -342,29 +339,36 @@ mod tests {
                 sink.push(piece);
                 context.sleep(Duration::from_millis(1)).await;
             }
-            let sealed = stream.seal(ready(block), &Sequential, &shards, round).await;
 
-            // Every message the build sent is a segment of this round.
+            // Every message the build sends is a segment of this round.
             let mut segments = Vec::new();
-            while let Ok(message) = receiver.try_recv() {
-                match message {
-                    Message::StreamSegment {
-                        round: streamed,
-                        segment,
-                    } => {
-                        assert_eq!(streamed, round);
-                        segments.push(segment);
+            let mut drain = |segments: &mut Vec<_>| {
+                while let Ok(message) = receiver.try_recv() {
+                    match message {
+                        Message::StreamSegment {
+                            round: streamed,
+                            segment,
+                        } => {
+                            assert_eq!(streamed, round);
+                            segments.push(segment);
+                        }
+                        _ => panic!("only segments must be sent while building"),
                     }
-                    _ => panic!("only segments must be sent while building"),
                 }
-            }
-            (sealed, segments)
+            };
+
+            // Segments sent before sealing are counted apart from those the seal sends.
+            drain(&mut segments);
+            let early = segments.len();
+            let sealed = stream.seal(ready(block), &Sequential, &shards, round).await;
+            drain(&mut segments);
+            (sealed, segments, early)
         })
     }
 
     /// Streaming the body and sealing produces the commitment and shards of a whole-block
     /// encode, and every segment reaches the shards engine in order with the chunk of each
-    /// shard.
+    /// shard. The segments the pushed body completes reach it before the block is sealed.
     #[test]
     fn test_streamed_block_matches_whole_encode() {
         // Three uneven pushes seal the block that a whole-block encode produces.
@@ -372,10 +376,14 @@ mod tests {
         let block = block(round);
         let expected =
             encode_block::<CodingB, SC, H>(block.clone(), coding_config_for_participants(4));
-        let (sealed, segments) = build(block.clone(), pieces(&block));
+        let (sealed, segments, early) = build(block.clone(), pieces(&block));
         assert_eq!(sealed.commitment(), expected.commitment());
         assert_eq!(sealed.digest(), expected.digest());
         assert!(sealed.shards(&Sequential) == expected.shards(&Sequential));
+        assert!(
+            early >= 2,
+            "the segments the pushes complete must be sent before sealing"
+        );
 
         // Each segment reached the engine in order, with its root and every shard's chunk.
         let shards = expected.shards(&Sequential);
@@ -399,7 +407,7 @@ mod tests {
         let block = block(round);
         let expected =
             encode_block::<CodingB, SC, H>(block.clone(), coding_config_for_participants(4));
-        let (sealed, segments) = build(block, Vec::new());
+        let (sealed, segments, _) = build(block, Vec::new());
         assert_eq!(sealed.commitment(), expected.commitment());
         assert!(segments.is_empty());
     }
@@ -415,7 +423,7 @@ mod tests {
             encode_block::<CodingB, SC, H>(block.clone(), coding_config_for_participants(4));
         let mut pushes = pieces(&block);
         pushes.pop();
-        let (sealed, _) = build(block, pushes);
+        let (sealed, _, _) = build(block, pushes);
         assert_eq!(sealed.commitment(), expected.commitment());
         assert!(sealed.shards(&Sequential) == expected.shards(&Sequential));
     }
