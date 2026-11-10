@@ -14,10 +14,10 @@
 //!
 //! Two peers exchange messages only while each tracks the other, as on an authenticated network.
 //! A peer tracks the peers listed in the peer sets it follows. By default it follows the
-//! network-wide sets, tracked through [Oracle::manager] or [Oracle::socket_manager]. Each call to
-//! [Control::manager] or [Control::socket_manager] gives the peer new, empty sets of its own
-//! instead, as starting a node does. Use this when peers advance through peer sets at different
-//! times.
+//! network-wide sets, tracked through [Oracle::manager] or [Oracle::socket_manager]. Once
+//! [Control::manager] or [Control::socket_manager] is called for a peer, it follows sets of its own
+//! instead, as a node does. Use this when peers advance through peer sets at different times, and
+//! [Control::reset_peer_sets] when a peer restarts.
 //!
 //! # Bandwidth Simulation
 //!
@@ -3128,7 +3128,7 @@ mod tests {
     }
 
     #[test]
-    fn test_manager_starts_peer_sets_empty() {
+    fn test_reset_peer_sets_starts_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, oracle) = Network::new(
@@ -3166,15 +3166,22 @@ mod tests {
             assert_eq!(updates.recv().await.unwrap().index, 2);
             assert!(delivered(&context, &mut sender1, &mut receiver2, &pk2).await);
 
-            // A new manager forgets the old sets and ends their subscriptions
-            let mut restarted = control1.manager();
-            assert!(restarted.peer_set(2).await.is_none());
+            // Another manager for the same peer shares its sets
+            let mut shared = oracle.control(pk1.clone()).manager();
+            assert!(shared.peer_set(2).await.is_some());
+            shared.track(3, Set::try_from([pk2.clone()]).unwrap());
+            assert_eq!(updates.recv().await.unwrap().index, 3);
+            assert!(delivered(&context, &mut sender1, &mut receiver2, &pk2).await);
+
+            // A reset forgets the old sets and ends their subscriptions
+            control1.reset_peer_sets();
+            assert!(manager1.peer_set(3).await.is_none());
             assert!(updates.recv().await.is_none());
             assert!(!delivered(&context, &mut sender1, &mut receiver2, &pk2).await);
 
             // An id older than the forgotten sets is accepted
-            restarted.track(1, Set::try_from([pk2.clone()]).unwrap());
-            assert!(restarted.peer_set(1).await.is_some());
+            manager1.track(1, Set::try_from([pk2.clone()]).unwrap());
+            assert!(manager1.peer_set(1).await.is_some());
             assert!(delivered(&context, &mut sender1, &mut receiver2, &pk2).await);
         });
     }

@@ -35,7 +35,7 @@ use futures::future;
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque, btree_map},
     fmt::Debug,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroUsize,
@@ -503,6 +503,15 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     ///
     /// Panics if `owner` has no tracker. [`ingress::Message::OwnPeerSets`] creates it before any
     /// other message names `owner`.
+    fn tracker(&self, owner: Option<&P>) -> &Tracker<P> {
+        owner.map_or(&self.network_tracker, |owner| {
+            self.own_trackers
+                .get(owner)
+                .expect("own peer sets must be created before use")
+        })
+    }
+
+    /// Mutable form of [`Self::tracker`].
     fn tracker_mut(&mut self, owner: Option<&P>) -> &mut Tracker<P> {
         match owner {
             Some(owner) => self
@@ -604,6 +613,12 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 }
             }
             ingress::Message::OwnPeerSets { owner } => {
+                if let btree_map::Entry::Vacant(entry) = self.own_trackers.entry(owner) {
+                    entry.insert(Tracker::new());
+                    self.broadcast_peer_list();
+                }
+            }
+            ingress::Message::ResetPeerSets { owner } => {
                 self.own_trackers.insert(owner, Tracker::new());
                 self.broadcast_peer_list();
             }
@@ -656,7 +671,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 id,
                 response,
             } => {
-                let _ = response.send(self.tracker_mut(owner.as_ref()).peer_set(id));
+                let _ = response.send(self.tracker(owner.as_ref()).peer_set(id));
             }
             ingress::Message::Subscribe { owner, response } => {
                 let _ = response.send(self.tracker_mut(owner.as_ref()).subscribe());
@@ -798,9 +813,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
     /// Broadcast updated peer list to all connected peer subscribers.
     ///
-    /// This runs when tracked membership changes ([`ingress::Message::Track`] or
-    /// [`ingress::Message::OwnPeerSets`]), not when peers are first discovered via register,
-    /// links, or bandwidth limits.
+    /// This runs when tracked membership changes ([`ingress::Message::Track`],
+    /// [`ingress::Message::OwnPeerSets`] or [`ingress::Message::ResetPeerSets`]), not when peers
+    /// are first discovered via register, links, or bandwidth limits.
     ///
     /// Subscribers whose receivers have been dropped are removed to prevent
     /// memory leaks.

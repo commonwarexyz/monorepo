@@ -164,7 +164,9 @@ impl Network {
         oracle: &simulated::Oracle<PublicKey, DeterministicContext>,
         public_key: &PublicKey,
     ) -> TestManager {
+        // A node starts with empty peer sets, including after a restart
         let control = oracle.control(public_key.clone());
+        control.reset_peer_sets();
         match self {
             Self::Discovery => TestManager::Discovery(control.manager()),
             Self::Lookup => TestManager::Lookup(AddressableManager::new(control.socket_manager())),

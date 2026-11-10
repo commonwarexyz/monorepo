@@ -265,7 +265,6 @@ fn reshare_e2e_multiple_epochs(#[case] network: Network) {
 #[test_traced("INFO")]
 fn reshare_e2e_multiple_epochs_rotating_subset(
     #[case] network: Network,
-    // Seeds 5 and 7 failed on both transports while all peers shared one list of peer sets
     #[values(0, 5, 7)] seed: u64,
 ) {
     successful_reshare_plan_with_schemes(ReshareEngine::with_committee(network, 7, 4), 4)

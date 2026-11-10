@@ -40,7 +40,7 @@ Two peers exchange messages only while each tracks the other. In most tests, tra
 oracle.manager().track(0, Set::try_from([pk1.clone(), pk2.clone()]).unwrap());
 ```
 
-When nodes move through peer sets at different times, such as epochs in a reshare, give each node its own manager with `oracle.control(pk).manager()` (or `socket_manager()` for lookup) and track that node's sets through it. Each node then follows only its own sets, as on an authenticated network, and `tracked_peer_sets` limits each node's sets separately. Each call starts the node's sets empty, as a restart does, so call it once each time the node starts and clone the manager for the components that share it.
+When nodes move through peer sets at different times, such as epochs in a reshare, give each node its own manager with `oracle.control(pk).manager()` (or `socket_manager()` for lookup) and track that node's sets through it. Each node then follows only its own sets, as on an authenticated network, and `tracked_peer_sets` limits each node's sets separately. Every manager for a node shares that node's sets. When a test restarts a node, call `oracle.control(pk).reset_peer_sets()` before starting it again so its sets start empty, as a real node's do.
 
 ## Adversarial scenarios
 
