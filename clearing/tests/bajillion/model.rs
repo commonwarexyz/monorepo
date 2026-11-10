@@ -60,10 +60,12 @@
 //! Claimed ranges never overlap or touch.
 //!
 //! The witnesses each workload requires are listed with it. They cover admission and withdrawals
-//! while a close awaits its post, a request admitted in the epoch after its own and its copy
-//! refused after its own epoch settled it, a retry acknowledged, a post settling an unacknowledged
-//! request, a payout capped by the balance, a repeated payout or claim refused, an omitted row
-//! challenged, and claims draining the custody.
+//! while a close awaits its post, a next state admitted while the preceding close awaits its post,
+//! a state built on a map whose close awaits its post, a request admitted in the epoch after its
+//! own and its copy refused after its own epoch settled it, a retry acknowledged, a post settling
+//! an unacknowledged request, a post dropping a request whose next state builds on another row, a
+//! payout capped by the balance, a repeated payout or claim refused, an omitted row challenged, and
+//! claims draining the custody.
 //!
 //! The workloads reach these parts of the users' and the operator's obligations. The model checks
 //! every request's roots and map (S1), the sender verifies acknowledgements (S2), the model
