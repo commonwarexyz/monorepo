@@ -2834,7 +2834,8 @@ mod tests {
     }
 
     /// When the final block's parent is the finalized tip, the scan accepts a branch that ends
-    /// at that parent and rejects a parent that conflicts with the tip.
+    /// at that parent and rejects a parent that conflicts with the tip, whether the parent's
+    /// digest is resident or read from its body.
     #[test]
     fn pending_logs_authenticates_a_fully_finalized_parent() {
         let executor = deterministic::Runner::default();
@@ -2865,6 +2866,7 @@ mod tests {
                 finalized_tip: Some(tip),
                 final_height: Height::new(7),
             };
+            let fetched = [(canonical.clone(), true), (detached.clone(), false)];
 
             // A branch that ends at the finalized parent holds no pending log.
             assert!(
@@ -2879,6 +2881,17 @@ mod tests {
                     .await
                     .is_none()
             );
+
+            // A source with no resident digest reads the parent's body, and that
+            // body must be the finalized tip.
+            for (block, accepted) in fetched {
+                let (release, gate) = oneshot::channel();
+                let (source, started) = gated_blocks([block], gate);
+                release.send(()).expect("gate must be open");
+                let logs = pending_logs(scan(), source, context.stopped()).await;
+                started.await.expect("scan must read the parent's body");
+                assert_eq!(logs.is_some(), accepted);
+            }
         });
     }
 

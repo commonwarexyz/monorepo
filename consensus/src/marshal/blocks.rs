@@ -184,8 +184,15 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// and lower heights are [`Error::Unavailable`].
     ///
     /// With no finalized block stored there, the step acquires the body by its commitment and
-    /// takes the parent it names as the next commitment. Finalized storage is sampled once per
-    /// step and never awaited for a height that is not known to be finalized.
+    /// takes the parent it names as the next commitment. The first step reads the body of the
+    /// history's first commitment. That is the bound parent's body when `history` holds nothing
+    /// below it. Finalized storage is sampled once per step and never awaited for a height that
+    /// is not known to be finalized.
+    ///
+    /// An anchored history gives each commitment a height by its position below `parent_height`.
+    /// If a block on the branch declares a height that is not one above its parent's, the anchor's
+    /// inferred height is wrong, and a read below it can wait on a height that is not finalized.
+    /// Such a block fails its own certification, so nothing built on it can finalize.
     ///
     /// A polled range keeps the part of its remaining heights that `history` covers prefetched
     /// in forward order, within the capacity shared by all ranges

@@ -265,7 +265,8 @@ where
         }
 
         // A verification recovers state for the block's parent, and a proposal for the parent it
-        // builds on. The caller holds every body the request names, so none is acquired.
+        // builds on. The caller holds every body the request names, so the missing path excludes
+        // them.
         let (block, parent, blocks) = match request {
             Request::Verify(request) => (
                 Some(request.block.upgrade()?),

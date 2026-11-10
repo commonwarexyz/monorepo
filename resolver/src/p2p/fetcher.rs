@@ -517,11 +517,6 @@ where
         assert!(!self.pending.contains(&key));
         let retries = self.retries.entry(key.clone()).or_default();
         *retries = retries.saturating_add(1);
-
-        // A previous pending key may have pushed the waiter far into the future
-        // because no eligible peer could serve it. Clear the stale global waiter
-        // so this retry can drive pending processing again.
-        self.waiter = None;
         let deadline = self.context.current() + self.retry_delay;
         self.add_pending(key, true, deadline);
     }

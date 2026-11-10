@@ -80,7 +80,8 @@ where
     /// `blocks`, without borrowing the application or forking database batches.
     ///
     /// `block` is the verification's own block and must extend `parent`. It is `None` when
-    /// recovering a proposal's parent. The request holds both bodies, so neither is acquired.
+    /// recovering a proposal's parent. The request holds both bodies, so the missing path
+    /// excludes them.
     ///
     /// A verification of a cached block, or of a block at or below the branch anchor's height,
     /// needs no execution and is answered from the cache or the canonical block at that height.

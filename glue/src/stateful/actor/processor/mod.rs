@@ -16,9 +16,9 @@
 //! - Recovery: when a parent's state is not cached (for example after a restart), its missing
 //!   ancestors are acquired forward from the selected branch, starting above the nearest cached
 //!   ancestor or the branch anchor, and processed in height order as candidates. The parent comes
-//!   last and is never acquired, because the request holds it. A recovered state is cached only
-//!   if it matches its block's commitments. Concurrent requests that need the same block's state,
-//!   including a verification of that block, share one processing call.
+//!   last. The request holds it, so the acquired range ends below it. A recovered state is cached
+//!   only if it matches its block's commitments. Concurrent requests that need the same block's
+//!   state, including a verification of that block, share one processing call.
 //! - Finalization: processing of the finalized block and of competing branches finishes before
 //!   the block's state is applied, while processing of its descendants may continue. The caller
 //!   coordinates durability, so one database barrier can cover several finalizations.
@@ -139,7 +139,7 @@ struct ReplayPath<B: Block> {
     /// acquired.
     range: Option<BlockRange<B>>,
 
-    /// The target. Its request holds it, so it is never acquired, and it is taken once every
+    /// The target. Its request holds it, so the range ends below it, and it is taken once every
     /// block below it has been acquired.
     target: Option<Digested<B>>,
 
@@ -1178,11 +1178,11 @@ where
     /// Returns the path of missing blocks through `target`, or [`None`] if `target`'s state is
     /// cached or is the branch anchor. Forks no database batches.
     ///
-    /// `blocks` is the selected branch ending at `target`. The caller holds `target`, so it is
-    /// never acquired. When cached states exist and the search reaches a height whose commitment
-    /// is not resident, `blocks` discovers that digest and the search continues from that height
-    /// against the current cache, so recovery starts above the nearest cached ancestor. When
-    /// `blocks` selects no digest there, recovery starts above the branch anchor.
+    /// `blocks` is the selected branch ending at `target`. The caller holds `target`, so the
+    /// path's range ends below it. When cached states exist and the search reaches a height whose
+    /// commitment is not resident, `blocks` discovers that digest and the search continues from
+    /// that height against the current cache, so recovery starts above the nearest cached
+    /// ancestor. When `blocks` selects no digest there, recovery starts above the branch anchor.
     ///
     /// For any other `target`, returns [`PrepareBatchesError::Invalid`] if it is at or below the
     /// branch anchor's height, above the tip of `blocks`, or not the selected block at its

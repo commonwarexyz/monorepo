@@ -6046,10 +6046,12 @@ mod tests {
     /// Recorded `send` call on the [`RecordingBuffer`].
     type BufferSend = (Round, Digested<B>, Recipients<PublicKey>);
 
-    /// A buffer that records each `send` invocation, holds subscriptions until a
-    /// test delivers or closes them, and optionally serves locally inserted blocks.
+    /// A buffer that records each `send` invocation, holds subscriptions until a test delivers or
+    /// closes them, and optionally serves locally inserted blocks. With `lookup_only` set, it
+    /// offers no subscriptions.
     #[derive(Clone, Default)]
     struct RecordingBuffer {
+        lookup_only: bool,
         blocks: Arc<Mutex<Vec<B>>>,
         last_handed: Arc<Mutex<Option<Weak<B>>>>,
         evict_on_next_hit: Arc<Mutex<bool>>,
@@ -6136,6 +6138,9 @@ mod tests {
             &self,
             _commitment: D,
         ) -> Option<oneshot::Receiver<Digested<B>>> {
+            if self.lookup_only {
+                return None;
+            }
             let (sender, receiver) = oneshot::channel();
             self.commitment_subscriptions.lock().push(sender);
             Some(receiver)
@@ -14381,6 +14386,67 @@ mod tests {
                 "local repair must retire the parent's speculative request",
             );
             assert!(matches!(lease.try_recv(), Err(TryRecvError::Empty)));
+        });
+    }
+
+    /// Gap repair that archives a block from a buffer without notifications answers the callers
+    /// already waiting for its commitment and cancels the request they owned.
+    #[test_traced("WARN")]
+    fn test_standard_local_gap_repair_answers_exact_callers() {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let (mut mailbox, buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "local-gap-repair-exact-callers",
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::default(),
+                Some(RecordingBuffer {
+                    lookup_only: true,
+                    ..RecordingBuffer::default()
+                }),
+                Start::Genesis(genesis.clone()),
+            )
+            .await;
+            let buffer = buffer.unwrap();
+
+            // An acquiring caller, a waiting caller, and a finalized waiter register before the
+            // parent is available anywhere. The buffer offers no notification for it.
+            let parent = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let child = make_raw_block(parent.digest(), Height::new(2), 101);
+            let acquired = mailbox.acquire(parent.digest());
+            let subscribed = mailbox.subscribe(parent.digest());
+            let finalized_parent = mailbox.finalized(parent.height());
+            assert!(mailbox.get_block(&parent.digest()).await.is_none());
+            assert!(resolver.active_subscription(parent.digest()).is_some());
+            assert_eq!(buffer.commitment_subscription_count(), 0);
+
+            // The parent and its child reach the buffer, and the child's finalization lets gap
+            // repair archive the parent from there.
+            buffer.insert(parent.clone());
+            buffer.insert(child.clone());
+            report_finalized(
+                &mut mailbox,
+                &schemes,
+                Round::new(Epoch::zero(), View::new(2)),
+                View::new(1),
+                child.digest(),
+            )
+            .await;
+            assert_eq!(finalized_parent.await.unwrap().digest(), parent.digest());
+
+            // Both callers receive the archived parent, and the acquiring caller's request is
+            // canceled.
+            let (acquired, subscribed) = select! {
+                result = async { (acquired.await, subscribed.await) } => result,
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("local repair must answer the callers waiting for the block");
+                },
+            };
+            assert_eq!(acquired.unwrap().digest(), parent.digest());
+            assert_eq!(subscribed.unwrap().digest(), parent.digest());
+            assert!(resolver.active_subscription(parent.digest()).is_none());
         });
     }
 

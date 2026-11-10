@@ -2138,10 +2138,13 @@ where
         )
         .unwrap_or_else(|e| panic!("failed to finalize: {e}"));
 
-        // An archived block retires its speculative demand, canceling an active fetch, and
-        // answers waiters at its height.
+        // An archived block answers the callers waiting for its commitment and the waiters at
+        // its height, and retires its speculative demand. Any request a fetching caller or an
+        // active speculative fetch still holds for it is canceled.
         let commitment = V::commitment(block);
-        if self.prefetch.retire(commitment) {
+        let fetching = self.block_subscriptions.fetching(&commitment);
+        self.block_subscriptions.notify(block);
+        if self.prefetch.retire(commitment) || fetching {
             Self::cancel_subscription_requests(resolver, vec![commitment]);
         }
         self.finalized_subscriptions.notify(block);
