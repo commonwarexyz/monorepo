@@ -307,7 +307,7 @@ impl<S: Simd, F: Field<S>> Points<S> for Point<F> {
                 let first = Fp2::<F>::reduce_each::<6, 12, S>(
                     simd,
                     #[cfg_attr(not(debug_assertions), inline(always))]
-                    |k| first.sum(simd, k),
+                    |k| first.stage(simd, k),
                 );
                 let [x, y, z] = Fp2::<F>::reduce_each::<3, 6, S>(
                     simd,
@@ -334,12 +334,12 @@ impl<S: Simd, F: Field<S>> Points<S> for Point<F> {
                 let first = Fp2::<F>::reduce_each::<4, 8, S>(
                     simd,
                     #[cfg_attr(not(debug_assertions), inline(always))]
-                    |k| self.doubling(simd, k),
+                    |k| self.doubling_stage(simd, k),
                 );
                 let [x, y, z] = Fp2::<F>::reduce_each::<3, 6, S>(
                     simd,
                     #[cfg_attr(not(debug_assertions), inline(always))]
-                    |k| Self::doubled(simd, &first, k),
+                    |k| Self::doubled_coordinate(simd, &first, k),
                 );
                 Self { x, y, z }
             },
@@ -354,7 +354,7 @@ impl<F> Point<F> {
     /// Within the coordinate bounds, the reduced values have limb bound `1` and integer bounds at
     /// most `17`, `5`, `5`, and `43` in every representation.
     #[inline(always)]
-    pub(crate) fn doubling<S: Simd>(self, simd: S, k: usize) -> Fp2<F::Product>
+    pub(crate) fn doubling_stage<S: Simd>(self, simd: S, k: usize) -> Fp2<F::Product>
     where
         F: Field<S>,
     {
@@ -381,9 +381,9 @@ impl<F> Point<F> {
     }
 
     /// Returns the `k`th coordinate of the doubled point, as a sum of products to reduce, given the
-    /// reduced values of [`Self::doubling`].
+    /// reduced values of [`Self::doubling_stage`].
     #[inline(always)]
-    pub(crate) fn doubled<S: Simd>(
+    pub(crate) fn doubled_coordinate<S: Simd>(
         simd: S,
         &[yy, xy, yz, b3zz]: &[Fp2<F>; 4],
         k: usize,
@@ -460,7 +460,7 @@ where
     /// cross terms `X1 Y2 + Y1 X2`, `Y1 Z2 + Z1 Y2`, and `X1 Z2 + Z1 X2`, then
     /// `Y1 Y2 + 3b Z1 Z2`, `Y1 Y2 - 3b Z1 Z2`, and `X1 X2`.
     #[inline(always)]
-    pub(crate) fn sum(&self, simd: S, k: usize) -> Fp2<F::Product> {
+    pub(crate) fn stage(&self, simd: S, k: usize) -> Fp2<F::Product> {
         match k {
             0 => Fp2::<F>::difference::<8, S>(simd, self.cross(simd, 0, 1, (self.xx, self.yy))),
             1 => Fp2::<F>::difference::<8, S>(simd, self.cross(simd, 1, 2, (self.yy, self.zz))),
@@ -498,7 +498,7 @@ where
     }
 
     /// Returns the `k`th coordinate of the sum, as a sum of products to reduce, given the reduced
-    /// values of [`Self::sum`].
+    /// values of [`Self::stage`].
     #[inline(always)]
     pub(crate) fn coordinate(
         simd: S,
