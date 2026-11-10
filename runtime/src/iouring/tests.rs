@@ -10,8 +10,10 @@ use super::{
         park::tests::waiting,
         queue::CAPACITY,
         request::{RecvRequest, Request},
+        slab::Id,
         task::{Task, tests::cancelled},
         tasks::tests::AFTER_INSERT,
+        waiter::WaiterId,
     },
     *,
 };
@@ -4420,6 +4422,74 @@ fn test_shutdown_retains_a_taken_forward_until_polling_ends() {
         }
     });
     assert_eq!(forwarded.lock().as_deref(), Some("pending"));
+}
+
+/// A worker applies at most [`BATCH_SIZE`] messages a turn and takes a batch
+/// only into an empty scratch. A batch that starts while the worker still
+/// applies an earlier one notifies before the observation of the turn that
+/// empties the scratch, so that turn sees no notification since. It must find
+/// the batch through the mail flag before it parks, on its futex or in its
+/// io_uring wait, since no later send to that mailbox notifies.
+#[test]
+fn test_batch_started_during_a_long_batch_is_taken_before_parking() {
+    for in_ring in [false, true] {
+        Runner::new(config().with_worker_threads(2)).start(|context| async move {
+            let pool = context.shared.pool.clone();
+            let (_, _peer) = occupy_worker_one(&context, in_ring);
+
+            // No request has this identity, so neither its cancellation nor
+            // its forward makes worker one ready.
+            let stale = WaiterId(Id {
+                index: u32::MAX,
+                generation: 0,
+            });
+
+            // Hold worker one inside a poll while a batch one message longer
+            // than a turn's share queues in its mailbox.
+            let (release, held) = mpsc::channel::<()>();
+            let _ = spawn_elsewhere(&context, async move {
+                let _ = held.recv_timeout(TEST_TIMEOUT);
+            });
+            for _ in 0..=BATCH_SIZE {
+                assert!(
+                    pool.mailbox(1)
+                        .send(Message::Cancel(Cancel::Waiter(stale)))
+                        .is_ok()
+                );
+            }
+
+            // Once worker one has taken that batch and applied its share,
+            // start a second batch. Its notification precedes the observation
+            // of the turn that applies the last message of the first.
+            let (sender, mut receiver) = oneshot::channel();
+            on_next_park(&pool, 1, ParkPoint::AfterMessages, {
+                let pool = pool.clone();
+                move || {
+                    let mailbox = pool.mailbox(1);
+                    assert!(!mailbox.has_mail(), "the first batch must be taken");
+                    assert!(
+                        mailbox
+                            .send(Message::Forward(Forward::Waiter(stale, sender)))
+                            .is_ok()
+                    );
+                }
+            });
+            release.send(()).unwrap();
+
+            // Worker one parks again only once it has answered the forward.
+            spin_until(|| is_waiting(&pool, 1), "worker one must park again");
+            let answered = receiver.try_recv().is_ok();
+
+            // A worker that parked with the batch hears no later send to its
+            // mailbox, the pool's stop included, so notify it before failing.
+            pool.mailbox(1).unparker.unpark();
+            spin_until(
+                || !pool.mailbox(1).has_mail(),
+                "worker one must take the second batch once notified",
+            );
+            assert!(answered, "worker one parked with a batch in its mailbox");
+        });
+    }
 }
 
 /// Teardown clears two idle tasks whose destructors wake each other, so
