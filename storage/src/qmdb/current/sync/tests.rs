@@ -740,69 +740,6 @@ fn test_current_sync_persist_failure_reopens_at_target() {
     });
 }
 
-/// Dropping a database's anchors before a state sync removes both its log anchors and its grafted
-/// anchors, so a reopen rebuilds from the pruning base to the same root.
-#[test_traced]
-fn test_current_drop_anchors_before_sync() {
-    type Db = crate::qmdb::current::unordered::fixed::Db<
-        crate::merkle::mmr::Family,
-        Context,
-        Digest,
-        Digest,
-        Sha256,
-        crate::translator::TwoCap,
-        32,
-        Sequential,
-    >;
-    let grafted_anchors = |db: &Db| {
-        db.metadata
-            .keys()
-            .filter(|key| key.prefix() == crate::qmdb::current::db::ANCHOR_PREFIX)
-            .count()
-    };
-
-    let executor = deterministic::Runner::default();
-    executor.start(|context: Context| async move {
-        let config = fixed_config::<crate::translator::TwoCap>("drop-anchors");
-        let mut db: Db = Db::init(context.child("build"), config.clone(), None)
-            .await
-            .unwrap();
-        let key = Digest::from([9u8; 32]);
-        for round in 0..300u64 {
-            let merkleized = db
-                .new_batch()
-                .write(key, Some(Digest::from([round as u8; 32])))
-                .merkleize(&db)
-                .await
-                .unwrap();
-            db = db.apply_batch(merkleized).await.unwrap();
-            if round % 50 == 49 {
-                db = db.sync().await.unwrap();
-            }
-        }
-        assert!(!db.any.log.frontier.anchors().is_empty());
-        assert!(grafted_anchors(&db) > 0);
-        let root = db.root();
-        drop(db);
-
-        <Db as SyncDatabase>::drop_anchors(context.child("drop"), &config)
-            .await
-            .unwrap();
-
-        let db: Db = Db::init(context.child("reopen"), config, None)
-            .await
-            .unwrap();
-        assert!(db.any.log.frontier.anchors().is_empty());
-        assert_eq!(grafted_anchors(&db), 0);
-        assert_eq!(
-            db.any.log.merkle.bounds().start,
-            crate::merkle::Location::new(0)
-        );
-        assert_eq!(db.root(), root);
-        db.destroy().await.unwrap();
-    });
-}
-
 /// A catch-up sync interrupted after it writes the grafted metadata but before it records the
 /// boundary reopens at the target under the previous frontier.
 #[test_traced]
@@ -870,10 +807,6 @@ fn test_current_sync_interrupted_between_writes_reopens_at_target() {
             local.bounds().end < target.range.end(),
             "the sync must fetch a suffix"
         );
-        assert!(
-            !local.any.log.frontier.anchors().is_empty(),
-            "the local database recorded anchors"
-        );
         drop(local);
 
         // Run the sync by hand: fetch the missing operations and the boundary pins, build the
@@ -928,9 +861,8 @@ fn test_current_sync_interrupted_between_writes_reopens_at_target() {
         .unwrap();
         assert_eq!(SyncDatabase::ops_root(&db), target.root);
 
-        // Persist only the first of the two writes, then stop. Building the database already
-        // dropped the local anchors.
-        drop(db.reset_metadata().await.unwrap());
+        // Persist only the first of the two writes, then stop.
+        drop(db.sync_metadata().await.unwrap());
 
         // The database reopens at the target. The frontier is still the local one, so the
         // operations before the target start remain readable until the next prune.

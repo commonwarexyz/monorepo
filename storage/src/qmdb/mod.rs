@@ -53,8 +53,7 @@
 //! `commit()` makes applied state durable. `start_sync()` is its pipelined form, which also
 //! tries to advance the recovery watermark to bound startup recovery. `sync()` makes applied state
 //! durable and advances the operation journal's recovery watermark. Full databases rebuild their
-//! Merkle digests from retained operations at every startup, starting at the pruning boundary or
-//! at the newest anchor `sync` recorded at or before the inactivity floor.
+//! Merkle digests from retained operations at every startup.
 //!
 //! # Initialization bounds
 //!

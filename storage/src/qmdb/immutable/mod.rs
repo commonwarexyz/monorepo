@@ -284,7 +284,7 @@ where
     {
         // Snapshot reconstruction replays from the selected commit's inactivity floor, so that
         // floor must remain in the retained operation prefix.
-        let mut pending = crate::qmdb::prepare_initialization::<F, E, C, H, S>(
+        let pending = crate::qmdb::prepare_initialization::<F, E, C, H, S>(
             context.child("journal"),
             cfg.merkle,
             cfg.log,
@@ -294,7 +294,6 @@ where
         let inactivity_floor_loc = crate::qmdb::validate_initialization(&pending, true)
             .await?
             .unwrap_or(Location::new(0));
-        pending.replay_from_anchor(inactivity_floor_loc)?;
 
         // Rebuild the in-memory state the last commit defines, while the journal rebuilds its
         // digests. Its inactivity floor is where the snapshot replay starts, so keys set before
@@ -629,8 +628,6 @@ where
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
         self.journal = self.journal.sync().await?;
-        let boundary = self.sync_boundary();
-        self.journal = self.journal.anchor(boundary).await?;
         Ok(self)
     }
 
@@ -646,14 +643,8 @@ where
     #[tracing::instrument(name = "qmdb.immutable.db.start_sync", level = "info", skip_all)]
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
         self.metrics.start_sync_calls.inc();
-        let (data, anchor);
-        (self.journal, data) = self.journal.start_sync().await?;
-        let boundary = self.sync_boundary();
-        (self.journal, anchor) = self.journal.start_anchor(boundary).await?;
-        let handle = Handle::from_future(async move {
-            data.await?;
-            anchor.await
-        });
+        let handle;
+        (self.journal, handle) = self.journal.start_sync().await?;
         Ok((self, handle))
     }
 

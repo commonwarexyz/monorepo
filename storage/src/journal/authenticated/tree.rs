@@ -234,11 +234,6 @@ pub(crate) struct ChunkPlan {
 }
 
 impl ChunkPlan {
-    /// The first leaf of the first chunk.
-    pub(crate) const fn start(&self) -> u64 {
-        self.range.start
-    }
-
     /// The chunks, in position order.
     pub(crate) fn chunks(&self) -> impl Iterator<Item = Range<u64>> + Send + 'static {
         let (mut next, end, width) = (self.range.start, self.range.end, 1u64 << self.height);
@@ -486,25 +481,6 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         };
         tree.update_metrics();
         Ok(tree)
-    }
-
-    /// Restart the empty tree at `boundary`, whose pinned digests are `pins`.
-    pub(crate) fn rebase(
-        &mut self,
-        boundary: Location<F>,
-        pins: Vec<D>,
-    ) -> Result<(), super::Error<F>> {
-        assert_eq!(
-            self.leaves(),
-            self.boundary,
-            "only an empty tree can be rebased"
-        );
-        self.mem = Arc::new(Mem::from_components(Vec::new(), boundary, pins.clone())?);
-        self.boundary = boundary;
-        self.pins = F::nodes_to_pin(boundary).zip(pins).collect();
-        self.resident = Resident::new(self.resident.height, F::location_to_position(boundary));
-        self.update_metrics();
-        Ok(())
     }
 
     fn update_metrics(&self) {

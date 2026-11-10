@@ -36,7 +36,7 @@
 //!
 //! A Current database ([Db]) wraps an Any database and adds:
 //!
-//! - **Status bitmap** ([BitMap](commonware_utils::bitmap::Prunable)): One bit per operation in the log. Bit _i_ is 1 if operation _i_
+//! - **Status bitmap** ([BitMap]): One bit per operation in the log. Bit _i_ is 1 if operation _i_
 //!   is active, 0 otherwise. The bitmap is divided into fixed-size chunks of `N` bytes (i.e. `N *
 //!   8` bits each). `N` must be a power of two.
 //!
@@ -338,6 +338,7 @@ use crate::{
                 update::{Ordered as OrderedUpdate, Unordered as UnorderedUpdate},
             },
         },
+        bitmap::Shared,
         operation::Key,
         value::ValueEncoding,
     },
@@ -348,7 +349,7 @@ use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
-use commonware_utils::bitmap::Readable as _;
+use commonware_utils::bitmap::Prunable as BitMap;
 use core::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -502,54 +503,27 @@ where
     let strategy = cfg.merkle.strategy.clone();
     let metadata_partition = cfg.grafted_metadata_partition.clone();
 
-    // Load bitmap metadata: the pruning base and the anchors, each a pruned-chunk count with the
-    // grafted tree's pinned nodes there.
-    let (metadata, base, anchors) =
-        db::init_metadata::<F, _, H::Digest>(context.child("metadata"), &metadata_partition)
-            .await?;
+    // Load bitmap metadata (pruned_chunks + pinned nodes for the grafted tree).
+    let (metadata, pruned_chunks, pinned_nodes) =
+        db::init_metadata(context.child("metadata"), &metadata_partition).await?;
 
-    // The bitmap starts at the newest anchor the selected commit can be rebuilt from, else at the
-    // base. Each boundary constrains which retained commits can be reconstructed: their floors and
-    // sizes, and the delayed-pair absorption threshold. The underlying `any` database checks them
-    // before publishing the selected journal prefix, then populates the bitmap during snapshot
-    // rebuild.
-    let boundary = |chunks: usize| {
-        // A boundary must stand for a valid operation location, which a corrupt count can exceed.
-        let valid = (chunks as u64)
-            .checked_mul(commonware_utils::bitmap::Prunable::<N>::CHUNK_SIZE_BITS)
-            .is_some_and(|bits| Location::<F>::new(bits).is_valid());
-        if !valid {
-            return Err(crate::qmdb::Error::<F>::DataCorrupted(
-                "bitmap boundary past the last operation location",
-            ));
-        }
-        Ok(any::BitmapBoundary {
-            chunks,
-            min_size: db::pair_absorption_threshold::<F, N>(chunks as u64),
-        })
-    };
-    let boundaries = any::BitmapBoundaries {
-        base: boundary(base.0)?,
-        anchors: anchors
-            .iter()
-            .map(|(chunks, _)| boundary(*chunks))
-            .collect::<Result<_, _>>()?,
-    };
-    let any =
-        any::init_with_bitmap(context.child("any"), cfg.into(), Some(boundaries), max_size).await?;
-    let chunks = any.bitmap.pruned_chunks();
-    let pinned_nodes = if chunks == base.0 {
-        base.1
-    } else {
-        anchors
-            .into_iter()
-            .find(|(anchor, _)| *anchor == chunks)
-            .ok_or(crate::qmdb::Error::<F>::DataCorrupted(
-                "bitmap starts at no boundary",
-            ))?
-            .1
-    };
-    let metadata = db::drop_anchors_after::<F, _, N>(metadata, any.inactivity_floor_loc).await?;
+    // Pre-build the activity-status bitmap with the known pruned-chunk count from grafted metadata.
+    let bitmap = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
+        .map_err(|_| crate::qmdb::Error::<F>::DataCorrupted("pruned chunks overflow"))?;
+    let bitmap = Arc::new(Shared::<N>::new(bitmap));
+
+    // The persisted bitmap boundary and delayed-pair absorption threshold constrain which retained
+    // commit can be reconstructed. The underlying `any` database takes sole ownership of the
+    // bitmap, validates both constraints before publishing the selected journal prefix, then
+    // populates the bitmap during snapshot rebuild.
+    let any = any::init_with_bitmap(
+        context.child("any"),
+        cfg.into(),
+        Some(bitmap),
+        max_size,
+        db::pair_absorption_threshold::<F, N>(pruned_chunks as u64),
+    )
+    .await?;
 
     // Rebuild the grafted tree, graft roots, and ops root witness from the persisted pins and
     // selected operation tree.
@@ -2641,256 +2615,6 @@ pub mod tests {
             });
         }
         (db, history)
-    }
-
-    /// A reopen rebuilds the bitmap from the newest anchor. A prune before the anchor keeps the
-    /// pruning base, so a bounded restart at an earlier retained commit still works afterwards.
-    #[test_traced("INFO")]
-    fn test_current_reopens_from_anchor() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let partition = "current-anchor";
-            let (db, history) = build_generations(&context, partition, 6).await;
-            let last = history.last().unwrap();
-            let db = db.sync().await.unwrap();
-            drop(db);
-
-            let db: UnorderedVariableDb = UnorderedVariableDb::init(
-                context.child("reopen"),
-                variable_config::<OneCap>(partition),
-                None,
-            )
-            .await
-            .unwrap();
-            assert_eq!(db.root(), last.root);
-            assert_eq!(db.pruned_bits(), *last.sync_boundary);
-            assert_eq!(db.bounds().start, Location::new(0));
-
-            let earlier = history
-                .iter()
-                .find(|generation| generation.floor < last.sync_boundary)
-                .unwrap();
-            let db = db.prune(earlier.floor).await.unwrap();
-            assert_eq!(db.pruned_bits(), *last.sync_boundary);
-            assert_eq!(db.bounds().start, Location::new(0));
-            let db = db.sync().await.unwrap();
-            drop(db);
-
-            let db: UnorderedVariableDb = UnorderedVariableDb::init(
-                context.child("bounded"),
-                variable_config::<OneCap>(partition),
-                Some(earlier.size),
-            )
-            .await
-            .unwrap();
-            assert_eq!(db.root(), earlier.root);
-            assert_eq!(db.pruned_bits(), 0);
-            db.destroy().await.unwrap();
-        });
-    }
-
-    /// A restart bounded below a grafted anchor drops it, so a history that diverges after the
-    /// bound and moves its floor past that anchor's boundary reopens at its own root.
-    #[test_traced("INFO")]
-    fn test_current_bounded_restart_drops_later_grafted_anchors() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let partition = "current-bounded-drops-anchors";
-            let (db, history) = build_generations(&context, partition, 6).await;
-            let last = history.last().unwrap();
-            let db = db.sync().await.unwrap();
-            drop(db);
-
-            // Restart at an earlier retained commit whose floor precedes the anchor.
-            let earlier = history
-                .iter()
-                .find(|generation| generation.floor < last.sync_boundary)
-                .unwrap();
-            let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
-                context.child("bounded"),
-                variable_config::<OneCap>(partition),
-                Some(earlier.size),
-            )
-            .await
-            .unwrap();
-            assert_eq!(db.root(), earlier.root);
-
-            // Write other values until the floor passes the anchor's boundary, committing without
-            // a sync so that no newer anchor is recorded.
-            let mut generation = 100u64;
-            while db.inactivity_floor() < last.sync_boundary {
-                assert!(generation < 120, "the floor stopped moving");
-                db = commit_writes_with_metadata(
-                    db,
-                    (0..384).map(|i| (key(i), Some(val(generation * 1_000 + i)))),
-                    None,
-                )
-                .await;
-                generation += 1;
-            }
-            let root = db.root();
-            drop(db);
-
-            let db: UnorderedVariableDb = UnorderedVariableDb::init(
-                context.child("reopen"),
-                variable_config::<OneCap>(partition),
-                None,
-            )
-            .await
-            .unwrap();
-            assert_eq!(db.root(), root);
-            db.destroy().await.unwrap();
-        });
-    }
-
-    /// A grafted anchor whose chunk count is a valid location but overflows the operations it
-    /// stands for is reported as corruption.
-    #[test_traced("INFO")]
-    fn test_current_rejects_overflowing_anchor() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let partition = "current-overflowing-anchor";
-            let (db, _) = build_generations(&context, partition, 1).await;
-            let db = db.sync().await.unwrap();
-            drop(db);
-
-            // 2^60 chunks of 256 bits pass the location check but overflow 64 bits.
-            let chunks = 1u64 << 60;
-            type U64 = commonware_utils::sequence::prefixed_u64::U64;
-            let mut metadata = crate::metadata::Metadata::<_, U64, Vec<u8>>::init(
-                context.child("corrupt"),
-                crate::metadata::Config {
-                    partition: format!("{partition}-grafted-metadata-partition"),
-                    codec_config: ((0..).into(), ()),
-                },
-            )
-            .await
-            .unwrap();
-            let pins = <mmr::Family as merkle::Family>::nodes_to_pin(Location::new(chunks)).count();
-            let pins = vec![0; pins * <Digest as commonware_codec::FixedSize>::SIZE];
-            metadata.put(U64::new(db::ANCHOR_PREFIX, chunks), pins);
-            drop(metadata.sync().await.unwrap());
-
-            let result = UnorderedVariableDb::init(
-                context.child("reopen"),
-                variable_config::<OneCap>(partition),
-                None,
-            )
-            .await;
-            assert!(matches!(
-                result,
-                Err(crate::qmdb::Error::DataCorrupted(
-                    "bitmap boundary past the last operation location"
-                ))
-            ));
-        });
-    }
-
-    /// Under MMB, whose merges are delayed, a bitmap boundary also needs its youngest chunk pair
-    /// absorbed. A reopen from an anchor, a prune before it, a sync and a bounded restart at an
-    /// earlier retained commit all work there too.
-    #[test_traced("INFO")]
-    fn test_current_mmb_reopens_from_anchor() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let partition = "current-mmb-anchor";
-            let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
-                context.child("storage"),
-                variable_config::<OneCap>(partition),
-                None,
-            )
-            .await
-            .unwrap();
-            let mut history = Vec::new();
-            for generation in 0..6u64 {
-                let mut batch = db.new_batch();
-                for i in 0..384 {
-                    batch = batch.write(key(i), Some(val(generation * 1_000 + i)));
-                }
-                let merkleized = batch.merkleize(&db).await.unwrap();
-                db = db.apply_batch(merkleized).await.unwrap();
-                db = db.sync().await.unwrap();
-                history.push((
-                    db.bounds().end,
-                    db.inactivity_floor(),
-                    db.sync_boundary(),
-                    db.root(),
-                ));
-            }
-            let (_, _, last_boundary, last_root) = *history.last().unwrap();
-            drop(db);
-
-            let db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
-                context.child("reopen"),
-                variable_config::<OneCap>(partition),
-                None,
-            )
-            .await
-            .unwrap();
-            assert_eq!(db.root(), last_root);
-            assert_eq!(db.pruned_bits(), *last_boundary);
-
-            let &(size, floor, _, root) = history
-                .iter()
-                .find(|(_, floor, ..)| *floor < last_boundary)
-                .unwrap();
-            let db = db.prune(floor).await.unwrap();
-            assert_eq!(db.pruned_bits(), *last_boundary);
-            let db = db.sync().await.unwrap();
-            drop(db);
-
-            let db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
-                context.child("bounded"),
-                variable_config::<OneCap>(partition),
-                Some(size),
-            )
-            .await
-            .unwrap();
-            assert_eq!(db.root(), root);
-            db.destroy().await.unwrap();
-        });
-    }
-
-    /// A database reopened and synced again still restarts bounded at an earlier retained commit
-    /// whose floor precedes the last sync boundary.
-    #[test_traced("INFO")]
-    fn test_current_bounded_restart_after_reopen_and_sync() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let partition = "current-bounded-after-sync";
-            let (db, history) = build_generations(&context, partition, 6).await;
-            let last = history.last().unwrap();
-            let db = db.sync().await.unwrap();
-            drop(db);
-
-            let db: UnorderedVariableDb = UnorderedVariableDb::init(
-                context.child("reopen"),
-                variable_config::<OneCap>(partition),
-                None,
-            )
-            .await
-            .unwrap();
-            assert_eq!(db.root(), last.root);
-            let db = db.sync().await.unwrap();
-            drop(db);
-
-            let earlier = history
-                .iter()
-                .find(|generation| generation.floor < last.sync_boundary)
-                .unwrap();
-            let db: Result<UnorderedVariableDb, _> = UnorderedVariableDb::init(
-                context.child("bounded"),
-                variable_config::<OneCap>(partition),
-                Some(earlier.size),
-            )
-            .await;
-            let db = match db {
-                Ok(db) => db,
-                Err(error) => panic!("bounded restart at an earlier retained commit: {error:?}"),
-            };
-            assert_eq!(db.root(), earlier.root);
-            db.destroy().await.unwrap();
-        });
     }
 
     /// Operations whose first length query reports `first`, and later ones their true length.

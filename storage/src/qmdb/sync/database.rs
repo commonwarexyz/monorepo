@@ -105,17 +105,6 @@ pub trait Database: Sized + Send {
         self,
     ) -> impl Future<Output = Result<Self, crate::qmdb::Error<Self::Family>>> + Send;
 
-    /// Durably drop the database's anchors, the records besides its pruning boundary that
-    /// initialization can replay from. The engine calls this before it opens the sync journal,
-    /// which may truncate the local operations and append others that anchors would no longer
-    /// describe.
-    fn drop_anchors(
-        _context: Self::Context,
-        _config: &Self::Config,
-    ) -> impl Future<Output = Result<(), crate::qmdb::Error<Self::Family>>> + Send {
-        async { Ok(()) }
-    }
-
     /// Return pinned nodes for the target computed from local state, if it can provide them.
     ///
     /// Returning `Some` lets a completed sync journal reuse pinned nodes from an on-disk

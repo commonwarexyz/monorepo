@@ -1002,11 +1002,6 @@ where
     I: Partitioned + Index<Value = Location<F>>,
     H: MerkleHasher<F> + 'static,
 {
-    // The decode tasks scan from the Merkle structure's start, so it must not pass the floor, or
-    // the operations between them would never reach the index.
-    if leaves.start() > *inactivity_floor_loc {
-        return Err(Error::DataCorrupted("hashing scan starts after the floor"));
-    }
     let Some(plan) = ParallelPlan::new(snapshot.partition_count(), init_concurrency, cache_size)
     else {
         let built = build_snapshot_serial(

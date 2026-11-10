@@ -2013,7 +2013,6 @@ mod test {
         let authenticated::Journal {
             merkle,
             frontier,
-            boundary,
             boundary_recorded,
             journal,
             hasher,
@@ -2021,7 +2020,6 @@ mod test {
         let log = authenticated::Journal {
             merkle,
             frontier,
-            boundary,
             boundary_recorded,
             journal: Controlled {
                 inner: journal,
