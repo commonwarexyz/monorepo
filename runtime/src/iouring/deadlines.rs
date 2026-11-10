@@ -22,15 +22,18 @@ use super::wheel::{BUDGET, InstantExt as _, Wheel};
 use std::time::Instant;
 
 /// Resolution of request deadlines in nanoseconds, about a millisecond.
-/// Requests usually complete long before their deadlines, so coarse ticks
-/// cost little precision, and the expiries of a burst share a few passes.
+/// Rounding up delays an expiry by less than one tick, which is small next to
+/// network timeouts of seconds, and most requests complete long before their
+/// deadlines. Deadlines within one tick share a firing time, so a burst of
+/// them costs its worker one timed wake.
 pub const RESOLUTION: u64 = 1 << 20;
 
 /// Request deadlines of one driver, keyed by waiter slot.
 pub struct Deadlines {
     /// One resident slot per active request with an installed deadline.
     wheel: Wheel<RESOLUTION>,
-    /// Origin of the wheel's nanosecond time domain.
+    /// The instant of the driver's creation, from which the wheel, the
+    /// bound and expiry times count nanoseconds.
     origin: Instant,
     /// A time never later than the earliest resident's firing time, by
     /// which the next expiry pass must run (see [`Wheel::bound`]), lowered by
