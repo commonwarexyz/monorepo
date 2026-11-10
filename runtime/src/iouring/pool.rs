@@ -1902,7 +1902,9 @@ mod loom_tests {
     /// its first sighting, and no lone runnable ripens early.
     #[test]
     fn test_racing_looks_never_age_a_count_past_its_first_sighting() {
+        /// The count the stalled look saw alone.
         const STALE: u64 = 1;
+        /// A later count with the same low 24 bits.
         const FRESH: u64 = 1 + (1 << 24);
         loom::model(|| {
             let stamp = loom::sync::Arc::new(Stamp::new());

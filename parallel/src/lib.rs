@@ -5892,6 +5892,7 @@ mod test {
     fn parallel_bodies_call_the_block_hook() {
         /// A named strategy call.
         type Body = (&'static str, fn(&Rayon));
+        /// The items every body maps, folds or sorts.
         fn items() -> Vec<u64> {
             (0..64).collect()
         }
