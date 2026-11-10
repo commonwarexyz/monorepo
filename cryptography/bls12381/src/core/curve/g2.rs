@@ -385,13 +385,12 @@ impl<F> Point<F> {
     #[inline(always)]
     pub(crate) fn doubled<S: Simd>(
         simd: S,
-        [yy, xy, yz, b3zz]: &[Fp2<F>; 4],
+        &[yy, xy, yz, b3zz]: &[Fp2<F>; 4],
         k: usize,
     ) -> Fp2<F::Product>
     where
         F: Field<S>,
     {
-        let (yy, xy, yz, b3zz) = (*yy, *xy, *yz, *b3zz);
         // 9b z^2, 8 y^2, and y^2 - 9b z^2 and y^2 + 3b z^2.
         let b9zz = b3zz.mul_small::<3, S>(simd).carry(simd);
         let yy8 = yy.mul_small::<8, S>(simd).carry(simd);
@@ -503,10 +502,9 @@ where
     #[inline(always)]
     pub(crate) fn coordinate(
         simd: S,
-        [xy, yz, xz, sum, difference, xx]: &[Fp2<F>; 6],
+        &[xy, yz, xz, sum, difference, xx]: &[Fp2<F>; 6],
         k: usize,
     ) -> Fp2<F::Product> {
-        let (xy, yz, xz, sum, difference) = (*xy, *yz, *xz, *sum, *difference);
         let xx3 = xx.mul_small::<3, S>(simd).carry(simd);
         let xz12 = xz.mul_small::<12, S>(simd).carry(simd);
         match k {
