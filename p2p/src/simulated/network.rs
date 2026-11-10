@@ -489,10 +489,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     ) -> bool {
         // Reject an id that is not newer than every set already tracked.
         if !self.tracker_mut(owner).await.accepts(id) {
-            warn!(
-                ?owner,
-                id, "attempted to register peer set with non-monotonically increasing ID"
-            );
             return false;
         }
 
@@ -617,8 +613,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 }
             }
             ingress::Message::ResetPeerSets { owner } => {
-                // Empty the peer's sets and broadcast the updated membership. Dropping the old
-                // tracker ends its subscriptions.
+                // Replace the peer's tracker. Its subscriptions close with it, so no subscriber
+                // sees peer set ids start over. Then broadcast updated tracked membership to
+                // SubscribePeers subscribers.
                 *self.tracker_mut(Some(&owner)).await = Tracker::new();
                 self.broadcast_peer_list();
             }
