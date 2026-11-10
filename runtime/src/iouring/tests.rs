@@ -5892,3 +5892,67 @@ fn test_full_run_queue_does_not_stall_a_crowded_cascade() {
         );
     });
 }
+
+/// A due sleep fires while the run queue stays full of tasks that requeue
+/// themselves, since every expiry pass fires at least one sleep.
+#[test]
+fn test_due_sleep_fires_beside_a_full_run_queue() {
+    Runner::new(config()).start(|context| async move {
+        // The sleep registers in the sleeper's first poll, before the run
+        // queue fills.
+        let stop = Arc::new(AtomicBool::new(false));
+        let registered = Arc::new(AtomicBool::new(false));
+        let sleeper = context.child("sleeper").spawn({
+            let stop = stop.clone();
+            let registered = registered.clone();
+            move |context| async move {
+                registered.store(true, Ordering::Relaxed);
+                context.sleep(Duration::from_millis(20)).await;
+                stop.store(true, Ordering::Relaxed);
+            }
+        });
+        while !registered.load(Ordering::Relaxed) {
+            reschedule().await;
+        }
+
+        // Tasks that requeue themselves fill the run queue exactly, so every
+        // service pass finds it without room.
+        let spinners: Vec<_> = (0..CAPACITY)
+            .map(|_| {
+                let stop = stop.clone();
+                context.child("spinner").spawn(move |_| async move {
+                    while !stop.load(Ordering::Relaxed) {
+                        reschedule().await;
+                    }
+                })
+            })
+            .collect();
+
+        // A watchdog stops the spinners if the sleep starves, so the test
+        // fails rather than hangs.
+        let starved = Arc::new(AtomicBool::new(false));
+        let watchdog = thread::spawn({
+            let stop = stop.clone();
+            let starved = starved.clone();
+            move || {
+                let began = Instant::now();
+                while !stop.load(Ordering::Relaxed) {
+                    if began.elapsed() > Duration::from_secs(5) {
+                        starved.store(true, Ordering::Relaxed);
+                        stop.store(true, Ordering::Relaxed);
+                    }
+                    thread::sleep(Duration::from_millis(1));
+                }
+            }
+        });
+        sleeper.await.unwrap();
+        for spinner in spinners {
+            spinner.await.unwrap();
+        }
+        watchdog.join().unwrap();
+        assert!(
+            !starved.load(Ordering::Relaxed),
+            "a full run queue starved a due sleep"
+        );
+    });
+}
