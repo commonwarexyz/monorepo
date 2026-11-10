@@ -703,8 +703,8 @@ pub(crate) mod test {
         });
     }
 
-    /// A bounded reopen at an older commit, through a build that hashes the journal's operations on
-    /// its decode tasks, rebuilds that commit's root and every value.
+    /// A reopen bounded one operation past an older commit, through a build that hashes the
+    /// journal's operations on its decode tasks, rewinds to that commit and rebuilds its state.
     #[test_traced("WARN")]
     fn test_ordered_partitioned_bounded_reopen_hashes_older_commit() {
         deterministic::Runner::default().start(|context| async move {
@@ -739,13 +739,16 @@ pub(crate) mod test {
             }
             drop(db);
 
-            // A budget of four gives the build decode tasks, which hash the operations.
+            // A budget of four makes the build hash the operations on its decode tasks. The bound
+            // admits one operation past the commit, so the reopen rewinds before it plans chunks.
             let (size, root, active_keys, latest) = generations[1].clone();
             let mut cfg = fixed_db_config_partitioned::<OneCap>(partition);
             cfg.init_concurrency = NZUsize!(4);
-            let db = PartitionedDb::<Sequential>::init(context.child("bounded"), cfg, Some(size))
-                .await
-                .unwrap();
+            let db =
+                PartitionedDb::<Sequential>::init(context.child("bounded"), cfg, Some(size + 1))
+                    .await
+                    .unwrap();
+            assert_eq!(db.bounds().end, size);
             assert_eq!(db.root(), root);
             assert_eq!(db.active_keys, active_keys);
             for i in 0..KEYS {
