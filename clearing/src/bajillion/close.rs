@@ -654,6 +654,7 @@ mod tests {
         withdrawals: 4,
     };
 
+    /// Returns a row of `signer` paying `receiver` 1, under a signature over no state.
     fn row(signer: &PrivateKey, receiver: &PrivateKey) -> Row<PublicKey, u64> {
         Row {
             account: signer.public_key(),
@@ -674,6 +675,8 @@ mod tests {
         encoded
     }
 
+    /// A withdrawal verifies only under its account's signature over its exact fields, in its
+    /// namespace, and for a nonzero amount.
     #[test]
     fn test_withdrawal_signature() {
         let namespace = namespace();
@@ -709,6 +712,8 @@ mod tests {
         assert!(!Withdrawal::<_, u64>::sign(&signer, &namespace, 3, 0, 7).verify(&namespace));
     }
 
+    /// A canonical close round-trips. Decoding refuses unsorted or repeated rows, a row that pays
+    /// no one, a repeated withdrawal request, and rows, receivers, or withdrawals over the limits.
     #[test]
     fn test_decode_rejects_non_canonical_close() {
         let namespace = namespace();
@@ -774,6 +779,8 @@ mod tests {
         }
     }
 
+    /// A prefix holds the oldest requests of each queue, at least the required count and at most
+    /// the queue's length.
     #[test]
     fn test_queue_prefix() {
         let signers = users(1);
@@ -791,30 +798,47 @@ mod tests {
                 },
             ],
             required_deposits: 1,
-            forced_withdrawals: vec![ForcedWithdrawal { account, amount: 3 }],
+            forced_withdrawals: vec![
+                ForcedWithdrawal {
+                    account: account.clone(),
+                    amount: 3,
+                },
+                ForcedWithdrawal { account, amount: 4 },
+            ],
             required_forced_withdrawals: 0,
         };
         let (deposits, forced) = queue.prefix(1, 0).unwrap();
         assert_eq!((deposits.len(), forced.len()), (1, 0));
-        let (deposits, forced) = queue.prefix(2, 1).unwrap();
-        assert_eq!((deposits.len(), forced.len()), (2, 1));
-        for (deposits, forced) in [(0, 0), (3, 0), (1, 2)] {
+        let (deposits, forced) = queue.prefix(1, 1).unwrap();
+        assert_eq!(deposits, &queue.deposits[..1]);
+        assert_eq!(forced, &queue.forced_withdrawals[..1]);
+        let (deposits, forced) = queue.prefix(2, 2).unwrap();
+        assert_eq!((deposits.len(), forced.len()), (2, 2));
+        for (deposits, forced) in [(0, 0), (3, 0), (1, 3)] {
             assert!(queue.prefix(deposits, forced).is_none());
         }
     }
 
+    /// An account signs the epoch, account, amount, and tag in their fixed encodings, in that
+    /// order, in the withdrawal namespace.
     #[test]
     fn test_withdrawal_message_is_what_the_account_signs() {
         let namespace = namespace();
         let signer = user(0);
         let withdrawal = Withdrawal::<_, u64>::sign(&signer, &namespace, 3, 10, 7);
         let message = Withdrawal::<PublicKey, u64>::message(3, &signer.public_key(), 10, 7);
+        let mut expected = 3u64.to_be_bytes().to_vec();
+        expected.extend_from_slice(signer.public_key().as_ref());
+        expected.extend_from_slice(&10u64.to_be_bytes());
+        expected.extend_from_slice(&7u64.to_be_bytes());
+        assert_eq!(message, expected);
         assert_eq!(
             signer.sign(&namespace.withdrawal, &message),
             withdrawal.signature
         );
     }
 
+    /// Deposits and forced withdrawals encode at their fixed size and round-trip.
     #[test]
     fn test_queued_requests_have_fixed_encodings() {
         let account = account(0);
@@ -906,6 +930,8 @@ mod tests {
         );
     }
 
+    /// Assembly refuses a second row of an account, a repeated request, and a count outside the
+    /// queue's bounds.
     #[test]
     fn test_assembly_refuses_repeats_and_counts() {
         let namespace = namespace();
@@ -956,6 +982,7 @@ mod tests {
         assemble(1, Vec::new(), vec![withdrawal]).unwrap();
     }
 
+    /// Assembly refuses a row that pays no receiver and a soft withdrawal of another epoch.
     #[test]
     fn test_assembly_refuses_rows_and_withdrawals_validators_reject() {
         let namespace = namespace();

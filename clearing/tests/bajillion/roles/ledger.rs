@@ -103,6 +103,7 @@ pub struct Ledger<P: PublicKey, O: PublicKey, V: Verifier, H: Hasher, A: Amount>
     operator: O,
     /// Verifier of the validators' certificates.
     verifier: V,
+    /// Queues, posts, payout ranges, and funds held.
     persisted: Persisted<P, H::Digest, A>,
 }
 

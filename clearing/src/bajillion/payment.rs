@@ -828,6 +828,7 @@ mod tests {
         );
     }
 
+    /// States do not derive from an empty batch, an epoch with no successor, or an overflowing map.
     #[test]
     fn test_states_refuse_unpayable_batches() {
         assert!(matches!(
@@ -993,6 +994,7 @@ mod tests {
         ));
     }
 
+    /// A receipt issued from a countersigned state verifies and round-trips.
     #[test]
     fn test_issued_receipts_verify() {
         let namespace = namespace();
@@ -1006,6 +1008,7 @@ mod tests {
         );
     }
 
+    /// Issuing refuses a map the state does not commit to and a receiver the map does not pay.
     #[test]
     fn test_issue_refuses_maps_that_do_not_commit_to_the_state() {
         let namespace = namespace();
@@ -1026,6 +1029,7 @@ mod tests {
         assert_eq!(issue(&states.payments, 2).unwrap()[0].amount, 4);
     }
 
+    /// A receipt verifies only with its own fields, operator key, and namespace.
     #[test]
     fn test_receipt_rejects_tampering() {
         let namespace = namespace();
@@ -1067,9 +1071,9 @@ mod tests {
         assert!(!receipt.verify::<Sha256>(&Namespace::new(b"other"), &operator));
     }
 
+    /// A receipt signed by another account does not verify, even with a valid countersignature.
     #[test]
     fn test_receipt_needs_the_sender_signature() {
-        // Everything but the sender's signature is valid.
         let namespace = namespace();
         let mut receipt = receipt();
         let operator = operator_key().public_key();
@@ -1082,10 +1086,10 @@ mod tests {
         assert!(!receipt.verify::<Sha256>(&namespace, &operator));
     }
 
+    /// The operator's countersignature never verifies as the sender's signature, even when the
+    /// operator signs with the sender's key.
     #[test]
     fn test_signatures_are_domain_separated() {
-        // The operator's countersignature never verifies as the sender's signature, even when the
-        // operator signs with the sender's key.
         let namespace = namespace();
         let receipt = receipt();
         let countersignature = receipt.state.acknowledge(&user(0), &namespace);

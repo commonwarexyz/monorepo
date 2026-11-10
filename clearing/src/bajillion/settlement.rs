@@ -343,6 +343,7 @@ mod tests {
     use commonware_codec::{DecodeExt as _, Encode as _};
     use commonware_cryptography::ed25519::PublicKey;
 
+    /// Flows whose credits and debits exceed the largest amount settle exactly and round-trip.
     #[test]
     fn test_flows_round_trip_beyond_the_largest_amount() {
         // Alice pays herself and bob the largest amount each and deposits it too, so her credits
@@ -384,6 +385,7 @@ mod tests {
         }
     }
 
+    /// A requested total beyond the largest amount pays out the whole balance.
     #[test]
     fn test_payout_is_capped_by_the_balance_beyond_the_largest_amount() {
         // Alice holds 10 and is forced to withdraw the largest amount and 3 more in one close, so

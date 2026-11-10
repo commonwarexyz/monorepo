@@ -267,6 +267,7 @@ mod tests {
 
     type TestLookup = Lookup<u64, u64, Digest>;
 
+    /// Returns the leaf committing to `key` and `value`.
     fn leaf(key: &u64, value: &u64) -> Digest {
         Sha256::hash(&[&key.to_be_bytes(), &value.to_be_bytes()])
     }
@@ -281,12 +282,14 @@ mod tests {
         (entries, builder.build())
     }
 
+    /// Verifies `lookup` as an opening of `key` under `root`, and returns the value it opens.
     fn verify(lookup: &TestLookup, key: u64, root: &Digest) -> Result<Option<u64>, InvalidOpening> {
         lookup
             .verify::<Sha256>(root, &key, leaf)
             .map(|value| value.copied())
     }
 
+    /// Every key, present or absent, opens and verifies under the root.
     #[test]
     fn test_opens_every_key() {
         for count in 0..=6 {
@@ -305,6 +308,7 @@ mod tests {
         }
     }
 
+    /// A member opening verifies only for its own value, position, key, and root.
     #[test]
     fn test_rejects_tampered_members() {
         let (entries, tree) = list(4);
@@ -339,6 +343,8 @@ mod tests {
         ));
     }
 
+    /// A non-member opening verifies only for a key strictly between its neighbors, with every
+    /// neighbor its position requires.
     #[test]
     fn test_rejects_tampered_non_members() {
         let (entries, tree) = list(4);
@@ -417,6 +423,7 @@ mod tests {
         assert!(matches!(verify(&lookup, 40, &root), Err(InvalidOpening)));
     }
 
+    /// The empty list opens every key as absent, and its opening verifies under no other root.
     #[test]
     fn test_empty_list() {
         let (entries, tree) = list(0);
@@ -428,6 +435,7 @@ mod tests {
         ));
     }
 
+    /// Openings round-trip, and a tag naming neither variant is refused.
     #[test]
     fn test_codec() {
         let (entries, tree) = list(3);

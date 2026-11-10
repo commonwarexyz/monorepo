@@ -447,6 +447,19 @@ mod tests {
         ));
     }
 
+    /// Validators certify a summary's encoding in the summary namespace.
+    #[test]
+    fn test_certificate_covers_the_encoding_in_the_summary_namespace() {
+        let genesis = genesis();
+        let subject = &genesis;
+        let namespace = Namespace::new(NAMESPACE);
+        assert_eq!(certificate::Subject::message(&subject), genesis.encode());
+        assert_eq!(
+            certificate::Subject::namespace(&subject, &namespace),
+            namespace.summary.as_slice()
+        );
+    }
+
     /// Both running hashes start at all zeros. Each extends its parent's by `H(hash || request)`
     /// for every request processed in queue order.
     #[test]

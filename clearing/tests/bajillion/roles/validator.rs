@@ -104,12 +104,10 @@ where
 {
     /// Configuration the validator opened with.
     config: Config<O, T, S>,
-
     /// Balances database, absent once a failed apply left it unusable until a restart.
     balances: Option<Database<E, P, H, T, S, A>>,
     /// Payout log, absent once a failed apply left it unusable until a restart.
     log: Option<Payouts<E, P, H, S, A>>,
-
     /// Closes the validator attested (V4).
     persisted: Persisted<H::Digest>,
     /// Checkpoint of the last close applied.

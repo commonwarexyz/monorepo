@@ -260,6 +260,7 @@ mod tests {
     use commonware_codec::{DecodeExt as _, Encode as _};
     use commonware_cryptography::{Sha256, ed25519::PublicKey};
 
+    /// Returns the payment map paying each `(receiver, amount)`.
     fn payments(entries: &[(&PublicKey, u64)]) -> Amounts<PublicKey, u64> {
         Amounts::new(
             entries
@@ -280,6 +281,8 @@ mod tests {
         )
     }
 
+    /// Every sender and receiver pair opens to the amount paid, or zero, and every sender to the
+    /// root of its row.
     #[test]
     fn test_opens_every_pair() {
         let keys = accounts(6);
@@ -325,6 +328,8 @@ mod tests {
         );
     }
 
+    /// An opening verifies only with an entry exactly when its sender has a row, under its own
+    /// root, and for its own pair.
     #[test]
     fn test_rejects_inconsistent_openings() {
         let keys = accounts(4);

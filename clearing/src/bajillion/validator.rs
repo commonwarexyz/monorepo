@@ -646,16 +646,17 @@ mod tests {
     }
 
     /// Returns closes that credit, pay out, and empty the balances of 13 accounts over `epochs`
-    /// epochs, each with the queue it processes in full.
+    /// epochs, each with the queue it processes in full. The accounts of users 42, 46, and 51
+    /// share their first byte.
     fn churn(epochs: u64) -> Vec<(TestClose, TestQueue)> {
         (1..=epochs)
             .map(|epoch| {
                 let deposits: Vec<_> = (0..6)
-                    .map(|index| (10 + (index + epoch) % 13, 1 + epoch * 3 + index))
+                    .map(|index| (40 + (index + epoch) % 13, 1 + epoch * 3 + index))
                     .collect();
                 let forced: Vec<_> = if epoch % 4 == 0 {
                     (0..3)
-                        .map(|index| (10 + (index * 5 + epoch) % 13, u64::MAX))
+                        .map(|index| (40 + (index * 5 + epoch) % 13, u64::MAX))
                         .collect()
                 } else {
                     Vec::new()
@@ -702,6 +703,9 @@ mod tests {
         (proof, payout)
     }
 
+    /// Validators check the close of the next epoch against the queue, and refuse a wrong epoch,
+    /// count, signature, row predecessor, soft withdrawal, or checkpoint. A close that overdrafts
+    /// checks but does not settle.
     #[test]
     fn test_validators_reject_invalid_closes() {
         deterministic::Runner::default().start(|context| async move {
@@ -731,6 +735,18 @@ mod tests {
                 let close = sign_close(&operator, 2, Vec::new(), Vec::new(), deposits, forced);
                 assert!(matches!(
                     check(close, &parent, &queued),
+                    Err(CheckError::InvalidCount)
+                ));
+            }
+            let required = Queue {
+                required_deposits: 1,
+                required_forced_withdrawals: 1,
+                ..queued.clone()
+            };
+            for (deposits, forced) in [(0, 1), (1, 0)] {
+                let close = sign_close(&operator, 2, Vec::new(), Vec::new(), deposits, forced);
+                assert!(matches!(
+                    check(close, &parent, &required),
                     Err(CheckError::InvalidCount)
                 ));
             }
@@ -1261,6 +1277,17 @@ mod tests {
             assert_ne!(paying.summary().matrix, staged.summary().matrix);
             assert_eq!(paying.summary().balances, staged.summary().balances);
 
+            // Alice withdrawing exactly what a deposit credits her keeps her balance, so the close
+            // stages the same balances root as an empty close while it owes her the payout.
+            let funded = queue(3, &[(0, 4)], &[(0, 4)]);
+            let withdrawing = sign_close(&operator, 3, Vec::new(), Vec::new(), 1, 1);
+            let withdrawing = twice
+                .settle(&check(withdrawing, &parent, &funded).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(withdrawing.payouts(), &amounts(&[(0, 4)]));
+            assert_eq!(withdrawing.summary().balances, staged.summary().balances);
+
             // A close that changes no balance still changes the root.
             let (idle, _) = post(twice, &parent, idle, &next).await;
             assert_ne!(idle.balances.root(), parent.summary.balances);
@@ -1274,6 +1301,11 @@ mod tests {
     fn test_index_does_not_affect_the_balances_root() {
         deterministic::Runner::default().start(|context| async move {
             let closes = churn(40);
+
+            // Three of the accounts share their first byte, so they collide in the plain index
+            // under OneCap.
+            let colliding = [42, 46, 51].map(|index| account(index).encode()[0]);
+            assert!(colliding.iter().all(|first| *first == colliding[0]));
             let eight = open(context.child("eight"), "eight").await;
             let parent = genesis(eight.balances.root());
             let (_, _, expected) = replay(eight, parent.clone(), &closes).await;

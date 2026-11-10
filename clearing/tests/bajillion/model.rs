@@ -1192,6 +1192,16 @@ impl Model for Workload {
                             self.witness(
                                 "a payment is admitted while the last close awaits its post",
                             );
+                            if epoch == sent.request.0.epoch + 1 {
+                                self.witness(
+                                    "a next state is admitted while the preceding close awaits its post",
+                                );
+                            }
+                            if world.countersigned.iter().any(|(index, earlier)| {
+                                world.sent[*index].user == sent.user && *earlier + 1 == epoch
+                            }) {
+                                self.witness("a state builds on a map whose close awaits its post");
+                            }
                         }
                         if world.omitted.contains(&(epoch - 1, sent.user)) {
                             self.witness("a payment builds on a row the close omitted");
@@ -1715,6 +1725,7 @@ fn test_model_admits_one_payment() {
         &[
             "every epoch posts",
             "a request is admitted in the epoch after its own",
+            "a next state is admitted while the preceding close awaits its post",
             "a post keeps a request pending",
             "a refusal of a request sent once is final",
         ],
@@ -1741,6 +1752,7 @@ fn test_model_retries_payments() {
             "a payment is admitted while the last close awaits its post",
             "a request is admitted in the epoch after its own",
             "a copy is refused after its own epoch settled it",
+            "a state builds on a map whose close awaits its post",
             "a post keeps a request pending",
             "a post settles a request before its acknowledgement arrives",
             "a post drops a request",
@@ -1830,6 +1842,7 @@ fn test_model_rebuilds_on_the_posted_row() {
             "every epoch posts",
             "an omitted payment halts the ledger",
             "a payment builds on a row the close omitted",
+            "a state builds on a map whose close awaits its post",
         ],
     );
 }

@@ -3,7 +3,8 @@
 use arbitrary::Arbitrary;
 use commonware_clearing::bajillion::{
     Amounts, BalanceProof, Challenge, Close, Deposit, Flow, ForcedWithdrawal, Limits, Lookup,
-    Opening, Payout, PayoutProof, Processed, Receipt, Request, Row, State, Summary, Withdrawal,
+    Opening, Payout, PayoutProof, Processed, Receipt, Request, Row, Signatures, State, Summary,
+    Withdrawal,
 };
 use commonware_codec::{Codec, Copying, RangeCfg};
 use commonware_cryptography::{Sha256, ed25519::PublicKey, sha256::Digest};
@@ -26,6 +27,7 @@ const LIMITS: Limits = Limits {
 enum FuzzInput {
     Amounts(Amounts<PublicKey, u64>),
     State(State<PublicKey, Digest>),
+    Signatures(Signatures<PublicKey>),
     Request(Request<PublicKey, Digest, u64>),
     Receipt(Receipt<PublicKey, PublicKey, Digest, u64>),
     Challenge(Challenge<PublicKey, PublicKey, Digest, u64>),
@@ -65,6 +67,7 @@ fuzz_target!(|input: FuzzInput| {
     match input {
         FuzzInput::Amounts(value) => roundtrip(&value, &RangeCfg::new(..=value.len())),
         FuzzInput::State(value) => roundtrip(&value, &()),
+        FuzzInput::Signatures(value) => roundtrip(&value, &()),
         FuzzInput::Request(value) => roundtrip(&value, &value.batch.len()),
         FuzzInput::Receipt(value) => roundtrip(&value, &()),
         FuzzInput::Challenge(value) => roundtrip(&value, &()),
@@ -96,6 +99,7 @@ fuzz_target!(|input: FuzzInput| {
         FuzzInput::Bytes(bytes) => {
             decode::<Amounts<PublicKey, u64>>(&bytes, &RangeCfg::new(..=RECEIVERS));
             decode::<State<PublicKey, Digest>>(&bytes, &());
+            decode::<Signatures<PublicKey>>(&bytes, &());
             decode::<Request<PublicKey, Digest, u64>>(&bytes, &RECEIVERS);
             decode::<Receipt<PublicKey, PublicKey, Digest, u64>>(&bytes, &());
             decode::<Challenge<PublicKey, PublicKey, Digest, u64>>(&bytes, &());

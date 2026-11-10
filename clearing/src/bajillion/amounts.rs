@@ -228,6 +228,7 @@ mod tests {
 
     type TestAmounts = Amounts<PublicKey, u64>;
 
+    /// Collecting entries orders them by account, and each account reads back its amount or zero.
     #[test]
     fn test_new_sorts_entries() {
         let keys = accounts(4);
@@ -255,6 +256,7 @@ mod tests {
         assert_eq!(amounts.get(&keys[3]), 0);
     }
 
+    /// Zero amounts and repeated accounts are refused, and no entries form the empty amounts.
     #[test]
     fn test_new_rejects_invalid_entries() {
         let keys = accounts(2);
@@ -269,6 +271,7 @@ mod tests {
         assert!(TestAmounts::new([]).unwrap().is_empty());
     }
 
+    /// Combining adds amounts per account in either order and refuses a sum that overflows.
     #[test]
     fn test_combine() {
         let keys = accounts(3);
@@ -294,6 +297,7 @@ mod tests {
         assert_eq!(overflowing.unwrap().total(), None);
     }
 
+    /// A leaf hashes the account and the amount's big-endian encoding at every width.
     #[test]
     fn test_leaf_hashes_account_and_big_endian_amount() {
         let key = &accounts(1)[0];
@@ -313,6 +317,7 @@ mod tests {
         );
     }
 
+    /// The root changes with every account, every amount, and the number of entries.
     #[test]
     fn test_root_commits_to_entries() {
         let keys = accounts(2);
@@ -322,7 +327,6 @@ mod tests {
             Builder::<Sha256>::new(0).build().root()
         );
 
-        // Every account and amount, and the number of entries, changes the root.
         let one = TestAmounts::new([(keys[0].clone(), 1)]).unwrap();
         let roots = [
             empty.root::<Sha256>(),
@@ -344,6 +348,7 @@ mod tests {
         }
     }
 
+    /// Every account, present or absent, opens to its amount under the root.
     #[test]
     fn test_lookup() {
         let keys = accounts(5);
@@ -360,6 +365,7 @@ mod tests {
         }
     }
 
+    /// Decoding refuses unsorted, repeated, zero, and over-limit entries.
     #[test]
     fn test_decode_rejects_non_canonical_entries() {
         let keys = accounts(2);

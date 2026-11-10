@@ -166,6 +166,7 @@ mod tests {
         value.0.to_be_bytes()
     }
 
+    /// Addition and subtraction wrap to the width and report whether they overflowed.
     #[test]
     fn test_arithmetic_reports_overflow() {
         let (five, six) = (U256::from(5), U256::from(6));
@@ -176,6 +177,7 @@ mod tests {
         assert_eq!(U256::from_limbs([0, 0, 1, 0]).as_limbs(), &[0, 0, 1, 0]);
     }
 
+    /// A value encodes as the big-endian bytes of its width and round-trips.
     #[test]
     fn test_round_trips_as_big_endian() {
         for value in [
@@ -195,6 +197,7 @@ mod tests {
         assert_eq!(U512::decode(value.encode()).unwrap(), value);
     }
 
+    /// A width that ends inside a limb encodes only the bytes of that limb within the width.
     #[test]
     fn test_partial_limbs_encode_their_bytes_only() {
         type U40 = Uint<40, 1>;
@@ -209,8 +212,19 @@ mod tests {
             U40::decode(Copying(&[0xff; 4])),
             Err(Error::EndOfBuffer)
         ));
+
+        // A partial limb above a whole one encodes its bytes first.
+        type U72 = Uint<72, 2>;
+        assert_eq!(U72::SIZE, 9);
+        let value = U72::from_limbs([0x0102_0304_0506_0708, 0xab]);
+        assert_eq!(
+            value.encode().as_ref(),
+            [0xab, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]
+        );
+        assert_eq!(U72::decode(value.encode()).unwrap(), value);
     }
 
+    /// Decoding refuses a bit set beyond the width.
     #[test]
     fn test_rejects_bits_beyond_the_width() {
         type U36 = Uint<36, 1>;

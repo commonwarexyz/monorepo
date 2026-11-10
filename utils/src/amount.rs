@@ -71,6 +71,7 @@ mod tests {
     use super::*;
     use commonware_codec::U256;
 
+    /// Checked arithmetic on primitives returns `None` exactly when the result does not fit.
     #[test]
     fn test_checked_arithmetic_follows_overflow() {
         assert_eq!(Amount::checked_add(250u8, 5), Some(255));
@@ -80,6 +81,7 @@ mod tests {
         assert_eq!(<u128 as Amount>::ZERO, 0);
     }
 
+    /// Checked arithmetic on a wide integer returns `None` exactly when the result does not fit.
     #[test]
     fn test_uint_arithmetic_follows_overflow() {
         let (five, six) = (U256::from(5), U256::from(6));
