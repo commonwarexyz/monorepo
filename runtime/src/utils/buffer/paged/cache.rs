@@ -3941,6 +3941,28 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_read_cached_many_serves_unhinted_page() {
+        // A slot that does not fit in a hint leaves its entry at `u32::MAX`, so the cached page is
+        // served through the cache's own lookup.
+        let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(2));
+        let blob_id = cache_ref.next_id();
+        let page_size = PAGE_SIZE.get() as usize;
+        {
+            let mut cache = cache_ref.cache.write();
+            cache.cache(blob_id, &vec![0x5A; page_size], 3);
+            let hint = cache.hint_index(blob_id, 3);
+            cache.hints[hint] = u32::MAX;
+        }
+
+        let mut buf = vec![0u8; page_size];
+        let mut ranges: Vec<(&mut [u8], u64)> = vec![(&mut buf, 3 * PAGE_SIZE_U64)];
+        cache_ref.read_cached_many(blob_id, &mut ranges);
+        assert!(ranges.is_empty());
+        drop(ranges);
+        assert_eq!(buf, vec![0x5A; page_size]);
+    }
+
+    #[test_traced]
     fn test_read_cached_many_evicted_page_is_a_miss() {
         let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(1));
         let blob_id = cache_ref.next_id();
