@@ -108,11 +108,11 @@ impl<F> Fp2<F> {
         let mut components = [[[0; FP_BYTES]; MAX_LANES]; 2];
         let lanes = elements.len().min(F::LANES);
         for (lane, element) in elements[..lanes].iter().enumerate() {
-            let (c1, c0) = split(element);
+            let [c0, c1] = split(element);
             components[0][lane] = *c0;
             components[1][lane] = *c1;
         }
-        let (fill1, fill0) = split(fill);
+        let [fill0, fill1] = split(fill);
         Self {
             c0: F::load(simd, &components[0][..lanes], fill0),
             c1: F::load(simd, &components[1][..lanes], fill1),
@@ -763,13 +763,11 @@ impl<F> Fp2<F> {
     }
 }
 
-/// Splits an element's encoding into its `c1` and `c0` encodings.
+/// Splits an element's encoding into its `c0` and `c1` encodings.
 #[inline(always)]
-fn split(element: &[u8; BYTES]) -> (&[u8; FP_BYTES], &[u8; FP_BYTES]) {
-    let (c1, c0) = element
-        .split_first_chunk::<FP_BYTES>()
-        .expect("two components");
-    (c1, c0.try_into().expect("two components"))
+const fn split(element: &[u8; BYTES]) -> [&[u8; FP_BYTES]; 2] {
+    let (chunks, _) = element.as_chunks::<FP_BYTES>();
+    [&chunks[1], &chunks[0]]
 }
 
 /// Reference arithmetic on elements with canonical components, for testing formulas.
@@ -833,7 +831,7 @@ pub(crate) mod reference {
 
     /// Returns the residues of an encoding's components.
     pub(crate) fn decode(bytes: &[u8; BYTES]) -> Element {
-        let (c1, c0) = super::split(bytes);
+        let [c0, c1] = super::split(bytes);
         (fp::reduce(c0), fp::reduce(c1))
     }
 
