@@ -87,10 +87,10 @@ where
     /// (`=` kept, `.` eligible for pruning)
     ///
     ///   P = (8, 15)   ep 7 ........ | ep 8  . . . . . = = = = = = = = = = P
-    ///                 the window fits in epoch 8: prune below (8, 5) and all earlier epochs
+    ///                 the window fits in epoch 8, so prune below (8, 5) and all earlier epochs
     ///
     ///   P = (8, 3)    ep 5 ........ | ep 6 = = = = | ep 7 = = = = | ep 8  = = = P
-    ///                 epoch 8 has 3 of the 10 views; the 7 heights below it reach into epoch 6
+    ///                 epoch 8 has 3 of the 10 views, and the 7 heights below it reach into epoch 6
     /// ```
     pub view_retention: ViewDelta,
 
