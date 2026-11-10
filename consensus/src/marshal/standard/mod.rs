@@ -16710,4 +16710,63 @@ mod tests {
             );
         });
     }
+
+    /// A range below a history suffix requests each missing body once, although the walk and
+    /// the range both read it. Marshal stores no body that nothing certifies, so a second
+    /// reader would download the body again.
+    #[test_traced("WARN")]
+    fn test_standard_range_requests_walked_body_once() {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let (mailbox, _, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "walked-body-requested-once",
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::default(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(genesis.clone()),
+            )
+            .await;
+
+            // Marshal holds the bound parent alone, and nothing notarizes the blocks below it.
+            let one = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let two = make_raw_block(one.digest(), Height::new(2), 200);
+            let three = make_raw_block(two.digest(), Height::new(3), 300);
+            let round = Round::new(Epoch::zero(), View::new(3));
+            assert!(mailbox.verified(round, ready(three.clone())).await);
+            let history = History::suffix(Arc::from([three.digest()]));
+            let source = mailbox.blocks_with_parent(three.height(), three.digest(), history);
+            let mut range = source.range(one.height()..=three.height());
+
+            // The body is delivered as soon as its first request reaches the resolver, before
+            // the range is polled again. Marshal does not store it.
+            for block in [&two, &one] {
+                while resolver.subscriptions(block.digest()) == 0 {
+                    assert!(range.next().now_or_never().is_none());
+                    let _ = mailbox.get_processed().await;
+                    assert!(
+                        resolver.subscriptions(two.digest()) <= 1,
+                        "a walked body must be requested once"
+                    );
+                }
+                let fetch = resolver.active_subscription(block.digest()).unwrap();
+                deliver_acquisition_test_block(&resolver, fetch.clone(), block).await;
+                resolver.complete(&fetch);
+                assert!(mailbox.get_block(&block.digest()).await.is_none());
+            }
+
+            for block in [&one, &two, &three] {
+                assert_eq!(
+                    range.next().await.unwrap().unwrap().digest(),
+                    block.digest()
+                );
+            }
+            assert!(range.next().await.is_none());
+            assert_eq!(resolver.subscriptions(one.digest()), 1);
+            assert_eq!(resolver.subscriptions(two.digest()), 1);
+            assert_eq!(resolver.subscriptions(three.digest()), 0);
+        });
+    }
 }

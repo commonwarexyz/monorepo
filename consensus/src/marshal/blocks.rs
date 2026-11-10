@@ -123,9 +123,13 @@ pub enum Error {
 /// body at a time. Dropping every waiter cancels that acquisition, and the commitments discovered
 /// so far stay with the source.
 ///
+/// Below the suffix a body has one acquirer, the walk. The walk reads each body to learn the
+/// commitment under it, and a range waits for that read and takes the body from the walk. The
+/// walk therefore learns one commitment below the lowest height a range reads.
+///
 /// The walk retains the lowest bodies it read, at most a range's window of them, until a range
-/// takes them or the source drops. A range over a gap no deeper than the window therefore
-/// acquires each body once.
+/// takes them or the source drops. A range acquires a walked body itself only when the walk no
+/// longer holds it, so a range over a gap no deeper than the window acquires each body once.
 ///
 /// Later finalization or pruning does not redirect an acquisition that is already pending. It
 /// stays pending until the body arrives, every waiter drops, or marshal shuts down.
@@ -406,10 +410,21 @@ impl<S: Scheme, V: Variant> Source<V::ApplicationBlock> for SelectedSource<S, V>
     ) -> BoxFuture<'static, Result<Digested<V::ApplicationBlock>, Error>> {
         Box::pin(async move {
             let block = match self.discover(height).await? {
-                Some(commitment) => match self.take(height) {
-                    Some(block) => Ok(block),
-                    None => self.marshal.acquire(commitment).await,
-                },
+                Some(commitment) => {
+                    // Below the commitments, the walk reads this body to learn the commitment
+                    // under it. Waiting for that step leaves the body with one acquirer. The
+                    // walk holds no body that it evicted, that another reader took, or at
+                    // which it ended, and this read then acquires the body itself.
+                    if suffix_at(self.parent_height, &self.commitments, height).is_none()
+                        && let Some(below) = height.previous()
+                    {
+                        let _ = self.discover(below).await;
+                    }
+                    match self.take(height) {
+                        Some(block) => Ok(block),
+                        None => self.marshal.acquire(commitment).await,
+                    }
+                }
                 None => self.marshal.finalized(height).await,
             }
             .map_err(|_| Error::Unavailable)?;
@@ -1010,14 +1025,20 @@ mod tests {
 
             // Each step sampled finalized storage at the lowest known height, and no read
             // waited on it.
-            assert_eq!(scripted.infos, [7, 6, 5, 4].map(Height::new));
+            assert_eq!(scripted.infos, [7, 6, 5, 4, 3].map(Height::new));
             assert!(scripted.awaited.is_empty());
 
-            // The discovered commitments are resident, and the walk stopped at the range.
+            // The walk alone acquired the bodies below the suffix, and the range took them.
             for block in &blocks[3..7] {
+                assert_eq!(scripted.acquisitions(block), 1);
+            }
+
+            // The discovered commitments are resident, and the walk stopped one below the
+            // range.
+            for block in &blocks[2..7] {
                 assert_eq!(source.digest(block.height), Some(block.digest()));
             }
-            assert_eq!(source.digest(Height::new(2)), None);
+            assert_eq!(source.digest(Height::new(1)), None);
         });
     }
 
@@ -1304,7 +1325,7 @@ mod tests {
             assert_eq!(suffix.digest(Height::new(3)), Some(parent));
             let mut range = suffix.range(Height::new(1)..=Height::new(3));
             unfinalized.read(&mut receiver, &mut range, &blocks[1..]);
-            assert_eq!(unfinalized.infos, [3, 2].map(Height::new));
+            assert_eq!(unfinalized.infos, [3, 2, 1].map(Height::new));
             assert!(unfinalized.awaited.is_empty());
         });
     }
