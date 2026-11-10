@@ -2,24 +2,14 @@
 //! counterparts.
 
 use commonware_cryptography_bls12381::{G1, G2, Scalar};
-use commonware_math::algebra::CryptoGroup;
+use commonware_math::algebra::{CryptoGroup, Random};
+use commonware_utils::TestRng;
 use std::ptr;
 
 /// Returns `count` deterministic scalars, uniform over the scalar field.
 pub fn scalars(count: usize, seed: u64) -> Vec<Scalar> {
-    let mut state = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
-    (0..count)
-        .map(|_| {
-            let mut bytes = [0u8; Scalar::WIDE_BYTES];
-            for byte in &mut bytes {
-                state ^= state << 13;
-                state ^= state >> 7;
-                state ^= state << 17;
-                *byte = state as u8;
-            }
-            Scalar::from_bytes_wide(&bytes)
-        })
-        .collect()
+    let mut rng = TestRng::new(seed);
+    (0..count).map(|_| Scalar::random(&mut rng)).collect()
 }
 
 /// Returns a scalar as the little-endian bytes blst reads.
