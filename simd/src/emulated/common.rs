@@ -1,30 +1,15 @@
 //! Shared array semantics for emulated backends.
 
 /// Returns the 32-bit lane held by lane `i` of part `part` (zero for the first, one for the
-/// second) of a widening split, or `None` beyond that part.
+/// second) of a widening split.
 ///
 /// Interleaved splits pair even and odd lanes; others pair the low and high lanes.
-pub(super) const fn pair_lane(
-    interleaved: bool,
-    u32_lanes: usize,
-    u64_lanes: usize,
-    part: usize,
-    i: usize,
-) -> Option<usize> {
-    let first = if u32_lanes < u64_lanes {
-        u32_lanes
-    } else {
-        u64_lanes
-    };
-    let len = if part == 0 { first } else { u32_lanes - first };
-    if i >= len {
-        return None;
-    }
-    Some(if interleaved {
+pub(super) const fn pair_lane(interleaved: bool, u64_lanes: usize, part: usize, i: usize) -> usize {
+    if interleaved {
         2 * i + part
     } else {
-        part * first + i
-    })
+        part * u64_lanes + i
+    }
 }
 
 macro_rules! impl_common {
@@ -563,9 +548,7 @@ macro_rules! impl_common {
                 let mut narrowed = [0; $u32_lanes];
                 for (part, values) in [first, second].into_iter().enumerate() {
                     for (i, value) in values.into_iter().enumerate() {
-                        if let Some(lane) = Self::pair_lane(part, i) {
-                            narrowed[lane] = value as u32;
-                        }
+                        narrowed[Self::pair_lane(part, i)] = value as u32;
                     }
                 }
                 narrowed
@@ -595,8 +578,8 @@ macro_rules! impl_common {
 
         impl $backend {
             /// Returns the 32-bit lane held by lane `i` of part `part` of a widening split.
-            const fn pair_lane(part: usize, i: usize) -> Option<usize> {
-                $crate::emulated::common::pair_lane($interleaved, $u32_lanes, $u64_lanes, part, i)
+            const fn pair_lane(part: usize, i: usize) -> usize {
+                $crate::emulated::common::pair_lane($interleaved, $u64_lanes, part, i)
             }
 
             /// Returns the widening products held by part `part` of a split.
@@ -607,8 +590,8 @@ macro_rules! impl_common {
                 b: [u32; $u32_lanes],
             ) -> [u64; $u64_lanes] {
                 core::array::from_fn(|i| {
-                    Self::pair_lane(part, i)
-                        .map_or(0, |lane| u64::from(a[lane]) * u64::from(b[lane]))
+                    let lane = Self::pair_lane(part, i);
+                    u64::from(a[lane]) * u64::from(b[lane])
                 })
             }
         }

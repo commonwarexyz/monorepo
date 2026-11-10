@@ -438,13 +438,12 @@ pub trait Simd: Copy {
     /// `r[i] = (acc[i] + (floor(p / 2^52))) mod 2^64` (VPMADD52HUQ).
     fn u64_madd52hi(self, acc: Self::U64, a: Self::U64, b: Self::U64) -> Self::U64;
 
-    /// `r[i] = a[first(i)] * b[first(i)]`, the full unsigned 64-bit product, for `i < h`;
-    /// `r[i] = 0` for `h <= i < L`.
+    /// `r[i] = a[first(i)] * b[first(i)]`, the full unsigned 64-bit product, for
+    /// `i < Self::U64_LANES`.
     ///
     /// The widening instructions split the 32-bit lanes of a vector between two 64-bit
-    /// vectors. Every backend has `Self::U32_LANES <= 2 * Self::U64_LANES`. Let
-    /// `h = min(Self::U64_LANES, Self::U32_LANES)` and `m = Self::U32_LANES - h`. The maps
-    /// `first` on `0..h` and `second` on `0..m` send their lanes to distinct 32-bit lanes,
+    /// vectors. Every backend has `Self::U32_LANES == 2 * Self::U64_LANES`. The maps
+    /// `first` and `second` on `0..Self::U64_LANES` send their lanes to distinct 32-bit lanes,
     /// together covering `0..Self::U32_LANES`. Each backend fixes the maps to suit its
     /// multiplier: x86v4c sends `first(i) = 2i` and `second(i) = 2i + 1` (VPMULUDQ), while
     /// NEON sends `first(i) = i` and `second(i) = i + 2` (UMULL and UMULL2), and the scalar
@@ -452,12 +451,12 @@ pub trait Simd: Copy {
     /// split, so multi-precision arithmetic can keep 32-bit limbs and 64-bit column sums.
     fn u32_widen_mul_first(self, a: Self::U32, b: Self::U32) -> Self::U64;
 
-    /// `r[i] = a[second(i)] * b[second(i)]`, the full unsigned 64-bit product, for `i < m`;
-    /// `r[i] = 0` for `m <= i < L`, with the split of [`Self::u32_widen_mul_first`].
+    /// `r[i] = a[second(i)] * b[second(i)]`, the full unsigned 64-bit product, for
+    /// `i < Self::U64_LANES`, with the split of [`Self::u32_widen_mul_first`].
     fn u32_widen_mul_second(self, a: Self::U32, b: Self::U32) -> Self::U64;
 
-    /// `r[first(i)] = first[i] mod 2^32` for `i < h` and `r[second(i)] = second[i] mod 2^32`
-    /// for `i < m`, with the split of [`Self::u32_widen_mul_first`].
+    /// `r[first(i)] = first[i] mod 2^32` and `r[second(i)] = second[i] mod 2^32`
+    /// for `i < Self::U64_LANES`, with the split of [`Self::u32_widen_mul_first`].
     fn u64_narrow_pair(self, first: Self::U64, second: Self::U64) -> Self::U32;
 
     /// `r[i] = (a[i] * b[i]) mod 2^32`.
