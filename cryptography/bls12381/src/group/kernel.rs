@@ -153,12 +153,6 @@ pub trait Group: Copy + Send + Sync {
 
     /// Wraps the coordinates of an element of the group.
     fn from_coordinates(coordinates: Self::Coordinates) -> Self;
-
-    /// Returns `-self`.
-    fn negate(&self) -> Self;
-
-    /// Returns whether this is the identity.
-    fn is_identity(&self) -> bool;
 }
 
 /// Loads `element` into every lane.
