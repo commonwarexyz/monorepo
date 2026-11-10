@@ -28,7 +28,7 @@ pub(crate) enum Resolved<D, S, A, M = ()> {
     /// The parent is fetched and the application may build on its ancestry. The timer
     /// measures the application's build from this point. The metadata (the coding body
     /// stream, or unit for standard blocks) is passed to the sealing callback with the built
-    /// block, and the sink is handed to the application to receive the block's body.
+    /// block, and the sink becomes the application's input.
     Build(A, Timer, M, BodySink),
 }
 
@@ -55,7 +55,7 @@ pub(crate) fn prepare<E, A, D, P, S, N, Fut, M, Seal>(
 ) -> oneshot::Receiver<Handoff<D>>
 where
     E: Spawner + Clock,
-    A: Application<E, Context = Context<D, P>, Input = ()>,
+    A: Application<E, Context = Context<D, P>, Input: From<BodySink>>,
     D: Digest,
     P: PublicKey,
     S: Clone + Send + Sync + 'static,
@@ -111,8 +111,7 @@ where
                 .prepare(
                     (runtime_context.child("app_prepare"), consensus_context),
                     ancestry,
-                    (),
-                    body,
+                    body.into(),
                 )
                 .instrument(build_span());
             let prepared = select! {
@@ -177,7 +176,7 @@ pub(crate) fn propose<E, A, D, P, S, N, Fut, M, Seal>(
 ) -> oneshot::Receiver<D>
 where
     E: Spawner + Clock,
-    A: Application<E, Context = Context<D, P>, Input = ()>,
+    A: Application<E, Context = Context<D, P>, Input: From<BodySink>>,
     D: Digest,
     P: PublicKey,
     S: Clone + Send + Sync + 'static,
@@ -230,8 +229,7 @@ where
                 .propose(
                     (runtime_context.child("app_propose"), consensus_context),
                     ancestor_stream,
-                    (),
-                    body,
+                    body.into(),
                 )
                 .instrument(build_span());
 

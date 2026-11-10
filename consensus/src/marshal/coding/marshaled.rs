@@ -22,6 +22,10 @@
 //! sign, waits for validation of the shard assigned to it by the proposer. If that shard is valid,
 //! the assigned shard is relayed to all other participants to aid in block reconstruction.
 //!
+//! For each build, the wrapper converts a live [`BodySink`] into the application's input. It codes
+//! the body pushed to the sink one segment at a time and sends each segment's chunks while the
+//! application is still building the block.
+//!
 //! A participant may still reconstruct the full block from gossiped shards before its assigned shard
 //! arrives. That is sufficient for later certification and repair flows, but it is not treated as
 //! notarization readiness: a signer only helps form a notarization once it has validated the
@@ -84,8 +88,8 @@
 //! ```
 
 use crate::{
-    Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Handoff,
-    Heightable, Relay, Reporter,
+    Application, Automaton, Block, BodySink, CertifiableAutomaton, CertifiableBlock, Epochable,
+    Handoff, Heightable, Relay, Reporter,
     marshal::{
         ancestry::Ancestry,
         application::{
@@ -238,7 +242,7 @@ where
             Block = B,
             SigningScheme = Z::Scheme,
             Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
-            Input = (),
+            Input: From<BodySink>,
         >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context> + CodedLayout,
     C: Segmentable,
@@ -771,7 +775,7 @@ where
             Block = B,
             SigningScheme = Z::Scheme,
             Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
-            Input = (),
+            Input: From<BodySink>,
         >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context> + CodedLayout,
     C: Segmentable,
@@ -1074,7 +1078,7 @@ where
             Block = B,
             SigningScheme = Z::Scheme,
             Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
-            Input = (),
+            Input: From<BodySink>,
         >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context> + CodedLayout,
     C: Segmentable,

@@ -126,7 +126,7 @@
 //! [`coding::Marshaled`]: commonware_consensus::marshal::coding::Marshaled
 
 use commonware_consensus::{
-    BodySink, CertifiableBlock, Epochable, Handoff, Viewable, marshal::ancestry::Ancestry,
+    CertifiableBlock, Epochable, Handoff, Viewable, marshal::ancestry::Ancestry,
 };
 use commonware_cryptography::certificate::Scheme;
 use db::DatabaseSet;
@@ -229,7 +229,6 @@ pub trait Application<E>: Clone + Send + 'static {
         _ancestry: impl Ancestry<Self::Block>,
         _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: Input<Self::Input, Self::Provider>,
-        _body: BodySink,
     ) -> impl Future<Output = Handoff<Proposed<Self, E>>> + Send {
         async { Handoff::Wait }
     }
@@ -244,9 +243,6 @@ pub trait Application<E>: Clone + Send + 'static {
     /// the merkleized batch's canonical root, because the sync targets cover only the ops root and
     /// operation range.
     ///
-    /// `body` accepts the block's coded-layout body bytes as soon as they are final, so they can be
-    /// disseminated while the rest of the block is still being computed. Pushing is optional.
-    ///
     /// The caller may cancel this future before it completes, so implementations must be
     /// cancellation-safe. A dropped call must leave the application's own state consistent.
     fn propose(
@@ -255,7 +251,6 @@ pub trait Application<E>: Clone + Send + 'static {
         ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
-        body: BodySink,
     ) -> impl Future<Output = Option<Proposed<Self, E>>> + Send;
 
     /// Processes an existing block on its parent's state and returns the merkleized result, or

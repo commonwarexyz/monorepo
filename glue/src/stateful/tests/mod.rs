@@ -25,7 +25,7 @@ use crate::{
 };
 use commonware_actor::Feedback;
 use commonware_consensus::{
-    Application as _, BodySink, CertifiableAutomaton as _, Reporter,
+    Application as _, CertifiableAutomaton as _, Reporter,
     marshal::{
         self,
         ancestry::{self, Ancestry},
@@ -981,7 +981,6 @@ impl Application<deterministic::Context> for GatedMultiApp {
         ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
-        body: BodySink,
     ) -> Option<Proposed<Self, deterministic::Context>> {
         let gate = self.propose_gate.lock().take();
         if let Some(mut gate) = gate {
@@ -994,7 +993,6 @@ impl Application<deterministic::Context> for GatedMultiApp {
             ancestry,
             batches,
             input,
-            body,
         )
         .await?;
         Some(Proposed {
@@ -1439,7 +1437,6 @@ fn finalizations_and_certifications_complete_during_proposal_parent_lookup_on_qm
             (context.child("propose"), blocks[5].context.clone()),
             PendingAncestry(PhantomData),
             (),
-            BodySink::noop(),
         ));
         assert!(futures::poll!(&mut proposal).is_pending());
         let mut reporter = stateful_mailbox.clone();
@@ -2061,7 +2058,6 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
             (context.child("propose"), blocks[3].context.clone()),
             ancestry::from_iter([digested(blocks[2].clone())]),
             (),
-            BodySink::noop(),
         ));
         assert!(futures::poll!(&mut proposal).is_pending());
         propose_started

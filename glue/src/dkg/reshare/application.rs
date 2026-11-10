@@ -5,7 +5,7 @@ use crate::dkg::{
     types::Payload,
 };
 use commonware_consensus::{
-    Application as ConsensusApplication, BodySink, CertifiableBlock, Handoff, Heightable,
+    Application as ConsensusApplication, CertifiableBlock, Handoff, Heightable,
     marshal::ancestry::Ancestry,
     types::{EpochPhase, Epocher as _, FixedEpocher, Height},
 };
@@ -148,7 +148,6 @@ where
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         input: Self::Input,
-        body: BodySink,
     ) -> Handoff<Digested<Self::Block>> {
         let Some(parent) = ancestry.peek() else {
             return Handoff::Wait;
@@ -176,7 +175,6 @@ where
                     upstream: input,
                     payload: None,
                 },
-                body,
             )
             .await
     }
@@ -201,7 +199,6 @@ where
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         input: Self::Input,
-        body: BodySink,
     ) -> Option<Digested<Self::Block>> {
         let Some(parent) = ancestry.peek() else {
             debug!("proposal rejected: missing parent ancestry");
@@ -240,7 +237,6 @@ where
                     upstream: input,
                     payload,
                 },
-                body,
             )
             .await;
         if proposed.is_some()
@@ -427,13 +423,12 @@ mod tests {
             context: (E, Self::Context),
             ancestry: impl Ancestry<Self::Block>,
             input: Self::Input,
-            body: BodySink,
         ) -> Handoff<Digested<Self::Block>> {
             if self.handoff.is_wait() {
                 return Handoff::Wait;
             }
             let decision = self.handoff;
-            self.propose(context, ancestry, input, body)
+            self.propose(context, ancestry, input)
                 .await
                 .map_or(Handoff::Wait, |block| decision.map(|()| block))
         }
@@ -443,7 +438,6 @@ mod tests {
             (_, context): (E, Self::Context),
             ancestry: impl Ancestry<Self::Block>,
             input: Self::Input,
-            _body: BodySink,
         ) -> Option<Digested<Self::Block>> {
             let parent = ancestry.peek()?.clone();
             self.proposed.lock().push(input.payload.clone());
@@ -644,7 +638,6 @@ mod tests {
                             midpoint.digest(),
                         )]),
                         (),
-                        BodySink::noop(),
                     )
                     .await;
                 assert!(prepared.is_wait(), "a dealer log is left to propose");
@@ -666,7 +659,6 @@ mod tests {
                             midpoint.digest(),
                         )]),
                         (),
-                        BodySink::noop(),
                     )
                     .await
                     .expect("the ordinary proposal builds");
@@ -682,7 +674,6 @@ mod tests {
                             genesis.digest(),
                         )]),
                         (),
-                        BodySink::noop(),
                     )
                     .await;
                 match (decision, prepared) {
@@ -748,7 +739,6 @@ mod tests {
                             parent.digest(),
                         )]),
                         (),
-                        BodySink::noop(),
                     )
                     .await;
                 assert!(prepared.is_wait(), "the final block is left to propose");
@@ -770,7 +760,6 @@ mod tests {
                             parent.digest(),
                         )]),
                         (),
-                        BodySink::noop(),
                     )
                     .await
                     .expect("the ordinary proposal builds");
@@ -795,7 +784,6 @@ mod tests {
                     (context.child("app"), block_context(&parent, 2)),
                     ancestry::from_iter([Digested::precomputed(parent.clone(), parent.digest())]),
                     (),
-                    BodySink::noop(),
                 )
                 .await;
             assert!(proposed.is_none());
@@ -809,7 +797,6 @@ mod tests {
                     (context.child("app_retry"), block_context(&parent, 3)),
                     ancestry::from_iter([Digested::precomputed(parent.clone(), parent.digest())]),
                     (),
-                    BodySink::noop(),
                 )
                 .await;
             assert!(proposed.is_none());
@@ -838,7 +825,6 @@ mod tests {
                 (context.child("app"), block_context(&parent, 2)),
                 ancestry::from_iter([Digested::precomputed(parent.clone(), parent.digest())]),
                 (),
-                BodySink::noop(),
             ));
             assert!(propose.as_mut().now_or_never().is_none());
 
@@ -892,7 +878,6 @@ mod tests {
                     (context.child("app"), block_context(&parent, 2)),
                     ancestry::from_iter([Digested::precomputed(parent.clone(), parent.digest())]),
                     (),
-                    BodySink::noop(),
                 )
                 .await
                 .expect("proposal should be built");
@@ -926,7 +911,6 @@ mod tests {
                     (context.child("app"), block_context(&parent, 1)),
                     ancestry::from_iter([Digested::precomputed(parent.clone(), parent.digest())]),
                     (),
-                    BodySink::noop(),
                 )
                 .await;
 
@@ -954,7 +938,6 @@ mod tests {
                             parent.digest(),
                         )]),
                         (),
-                        BodySink::noop(),
                     )
                     .await
                     .expect("proposal must be built");

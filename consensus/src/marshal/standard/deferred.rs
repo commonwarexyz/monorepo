@@ -81,8 +81,8 @@
 //!   than blocks they need AND can fetch).
 
 use crate::{
-    Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Handoff,
-    Heightable, Relay, Reporter,
+    Application, Automaton, Block, BodySink, CertifiableAutomaton, CertifiableBlock, Epochable,
+    Handoff, Heightable, Relay, Reporter,
     marshal::{
         ancestry::Ancestry,
         application::{
@@ -204,7 +204,7 @@ where
             Block = B,
             SigningScheme = S,
             Context = Context<B::Digest, S::PublicKey>,
-            Input = (),
+            Input: From<BodySink>,
         >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context> + Codec,
     ES: Epocher,
@@ -553,7 +553,7 @@ where
                 ancestor_stream,
                 build_duration.timer(&*context),
                 (),
-                crate::BodySink::noop(),
+                BodySink::noop(),
             )
         }
     }
@@ -568,7 +568,7 @@ where
             Block = B,
             SigningScheme = S,
             Context = Context<B::Digest, S::PublicKey>,
-            Input = (),
+            Input: From<BodySink>,
         >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context> + Codec,
     ES: Epocher,
@@ -780,7 +780,7 @@ where
             Block = B,
             SigningScheme = S,
             Context = Context<B::Digest, S::PublicKey>,
-            Input = (),
+            Input: From<BodySink>,
         >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context> + Codec,
     ES: Epocher,

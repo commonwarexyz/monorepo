@@ -111,13 +111,12 @@ where
         context: (deterministic::Context, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         input: Self::Input,
-        body: crate::BodySink,
     ) -> Handoff<Digested<Self::Block>> {
         if self.handoff.is_wait() {
             return Handoff::Wait;
         }
         let decision = self.handoff;
-        self.propose(context, ancestry, input, body)
+        self.propose(context, ancestry, input)
             .await
             .map_or(Handoff::Wait, |block| decision.map(|()| block))
     }
@@ -127,7 +126,6 @@ where
         _context: (deterministic::Context, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
         _input: Self::Input,
-        _body: crate::BodySink,
     ) -> Option<Digested<Self::Block>> {
         let gate = self.proposal_gate.lock().take();
         if let Some(gate) = gate {
@@ -200,7 +198,6 @@ where
         _context: (deterministic::Context, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
         _input: Self::Input,
-        _body: crate::BodySink,
     ) -> Option<Digested<Self::Block>> {
         None
     }

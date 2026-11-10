@@ -55,7 +55,7 @@ use commonware_codec::{
     Write,
 };
 use commonware_consensus::{
-    Application, Block as ConsensusBlock, BodySink, BoundedBlock, CertifiableBlock, Heightable,
+    Application, Block as ConsensusBlock, BoundedBlock, CertifiableBlock, Heightable,
     marshal::{
         self, Start,
         ancestry::Ancestry,
@@ -739,7 +739,6 @@ where
         (_, context): (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         input: Self::Input,
-        _body: BodySink,
     ) -> Option<Digested<Self::Block>> {
         let parent = ancestry.peek()?.clone();
         let height = parent.height().next();

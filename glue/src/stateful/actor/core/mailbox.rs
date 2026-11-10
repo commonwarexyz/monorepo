@@ -6,8 +6,8 @@ use commonware_actor::{
     mailbox::{Overflow, Policy, Sender},
 };
 use commonware_consensus::{
-    Application as ConsensusApplication, Block, BodySink, CertifiableBlock, Epochable, Handoff,
-    Reporter, Viewable,
+    Application as ConsensusApplication, Block, CertifiableBlock, Epochable, Handoff, Reporter,
+    Viewable,
     marshal::{
         Update,
         ancestry::{Ancestry, BoxedAncestry},
@@ -117,7 +117,6 @@ where
     pub(super) context: (E, A::Context),
     pub(super) ancestry: BoxedAncestry<A::Block>,
     pub(super) upstream: A::Input,
-    pub(super) body: BodySink,
     pub(super) proposal: Proposal<Digested<A::Block>>,
 }
 
@@ -288,7 +287,6 @@ where
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         upstream: Self::Input,
-        body: BodySink,
     ) -> Handoff<Digested<Self::Block>> {
         let (response, receiver) = oneshot::channel();
         let span = info_span!(
@@ -301,7 +299,6 @@ where
             context,
             ancestry: BoxedAncestry::new(ancestry),
             upstream,
-            body,
             proposal: Proposal::Prepare(response),
         }));
         receiver.await.unwrap_or(Handoff::Wait)
@@ -312,7 +309,6 @@ where
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         upstream: Self::Input,
-        body: BodySink,
     ) -> Option<Digested<Self::Block>> {
         let (response, receiver) = oneshot::channel();
         let span = info_span!(
@@ -325,7 +321,6 @@ where
             context,
             ancestry: BoxedAncestry::new(ancestry),
             upstream,
-            body,
             proposal: Proposal::Propose(response),
         }));
         receiver.await.ok().flatten()

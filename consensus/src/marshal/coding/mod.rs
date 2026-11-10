@@ -29,8 +29,8 @@
 //!
 //! 1. The application produces a block through [`Marshaled`]. It codes the block's
 //!    [`types::CodedLayout`] and obtains a [`crate::types::coding::Commitment`] over its segment
-//!    roots. An application may push the block's body to a [`crate::BodySink`] while it builds,
-//!    so the body's segments are coded and sent before the block is sealed.
+//!    roots. An application whose input is a [`crate::BodySink`] may push the block's body to it
+//!    while it builds, so the body's segments are coded and sent before the block is sealed.
 //! 2. The block is broadcast via [`shards::Engine`]. Each participant receives its chunk of every
 //!    segment, then the roots that bind the segments to the commitment. Once consensus names the
 //!    commitment, each participant relays its chunks to everyone else as they verify against
@@ -84,22 +84,22 @@ mod stream;
 #[cfg(test)]
 mod tests {
     use crate::{
-        Automaton, Block, CertifiableAutomaton, CertifiableBlock, Handoff, Heightable, Relay,
-        Reporter,
+        Automaton, Block, BodySink, CertifiableAutomaton, CertifiableBlock, Handoff, Heightable,
+        Relay, Reporter,
         marshal::{
             ancestry::{Ancestry, BlockProvider},
             coding::{
                 Coding, Marshaled, MarshaledConfig, shards,
                 types::{
-                    CodedBlock, ShardMessage, StoredCodedBlock, StreamChunk, StreamRoots,
-                    coding_config_for_participants, hash_context,
+                    CodedBlock, CodedLayout as _, ShardMessage, StoredCodedBlock, StreamChunk,
+                    StreamRoots, coding_config_for_participants, hash_context,
                 },
             },
             config::{Config, Start},
             core::{self, Processed, durability::Durable as _},
             mocks::{
                 application::Application,
-                block::encode_block,
+                block::{encode_block, ready},
                 harness::{
                     self, BLOCKS_PER_EPOCH, CodingB, CodingCtx, CodingHarness, D, EmptyProvider, K,
                     LINK, NAMESPACE, NUM_VALIDATORS, QUORUM, S, TEST_QUOTA, TestCoding,
@@ -256,7 +256,6 @@ mod tests {
             _context: (deterministic::Context, CodingCtx),
             _ancestry: impl Ancestry<CodingB>,
             _input: (),
-            _body: crate::BodySink,
         ) -> Option<Digested<CodingB>> {
             None
         }
@@ -5331,6 +5330,155 @@ mod tests {
                     .expect("certify result missing"),
                 "certify must succeed for the relayed proposal"
             );
+        });
+    }
+
+    /// Pushes its block's body to the sink it receives as its input, then returns the block.
+    #[derive(Clone)]
+    struct StreamingApp {
+        block: CodingB,
+
+        /// Whether each build so far received an active sink.
+        live: Arc<Mutex<Vec<bool>>>,
+    }
+
+    impl crate::Application<deterministic::Context> for StreamingApp {
+        type Block = CodingB;
+        type Context = CodingCtx;
+        type SigningScheme = S;
+        type Input = BodySink;
+
+        async fn prepare(
+            &mut self,
+            context: (deterministic::Context, CodingCtx),
+            ancestry: impl Ancestry<CodingB>,
+            input: BodySink,
+        ) -> Handoff<Digested<CodingB>> {
+            self.propose(context, ancestry, input)
+                .await
+                .map_or(Handoff::Wait, Handoff::Stage)
+        }
+
+        async fn propose(
+            &mut self,
+            _context: (deterministic::Context, CodingCtx),
+            _ancestry: impl Ancestry<CodingB>,
+            input: BodySink,
+        ) -> Option<Digested<CodingB>> {
+            self.live.lock().push(input.is_active());
+            let mut body = Vec::new();
+            self.block.write_body(&mut body);
+            input.push(Bytes::from(body));
+            Some(ready(self.block.clone()))
+        }
+
+        async fn verify(
+            &mut self,
+            _context: (deterministic::Context, CodingCtx),
+            _ancestry: impl Ancestry<CodingB>,
+        ) -> bool {
+            true
+        }
+    }
+
+    /// The coding marshal hands each build a live [`BodySink`] as the application's input, for a
+    /// prepare and for a propose. The body an application pushes to it is coded through the
+    /// stream, so the shards engine receives stream segments and the proposal carries the
+    /// commitment of the whole block. An application whose input is `()` streams nothing.
+    #[test_traced("WARN")]
+    fn test_marshaled_hands_the_application_a_live_sink() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+                1024 * 1024,
+            )
+            .await;
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+            let setup = CodingHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+
+            // A shards mailbox whose receiver records the segments a build streams.
+            let (sender, mut receiver) = mailbox::new::<
+                shards::mailbox::Message<CodingB, TestCoding, Sha256, K>,
+            >(context.child("recorded"), NZUsize!(64));
+            let recorded = shards::Mailbox::new(sender);
+            let mut streamed = move || {
+                let mut segments = 0;
+                while let Ok(message) = receiver.try_recv() {
+                    assert!(
+                        matches!(message, shards::mailbox::Message::StreamSegment { .. }),
+                        "a build must send the engine only stream segments"
+                    );
+                    segments += 1;
+                }
+                segments
+            };
+
+            // The block built on genesis in view 1.
+            let genesis = genesis_block();
+            let ctx = CodingCtx {
+                round: Round::new(Epoch::zero(), View::new(1)),
+                leader: me.clone(),
+                parent: (View::zero(), genesis_coding_commitment(&genesis)),
+            };
+            let block = make_coding_block(ctx.clone(), genesis.digest(), Height::new(1), 100);
+            let expected =
+                encode_block::<_, TestCoding, Sha256>(block.clone(), coding_config).commitment();
+
+            // A prepare and a propose each hand the streaming application a live sink, and the
+            // body it pushes reaches the engine as stream segments.
+            let live = Arc::new(Mutex::new(Vec::new()));
+            let mut streaming = Marshaled::new(
+                context.child("streaming"),
+                MarshaledConfig {
+                    application: StreamingApp {
+                        block: block.clone(),
+                        live: live.clone(),
+                    },
+                    marshal: setup.mailbox.clone(),
+                    shards: recorded.clone(),
+                    scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                    epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                    strategy: Sequential,
+                },
+            );
+            let decision = streaming.prepare(ctx.clone()).await.await;
+            assert_eq!(decision, Ok(Handoff::Stage(expected)));
+            assert!(streamed() > 0, "a prepared build must stream its body");
+            let commitment = streaming.propose(ctx.clone()).await.await;
+            assert_eq!(commitment, Ok(expected));
+            assert!(streamed() > 0, "a proposed build must stream its body");
+            assert_eq!(*live.lock(), [true, true]);
+
+            // An application whose input is `()` is handed no sink, and its block is coded whole.
+            let mut whole = Marshaled::new(
+                context.child("whole"),
+                MarshaledConfig {
+                    application: MockVerifyingApp::<CodingB, S>::new().with_propose_result(block),
+                    marshal: setup.mailbox.clone(),
+                    shards: recorded,
+                    scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                    epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                    strategy: Sequential,
+                },
+            );
+            let commitment = whole.propose(ctx).await.await;
+            assert_eq!(commitment, Ok(expected));
+            assert_eq!(streamed(), 0, "a build without a sink must stream nothing");
         });
     }
 

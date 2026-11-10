@@ -219,7 +219,7 @@ mod tests {
         },
     };
     use commonware_consensus::{
-        BodySink, Heightable as _, Reporter as _,
+        Heightable as _, Reporter as _,
         marshal::{
             ancestry::Ancestry,
             core::{Cutoff, Processed},
@@ -357,7 +357,6 @@ mod tests {
             _ancestry: impl Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
-            _body: BodySink,
         ) -> Option<Proposed<Self, deterministic::Context>> {
             unreachable!("WedgeApp only serves the syncer harness")
         }

@@ -51,8 +51,8 @@
 //! - You are willing to perform full application verification before casting a notarize vote.
 
 use crate::{
-    Application, Automaton, Block, CertifiableAutomaton, Epochable, Handoff, Heightable, Relay,
-    Reporter,
+    Application, Automaton, Block, BodySink, CertifiableAutomaton, Epochable, Handoff, Heightable,
+    Relay, Reporter,
     marshal::{
         ancestry::Ancestry,
         application::{
@@ -194,7 +194,7 @@ where
             Block = B,
             SigningScheme = S,
             Context = Context<B::Digest, S::PublicKey>,
-            Input = (),
+            Input: From<BodySink>,
         >,
     B: Block + Codec,
     ES: Epocher,
@@ -292,7 +292,7 @@ where
                 ancestor_stream,
                 build_duration.timer(&*context),
                 (),
-                crate::BodySink::noop(),
+                BodySink::noop(),
             )
         }
     }
@@ -307,7 +307,7 @@ where
             Block = B,
             SigningScheme = S,
             Context = Context<B::Digest, S::PublicKey>,
-            Input = (),
+            Input: From<BodySink>,
         >,
     B: Block + Codec,
     ES: Epocher,
@@ -537,7 +537,7 @@ where
             Block = B,
             SigningScheme = S,
             Context = Context<B::Digest, S::PublicKey>,
-            Input = (),
+            Input: From<BodySink>,
         >,
     B: Block + Codec,
     ES: Epocher,
@@ -705,7 +705,7 @@ where
 mod tests {
     use super::Inline;
     use crate::{
-        Application, Automaton, Block, CertifiableAutomaton, Relay,
+        Application, Automaton, Block, BodySink, CertifiableAutomaton, Relay,
         marshal::{
             application::gates::Gates,
             mocks::{
@@ -744,7 +744,7 @@ mod tests {
                 Block = B,
                 SigningScheme = S,
                 Context = Context<B::Digest, S::PublicKey>,
-                Input = (),
+                Input: From<BodySink>,
             >,
         B: Block + Codec,
         ES: crate::types::Epocher,

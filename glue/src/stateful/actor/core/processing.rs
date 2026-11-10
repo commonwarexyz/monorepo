@@ -330,7 +330,6 @@ where
                     context,
                     ancestry,
                     upstream,
-                    body,
                     proposal,
                 })) => {
                     let process = match &proposal {
@@ -349,7 +348,6 @@ where
                             context,
                             ancestry,
                             input,
-                            body,
                             proposal,
                         )
                         .instrument(process);
@@ -517,7 +515,7 @@ mod tests {
     };
     use commonware_actor::mailbox as actor_mailbox;
     use commonware_consensus::{
-        Application as _, Automaton as _, Block as _, BodySink, CertifiableAutomaton as _,
+        Application as _, Automaton as _, Block as _, CertifiableAutomaton as _,
         CertifiableBlock as _, Handoff, Heightable as _, Reporter as _, Reporters,
         marshal::{
             Update,
@@ -614,7 +612,6 @@ mod tests {
             _ancestry: impl Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
-            _body: BodySink,
         ) -> Handoff<Proposed<Self, deterministic::Context>> {
             self.hold_proposal().await;
             Handoff::Wait
@@ -626,7 +623,6 @@ mod tests {
             _ancestry: impl Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
-            _body: BodySink,
         ) -> Option<Proposed<Self, deterministic::Context>> {
             self.hold_proposal().await;
             None
@@ -703,7 +699,6 @@ mod tests {
             _ancestry: impl Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
-            _body: BodySink,
         ) -> Option<Proposed<Self, deterministic::Context>> {
             panic!("read-gated application proposal is not used")
         }
@@ -814,9 +809,8 @@ mod tests {
             ancestry: impl Ancestry<Self::Block>,
             batches: TestUnmerkleized,
             input: Input<Self::Input, Self::Provider>,
-            body: BodySink,
         ) -> Handoff<Proposed<Self, deterministic::Context>> {
-            self.propose(context, ancestry, batches, input, body)
+            self.propose(context, ancestry, batches, input)
                 .await
                 .map_or(Handoff::Wait, Handoff::Vote)
         }
@@ -827,7 +821,6 @@ mod tests {
             ancestry: impl Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
-            _body: BodySink,
         ) -> Option<Proposed<Self, deterministic::Context>> {
             let gate = self.proposal_gate.lock().take();
             if let Some(mut gate) = gate {
@@ -1464,7 +1457,6 @@ mod tests {
                 ),
                 ancestry::from_iter([digested(parent.clone()), digested(genesis)]),
                 (),
-                BodySink::noop(),
             ));
             assert!(poll!(&mut proposal).is_pending());
             await_marshal_replies(&mailbox, &marshal).await;
@@ -1508,7 +1500,6 @@ mod tests {
                 ),
                 ancestry::from_iter([digested(parent.clone()), digested(genesis)]),
                 (),
-                BodySink::noop(),
             ));
             assert!(poll!(&mut proposal).is_pending());
             started.await.expect("parent replay must start");
@@ -1575,14 +1566,14 @@ mod tests {
             match request {
                 Managed::Verify => mailbox.verify((runtime, block.context()), ancestry).await,
                 Managed::Prepare => match mailbox
-                    .prepare((runtime, build_context), ancestry, (), BodySink::noop())
+                    .prepare((runtime, build_context), ancestry, ())
                     .await
                 {
                     Handoff::Vote(built) => built.parent() == block.digest(),
                     _ => false,
                 },
                 Managed::Propose => mailbox
-                    .propose((runtime, build_context), ancestry, (), BodySink::noop())
+                    .propose((runtime, build_context), ancestry, ())
                     .await
                     .is_some_and(|built| built.parent() == block.digest()),
             }
@@ -1618,12 +1609,7 @@ mod tests {
         );
         let mut prepare: PendingPrepare = Box::pin(async move {
             proposer
-                .prepare(
-                    prepare_context,
-                    ancestry::from_iter(blocks),
-                    (),
-                    BodySink::noop(),
-                )
+                .prepare(prepare_context, ancestry::from_iter(blocks), ())
                 .await
         });
         if verify_first {
@@ -2588,7 +2574,6 @@ mod tests {
                 (context.child("propose"), proposal_context),
                 ancestry::from_iter([digested(genesis)]),
                 (),
-                BodySink::noop(),
             ));
             assert!(poll!(&mut proposal).is_pending());
             proposal_started.await.expect("proposal should start");
@@ -2692,7 +2677,6 @@ mod tests {
                 (context.child("propose"), proposal_context),
                 ancestry::from_iter([digested(genesis)]),
                 (),
-                BodySink::noop(),
             ));
             assert!(poll!(&mut proposal).is_pending());
             proposal_started.await.expect("build must start");
@@ -2752,7 +2736,6 @@ mod tests {
                 (context.child("propose"), proposal_context),
                 ancestry::from_iter([digested(genesis.clone())]),
                 (),
-                BodySink::noop(),
             ));
             assert!(poll!(&mut proposal).is_pending());
             proposal_started.await.expect("proposal should start");
@@ -2924,7 +2907,6 @@ mod tests {
                 ),
                 ancestry::from_iter([digested(parent)]),
                 (),
-                BodySink::noop(),
             ));
             assert!(poll!(&mut proposal).is_pending());
             await_marshal_replies(&mailbox, &marshal.mailbox).await;
@@ -3120,7 +3102,6 @@ mod tests {
                 ),
                 ancestry::from_iter([digested(genesis.clone())]),
                 (),
-                BodySink::noop(),
             ));
             assert!(poll!(&mut proposal).is_pending());
             proposal_started
@@ -3254,7 +3235,6 @@ mod tests {
                 ),
                 ancestry::from_iter([digested(genesis.clone())]),
                 (),
-                BodySink::noop(),
             ));
             assert!(poll!(&mut proposal).is_pending());
             proposal_started.await.expect("proposal should start");
@@ -3363,7 +3343,6 @@ mod tests {
                 ),
                 ancestry::from_iter([digested(genesis.clone())]),
                 (),
-                BodySink::noop(),
             ));
             assert!(poll!(&mut proposal).is_pending());
             proposal_started.await.expect("proposal should start");
@@ -4300,7 +4279,6 @@ mod tests {
                 (context.child("propose"), proposal_context),
                 ancestry::from_iter([digested(winner)]),
                 (),
-                BodySink::noop(),
             ));
             assert!(poll!(&mut proposal).is_pending());
             prune_release.send(()).expect("prune should remain active");

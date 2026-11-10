@@ -28,7 +28,7 @@ use crate::stateful::{
     db::{Anchor, Barrier, DatabaseSet},
 };
 use commonware_consensus::{
-    Block, BodySink, CertifiableBlock, Handoff, Heightable, Roundable,
+    Block, CertifiableBlock, Handoff, Heightable, Roundable,
     marshal::{
         ancestry::{AncestorStream, Ancestry, BlockProvider, BoxedAncestry},
         core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
@@ -475,7 +475,6 @@ where
         (runtime_context, consensus_context): (E, A::Context),
         ancestry: impl Ancestry<A::Block>,
         input: Input<A::Input, A::Provider>,
-        body: BodySink,
         mut proposal: Proposal<Digested<A::Block>>,
     ) {
         let timer = self.execution.metrics.propose_duration.timer(context);
@@ -517,7 +516,7 @@ where
                 let Some(prepared) = await_or_cancel(
                     response.closed(),
                     self.app
-                        .prepare(application_context, ancestry, batches, input, body),
+                        .prepare(application_context, ancestry, batches, input),
                 )
                 .await
                 else {
@@ -542,7 +541,7 @@ where
                 let Some(proposed) = await_or_cancel(
                     response.closed(),
                     self.app
-                        .propose(application_context, ancestry, batches, input, body),
+                        .propose(application_context, ancestry, batches, input),
                 )
                 .await
                 else {
@@ -1136,7 +1135,7 @@ mod tests {
     };
     use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
     use commonware_consensus::{
-        Block as ConsensusBlock, BodySink, CertifiableBlock, Heightable,
+        Block as ConsensusBlock, CertifiableBlock, Heightable,
         marshal::ancestry::{self as marshal_ancestry, Ancestry, BlockProvider, BoxedAncestry},
         simplex::{mocks::scheme::Scheme as MockScheme, types::Context as ConsensusContext},
         types::{Epoch, Height, Round, View},
@@ -1512,7 +1511,6 @@ mod tests {
             ancestry: impl Ancestry<Self::Block>,
             batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
             _input: Input<Self::Input, Self::Provider>,
-            _body: BodySink,
         ) -> Option<Proposed<Self, deterministic::Context>> {
             let mut ancestry = Box::pin(ancestry);
             let parent = ancestry.next().await?;

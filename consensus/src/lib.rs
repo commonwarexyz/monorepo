@@ -440,8 +440,12 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     /// codes the block whole. Bytes of the right length that differ from the body commit the
     /// proposal to a payload that does not decode to the block, so no peer can reconstruct it.
     ///
-    /// Pushing is optional and never blocks. A sink handed to a marshal that does not stream (or
-    /// whose receiving side has gone away) drops the bytes.
+    /// A marshal converts the sink into the application's [`Application::Input`]. An application
+    /// that streams its body declares `type Input = BodySink`. One that declares `()` receives no
+    /// sink, and a coding marshal codes its block once it is built.
+    ///
+    /// Pushing is optional and never blocks. A sink from a marshal that does not stream (or whose
+    /// receiving side has gone away) drops the bytes.
     #[derive(Clone, Debug)]
     pub struct BodySink(Option<mpsc::UnboundedSender<Bytes>>);
 
@@ -470,6 +474,11 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
                 sender.send_lossy(bytes);
             }
         }
+    }
+
+    /// An application whose input is `()` takes no sink.
+    impl From<BodySink> for () {
+        fn from(_: BodySink) -> Self {}
     }
 
     /// Application is a minimal interface for standard implementations that operate over a stream
@@ -539,7 +548,6 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
             _context: (E, Self::Context),
             _ancestry: impl Ancestry<Self::Block>,
             _input: Self::Input,
-            _body: BodySink,
         ) -> impl Future<Output = Handoff<Digested<Self::Block>>> + Send {
             async { Handoff::Wait }
         }
@@ -547,8 +555,7 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// Build a new block on top of the provided parent ancestry. If the build job fails,
         /// or the proposer's slot should be skipped, the implementor should return [None].
         ///
-        /// `input` is the per-proposal input for this build. `body` is a [`BodySink`] for the
-        /// block's body bytes as they become final, and ignoring it is always correct.
+        /// `input` is the per-proposal input for this build.
         ///
         /// This future may be cancelled before it completes. Implementations must be
         /// cancellation-safe.
@@ -557,7 +564,6 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
             context: (E, Self::Context),
             ancestry: impl Ancestry<Self::Block>,
             input: Self::Input,
-            body: BodySink,
         ) -> impl Future<Output = Option<Digested<Self::Block>>> + Send;
 
         /// Verify a block produced by the application's proposer, relative to its ancestry.

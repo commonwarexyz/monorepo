@@ -20,7 +20,7 @@ use commonware_codec::{
     Write,
 };
 use commonware_consensus::{
-    Block as ConsensusBlock, BodySink, BoundedBlock, CertifiableBlock, Heightable,
+    Block as ConsensusBlock, BoundedBlock, CertifiableBlock, Heightable,
     marshal::{
         self,
         ancestry::Ancestry,
@@ -241,7 +241,6 @@ impl<E: Spawner + StorageContext> Application<E> for App {
         ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: Input<Self::Input, Self::Provider>,
-        _body: BodySink,
     ) -> Option<Proposed<Self, E>> {
         let mut ancestry = Box::pin(ancestry);
         let parent = ancestry.next().await?;

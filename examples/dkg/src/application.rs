@@ -2,7 +2,7 @@
 
 use crate::types::{Block, Database, Scheme};
 use commonware_consensus::{
-    BodySink, Heightable as _, marshal::ancestry::Ancestry, simplex::types::Context, types::Height,
+    Heightable as _, marshal::ancestry::Ancestry, simplex::types::Context, types::Height,
 };
 use commonware_cryptography::{
     Digestible as _, bls12381::primitives::variant::MinSig, ed25519, sha256,
@@ -67,7 +67,6 @@ where
         mut ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
-        _body: BodySink,
     ) -> Option<Proposed<Self, E>> {
         // The `reshare::Application` wrapper selected and fetched the payload.
         let payload = input.upstream.payload;
