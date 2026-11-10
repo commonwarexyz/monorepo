@@ -575,7 +575,7 @@ impl<P: PublicKey, H: Hasher, S: Strategy, A: Amount> Proposal<P, H, S, A> {
 
     /// Returns the payouts the close appends to the payout log, in account order. With p the
     /// parent's payouts size and s this summary's, they take the indices [p, s - 1) before the
-    /// commit at s - 1.
+    /// commit at s - 1, so an account's payout sits at p plus the account's [Amounts::position].
     pub const fn payouts(&self) -> &Amounts<P, A> {
         &self.payouts
     }
@@ -907,18 +907,19 @@ mod tests {
             assert_eq!(store.log.root(), summary.payouts.root);
             assert_eq!(store.log.bounds().end, summary.payouts.size);
 
-            // The payouts take the indices from the parent's payouts size in account order, and the
-            // commit follows them.
-            let mut index = parent.summary.payouts.size;
+            // Each payout sits at the parent's payouts size plus its account's position in the
+            // close's payouts, and the commit follows them.
+            let start = parent.summary.payouts.size;
             for (account, amount) in expected.iter() {
-                let payout = store.log.get(index).await.unwrap();
+                let position: u64 = Widen::widen(expected.position(account).unwrap());
+                let payout = store.log.get(start + position).await.unwrap();
                 let expected = Payout {
                     account: account.clone(),
                     amount,
                 };
                 assert_eq!(payout, Some(expected));
-                index += 1;
             }
+            assert_eq!(expected.position(&account(1)), None);
             let commit = summary.payouts.size - 1;
             assert_eq!(store.log.get(commit).await.unwrap(), None);
 

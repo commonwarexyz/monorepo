@@ -384,10 +384,13 @@
 //!
 //! Every payout joins the [Payouts] log and keeps its index there for good. [Checked::settle]
 //! stages the close's batch with [Payout::stage], and the summary records the log's size and root
-//! after the batch. With p the parent's payouts size and s the close's, the close's payouts take
-//! the indices [p, s - 1) in account order and its commit takes s - 1 ([Proposal::payouts]). A
-//! validator can find an account's payout of a close by binary search over [p, s - 1) and prove it
-//! with the log's proof of that one operation ([PayoutProof]).
+//! after the batch.
+//!
+//! With p the parent's payouts size and s the close's, the payouts of the close take the indices
+//! [p, s - 1) in account order and its commit takes s - 1 ([Proposal::payouts]). An account's
+//! payout sits at p plus the account's position in the close's payouts ([Amounts::position]), and a
+//! validator that does not keep them can binary search [p, s - 1). The log's proof of that one
+//! operation proves the payout ([PayoutProof]).
 //!
 //! ```text
 //!   Summary(e)

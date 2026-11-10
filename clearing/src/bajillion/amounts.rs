@@ -145,8 +145,9 @@ impl<P: PublicKey, A: Amount> Amounts<P, A> {
         Self::from_sorted(entries)
     }
 
-    /// Returns the index of `account` in the entries.
-    fn position(&self, account: &P) -> Option<usize> {
+    /// Returns the position of `account` among the entries in account order, or `None` if it has
+    /// no amount.
+    pub fn position(&self, account: &P) -> Option<usize> {
         self.entries
             .binary_search_by(|(candidate, _)| candidate.cmp(account))
             .ok()
@@ -240,7 +241,8 @@ mod tests {
 
     type TestAmounts = Amounts<PublicKey, u64>;
 
-    /// Collecting entries orders them by account, and each account reads back its amount or zero.
+    /// Collecting entries orders them by account, and each account reads back its amount or zero
+    /// and its position, if it has one.
     #[test]
     fn test_new_sorts_entries() {
         let keys = accounts(4);
@@ -266,6 +268,8 @@ mod tests {
         assert_eq!(amounts.total(), Some(6));
         assert_eq!(amounts.get(&keys[1]), 2);
         assert_eq!(amounts.get(&keys[3]), 0);
+        assert_eq!(amounts.position(&keys[2]), Some(2));
+        assert_eq!(amounts.position(&keys[3]), None);
     }
 
     /// Zero amounts and repeated accounts are refused, and no entries form the empty amounts.
