@@ -104,9 +104,7 @@ pub fn graftable_chunks<F: Graftable>(ops_leaves: u64, grafting_height: u32) -> 
     (ops_leaves - birth_chunk_0) / chunk_size + 1
 }
 
-/// Returns the grafted leaf for a bitmap `chunk` and the root of the ops subtree it covers:
-/// `hash(chunk || ops_subtree_root)`, except that an all-zero chunk grafts to `ops_subtree_root`
-/// itself (the zero-chunk identity).
+/// Returns the grafted leaf for a bitmap `chunk` and the root of the ops subtree it covers.
 fn grafted_leaf<H: Hasher>(
     hasher: &merkle::hasher::Standard<H>,
     chunk: &[u8],
