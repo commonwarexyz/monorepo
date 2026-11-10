@@ -257,8 +257,7 @@ mod fuzz {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crate::core::field::fp::reference;
-        use commonware_formatting::hex;
+        use crate::{core::field::fp::reference, group::vectors::G1_MULTIPLES};
 
         shared::tests!(G1);
 
@@ -273,32 +272,10 @@ mod fuzz {
         fn multiples_match_known_answers() {
             let [x, y, _] = GENERATOR;
             assert_eq!(affine(&G1::generator()), [x, y]);
-            assert_eq!(
-                affine(&(G1::generator() * &Scalar::from_u64(2))),
-                [
-                    hex!(
-                        "0572cbea904d67468808c8eb50a9450c9721db309128012543902d0ac358a62ae28f75bb8f1c7c42c39a8c5529bf0f4e"
-                    ),
-                    hex!(
-                        "166a9d8cabc673a322fda673779d8e3822ba3ecb8670e461f73bb9021d5fd76a4c56d9d4cd16bd1bba86881979749d28"
-                    ),
-                ]
-            );
-            let scalar = Scalar::from_bytes(&hex!(
-                "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
-            ))
-            .expect("below the order");
-            assert_eq!(
-                affine(&(G1::generator() * &scalar)),
-                [
-                    hex!(
-                        "172a59075fca0729b40b2cea5bb9685afdd219e77407e13631664c53b847cdcad45ab174a073aaa4122ad813fa094485"
-                    ),
-                    hex!(
-                        "028e53b49dfb3b48ebd12df0158912b6a5036da6204a58275b9ad64acc45e372b0dff305bb6134f9d350a89f75e65ab7"
-                    ),
-                ]
-            );
+            for (scalar, expected) in G1_MULTIPLES {
+                let scalar = Scalar::from_bytes(&scalar).expect("below the order");
+                assert_eq!(affine(&(G1::generator() * &scalar)), expected);
+            }
         }
     }
 }

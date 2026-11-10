@@ -256,8 +256,7 @@ mod fuzz {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crate::core::field::fp2::reference;
-        use commonware_formatting::hex;
+        use crate::{core::field::fp2::reference, group::vectors::G2_MULTIPLES};
 
         shared::tests!(G2);
 
@@ -272,36 +271,10 @@ mod fuzz {
         fn multiples_match_known_answers() {
             let [x, y, _] = GENERATOR;
             assert_eq!(affine(&G2::generator()), [x, y]);
-            assert_eq!(
-                affine(&(G2::generator() * &Scalar::from_u64(2))),
-                [
-                    hex!(
-                        "0a4edef9c1ed7f729f520e47730a124fd70662a904ba1074728114d1031e1572c6c886f6b57ec72a6178288c47c33577"
-                        "1638533957d540a9d2370f17cc7ed5863bc0b995b8825e0ee1ea1e1e4d00dbae81f14b0bf3611b78c952aacab827a053"
-                    ),
-                    hex!(
-                        "0f6d4552fa65dd2638b361543f887136a43253d9c66c411697003f7a13c308f5422e1aa0a59c8967acdefd8b6e36ccf3"
-                        "0468fb440d82b0630aeb8dca2b5256789a66da69bf91009cbfe6bd221e47aa8ae88dece9764bf3bd999d95d71e4c9899"
-                    ),
-                ]
-            );
-            let scalar = Scalar::from_bytes(&hex!(
-                "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
-            ))
-            .expect("below the order");
-            assert_eq!(
-                affine(&(G2::generator() * &scalar)),
-                [
-                    hex!(
-                        "06c7468834785e7b83fcf140ddf26c348a16adcf0b3bc1fe5aa2daf7d32175257a8b83335486532f36786f271360e059"
-                        "0460179e06b1d17c1bc0dc9dbc27b107a52c9907e88e6856892cade7ce1ff7a09ec4caf0ea6c9f39a8c7057c5ba56695"
-                    ),
-                    hex!(
-                        "15a0a1bae250e8cc64d7e3c5bcd4c9eb47d6c489a24816df4ac52886964035e892ea63c8b4eec405f93cf1d325dc0786"
-                        "191379c0c4a561348798f7598ee8a935ecad1f19ca837f1ad79218cf15098b93ebd5f167ed3a7ed622b73d7d83f3682a"
-                    ),
-                ]
-            );
+            for (scalar, expected) in G2_MULTIPLES {
+                let scalar = Scalar::from_bytes(&scalar).expect("below the order");
+                assert_eq!(affine(&(G2::generator() * &scalar)), expected);
+            }
         }
     }
 }

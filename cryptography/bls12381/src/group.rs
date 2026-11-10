@@ -6,6 +6,8 @@ mod g2;
 mod kernel;
 mod pairing;
 mod scalar;
+#[cfg(test)]
+mod vectors;
 
 use core::num::NonZeroUsize;
 pub use g1::G1;

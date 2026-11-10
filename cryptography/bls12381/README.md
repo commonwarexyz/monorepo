@@ -20,6 +20,15 @@ python3 cryptography/bls12381/scripts/parameters.py --check
 
 The generator checks the tables against a model of the arithmetic and checks accumulator, rounding, and representation bounds with integer arithmetic.
 
+## Test Vectors
+
+The known answers for multiples of the generators and for the pairing of the generators are generated from their definitions with integer arithmetic. Regenerate or check them from the workspace root:
+
+```sh
+python3 cryptography/bls12381/scripts/vectors.py
+python3 cryptography/bls12381/scripts/vectors.py --check
+```
+
 ## References
 
 - [VROOM](https://eprint.iacr.org/2026/393), the residue arithmetic design.
