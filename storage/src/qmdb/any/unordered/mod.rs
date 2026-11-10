@@ -3,10 +3,7 @@ use crate::{
     index::Unordered as Index,
     journal::contiguous::Contiguous,
     merkle::{Family, Location},
-    qmdb::{
-        any::{ValueEncoding, db::Db},
-        operation::Key,
-    },
+    qmdb::{any::db::Db, operation::Key, value::ValueEncoding},
 };
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;

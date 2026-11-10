@@ -97,7 +97,7 @@ impl MultiArgs {
         let pairs: Vec<_> = elements
             .iter()
             .zip(&locations)
-            .map(|(e, &loc)| (*e, loc))
+            .map(|(e, &loc)| (loc, *e))
             .collect();
         if !proof.verify_multi_inclusion(&hasher, &pairs, &root) {
             return Err("Commonware rejected its generated multiproof".into());
@@ -157,14 +157,14 @@ fn prove<F: Family, H: Hasher, S: Storage<Family = F, Digest = H::Digest>>(
 fn check_rejections<F: Family, H: Hasher>(
     hasher: &MerkleHasher<H>,
     proof: &Proof<F, H::Digest>,
-    pairs: &[([u8; 32], Location<F>)],
+    pairs: &[(Location<F>, [u8; 32])],
     root: H::Digest,
 ) -> Result<(), String> {
     let mut bytes = root.as_ref().to_vec();
     bytes[0] ^= 1;
     let bad_root = H::Digest::decode(Copying(bytes.as_slice())).unwrap();
     let mut bad_pairs = pairs.to_vec();
-    bad_pairs[0].0[0] ^= 1;
+    bad_pairs[0].1[0] ^= 1;
     if proof.verify_multi_inclusion(hasher, pairs, &bad_root)
         || proof.verify_multi_inclusion(hasher, &bad_pairs, &root)
     {
@@ -323,9 +323,9 @@ pub(super) fn check<F: Family, H: Hasher>(encoded: &[u8], policy: Policy) -> boo
         if loc >= leaves {
             return false;
         }
-        pairs.push((element, Location::new(loc)));
+        pairs.push((Location::new(loc), element));
     }
-    let locations: Vec<_> = pairs.iter().map(|(_, loc)| *loc).collect();
+    let locations: Vec<_> = pairs.iter().map(|(loc, _)| *loc).collect();
     let Ok(expected) = canonical_positions::<F>(leaves, &locations, policy) else {
         return false;
     };

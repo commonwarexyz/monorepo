@@ -68,11 +68,6 @@ pub struct Commitment<F: Family, D: Digest> {
 }
 
 impl<F: Family, D: Digest> Commitment<F, D> {
-    /// Create a [`Commitment`] from an operation `size` and its committing `root` digest.
-    pub(crate) const fn new(size: Location<F>, root: D) -> Self {
-        Self { size, root }
-    }
-
     /// Check that `current` still equals this commitment, for reads through a batch built
     /// directly on the database at this commitment. Returns [`Error::StaleRead`] otherwise.
     pub(crate) fn compatible<'a, T>(
@@ -249,7 +244,7 @@ pub(crate) fn merkleizable<'a, T, F: Family, D: Digest>(
 ///
 /// # Errors
 ///
-/// Returns [`Error::FloorRegressed`] if `floor < start` and [`Error::FloorBeyondSize`] if
+/// Returns [`Error::FloorRegressed`] if `floor < start` and [`Error::FloorBeyondCommit`] if
 /// `floor > commit_loc`.
 pub(crate) fn validate_merkleize_floor<F: Family>(
     start: Location<F>,
@@ -260,7 +255,7 @@ pub(crate) fn validate_merkleize_floor<F: Family>(
         return Err(Error::FloorRegressed(floor, start));
     }
     if floor > commit_loc {
-        return Err(Error::FloorBeyondSize(floor, commit_loc));
+        return Err(Error::FloorBeyondCommit(floor, commit_loc));
     }
     Ok(())
 }
@@ -285,7 +280,10 @@ mod tests {
     }
 
     fn state(size: u64, marker: u8) -> Commitment<F, D> {
-        Commitment::new(Location::new(size), D::from([marker; 32]))
+        Commitment {
+            size: Location::new(size),
+            root: D::from([marker; 32]),
+        }
     }
 
     #[test]

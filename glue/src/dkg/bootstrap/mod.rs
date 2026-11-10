@@ -38,7 +38,7 @@
 //! use commonware_utils::{NZU32, sequence::Unit};
 //!
 //! // The network limit for a ceremony among 4 participants with a key-only directory.
-//! let size = max_message_size(&[max_payload_size::<MinSig, Unit>(NZU32!(4), ModeVersion::v0())]);
+//! let size = max_message_size([max_payload_size::<MinSig, Unit>(NZU32!(4), ModeVersion::v0())]);
 //! ```
 
 use crate::dkg::{
@@ -521,6 +521,7 @@ where
                 priority: false,
                 codec_config: block_codec_config,
                 peer_provider: self.config.manager.clone(),
+                blocker: self.config.blocker.clone(),
                 strategy: self.config.strategy.clone(),
             },
         );

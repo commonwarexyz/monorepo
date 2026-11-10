@@ -11,8 +11,8 @@ use crate::{
         self,
         keyless::{self, Operation, fixed, variable},
         sync::{
-            self, Engine, Target,
-            engine::{Config, NextStep},
+            self, Config, Engine, Target,
+            engine::NextStep,
             harness::{
                 CompactConfigOf, CompactOpOf, CompactSyncTestHarness, ConfigOf, DbOf, JournalOf,
                 OpOf, PAGE_CACHE_SIZE, PAGE_SIZE, SyncTestHarness, compact_engine_config,
@@ -95,7 +95,7 @@ where
         let target_db = H::init_db(context.child("target")).await;
         let target_db = H::apply_ops(target_db, H::create_ops(5), Some(H::sample_metadata())).await;
         let bounds = H::bounds(&target_db);
-        let target_root = H::db_root(&target_db);
+        let target_root = H::ops_root(&target_db);
         let target_db = Arc::new(target_db);
         let (size, start) = (bounds.end, bounds.start);
         // The arm mapping below assumes every request is an Operations request, which
@@ -148,7 +148,7 @@ where
         .await
         .unwrap();
         assert_eq!(source.take_verdicts().await, vec![false, true]);
-        assert_eq!(H::db_root(&synced), target_root);
+        assert_eq!(H::ops_root(&synced), target_root);
         H::destroy(synced).await;
 
         // An empty batch is invalid regardless of its proof.
@@ -234,9 +234,9 @@ where
         let source_db =
             H::apply_ops_raising_floor(source_db, ops.clone(), Some(H::sample_metadata())).await;
         let bounds = H::bounds(&source_db);
-        let floor = H::inactivity_floor_loc(&source_db);
+        let floor = H::inactivity_floor(&source_db);
         assert_eq!(floor, bounds.end.checked_sub(1).unwrap());
-        let root = H::db_root(&source_db);
+        let root = H::ops_root(&source_db);
 
         // Sync a fresh client over the full range.
         let source_db = Arc::new(source_db);
@@ -258,8 +258,8 @@ where
         let synced: DbOf<H> = sync::sync(config).await.unwrap();
 
         assert_eq!(H::bounds(&synced), bounds);
-        assert_eq!(H::inactivity_floor_loc(&synced), floor);
-        assert_eq!(H::db_root(&synced), root);
+        assert_eq!(H::inactivity_floor(&synced), floor);
+        assert_eq!(H::ops_root(&synced), root);
         H::assert_ops_applied(&synced, start, &ops).await;
 
         H::destroy(synced).await;
@@ -313,19 +313,19 @@ where
         let start = H::bounds(&target_db).start;
         assert!(*start > 0);
         let initial_target = Target {
-            root: H::db_root(&target_db),
+            root: H::ops_root(&target_db),
             range: non_empty_range!(start, H::bounds(&target_db).end),
         };
         let target_db =
             H::apply_ops_raising_floor(target_db, H::create_ops_seeded(10, 1), None).await;
         let next_target = Target {
-            root: H::db_root(&target_db),
+            root: H::ops_root(&target_db),
             range: non_empty_range!(start, H::bounds(&target_db).end),
         };
         let target_db =
             H::apply_ops_raising_floor(target_db, H::create_ops_seeded(10, 2), None).await;
         let final_target = Target {
-            root: H::db_root(&target_db),
+            root: H::ops_root(&target_db),
             range: non_empty_range!(start, H::bounds(&target_db).end),
         };
 
@@ -381,7 +381,7 @@ where
         assert!(update_tx.send_lossy(final_target.clone()));
         drop(update_tx);
         let synced = client.sync().await.unwrap();
-        assert_eq!(H::db_root(&synced), final_target.root);
+        assert_eq!(H::ops_root(&synced), final_target.root);
         assert_eq!(H::bounds(&synced), start..final_target.range.end());
         H::destroy(synced).await;
         H::destroy(Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("single source"))).await;
@@ -441,14 +441,14 @@ where
         let floor = H::bounds(&target_db).start;
         assert!(*floor > 0);
         let initial_target = Target {
-            root: H::db_root(&target_db),
+            root: H::ops_root(&target_db),
             range: non_empty_range!(floor, H::bounds(&target_db).end),
         };
         let target_db =
             H::apply_ops_raising_floor(target_db, H::create_ops_seeded(10, 1), None).await;
         let next_floor = floor.checked_add(2).unwrap();
         let next_target = Target {
-            root: H::db_root(&target_db),
+            root: H::ops_root(&target_db),
             range: non_empty_range!(next_floor, H::bounds(&target_db).end),
         };
 
@@ -485,7 +485,7 @@ where
         assert!(update_tx.send_lossy(next_target.clone()));
         drop(update_tx);
         let synced = client.sync().await.unwrap();
-        assert_eq!(H::db_root(&synced), next_target.root);
+        assert_eq!(H::ops_root(&synced), next_target.root);
         H::destroy(synced).await;
         H::destroy(Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("single source"))).await;
     });
@@ -516,7 +516,7 @@ pub(crate) fn test_replay_sync_single_op_range<F: Family>() {
             .new_batch()
             .append(vec![1, 2, 3])
             .append(vec![4, 5, 6])
-            .merkleize(&source, None, Location::new(0))
+            .merkleize(&source)
             .await
             .unwrap();
         let source = source.apply_batch(batch).await.unwrap();
@@ -528,7 +528,9 @@ pub(crate) fn test_replay_sync_single_op_range<F: Family>() {
         let floor = source.bounds().end;
         let batch = source
             .new_batch()
-            .merkleize(&source, Some(metadata.clone()), floor)
+            .with_metadata(Some(metadata.clone()))
+            .with_inactivity_floor(floor)
+            .merkleize(&source)
             .await
             .unwrap();
         let source = source.apply_batch(batch).await.unwrap();
@@ -541,7 +543,7 @@ pub(crate) fn test_replay_sync_single_op_range<F: Family>() {
         let source = Arc::new(source);
 
         // The sync range holds only the floor commit, so one boundary response supplies all of it.
-        let client: DbOf<harnesses::VariableHarness<F>> = sync::sync(sync::engine::Config {
+        let client: DbOf<harnesses::VariableHarness<F>> = sync::sync(sync::Config {
             context: context.child("client"),
             db_config: fine_config(&format!("{suffix}-client")),
             fetch_batch_size: NZU64!(2),
@@ -644,13 +646,13 @@ pub(crate) fn test_compact_sync_root_mismatch_preserves_existing_state<
 
 pub(crate) mod harnesses {
     use super::*;
-    use crate::{journal::contiguous::Mutable, qmdb::any::value::ValueEncoding};
+    use crate::{journal::contiguous::Mutable, qmdb::value::ValueEncoding};
     use commonware_codec::{EncodeShared, Read};
     use commonware_parallel::Sequential;
     use commonware_utils::sequence::U64;
 
     type VariableDb<F> = variable::Db<F, deterministic::Context, Vec<u8>, Sha256, Sequential>;
-    type VariableOp<F> = Operation<F, crate::qmdb::any::value::VariableEncoding<Vec<u8>>>;
+    type VariableOp<F> = Operation<F, crate::qmdb::value::VariableEncoding<Vec<u8>>>;
 
     fn variable_config(
         suffix: &str,
@@ -710,7 +712,8 @@ pub(crate) mod harnesses {
                 }
             }
         }
-        let merkleized = batch.merkleize(&db, metadata, floor).await.unwrap();
+        let batch = batch.with_metadata(metadata).with_inactivity_floor(floor);
+        let merkleized = batch.merkleize(&db).await.unwrap();
         db.apply_batch(merkleized).await.unwrap()
     }
 
@@ -764,17 +767,18 @@ pub(crate) mod harnesses {
             ops: Vec<OpOf<Self>>,
             metadata: Option<Self::Metadata>,
         ) -> Self::Db {
-            let floor = db.inactivity_floor_loc();
+            let floor = db.inactivity_floor();
             variable_apply_ops::<F>(db, ops, metadata, floor).await
         }
 
         async fn prune(db: Self::Db, loc: Location<Self::Family>) -> Self::Db {
             // Prune requires the floor to be at or beyond the prune target, so commit `loc` as
             // the floor unless the floor already exceeds it.
-            let db = if db.inactivity_floor_loc() > loc {
+            let db = if db.inactivity_floor() > loc {
                 db
             } else {
-                let merkleized = db.new_batch().merkleize(&db, None, loc).await.unwrap();
+                let batch = db.new_batch().with_inactivity_floor(loc);
+                let merkleized = batch.merkleize(&db).await.unwrap();
                 let db = db.apply_batch(merkleized).await.unwrap();
                 db.commit().await.unwrap()
             };
@@ -789,11 +793,11 @@ pub(crate) mod harnesses {
             db.sync_boundary()
         }
 
-        fn inactivity_floor_loc(db: &Self::Db) -> Location<Self::Family> {
-            db.inactivity_floor_loc()
+        fn inactivity_floor(db: &Self::Db) -> Location<Self::Family> {
+            db.inactivity_floor()
         }
 
-        fn db_root(db: &Self::Db) -> sha256::Digest {
+        fn ops_root(db: &Self::Db) -> sha256::Digest {
             db.root()
         }
 
@@ -847,7 +851,7 @@ pub(crate) mod harnesses {
         variable::CompactDb<F, deterministic::Context, Vec<u8>, Sha256, Sequential>;
     type FixedDb<F> = fixed::Db<F, deterministic::Context, U64, Sha256, Sequential>;
     type CompactFixedDb<F> = fixed::CompactDb<F, deterministic::Context, U64, Sha256, Sequential>;
-    type FullDb<F, V, C> = keyless::Keyless<F, deterministic::Context, V, C, Sha256, Sequential>;
+    type FullDb<F, V, C> = keyless::Db<F, deterministic::Context, V, C, Sha256, Sequential>;
     type CompactDb<F, V> = keyless::CompactDb<F, deterministic::Context, V, Sha256, Sequential>;
 
     fn fixed_config(suffix: &str) -> fixed::Config<Sequential> {
@@ -906,7 +910,8 @@ pub(crate) mod harnesses {
         for value in values {
             batch = batch.append(value.clone());
         }
-        let batch = batch.merkleize(&db, metadata, floor).await.unwrap();
+        let batch = batch.with_metadata(metadata).with_inactivity_floor(floor);
+        let batch = batch.merkleize(&db).await.unwrap();
         db.apply_batch(batch).await.unwrap()
     }
 
@@ -926,7 +931,8 @@ pub(crate) mod harnesses {
         for value in values {
             batch = batch.append(value.clone());
         }
-        let batch = batch.merkleize(&db, metadata, floor).await.unwrap();
+        let batch = batch.with_metadata(metadata).with_inactivity_floor(floor);
+        let batch = batch.merkleize(&db).await.unwrap();
         db.apply_batch(batch).await.unwrap()
     }
 
@@ -1084,8 +1090,8 @@ pub(crate) mod harnesses {
             db.size()
         }
 
-        fn inactivity_floor_loc(db: &Self::Db) -> Location<F> {
-            db.inactivity_floor_loc()
+        fn inactivity_floor(db: &Self::Db) -> Location<F> {
+            db.inactivity_floor()
         }
 
         fn metadata(db: &Self::Db) -> Option<Self::Value> {
@@ -1211,8 +1217,8 @@ pub(crate) mod harnesses {
             db.size()
         }
 
-        fn inactivity_floor_loc(db: &Self::Db) -> Location<F> {
-            db.inactivity_floor_loc()
+        fn inactivity_floor(db: &Self::Db) -> Location<F> {
+            db.inactivity_floor()
         }
 
         fn metadata(db: &Self::Db) -> Option<Self::Value> {
@@ -1344,7 +1350,7 @@ fn test_keyless_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         let local_start = bounds.start;
         let local_end = bounds.end;
         assert!(local_start > Location::new(0));
-        let sync_root = H::db_root(&db);
+        let sync_root = H::ops_root(&db);
 
         // Reopen the operation journal independently to probe the persisted Merkle boundary.
         drop(db);

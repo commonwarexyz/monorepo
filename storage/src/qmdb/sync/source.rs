@@ -583,8 +583,7 @@ where
     }
 }
 
-impl<F, E, C, I, H, U, const N: usize, S> Source
-    for crate::qmdb::any::db::Db<F, E, C, I, H, U, N, S>
+impl<F, E, C, I, H, U, const N: usize, S> Source for crate::qmdb::any::Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
     E: Context,

@@ -15,7 +15,7 @@
 //!
 //! # Database Lifecycle
 //!
-//! All variants are modified through a batch API that follows a common pattern:
+//! All authenticated variants are modified through a batch API that follows a common pattern:
 //! 1. Create a batch from the database.
 //! 2. Stage mutations on the batch.
 //! 3. Merkleize the batch. This resolves mutations against the current state and computes
@@ -24,7 +24,15 @@
 //! 5. Apply the batch to the database (unapplied ancestors are applied automatically).
 //!
 //! [any] and [current] advance the inactivity floor with a [`floor::Policy`] when merkleizing.
-//! [store] does so when applying a batch.
+//! `merkleize` uses [`floor::Proportional`], which keeps the share of inactive operations in the
+//! log bounded, and `merkleize_with` takes a caller-owned policy. [store] takes the policy when
+//! applying a batch. [immutable] and [keyless], including their compact variants, start each batch
+//! at the database or parent batch's floor, and `with_inactivity_floor` sets a different one. That
+//! default holds the floor, so their logs grow until the application advances it.
+//!
+//! A batch records no commit metadata unless `with_metadata` sets it ([store] takes metadata in
+//! `finalize` instead). Metadata belongs to one batch. Child batches start without it, and [any]
+//! and [current] keep it through `stage` and `expand`.
 //!
 //! The specific mutation methods vary by variant.
 //! See each variant's module documentation for the concrete API and usage examples.
@@ -66,7 +74,9 @@
 //!
 //! # Traits
 //!
-//! Keyed mutable variants ([any] and [current]) implement `any::traits::DbAny`.
+//! The `test-traits` feature compiles `any::traits`, whose `DbAny` and `Provable` traits give the
+//! crate's tests and benchmarks one interface over the keyed mutable variants ([any] and
+//! [current]). Outside unit-test builds, this shared interface requires the `test-traits` feature.
 //!
 //! # Acknowledgments
 //!
@@ -106,14 +116,12 @@ mod metrics;
 pub mod operation;
 pub mod store;
 pub mod sync;
+pub mod value;
 pub mod verify;
 
 pub use index_build::IndexBuild;
 pub(super) use index_build::build_index_from_log;
-pub use verify::{
-    create_multi_proof, create_proof_store, verify_multi_proof, verify_proof,
-    verify_proof_and_extract_digests, verify_proof_and_pinned_nodes,
-};
+pub use verify::ProofExt;
 
 /// Reject a bound that cannot retain the bootstrap commit.
 pub(crate) fn validate_initialization_bound<F: Family>(
@@ -141,7 +149,7 @@ fn validate_initialization_commit<F: Family>(
         };
     }
     let floor = commit
-        .and_then(Floored::has_floor)
+        .and_then(Floored::inactivity_floor)
         .ok_or(Error::DataCorrupted(
             "selected operation has no commit floor",
         ))?;
@@ -204,7 +212,7 @@ where
         merkle,
         journal,
         max_size.map(|size| *size),
-        |op: &C::Item| op.has_floor().is_some(),
+        |op: &C::Item| op.inactivity_floor().is_some(),
         ROOT_BAGGING,
     )
     .await?)
@@ -285,7 +293,7 @@ where
 
     let op = reader.read(last_op).await?;
     let floor = op
-        .has_floor()
+        .inactivity_floor()
         .ok_or(Error::HistoricalFloorPruned(op_count))?;
     if floor > Location::new(last_op) {
         return Err(Error::DataCorrupted(
@@ -357,21 +365,27 @@ pub enum Error<F: Family> {
     #[error("initialization bound must allow at least one operation")]
     InvalidInitializationBound,
 
+    /// Database state failed a consistency check. The payload names the check.
     #[error("data corrupted: {0}")]
     DataCorrupted(&'static str),
 
+    /// An error from an underlying Merkle structure.
     #[error("merkle error: {0}")]
     Merkle(#[from] crate::merkle::Error<F>),
 
+    /// An error from a metadata store.
     #[error("metadata error: {0}")]
     Metadata(#[from] crate::metadata::Error),
 
+    /// An error from an underlying journal.
     #[error("journal error: {0}")]
     Journal(#[from] crate::journal::Error),
 
+    /// An error from the runtime.
     #[error("runtime error: {0}")]
     Runtime(#[from] commonware_runtime::Error),
 
+    /// The operation at the location, or the bitmap chunk covering it, has been pruned.
     #[error("operation pruned: {0}")]
     OperationPruned(Location<F>),
 
@@ -383,9 +397,13 @@ pub enum Error<F: Family> {
     #[error("key exists")]
     KeyExists,
 
+    /// An index location does not hold a set, or a compact sync result is not exactly one
+    /// commit at the expected location. The payload is that location.
     #[error("unexpected data at location: {0}")]
     UnexpectedData(Location<F>),
 
+    /// A requested location is at or past the size of the database or batch being read. The
+    /// payloads are the location and that size.
     #[error("location out of bounds: {0} >= {1}")]
     LocationOutOfBounds(Location<F>, Location<F>),
 
@@ -393,6 +411,9 @@ pub enum Error<F: Family> {
     #[error("location {1} out of order after {0}")]
     LocationOutOfOrder(Location<F>, Location<F>),
 
+    /// A prune location exceeds the furthest location pruning may reach: the inactivity floor,
+    /// or the sync boundary for [current]. The payloads are the requested location and that
+    /// bound.
     #[error("prune location {0} beyond minimum required location {1}")]
     PruneBeyondMinRequired(Location<F>, Location<F>),
 
@@ -427,15 +448,17 @@ pub enum Error<F: Family> {
     BelowInactivityFloor(Location<F>),
 
     /// The batch's inactivity floor is lower than the floor it builds on: its parent's, or the
-    /// database's for a batch with no parent.
+    /// database's for a batch with no parent. The payloads are the batch's floor and that earlier
+    /// floor.
     #[error("floor regressed: batch floor {0} < prior floor {1}")]
     FloorRegressed(Location<F>, Location<F>),
 
-    /// The batch's inactivity floor exceeds its own commit operation's location. The floor
-    /// must not sit past the commit, since a subsequent `prune(floor)` would then remove the
-    /// last readable commit from the journal.
+    /// A commit's inactivity floor exceeds the commit operation's own location. The floor must
+    /// not sit past the commit, since a subsequent `prune(floor)` would then remove the last
+    /// readable commit from the journal. The payloads are the requested floor and the commit
+    /// operation's location.
     #[error("floor beyond commit location: floor {0} > commit loc {1}")]
-    FloorBeyondSize(Location<F>, Location<F>),
+    FloorBeyondCommit(Location<F>, Location<F>),
 
     /// The commit at the given operation count cannot be reconstructed from retained history.
     /// The payload is the requested or selected operation count, not its inactivity floor.

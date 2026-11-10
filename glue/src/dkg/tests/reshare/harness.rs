@@ -79,10 +79,7 @@ use commonware_storage::{
     archive::prunable,
     journal::contiguous::fixed::Config as FixedLogConfig,
     mmr::{self, Location, full::Config as MmrJournalConfig},
-    qmdb::{
-        any::{FixedConfig, unordered::fixed},
-        sync::Target,
-    },
+    qmdb::{any::unordered::fixed, sync::Target},
     translator::TwoCap,
 };
 use commonware_utils::{
@@ -571,7 +568,10 @@ impl<E: Spawner + Metrics + Clock + Storage> Application<E> for App {
     }
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
-        Target::new(block.state_root, block.range.clone())
+        Target {
+            root: block.state_root,
+            range: block.range.clone(),
+        }
     }
 }
 
@@ -936,7 +936,7 @@ impl EngineDefinition for ReshareEngine {
             SYNC_BATCH_SIZE,
             fixed::Operation::<mmr::Family, sha256::Digest, sha256::Digest>::SIZE,
         );
-        max_message_size(&[
+        max_message_size([
             orchestrator::max_payload_size::<Scheme, sha256::Digest>(participants),
             marshal::max_payload_size::<MarshalVariant, Scheme>(participants, &()),
             dkg_probe::max_payload_size::<MarshalVariant, Scheme>(participants, &()),
@@ -1010,6 +1010,7 @@ impl EngineDefinition for ReshareEngine {
             priority: false,
             codec_config: (),
             peer_provider: dkg_manager.clone(),
+            blocker: oracle.control(public_key.clone()),
             strategy: Sequential,
         };
         let (broadcast_engine, buffer) =
@@ -1199,8 +1200,8 @@ impl EngineDefinition for ReshareEngine {
             .lock()
             .insert(public_key.clone(), marshal.clone());
 
-        let db_config = FixedConfig {
-            merkle_config: MmrJournalConfig {
+        let db_config = fixed::Config {
+            merkle: MmrJournalConfig {
                 journal_partition: format!("{partition_prefix}-qmdb-mmr-journal"),
                 metadata_partition: format!("{partition_prefix}-qmdb-mmr-metadata"),
                 items_per_blob: NZU64!(11),
@@ -1209,7 +1210,7 @@ impl EngineDefinition for ReshareEngine {
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
-            journal_config: FixedLogConfig {
+            log: FixedLogConfig {
                 partition: format!("{partition_prefix}-qmdb-log-journal"),
                 items_per_blob: NZU64!(7),
                 page_cache: page_cache.clone(),

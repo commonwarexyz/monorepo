@@ -958,7 +958,7 @@ mod tests {
         }
 
         fn max_message_size(&self) -> u32 {
-            commonware_p2p::max_message_size(&[])
+            commonware_p2p::max_message_size(core::iter::empty::<usize>())
         }
 
         fn init(
@@ -1052,7 +1052,7 @@ mod tests {
         }
 
         fn max_message_size(&self) -> u32 {
-            commonware_p2p::max_message_size(&[])
+            commonware_p2p::max_message_size(core::iter::empty::<usize>())
         }
 
         fn init(

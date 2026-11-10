@@ -634,8 +634,10 @@ impl<B: RBlob> FrameReader for Blob<'_, B> {
         offset: u64,
         len: usize,
         bufs: impl Into<IoBufMut> + Send,
-    ) -> Result<(IoBufMut, usize), Error> {
-        Self::read_up_to(self, offset, len, bufs).await
+    ) -> Result<IoBufMut, Error> {
+        Self::read_up_to(self, offset, len, bufs)
+            .await
+            .map(|(buf, _)| buf)
     }
 
     async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {

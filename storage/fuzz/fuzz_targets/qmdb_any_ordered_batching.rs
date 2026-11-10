@@ -11,12 +11,10 @@ use commonware_storage::{
     mmr::full::Config as MerkleConfig,
     qmdb::{
         any::{
-            FixedConfig as Config,
-            db::Db as AnyDb,
-            ordered::{Operation, Update},
-            value::FixedEncoding,
+            Db as AnyDb,
+            ordered::{Operation, Update, fixed::Config},
         },
-        floor::Proportional,
+        value::FixedEncoding,
     },
     translator::EightCap,
 };
@@ -75,10 +73,7 @@ async fn commit_pending<F: MerkleFamily>(
     for (k, v) in pending_writes.drain(..) {
         batch = batch.write(k, v);
     }
-    let merkleized = batch
-        .merkleize(&db, metadata, &mut Proportional)
-        .await
-        .unwrap();
+    let merkleized = batch.with_metadata(metadata).merkleize(&db).await.unwrap();
     let db = db
         .apply_batch(merkleized)
         .await
@@ -99,7 +94,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
         async move {
             let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
             let cfg = Config::<EightCap, Sequential> {
-                merkle_config: MerkleConfig {
+                merkle: MerkleConfig {
                     journal_partition: format!("test-qmdb-merkle-journal-{suffix}"),
                     metadata_partition: format!("test-qmdb-merkle-metadata-{suffix}"),
                     items_per_blob: NZU64!(500000),
@@ -108,7 +103,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                     strategy: Sequential,
                     page_cache: page_cache.clone(),
                 },
-                journal_config: FConfig {
+                log: FConfig {
                     partition: format!("test-qmdb-log-journal-{suffix}"),
                     items_per_blob: NZU64!(500000),
                     write_buffer: NZUsize!(1024),

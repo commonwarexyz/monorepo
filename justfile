@@ -58,9 +58,15 @@ fix: fix-clippy fix-fmt fix-toml-fmt fix-features
 test-benches crate test_flags='' lint_flags='':
     #!/usr/bin/env bash
     set -euo pipefail
+    # The name lint needs lint_flags, which make listing the benchmarks its own build, so only the
+    # first partition lints. The others list with the run's flags, a build the benchmarks reuse.
     # Color codes would split the `Running` lines parsed below.
-    list=$(RUSTFLAGS="{{ lint_flags }}" cargo test --color never --benches -p {{ crate }} {{ test_flags }} -- --list 2>&1)
-    echo "$list" | python3 .github/scripts/lint_benchmark_names.py -
+    if [[ "{{ partition }}" == 1/* ]]; then
+        list=$(RUSTFLAGS="{{ lint_flags }}" cargo test --color never --benches -p {{ crate }} {{ test_flags }} -- --list 2>&1)
+        echo "$list" | python3 .github/scripts/lint_benchmark_names.py -
+    else
+        list=$(cargo test --color never --benches -p {{ crate }} {{ test_flags }} -- --list 2>&1)
+    fi
     all=$(echo "$list" | sed -n 's|.*Running .*/deps/\(.*\)-[a-f0-9]*).*|\1|p')
     if [ -z "$all" ]; then
         echo "error: no benchmark binaries found for {{ crate }}" >&2
@@ -195,9 +201,15 @@ fuzz fuzz_dir max_time='60' max_mem='4000':
     if [ -z "$targets" ]; then
         exit 0
     fi
-    # Build every target in one cargo invocation before fuzzing. Each target is
+    # Build this partition's targets in one cargo invocation before fuzzing. Each target is
     # its own sanitizer-instrumented binary, so building inside the run loop
     # serializes the links against the fuzz sessions while most cores sit idle.
+    # cargo-fuzz builds one target or all of them, so until this recipe exits the
+    # manifest lists only this partition's targets.
+    manifest={{fuzz_dir}}/Cargo.toml
+    cp "$manifest" "$manifest.orig"
+    trap 'mv "$manifest.orig" "$manifest"' EXIT
+    python3 .github/scripts/keep_fuzz_targets.py "$manifest" $targets
     cargo {{nightly_version}} fuzz build --fuzz-dir {{fuzz_dir}}
     for target in $targets; do
         cargo {{nightly_version}} fuzz run $target --fuzz-dir {{fuzz_dir}} -- -max_total_time={{max_time}} -rss_limit_mb={{max_mem}}
@@ -214,7 +226,11 @@ udeps:
 
 # Run the tests in the `miri` test group under Miri (optionally filtered: just miri -p commonware-runtime iobuf::)
 miri *args='':
-    MIRIFLAGS="-Zmiri-disable-isolation" cargo miri nextest run --profile miri --lib {{ args }}
+    MIRIFLAGS="-Zmiri-disable-isolation" cargo miri nextest run --profile miri --lib --no-tests=warn {{ args }}
+
+# Like `miri`, under Tree Borrows with the leak check off, for crates whose dependencies fail `miri` (crossbeam-epoch)
+miri-lenient *args='':
+    MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-tree-borrows -Zmiri-ignore-leaks" cargo miri nextest run --profile miri --lib --no-tests=warn {{ args }}
 
 # Run zepter feature checks
 check-features:

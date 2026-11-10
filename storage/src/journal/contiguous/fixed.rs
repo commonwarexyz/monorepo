@@ -149,7 +149,7 @@ use crate::{
     },
 };
 use bytes::Bytes;
-use commonware_codec::{CodecFixedShared, Copying, DecodeExt as _, ReadExt as _};
+use commonware_codec::{CodecFixedShared, Copying, DecodeExt as _, ReadExt as _, Viewing};
 use commonware_runtime::{
     Blob as RBlob, Buf, Handle, IoBuf, ReadOptions,
     buffer::paged::{CacheRef, Recovery as PagedRecovery},
@@ -1884,9 +1884,10 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
             .map(|group_hits| group_hits as u64)
             .sum();
 
-        let mut bytes = Bytes::from(buf);
+        let bytes = Bytes::from(buf);
+        let mut items = Viewing::new(&bytes);
         for _ in positions {
-            result.push(A::decode((&mut bytes).take(A::SIZE)).map_err(Error::Codec)?);
+            result.push(A::decode(items.split_to(A::SIZE)).map_err(Error::Codec)?);
         }
 
         self.metrics.cache_hits.inc_by(hits);

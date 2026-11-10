@@ -578,7 +578,7 @@ where
     Op: Floored<F> + Encode,
 {
     let inactivity_floor_loc = op
-        .has_floor()
+        .inactivity_floor()
         .ok_or(Error::DataCorrupted("last operation was not a commit"))?;
     let op_bytes = op.encode();
     let hasher = qmdb::hasher::<H>();
@@ -875,7 +875,7 @@ pub(crate) mod tests {
     }
 
     impl Floored<mmr::Family> for PaddedCommit {
-        fn has_floor(&self) -> Option<Location<mmr::Family>> {
+        fn inactivity_floor(&self) -> Option<Location<mmr::Family>> {
             Some(Location::new(0))
         }
     }
