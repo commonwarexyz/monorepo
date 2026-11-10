@@ -122,9 +122,8 @@ enum ReplayStart<D: Digest> {
     Known,
     /// Recovery starts above this cached ancestor or the branch anchor.
     Above(Anchor<D>),
-    /// The selected commitment at `height` is not resident. `anchor` is the branch anchor
-    /// observed by the same search.
-    Missing { height: Height, anchor: Anchor<D> },
+    /// The selected commitment at this height is not resident.
+    Missing(Height),
 }
 
 /// Missing blocks between cached or applied state and a recovery target, acquired forward from
@@ -778,9 +777,9 @@ where
     /// `block`'s merkleized state is ready, and that state remains cached through the
     /// application's `finalized` hook.
     ///
-    /// An uncached `block` is processed as [`Finality::Finalized`] on the selected history
-    /// returned by `history`, which must be canonical finalized history ending at `block`'s
-    /// parent. `history` is called only for an uncached block.
+    /// An uncached `block` is processed as [`Finality::Finalized`] on the history that `history`
+    /// returns for the height of `block`'s parent, which must be canonical finalized history
+    /// ending there. `history` is called only for an uncached block.
     ///
     /// Panics if `block` does not have the next height and the branch anchor as its parent, if a
     /// request is still processing `block`, or if an uncached block fails to process or match its
@@ -788,7 +787,7 @@ where
     pub(super) async fn finalize(
         &mut self,
         context: &E,
-        history: impl FnOnce() -> Blocks<A::Block>,
+        history: impl FnOnce(Height) -> Blocks<A::Block>,
         block: &Digested<A::Block>,
         start_barrier: bool,
     ) -> Applied<SyncTargets<A, E>> {
@@ -834,7 +833,7 @@ where
                 .process(
                     (context.child("finalize_reconstruct"), block_context),
                     block.clone(),
-                    history(),
+                    history(anchor.height),
                     batches,
                     Finality::Finalized,
                 )
@@ -1097,12 +1096,14 @@ where
     /// Selects the nearest cached ancestor of `target` or the branch anchor using the resident
     /// commitments in `blocks`, without reading bodies.
     ///
-    /// `target`'s parent identifies the cached ancestor one height below it even when its
-    /// commitment is not resident.
+    /// The search descends from `resume`, a height with the digest discovered for it, or from
+    /// `target`'s parent when `resume` is `None`. `target`'s parent identifies the cached ancestor
+    /// one height below it even when its commitment is not resident.
     fn replay_start(
         &self,
         blocks: &Blocks<A::Block>,
         target: &Digested<A::Block>,
+        resume: Option<(Height, BlockDigest<A, E>)>,
     ) -> Result<ReplayStart<BlockDigest<A, E>>, PrepareBatchesError> {
         let (target_height, target_digest) = (target.height(), target.digest());
         let state = self.state.lock();
@@ -1124,18 +1125,19 @@ where
             );
             return Err(PrepareBatchesError::Invalid);
         }
-        let mut height = target_height
-            .previous()
-            .expect("target above the branch anchor must have a parent");
+        let (start, known) = resume.unwrap_or_else(|| {
+            let parent_height = target_height
+                .previous()
+                .expect("target above the branch anchor must have a parent");
+            (parent_height, target.parent())
+        });
+        let mut height = start;
         while !state.pending.is_empty() && height > state.branch.height {
             let Some(digest) = blocks
                 .digest(height)
-                .or_else(|| (height.next() == target_height).then(|| target.parent()))
+                .or_else(|| (height == start).then_some(known))
             else {
-                return Ok(ReplayStart::Missing {
-                    height,
-                    anchor: state.branch,
-                });
+                return Ok(ReplayStart::Missing(height));
             };
             if let Some(entry) = state.pending.get(&digest) {
                 if entry.height != height {
@@ -1159,9 +1161,9 @@ where
     ///
     /// `blocks` is the selected branch ending at `target`, which the caller holds and which is
     /// never acquired. When cached states exist and the search reaches a height whose commitment
-    /// is not resident, it asks `blocks` to discover that digest and searches again against the
-    /// current branch anchor and cache, so recovery starts above the nearest cached ancestor.
-    /// When `blocks` selects no digest at that height, recovery starts above the branch anchor.
+    /// is not resident, it asks `blocks` to discover that digest and continues from that height
+    /// against the current cache, so recovery starts above the nearest cached ancestor. When
+    /// `blocks` selects no digest at that height, recovery starts above the branch anchor.
     ///
     /// Returns [`PrepareBatchesError::Invalid`] if `target` is at or below the branch anchor's
     /// height, above the tip of `blocks`, or not the selected block at its height, or if a cached
@@ -1175,26 +1177,21 @@ where
     ) -> Result<Option<ReplayPath<A::Block>>, PrepareBatchesError> {
         let timer = self.metrics.rebuild_pending_duration.timer(context);
 
-        // Each missing height is discovered once. A search that still misses it has no selected
-        // digest left to match, and recovery starts above the branch anchor that search observed.
-        let mut discovered = None;
+        // The search continues from each height it discovers. Once `blocks` selects no digest at
+        // a height, the search has nothing left to match, and recovery starts above the branch
+        // anchor. That anchor moves only during maintenance, which first drops this future, so
+        // it is the anchor every search here observed.
+        let mut resume = None;
         let anchor = loop {
-            match self.replay_start(blocks, &target)? {
+            match self.replay_start(blocks, &target, resume)? {
                 ReplayStart::Known => return Ok(None),
                 ReplayStart::Above(anchor) => break anchor,
-                ReplayStart::Missing { height, anchor } if discovered == Some(height) => {
-                    break anchor;
-                }
-                ReplayStart::Missing { height, .. } => {
-                    blocks
-                        .resolve_digest(height)
-                        .await
-                        .map_err(|error| match error {
-                            BlocksError::Unavailable => PrepareBatchesError::Incomplete,
-                            _ => PrepareBatchesError::Invalid,
-                        })?;
-                    discovered = Some(height);
-                }
+                ReplayStart::Missing(height) => match blocks.resolve_digest(height).await {
+                    Ok(Some(digest)) => resume = Some((height, digest)),
+                    Ok(None) => break self.branch_anchor(),
+                    Err(BlocksError::Unavailable) => return Err(PrepareBatchesError::Incomplete),
+                    Err(_) => return Err(PrepareBatchesError::Invalid),
+                },
             }
         };
 
@@ -1857,15 +1854,10 @@ mod tests {
         }
 
         /// Returns the finalized history ending at `block`'s parent, built on demand.
-        fn history(&self, block: &Digested<Block>) -> impl FnOnce() -> Blocks<Block> + use<> {
+        fn history(&self, block: &Digested<Block>) -> impl FnOnce(Height) -> Blocks<Block> + use<> {
             let provider = self.clone();
-            let (height, parent) = (block.height(), block.parent());
-            move || {
-                let tip = height
-                    .previous()
-                    .expect("finalized block must have a parent");
-                provider.branch(tip, parent)
-            }
+            let parent = block.parent();
+            move |tip| provider.branch(tip, parent)
         }
     }
 

@@ -11,7 +11,7 @@ use crate::stateful::{
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
-    Heightable, History,
+    Heightable,
     marshal::core::{Mailbox as MarshalMailbox, Variant},
     types::Height,
 };
@@ -25,10 +25,7 @@ use futures::{
     FutureExt as _,
     future::{Either, pending, ready},
 };
-use std::{
-    collections::VecDeque,
-    sync::{Arc, mpsc::TryRecvError},
-};
+use std::{collections::VecDeque, sync::mpsc::TryRecvError};
 use tracing::{Instrument as _, debug, info_span};
 
 /// Work selected for one iteration of the processing loop.
@@ -402,18 +399,11 @@ where
                             _ = verifications.pause(Some(boundary), &mut actions) => {},
                         }
                         async {
-                            // An uncached finalized block is processed on canonical finalized
-                            // history, which is read only if the application ranges it.
-                            let parent_height = block
-                                .height()
-                                .previous()
-                                .expect("finalized block above the anchor must have a parent");
-                            let marshal = &self.marshal;
                             let Applied { barrier, prune } = verifications
                                 .drive(
                                     self.processor.finalize(
                                         &self.context,
-                                        || marshal.blocks(parent_height, History::anchored(Arc::from([]))),
+                                        |tip| self.marshal.finalized_blocks(tip),
                                         &block,
                                         durability.barrier.is_none(),
                                     ),
@@ -3131,8 +3121,9 @@ mod tests {
             let outgoing = TestBlock::child(&genesis, 1);
             let parent = TestBlock::child(&outgoing, 2);
             // The selected history names the parent's own parent, which marshal must acquire.
-            let history = marshal.mailbox.blocks(
+            let history = marshal.mailbox.blocks_with_parent(
                 parent.height(),
+                parent.digest(),
                 History::anchored(Arc::from([outgoing.digest(), parent.digest()])),
             );
             let mut proposer = mailbox.clone();

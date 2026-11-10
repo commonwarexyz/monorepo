@@ -123,8 +123,9 @@ where
     /// the shared capacity. Each stays active until its block is delivered or its receiver is
     /// dropped.
     ///
-    /// Sources from [`Mailbox::blocks`](super::core::Mailbox::blocks) give each range an
-    /// additional window of this size for pending acquisitions and buffered bodies. A source
+    /// Sources from [`Mailbox::blocks_with_parent`](super::core::Mailbox::blocks_with_parent)
+    /// and [`Mailbox::finalized_blocks`](super::core::Mailbox::finalized_blocks) give each range
+    /// an additional window of this size for pending acquisitions and buffered bodies. A source
     /// that discovers commitments below a history suffix retains at most this many of the
     /// bodies it reads.
     pub max_repair: NonZeroUsize,

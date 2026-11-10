@@ -5192,8 +5192,9 @@ pub fn blocks_forward_range<H: TestHarness>() {
             parent_commitment = commitment;
         }
 
-        let blocks = handle.mailbox.blocks(
+        let blocks = handle.mailbox.blocks_with_parent(
             Height::new(7),
+            parent_commitment,
             crate::History::anchored(Arc::from(selected)),
         );
         assert_eq!(blocks.tip(), Height::new(7));

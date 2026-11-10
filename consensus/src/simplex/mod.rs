@@ -435,14 +435,9 @@
 //!
 //! Proposal verification repairs this split by requesting the first missing nullification or named
 //! parent from the proposal's elected leader, even below the certified floor. The voter rechecks the
-//! proposal's parent span after each delivery and dispatches verification once it is valid. The
-//! voter does not request an uncertified parent inside the optimistic issuance window: its
-//! certificate is still forming from live votes (see [Optimistic Validation](#optimistic-validation)).
-//!
-//! Application requests receive the resident suffix of their selected branch without waiting for
-//! older certificates. If the application needs the missing prefix, its history handle starts
-//! notarization repair from any peer. Repair preserves the captured branch and cannot splice in
-//! a replacement ancestor.
+//! full ancestry after each delivery and votes only once it is valid. The voter does not request
+//! an uncertified parent inside the optimistic issuance window: its certificate is still forming
+//! from live votes (see [Optimistic Validation](#optimistic-validation)).
 //!
 //! The same split can block certification. A notarized view certifies only after its parent
 //! certifies, and certifying the parent requires its exact-view notarization. When the voter holds

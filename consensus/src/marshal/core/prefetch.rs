@@ -120,9 +120,9 @@ impl<V: Variant> Prefetches<V> {
         Some(demand)
     }
 
-    pub(super) fn get_ready(&self, commitment: &V::Commitment) -> Option<V::Block> {
+    pub(super) fn get_ready(&self, commitment: &V::Commitment) -> Option<&V::Block> {
         match &self.entries.get(commitment)?.phase {
-            Phase::Ready(block) => Some(block.clone()),
+            Phase::Ready(block) => Some(block),
             Phase::Queued(_) | Phase::Active => None,
         }
     }

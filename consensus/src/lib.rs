@@ -180,7 +180,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// dispatch, in forward order, ending at the parent and excluding the new payload.
         /// Consecutive re-proposals of one payload contribute one commitment. An anchored
         /// history begins at a finalized or genesis anchor. A suffix, possibly empty, holds
-        /// only the newest commitments, and consensus fetches no certificate to extend it.
+        /// only the newest commitments.
         ///
         /// Closing the response declines this request, which consensus may
         /// treat as final for the context. Keep the response pending when

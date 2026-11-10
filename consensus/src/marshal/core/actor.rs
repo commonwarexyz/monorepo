@@ -2202,7 +2202,7 @@ where
         commitment: V::Commitment,
     ) -> Option<V::Block> {
         if let Some(block) = self.prefetch.get_ready(&commitment) {
-            return Some(block);
+            return Some(block.clone());
         }
         if let Some(block) = buffer.find_by_commitment(commitment).await {
             return Some(block);

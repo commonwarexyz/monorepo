@@ -15,7 +15,7 @@ use crate::stateful::{
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
-    CertifiableBlock, Epochable, Heightable, History, Viewable,
+    CertifiableBlock, Epochable, Heightable, Viewable,
     marshal::core::{Mailbox as MarshalMailbox, Variant},
 };
 use commonware_cryptography::{Digested, Digestible};
@@ -28,7 +28,7 @@ use commonware_utils::{
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, oneshot},
 };
-use std::{collections::VecDeque, mem, sync::Arc};
+use std::{collections::VecDeque, mem};
 use tracing::{Instrument as _, debug, error, info_span};
 
 /// A retained finalization classified against the converged sync anchor.
@@ -269,17 +269,10 @@ where
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
                     if !processor.redelivered(&block) {
-                        // An uncached finalized block is processed on canonical finalized
-                        // history, which is read only if the application ranges it.
-                        let parent_height = block
-                            .height()
-                            .previous()
-                            .expect("finalized block above the anchor must have a parent");
-                        let marshal = &self.marshal;
                         let Applied { prune, .. } = processor
                             .finalize(
                                 self.context.as_present(),
-                                || marshal.blocks(parent_height, History::anchored(Arc::from([]))),
+                                |tip| self.marshal.finalized_blocks(tip),
                                 &block,
                                 false,
                             )

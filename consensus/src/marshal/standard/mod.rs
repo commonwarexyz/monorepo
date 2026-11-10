@@ -266,8 +266,9 @@ mod tests {
                     digests.push(digest);
                 }
 
-                let blocks = marshal.blocks(
+                let blocks = marshal.blocks_with_parent(
                     Height::new(3),
+                    parent,
                     crate::History::anchored(Arc::from(digests.clone())),
                 );
                 let mut range = blocks.range(Height::new(1)..=Height::new(3));
@@ -6664,8 +6665,9 @@ mod tests {
             let missing = make_raw_block(Sha256::hash(&[b"missing-parent"]), missing_height, 400);
             let anchor = make_raw_block(missing.digest(), Height::new(5), 500);
             let mut finalized = mailbox.finalized(missing_height);
-            let source = mailbox.blocks(
+            let source = mailbox.blocks_with_parent(
                 anchor.height(),
+                anchor.digest(),
                 crate::History::anchored(Arc::from([anchor.digest()])),
             );
             let mut range = source.range(missing_height..=missing_height);
@@ -12731,8 +12733,9 @@ mod tests {
                         block
                     })
                     .collect();
-                let source = mailbox.blocks(
+                let source = mailbox.blocks_with_parent(
                     Height::new(LENGTH),
+                    *selected.last().unwrap(),
                     crate::History::anchored(Arc::from(selected)),
                 );
                 let mut range = source.range(Height::new(1)..=Height::new(LENGTH));
@@ -12910,8 +12913,9 @@ mod tests {
             operations.lock().clear();
 
             let expected = selected[1];
-            let source = mailbox.blocks(
+            let source = mailbox.blocks_with_parent(
                 Height::new(LENGTH),
+                *selected.last().unwrap(),
                 crate::History::anchored(Arc::from(selected)),
             );
             let mut range = source.range(Height::new(1)..=Height::new(LENGTH));
@@ -14657,7 +14661,7 @@ mod tests {
                         mailbox.prune(Height::new(10));
                     }
                     let mut direct = mailbox.finalized(height);
-                    let source = mailbox.blocks(height, crate::History::anchored(Arc::from([])));
+                    let source = mailbox.finalized_blocks(height);
                     let mut range = source.range(height..=height);
                     let mut read = Box::pin(range.next());
                     let early = read.as_mut().now_or_never();
