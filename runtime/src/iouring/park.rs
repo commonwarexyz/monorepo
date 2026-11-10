@@ -1596,8 +1596,8 @@ mod loom_tests {
     fn batch_started_during_partial_drain(check_mail: bool) {
         loom::model(move || {
             // The inbox holds a batch of two before the producer starts.
-            let mailbox = Arc::new(Mailbox::new());
-            let parker = mailbox.parker();
+            let (mailbox, parker) = Mailbox::new();
+            let mailbox = Arc::new(mailbox);
             assert!(mailbox.send(message(0)).is_ok());
             assert!(mailbox.send(message(1)).is_ok());
 
@@ -1656,8 +1656,8 @@ mod loom_tests {
     fn test_batch_notification_and_take_gate() {
         check_bounded(|| {
             // A producer sends two messages around a claim notification.
-            let mailbox = Arc::new(Mailbox::new());
-            let parker = mailbox.parker();
+            let (mailbox, parker) = Mailbox::new();
+            let mailbox = Arc::new(mailbox);
             let producer = thread::spawn({
                 let mailbox = mailbox.clone();
                 move || {
@@ -1718,8 +1718,8 @@ mod loom_tests {
     fn test_batch_close_with_retained_scratch_and_delayed_notification() {
         loom::model(|| {
             // The worker took a batch of two and applied one, then armed.
-            let mailbox = Arc::new(Mailbox::new());
-            let parker = mailbox.parker();
+            let (mailbox, parker) = Mailbox::new();
+            let mailbox = Arc::new(mailbox);
             assert!(mailbox.send(message(0)).is_ok());
             assert!(mailbox.send(message(1)).is_ok());
             let mut scratch = Vec::new();

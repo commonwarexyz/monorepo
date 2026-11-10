@@ -1244,7 +1244,7 @@ pub mod tests {
     /// A pool of one worker that never runs, so every wake takes the global
     /// queue path.
     pub fn pool() -> Arc<Pool> {
-        Arc::new(Pool::new(vec![Arc::new(Mailbox::new())]))
+        Arc::new(Pool::new(vec![Arc::new(Mailbox::new().0)]))
     }
 
     impl Ready {
@@ -2027,13 +2027,24 @@ mod loom_tests {
         (state.0.load(Ordering::Acquire) & REFS) / REF_ONE
     }
 
-    /// A pool of `workers` workers with no runner. Task headers hold a
-    /// standard `Weak` to it, and every wake takes the global queue path.
-    fn pool(workers: usize) -> std::sync::Arc<Pool> {
-        let mailboxes = (0..workers)
-            .map(|_| std::sync::Arc::new(Mailbox::new()))
-            .collect();
-        std::sync::Arc::new(Pool::new(mailboxes))
+    /// A pool of `workers` workers with no runner, and the parker of each
+    /// worker's mailbox. Task headers hold a standard `Weak` to the pool, and
+    /// every wake takes the global queue path.
+    fn pool(workers: usize) -> (std::sync::Arc<Pool>, Vec<Parker>) {
+        let (mailboxes, parkers) = (0..workers)
+            .map(|_| {
+                let (mailbox, parker) = Mailbox::new();
+                (std::sync::Arc::new(mailbox), parker)
+            })
+            .unzip();
+        (std::sync::Arc::new(Pool::new(mailboxes)), parkers)
+    }
+
+    /// The parkers of a pool of `N` workers, in worker order.
+    fn parker_array<const N: usize>(parkers: Vec<Parker>) -> [Parker; N] {
+        parkers
+            .try_into()
+            .unwrap_or_else(|_| panic!("expected {N} parkers"))
     }
 
     /// Counts the drops of a future's captured state.
@@ -2126,8 +2137,7 @@ mod loom_tests {
     /// while no notification moved it since. With `spin`, a worker that sees
     /// it moved runs again without arming, as an idle spin that sees it does.
     /// The worker that completes the last task wakes every worker, so none
-    /// waits forever. Models take every parker before starting any thread, so
-    /// the mailbox lock adds no schedules.
+    /// waits forever.
     #[allow(clippy::too_many_arguments)]
     fn work(
         pool: &Pool,
@@ -2180,7 +2190,7 @@ mod loom_tests {
         let mut builder = loom::model::Builder::new();
         builder.preemption_bound = bound;
         builder.check(move || {
-            let pool = pool(workers);
+            let (pool, mut parkers) = pool(workers);
             let set = Arc::new(Tasks::new(workers));
             let signal = Arc::new(AtomicBool::new(false));
             let drops = Arc::new(AtomicUsize::new(0));
@@ -2199,9 +2209,6 @@ mod loom_tests {
                 handles.push(task);
             }
 
-            let mut parkers: Vec<Parker> = (0..workers as u32)
-                .map(|index| pool.mailbox(index).parker())
-                .collect();
             let parker = parkers.remove(0);
             let pushing = thread::spawn(move || {
                 signal.store(true, Ordering::Release);
@@ -2343,8 +2350,8 @@ mod loom_tests {
         let mut builder = loom::model::Builder::new();
         builder.preemption_bound = Some(3);
         builder.check(|| {
-            let pool = pool(2);
-            let (p0, p1) = (pool.mailbox(0).parker(), pool.mailbox(1).parker());
+            let (pool, parkers) = pool(2);
+            let [p0, p1] = parker_array(parkers);
             let set = Arc::new(Tasks::new(2));
             let completed = Arc::new(AtomicUsize::new(0));
             let ran: Ran = Arc::new((Mutex::new(false), Condvar::new()));
@@ -2383,8 +2390,8 @@ mod loom_tests {
         let mut builder = loom::model::Builder::new();
         builder.preemption_bound = Some(2);
         builder.check(|| {
-            let pool = pool(3);
-            let (p0, p2) = (pool.mailbox(0).parker(), pool.mailbox(2).parker());
+            let (pool, parkers) = pool(3);
+            let [p0, _p1, p2] = parker_array(parkers);
             let set = Arc::new(Tasks::new(3));
             let completed = Arc::new(AtomicUsize::new(0));
             let ran: Ran = Arc::new((Mutex::new(false), Condvar::new()));
@@ -2445,8 +2452,8 @@ mod loom_tests {
         let mut builder = loom::model::Builder::new();
         builder.preemption_bound = Some(2);
         builder.check(|| {
-            let pool = pool(4);
-            let (p1, p3) = (pool.mailbox(1).parker(), pool.mailbox(3).parker());
+            let (pool, parkers) = pool(4);
+            let [_p0, p1, _p2, p3] = parker_array(parkers);
             let set = Arc::new(Tasks::new(4));
             let completed = Arc::new(AtomicUsize::new(0));
             let ran: Ran = Arc::new((Mutex::new(false), Condvar::new()));
@@ -2530,7 +2537,7 @@ mod loom_tests {
     #[test]
     fn test_exit_racing_a_claim_restores_the_idle_state() {
         loom::model(|| {
-            let pool = pool(2);
+            let (pool, _parkers) = pool(2);
             let set = Tasks::new(2);
             let drops = Arc::new(AtomicUsize::new(0));
             let (task, runnable) =
@@ -2564,8 +2571,8 @@ mod loom_tests {
         let mut builder = loom::model::Builder::new();
         builder.preemption_bound = Some(2);
         builder.check(|| {
-            let pool = pool(3);
-            let (p0, p2) = (pool.mailbox(0).parker(), pool.mailbox(2).parker());
+            let (pool, parkers) = pool(3);
+            let [p0, _p1, p2] = parker_array(parkers);
             let set = Arc::new(Tasks::new(3));
             let completed = Arc::new(AtomicUsize::new(0));
             let ran: Arc<(Mutex<usize>, Condvar)> = Arc::new((Mutex::new(0), Condvar::new()));
@@ -2642,7 +2649,7 @@ mod loom_tests {
     fn test_foreign_wake_racing_the_poll_path_is_never_lost() {
         for by_value in [false, true] {
             loom::model(move || {
-                let pool = pool(1);
+                let (pool, _parkers) = pool(1);
                 let set = Tasks::new(1);
                 let signal = Arc::new(AtomicBool::new(false));
                 let drops = Arc::new(AtomicUsize::new(0));
@@ -2692,7 +2699,7 @@ mod loom_tests {
     #[test]
     fn test_teardown_racing_a_foreign_wake_disposes_of_the_task_once() {
         loom::model(|| {
-            let pool = pool(1);
+            let (pool, _parkers) = pool(1);
             let set = Tasks::new(1);
             let drops = Arc::new(AtomicUsize::new(0));
             let (task, runnable) =
@@ -2722,7 +2729,7 @@ mod loom_tests {
     #[test]
     fn test_registration_racing_teardown_disposes_of_the_task_once() {
         loom::model(|| {
-            let pool = pool(1);
+            let (pool, _parkers) = pool(1);
             let set = Arc::new(Tasks::new(1));
             let drops = Arc::new(AtomicUsize::new(0));
             let registering = thread::spawn({
@@ -2753,7 +2760,7 @@ mod loom_tests {
     #[test]
     fn test_teardown_racing_the_poll_path_drops_the_future_once() {
         loom::model(|| {
-            let pool = pool(1);
+            let (pool, _parkers) = pool(1);
             let set = Arc::new(Tasks::new(1));
             let drops = Arc::new(AtomicUsize::new(0));
             let guard = DropCount(drops.clone());

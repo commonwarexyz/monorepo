@@ -30,10 +30,10 @@
 //! reads the flag again after it applies messages and blocks only while the
 //! flag is clear.
 //!
-//! The mailbox also holds the worker's [`Parker`] until the worker takes it at
-//! startup, so the word has one parker. The pool's idle state unparks a
-//! selected worker through its mailbox's [`Unparker`], without a message. See
-//! [`super::idle`] for parking order.
+//! [`Mailbox::new`] returns the word's only [`Parker`] beside the mailbox, for
+//! the worker that drains it. The pool's idle state unparks a selected worker
+//! through its mailbox's [`Unparker`], without a message. See [`super::idle`]
+//! for parking order.
 
 use super::{
     park::{Parker, Unparker},
@@ -88,8 +88,6 @@ struct Inbox {
     /// Pending batch. Transfer swaps it with the worker's drained scratch, so
     /// both buffers keep their capacity.
     messages: Vec<Message>,
-    /// The parker of the word until its worker takes it.
-    parker: Option<Parker>,
 }
 
 /// A worker's shared entry point: its inbox and the unparker of its word.
@@ -107,29 +105,20 @@ pub struct Mailbox {
 }
 
 impl Mailbox {
-    /// Create an open mailbox with a fresh word, holding its parker for the
-    /// worker.
-    pub fn new() -> Self {
+    /// Create an open mailbox with a fresh word, and return it with the word's
+    /// only parker, which belongs to the worker that drains the mailbox.
+    pub fn new() -> (Self, Parker) {
         let parker = Parker::new();
-        Self {
+        let mailbox = Self {
             unparker: parker.unparker(),
             inbox: Mutex::new(Inbox {
                 open: true,
                 messages: Vec::new(),
-                parker: Some(parker),
             }),
             #[cfg(test)]
             takes: std::sync::atomic::AtomicUsize::new(0),
-        }
-    }
-
-    /// Take the parker of this mailbox's word, panicking if it was already
-    /// taken, even if it has since been dropped.
-    pub fn parker(&self) -> Parker {
-        self.lock()
-            .parker
-            .take()
-            .expect("mailbox parker must be taken at most once")
+        };
+        (mailbox, parker)
     }
 
     /// Lock the inbox.
@@ -302,7 +291,7 @@ mod tests {
     #[test]
     fn test_messages_notify_once_per_batch() {
         // A fresh mailbox has no batch, no notification, and no mail.
-        let mailbox = Mailbox::new();
+        let (mailbox, _parker) = Mailbox::new();
         let mut scratch = Vec::new();
         assert!(mailbox.is_open());
         assert!(!mailbox.take(&mut scratch));
@@ -342,8 +331,7 @@ mod tests {
     #[test]
     fn test_notification_without_message_is_not_mail() {
         // A pool claim or a permit grant unparks the worker without a message.
-        let mailbox = Mailbox::new();
-        let parker = mailbox.parker();
+        let (mailbox, parker) = Mailbox::new();
         mailbox.unparker.unpark();
 
         // The word moved, but the worker's parker reports no mail, so the
@@ -361,8 +349,7 @@ mod tests {
     #[test]
     fn test_send_wakes_armed_worker() {
         // The worker parks on its word with a bounded deadline.
-        let mailbox = Mailbox::new();
-        let parker = mailbox.parker();
+        let (mailbox, parker) = Mailbox::new();
         let deadline = Instant::now() + Duration::from_secs(10);
         let parked = thread::spawn(move || parker.park(0, Some(deadline)));
 
@@ -377,26 +364,10 @@ mod tests {
         assert_eq!(notifications(&mailbox.unparker), 1);
     }
 
-    /// A mailbox hands out the parker of its word once, so one worker waits on
-    /// it, while its unparker keeps working after that parker is dropped.
-    #[test]
-    #[should_panic(expected = "mailbox parker must be taken at most once")]
-    fn test_parker_is_taken_at_most_once() {
-        // The worker takes the parker and drops it, which leaves the word to
-        // its unparkers.
-        let mailbox = Mailbox::new();
-        drop(mailbox.parker());
-        mailbox.unparker.unpark();
-        assert_eq!(notifications(&mailbox.unparker), 1);
-
-        // Another take panics, even after the first parker is gone.
-        mailbox.parker();
-    }
-
     #[test]
     #[should_panic(expected = "mailbox scratch must be drained before transfer")]
     fn test_take_requires_empty_scratch() {
-        let mailbox = Mailbox::new();
+        let (mailbox, _parker) = Mailbox::new();
         let mut scratch = vec![Message::WakeRoot];
 
         mailbox.take(&mut scratch);
@@ -404,7 +375,7 @@ mod tests {
 
     #[test]
     fn test_close_returns_messages_and_rejects_new_ones() {
-        let mailbox = Arc::new(Mailbox::new());
+        let mailbox = Arc::new(Mailbox::new().0);
         let (message, _receiver, reentrant) = forward_message(&mailbox);
         assert!(mailbox.send(message).is_ok());
 
@@ -437,7 +408,7 @@ mod tests {
 
     #[test]
     fn test_send_racing_close_preserves_payload_ownership() {
-        let mailbox = Arc::new(Mailbox::new());
+        let mailbox = Arc::new(Mailbox::new().0);
         let gate = Arc::new(Barrier::new(2));
         let (message, _receiver, reentrant) = forward_message(&mailbox);
 
