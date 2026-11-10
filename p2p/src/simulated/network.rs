@@ -120,8 +120,8 @@ struct PeerRefCounts {
     secondary: usize,
 }
 
-/// The most recent peer sets tracked through one manager, either the network-wide manager or
-/// the managers of one peer.
+/// The most recent peer sets tracked either through the network-wide manager or through the
+/// managers of one peer.
 struct Tracker<P: PublicKey> {
     // Primary and secondary peer sets indexed by peer set ID.
     sets: BTreeMap<u64, PeerSetsAtIndex<P>>,
@@ -307,7 +307,9 @@ pub struct Config {
     /// Maximum number of distinct identities at one peer-set index.
     ///
     /// This applies to the deduplicated union of a peer set's primary and secondary identities.
-    /// The simulator panics when it processes an oversized registration.
+    /// Sets that a peer tracks through [`ingress::Control::manager`] or
+    /// [`ingress::Control::socket_manager`] also count that peer when they omit it. The simulator
+    /// panics when it processes an oversized registration.
     pub max_peers_per_set: NonZeroUsize,
 
     /// True if peers should disconnect upon being blocked. While production networking would
@@ -501,8 +503,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
     /// The network-wide tracker, or `owner`'s own tracker.
     ///
-    /// Panics if `owner` has no tracker. [`ingress::Message::OwnPeerSets`] creates it before any
-    /// other message names `owner`.
+    /// Panics if `owner` has no tracker. [`ingress::Control`] enqueues
+    /// [`ingress::Message::OwnPeerSets`] before it returns a manager for `owner`, so the tracker
+    /// exists before any of that manager's messages arrive.
     fn tracker(&self, owner: Option<&P>) -> &Tracker<P> {
         owner.map_or(&self.network_tracker, |owner| {
             self.own_trackers
@@ -522,8 +525,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         }
     }
 
-    /// The peer sets `peer` follows: its own if it has a manager from [`ingress::Control`],
-    /// otherwise the network-wide ones.
+    /// The peer sets `peer` follows. These are its own once [`ingress::Control`] has given it
+    /// some, and the network-wide ones otherwise.
     fn tracked_by(&self, peer: &P) -> &Tracker<P> {
         self.own_trackers.get(peer).unwrap_or(&self.network_tracker)
     }

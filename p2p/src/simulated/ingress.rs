@@ -546,7 +546,8 @@ impl<P: PublicKey, E: Clock> Control<P, E> {
     /// Replace this peer's own peer sets with empty ones, as a node's are when it restarts.
     ///
     /// Subscriptions to the old sets end, and components holding them stop, so call this only
-    /// while none of this peer's components are running.
+    /// while none of this peer's components are running. A peer that has no sets of its own gets
+    /// empty ones and stops following the network-wide sets.
     pub fn reset_peer_sets(&self) {
         let _ = enqueue(
             &self.sender,
