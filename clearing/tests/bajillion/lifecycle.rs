@@ -423,8 +423,22 @@ mod schemes {
     const UNIT: U256 = U256::from_limbs([0, 0, 1, 0]);
 
     /// Returns `units` times [UNIT].
-    fn units(units: u64) -> U256 {
-        UNIT * U256::from(units)
+    const fn units(units: u64) -> U256 {
+        U256::from_limbs([0, 0, units, 0])
+    }
+
+    /// Returns `amount` plus one.
+    fn above(amount: U256) -> U256 {
+        amount
+            .checked_add(U256::ONE)
+            .expect("the amount must be below the largest")
+    }
+
+    /// Returns `amount` less one.
+    fn below(amount: U256) -> U256 {
+        amount
+            .checked_sub(U256::ONE)
+            .expect("the amount must be positive")
     }
 
     /// The reference roles run with secp256r1 users, a BLS12-381 operator, secp256r1 validator
@@ -465,15 +479,15 @@ mod schemes {
                 key.public_key(),
                 2,
             );
-            let batch = Amounts::new([(users[1].public_key(), units(2) + U256::ONE)]).unwrap();
+            let batch = Amounts::new([(users[1].public_key(), above(units(2)))]).unwrap();
             let request = alice.send(2, batch).unwrap();
             let acknowledgement = deployment.operator.accept(&request).unwrap();
             for receipt in alice.acknowledged(&acknowledgement).unwrap() {
-                assert_eq!(bob.receive(receipt).unwrap(), units(2) + U256::ONE);
+                assert_eq!(bob.receive(receipt).unwrap(), above(units(2)));
             }
             assert_eq!(
                 deployment.operator.live(&users[0].public_key()),
-                units(3) - U256::ONE
+                below(units(3))
             );
             deployment
                 .operator
@@ -496,8 +510,8 @@ mod schemes {
                     .is_none()
             );
             let balances = [
-                (users[0].public_key(), units(2) - U256::ONE),
-                (users[1].public_key(), UNIT + U256::ONE),
+                (users[0].public_key(), below(units(2))),
+                (users[1].public_key(), above(UNIT)),
             ];
             deployment.check_balances(&balances).await;
             assert_eq!(deployment.ledger.custody(), units(3));

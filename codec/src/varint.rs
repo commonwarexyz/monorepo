@@ -214,17 +214,21 @@ mod sealed {
 
     #[stability(ALPHA)]
     impl<const BITS: usize, const LIMBS: usize> UPrim for crate::Uint<BITS, LIMBS> {
-        const BITS: usize = {
-            assert!(
-                BITS >= BITS_PER_BYTE,
-                "a varint integer must hold the continuation threshold"
-            );
-            BITS
-        };
+        const BITS: usize = BITS;
 
         #[inline(always)]
         fn from_u8(byte: u8) -> Self {
-            Self::from(u64::from(byte))
+            // Every varint is built from bytes, so a width that cannot hold one does not compile.
+            // A width that holds one has a least significant limb.
+            const {
+                assert!(
+                    BITS >= BITS_PER_BYTE,
+                    "a varint integer must hold the continuation threshold"
+                )
+            };
+            let mut limbs = [0; LIMBS];
+            limbs[0] = u64::from(byte);
+            Self::from_limbs(limbs)
         }
 
         #[inline(always)]

@@ -4,14 +4,14 @@ use crate::{Buf, Error, FixedSize, Read, Write, util::at_least};
 use bytes::BufMut;
 use core::{
     fmt::{self, Debug, Display, Formatter},
-    ops::{Add, BitOrAssign, Mul, Shl, ShrAssign, Sub},
+    ops::{BitOrAssign, Shl, ShrAssign},
 };
 
 /// An unsigned integer of `BITS` bits held in `LIMBS` limbs of 64 bits, such as [U256].
 ///
 /// It encodes as its value in big-endian over the fewest bytes that hold its bits, so a 256-bit
 /// integer encodes as 32 bytes. Decoding refuses an encoding with a bit set beyond the width, so
-/// every value has exactly one encoding. Arithmetic through the operators wraps.
+/// every value has exactly one encoding.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Uint<const BITS: usize, const LIMBS: usize>(ruint::Uint<BITS, LIMBS>);
 
@@ -67,10 +67,15 @@ impl<const BITS: usize, const LIMBS: usize> Uint<BITS, LIMBS> {
 }
 
 impl<const BITS: usize, const LIMBS: usize> From<u64> for Uint<BITS, LIMBS> {
-    /// # Panics
+    /// Returns the integer holding `value`. A width below 64 bits does not compile.
     ///
-    /// Panics if `value` does not fit in `BITS` bits.
+    /// ```compile_fail
+    /// use commonware_codec::Uint;
+    ///
+    /// let narrow = Uint::<40, 1>::from(1);
+    /// ```
     fn from(value: u64) -> Self {
+        const { assert!(BITS >= 64, "the width must hold a u64") };
         Self(ruint::Uint::from(value))
     }
 }
@@ -84,30 +89,6 @@ impl<const BITS: usize, const LIMBS: usize> Debug for Uint<BITS, LIMBS> {
 impl<const BITS: usize, const LIMBS: usize> Display for Uint<BITS, LIMBS> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         Display::fmt(&self.0, f)
-    }
-}
-
-impl<const BITS: usize, const LIMBS: usize> Add for Uint<BITS, LIMBS> {
-    type Output = Self;
-
-    fn add(self, other: Self) -> Self {
-        Self(self.0 + other.0)
-    }
-}
-
-impl<const BITS: usize, const LIMBS: usize> Sub for Uint<BITS, LIMBS> {
-    type Output = Self;
-
-    fn sub(self, other: Self) -> Self {
-        Self(self.0 - other.0)
-    }
-}
-
-impl<const BITS: usize, const LIMBS: usize> Mul for Uint<BITS, LIMBS> {
-    type Output = Self;
-
-    fn mul(self, other: Self) -> Self {
-        Self(self.0 * other.0)
     }
 }
 
@@ -186,9 +167,8 @@ mod tests {
     }
 
     #[test]
-    fn test_arithmetic_wraps_and_reports_overflow() {
+    fn test_arithmetic_reports_overflow() {
         let (five, six) = (U256::from(5), U256::from(6));
-        assert_eq!(five * six - U256::ONE, U256::from(29));
         assert_eq!(U256::MAX.overflowing_add(U256::ONE), (U256::ZERO, true));
         assert_eq!(five.overflowing_add(six), (U256::from(11), false));
         assert_eq!(five.overflowing_sub(six), (U256::MAX, true));
@@ -210,7 +190,7 @@ mod tests {
             assert_eq!(U256::decode(encoded).unwrap(), value);
         }
         type U512 = Uint<512, 8>;
-        let value = U512::MAX - U512::from(7);
+        let (value, _) = U512::MAX.overflowing_sub(U512::from(7));
         assert_eq!(value.encode().as_ref(), value.0.to_be_bytes::<64>());
         assert_eq!(U512::decode(value.encode()).unwrap(), value);
     }
