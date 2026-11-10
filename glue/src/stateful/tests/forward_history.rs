@@ -4,20 +4,19 @@
 //! [`Deferred`] Marshal adapter, the Marshal core actor with its P2P resolver, and the
 //! [`StatefulActor`] over a real QMDB. The test plays the other three validators over the
 //! simulated network. It sends valid notarizations so the real voter selects a chain
-//! `B1..BD` above the finalized genesis without warming application state, then measures one
+//! `B1..BD` above the finalized genesis without warming application state, then sends one
 //! public input event: the leader's proposal and notarization of the candidate `C = B(D+1)`.
 //!
 //! Peers answer Marshal block requests through real resolver P2P engines over simulated links
 //! with fixed latency. Out-of-order and tail scenarios hold one response at the producer. Sparse
 //! scenarios send the voter only the parent's notarization, so the history it supplies is a
-//! suffix and Marshal discovers the commitments below the parent from block bodies. Each run
-//! prints one machine-readable line prefixed by `E2E_FORWARD_HISTORY`.
+//! suffix and Marshal discovers the commitments below the parent from block bodies.
 //!
 //! "Cold" means a cold in-memory application backlog above finality on a live node. No
 //! scenario performs a persisted restart.
 
 use super::{
-    NoopQmdbResolver,
+    NoopQmdbResolver, build_chain_with_leaders,
     common::{
         EPOCH_LENGTH, IO_BUFFER_SIZE, PAGE_CACHE_SIZE, PAGE_SIZE, TEST_QUOTA, archive_config,
     },
@@ -49,7 +48,7 @@ use commonware_consensus::{
         mocks::scheme::{self as scheme_mocks, Scheme as MockScheme},
         types::{Activity, Certificate, Context, Notarization, Notarize, Proposal, Vote},
     },
-    types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
+    types::{Epoch, FixedEpocher, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
     Digested, Digestible as _, Sha256, certificate::ConstantProvider, ed25519, sha256,
@@ -65,8 +64,7 @@ use commonware_runtime::{
 };
 use commonware_storage::archive::prunable;
 use commonware_utils::{
-    NZDuration, NZU64, NZUsize, channel::oneshot, non_empty, non_empty_range, ordered::Set,
-    probability, sync::Mutex,
+    NZDuration, NZU64, NZUsize, channel::oneshot, non_empty, ordered::Set, probability, sync::Mutex,
 };
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -87,13 +85,43 @@ const SIMPLEX_RESOLVER: u64 = 2;
 const BACKFILL: u64 = 3;
 const BROADCAST: u64 = 4;
 
-/// Upper bound on a producer-held response, so revisions that cannot satisfy a gate finish.
+/// Selected blocks `B1..BD` below the candidate.
+const DEPTH: u64 = 8;
+
+/// Marshal's repair window, which also bounds a range's pending bodies.
+const WINDOW: usize = 3;
+
+/// One-way latency of every simulated link.
+const LATENCY: Duration = Duration::from_millis(20);
+
+/// Upper bound on a producer-held response, so a run that cannot satisfy a gate still finishes.
 const HOLD_LIMIT: Duration = Duration::from_secs(3);
+
+/// Interval at which the test polls for a condition.
+const POLL: Duration = Duration::from_millis(1);
+
+/// Quiet period before the input event, in which any premature request or execution would show.
+const SETTLE: Duration = Duration::from_millis(500);
+
+/// Hang guard for a whole run.
+const RUN_LIMIT: Duration = Duration::from_secs(600);
+
+/// Timeout of one resolver fetch.
+const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Delay before a resolver retries a fetch.
+const FETCH_RETRY: Duration = Duration::from_millis(100);
+
+/// Simplex leader and retry timeout, long enough that no view times out during a run.
+const VIEW_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Simplex certification timeout, long enough that no certification times out during a run.
+const CERTIFICATION_TIMEOUT: Duration = Duration::from_secs(400);
 
 /// Which bodies are local and how peers order their responses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
-    /// Every selected body is buffered locally before the measured event.
+    /// Every selected body is buffered locally before the input event.
     Local,
     /// Only the parent `BD` (and the candidate) are local; peers answer immediately.
     Cold,
@@ -106,41 +134,12 @@ enum Kind {
     Tail,
 }
 
-impl Kind {
-    fn parse(value: &str) -> Self {
-        match value {
-            "local" => Self::Local,
-            "cold" => Self::Cold,
-            "mixed" => Self::Mixed,
-            "ooo" => Self::OutOfOrder,
-            "tail" => Self::Tail,
-            other => panic!("unknown FH_SCENARIO {other}"),
-        }
-    }
-
-    const fn name(self) -> &'static str {
-        match self {
-            Self::Local => "local",
-            Self::Cold => "cold",
-            Self::Mixed => "mixed",
-            Self::OutOfOrder => "ooo",
-            Self::Tail => "tail",
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug)]
 struct Scenario {
     kind: Kind,
     /// Whether the voter receives a notarization for the parent `BD` alone. Otherwise it
     /// receives one for each of `B1..BD`.
     sparse: bool,
-    seed: u64,
-    depth: u64,
-    window: usize,
-    latency_ms: u64,
-    forward_reports: bool,
-    assert_pipeline: bool,
 }
 
 impl Scenario {
@@ -148,12 +147,6 @@ impl Scenario {
         Self {
             kind,
             sparse: false,
-            seed: 0,
-            depth: 8,
-            window: 3,
-            latency_ms: 20,
-            forward_reports: false,
-            assert_pipeline: true,
         }
     }
 
@@ -163,43 +156,13 @@ impl Scenario {
         self
     }
 
-    /// Applies optional FH_* environment overrides.
-    fn with_env(mut self) -> Self {
-        let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
-        if let Some(kind) = var("FH_SCENARIO") {
-            self.kind = Kind::parse(&kind);
-        }
-        if let Some(certificates) = var("FH_CERTIFICATES") {
-            self.sparse = certificates == "sparse";
-        }
-        if let Some(seed) = var("FH_SEED") {
-            self.seed = seed.parse().expect("FH_SEED");
-        }
-        if let Some(depth) = var("FH_DEPTH") {
-            self.depth = depth.parse().expect("FH_DEPTH");
-        }
-        if let Some(window) = var("FH_WINDOW") {
-            self.window = window.parse().expect("FH_WINDOW");
-        }
-        if let Some(latency) = var("FH_LATENCY_MS") {
-            self.latency_ms = latency.parse().expect("FH_LATENCY_MS");
-        }
-        if let Some(report) = var("FH_REPORT") {
-            self.forward_reports = report == "forward";
-        }
-        if let Some(assert) = var("FH_ASSERT_PIPELINE") {
-            self.assert_pipeline = assert != "0";
-        }
-        self
-    }
-
-    /// Heights of `B1..BD` whose bodies are buffered locally before the measured event.
+    /// Heights of `B1..BD` whose bodies are buffered locally before the input event.
     fn local_heights(&self) -> BTreeSet<u64> {
-        (1..=self.depth)
+        (1..=DEPTH)
             .filter(|&height| match self.kind {
                 Kind::Local => true,
-                Kind::Mixed => height == self.depth || height % 2 == 1,
-                Kind::Cold | Kind::OutOfOrder | Kind::Tail => height == self.depth,
+                Kind::Mixed => height == DEPTH || height % 2 == 1,
+                Kind::Cold | Kind::OutOfOrder | Kind::Tail => height == DEPTH,
             })
             .collect()
     }
@@ -208,9 +171,7 @@ impl Scenario {
 /// Application execution observed through the instrumented wrapper.
 #[derive(Clone, Debug)]
 struct Execution {
-    kind: &'static str,
     height: u64,
-    start: SystemTime,
     end: Option<SystemTime>,
     ok: Option<bool>,
 }
@@ -219,9 +180,7 @@ struct Execution {
 #[derive(Clone, Debug)]
 struct Request {
     at: SystemTime,
-    peer: usize,
     height: u64,
-    kind: &'static str,
 }
 
 #[derive(Default)]
@@ -232,75 +191,47 @@ struct Observations {
     responses: Vec<(SystemTime, u64)>,
     other_requests: usize,
     held: Option<(u64, oneshot::Sender<Bytes>, Bytes)>,
-    hold_release: Option<(SystemTime, &'static str)>,
+    hold_release: Option<&'static str>,
     stub_certified: u64,
-    stub_verifies: usize,
-    stub_certifies: usize,
     target_verifies: usize,
     target_certifies: usize,
     finalized_reports: usize,
-    proposes: usize,
     inner_calls_before_t0: usize,
-    target_verify_at: Option<SystemTime>,
-    target_certify_at: Option<SystemTime>,
-    certify_result: Option<(SystemTime, bool)>,
+    certified: Option<bool>,
     finalize_vote_at: Option<SystemTime>,
 }
 
 type Shared = Arc<Mutex<Observations>>;
 
-fn ns(from: SystemTime, to: SystemTime) -> u128 {
-    to.duration_since(from).unwrap_or_default().as_nanos()
-}
-
-/// Values the assertions read, with the transport estimate they share with the record.
-///
-/// Report-only values are derived in [`Self::record`].
-struct Measured<'a> {
-    observations: &'a Observations,
-    t0: SystemTime,
+/// Values the assertions read, derived from the observations of one run.
+struct Outcome<'a> {
     /// Executions of `B1..BD` in observed order.
     replay: Vec<&'a Execution>,
     apply_order: Vec<u64>,
-    first_apply_done: Option<u128>,
     correct_root: bool,
-    certified: bool,
     executions_before_completion: usize,
     requested: Vec<u64>,
     distinct: BTreeSet<u64>,
-    /// Estimated departure of each request and earliest arrival of its response at the node.
-    intervals: Vec<(SystemTime, Option<SystemTime>)>,
     inflight_before_first_arrival: usize,
 }
 
-impl<'a> Measured<'a> {
-    fn derive(
-        observations: &'a Observations,
-        t0: SystemTime,
-        depth: u64,
-        latency: Duration,
-    ) -> Self {
+impl<'a> Outcome<'a> {
+    fn derive(observations: &'a Observations) -> Self {
         let replay = observations
             .executions
             .iter()
-            .filter(|execution| execution.height <= depth)
+            .filter(|execution| execution.height <= DEPTH)
             .collect::<Vec<_>>();
         let apply_order = replay
             .iter()
             .map(|execution| execution.height)
             .collect::<Vec<_>>();
-        let first_apply_done = replay
-            .iter()
-            .filter_map(|execution| execution.end)
-            .min()
-            .map(|end| ns(t0, end));
         let candidate_execution = observations
             .executions
             .iter()
-            .find(|execution| execution.height == depth + 1)
+            .find(|execution| execution.height == DEPTH + 1)
             .expect("candidate was not verified");
         let correct_root = candidate_execution.ok == Some(true);
-        let (_, certified) = observations.certify_result.expect("certify result");
         let finalize_vote_at = observations.finalize_vote_at.expect("finalize vote");
         let executions_before_completion = observations
             .executions
@@ -326,8 +257,8 @@ impl<'a> Measured<'a> {
                 let end = answered
                     .iter()
                     .position(|(at, height)| *height == request.height && *at >= request.at)
-                    .map(|index| answered.remove(index).0 + latency);
-                (request.at - latency, end)
+                    .map(|index| answered.remove(index).0 + LATENCY);
+                (request.at - LATENCY, end)
             })
             .collect::<Vec<_>>();
         let first_arrival = intervals.iter().filter_map(|(_, end)| *end).min();
@@ -339,168 +270,14 @@ impl<'a> Measured<'a> {
         });
 
         Self {
-            observations,
-            t0,
             replay,
             apply_order,
-            first_apply_done,
             correct_root,
-            certified,
             executions_before_completion,
             requested,
             distinct,
-            intervals,
             inflight_before_first_arrival,
         }
-    }
-
-    /// Formats the `E2E_FORWARD_HISTORY` record.
-    fn record(&self, scenario: &Scenario, processed_height: u64, local: &BTreeSet<u64>) -> String {
-        let (observations, t0, depth) = (self.observations, self.t0, scenario.depth);
-        let first_apply = self.replay.first().map(|execution| ns(t0, execution.start));
-        let replay_done = self
-            .replay
-            .iter()
-            .filter_map(|execution| execution.end)
-            .max()
-            .map(|end| ns(t0, end));
-        let verify_done = observations
-            .executions
-            .iter()
-            .find(|execution| execution.height == depth + 1)
-            .expect("candidate was not verified")
-            .end
-            .map(|end| ns(t0, end));
-        let (certified_at, certified) = observations.certify_result.expect("certify result");
-        let completion = ns(t0, observations.finalize_vote_at.expect("finalize vote"));
-        let max_inflight = self
-            .intervals
-            .iter()
-            .map(|(start, _)| {
-                self.intervals
-                    .iter()
-                    .filter(|(s, e)| s <= start && e.is_none_or(|e| *start < e))
-                    .count()
-            })
-            .max()
-            .unwrap_or(0);
-        let first_arrival = self.intervals.iter().filter_map(|(_, end)| *end).min();
-        let first_response = observations.responses.first().map(|(at, _)| ns(t0, *at));
-        let last_response = observations.responses.last().map(|(at, _)| ns(t0, *at));
-        let response_order = observations.responses.iter().map(|(_, height)| *height);
-        let request_times = observations
-            .requests
-            .iter()
-            .map(|request| ns(t0, request.at));
-        let request_peers = observations.requests.iter().map(|request| request.peer);
-        let hold_release = observations.hold_release.map_or_else(
-            || "null".to_string(),
-            |(at, reason)| format!("{{\"at_ns\":{},\"reason\":\"{reason}\"}}", ns(t0, at)),
-        );
-        let opt = |value: Option<u128>| value.map_or_else(|| "null".to_string(), |v| v.to_string());
-        let fields = [
-            format!("\"scenario\":\"{}\"", scenario.kind.name()),
-            format!(
-                "\"certificates\":\"{}\"",
-                if scenario.sparse {
-                    "sparse"
-                } else {
-                    "complete"
-                }
-            ),
-            format!("\"seed\":{}", scenario.seed),
-            format!("\"depth\":{depth}"),
-            format!("\"window\":{}", scenario.window),
-            format!("\"latency_ms\":{}", scenario.latency_ms),
-            format!(
-                "\"reports\":\"{}\"",
-                if scenario.forward_reports {
-                    "forward"
-                } else {
-                    "gated"
-                }
-            ),
-            format!(
-                "\"t0_abs_ns\":{}",
-                t0.duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ),
-            format!("\"first_apply_ns\":{}", opt(first_apply)),
-            format!("\"first_apply_done_ns\":{}", opt(self.first_apply_done)),
-            format!("\"replay_done_ns\":{}", opt(replay_done)),
-            format!("\"completion_ns\":{completion}"),
-            format!("\"verify_done_ns\":{}", opt(verify_done)),
-            format!("\"certify_done_ns\":{}", ns(t0, certified_at)),
-            format!(
-                "\"target_verify_ns\":{}",
-                opt(observations.target_verify_at.map(|at| ns(t0, at)))
-            ),
-            format!(
-                "\"target_certify_ns\":{}",
-                opt(observations.target_certify_at.map(|at| ns(t0, at)))
-            ),
-            format!("\"external_requests\":{}", self.requested.len()),
-            format!("\"distinct_requested_bodies\":{}", self.distinct.len()),
-            format!("\"other_requests\":{}", observations.other_requests),
-            format!("\"max_inflight\":{max_inflight}"),
-            format!("\"max_inflight_estimated\":{max_inflight}"),
-            "\"transport_timing\":\"estimated_from_peer_timestamps_and_fixed_latency\"".to_string(),
-            "\"completion\":\"peer_observed_finalize_vote\"".to_string(),
-            format!(
-                "\"requests_before_earliest_possible_arrival\":{}",
-                self.inflight_before_first_arrival
-            ),
-            format!(
-                "\"earliest_possible_body_arrival_ns\":{}",
-                opt(first_arrival.map(|at| ns(t0, at)))
-            ),
-            format!("\"first_response_ns\":{}", opt(first_response)),
-            format!("\"last_response_ns\":{}", opt(last_response)),
-            format!("\"hold_release\":{hold_release}"),
-            format!("\"local_heights\":{}", json_list(local.iter())),
-            format!("\"requested_heights\":{}", json_list(self.requested.iter())),
-            format!("\"request_ns\":{}", json_list(request_times)),
-            format!("\"request_peers\":{}", json_list(request_peers)),
-            format!(
-                "\"request_kinds\":{}",
-                json_list(
-                    observations
-                        .requests
-                        .iter()
-                        .map(|request| format!("\"{}\"", request.kind))
-                )
-            ),
-            format!("\"proposes\":{}", observations.proposes),
-            format!("\"response_order\":{}", json_list(response_order)),
-            format!("\"apply_order\":{}", json_list(self.apply_order.iter())),
-            format!(
-                "\"apply_start_ns\":{}",
-                json_list(self.replay.iter().map(|execution| ns(t0, execution.start)))
-            ),
-            format!(
-                "\"replay_kinds\":{}",
-                json_list(
-                    self.replay
-                        .iter()
-                        .map(|execution| format!("\"{}\"", execution.kind))
-                )
-            ),
-            format!("\"stub_verifies\":{}", observations.stub_verifies),
-            format!("\"stub_certifies\":{}", observations.stub_certifies),
-            format!("\"target_verifies\":{}", observations.target_verifies),
-            format!("\"target_certifies\":{}", observations.target_certifies),
-            format!("\"executions\":{}", observations.executions.len()),
-            format!(
-                "\"executions_before_completion\":{}",
-                self.executions_before_completion
-            ),
-            format!("\"finalized_reports\":{}", observations.finalized_reports),
-            format!("\"processed_height\":{processed_height}"),
-            format!("\"correct_root\":{}", self.correct_root),
-            format!("\"certified\":{certified}"),
-        ];
-        format!("E2E_FORWARD_HISTORY {{{}}}", fields.join(","))
     }
 }
 
@@ -512,15 +289,13 @@ struct InstrumentedApp {
 }
 
 impl InstrumentedApp {
-    fn begin(&self, context: &deterministic::Context, kind: &'static str, height: u64) -> usize {
+    fn begin(&self, height: u64) -> usize {
         let mut observations = self.observations.lock();
         if observations.t0.is_none() {
             observations.inner_calls_before_t0 += 1;
         }
         observations.executions.push(Execution {
-            kind,
             height,
-            start: context.current(),
             end: None,
             ok: None,
         });
@@ -556,7 +331,6 @@ impl Application<deterministic::Context> for InstrumentedApp {
         batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, deterministic::Context>> {
-        self.observations.lock().proposes += 1;
         let proposed = <App as Application<deterministic::Context>>::propose(
             &mut self.inner,
             context,
@@ -581,11 +355,7 @@ impl Application<deterministic::Context> for InstrumentedApp {
         finality: Finality,
     ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
         let runtime = context.0.child("instrument");
-        let kind = match finality {
-            Finality::Candidate => "candidate",
-            Finality::Finalized => "finalized",
-        };
-        let index = self.begin(&runtime, kind, block.height().get());
+        let index = self.begin(block.height().get());
         let expected_root = block.inner().state_root;
         let result = <App as Application<deterministic::Context>>::process(
             &mut self.inner,
@@ -649,14 +419,13 @@ impl Application<deterministic::Context> for InstrumentedApp {
 ///
 /// Requests for the selected views `1..=D` are answered without reaching [`Deferred`], so no
 /// independent verification or certification job prepares application state before the
-/// measured event. Requests for the candidate view are forwarded unchanged with the voter's
+/// input event. Requests for the candidate view are forwarded unchanged with the voter's
 /// history. Proposals are never produced.
 #[derive(Clone)]
 struct Gate<A> {
     context: Arc<deterministic::Context>,
     inner: A,
     target: View,
-    forward_reports: bool,
     observations: Shared,
     proposals: Arc<Mutex<Vec<oneshot::Sender<D>>>>,
 }
@@ -685,14 +454,9 @@ where
         ancestry: History<Self::Digest>,
     ) -> oneshot::Receiver<bool> {
         if context.round.view() == self.target {
-            {
-                let mut observations = self.observations.lock();
-                observations.target_verify_at = Some(self.context.current());
-                observations.target_verifies += 1;
-            }
+            self.observations.lock().target_verifies += 1;
             return self.inner.verify(context, payload, ancestry);
         }
-        self.observations.lock().stub_verifies += 1;
         let (sender, receiver) = oneshot::channel();
         let _ = sender.send(true);
         receiver
@@ -714,23 +478,18 @@ where
             {
                 let mut observations = self.observations.lock();
                 observations.stub_certified = observations.stub_certified.max(round.view().get());
-                observations.stub_certifies += 1;
             }
             let _ = sender.send(true);
             return receiver;
         }
-        {
-            let mut observations = self.observations.lock();
-            observations.target_certify_at = Some(self.context.current());
-            observations.target_certifies += 1;
-        }
+        self.observations.lock().target_certifies += 1;
         let inner = self.inner.certify(round, payload, ancestry);
         let observations = self.observations.clone();
         self.context
             .child("target_certify")
-            .spawn(move |context| async move {
+            .spawn(move |_| async move {
                 if let Ok(result) = inner.await {
-                    observations.lock().certify_result = Some((context.current(), result));
+                    observations.lock().certified = Some(result);
                     let _ = sender.send(result);
                 }
             });
@@ -755,7 +514,7 @@ where
     type Activity = Activity<S, D>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
-        if !self.forward_reports && activity.view() < self.target {
+        if activity.view() < self.target {
             return Feedback::Ok;
         }
         self.inner.report(activity)
@@ -766,7 +525,6 @@ where
 #[derive(Clone)]
 struct ScriptedProducer {
     context: Arc<deterministic::Context>,
-    peer: usize,
     kind: Kind,
     bodies: Arc<HashMap<D, (u64, Bytes)>>,
     notarized: Arc<HashMap<Round, (u64, Bytes)>>,
@@ -784,7 +542,7 @@ impl ScriptedProducer {
         if let Some((height, sender, body)) = observations.held.take() {
             let _ = sender.send(body);
             Self::respond(observations, at, height);
-            observations.hold_release = Some((at, reason));
+            observations.hold_release = Some(reason);
         }
     }
 
@@ -813,7 +571,7 @@ impl ScriptedProducer {
                         return;
                     }
                 }
-                context.sleep(Duration::from_millis(1)).await;
+                context.sleep(POLL).await;
             }
         });
     }
@@ -828,21 +586,16 @@ impl resolver_p2p::Producer for ScriptedProducer {
         let mut observations = self.observations.lock();
         // Bodies by digest carry only the block. Notarized requests by round carry the
         // notarization followed by its block. Both share one availability and hold policy.
-        let (kind, found) = match key {
-            Key::Block(digest) => ("block", self.bodies.get(&digest).cloned()),
-            Key::Notarized { round } => ("notarized", self.notarized.get(&round).cloned()),
-            Key::Finalized { .. } => ("finalized", None),
+        let found = match key {
+            Key::Block(digest) => self.bodies.get(&digest).cloned(),
+            Key::Notarized { round } => self.notarized.get(&round).cloned(),
+            Key::Finalized { .. } => None,
         };
         let Some((height, body)) = found else {
             observations.other_requests += 1;
             return receiver;
         };
-        observations.requests.push(Request {
-            at: now,
-            peer: self.peer,
-            height,
-            kind,
-        });
+        observations.requests.push(Request { at: now, height });
         let hold = observations.held.is_none()
             && observations.hold_release.is_none()
             && match self.kind {
@@ -896,56 +649,6 @@ fn leader(participants: &[P], view: u64) -> &P {
     &participants[(view as usize) % participants.len()]
 }
 
-/// Builds `B1..B(blocks)` on a private QMDB with contexts matching the real voter's rounds.
-async fn build_chain(
-    context: &deterministic::Context,
-    participants: &[P],
-    blocks: u64,
-) -> (Block, Vec<Block>) {
-    let initial_target =
-        <SingleDatabaseSet<deterministic::Context> as DatabaseSet<_>>::initial_sync_targets();
-    let genesis = Block::genesis(initial_target.root, initial_target.range);
-    let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
-    let databases = <SingleDatabaseSet<deterministic::Context> as DatabaseSet<_>>::init(
-        context.child("chain_builder"),
-        qmdb_config("forward-history-chain-builder", page_cache),
-        None,
-    )
-    .await;
-    let mut batches = <SingleDatabaseSet<deterministic::Context> as DatabaseSet<
-        deterministic::Context,
-    >>::new_batches(&databases)
-    .await;
-    let mut parent = genesis.clone();
-    let mut chain = Vec::with_capacity(blocks as usize);
-
-    // QMDB descendants retain uncommitted ancestry by weak reference after merkleization.
-    let mut speculative = Vec::with_capacity(blocks as usize);
-    for height in 1..=blocks {
-        let height = Height::new(height);
-        let merkleized = App::execute(height, batches).await;
-        let bounds = merkleized.bounds();
-        let block = Block {
-            context: Context {
-                round: Round::new(Epoch::zero(), View::new(height.get())),
-                leader: leader(participants, height.get()).clone(),
-                parent: (parent.context.round.view(), parent.digest()),
-            },
-            parent: parent.digest(),
-            height,
-            state_root: merkleized.root(),
-            range: non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
-        };
-        speculative.push(merkleized);
-        batches = <SingleDatabaseSet<deterministic::Context> as DatabaseSet<_>>::fork_batches(
-            speculative.last().expect("speculative batch missing"),
-        );
-        parent = block.clone();
-        chain.push(block);
-    }
-    (genesis, chain)
-}
-
 fn proposal(block: &Block) -> Proposal<D> {
     Proposal::new(block.context.round, block.context.parent.0, block.digest())
 }
@@ -958,20 +661,9 @@ fn notarization(schemes: &[S], signers: &[usize], block: &Block) -> Notarization
     Notarization::from_notarizes(&schemes[signers[0]], non_empty![@&votes], &Sequential).unwrap()
 }
 
-fn json_list<T: std::fmt::Display>(values: impl IntoIterator<Item = T>) -> String {
-    let values = values
-        .into_iter()
-        .map(|value| value.to_string())
-        .collect::<Vec<_>>();
-    format!("[{}]", values.join(","))
-}
-
 fn run(scenario: Scenario) {
-    let config = deterministic::Config::new()
-        .with_seed(scenario.seed)
-        .with_timeout(Some(Duration::from_secs(600)));
-    deterministic::Runner::new(config).start(|context| async move {
-        let depth = scenario.depth;
+    deterministic::Runner::timed(RUN_LIMIT).start(|context| async move {
+        let depth = DEPTH;
         let target = View::new(depth + 1);
         let mut rng = context.child("fixture");
         let fixture = scheme_mocks::fixture(&mut rng, NAMESPACE, N as u32);
@@ -983,7 +675,11 @@ fn run(scenario: Scenario) {
         let peers = (0..N).filter(|&index| index != me).collect::<Vec<_>>();
         let candidate_leader = (depth + 1) as usize % N;
         assert_ne!(candidate_leader, me);
-        let (genesis, chain) = build_chain(&context, &participants, depth + 1).await;
+        // The chain's contexts name the leaders the real voter elects for its rounds.
+        let (genesis, chain) = build_chain_with_leaders(&context, depth + 1, |view| {
+            leader(&participants, view).clone()
+        })
+        .await;
         let candidate = chain.last().expect("candidate missing").clone();
         let selected = &chain[..depth as usize];
         let local = scenario.local_heights();
@@ -1029,7 +725,7 @@ fn run(scenario: Scenario) {
         let mut manager = oracle.manager();
         manager.track(0, Set::from_iter_dedup(participants.iter().cloned()));
         let link = Link {
-            latency: Duration::from_millis(scenario.latency_ms),
+            latency: LATENCY,
             jitter: Duration::ZERO,
             success_rate: probability!(1.0),
         };
@@ -1072,21 +768,20 @@ fn run(scenario: Scenario) {
                     consumer: NullConsumer,
                     producer: ScriptedProducer {
                         context: Arc::new(context.child("producer").with_attribute("index", index)),
-                        peer: index,
                         kind: scenario.kind,
                         bodies: bodies.clone(),
                         notarized: notarized.clone(),
                         missing: missing_shared.clone(),
                         tail: missing
                             .iter()
-                            .nth(scenario.window.min(missing.len().saturating_sub(1)))
+                            .nth(WINDOW.min(missing.len().saturating_sub(1)))
                             .copied(),
                         observations: observations.clone(),
                     },
                     mailbox_size: NZUsize!(1024),
                     me: Some(participants[index].clone()),
-                    fetch_timeout: NZDuration!(Duration::from_secs(10)),
-                    fetch_retry_delay: Duration::from_millis(100),
+                    fetch_timeout: NZDuration!(FETCH_TIMEOUT),
+                    fetch_retry_delay: FETCH_RETRY,
                     priority_requests: false,
                     priority_responses: false,
                 },
@@ -1140,7 +835,7 @@ fn run(scenario: Scenario) {
         );
         leader_engine.start(leader_broadcast);
 
-        // Measured node: production wiring as in the single-database engine.
+        // Node under test: production wiring as in the single-database engine.
         let public_key = participants[me].clone();
         let control = oracle.control(public_key.clone());
         let vote_network = control.register(VOTES, TEST_QUOTA).await.unwrap();
@@ -1161,8 +856,8 @@ fn run(scenario: Scenario) {
                 peer_provider: oracle.manager(),
                 blocker: oracle.control(public_key.clone()),
                 mailbox_size: NZUsize!(1024),
-                fetch_timeout: NZDuration!(Duration::from_secs(10)),
-                fetch_retry_delay: Duration::from_millis(100),
+                fetch_timeout: NZDuration!(FETCH_TIMEOUT),
+                fetch_retry_delay: FETCH_RETRY,
                 priority_requests: false,
                 priority_responses: false,
             },
@@ -1213,7 +908,7 @@ fn run(scenario: Scenario) {
                     key_write_buffer: IO_BUFFER_SIZE,
                     value_write_buffer: IO_BUFFER_SIZE,
                     block_codec_config: (),
-                    max_repair: NZUsize!(scenario.window),
+                    max_repair: NZUsize!(WINDOW),
                     max_pending_acks: NZUsize!(1),
                     strategy: Sequential,
                 },
@@ -1255,7 +950,6 @@ fn run(scenario: Scenario) {
             context: Arc::new(node.child("gate")),
             inner: deferred,
             target,
-            forward_reports: scenario.forward_reports,
             observations: observations.clone(),
             proposals: Arc::new(Mutex::new(Vec::new())),
         };
@@ -1276,13 +970,13 @@ fn run(scenario: Scenario) {
                 replay_buffer: IO_BUFFER_SIZE,
                 write_buffer: IO_BUFFER_SIZE,
                 page_cache,
-                leader_timeout: Duration::from_secs(300),
-                certification_timeout: Duration::from_secs(400),
-                timeout_retry: Duration::from_secs(300),
+                leader_timeout: VIEW_TIMEOUT,
+                certification_timeout: CERTIFICATION_TIMEOUT,
+                timeout_retry: VIEW_TIMEOUT,
                 view_retention: ViewDelta::new(1024),
                 skip: SkipPolicy::Disabled,
-                fetch_timeout: NZDuration!(Duration::from_secs(10)),
-                fetch_retry_delay: Duration::from_millis(100),
+                fetch_timeout: NZDuration!(FETCH_TIMEOUT),
+                fetch_retry_delay: FETCH_RETRY,
                 forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             },
@@ -1307,7 +1001,7 @@ fn run(scenario: Scenario) {
             );
         }
         while observations.lock().stub_certified < depth {
-            context.sleep(Duration::from_millis(1)).await;
+            context.sleep(POLL).await;
         }
 
         // Seed local bodies through the network buffer, as a leader relay would: the parent BD,
@@ -1325,26 +1019,25 @@ fn run(scenario: Scenario) {
         }
         for block in &relayed {
             while local_buffer.get(block.digest()).await.is_none() {
-                context.sleep(Duration::from_millis(1)).await;
+                context.sleep(POLL).await;
             }
         }
-        context.sleep(Duration::from_millis(500)).await;
+        context.sleep(SETTLE).await;
         {
             let guard = observations.lock();
             assert!(
                 guard.requests.is_empty(),
-                "block requests before the measured event"
+                "block requests before the input event"
             );
             assert_eq!(
                 guard.inner_calls_before_t0, 0,
-                "application ran before the measured event"
+                "application ran before the input event"
             );
-            assert!(guard.target_verify_at.is_none());
+            assert_eq!(guard.target_verifies, 0);
         }
 
-        // Measured public input event: the leader's proposal and the candidate's notarization.
-        let t0 = context.current();
-        observations.lock().t0 = Some(t0);
+        // Public input event: the leader's proposal and the candidate's notarization.
+        observations.lock().t0 = Some(context.current());
         let leader_vote = Vote::Notarize(
             Notarize::sign(&schemes[candidate_leader], proposal(&candidate)).unwrap(),
         );
@@ -1362,11 +1055,11 @@ fn run(scenario: Scenario) {
         loop {
             {
                 let guard = observations.lock();
-                if guard.finalize_vote_at.is_some() && guard.certify_result.is_some() {
+                if guard.finalize_vote_at.is_some() && guard.certified.is_some() {
                     break;
                 }
             }
-            context.sleep(Duration::from_millis(1)).await;
+            context.sleep(POLL).await;
         }
         drop(peer_channels);
         drop(peer_resolvers);
@@ -1377,18 +1070,10 @@ fn run(scenario: Scenario) {
             .await
             .map_or(0, |processed| processed.height().get());
 
-        // Metrics.
         let guard = observations.lock();
-        let measured = Measured::derive(
-            &guard,
-            t0,
-            depth,
-            Duration::from_millis(scenario.latency_ms),
-        );
-        println!("{}", measured.record(&scenario, processed_height, &local));
+        let outcome = Outcome::derive(&guard);
 
-        // Revision-independent correctness.
-        assert!(measured.correct_root, "candidate QMDB root mismatch");
+        assert!(outcome.correct_root, "candidate QMDB root mismatch");
         assert_eq!(
             processed_height, 0,
             "scripted ancestors advanced the processed floor"
@@ -1396,10 +1081,6 @@ fn run(scenario: Scenario) {
         assert_eq!(
             guard.finalized_reports, 0,
             "finalized blocks reached the application"
-        );
-        assert_eq!(
-            guard.proposes, 0,
-            "the measured node must not build proposals"
         );
         assert_eq!(
             guard.other_requests, 0,
@@ -1419,111 +1100,96 @@ fn run(scenario: Scenario) {
             "application executed blocks other than one replay of B1..BD and the candidate"
         );
         assert_eq!(
-            measured.executions_before_completion,
+            outcome.executions_before_completion,
             depth as usize + 1,
             "replay and candidate verification must finish before the finalize vote"
         );
         assert!(
-            measured
+            outcome
                 .replay
                 .iter()
                 .all(|execution| execution.ok == Some(true)),
             "replayed QMDB roots differ from the selected blocks"
         );
-        assert!(measured.certified, "candidate was not certified");
+        assert_eq!(guard.certified, Some(true), "candidate was not certified");
         assert!(
-            measured.distinct.is_disjoint(&local),
+            outcome.distinct.is_disjoint(&local),
             "local bodies were requested"
         );
         assert_eq!(
-            measured.distinct, missing,
+            outcome.distinct, missing,
             "requested bodies differ from missing bodies"
         );
         assert_eq!(
-            measured.apply_order,
+            outcome.apply_order,
             (1..=depth).collect::<Vec<_>>(),
             "replay must execute every selected block once in forward order"
         );
 
-        // Forward-pipeline properties expected of the forward-history revision.
         // A single held response gates the causal scenarios, so a duplicate request for the held
         // height could bypass the hold. Require each missing body to be requested exactly once.
         if matches!(scenario.kind, Kind::OutOfOrder | Kind::Tail) {
             assert_eq!(
-                measured.requested.len(),
-                measured.distinct.len(),
+                outcome.requested.len(),
+                outcome.distinct.len(),
                 "duplicate requests would bypass the causal hold"
             );
         }
 
-        if scenario.assert_pipeline {
-            // Below a suffix, each commitment is discovered from the body above it, so missing
-            // bodies are requested one at a time.
-            if missing.len() >= 2 && scenario.window >= 2 && !scenario.sparse {
-                assert!(
-                    measured.inflight_before_first_arrival >= 2,
-                    "missing bodies were not requested concurrently"
-                );
-            }
-            if scenario.kind == Kind::Tail {
-                let (released, reason) = guard.hold_release.expect("tail body never released");
-                assert!(
-                    measured
-                        .first_apply_done
-                        .is_some_and(|done| done <= ns(t0, released)),
-                    "no prefix block finished executing before the held body was released"
-                );
-                assert_eq!(
-                    reason, "prefix_applied",
-                    "replay did not start before the last missing body arrived"
-                );
-            }
-            if scenario.kind == Kind::OutOfOrder {
-                let (_, reason) = guard.hold_release.expect("held body never released");
-                assert_eq!(reason, "higher_body_answered");
-            }
+        // Bodies missing under a complete history are requested concurrently. Below a suffix,
+        // each commitment is discovered from the body above it, so they are requested one at a
+        // time.
+        if missing.len() >= 2 && !scenario.sparse {
+            assert!(
+                outcome.inflight_before_first_arrival >= 2,
+                "missing bodies were not requested concurrently"
+            );
+        }
+        if scenario.kind == Kind::Tail {
+            let reason = guard.hold_release.expect("tail body never released");
+            assert_eq!(
+                reason, "prefix_applied",
+                "replay did not start before the last missing body arrived"
+            );
+        }
+        if scenario.kind == Kind::OutOfOrder {
+            let reason = guard.hold_release.expect("held body never released");
+            assert_eq!(reason, "higher_body_answered");
         }
     });
 }
 
 #[test]
-fn forward_history_local() {
+fn local() {
     run(Scenario::new(Kind::Local));
 }
 
 #[test]
-fn forward_history_cold() {
+fn cold() {
     run(Scenario::new(Kind::Cold));
 }
 
 #[test]
-fn forward_history_mixed() {
+fn mixed() {
     run(Scenario::new(Kind::Mixed));
 }
 
 #[test]
-fn forward_history_out_of_order() {
+fn out_of_order() {
     run(Scenario::new(Kind::OutOfOrder));
 }
 
 #[test]
-fn forward_history_tail() {
+fn tail() {
     run(Scenario::new(Kind::Tail));
 }
 
 #[test]
-fn forward_history_sparse_local() {
+fn sparse_local() {
     run(Scenario::new(Kind::Local).sparse());
 }
 
 #[test]
-fn forward_history_sparse_cold() {
+fn sparse_cold() {
     run(Scenario::new(Kind::Cold).sparse());
-}
-
-/// Entry point for repeated measurement runs driven by FH_* variables.
-#[test]
-#[ignore]
-fn forward_history_env() {
-    run(Scenario::new(Kind::Cold).with_env());
 }
