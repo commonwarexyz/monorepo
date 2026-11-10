@@ -890,7 +890,7 @@ mod test {
     fn test_store_metrics() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = create_test_store(ctx.child("db")).await;
-            let key = Digest::random(&mut ctx.child("key"));
+            let key = Digest::random(ctx.child("key"));
             let value = vec![7u8; 8];
             let batch = db.new_batch().write(key, Some(value.clone())).finalize();
             let db = db.apply_batch(batch).await.unwrap();
