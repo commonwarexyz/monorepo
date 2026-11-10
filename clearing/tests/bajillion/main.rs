@@ -94,6 +94,11 @@ fn account(index: u64) -> PublicKey {
     user(index).public_key()
 }
 
+/// Returns the position of user `index` in a list that holds one entry per user.
+fn slot(index: u64) -> usize {
+    usize::try_from(index).expect("a user index must fit a usize")
+}
+
 /// Returns the operator's signing key.
 fn operator_key() -> PrivateKey {
     PrivateKey::from_seed(1_000)

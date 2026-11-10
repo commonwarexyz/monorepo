@@ -35,8 +35,8 @@ fn test_assembly_matches_monolithic_close() {
             let to = (from + offset) % USERS;
             let sender = senders.get_mut(from).unwrap();
             let request = sender.send(2, amounts(&[(to, 10 + from)])).unwrap();
-            let shard = &mut shards[(from % SHARDS) as usize];
-            let acknowledgement = shard.accept(&request).unwrap();
+            let shard = usize::try_from(from % SHARDS).expect("a shard index must fit a usize");
+            let acknowledgement = shards[shard].accept(&request).unwrap();
             replica.accept(&request).unwrap();
             sender.acknowledged(&acknowledgement).unwrap();
         }

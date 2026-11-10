@@ -10,6 +10,8 @@ use commonware_clearing::bajillion::{
 };
 use commonware_cryptography::Digest as _;
 use commonware_runtime::Runner as _;
+use commonware_storage::merkle::{Location, mmr};
+use core::ops::Range;
 
 /// The ledger queues nonzero deposits and forced withdrawals, and never takes custody of more than
 /// the largest amount.
@@ -229,7 +231,7 @@ fn test_ledger_posts_only_certified_successors() {
         assert_eq!(ledger.epoch(), 2);
         assert_eq!(ledger.balances(), &summary.balances);
         assert_eq!(ledger.matrix(1), Some(&summary.matrix));
-        assert_eq!(ledger.ranges(), vec![(0, *summary.payouts.size)]);
+        assert_eq!(ledger.ranges(), [Location::new(0)..summary.payouts.size]);
         assert!(matches!(
             ledger.post(&mut context, &summary, &certificate),
             Err(Refusal::Summary(SummaryError::WrongEpoch {
@@ -427,7 +429,7 @@ fn test_custody_backs_balances_deposits_and_payouts() {
             // another forces a withdrawal through the ledger, and a third deposits.
             for from in 0..USERS {
                 let to = (from + 1) % USERS;
-                let sender = &mut senders[from as usize];
+                let sender = &mut senders[slot(from)];
                 let request = sender.send(epoch, amounts(&[(to, 5 + epoch)])).unwrap();
                 let acknowledgement = deployment.operator.accept(&request).unwrap();
                 sender.acknowledged(&acknowledgement).unwrap();
@@ -612,7 +614,7 @@ fn test_withdrawn_ranges_stay_compact() {
     type Reorder = fn(&mut Vec<PayoutProof<PublicKey, Digest, u64>>);
     let orders: [(&str, Reorder); 3] = [
         ("alternating", |proofs| {
-            proofs.sort_by_key(|proof| (proof.index % 2 == 0, proof.index))
+            proofs.sort_by_key(|proof| (*proof.index % 2 == 0, proof.index))
         }),
         ("reversed", |proofs| proofs.reverse()),
         ("strided", |proofs| {
@@ -645,7 +647,7 @@ fn test_withdrawn_ranges_stay_compact() {
                 let summary = deployment.post(&mut context, proposals).await;
                 owed.extend(accounts.map(|index| (summary.epoch, account(index))));
             }
-            let size = *deployment.validators[0].summary().payouts.size;
+            let size = deployment.validators[0].summary().payouts.size;
 
             // Prove every payout, then order the proofs for this run.
             let mut proofs = Vec::new();
@@ -666,10 +668,10 @@ fn test_withdrawn_ranges_stay_compact() {
             // payouts outstanding. The last leaves one range over the whole log, and the funds held
             // are then the deposits less every payout.
             let mut outstanding = proofs.len();
-            let check = |ranges: Vec<(u64, u64)>, outstanding: usize| {
+            let check = |ranges: Vec<Range<Location<mmr::Family>>>, outstanding: usize| {
                 assert!(ranges.len() <= outstanding + 1, "{order}: {ranges:?}");
                 for pair in ranges.windows(2) {
-                    assert!(pair[0].1 < pair[1].0, "{order}: {ranges:?}");
+                    assert!(pair[0].end < pair[1].start, "{order}: {ranges:?}");
                 }
             };
             check(deployment.ledger.ranges(), outstanding);
@@ -678,7 +680,11 @@ fn test_withdrawn_ranges_stay_compact() {
                 outstanding -= 1;
                 check(deployment.ledger.ranges(), outstanding);
             }
-            assert_eq!(deployment.ledger.ranges(), vec![(0, size)], "{order}");
+            assert_eq!(
+                deployment.ledger.ranges(),
+                [Location::new(0)..size],
+                "{order}"
+            );
             let funded: u64 = funded.iter().map(|(_, amount)| amount).sum();
             let payouts: u64 = Widen::widen(proofs.len());
             assert_eq!(deployment.ledger.custody(), funded - 3 * payouts);

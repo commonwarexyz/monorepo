@@ -337,7 +337,7 @@ mod tests {
         assert_eq!(&encoded[1..], commitment.root.as_ref());
         assert_eq!(Commitment::<F, D>::decode(encoded).unwrap(), commitment);
 
-        let beyond = Commitment::new(loc(*F::MAX_LEAVES + 1), commitment.root);
+        let beyond = Commitment::new(F::MAX_LEAVES + 1, commitment.root);
         assert!(matches!(
             Commitment::<F, D>::decode(beyond.encode()),
             Err(CodecError::Invalid("Location", _))

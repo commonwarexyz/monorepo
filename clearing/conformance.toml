@@ -71,5 +71,5 @@ hash = "cbe1b1f8a2196482589b54359cfbdbac386e6fcaedd286739d7ac9daa5de150b"
 n_cases = 65536
 
 ["commonware_clearing::bajillion::validator::tests::conformance::CodecConformance<PayoutProof<PublicKey,Digest,u64>>"]
-hash = "55c247e3e31d127d9475a61667d17d67c29d6c01cb0040e494db7c42571620f8"
+hash = "f06d74990d9993cc4b5d8cb0d9f6743eb22049dfbfb8c3bc50728a87c0f9642d"
 n_cases = 65536

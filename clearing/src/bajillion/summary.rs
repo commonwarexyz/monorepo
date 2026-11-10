@@ -436,7 +436,7 @@ mod tests {
         // A payouts size the log cannot reach does not decode.
         let beyond = Summary {
             payouts: Commitment {
-                size: Location::new(*mmr::Family::MAX_LEAVES + 1),
+                size: mmr::Family::MAX_LEAVES + 1,
                 ..genesis.payouts
             },
             ..genesis

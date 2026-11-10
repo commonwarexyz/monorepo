@@ -336,7 +336,7 @@
 //! receipt, the receiver submits a [Challenge] holding the receipt and the opening.
 //!
 //! ```text
-//!          post(1)       post(2)       post(3)                    halt
+//!          post(1)       post(2)       post(3)                 halt
 //!   ---------+-------------+-------------+----------------------x---------> time
 //!                          ^                                    |
 //!                          '------- challenge against post(2) --'
@@ -432,7 +432,7 @@
 //!                       apply after              apply after            apply after
 //!                     post(e-1) final           post(e) final         post(e+1) final
 //!                            v                        v                      v
-//!   Payouts L(e-2) -- batch(e-1) --> L(e-1) --- batch(e) ---> L(e) -- batch(e+1) --> L(e+1)
+//!   Payouts   L(e-2) -- batch(e-1) --> L(e-1) --- batch(e) ---> L(e) -- batch(e+1) --> L(e+1)
 //!                            |                        |                      |
 //!                       once durable             once durable           once durable
 //!                            v                        v                      v
@@ -504,8 +504,8 @@
 //!                           +------------------------------+
 //!                           +------------------------------+
 //!   Summary, certificate -->| posted                       |-- claim, after halt --> account
-//!   Challenge ------------->| last digest, balances root   |
-//!                           | matrix root of each epoch    |
+//!                           | last digest, balances root   |
+//!   Challenge ------------->| matrix root of each epoch    |
 //!                           | halted or not                |
 //!                           +------------------------------+
 //!                           +------------------------------+
@@ -636,15 +636,10 @@
 //! An implementation must compute the same digests, roots, and verification results as the crate
 //! for every post, challenge, and claim. The rules below fix those computations, and a test vector
 //! in the crate pins their results for one deployment, so an implementation checks itself against
-//! the crate before it holds funds.
+//! the crate before it holds funds. Fixed-width integers are big-endian, and the rest are varints,
+//! the canonical unsigned LEB128 of [commonware_codec::varint].
 //!
-//! 1. **Integers.** Epochs and built-in amounts encode big-endian at their full width. Lengths,
-//!    counts, and the payout log's size encode as the varints of [commonware_codec::varint], the
-//!    canonical unsigned LEB128 of protocol buffers. A length is bounded to `u32` and takes at
-//!    most five bytes, the size is bounded to 2^62 and takes at most nine, and a count takes at
-//!    most ten. Public keys and digests encode as their raw bytes.
-//!
-//! 2. **Trees.** Payment maps and the matrix commit with the binary Merkle tree of
+//! 1. **Trees.** Payment maps and the matrix commit with the binary Merkle tree of
 //!    [commonware_storage::bmt] over the digests of their entries. Entries are strictly increasing
 //!    in the account type's order. For the schemes of this workspace, that is the byte order of the
 //!    key. An empty tree holds the single node `H()`, so its root is `H(0u32 || H())`.
@@ -669,7 +664,7 @@
 //!            l0          l1         l2               li = H(i || ei), ei the digest of entry i
 //!    ```
 //!
-//! 3. **Openings.** A member [Lookup] proves one leaf. A non-member lookup proves the neighbors at
+//! 2. **Openings.** A member [Lookup] proves one leaf. A non-member lookup proves the neighbors at
 //!    `position - 1` and `position`, with the key strictly between them, and a missing neighbor
 //!    means the key precedes the first entry or follows the last. An [Opening] verifies the row
 //!    under the matrix root, then the entry under the row's root, and has an entry exactly when the
@@ -682,7 +677,7 @@
 //!                         k                 k > e3                4       3
 //!    ```
 //!
-//! 4. **Signatures.** Each scheme's verification defines its framing, and the schemes of this
+//! 3. **Signatures.** Each scheme's verification defines its framing, and the schemes of this
 //!    workspace sign the bytes below. Each [Namespace] field frames the deployment's namespace the
 //!    same way before its suffix.
 //!
@@ -699,7 +694,7 @@
 //!    s = STATE, ACKNOWLEDGEMENT, WITHDRAWAL, CLOSE, or SUMMARY
 //!    ```
 //!
-//! 5. **Receipts.** The sender signs a [State] in [Namespace::state] and the operator in
+//! 4. **Receipts.** The sender signs a [State] in [Namespace::state] and the operator in
 //!    [Namespace::acknowledgement], and the receipt's entry proves under the state's payments root
 //!    at its position.
 //!
@@ -710,7 +705,7 @@
 //!    +-----------+-------------+--------------+--------------+
 //!    ```
 //!
-//! 6. **Summaries.** A [Summary]'s digest is the hash of its encoding, and the certificate covers
+//! 5. **Summaries.** A [Summary]'s digest is the hash of its encoding, and the certificate covers
 //!    the encoding in [Namespace::summary]. A running hash extends the parent summary's over each
 //!    request the close processes from that queue, in queue order. The ledger takes the running
 //!    hashes as certified and does not recompute them. The genesis summary has epoch 0, a parent of
@@ -731,44 +726,44 @@
 //!    +---------------+-------------+------------+
 //!    ```
 //!
-//! 7. **Counts.** A summary's count for each queue lies between that queue's required count and its
+//! 6. **Counts.** A summary's count for each queue lies between that queue's required count and its
 //!    length.
 //!
-//! 8. **The empty roots.** A deployment reads the empty balances root from an empty [Balances]
+//! 7. **The empty roots.** A deployment reads the empty balances root from an empty [Balances]
 //!    database. It depends on the hasher, account type, and amount type, because the database pads
 //!    its fixed-size operations to the key and value widths. An empty [Payouts] log holds one
 //!    commit with no metadata and an inactivity floor of zero, so its size is 1. [Summary::genesis]
 //!    records its size and root.
 //!
-//! 9. **Balance proofs.** [BalanceProof::verify] is the key-value proof of QMDB's current database,
+//! 8. **Balance proofs.** [BalanceProof::verify] is the key-value proof of QMDB's current database,
 //!    an operation proof under the canonical root together with its bitmap chunk of 32 bytes. It is
 //!    the largest part of an implementation.
 //!
-//! 10. **Payout proofs.** [PayoutProof::verify] is the range proof of QMDB's keyless database for
-//!     one operation, over the Merkle Mountain Range of [commonware_storage::merkle::mmr]. A leaf's
-//!     node position in the range differs from the operation's index. The proof carries the log's
-//!     size and rebuilds the root from that leaf and that size. The floor stays zero, so the root
-//!     has no inactive peaks. An implementation reproduces the storage crate's node and root
-//!     hashing for that family.
+//! 9. **Payout proofs.** [PayoutProof::verify] is the range proof of QMDB's keyless database for
+//!    one operation, over the Merkle Mountain Range of [commonware_storage::merkle::mmr]. A leaf's
+//!    node position in the range differs from the operation's index. The proof carries the log's
+//!    size and rebuilds the root from that leaf and that size. The floor stays zero, so the root
+//!    has no inactive peaks. An implementation reproduces the storage crate's node and root
+//!    hashing for that family.
 //!
-//!     ```text
-//!     appended payout
-//!     +---------+-------------+------------+-----------+
-//!     | tag (1) | account (P) | amount (A) | zeros (9) |
-//!     |    1    |             |            |           |
-//!     +---------+-------------+------------+-----------+
+//!    ```text
+//!    appended payout
+//!    +---------+-------------+------------+-----------+
+//!    | tag (1) | account (P) | amount (A) | zeros (9) |
+//!    |    1    |             |            |           |
+//!    +---------+-------------+------------+-----------+
 //!
-//!     commit
-//!     +---------+--------------+---------------+-----------+
-//!     | tag (1) | metadata (1) | zeros (P + A) | floor (8) |
-//!     |    0    |      0       |               |     0     |
-//!     +---------+--------------+---------------+-----------+
+//!    commit
+//!    +---------+--------------+---------------+-----------+
+//!    | tag (1) | metadata (1) | zeros (P + A) | floor (8) |
+//!    |    0    |      0       |               |     0     |
+//!    +---------+--------------+---------------+-----------+
 //!
-//!     leaf
-//!     +-------------------+------------------------+
-//!     | node position (8) | operation (P + A + 10) |
-//!     +-------------------+------------------------+
-//!     ```
+//!    leaf
+//!    +-------------------+------------------------+
+//!    | node position (8) | operation (P + A + 10) |
+//!    +-------------------+------------------------+
+//!    ```
 
 mod amounts;
 mod close;

@@ -135,7 +135,7 @@ impl<P: PublicKey, A: Amount> Amounts<P, A> {
     }
 
     /// Returns the index of `account` in the entries.
-    pub(crate) fn position(&self, account: &P) -> Option<usize> {
+    fn position(&self, account: &P) -> Option<usize> {
         self.entries
             .binary_search_by(|(candidate, _)| candidate.cmp(account))
             .ok()

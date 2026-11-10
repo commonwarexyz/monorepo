@@ -290,23 +290,23 @@ where
         // The close's payouts start at its parent's payouts size. The parent of epoch 1 is the
         // genesis summary.
         let start = match self.persisted.attested.get(&summary.parent) {
-            Some(parent) => *Self::summary_of(parent).payouts.size,
-            None if epoch == 1 => *Summary::<H>::genesis::<P, A>(H::Digest::EMPTY).payouts.size,
+            Some(parent) => Self::summary_of(parent).payouts.size,
+            None if epoch == 1 => Summary::<H>::genesis::<P, A>(H::Digest::EMPTY).payouts.size,
             None => return Err(Refusal::InvalidCheckpoint),
         };
         let log = self.payout_log();
-        let (mut low, mut high) = (start, *summary.payouts.size - 1);
+        let (mut low, mut high) = (start, summary.payouts.size - 1);
         while low < high {
-            let index = low + (high - low) / 2;
+            let index = low + (*high - *low) / 2;
             let payout = log
-                .get(Location::new(index))
+                .get(index)
                 .await?
                 .expect("a close's payouts must precede its commit");
             match payout.account.cmp(account) {
                 Ordering::Less => low = index + 1,
                 Ordering::Greater => high = index,
                 Ordering::Equal => {
-                    let (proof, _) = log.proof(Location::new(index), NZU64!(1)).await?;
+                    let (proof, _) = log.proof(index, NZU64!(1)).await?;
                     return Ok(Some(PayoutProof {
                         index,
                         payout,

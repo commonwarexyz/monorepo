@@ -262,7 +262,7 @@ where
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PayoutProof<P: PublicKey, D: Digest, A: Amount> {
     /// Index of the payout in the log.
-    pub index: u64,
+    pub index: Location<mmr::Family>,
     /// The payout.
     pub payout: Payout<P, A>,
     /// Opening of the payout's operation under the log's root.
@@ -277,8 +277,7 @@ impl<P: PublicKey, D: Digest, A: Amount> PayoutProof<P, D, A> {
     pub fn verify<H: Hasher<Digest = D>>(&self, root: &D) -> bool {
         let operation =
             keyless::fixed::Operation::<mmr::Family, Payout<P, A>>::Append(self.payout.clone());
-        self.proof
-            .verify::<H, _>(Location::new(self.index), &[operation], root)
+        self.proof.verify::<H, _>(self.index, &[operation], root)
     }
 }
 
@@ -292,7 +291,7 @@ impl<P: PublicKey, D: Digest, A: Amount> Write for PayoutProof<P, D, A> {
 
 impl<P: PublicKey, D: Digest, A: Amount> EncodeSize for PayoutProof<P, D, A> {
     fn encode_size(&self) -> usize {
-        u64::SIZE + Payout::<P, A>::SIZE + self.proof.encode_size()
+        self.index.encode_size() + Payout::<P, A>::SIZE + self.proof.encode_size()
     }
 }
 
@@ -301,7 +300,7 @@ impl<P: PublicKey, D: Digest, A: Amount> Read for PayoutProof<P, D, A> {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         Ok(Self {
-            index: u64::read(buf)?,
+            index: Location::read(buf)?,
             payout: Payout::read(buf)?,
             proof: Proof::read_cfg(buf, &MAX_PROOF_DIGESTS_PER_ELEMENT)?,
         })
@@ -693,9 +692,9 @@ mod tests {
     /// Returns the proof of the one operation at `index` in `log` under its current root.
     async fn prove(
         log: &TestLog,
-        index: u64,
+        index: Location<mmr::Family>,
     ) -> (Proof<mmr::Family, Digest>, Option<Payout<PublicKey, u64>>) {
-        let (proof, operations) = log.proof(Location::new(index), NZU64!(1)).await.unwrap();
+        let (proof, operations) = log.proof(index, NZU64!(1)).await.unwrap();
         let payout = match &operations[..] {
             [keyless::fixed::Operation::Append(payout)] => Some(payout.clone()),
             _ => None,
@@ -864,7 +863,7 @@ mod tests {
             let store = open(context.child("opened"), "appends").await;
             let parent = genesis(store.balances.root());
             assert_eq!(parent.summary.payouts.root, store.log.root());
-            assert_eq!(*store.log.bounds().end, parent.summary.payouts.size);
+            assert_eq!(store.log.bounds().end, parent.summary.payouts.size);
 
             // The close of epoch 1 credits three accounts and pays two of them out.
             let queued = queue(1, &[(0, 10), (1, 20), (2, 30)], &[(2, 30), (0, 4)]);
@@ -882,14 +881,15 @@ mod tests {
 
             // The payouts take the indices from the parent's payouts size in account order, and the
             // commit follows them.
-            let start = *parent.summary.payouts.size;
-            for (index, (account, amount)) in (start..).zip(expected.iter()) {
-                let payout = store.log.get(Location::new(index)).await.unwrap();
+            let mut index = parent.summary.payouts.size;
+            for (account, amount) in expected.iter() {
+                let payout = store.log.get(index).await.unwrap();
                 let expected = Payout {
                     account: account.clone(),
                     amount,
                 };
                 assert_eq!(payout, Some(expected));
+                index += 1;
             }
             let commit = summary.payouts.size - 1;
             assert_eq!(store.log.get(commit).await.unwrap(), None);
@@ -1060,7 +1060,7 @@ mod tests {
             // validator that committed after every close.
             let Store { balances, log } = crashed;
             drop(log);
-            let size = Some(*applied[held].summary.payouts.size);
+            let size = Some(applied[held].summary.payouts.size);
             let log = open_log(context.child("rewound"), "ahead", size).await;
             assert_eq!(log.root(), applied[held].summary.payouts.root);
             let (store, rewound_parent, rewound) = replay(
@@ -1344,7 +1344,7 @@ mod tests {
             let log = open_log(
                 context.child("rewound_log"),
                 "rewind",
-                Some(*parent.summary.payouts.size),
+                Some(parent.summary.payouts.size),
             )
             .await;
             let store = Store { balances, log };
@@ -1392,7 +1392,7 @@ mod tests {
                     Ok(balances) => {
                         rewound += 1;
                         drop(log);
-                        let size = Some(*previous.summary.payouts.size);
+                        let size = Some(previous.summary.payouts.size);
                         let log = open_log(context.child("rewound"), "pruned", size).await;
                         let earlier = Store { balances, log };
                         assert_eq!(
@@ -1435,10 +1435,10 @@ mod tests {
             let root = first.summary.payouts.root;
 
             // The payout at index 1 proves, and its proof round-trips.
-            let (proof, payout) = prove(&store.log, 1).await;
+            let (proof, payout) = prove(&store.log, Location::new(1)).await;
             let payout = payout.unwrap();
             let valid = PayoutProof {
-                index: 1,
+                index: Location::new(1),
                 payout: payout.clone(),
                 proof,
             };
@@ -1472,7 +1472,7 @@ mod tests {
             ];
             for (index, payout) in forged {
                 let forged = PayoutProof {
-                    index,
+                    index: Location::new(index),
                     payout,
                     ..valid.clone()
                 };
@@ -1482,14 +1482,14 @@ mod tests {
             // The root binds the log's size and its count of inactive peaks, so a proof claiming
             // another size or another count of inactive peaks does not verify either.
             let mut resized = valid.clone();
-            resized.proof.leaves = Location::new(*valid.proof.leaves + 1);
+            resized.proof.leaves = valid.proof.leaves + 1;
             assert!(!resized.verify::<Sha256>(&root));
             let mut inactive = valid.clone();
             inactive.proof.inactive_peaks = 1;
             assert!(!inactive.verify::<Sha256>(&root));
 
             // The commit position does not verify as a payout.
-            let commit = *first.summary.payouts.size - 1;
+            let commit = first.summary.payouts.size - 1;
             let (proof, logged) = prove(&store.log, commit).await;
             assert_eq!(logged, None);
             let at_commit = PayoutProof {
@@ -1504,7 +1504,7 @@ mod tests {
             let (store, second) = post(store, &first, close, &queue(2, &[], &[])).await;
             let root = second.summary.payouts.root;
             assert!(!valid.verify::<Sha256>(&root));
-            let (proof, _) = prove(&store.log, 1).await;
+            let (proof, _) = prove(&store.log, valid.index).await;
             let fresh = PayoutProof { proof, ..valid };
             assert!(fresh.verify::<Sha256>(&root));
         });
@@ -1536,7 +1536,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(log.get_metadata().await.unwrap(), Some(payout.clone()));
-            for index in [1, 2] {
+            for index in [1, 2].map(Location::new) {
                 let (proof, _) = prove(&log, index).await;
                 let claimed = PayoutProof {
                     index,

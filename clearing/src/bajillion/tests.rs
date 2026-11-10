@@ -18,7 +18,7 @@ use commonware_runtime::{Runner as _, Supervisor as _, buffer::paged::CacheRef, 
 use commonware_storage::{
     index::{Unordered, unordered::Index},
     journal::contiguous::fixed::Config as JournalConfig,
-    merkle::{Location, full::Config as MerkleConfig, mmb},
+    merkle::{Location, full::Config as MerkleConfig, mmb, mmr},
     qmdb::{current::unordered::fixed, keyless},
     translator::{EightCap, Translator},
 };
@@ -255,9 +255,9 @@ fn log_config(name: &str) -> keyless::fixed::Config<Sequential> {
 pub(crate) async fn open_log(
     context: deterministic::Context,
     name: &str,
-    size: Option<u64>,
+    size: Option<Location<mmr::Family>>,
 ) -> TestLog {
-    TestLog::init(context, log_config(name), size.map(Location::new))
+    TestLog::init(context, log_config(name), size)
         .await
         .unwrap()
 }
@@ -344,7 +344,7 @@ fn test_ledger_vector() {
             "4e051a8ba89ab421a291d4b906848b2e0f80402175824a056cc3cc00efc4cc65"
         );
         assert_eq!(genesis.payouts.root, store.log.root());
-        assert_eq!(*store.log.bounds().end, genesis.payouts.size);
+        assert_eq!(store.log.bounds().end, genesis.payouts.size);
         assert_eq!(
             hex(store.log.root().as_ref()),
             "97f9a47536a9ff3eda91ef4e53351d365e104280df46dbcc5dddc7adfabcef2c"
@@ -455,10 +455,10 @@ fn test_ledger_vector() {
             .await
             .unwrap();
         let log = store.log.apply_batch(batch).await.unwrap();
-        let (root, size) = (log.root(), *log.bounds().end);
+        let (root, size) = (log.root(), log.bounds().end);
         let (proof, _) = log.proof(Location::new(1), NZU64!(1)).await.unwrap();
         let proof = PayoutProof {
-            index: 1,
+            index: Location::new(1),
             payout: Payout {
                 account: account(1),
                 amount: 3u64,
@@ -474,10 +474,10 @@ fn test_ledger_vector() {
         assert_eq!(
             hex(proof.encode().as_ref()),
             concat!(
-                "0000000000000001478b8e507e0bb2b18c0f9e0824769e8562d10df9abe2e774",
-                "896f82b4b4405266000000000000000304000266b4a8b2a17f0463f7427c0239",
-                "106eaf710ea7129f42d184a58c50cdff614ba4c9b32f58d153a4f26cb6078783",
-                "a7d3a6cfab16d8f6fcedaa19ed63c338e2a9ce",
+                "01478b8e507e0bb2b18c0f9e0824769e8562d10df9abe2e774896f82b4b44052",
+                "66000000000000000304000266b4a8b2a17f0463f7427c0239106eaf710ea712",
+                "9f42d184a58c50cdff614ba4c9b32f58d153a4f26cb6078783a7d3a6cfab16d8",
+                "f6fcedaa19ed63c338e2a9ce",
             )
         );
     });

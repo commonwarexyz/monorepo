@@ -31,10 +31,10 @@ fn test_epochs_settle_payments_and_withdrawals() {
         for receiver in &mut receivers {
             receiver.posted(1);
         }
-        let mut expected = [1_000; USERS as usize];
+        let mut expected = vec![1_000; slot(USERS)];
         let held = |expected: &[u64]| {
             (0..USERS)
-                .map(|index| (account(index), expected[index as usize]))
+                .map(|index| (account(index), expected[slot(index)]))
                 .collect::<Vec<_>>()
         };
         deployment.check_balances(&held(&expected)).await;
@@ -46,13 +46,13 @@ fn test_epochs_settle_payments_and_withdrawals() {
                 for offset in [1, 2] {
                     let to = (from + offset) % USERS;
                     let amount = epoch * 10 + offset + from;
-                    expected[from as usize] -= amount;
-                    expected[to as usize] += amount;
-                    let sender = &mut senders[from as usize];
+                    expected[slot(from)] -= amount;
+                    expected[slot(to)] += amount;
+                    let sender = &mut senders[slot(from)];
                     let request = sender.send(epoch, amounts(&[(to, amount)])).unwrap();
                     let acknowledgement = deployment.operator.accept(&request).unwrap();
                     for receipt in sender.acknowledged(&acknowledgement).unwrap() {
-                        receivers[to as usize].receive(receipt).unwrap();
+                        receivers[slot(to)].receive(receipt).unwrap();
                     }
                 }
             }
@@ -65,9 +65,9 @@ fn test_epochs_settle_payments_and_withdrawals() {
             deployment.operator.withdraw(withdrawal).unwrap();
             deployment.ledger.withdraw(account(forced), 15).unwrap();
             deployment.ledger.deposit(account(deposited), 40).unwrap();
-            expected[soft as usize] -= 25;
-            expected[forced as usize] -= 15;
-            expected[deposited as usize] += 40;
+            expected[slot(soft)] -= 25;
+            expected[slot(forced)] -= 15;
+            expected[slot(deposited)] += 40;
 
             // The close processes the deposit and the forced withdrawal, and appends the payouts
             // of both withdrawals and its commit to the payout log.

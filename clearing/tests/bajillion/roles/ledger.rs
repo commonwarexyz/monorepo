@@ -6,8 +6,9 @@ use commonware_clearing::bajillion::{
     PayoutProof, Queue, Summary, SummaryError,
 };
 use commonware_cryptography::{Digest, Digestible, Hasher, PublicKey, certificate::Verifier};
+use commonware_storage::merkle::{Location, mmr};
 use commonware_utils::Widen;
-use core::hash::Hash;
+use core::{hash::Hash, ops::Range};
 use rand_core::CryptoRng;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -80,7 +81,7 @@ pub struct Persisted<P: PublicKey, D: Digest, A: Amount> {
     pub required_forced_withdrawals: usize,
     /// Payout log indices that hold a commit or a paid payout, as ranges from start to exclusive
     /// end. No two ranges overlap or touch.
-    pub ranges: BTreeMap<u64, u64>,
+    pub ranges: BTreeMap<Location<mmr::Family>, Location<mmr::Family>>,
     /// Why the ledger halted, if it has.
     pub halt: Option<Halt>,
     /// Accounts that claimed their balance after the halt.
@@ -157,7 +158,7 @@ where
             required_deposits: 0,
             forced_withdrawals: VecDeque::new(),
             required_forced_withdrawals: 0,
-            ranges: BTreeMap::from([(0, *genesis.payouts.size)]),
+            ranges: BTreeMap::from([(Location::new(0), genesis.payouts.size)]),
             halt: None,
             claimed: BTreeSet::new(),
             claimable: BTreeMap::new(),
@@ -171,8 +172,9 @@ where
     }
 
     /// Returns the epoch of the close the ledger expects.
-    pub const fn epoch(&self) -> Epoch {
-        self.persisted.matrices.len() as Epoch + 1
+    pub fn epoch(&self) -> Epoch {
+        let posted: Epoch = Widen::widen(self.persisted.matrices.len());
+        posted + 1
     }
 
     /// Returns the digest of the last posted summary.
@@ -193,11 +195,11 @@ where
 
     /// Returns the ranges of payout log indices that hold a commit or a paid payout, in order, each
     /// from start to exclusive end.
-    pub fn ranges(&self) -> Vec<(u64, u64)> {
+    pub fn ranges(&self) -> Vec<Range<Location<mmr::Family>>> {
         self.persisted
             .ranges
             .iter()
-            .map(|(start, end)| (*start, *end))
+            .map(|(start, end)| *start..*end)
             .collect()
     }
 
@@ -283,7 +285,7 @@ where
             usize::try_from(summary.deposits.count).expect("a count within the queue must fit");
         let forced_withdrawals = usize::try_from(summary.forced_withdrawals.count)
             .expect("a count within the queue must fit");
-        let commit = *summary.payouts.size - 1;
+        let commit = summary.payouts.size - 1;
 
         // One state change claims the commit position, drops the processed requests, requires
         // the rest, and records the summary (L5).
@@ -326,7 +328,7 @@ where
     }
 
     /// Returns whether a range covers `index`.
-    fn covers(&self, index: u64) -> bool {
+    fn covers(&self, index: Location<mmr::Family>) -> bool {
         self.persisted
             .ranges
             .range(..=index)
@@ -335,7 +337,7 @@ where
     }
 
     /// Adds `index` to the ranges, merging it with each range it touches.
-    fn fold(&mut self, index: u64) {
+    fn fold(&mut self, index: Location<mmr::Family>) {
         let ranges = &mut self.persisted.ranges;
         let (mut start, mut end) = (index, index + 1);
         if let Some((&before, &until)) = ranges.range(..=index).next_back()

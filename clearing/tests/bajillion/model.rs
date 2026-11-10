@@ -35,7 +35,7 @@
 //!   |                                                                                |
 //!   |  Sender --- Request, copies ---> Operator --- Close(e) ---> candidate          |
 //!   |  send, resolve                   accept, withdraw, close     certified         |
-//!   |    ^  |                             |                            |             |
+//!   |    |  ^                             |                            |             |
 //!   |    |  '<-- Reply: ack or refusal ---'                            | Post        |
 //!   |    |           may be lost                                       v             |
 //!   |    '--- Receipt ---> Receiver --- Challenge, after audit ---> Ledger           |
@@ -877,6 +877,12 @@ impl World {
     fn last_posted(&self) -> Epoch {
         Widen::widen(self.posted.len())
     }
+
+    /// Returns the post of the close of `epoch`, if it posted.
+    fn post(&self, epoch: Epoch) -> Option<&Posted> {
+        let index = usize::try_from(epoch.checked_sub(1)?).ok()?;
+        self.posted.get(index)
+    }
 }
 
 impl Model for Workload {
@@ -1360,6 +1366,7 @@ impl Model for Workload {
                     );
                 }
                 let epoch = summary.epoch;
+                let close = processed.close.clone();
                 world.posted.push(Posted { processed, summary });
                 if world.last_posted() == self.epochs {
                     self.witness("every epoch posts");
@@ -1369,7 +1376,6 @@ impl Model for Workload {
                 // with the opening the committee serves, challenging a post that credits less
                 // (R3, V6).
                 let snapshot = self.snapshot(&world);
-                let close = world.posted[epoch as usize - 1].processed.close.clone();
                 for receiver in 0..self.accounts.len() {
                     world.receivers[receiver].posted(epoch);
                     for sender in 0..self.accounts.len() {
@@ -1412,7 +1418,11 @@ impl Model for Workload {
                 let account = self.accounts[user].clone();
                 let snapshot = self.snapshot(&world);
                 let opening = &snapshot.openings[&(epoch, account.clone(), account)];
-                let root = world.posted[epoch as usize - 1].summary.matrix;
+                let root = world
+                    .post(epoch)
+                    .expect("the epoch a sender resolves must have posted")
+                    .summary
+                    .matrix;
                 let resolution = self.resolution(&world, epoch, user);
                 match world.senders[user].posted(epoch, &root, opening) {
                     Ok(outcome) if outcome == resolution => match outcome {
@@ -1596,7 +1606,7 @@ impl Model for Workload {
                 "every receipt of a posted epoch is honored unless its admission was forgotten",
                 |model: &Self, world: &World| {
                     world.held.iter().all(|((receiver, epoch, sender), held)| {
-                        let Some(post) = world.posted.get(*epoch as usize - 1) else {
+                        let Some(post) = world.post(*epoch) else {
                             return true;
                         };
                         row_in(&post.processed.close, &model.accounts[*sender]).is_some_and(|row| {
@@ -1630,7 +1640,7 @@ impl Model for Workload {
                         .ledger
                         .ranges()
                         .windows(2)
-                        .all(|pair| pair[0].1 < pair[1].0)
+                        .all(|pair| pair[0].end < pair[1].start)
                 },
             ),
         ]

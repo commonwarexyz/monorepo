@@ -1,6 +1,6 @@
 //! Payment states, requests, acknowledgements, receipts, and challenges.
 
-use super::{Amount, Amounts, Epoch, InvalidOpening, Namespace, Opening, amounts::leaf};
+use super::{Amount, Amounts, Epoch, InvalidOpening, Lookup, Namespace, Opening, amounts::leaf};
 use bytes::BufMut;
 use commonware_codec::{
     Buf, Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
@@ -502,19 +502,22 @@ impl<P: PublicKey, O: PublicKey, D: Digest, A: Amount> Receipt<P, O, D, A> {
         receivers
             .into_iter()
             .map(|receiver| {
-                let position = payments.position(&receiver)?;
-                let position = u32::try_from(position)
-                    .expect("a payment map must hold at most u32::MAX entries");
+                let Lookup::Member {
+                    position,
+                    value: amount,
+                    proof,
+                } = payments.lookup(&tree, &receiver)
+                else {
+                    return None;
+                };
                 Some(Self {
                     state: state.clone(),
                     signature: signature.clone(),
                     acknowledgement: acknowledgement.clone(),
-                    amount: payments.get(&receiver),
                     receiver,
+                    amount,
                     position,
-                    proof: tree
-                        .proof(position)
-                        .expect("a receiver in the payment map must have a proof"),
+                    proof,
                 })
             })
             .collect()
