@@ -170,7 +170,7 @@ fn double_step<S: Simd, F: Field<S>>(simd: S, t: &mut Point<F>, pair: &Pair<F>) 
                 #[cfg_attr(not(debug_assertions), inline(always))]
                 |k| {
                     if k < 4 {
-                        return t.doubling(simd, k);
+                        return t.doubling_stage(simd, k);
                     }
                     let x = t.x.ready::<1, S>(simd);
                     let square = x.square_product::<{ g2::BOUND + 1 }, S>(simd);
@@ -186,7 +186,7 @@ fn double_step<S: Simd, F: Field<S>>(simd: S, t: &mut Point<F>, pair: &Pair<F>) 
                 simd,
                 #[cfg_attr(not(debug_assertions), inline(always))]
                 |k| match k {
-                    0..=2 => Point::doubled(simd, &doubling, k),
+                    0..=2 => Point::doubled_coordinate(simd, &doubling, k),
                     3 => Fp2::<F>::difference::<1, S>(simd, xx3.product_base(simd, pair.x)),
                     _ => {
                         let product = yz2.product_base(simd, pair.negated_y);
@@ -222,7 +222,7 @@ fn add_step<S: Simd, F: Field<S>>(simd: S, t: &mut Point<F>, pair: &Pair<F>) -> 
             let first = Fp2::<F>::reduce_each::<6, 12, S>(
                 simd,
                 #[cfg_attr(not(debug_assertions), inline(always))]
-                |k| first.sum(simd, k),
+                |k| first.stage(simd, k),
             );
             let [sx, sy, sz, l0, qyz, qxz] = Fp2::<F>::reduce_each::<6, 12, S>(
                 simd,
