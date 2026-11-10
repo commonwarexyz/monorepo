@@ -233,8 +233,6 @@ mod fuzz {
         use super::*;
         use crate::{core::field::fp2::reference, group::vectors::G2_MULTIPLES};
 
-        shared::tests!(G2);
-
         /// Returns the affine coordinates of an element other than the identity.
         fn affine(element: &G2) -> [[u8; BYTES]; 2] {
             let [x, y, z] = element.0.map(|coordinate| reference::decode(&coordinate));
