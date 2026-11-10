@@ -688,8 +688,8 @@ pub mod tests {
             tests::{notifications, reset},
         },
         pool::{
-            HALF,
-            tests::{pool, pool_with_parkers, push, ready, task},
+            HALF, Pool,
+            tests::{pool, push, ready, task},
         },
         queue::{CAPACITY, STEALABLE},
         task::{Task, tests::queue},
@@ -823,7 +823,7 @@ pub mod tests {
     /// A pool that lives as long as the test thread, for hooks that act on
     /// its workers, with every worker's part, run queue owner, and parker.
     fn leaked(workers: usize) -> (&'static Pool, Vec<Part>) {
-        let (pool, parkers) = pool_with_parkers(workers);
+        let (pool, parkers) = Pool::new(workers);
         let pool: &'static Pool = Box::leak(Box::new(pool));
 
         let parts = (0..workers as u32)

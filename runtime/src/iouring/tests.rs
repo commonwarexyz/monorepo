@@ -1029,30 +1029,59 @@ struct Turn {
     offered: bool,
     /// Whether the turn's service deferred kernel service to its wait.
     deferred: bool,
-    /// Mailbox takes since the notification.
-    takes: usize,
+    /// Whether the turn could not finish while another thread held worker
+    /// one's inbox lock, so it took or tried to take from the mailbox.
+    blocked: bool,
+    /// Whether the mailbox still reported mail when the turn finished.
+    mail: bool,
+}
+
+/// Hold worker `index`'s inbox lock on another thread until the returned
+/// sender signals the end of the turn being checked, or until [`RESCUE`]
+/// passes. The holder returns whether it gave up waiting, which means the
+/// turn needed the lock.
+fn hold_inbox(pool: &Arc<Pool>, index: u32) -> (mpsc::Sender<()>, thread::JoinHandle<bool>) {
+    let (held, ready) = mpsc::channel();
+    let (release, finished) = mpsc::channel();
+    let pool = pool.clone();
+    let holder = thread::spawn(move || {
+        let _inbox = pool.mailbox(index).lock_inbox();
+        held.send(()).unwrap();
+        finished.recv_timeout(RESCUE).is_err()
+    });
+    ready.recv().unwrap();
+    (release, holder)
 }
 
 /// Notify worker one, parked in its ring with a receive in flight, first
 /// with a pool claim and then with a message, each just before it waits, and
-/// report the turn that follows each notification.
+/// report the turn that follows each notification. Another thread holds
+/// worker one's inbox lock through the turn after the claim.
 fn claim_then_mail() -> [Turn; 2] {
     let (sender, turns) = mpsc::channel();
     Runner::new(config().with_worker_threads(2)).start(|context| async move {
         let pool = context.shared.pool.clone();
         spin_until(|| is_waiting(&pool, 1), "worker one must start and park");
 
-        // Report the next turn of worker one, counting takes from `before`.
+        // Report the next turn of worker one. A holder of its inbox lock is
+        // released once the turn has finished, and reports whether it gave up
+        // waiting first.
         let report = {
             let pool = pool.clone();
-            move |sender: mpsc::Sender<Turn>, before: usize| {
+            move |sender: mpsc::Sender<Turn>,
+                  holder: Option<(mpsc::Sender<()>, thread::JoinHandle<bool>)>| {
                 let hooked = pool.clone();
                 on_next_park(&pool, 1, ParkPoint::AfterMessages, move || {
                     let (offered, deferred) = kernel_service();
+                    let blocked = holder.is_some_and(|(release, holder)| {
+                        let _ = release.send(());
+                        holder.join().unwrap()
+                    });
                     let turn = Turn {
                         offered,
                         deferred,
-                        takes: hooked.mailbox(1).takes() - before,
+                        blocked,
+                        mail: has_mail(&hooked.mailbox(1).unparker),
                     };
                     sender.send(turn).unwrap();
                 });
@@ -1067,7 +1096,7 @@ fn claim_then_mail() -> [Turn; 2] {
             let pool = pool.clone();
             let sender = sender.clone();
             move || {
-                report(sender.clone(), pool.mailbox(1).takes());
+                report(sender.clone(), Some(hold_inbox(&pool, 1)));
                 thread::spawn(move || drop(claimant.spawn(|_| async {})))
                     .join()
                     .unwrap();
@@ -1076,7 +1105,7 @@ fn claim_then_mail() -> [Turn; 2] {
                 let hooked = pool.clone();
                 on_next_park(&pool, 1, ParkPoint::BeforeWait, move || {
                     let mailbox = hooked.mailbox(1);
-                    report(sender, mailbox.takes());
+                    report(sender, None);
                     let stale = Message::Cancel(Cancel::Waiter(stale_waiter()));
                     assert!(mailbox.send(stale).is_ok());
                 });
@@ -4615,13 +4644,14 @@ fn test_batch_started_during_a_long_batch_is_taken_before_parking() {
     }
 }
 
-/// A pool claim moves the word without mail, so the turn it causes takes
-/// nothing from the mailbox, while the turn after a message takes it once.
+/// A pool claim moves the word without mail, so the turn it causes finishes
+/// without the inbox lock that another thread holds through it, while the
+/// turn after a message takes the batch.
 #[test]
 fn test_claim_without_mail_takes_nothing() {
     let [claim, mail] = claim_then_mail();
-    assert_eq!(claim.takes, 0, "a claim without mail took from the mailbox");
-    assert_eq!(mail.takes, 1);
+    assert!(!claim.blocked, "a claim without mail took from the mailbox");
+    assert!(!mail.mail, "the turn after a message left its batch");
 }
 
 /// A pool claim moves the word without mail, so the turn it causes still

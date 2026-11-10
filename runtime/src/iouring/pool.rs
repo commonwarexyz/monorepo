@@ -152,7 +152,7 @@ use super::{
     mailbox::{Mailbox, Message},
     park::Parker,
     queue::{self, CAPACITY, Overflow, Push, STEALABLE},
-    runtime::{Panic, Shared, Start, Worker},
+    runtime::{Panic, Role, Shared, Worker},
     task::{Ready, Runnable},
 };
 use crate::utils::Panicker;
@@ -239,16 +239,21 @@ pub struct Pool {
 }
 
 impl Pool {
-    /// The state for a pool whose workers own `mailboxes`, in worker order,
-    /// with an empty run queue for each. Panics unless there are between one
-    /// and [`MAX_WORKERS`] mailboxes.
-    pub fn new(mailboxes: Vec<Arc<Mailbox>>) -> Self {
+    /// The state for a pool of `workers` workers, with a mailbox and an empty
+    /// run queue for each, and the parker of each worker's word, in worker
+    /// order. Each worker must start with its parker. Panics unless there are
+    /// between one and [`MAX_WORKERS`] workers.
+    pub fn new(workers: usize) -> (Self, Vec<Parker>) {
         // The idle set has one bit per worker.
-        let workers = mailboxes.len();
         assert!(
             (1..=MAX_WORKERS).contains(&workers),
             "an io_uring pool must have 1 to {MAX_WORKERS} workers"
         );
+        let parkers: Vec<Parker> = (0..workers).map(|_| Parker::new()).collect();
+        let mailboxes = parkers
+            .iter()
+            .map(|parker| Arc::new(Mailbox::new(parker.unparker())))
+            .collect();
 
         // A worker reads another's run queue only to steal from it, and a pool
         // of one worker has no other worker, so its run queue is exclusive.
@@ -260,9 +265,9 @@ impl Pool {
             }
         };
 
-        Self {
+        let pool = Self {
             idle: CachePadded::new(Idle::new()),
-            mailboxes: mailboxes.into(),
+            mailboxes,
             queues: (0..workers).map(|_| queue()).collect(),
             global_len: CachePadded::new(AtomicUsize::new(0)),
             global: CachePadded::new(Mutex::new(GlobalQueue {
@@ -275,7 +280,8 @@ impl Pool {
                 active: 0,
             }),
             progress: Condvar::new(),
-        }
+        };
+        (pool, parkers)
     }
 
     /// Number of workers in the pool, worker zero included.
@@ -618,51 +624,47 @@ pub struct Threads {
 }
 
 impl Threads {
-    /// Start every worker after worker zero, waiting for each to create its
-    /// io_uring ring before starting the next. `parkers` holds the parkers of
-    /// those workers in index order. Every failure of a started worker is sent
-    /// to `failures`, which interrupts the root while it runs. The runner
-    /// collects a later one after joining the pool.
+    /// Start pool worker `index` with `parker`, the parker [`Pool::new`]
+    /// returned for it, and wait until it has created its io_uring ring. Every
+    /// failure of a started worker is sent to `failures`, which interrupts the
+    /// root while it runs. The runner collects a later one after joining the
+    /// pool.
     ///
-    /// Worker zero must call this once, after it enters the shutdown barrier.
-    /// Panics with the first startup failure, after which worker zero's
-    /// cleanup stops the workers already started.
-    pub fn start(&mut self, shared: &Arc<Shared>, failures: &Panicker, parkers: Vec<Parker>) {
-        let count = shared.pool.workers();
-        assert_eq!(
-            parkers.len(),
-            count - 1,
-            "every pool worker after worker zero needs its parker"
-        );
-        self.handles.reserve(count - 1);
+    /// Worker zero starts every other worker this way, in index order, after
+    /// it enters the shutdown barrier. Panics with a startup failure, after
+    /// which worker zero's cleanup stops the workers already started.
+    pub fn start(
+        &mut self,
+        shared: &Arc<Shared>,
+        failures: &Panicker,
+        index: usize,
+        parker: Parker,
+    ) {
+        #[cfg(test)]
+        let _fault = super::runtime::tests::before_pool_worker(shared, index);
+        let (ready, started) = mpsc::channel();
+        let shared = shared.clone();
+        let failures = failures.clone();
+        let handle = thread::Builder::new()
+            .name(format!("iouring-pool-{index}"))
+            .stack_size(shared.cfg.thread_stack_size())
+            .spawn(move || run(shared, index as u32, parker, ready, failures))
+            .expect("pool worker thread must spawn");
 
-        for (index, parker) in (1..count).zip(parkers) {
-            #[cfg(test)]
-            let _fault = super::runtime::tests::before_pool_worker(shared, index);
-            let (ready, started) = mpsc::channel();
-            let shared = shared.clone();
-            let failures = failures.clone();
-            let handle = thread::Builder::new()
-                .name(format!("iouring-pool-{index}"))
-                .stack_size(shared.cfg.thread_stack_size())
-                .spawn(move || run(shared, index as u32, parker, ready, failures))
-                .expect("pool worker thread must spawn");
+        // Keep the handle before waiting, so a worker that fails at startup
+        // is still joined.
+        self.handles.push(handle);
 
-            // Keep the handle before waiting, so a worker that fails at startup
-            // is still joined.
-            self.handles.push(handle);
-
-            // One worker at a time: each has entered the barrier and created
-            // its io_uring ring before the next starts. A startup failure
-            // resumes here, inside worker zero's root builder, so the runner's
-            // root is never built.
-            match started
-                .recv()
-                .expect("pool worker must report its startup before exiting")
-            {
-                Ok(()) => {}
-                Err(panic) => resume_unwind(panic),
-            }
+        // One worker at a time: each has entered the barrier and created its
+        // io_uring ring before the next starts. A startup failure resumes
+        // here, inside worker zero's root builder, so the runner's root is
+        // never built.
+        match started
+            .recv()
+            .expect("pool worker must report its startup before exiting")
+        {
+            Ok(()) => {}
+            Err(panic) => resume_unwind(panic),
         }
     }
 
@@ -719,7 +721,8 @@ fn run(
     let result = catch_unwind(AssertUnwindSafe(|| {
         let (mut worker, _) = Worker::run(
             shared,
-            Start::Pool(index, parker),
+            Role::Pool(index),
+            parker,
             || {
                 let _ = ready.take().unwrap().send(Ok(()));
 
@@ -820,21 +823,10 @@ pub mod tests {
         }
     }
 
-    /// A pool of `workers` workers with no runner, whose workers never wait.
+    /// A pool of `workers` workers with no runner, whose workers never wait,
+    /// so their parkers are dropped.
     pub fn pool(workers: usize) -> Pool {
-        pool_with_parkers(workers).0
-    }
-
-    /// A pool of `workers` workers with no runner, and the parker of each
-    /// worker's mailbox, in worker order.
-    pub fn pool_with_parkers(workers: usize) -> (Pool, Vec<Parker>) {
-        let (mailboxes, parkers) = (0..workers)
-            .map(|_| {
-                let (mailbox, parker) = Mailbox::new();
-                (Arc::new(mailbox), parker)
-            })
-            .unzip();
-        (Pool::new(mailboxes), parkers)
+        Pool::new(workers).0
     }
 
     /// The owner's end of worker `index`'s run queue.

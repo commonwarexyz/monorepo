@@ -336,9 +336,7 @@ impl Driver {
         self.state.reap(&mut self.ring, deferred);
 
         #[cfg(test)]
-        tests::after_service(&self.ring, deferred)?;
-        #[cfg(test)]
-        tests::while_acquiring(&self.state);
+        tests::after_service(&self.ring, &self.state, deferred)?;
 
         Ok(!service_kernel && !self.is_empty())
     }
@@ -890,14 +888,25 @@ pub mod tests {
         take_fault(ring, Fault::DropCompletion)
     }
 
-    /// Fail service when retired resources are awaiting deferred cleanup.
-    pub fn after_service(ring: &IoUring, deferred: &Deferred) -> io::Result<()> {
+    /// Fail service when retired resources are awaiting deferred cleanup, and
+    /// otherwise run the hook installed by [`on_service_while_acquiring`] if
+    /// a durability request still waits for its permit.
+    pub(super) fn after_service(
+        ring: &IoUring,
+        state: &State,
+        deferred: &Deferred,
+    ) -> io::Result<()> {
         if !deferred.resources.is_empty() && take_fault(ring, Fault::AfterCompletion) {
             return Err(io::Error::other(
                 "injected service failure after completion",
             ));
         }
 
+        if !state.acquiring.is_empty()
+            && let Some(hook) = WHILE_ACQUIRING.take()
+        {
+            hook();
+        }
         Ok(())
     }
 
@@ -908,17 +917,6 @@ pub mod tests {
     pub fn on_service_while_acquiring(hook: impl FnOnce() + 'static) {
         let previous = WHILE_ACQUIRING.replace(Some(Box::new(hook)));
         assert!(previous.is_none(), "service hook already installed");
-    }
-
-    /// Run the hook installed for a service turn that leaves a durability
-    /// request waiting for its permit, if this is one.
-    pub(super) fn while_acquiring(state: &State) {
-        if state.acquiring.is_empty() {
-            return;
-        }
-        if let Some(hook) = WHILE_ACQUIRING.take() {
-            hook();
-        }
     }
 
     /// Duplicate the driver's ring descriptor, so the kernel keeps the ring
@@ -2846,8 +2844,8 @@ pub mod tests {
     fn test_foreign_durability_release_wakes_closed_worker_park() {
         let (directory, file) = make_file("closed_permit_wake");
         let permit = file.durability.clone().try_lock_owned().unwrap();
-        let (mailbox, parker) = Mailbox::new();
-        let mailbox = Arc::new(mailbox);
+        let parker = Parker::new();
+        let mailbox = Arc::new(Mailbox::new(parker.unparker()));
         let mut driver = Driver::new(
             &RingConfig {
                 size: 2,
