@@ -385,7 +385,8 @@ impl<F: Family, H: MerkleHasher<F> + 'static, Item: Encode> Scan<F, Item> for Le
         self.concurrency()
     }
 
-    // The Merkle structure's chunks, from its start, which callers keep at or before the floor.
+    // The journal's chunks, from its pruning boundary, which initialization keeps at or before the
+    // floor.
     fn chunks(&self, _: u64, _: u64) -> impl Iterator<Item = Range<u64>> + Send + 'static {
         Self::chunks(self)
     }

@@ -3086,13 +3086,14 @@ mod tests {
         .unwrap();
         let retained = journal.journal.bounds();
         assert_eq!(journal.prune_target(40), 20);
-        let (journal, _) = journal.prune(Location::new(40)).await.unwrap();
+        let (journal, pruned) = journal.prune(Location::new(40)).await.unwrap();
+        assert_eq!(pruned, Location::new(20));
         assert_eq!(journal.frontier.boundary(), Default::default());
         assert_eq!(journal.journal.bounds(), retained);
 
-        // The boundary sits mid-blob, so a prune before it leaves the start there.
         let journal = journal.persist_boundary().await.unwrap();
         assert_eq!(journal.frontier.boundary(), (start, pins));
+        // The boundary sits mid-blob, so a prune before it leaves the start there.
         assert_eq!(journal.prune_target(15), 20);
         assert_eq!(journal.prune_target(40), 35);
         let (journal, pruned) = journal.prune(Location::new(40)).await.unwrap();

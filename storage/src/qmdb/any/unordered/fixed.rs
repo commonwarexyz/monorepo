@@ -1811,9 +1811,9 @@ pub(crate) mod test {
         });
     }
 
-    /// After syncing again, and after a restart, a database still serves a peer syncing to a
-    /// previous sync target whose operations it retains. It returns the pins at the target's start
-    /// and a proof of its operations against the target's root.
+    /// After syncing again, pruning to a previous sync target and restarting, a database still
+    /// serves a peer syncing to that target. It returns the pins at the target's start and a proof
+    /// of its operations against the target's root.
     #[test]
     fn test_any_fixed_db_serves_previous_sync_target() {
         let executor = deterministic::Runner::default();
@@ -1823,11 +1823,12 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            // Rewrite the same keys so the inactivity floor advances across operation blobs.
+            // Rewrite the same keys so the inactivity floor passes whole operation blobs, which a
+            // prune can remove.
             let mut rng = TestRng::new(7);
             let keys: Vec<Digest> = (0..24).map(|_| Digest::random(&mut rng)).collect();
-            let rewrite = async |mut db: AnyTest, rounds: usize, rng: &mut TestRng| {
-                for _ in 0..rounds {
+            let rewrite = async |mut db: AnyTest, rng: &mut TestRng| {
+                for _ in 0..4 {
                     let mut batch = db.new_batch();
                     for key in &keys {
                         batch = batch.write(*key, Some(Digest::random(&mut *rng)));
@@ -1835,19 +1836,16 @@ pub(crate) mod test {
                     let merkleized = batch.merkleize(&db).await.unwrap();
                     db = db.apply_batch(merkleized).await.unwrap();
                 }
-                db
+                db.sync().await.unwrap()
             };
-            let db = rewrite(db, 4, &mut rng).await;
-            let db = db.sync().await.unwrap();
+            let db = rewrite(db, &mut rng).await;
             let (start, size, root) = (db.sync_boundary(), db.bounds().end, db.root());
-
-            let db = rewrite(db, 4, &mut rng).await;
-            let db = db.sync().await.unwrap();
+            let db = rewrite(db, &mut rng).await;
             assert!(db.sync_boundary() > start, "the floor did not move");
-            assert!(
-                db.bounds().start <= start,
-                "the target's operations were pruned"
-            );
+
+            // Prune to the previous target, as a node does to the oldest target it serves.
+            let db = db.prune(start).await.unwrap();
+            assert!(db.bounds().start > Location::new(0), "nothing was pruned");
             let serves = async |db: &AnyTest| {
                 let pins = db.pinned_nodes_at(start).await;
                 assert!(

@@ -911,13 +911,13 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
             return Ok(result);
         }
         let mut fills = stream::iter(fills)
-            .map(|(region, low_peaks)| async move {
+            .map(|(region, wanted)| async move {
                 let filled = self.fill_region(journal, hasher, region).await?;
-                Ok::<_, merkle::Error<F>>((filled, low_peaks))
+                Ok::<_, merkle::Error<F>>((filled, wanted))
             })
             .buffer_unordered(CONCURRENT_FILLS);
-        while let Some((filled, low_peaks)) = fills.try_next().await? {
-            for (index, slot) in low_peaks {
+        while let Some((filled, wanted)) = fills.try_next().await? {
+            for (index, slot) in wanted {
                 result[index] =
                     filled[slot].ok_or(merkle::Error::DataCorrupted("incomplete region fill"))?;
             }
