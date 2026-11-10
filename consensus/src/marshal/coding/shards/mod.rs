@@ -23,6 +23,3 @@ mod metrics;
 
 mod engine;
 pub use engine::{Config, Engine, Error};
-
-mod leader;
-pub use leader::{RoundLeader, scheduled_leader};

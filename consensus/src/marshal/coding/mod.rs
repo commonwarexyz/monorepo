@@ -113,6 +113,7 @@ mod tests {
         },
         simplex::{
             Plan,
+            elector::RoundRobin,
             scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
             types::{Activity, Finalization, Proposal},
         },
@@ -589,7 +590,7 @@ mod tests {
         )
         .await;
         let control = oracle.control(me.clone());
-        let shard_config: shards::Config<_, _, _, _, _, _> = shards::Config {
+        let shard_config: shards::Config<_, _, _, _, _, _, RoundRobin> = shards::Config {
             scheme_provider: provider,
             blocker: control.clone(),
             block_codec_config: (),
@@ -598,7 +599,7 @@ mod tests {
             peer_buffer_size: NZUsize!(64),
             records: harness::RECORDS,
             peer_provider: oracle.manager(),
-            leader: Arc::new(|_| None),
+            elector: None,
         };
         let (shard_engine, shard_mailbox) =
             shards::Engine::new(context.child("shards"), shard_config);

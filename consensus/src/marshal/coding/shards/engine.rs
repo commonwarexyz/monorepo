@@ -104,11 +104,10 @@
 //!
 //! # Relaying Before Naming
 //!
-//! [`Config::leader`] can name a round's leader before consensus names the round's commitment, as
-//! a [`Scheduled`](crate::simplex::elector::Scheduled) elector does (see
-//! [`scheduled_leader`](super::scheduled_leader)). A participant then relays each chunk at its
-//! index as soon as that leader sends it, so its peers collect each segment while the leader is
-//! still streaming later ones.
+//! A [`Scheduled`](crate::simplex::elector::Scheduled) elector names a round's leader before
+//! consensus names the round's commitment. With one in [`Config::elector`], a participant relays
+//! each chunk at its index as soon as that leader sends it, so its peers collect each segment
+//! while the leader is still streaming later ones.
 //!
 //! ```text
 //!   time -------------------------------------------------------------------------------------->
@@ -125,10 +124,10 @@
 //!
 //! Let H be [`Config::records`] and S the most segments a block at the
 //! [`Config::block_codec_config`] bound codes into. A node relays a chunk before naming only when
-//! the chunk is at the node's index, comes from the sender [`Config::leader`] names for the
-//! chunk's round, claims a round at most H views past the highest round consensus has signaled or
-//! among the first H views of the next epoch, and verifies against the root it claims. A chunk
-//! from that sender that fails verification blocks it, since no honest sender sends one.
+//! the chunk is at the node's index, comes from the leader the elector names for the chunk's
+//! round, claims a round at most H views past the highest round consensus has signaled or among
+//! the first H views of the next epoch, and verifies against the root it claims. A chunk from that
+//! leader that fails verification blocks it, since no honest sender sends one.
 //!
 //! Each round relays at most 2S chunks this way in total, two blocks' worth for a prepared build
 //! and the proposal that replaces it. At most 2H + 2 rounds are open to such relays at a time, so
@@ -141,9 +140,10 @@
 //! [`Config::peer_buffer_size`] asks still holds the earlier relay while fewer have been sent. A
 //! peer that bound the roots before this node did therefore holds the earlier relay in its record.
 //!
-//! A wrong leader from [`Config::leader`], or a leader that streams a block consensus never names,
-//! therefore costs at most those relays and blocks no honest sender. While [`Config::leader`]
-//! names no leader, or before consensus signals any round, nothing is relayed before naming.
+//! An elector configured differently from the consensus engine's, or a leader that streams a
+//! block consensus never names, therefore costs at most those relays and blocks no honest sender.
+//! Without an elector, with a [`Dynamic`](crate::simplex::elector::Dynamic) one, or before
+//! consensus signals any round, nothing is relayed before naming.
 //!
 //! # Peer Validation and Blocking Rules
 //!
@@ -185,13 +185,12 @@
 //! For each candidate of a round, an honest sender sends a peer at most S + 1 messages, where S is
 //! the number of segments in a block. They are its chunk of every segment and one roots message,
 //! whether it leads the round or relays. [`Config::peer_buffer_size`] sizes rings from that bound,
-//! including the 2(S + 1) more messages a ring needs with [`Config::leader`] set. A ring must hold
-//! a chunk only until its commitment binds, since the record keeps what it ingests. Chunks evicted
-//! before their commitment binds are lost to the stream, and the node fetches that block from a
-//! peer that reconstructed it.
+//! including the 2(S + 1) more messages a ring needs with a scheduled elector in
+//! [`Config::elector`]. A ring must hold a chunk only until its commitment binds, since the record
+//! keeps what it ingests. Chunks evicted before their commitment binds are lost to the stream, and
+//! the node fetches that block from a peer that reconstructed it.
 
 use super::{
-    leader::RoundLeader,
     mailbox::{Mailbox, Message},
     metrics::ShardMetrics,
 };
@@ -205,6 +204,7 @@ use crate::{
         },
         validation::{ReconstructionError as InvariantError, validate_reconstruction},
     },
+    simplex::elector::{Config as ElectorConfig, Elector, Mode},
     types::{Epoch, Round, coding::Commitment},
 };
 use commonware_actor::mailbox;
@@ -386,7 +386,7 @@ enum BlockSubscriptionKey<K, D> {
 }
 
 /// Configuration for the [`Engine`].
-pub struct Config<P, S, X, D, B, T>
+pub struct Config<P, S, X, D, B, T, L>
 where
     P: PublicKey,
     S: Provider<Scope = Epoch>,
@@ -394,6 +394,7 @@ where
     D: PeerProvider<PublicKey = P>,
     B: CertifiableBlock + CodedLayout,
     T: Strategy,
+    L: ElectorConfig<S::Scheme>,
 {
     /// The scheme provider.
     ///
@@ -431,12 +432,12 @@ where
     /// bounded list of segment roots. Chunks wait there until consensus names their commitment and
     /// its roots bind, and the commitment's record keeps the chunks it ingests from then on.
     ///
-    /// For each candidate of a round, an honest sender sends a peer at most S + 1 messages, where
-    /// S is the number of segments in a block at the bound of `block_codec_config`. Size the ring
-    /// for S + 1 messages times the number of rounds a node can trail its peers by, and double it
-    /// if a leader can replace a candidate within a round. With [`Config::leader`] set, add
-    /// 2(S + 1) messages, since a peer must still hold a chunk relayed before naming when its
-    /// commitment is named.
+    /// For each candidate of a round, an honest sender sends a peer at most S + 1 messages, where S
+    /// is the number of segments in a block at the bound of `block_codec_config`. Size the ring for
+    /// S + 1 messages times the number of rounds a node can trail its peers by, and double it if a
+    /// leader can replace a candidate within a round. With a scheduled elector in
+    /// [`Config::elector`], add 2(S + 1) messages, since a peer must still hold a chunk relayed
+    /// before naming when its commitment is named.
     ///
     /// A ring too small for a distant or slow node evicts chunks before they are needed, and the
     /// node then fetches those blocks from peers that reconstructed them.
@@ -450,7 +451,7 @@ where
     /// [`crate::simplex::elector::Terms::optimistic_views`].
     ///
     /// It is also how many views past the highest round consensus has signaled a chunk may claim
-    /// to be relayed before its commitment is named (see [`Config::leader`]).
+    /// to be relayed before its commitment is named (see [`Config::elector`]).
     pub records: NonZeroUsize,
 
     /// Provider for peer set information. Messages are buffered per peer only while that peer is a
@@ -459,16 +460,18 @@ where
     /// [`commonware_p2p::PeerSetUpdate::all`] union.
     pub peer_provider: D,
 
-    /// Names the leader of a round before consensus names the round's commitment, or `None` while
-    /// it is not known. [`scheduled_leader`](super::scheduled_leader) builds one from a scheduled
-    /// elector.
+    /// The consensus engine's elector configuration, or `None` to relay nothing before naming.
     ///
-    /// The answer gates only the relay of chunks at this node's index before the commitment is
+    /// A [`Scheduled`](crate::simplex::elector::Scheduled) elector names a round's leader before
+    /// consensus names the round's commitment. A [`Dynamic`](crate::simplex::elector::Dynamic)
+    /// one names none that early, so nothing is relayed before naming.
+    ///
+    /// The leader gates only the relay of chunks at this node's index before the commitment is
     /// named, and a chunk chosen for that relay must verify or its sender is blocked. Admission and
-    /// classification after naming use the leader consensus names, so a wrong answer costs at most
-    /// those relays. Setting it requires room for more messages in each ring
-    /// ([`Config::peer_buffer_size`]).
-    pub leader: RoundLeader<P>,
+    /// classification after naming use the leader consensus names, so a configuration that differs
+    /// from the consensus engine's costs at most those relays. A scheduled elector requires room
+    /// for more messages in each ring ([`Config::peer_buffer_size`]).
+    pub elector: Option<L>,
 }
 
 /// The number of candidates one round may carry: a prepared build and the proposal that replaces
@@ -678,7 +681,7 @@ where
 /// A relayed message arrived on the engine's receiver, so the receiver must yield no payload
 /// larger than the sender's network admits. The channels of one p2p network and the paired
 /// subchannels of a [`Muxer`](commonware_p2p::utils::mux::Muxer) meet this.
-pub struct Engine<E, S, X, D, C, H, B, P, T>
+pub struct Engine<E, S, X, D, C, H, B, P, T, L>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Provider<Scope = Epoch>,
@@ -690,6 +693,7 @@ where
     B: CertifiableBlock + CodedLayout,
     P: PublicKey,
     T: Strategy,
+    L: ElectorConfig<S::Scheme>,
 {
     /// Context held by the actor.
     context: ContextCell<E>,
@@ -765,8 +769,12 @@ where
     /// round, in segment order.
     streamed: BTreeMap<Round, Vec<C::Commitment>>,
 
-    /// Names a round's leader before consensus names its commitment.
-    leader: RoundLeader<P>,
+    /// The elector configuration from [`Config::elector`].
+    elector: Option<L>,
+
+    /// The elector built for each epoch open to relays before naming. They are the epoch of the
+    /// highest round consensus has signaled and the next.
+    electors: BTreeMap<Epoch, L::Elector>,
 
     /// The most segments a block at the bound of the block codec config codes into.
     max_segments: u16,
@@ -791,7 +799,7 @@ where
     relayed: BTreeMap<Round, Vec<(u16, C::Commitment, u64)>>,
 }
 
-impl<E, S, X, D, C, H, B, P, T> Engine<E, S, X, D, C, H, B, P, T>
+impl<E, S, X, D, C, H, B, P, T, L> Engine<E, S, X, D, C, H, B, P, T, L>
 where
     E: Rng + Spawner + Metrics + Clock,
     S: Provider<Scope = Epoch>,
@@ -803,9 +811,10 @@ where
     B: CertifiableBlock + BoundedBlock + CodedLayout,
     P: PublicKey,
     T: Strategy,
+    L: ElectorConfig<S::Scheme>,
 {
     /// Create a new [`Engine`] with the given configuration.
-    pub fn new(context: E, config: Config<P, S, X, D, B, T>) -> (Self, Mailbox<B, C, H, P>) {
+    pub fn new(context: E, config: Config<P, S, X, D, B, T, L>) -> (Self, Mailbox<B, C, H, P>) {
         let metrics = ShardMetrics::new(&context);
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
         let max_segments = C::segments(CodedBlock::<B, C, H>::max_coded_size(B::max_encode_size(
@@ -832,7 +841,8 @@ where
                 jobs: AbortablePool::default(),
                 metrics,
                 streamed: BTreeMap::new(),
-                leader: config.leader,
+                elector: config.elector,
+                electors: BTreeMap::new(),
                 max_segments,
                 signaled: None,
                 sent: 0,
@@ -1010,11 +1020,11 @@ where
     /// its commitment, so peers collect each segment while the leader still streams later ones.
     ///
     /// The chunk must claim a round [`within_horizon`] of the highest round consensus has signaled,
-    /// with [`Config::records`] as the horizon. It must also come from the sender
-    /// [`Config::leader`] names for that round and verify against the root it claims, and a chunk
-    /// from that sender that fails verification blocks it. A round relays at most
-    /// [`RELAY_CANDIDATES`] blocks' worth of chunks this way. The ledger entry lets the relay after
-    /// naming skip the chunk while peers still hold this relay.
+    /// with [`Config::records`] as the horizon. It must also come from the leader the elector names
+    /// for that round and verify against the root it claims, and a chunk from that leader that
+    /// fails verification blocks it. A round relays at most [`RELAY_CANDIDATES`] blocks' worth of
+    /// chunks this way. The ledger entry lets the relay after naming skip the chunk while peers
+    /// still hold this relay.
     fn relay_early<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, ShardMessage<B, C, H>>,
@@ -1053,7 +1063,17 @@ where
         }) {
             return;
         }
-        if (self.leader)(round).as_ref() != Some(peer) {
+        let Some(config) = &self.elector else {
+            return;
+        };
+        let Some(input) = <<L::Elector as Elector<S::Scheme>>::Mode as Mode>::early() else {
+            return;
+        };
+        let elector = self
+            .electors
+            .entry(round.epoch())
+            .or_insert_with(|| config.clone().build(scheme.participants()));
+        if scheme.participants().key(elector.elect(round, input)) != Some(peer) {
             return;
         }
         if C::check_chunk(
@@ -1077,10 +1097,11 @@ where
         self.metrics.chunks_forwarded.inc();
     }
 
-    /// Records that consensus signaled `round`.
+    /// Records that consensus signaled `round`, and drops the electors of earlier epochs.
     fn signal(&mut self, round: Round) {
         if self.signaled.is_none_or(|anchor| anchor < round) {
             self.signaled = Some(round);
+            self.electors.retain(|epoch, _| *epoch >= round.epoch());
         }
     }
 
@@ -2357,6 +2378,7 @@ mod tests {
                 harness::{CodingB, TestCoding},
             },
         },
+        simplex::elector::{Dynamic, Input as ElectorInput, Scheduled, Terms},
         types::{Epoch, Height, View},
     };
     use bytes::Bytes;
@@ -2387,7 +2409,7 @@ mod tests {
         num::NonZeroUsize,
         sync::{
             Arc,
-            atomic::{AtomicIsize, Ordering},
+            atomic::{AtomicIsize, AtomicUsize, Ordering},
             mpsc,
         },
         thread,
@@ -2541,9 +2563,10 @@ mod tests {
     type Prov = MultiEpochProvider;
     type NetworkSender = simulated::Sender<P, deterministic::Context>;
     type D = simulated::Manager<P, deterministic::Context>;
-    type ShardEngine<S, T = Sequential> = Engine<deterministic::Context, Prov, X, D, S, H, B, P, T>;
+    type ShardEngine<S, T = Sequential, L = Named> =
+        Engine<deterministic::Context, Prov, X, D, S, H, B, P, T, L>;
     type ChurningShardEngine<S> =
-        Engine<deterministic::Context, ChurningProvider, X, D, S, H, B, P, Sequential>;
+        Engine<deterministic::Context, ChurningProvider, X, D, S, H, B, P, Sequential, Named>;
     type EngineSender<S> = WrappedSender<NetworkSender, ShardMessage<B, S, H>>;
 
     /// Segmented coding whose segments are small enough that a test block spans several.
@@ -2830,8 +2853,8 @@ mod tests {
     }
 
     /// Hands every message to `engine` as if received from `peer`.
-    fn receive<S: Segmentable, T: Strategy>(
-        engine: &mut ShardEngine<S, T>,
+    fn receive<S: Segmentable, T: Strategy, L: ElectorConfig<Scheme>>(
+        engine: &mut ShardEngine<S, T, L>,
         sender: &mut EngineSender<S>,
         peer: &P,
         messages: impl IntoIterator<Item = ShardMessage<B, S, H>>,
@@ -2841,10 +2864,75 @@ mod tests {
         }
     }
 
-    /// Makes the engine's [`Config::leader`] name `leader` for every round.
-    fn elect<S: Segmentable, T: Strategy>(engine: &mut ShardEngine<S, T>, leader: &P) {
-        let leader = leader.clone();
-        engine.leader = Arc::new(move |_| Some(leader.clone()));
+    /// A scheduled elector that names one participant for every round and counts its builds and
+    /// elections. It is its own configuration.
+    #[derive(Clone)]
+    struct Named {
+        leader: Participant,
+        built: Arc<AtomicUsize>,
+        elected: Arc<AtomicUsize>,
+    }
+
+    impl Named {
+        fn new(leader: usize) -> Self {
+            Self {
+                leader: Participant::from_usize(leader),
+                built: Arc::default(),
+                elected: Arc::default(),
+            }
+        }
+    }
+
+    impl ElectorConfig<Scheme> for Named {
+        type Elector = Self;
+
+        fn build(self, _: &Set<P>) -> Self {
+            self.built.fetch_add(1, Ordering::Relaxed);
+            self
+        }
+    }
+
+    impl Elector<Scheme> for Named {
+        type Mode = Scheduled;
+
+        fn terms(&self) -> Terms {
+            Terms::rotating()
+        }
+
+        fn elect(&self, _: Round, _: ()) -> Participant {
+            self.elected.fetch_add(1, Ordering::Relaxed);
+            self.leader
+        }
+    }
+
+    /// A dynamic elector. It names no leader before the certificate that unlocks a round.
+    #[derive(Clone)]
+    struct Late;
+
+    impl ElectorConfig<Scheme> for Late {
+        type Elector = Self;
+
+        fn build(self, _: &Set<P>) -> Self {
+            self
+        }
+    }
+
+    impl Elector<Scheme> for Late {
+        type Mode = Dynamic;
+
+        fn terms(&self) -> Terms {
+            Terms::rotating()
+        }
+
+        fn elect(&self, _: Round, _: ElectorInput<'_, Scheme, Self>) -> Participant {
+            unreachable!("the engine must not elect without the round's certificate")
+        }
+    }
+
+    /// Makes the engine's elector name participant `leader` for every round.
+    fn elect<S: Segmentable, T: Strategy>(engine: &mut ShardEngine<S, T>, leader: usize) {
+        engine.elector = Some(Named::new(leader));
+        engine.electors.clear();
     }
 
     /// Returns a block that shares no segment with the other test blocks. A test notarizes its
@@ -3020,8 +3108,8 @@ mod tests {
         peer_buffer_size: NonZeroUsize,
         /// Maximum number of commitment records each engine retains.
         records: NonZeroUsize,
-        /// Index of the primary peer every engine's [`Config::leader`] names for every round, or
-        /// `None` for engines that learn leaders only from consensus.
+        /// Index of the primary peer every engine's elector names for every round, or `None` for
+        /// engines without an elector.
         round_leader: Option<usize>,
         /// Marker for the coding scheme type parameter.
         _marker: PhantomData<S>,
@@ -3065,13 +3153,7 @@ mod tests {
                 let peer_keys: Vec<P> = private_keys.iter().map(|c| c.public_key()).collect();
 
                 let participants: Set<P> = Set::from_iter_dedup(peer_keys.clone());
-                let round_leader: RoundLeader<P> = match self.round_leader {
-                    Some(index) => {
-                        let leader = peer_keys[index].clone();
-                        Arc::new(move |_| Some(leader.clone()))
-                    }
-                    None => Arc::new(|_| None),
-                };
+                let elector = self.round_leader.map(Named::new);
 
                 let mut np_private_keys = (0..self.num_secondary_peers)
                     .map(|i| PrivateKey::from_seed((self.num_primary_peers + i) as u64))
@@ -3160,7 +3242,7 @@ mod tests {
                         peer_buffer_size: self.peer_buffer_size,
                         records: self.records,
                         peer_provider: oracle.manager(),
-                        leader: round_leader.clone(),
+                        elector: elector.clone(),
                     };
 
                     let (engine, mailbox) = ShardEngine::new(engine_context, config);
@@ -3203,7 +3285,7 @@ mod tests {
                         peer_buffer_size: self.peer_buffer_size,
                         records: self.records,
                         peer_provider: oracle.manager(),
-                        leader: round_leader.clone(),
+                        elector: elector.clone(),
                     };
 
                     let (engine, mailbox) = ShardEngine::new(engine_context, config);
@@ -3252,6 +3334,28 @@ mod tests {
         records: NonZeroUsize,
         strategy: T,
     ) -> (ShardEngine<S, T>, EngineSender<S>) {
+        unstarted_electing(
+            context,
+            oracle,
+            private_keys,
+            index,
+            records,
+            strategy,
+            None,
+        )
+        .await
+    }
+
+    /// Builds an unstarted engine that holds `elector`, as [`unstarted_with`] does.
+    async fn unstarted_electing<S: Segmentable, T: Strategy, L: ElectorConfig<Scheme>>(
+        context: &deterministic::Context,
+        oracle: &O,
+        private_keys: &[PrivateKey],
+        index: usize,
+        records: NonZeroUsize,
+        strategy: T,
+        elector: Option<L>,
+    ) -> (ShardEngine<S, T, L>, EngineSender<S>) {
         let participants: Set<P> =
             Set::from_iter_dedup(private_keys.iter().map(|key| key.public_key()));
         let control = oracle.control(private_keys[index].public_key());
@@ -3265,7 +3369,7 @@ mod tests {
             private_keys[index].clone(),
         )
         .expect("signer scheme must be created");
-        let config: Config<_, _, _, _, _, _> = Config {
+        let config = Config {
             scheme_provider: MultiEpochProvider::single(scheme),
             blocker: control,
             block_codec_config: (),
@@ -3274,9 +3378,9 @@ mod tests {
             peer_buffer_size: NZUsize!(4),
             records,
             peer_provider: oracle.manager(),
-            leader: Arc::new(|_| None),
+            elector,
         };
-        let (mut engine, _) = ShardEngine::new(context.child("engine"), config);
+        let (mut engine, _) = Engine::new(context.child("engine"), config);
         engine.update_primary_peers(participants);
         let sender = WrappedSender::new(sender);
         (engine, sender)
@@ -6935,7 +7039,7 @@ mod tests {
             let scheme_provider =
                 MultiEpochProvider::single(scheme_epoch0).with_epoch(Epoch::new(1), scheme_epoch1);
 
-            let config: Config<_, _, _, _, _, _> = Config {
+            let config: Config<_, _, _, _, _, _, Named> = Config {
                 scheme_provider,
                 blocker: receiver_control.clone(),
                 block_codec_config: (),
@@ -6944,7 +7048,7 @@ mod tests {
                 peer_buffer_size: NZUsize!(64),
                 records: NZUsize!(16),
                 peer_provider: oracle.manager(),
-                leader: Arc::new(|_| None),
+                elector: None,
             };
 
             let (engine, mailbox) = ShardEngine::new(context.child("receiver"), config);
@@ -7065,7 +7169,7 @@ mod tests {
             // the leader's roots, and ingesting the leader's chunk each look up the epoch's scheme
             // once. Any later lookup churns to None.
             let broadcaster_provider = ChurningProvider::new(broadcaster_scheme, 4);
-            let broadcaster_config: Config<_, _, _, _, _, _> = Config {
+            let broadcaster_config: Config<_, _, _, _, _, _, Named> = Config {
                 scheme_provider: broadcaster_provider,
                 blocker: broadcaster_control.clone(),
                 block_codec_config: (),
@@ -7074,7 +7178,7 @@ mod tests {
                 peer_buffer_size: NZUsize!(64),
                 records: NZUsize!(16),
                 peer_provider: oracle.manager(),
-                leader: Arc::new(|_| None),
+                elector: None,
             };
             let (broadcaster_engine, broadcaster_mailbox) =
                 ChurningShardEngine::new(context.child("broadcaster"), broadcaster_config);
@@ -7087,7 +7191,7 @@ mod tests {
                 private_keys[receiver_idx].clone(),
             )
             .expect("signer scheme must be created");
-            let receiver_config: Config<_, _, _, _, _, _> = Config {
+            let receiver_config: Config<_, _, _, _, _, _, Named> = Config {
                 scheme_provider: MultiEpochProvider::single(receiver_scheme),
                 blocker: receiver_control.clone(),
                 block_codec_config: (),
@@ -7096,7 +7200,7 @@ mod tests {
                 peer_buffer_size: NZUsize!(64),
                 records: NZUsize!(16),
                 peer_provider: oracle.manager(),
-                leader: Arc::new(|_| None),
+                elector: None,
             };
             let (receiver_engine, receiver_mailbox) =
                 ShardEngine::new(context.child("receiver"), receiver_config);
@@ -7183,7 +7287,7 @@ mod tests {
                 private_keys[2].clone(),
             )
             .expect("signer scheme must be created");
-            let config: Config<_, _, _, _, _, _> = Config {
+            let config: Config<_, _, _, _, _, _, Named> = Config {
                 scheme_provider: MultiEpochProvider::single(scheme),
                 blocker: control,
                 block_codec_config: (),
@@ -7194,10 +7298,10 @@ mod tests {
                 peer_buffer_size: NZUsize!(64),
                 records: NZUsize!(16),
                 peer_provider: oracle.manager(),
-                leader: Arc::new(|_| None),
+                elector: None,
             };
             let (engine, mailbox) =
-                Engine::<_, _, _, _, Gated, H, B, P, _>::new(context.child("receiver"), config);
+                Engine::<_, _, _, _, Gated, H, B, P, _, _>::new(context.child("receiver"), config);
             engine.start((sender, receiver));
 
             let coding_config = coding_config_for_participants(peer_keys.len() as u16);
@@ -8425,7 +8529,7 @@ mod tests {
                 private_keys[receiver_idx].clone(),
             )
             .expect("signer scheme must be created");
-            let config: Config<_, _, _, _, _, _> = Config {
+            let config: Config<_, _, _, _, _, _, Named> = Config {
                 scheme_provider: MultiEpochProvider::single(scheme),
                 blocker: receiver_control.clone(),
                 block_codec_config: (),
@@ -8434,7 +8538,7 @@ mod tests {
                 peer_buffer_size: NZUsize!(64),
                 records: NZUsize!(16),
                 peer_provider: oracle.manager(),
-                leader: Arc::new(|_| None),
+                elector: None,
             };
             let (engine, mailbox) = ShardEngine::new(context.child("receiver"), config);
             engine.start((sender_handle, receiver_handle));
@@ -8600,7 +8704,7 @@ mod tests {
                 private_keys[0].clone(),
             )
             .expect("signer scheme must be created");
-            let config: Config<_, _, _, _, _, _> = Config {
+            let config: Config<_, _, _, _, _, _, Named> = Config {
                 scheme_provider: MultiEpochProvider::single(scheme),
                 blocker: receiver_control,
                 block_codec_config: (),
@@ -8609,7 +8713,7 @@ mod tests {
                 peer_buffer_size: NZUsize!(4),
                 records: NZUsize!(16),
                 peer_provider: oracle.manager(),
-                leader: Arc::new(|_| None),
+                elector: None,
             };
             let (mut engine, _mailbox) = ShardEngine::new(context.child("engine"), config);
             engine.update_primary_peers(Set::from_iter_dedup([sender_pk.clone()]));
@@ -8713,7 +8817,7 @@ mod tests {
             let scheme_epoch1 =
                 Scheme::signer(SCHEME_NAMESPACE, epoch1_set.clone(), receiver_key.clone())
                     .expect("epoch 1 signer scheme must be created");
-            let config: Config<_, _, _, _, _, _> = Config {
+            let config: Config<_, _, _, _, _, _, Named> = Config {
                 scheme_provider: MultiEpochProvider::single(scheme_epoch0)
                     .with_epoch(Epoch::new(1), scheme_epoch1),
                 blocker: receiver_control.clone(),
@@ -8723,7 +8827,7 @@ mod tests {
                 peer_buffer_size: NZUsize!(64),
                 records: NZUsize!(16),
                 peer_provider: oracle.manager(),
-                leader: Arc::new(|_| None),
+                elector: None,
             };
             let (engine, mailbox) = ShardEngine::new(context.child("receiver"), config);
             engine.start((sender_handle, receiver_handle));
@@ -8821,7 +8925,7 @@ mod tests {
                 private_keys[receiver_idx].clone(),
             )
             .expect("signer scheme must be created");
-            let config: Config<_, _, _, _, _, _> = Config {
+            let config: Config<_, _, _, _, _, _, Named> = Config {
                 scheme_provider: MultiEpochProvider::single(scheme),
                 blocker: receiver_control.clone(),
                 block_codec_config: (),
@@ -8830,7 +8934,7 @@ mod tests {
                 peer_buffer_size: NZUsize!(64),
                 records: NZUsize!(16),
                 peer_provider: oracle.manager(),
-                leader: Arc::new(|_| None),
+                elector: None,
             };
             let (engine, mailbox) = ShardEngine::new(context.child("evicted"), config);
             engine.start((evicted_sender, evicted_receiver));
@@ -9000,8 +9104,8 @@ mod tests {
 
     /// An unstarted [`SC`] engine for participant 0 of four and two blocks for the same round.
     /// Peer 2 observes the engine's sends.
-    struct ChunkSetup {
-        engine: ShardEngine<SC>,
+    struct ChunkSetup<L: ElectorConfig<Scheme> = Named> {
+        engine: ShardEngine<SC, Sequential, L>,
         sender: EngineSender<SC>,
         peer_keys: Vec<P>,
         observer: simulated::Receiver<P>,
@@ -9012,13 +9116,29 @@ mod tests {
 
     /// Builds a [`ChunkSetup`] whose test block spans several segments.
     async fn chunk_setup(context: &deterministic::Context, oracle: &O) -> ChunkSetup {
+        chunk_setup_electing(context, oracle, None).await
+    }
+
+    /// Builds a [`ChunkSetup`] whose engine holds `elector`, as [`chunk_setup`] does.
+    async fn chunk_setup_electing<L: ElectorConfig<Scheme>>(
+        context: &deterministic::Context,
+        oracle: &O,
+        elector: Option<L>,
+    ) -> ChunkSetup<L> {
         let mut private_keys: Vec<PrivateKey> = (0..4).map(PrivateKey::from_seed).collect();
         private_keys.sort_by_key(|key| key.public_key());
         let peer_keys: Vec<P> = private_keys.iter().map(|key| key.public_key()).collect();
         let participants: Set<P> = Set::from_iter_dedup(peer_keys.clone());
-        let (mut engine, sender) =
-            unstarted_with::<SC, _>(context, oracle, &private_keys, 0, NZUsize!(16), STRATEGY)
-                .await;
+        let (mut engine, sender) = unstarted_electing::<SC, _, _>(
+            context,
+            oracle,
+            &private_keys,
+            0,
+            NZUsize!(16),
+            STRATEGY,
+            elector,
+        )
+        .await;
 
         // Each peer's ring holds a whole block's stream, so a round can wait in full for its
         // leader. Peer 2 registers, and a link from participant 0 lets it observe what the engine
@@ -9895,9 +10015,9 @@ mod tests {
     }
 
     /// Once consensus has signaled a round, a participant relays each chunk at its index from the
-    /// leader [`Config::leader`] names for a round within the horizon, as the chunk arrives and
-    /// before any roots. Chunks other participants relay are not relayed. Once consensus names the
-    /// commitment, the roots bind and the block reconstructs.
+    /// leader the elector names for a round within the horizon, as the chunk arrives and before any
+    /// roots. Chunks other participants relay are not relayed. Once consensus names the commitment,
+    /// the roots bind and the block reconstructs.
     #[test_traced]
     fn test_leader_chunks_relayed_before_roots_once_consensus_signals() {
         let executor = deterministic::Runner::default();
@@ -9919,7 +10039,7 @@ mod tests {
 
             // Peer 1 leads every round.
             let leader = peer_keys[1].clone();
-            elect(&mut engine, &leader);
+            elect(&mut engine, 1);
             let next = Round::new(Epoch::zero(), View::new(2));
             let commitment = block.commitment();
 
@@ -9973,11 +10093,10 @@ mod tests {
     }
 
     /// Nothing is relayed before naming while consensus has signaled no round, even from the leader
-    /// [`Config::leader`] names, or while [`Config::leader`] answers `None` for the chunk's round.
-    /// Once consensus names a commitment, its roots and then its chunks are relayed as the chunks
-    /// verify.
+    /// the elector names, or without an elector. Once consensus names a commitment, its roots and
+    /// then its chunks are relayed as the chunks verify.
     #[test_traced]
-    fn test_no_relay_before_naming_without_a_signal_or_an_answer() {
+    fn test_no_relay_before_naming_without_a_signal_or_an_elector() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
@@ -9995,10 +10114,9 @@ mod tests {
                 round,
             } = chunk_setup(&context, &oracle).await;
 
-            // The leader hook names peer 1 for view 1 and answers `None` for every other round.
+            // The elector names peer 1 for every round.
             let leader = peer_keys[1].clone();
-            let named = leader.clone();
-            engine.leader = Arc::new(move |asked| (asked == round).then(|| named.clone()));
+            elect(&mut engine, 1);
 
             // Before any consensus signal, the leader's chunks and roots only wait in its ring.
             let own = stream_of(&block, round, 0);
@@ -10019,7 +10137,8 @@ mod tests {
                 assert!(relay == Some(ShardMessage::Stream(chunk.clone())));
             }
 
-            // The hook answers `None` for view 2, so its leader's chunks wait.
+            // Without an elector, the chunks from view 2's leader wait.
+            engine.elector = None;
             let next = Round::new(Epoch::zero(), View::new(2));
             receive(&mut engine, &mut sender, &leader, relayed(&other, next, 0));
             assert!(next_message::<SC>(&context, &mut observer).await.is_none());
@@ -10027,7 +10146,49 @@ mod tests {
         });
     }
 
-    /// A wrong [`Config::leader`] answer blocks no one and still delivers the block. With the hook
+    /// A dynamic elector names no leader before the certificate that unlocks a round, so nothing is
+    /// relayed before naming. Once consensus names the commitment, its roots and then its chunks
+    /// are relayed as the chunks verify.
+    #[test_traced]
+    fn test_no_relay_before_naming_with_a_dynamic_elector() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
+                context.child("network"),
+                network_config(4),
+            );
+            network.start();
+            let ChunkSetup {
+                mut engine,
+                mut sender,
+                peer_keys,
+                mut observer,
+                block,
+                round,
+                ..
+            } = chunk_setup_electing(&context, &oracle, Some(Late)).await;
+
+            // Consensus has notarized view 1, and the chunks and roots from view 2's leader wait.
+            let leader = peer_keys[1].clone();
+            let next = Round::new(Epoch::zero(), View::new(2));
+            engine.handle_notarized_commitment(&mut sender, unrelated().commitment(), round);
+            let own = stream_of(&block, next, 0);
+            receive(&mut engine, &mut sender, &leader, assigned(&block, next, 0));
+            assert!(next_message::<SC>(&context, &mut observer).await.is_none());
+
+            // Discovery names the commitment, so its roots and then its chunks are relayed.
+            engine.handle_external_proposal(&mut sender, block.commitment(), leader.clone(), next);
+            let relay = next_message::<SC>(&context, &mut observer).await;
+            assert!(relay == Some(ShardMessage::Roots(roots_of(&block, next))));
+            for chunk in &own {
+                let relay = next_message::<SC>(&context, &mut observer).await;
+                assert!(relay == Some(ShardMessage::Stream(chunk.clone())));
+            }
+            assert!(oracle.blocked().await.unwrap().is_empty());
+        });
+    }
+
+    /// An elector that names the wrong leader blocks no one and still delivers the block. With it
     /// naming peer 3 while peer 1 leads, the leader's chunks wait for naming, and peer 3's valid
     /// chunks of an unrelated block at this node's index are relayed within the round's bound.
     /// Once consensus names the leader's commitment, its chunks verify and are relayed, and the
@@ -10051,10 +10212,10 @@ mod tests {
                 ..
             } = chunk_setup(&context, &oracle).await;
 
-            // The leader hook names peer 3 for every round while peer 1 leads view 2, and consensus
-            // has notarized view 1.
+            // The elector names peer 3 for every round while peer 1 leads view 2, and consensus has
+            // notarized view 1.
             let leader = peer_keys[1].clone();
-            elect(&mut engine, &peer_keys[3]);
+            elect(&mut engine, 3);
             let next = Round::new(Epoch::zero(), View::new(2));
             let commitment = block.commitment();
             engine.handle_notarized_commitment(&mut sender, unrelated().commitment(), round);
@@ -10133,7 +10294,7 @@ mod tests {
             // Peer 1 leads every round, consensus has notarized view 1, and a round may relay two
             // blocks' worth of chunks before naming.
             let leader = peer_keys[1].clone();
-            elect(&mut engine, &leader);
+            elect(&mut engine, 1);
             engine.handle_notarized_commitment(&mut sender, unrelated().commitment(), round);
             let cap = 2 * usize::from(engine.max_segments);
 
@@ -10200,7 +10361,7 @@ mod tests {
 
             // Peer 1 leads every round, and consensus has notarized view 1.
             let leader = peer_keys[1].clone();
-            elect(&mut engine, &leader);
+            elect(&mut engine, 1);
             engine.handle_notarized_commitment(&mut sender, unrelated().commitment(), round);
             let next = Round::new(Epoch::zero(), View::new(2));
             let own = stream_of(&block, next, 0);
@@ -10260,7 +10421,7 @@ mod tests {
 
     /// Chunks are relayed before naming only for rounds from the highest round consensus has
     /// signaled to [`Config::records`] views past it, or among the first that many views of the
-    /// next epoch. [`Config::leader`] is consulted only for chunks at this node's index.
+    /// next epoch. The elector is asked only about chunks at this node's index.
     #[test_traced]
     fn test_rounds_outside_the_relay_horizon_are_not_relayed_early() {
         let executor = deterministic::Runner::default();
@@ -10279,8 +10440,8 @@ mod tests {
                 ..
             } = chunk_setup(&context, &oracle).await;
 
-            // This node holds a scheme for epochs 0 and 1, and the leader hook names peer 1 for
-            // every round and counts the times it is asked.
+            // This node holds a scheme for epochs 0 and 1, and the elector names peer 1 for every
+            // round.
             let mut private_keys: Vec<PrivateKey> = (0..4).map(PrivateKey::from_seed).collect();
             private_keys.sort_by_key(|key| key.public_key());
             let participants: Set<P> = Set::from_iter_dedup(peer_keys.clone());
@@ -10295,13 +10456,9 @@ mod tests {
             engine.scheme_provider =
                 MultiEpochProvider::single(signer()).with_epoch(Epoch::new(1), signer());
             let leader = peer_keys[1].clone();
-            let asked = Arc::new(AtomicIsize::new(0));
-            let named = leader.clone();
-            let counter = asked.clone();
-            engine.leader = Arc::new(move |_| {
-                counter.fetch_add(1, Ordering::Relaxed);
-                Some(named.clone())
-            });
+            let named = Named::new(1);
+            let elected = named.elected.clone();
+            engine.elector = Some(named);
             let horizon = engine.window.get() as u64;
             let at = |epoch, view| Round::new(Epoch::new(epoch), View::new(view));
 
@@ -10330,15 +10487,93 @@ mod tests {
                 );
             }
 
-            // A chunk at another index never reaches the hook.
-            let before = asked.load(Ordering::Relaxed);
+            // A chunk at another index never reaches the elector.
+            let before = elected.load(Ordering::Relaxed);
             receive(
                 &mut engine,
                 &mut sender,
                 &leader,
                 [stream_of(&block, at(0, 11), 2).remove(0).into()],
             );
-            assert_eq!(asked.load(Ordering::Relaxed), before);
+            assert_eq!(elected.load(Ordering::Relaxed), before);
+            assert!(oracle.blocked().await.unwrap().is_empty());
+        });
+    }
+
+    /// The engine builds one elector for each epoch it is asked about and keeps those of the epoch
+    /// consensus has signaled and the next. Each epoch's elector is built once, even when chunks
+    /// for the next epoch arrive before chunks for the signaled one.
+    #[test_traced]
+    fn test_one_elector_is_built_for_each_epoch() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
+                context.child("network"),
+                network_config(4),
+            );
+            network.start();
+            let ChunkSetup {
+                mut engine,
+                mut sender,
+                peer_keys,
+                mut observer,
+                block,
+                ..
+            } = chunk_setup(&context, &oracle).await;
+
+            // This node holds a scheme for epochs 0 to 2, and the elector names peer 1 for every
+            // round.
+            let mut private_keys: Vec<PrivateKey> = (0..4).map(PrivateKey::from_seed).collect();
+            private_keys.sort_by_key(|key| key.public_key());
+            let participants: Set<P> = Set::from_iter_dedup(peer_keys.clone());
+            let signer = || {
+                Scheme::signer(
+                    SCHEME_NAMESPACE,
+                    participants.clone(),
+                    private_keys[0].clone(),
+                )
+                .expect("signer scheme must be created")
+            };
+            engine.scheme_provider = MultiEpochProvider::single(signer())
+                .with_epoch(Epoch::new(1), signer())
+                .with_epoch(Epoch::new(2), signer());
+            let leader = peer_keys[1].clone();
+            let named = Named::new(1);
+            let built = named.built.clone();
+            engine.elector = Some(named);
+            let at = |epoch, view| Round::new(Epoch::new(epoch), View::new(view));
+
+            // Consensus signals epoch 0 and then epoch 1. After each signal the leader's chunk for
+            // the next epoch arrives before its chunk for the signaled one, and both are relayed.
+            for (signaled, claimed) in [
+                (at(0, 1), [at(1, 1), at(0, 2)]),
+                (at(1, 1), [at(2, 1), at(1, 2)]),
+            ] {
+                engine.signal(signaled);
+                for round in claimed {
+                    receive(
+                        &mut engine,
+                        &mut sender,
+                        &leader,
+                        [stream_of(&block, round, 0).remove(0).into()],
+                    );
+                    assert!(
+                        next_message::<SC>(&context, &mut observer).await.is_some(),
+                        "a chunk of round {round} must be relayed before naming"
+                    );
+                }
+            }
+
+            // Each epoch's elector was built once, and epoch 0's was dropped when consensus
+            // signaled epoch 1.
+            assert_eq!(built.load(Ordering::Relaxed), 3);
+            assert!(
+                engine
+                    .electors
+                    .keys()
+                    .copied()
+                    .eq([Epoch::new(1), Epoch::new(2)])
+            );
             assert!(oracle.blocked().await.unwrap().is_empty());
         });
     }
@@ -10364,11 +10599,10 @@ mod tests {
                 round,
             } = chunk_setup(&context, &oracle).await;
 
-            // Peer 1 leads view 2, and consensus has notarized view 1.
+            // Peer 1 leads every round, and consensus has notarized view 1.
             let leader = peer_keys[1].clone();
+            elect(&mut engine, 1);
             let next = Round::new(Epoch::zero(), View::new(2));
-            let named = leader.clone();
-            engine.leader = Arc::new(move |asked| (asked == next).then(|| named.clone()));
             engine.handle_notarized_commitment(&mut sender, unrelated().commitment(), round);
 
             // Peer 2 receives its chunk of the first segment this node streams for view 3.
@@ -10410,7 +10644,7 @@ mod tests {
     /// leader then delivers the target's assigned shards to only two participants.
     fn early_relay_evicted_before_naming(flood: bool) {
         // Every ring holds one round's worth of messages from each sender, and every engine's
-        // leader hook names participant 0 for every round.
+        // elector names participant 0 for every round.
         let max_segments = SC::segments(CodedBlock::<B, SC, H>::max_coded_size(
             B::max_encode_size(&()),
         ));
@@ -10568,8 +10802,8 @@ mod tests {
         early_relay_evicted_before_naming(true);
     }
 
-    /// When the leader [`Config::leader`] names sends a chunk at this node's index that fails its
-    /// check against the root it claims, the chunk blocks the leader and is not relayed.
+    /// When the leader the elector names sends a chunk at this node's index that fails its check
+    /// against the root it claims, the chunk blocks the leader and is not relayed.
     #[test_traced]
     fn test_invalid_chunk_from_the_named_leader_blocks_it_and_is_not_relayed() {
         let executor = deterministic::Runner::default();
@@ -10591,7 +10825,7 @@ mod tests {
 
             // Peer 1 leads every round, and consensus has notarized view 1.
             let leader = peer_keys[1].clone();
-            elect(&mut engine, &leader);
+            elect(&mut engine, 1);
             engine.handle_notarized_commitment(&mut sender, unrelated().commitment(), round);
 
             // The leader's chunk for view 2 carries another block's data under this block's root.
@@ -10638,7 +10872,7 @@ mod tests {
             // Peer 1 leads every round, consensus has notarized view 1, and one round's messages
             // bound the rounds the ledger may keep.
             let leader = peer_keys[1].clone();
-            elect(&mut engine, &leader);
+            elect(&mut engine, 1);
             engine.handle_notarized_commitment(&mut sender, unrelated().commitment(), round);
             engine.trim();
             let span = RELAY_CANDIDATES * (usize::from(engine.max_segments) + 1);
@@ -10665,11 +10899,11 @@ mod tests {
         });
     }
 
-    /// With every engine's [`Config::leader`] naming the proposer, the other participants relay
-    /// their chunks while the proposer streams, before consensus names the block. The proposer
-    /// caches the block and counts its assigned shard as verified. Once the block is named
-    /// elsewhere, the other participants verify their assigned shards, all recipients reconstruct
-    /// the block, and no chunk is relayed twice.
+    /// With every engine's elector naming the proposer, the other participants relay their chunks
+    /// while the proposer streams, before consensus names the block. The proposer caches the block
+    /// and counts its assigned shard as verified. Once the block is named elsewhere, the other
+    /// participants verify their assigned shards, all recipients reconstruct the block, and no
+    /// chunk is relayed twice.
     #[test_traced]
     fn test_e2e_chunks_relayed_before_naming_reconstruct_everywhere() {
         let fixture: Fixture<SC> = Fixture {

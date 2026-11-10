@@ -22,6 +22,7 @@ use crate::{
         standard::Standard,
     },
     simplex::{
+        elector::RoundRobin,
         scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
         types::{Activity, Context, Finalization, Finalize, Notarization, Notarize, Proposal},
     },
@@ -2859,7 +2860,7 @@ impl TestHarness for CodingHarness {
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
-        let shard_config: shards::Config<_, _, _, _, _, _> = shards::Config {
+        let shard_config: shards::Config<_, _, _, _, _, _, RoundRobin> = shards::Config {
             scheme_provider: provider.clone(),
             blocker: oracle.control(validator.clone()),
             block_codec_config: (),
@@ -2868,7 +2869,7 @@ impl TestHarness for CodingHarness {
             peer_buffer_size: NZUsize!(64),
             records: RECORDS,
             peer_provider: oracle.manager(),
-            leader: Arc::new(|_| None),
+            elector: None,
         };
         let (shard_engine, shard_mailbox) =
             shards::Engine::new(context.child("shards"), shard_config);
@@ -3048,7 +3049,7 @@ impl TestHarness for CodingHarness {
         };
         let resolver = resolver::init(context.child("resolver"), resolver_cfg, backfill);
 
-        let shard_config: shards::Config<_, _, _, _, _, _> = shards::Config {
+        let shard_config: shards::Config<_, _, _, _, _, _, RoundRobin> = shards::Config {
             scheme_provider: provider.clone(),
             blocker: oracle.control(validator.clone()),
             block_codec_config: (),
@@ -3057,7 +3058,7 @@ impl TestHarness for CodingHarness {
             peer_buffer_size: NZUsize!(64),
             records: RECORDS,
             peer_provider: oracle.manager(),
-            leader: Arc::new(|_| None),
+            elector: None,
         };
         let (shard_engine, shard_mailbox) =
             shards::Engine::new(context.child("shards"), shard_config);
