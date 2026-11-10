@@ -1968,6 +1968,9 @@ impl Worker {
                 break;
             };
             match message {
+                // Taken under the inbox lock, which orders the root's next
+                // poll after the waking thread's writes. Sleeps rely on this
+                // (see `RootWaker::is_current`).
                 Message::WakeRoot => self.local.borrow_mut().root_ready = true,
                 Message::Forward(id, sender) => {
                     let mut local = self.local.borrow_mut();
