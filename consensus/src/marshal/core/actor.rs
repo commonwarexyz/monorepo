@@ -478,6 +478,13 @@ where
                     "stream must be synced before the actor handles its next event"
                 );
 
+                // Remove any dropped subscribers. If all subscribers dropped, abort the waiter.
+                // Requests that only dropped callers or leases owned are canceled.
+                let mut released = self.block_subscriptions.retain_open();
+                released.extend(self.prefetch.retain_open());
+                Self::cancel_subscription_requests(&mut resolver, released);
+                self.finalized_subscriptions.retain_open();
+
                 // Arm the prefetch branch only while queued demand has a free slot.
                 let prefetch_ready = if self.prefetch.ready() {
                     Either::Left(ready(()))
@@ -507,15 +514,6 @@ where
                         .await;
                 }
             },
-            // Cancel exact-body requests whose last fetching caller or prefetch lease closed.
-            closed = self.block_subscriptions.closed() => {
-                Self::cancel_subscription_requests(&mut resolver, closed);
-            },
-            closed = self.prefetch.closed() => {
-                Self::cancel_subscription_requests(&mut resolver, closed);
-            },
-            // Drop finalized-height waiters whose receivers closed.
-            () = self.finalized_subscriptions.closed() => {},
             // Handle application acknowledgements (drain all ready acks, sync once)
             result = self.pending_acks.current() => {
                 let next = match self

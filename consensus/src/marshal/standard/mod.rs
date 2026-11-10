@@ -6414,6 +6414,14 @@ mod tests {
         }
     }
 
+    /// Returns once marshal has dropped the callers and leases canceled before this call. Marshal
+    /// drops them at the start of a loop turn, and the second round trip shows that a turn started
+    /// after the first.
+    async fn prune_canceled(mailbox: &Mailbox<S, Standard<B>>) {
+        let _ = mailbox.get_processed().await;
+        let _ = mailbox.get_processed().await;
+    }
+
     /// A reporter that signals when application delivery starts and holds the
     /// block acknowledgement open.
     #[derive(Clone)]
@@ -14506,15 +14514,15 @@ mod tests {
     }
 
     /// Callers for one commitment share a single request that lasts until the last caller drops
-    /// its receiver. Cancellation alone must wake cleanup while the actor is otherwise idle.
+    /// its receiver. Marshal releases a dropped caller when it handles its next event.
     #[test_traced("WARN")]
-    fn test_standard_acquire_coalesces_and_cancels_last_caller_while_idle() {
+    fn test_standard_acquire_coalesces_and_cancels_last_caller() {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let (mailbox, buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
-                "acquire-shared-idle-cancel",
+                "acquire-shared-cancel",
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::default(),
                 Some(RecordingBuffer::default()),
@@ -14522,13 +14530,6 @@ mod tests {
             )
             .await;
             let buffer = buffer.unwrap();
-
-            // Marshal finishes processing genesis, so no other work is pending.
-            context.sleep(Duration::from_millis(100)).await;
-            assert_eq!(
-                mailbox.get_processed().await,
-                Some(Processed::Block(Height::zero()))
-            );
 
             // Two callers for a missing commitment share one buffer wait and one resolver request.
             let commitment = Sha256::hash(&[b"shared-acquisition"]);
@@ -14538,27 +14539,18 @@ mod tests {
             assert_eq!(buffer.commitment_subscription_count(), 1);
             assert_eq!(resolver.subscriptions(commitment), 1);
 
-            // From here on only cancellation can wake cleanup, so no mailbox traffic or block
-            // arrival can mask a missing cancellation wakeup. Dropping the first caller keeps the
-            // request for the second.
+            // Dropping the first caller keeps the request for the second.
             drop(first);
-            context.sleep(Duration::from_millis(100)).await;
+            prune_canceled(&mailbox).await;
             assert!(matches!(second.try_recv(), Err(TryRecvError::Empty)));
             assert!(resolver.active_subscription(commitment).is_some());
             assert!(!buffer.commitment_subscription_closed(0));
 
             // Dropping the last caller cancels the resolver request and the buffer wait.
             drop(second);
-            wait_until(
-                &context,
-                Duration::from_secs(1),
-                "idle acquisition cancellation",
-                || {
-                    resolver.active_subscription(commitment).is_none()
-                        && buffer.commitment_subscription_closed(0)
-                },
-            )
-            .await;
+            prune_canceled(&mailbox).await;
+            assert!(resolver.active_subscription(commitment).is_none());
+            assert!(buffer.commitment_subscription_closed(0));
             assert_eq!(resolver.subscriptions(commitment), 1);
         });
     }
@@ -14653,22 +14645,18 @@ mod tests {
                 1
             );
 
-            // Closing both leases is the only actor input before the second request retires. The
-            // first request belongs to the direct caller and stays active.
+            // Closing both leases retires the second request. The first request belongs to the
+            // direct caller and stays active.
             drop(old);
             drop(duplicate);
-            wait_until(
-                &context,
-                Duration::from_secs(1),
-                "old leases release only speculative request",
-                || {
-                    !resolver
-                        .active_fetches()
-                        .iter()
-                        .any(|fetch| fetch.key == second_key)
-                },
-            )
-            .await;
+            prune_canceled(&mailbox).await;
+            assert!(
+                !resolver
+                    .active_fetches()
+                    .iter()
+                    .any(|fetch| fetch.key == second_key),
+                "closed leases must release their speculative request"
+            );
             assert!(matches!(direct.try_recv(), Err(TryRecvError::Empty)));
             assert!(!buffer.commitment_subscription_closed(0));
 
@@ -14715,25 +14703,22 @@ mod tests {
             );
 
             // A best-effort lease cannot extend a direct caller's lifetime.
-            // No mailbox traffic or body delivery drives cancellation here.
             drop(direct);
-            wait_until(
-                &context,
-                Duration::from_secs(1),
-                "last direct caller cancels despite lease",
-                || {
-                    !resolver
-                        .active_fetches()
-                        .iter()
-                        .any(|fetch| fetch.key == inverse_key)
-                        && buffer
-                            .commitment_subscriptions
-                            .lock()
-                            .iter()
-                            .all(|sender| sender.is_closed())
-                },
-            )
-            .await;
+            prune_canceled(&mailbox).await;
+            assert!(
+                !resolver
+                    .active_fetches()
+                    .iter()
+                    .any(|fetch| fetch.key == inverse_key),
+                "a lease must not keep a dropped caller's request"
+            );
+            assert!(
+                buffer
+                    .commitment_subscriptions
+                    .lock()
+                    .iter()
+                    .all(|sender| sender.is_closed())
+            );
 
             // A later lease requests the commitment again and owns its cancellation. Dropping the
             // older lease leaves the renewed request active.
@@ -14759,7 +14744,7 @@ mod tests {
                 2
             );
             drop(old);
-            context.sleep(Duration::from_millis(100)).await;
+            prune_canceled(&mailbox).await;
             assert!(
                 resolver
                     .active_fetches()
@@ -14768,18 +14753,14 @@ mod tests {
             );
             assert!(matches!(renewed.try_recv(), Err(TryRecvError::Empty)));
             drop(renewed);
-            wait_until(
-                &context,
-                Duration::from_secs(1),
-                "renewed lease owns cancellation",
-                || {
-                    !resolver
-                        .active_fetches()
-                        .iter()
-                        .any(|fetch| fetch.key == inverse_key)
-                },
-            )
-            .await;
+            prune_canceled(&mailbox).await;
+            assert!(
+                !resolver
+                    .active_fetches()
+                    .iter()
+                    .any(|fetch| fetch.key == inverse_key),
+                "the renewed lease must cancel its own request"
+            );
         });
     }
 
@@ -14833,7 +14814,7 @@ mod tests {
             assert!(mailbox.get_block(Height::new(2)).await.is_none());
             assert_eq!(resolver.fetches().len(), fetches_before);
             drop(canceled);
-            context.sleep(Duration::from_millis(100)).await;
+            prune_canceled(&mailbox).await;
             assert!(matches!(survivor.try_recv(), Err(TryRecvError::Empty)));
 
             // Finalizing height 3 opens a gap at height 2, and repair requests its block.
@@ -14941,17 +14922,10 @@ mod tests {
             // Dropping the caller retires its request and the buffer wait, but not the
             // finalization's request.
             drop(acquisition);
-            wait_until(
-                &context,
-                Duration::from_secs(1),
-                "independent finality retention",
-                || {
-                    resolver.active_fetches().iter().any(is_finality)
-                        && resolver.active_subscription(commitment).is_none()
-                        && buffer.commitment_subscription_closed(0)
-                },
-            )
-            .await;
+            prune_canceled(&mailbox).await;
+            assert!(resolver.active_fetches().iter().any(is_finality));
+            assert!(resolver.active_subscription(commitment).is_none());
+            assert!(buffer.commitment_subscription_closed(0));
 
             // The finalization's request still delivers the block, and marshal dispatches it.
             let fetch = resolver
@@ -15331,18 +15305,14 @@ mod tests {
             // Dropping the leases cancels the lower lease's request.
             drop(parked_lease);
             drop(lease);
-            wait_until(
-                &context,
-                Duration::from_secs(1),
-                "parked lease cancellation",
-                || {
-                    !resolver
-                        .active_fetches()
-                        .iter()
-                        .any(|fetch| fetch.key == parked_key)
-                },
-            )
-            .await;
+            prune_canceled(&mailbox).await;
+            assert!(
+                !resolver
+                    .active_fetches()
+                    .iter()
+                    .any(|fetch| fetch.key == parked_key),
+                "a closed lease must release its request"
+            );
         });
     }
 
@@ -16202,10 +16172,8 @@ mod tests {
 
             // Closing the lease cancels the next height's request.
             drop(lease);
-            wait_until(&context, Duration::from_secs(1), "old lease closes", || {
-                active(&next).is_none()
-            })
-            .await;
+            prune_canceled(&mailbox).await;
+            assert!(active(&next).is_none());
 
             // A verdict-completed body occupies capacity until canonical storage claims it.
             let completed = make_raw_block(queued.digest(), Height::new(8), 800);
@@ -16476,31 +16444,19 @@ mod tests {
 
                 // Dropping the range cancels its own requests but not the parked lease's.
                 drop(range);
-                wait_until(
-                    &context,
-                    Duration::from_secs(1),
-                    "range cancellation preserves parked lease",
-                    || {
-                        resolver
-                            .active_fetches()
-                            .iter()
-                            .map(|fetch| fetch.key)
-                            .collect::<Vec<_>>()
-                            == parked_keys
-                    },
-                )
-                .await;
+                prune_canceled(&mailbox).await;
+                assert_eq!(
+                    resolver
+                        .active_fetches()
+                        .iter()
+                        .map(|fetch| fetch.key)
+                        .collect::<Vec<_>>(),
+                    parked_keys
+                );
                 assert!(matches!(lease.try_recv(), Err(TryRecvError::Empty)));
-                let _ = mailbox.get_processed().await;
                 drop(lease);
-                wait_until(
-                    &context,
-                    Duration::from_secs(1),
-                    "parked lease cancellation",
-                    || resolver.active_fetches().is_empty(),
-                )
-                .await;
-                let _ = mailbox.get_processed().await;
+                prune_canceled(&mailbox).await;
+                assert!(resolver.active_fetches().is_empty());
                 assert_eq!(fetched_keys(), expected);
             });
         }

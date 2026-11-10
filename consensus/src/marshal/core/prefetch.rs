@@ -4,10 +4,8 @@ use super::Variant;
 use commonware_utils::channel::oneshot;
 use std::{
     collections::{BTreeMap, BTreeSet, btree_map::Entry},
-    future::poll_fn,
     ops::Range,
     sync::Arc,
-    task::Poll,
 };
 
 /// Progress of speculative demand for one commitment.
@@ -179,36 +177,30 @@ impl<V: Variant> Prefetches<V> {
     }
 
     /// Removes closed leases and returns active fetches whose final owner disappeared.
-    pub(super) async fn closed(&mut self) -> Vec<V::Commitment> {
-        poll_fn(|cx| {
-            // Collect the leases whose receivers closed, registering a wake for the rest.
-            let closed: Vec<_> = self
-                .leases
-                .iter_mut()
-                .filter_map(|(id, lease)| lease.sender.poll_closed(cx).is_ready().then_some(*id))
-                .collect();
-            if closed.is_empty() {
-                return Poll::Pending;
-            }
+    pub(super) fn retain_open(&mut self) -> Vec<V::Commitment> {
+        // Collect the leases whose receivers closed.
+        let closed: Vec<_> = self
+            .leases
+            .iter()
+            .filter_map(|(id, lease)| lease.sender.is_closed().then_some(*id))
+            .collect();
 
-            // Drop each closed lease as an owner. Demand left without owners retires, and any
-            // active fetch among it is returned so its request can be canceled.
-            let mut removed = Vec::new();
-            for id in closed {
-                let lease = self.leases.remove(&id).expect("closed lease must exist");
-                for commitment in &lease.commitments[lease.range] {
-                    let Some(demand) = self.entries.get_mut(commitment) else {
-                        continue;
-                    };
-                    demand.owners.remove(&id);
-                    if demand.owners.is_empty() && self.retire(*commitment) {
-                        removed.push(*commitment);
-                    }
+        // Drop each closed lease as an owner. Demand left without owners retires, and any
+        // active fetch among it is returned so its request can be canceled.
+        let mut removed = Vec::new();
+        for id in closed {
+            let lease = self.leases.remove(&id).expect("closed lease must exist");
+            for commitment in &lease.commitments[lease.range] {
+                let Some(demand) = self.entries.get_mut(commitment) else {
+                    continue;
+                };
+                demand.owners.remove(&id);
+                if demand.owners.is_empty() && self.retire(*commitment) {
+                    removed.push(*commitment);
                 }
             }
-            Poll::Ready(removed)
-        })
-        .await
+        }
+        removed
     }
 }
 
@@ -226,19 +218,10 @@ mod tests {
         Digested, Digestible,
         sha256::{Digest, Sha256},
     };
-    use commonware_macros::select;
-    use commonware_runtime::{Clock, Runner as _, deterministic};
     use futures::FutureExt;
-    use std::time::Duration;
 
     type TestBlock = EmptyBlock<Sha256>;
     type TestPrefetches = Prefetches<Standard<TestBlock>>;
-
-    /// Delay before a test cancels a lease, so the scheduler under test is already waiting.
-    const CANCEL_DELAY: Duration = Duration::from_millis(1);
-
-    /// Time a cancellation has to wake the scheduler that waits on it.
-    const WAKE_TIMEOUT: Duration = Duration::from_secs(1);
 
     /// Returns a digested test block at `height`, distinct for each height.
     fn block(height: u64) -> Digested<TestBlock> {
@@ -343,10 +326,10 @@ mod tests {
         prefetch.complete(body.clone());
         assert_eq!(strong_count(&body), 2);
         drop(first);
-        assert_eq!(prefetch.closed().now_or_never(), Some(Vec::new()));
+        assert!(prefetch.retain_open().is_empty());
         assert_eq!(strong_count(&body), 2);
         drop(second);
-        assert_eq!(prefetch.closed().now_or_never(), Some(Vec::new()));
+        assert!(prefetch.retain_open().is_empty());
         assert_eq!(strong_count(&body), 1);
         assert!(prefetch.entries.is_empty());
     }
@@ -372,7 +355,7 @@ mod tests {
         // A new lease re-queues the first commitment, and closing the old lease leaves it queued.
         let _new = lease(&mut prefetch, &[first]);
         drop(old);
-        assert_eq!(prefetch.closed().now_or_never(), Some(Vec::new()));
+        assert!(prefetch.retain_open().is_empty());
 
         // Demand runs in queue order, and retired demand can be leased again.
         assert_eq!(prefetch.next(), Some(second));
@@ -395,7 +378,7 @@ mod tests {
         let old = lease(&mut prefetch, &[first, first]);
         let _second = lease(&mut prefetch, &[second]);
         drop(old);
-        assert_eq!(prefetch.closed().now_or_never(), Some(Vec::new()));
+        assert!(prefetch.retain_open().is_empty());
 
         // Leasing the first again queues it behind the second.
         let _first = lease(&mut prefetch, &[first]);
@@ -424,7 +407,7 @@ mod tests {
 
         // Closing the remaining lease leaves no state behind.
         drop(retained);
-        assert_eq!(prefetch.closed().now_or_never(), Some(Vec::new()));
+        assert!(prefetch.retain_open().is_empty());
         assert!(prefetch.leases.is_empty());
     }
 
@@ -462,42 +445,27 @@ mod tests {
         // Closing the lease retires both active fetches, reports them for cancellation, and
         // releases the sequence.
         drop(receiver);
-        assert_eq!(
-            prefetch.closed().now_or_never(),
-            Some(vec![commitments[1], commitments[2]])
-        );
+        assert_eq!(prefetch.retain_open(), vec![commitments[1], commitments[2]]);
         assert_eq!(Arc::strong_count(&commitments), 1);
     }
 
-    /// Closing a lease wakes a scheduler already waiting in `closed`, and `closed` returns the
-    /// canceled active fetch. The freed slot then starts the next queued commitment.
+    /// Cleanup after a lease closes returns its active fetch for cancellation. The freed slot then
+    /// starts the next queued commitment.
     #[test]
-    fn cancellation_wakes_idle_scheduler_and_releases_active_slot() {
-        deterministic::Runner::default().start(|context| async move {
-            // The first lease takes the only slot, and the second waits behind it.
-            let mut prefetch = TestPrefetches::new(1);
-            let first = block(1).digest();
-            let second = block(2).digest();
-            let receiver = lease(&mut prefetch, &[first]);
-            assert_eq!(prefetch.next(), Some(first));
-            let _second = lease(&mut prefetch, &[second]);
+    fn closed_lease_releases_active_slot() {
+        // The first lease takes the only slot, and the second waits behind it.
+        let mut prefetch = TestPrefetches::new(1);
+        let first = block(1).digest();
+        let second = block(2).digest();
+        let receiver = lease(&mut prefetch, &[first]);
+        assert_eq!(prefetch.next(), Some(first));
+        let _second = lease(&mut prefetch, &[second]);
 
-            // Dropping the first lease after the scheduler waits must wake it with the canceled
-            // fetch.
-            select! {
-                removed = prefetch.closed() => assert_eq!(removed, vec![first]),
-                _ = async {
-                    context.sleep(CANCEL_DELAY).await;
-                    drop(receiver);
-                    std::future::pending::<()>().await;
-                } => unreachable!(),
-                _ = context.sleep(WAKE_TIMEOUT) => {
-                    panic!("lease cancellation must wake the scheduler");
-                },
-            }
+        // Cleanup after the first lease closes returns its active fetch.
+        drop(receiver);
+        assert_eq!(prefetch.retain_open(), vec![first]);
 
-            // The freed slot starts the queued commitment.
-            assert_eq!(prefetch.next(), Some(second));
-        });
+        // The freed slot starts the queued commitment.
+        assert_eq!(prefetch.next(), Some(second));
     }
 }

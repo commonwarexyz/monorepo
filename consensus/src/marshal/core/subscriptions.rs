@@ -4,11 +4,7 @@ use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     futures::{AbortablePool, Aborter},
 };
-use std::{
-    collections::{BTreeMap, btree_map::Entry},
-    future::poll_fn,
-    task::Poll,
-};
+use std::collections::{BTreeMap, btree_map::Entry};
 use tracing::{Span, info_span};
 
 /// A set of local subscribers waiting for one block.
@@ -53,7 +49,7 @@ impl<V: Variant> Subscriptions<V> {
 
     /// Returns whether a caller waiting for `commitment` requested it from peers.
     ///
-    /// Includes closed callers until [`Self::closed`] removes them. This keeps speculative
+    /// Includes closed callers until [`Self::retain_open`] removes them. This keeps speculative
     /// demand from sharing a request that pending cancellation can remove.
     pub(super) fn fetching(&self, commitment: &V::Commitment) -> bool {
         self.entries
@@ -62,7 +58,9 @@ impl<V: Variant> Subscriptions<V> {
     }
 
     /// Removes canceled subscribers and returns commitments whose last fetching caller left.
-    fn retain_open(&mut self) -> Vec<V::Commitment> {
+    ///
+    /// Canceled callers that only wait are removed without being reported.
+    pub(super) fn retain_open(&mut self) -> Vec<V::Commitment> {
         let mut ended = Vec::new();
         self.entries.retain(|commitment, subscription| {
             // Report the commitment only when its last fetching caller closed here.
@@ -79,31 +77,6 @@ impl<V: Variant> Subscriptions<V> {
             !subscription.fetching.is_empty() || !subscription.waiting.is_empty()
         });
         ended
-    }
-
-    /// Waits until cancellation removes the last fetching caller for a commitment.
-    ///
-    /// Canceled callers that only wait are removed without being reported.
-    pub(super) async fn closed(&mut self) -> Vec<V::Commitment> {
-        poll_fn(|cx| {
-            // Register a wake for every caller so any cancellation reruns cleanup.
-            for subscription in self.entries.values_mut() {
-                for subscriber in subscription
-                    .fetching
-                    .iter_mut()
-                    .chain(subscription.waiting.iter_mut())
-                {
-                    let _ = subscriber.sender.poll_closed(cx);
-                }
-            }
-            let removed = self.retain_open();
-            if removed.is_empty() {
-                Poll::Pending
-            } else {
-                Poll::Ready(removed)
-            }
-        })
-        .await
     }
 
     /// Notifies matching subscribers and returns whether a subscription was removed.
@@ -202,28 +175,12 @@ impl<V: Variant> Finalized<V> {
         self.entries = self.entries.split_off(&min);
     }
 
-    /// Removes canceled callers, waking the actor even when no bodies arrive.
-    pub(super) async fn closed(&mut self) {
-        poll_fn(|cx| {
-            let mut closed = false;
-            self.entries.retain(|_, subscribers| {
-                subscribers.retain_mut(|subscriber| {
-                    if subscriber.sender.poll_closed(cx).is_ready() {
-                        closed = true;
-                        false
-                    } else {
-                        true
-                    }
-                });
-                !subscribers.is_empty()
-            });
-            if closed {
-                Poll::Ready(())
-            } else {
-                Poll::Pending
-            }
-        })
-        .await
+    /// Removes canceled callers.
+    pub(super) fn retain_open(&mut self) {
+        self.entries.retain(|_, subscribers| {
+            subscribers.retain(|subscriber| !subscriber.sender.is_closed());
+            !subscribers.is_empty()
+        });
     }
 }
 
@@ -239,24 +196,17 @@ mod tests {
         ed25519::PublicKey,
         sha256::{Digest, Sha256},
     };
-    use commonware_macros::select;
     use commonware_p2p::Recipients;
-    use commonware_runtime::{Clock, Runner as _, deterministic};
+    use commonware_runtime::{Runner as _, deterministic};
     use commonware_utils::sync::Mutex;
     use futures::FutureExt;
-    use std::{sync::Arc, time::Duration};
+    use std::sync::Arc;
 
     type TestBlock = EmptyBlock<Sha256>;
     type TestVariant = Standard<TestBlock>;
     type TestWaiters = AbortablePool<'static, Option<Digested<TestBlock>>>;
     type Subscriber = oneshot::Sender<Digested<TestBlock>>;
     type Subscribers = Arc<Mutex<Vec<Subscriber>>>;
-
-    /// Delay before a test cancels a caller, so the cleanup under test is already waiting.
-    const CANCEL_DELAY: Duration = Duration::from_millis(1);
-
-    /// Time a cancellation has to wake the cleanup that waits on it.
-    const WAKE_TIMEOUT: Duration = Duration::from_secs(1);
 
     #[derive(Clone, Default)]
     struct TestBuffer {
@@ -414,30 +364,18 @@ mod tests {
         assert!(!subscriptions.notify(&block));
     }
 
-    /// A canceled finalized waiter wakes cleanup that is already waiting, though no block arrives,
-    /// and cleanup removes it.
+    /// Cleanup removes a canceled finalized waiter, though no block arrives at its height.
     #[test]
-    fn finalized_cancellation_wakes_without_block_delivery() {
-        deterministic::Runner::default().start(|context| async move {
-            // One waiter is registered and later canceled while cleanup waits.
-            let mut subscriptions = Finalized::<TestVariant>::new();
-            let (response, receiver) = oneshot::channel();
-            subscriptions.insert(Span::none(), Height::new(5), response);
-            select! {
-                _ = subscriptions.closed() => {},
-                _ = async {
-                    context.sleep(CANCEL_DELAY).await;
-                    drop(receiver);
-                    std::future::pending::<()>().await;
-                } => unreachable!(),
-                _ = context.sleep(WAKE_TIMEOUT) => {
-                    panic!("cancellation must wake finalized waiter cleanup");
-                },
-            }
+    fn finalized_retain_open_drops_canceled_waiters() {
+        // A registered waiter cancels.
+        let mut subscriptions = Finalized::<TestVariant>::new();
+        let (response, receiver) = oneshot::channel();
+        subscriptions.insert(Span::none(), Height::new(5), response);
+        drop(receiver);
 
-            // Cleanup removed the canceled waiter.
-            assert!(subscriptions.entries.is_empty());
-        });
+        // Cleanup removes the waiter and leaves no entry for its height.
+        subscriptions.retain_open();
+        assert!(subscriptions.entries.is_empty());
     }
 
     #[test]
@@ -507,11 +445,10 @@ mod tests {
     }
 
     /// Fetching callers that share a commitment keep its subscription and buffer waiter until the
-    /// last of them cancels. That cancellation wakes cleanup, and cleanup reports the commitment
-    /// and aborts the buffer waiter.
+    /// last of them cancels. Cleanup then reports the commitment and aborts the buffer waiter.
     #[test]
-    fn shared_cancellation_wakes_when_last_caller_closes() {
-        deterministic::Runner::default().start(|context| async move {
+    fn shared_subscription_ends_when_last_caller_cancels() {
+        deterministic::Runner::default().start(|_| async move {
             // Two fetching callers share one buffer waiter.
             let mut fixture = Fixture::new();
             let commitment = block(6, 60).digest();
@@ -521,24 +458,13 @@ mod tests {
 
             // Canceling one caller reports nothing and keeps the buffer waiter open.
             drop(first_receiver);
-            assert!(fixture.subscriptions.closed().now_or_never().is_none());
+            assert!(fixture.subscriptions.retain_open().is_empty());
             assert!(fixture.subscriptions.entries.contains_key(&commitment));
             assert!(!fixture.buffer.commitment_subscribers.lock()[0].is_closed());
 
-            // Canceling the last caller wakes cleanup with the commitment.
-            select! {
-                removed = fixture.subscriptions.closed() => {
-                    assert_eq!(removed, vec![commitment]);
-                },
-                _ = async {
-                    context.sleep(CANCEL_DELAY).await;
-                    drop(second_receiver);
-                    std::future::pending::<()>().await;
-                } => unreachable!(),
-                _ = context.sleep(WAKE_TIMEOUT) => {
-                    panic!("last cancellation must wake subscription cleanup");
-                },
-            }
+            // Canceling the last caller reports the commitment.
+            drop(second_receiver);
+            assert_eq!(fixture.subscriptions.retain_open(), vec![commitment]);
 
             // The subscription is gone and its buffer waiter was aborted.
             assert!(!fixture.subscriptions.entries.contains_key(&commitment));
@@ -552,8 +478,8 @@ mod tests {
     /// waiting caller keeps the subscription and buffer waiter. A waiting caller's cancellation is
     /// never reported.
     #[test]
-    fn closed_reports_only_the_last_fetching_caller() {
-        deterministic::Runner::default().start(|context| async move {
+    fn retain_open_reports_only_the_last_fetching_caller() {
+        deterministic::Runner::default().start(|_| async move {
             // One waiting and one fetching caller share a buffer waiter.
             let mut fixture = Fixture::new();
             let commitment = block(8, 80).digest();
@@ -564,19 +490,8 @@ mod tests {
             assert_eq!(fixture.buffer.commitment_subscription_count(), 1);
 
             // Canceling the only fetching caller ends peer demand but keeps the local wait.
-            select! {
-                ended = fixture.subscriptions.closed() => {
-                    assert_eq!(ended, vec![commitment]);
-                },
-                _ = async {
-                    context.sleep(CANCEL_DELAY).await;
-                    drop(fetching_receiver);
-                    std::future::pending::<()>().await;
-                } => unreachable!(),
-                _ = context.sleep(WAKE_TIMEOUT) => {
-                    panic!("canceling the last fetching caller must be reported");
-                },
-            }
+            drop(fetching_receiver);
+            assert_eq!(fixture.subscriptions.retain_open(), vec![commitment]);
             assert!(!fixture.subscriptions.fetching(&commitment));
             assert!(fixture.subscriptions.entries.contains_key(&commitment));
             assert!(!fixture.buffer.commitment_subscribers.lock()[0].is_closed());
