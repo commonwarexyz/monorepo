@@ -64,7 +64,7 @@
 
 pub(crate) mod parameters;
 
-use super::{BYTES, WORDS, bytes_from_words, limbs_from_words, words_from_bytes};
+use super::{BYTES, MODULUS, WORDS, bytes_from_words, limbs_from_words, words_from_bytes};
 use crate::{
     core::{
         debug_counter::DebugCounter,
@@ -75,8 +75,7 @@ use crate::{
 use commonware_simd::{Operation, Simd, X86V4C};
 use core::hint::black_box;
 use parameters::{
-    CANONICAL_CORRECTION, ENCODED_P, EXPAND, M, M_OVER_P, MODULUS, MODULUS_N0, N, N_OVER_P, REDUCE,
-    TO_CANONICAL, TO_RNS,
+    CANONICAL_CORRECTION, ENCODED_P, EXPAND, M, M_OVER_P, N, N_OVER_P, REDUCE, TO_CANONICAL, TO_RNS,
 };
 
 /// Number of moduli in each basis.
@@ -103,6 +102,9 @@ const INVERSE_LIMBS: usize = 7;
 
 /// `p^(-1) mod 2^62`, for [`montgomery::invert`].
 const INVERSE_LIMB: u64 = montgomery::inverse_mod_limb(MODULUS[0]);
+
+/// `-p^(-1) mod 2^64`, the word Montgomery constant of the canonical conversion.
+const MODULUS_N0: u64 = montgomery::negated_inverse(MODULUS[0]);
 
 /// Bound on the multiple of `M` by which the unestimated quotient of a multiplication may exceed
 /// the exact one, which adds at most this multiple of `p` to the product.
@@ -414,11 +416,6 @@ const fn check_conversion(maxima: &[u64; MODULI], conversion: &Conversion, desti
 }
 
 const _: () = {
-    let mut i = 0;
-    while i < WORDS {
-        assert!(MODULUS[i] == super::MODULUS[i]);
-        i += 1;
-    }
     let mut i = 0;
     while i < MODULI {
         // Residues up to 4q, the largest sum before a conditional subtraction, are exact 52-bit
