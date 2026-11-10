@@ -248,13 +248,7 @@ const ONE: [u64; RESIDUES] = {
     let mut j = 0;
     while j < MODULI {
         let q = M.moduli[j];
-        let mut total = (k & MASK) as u128 * EXPAND.correction[j] as u128
-            + (k >> WORD) as u128 * EXPAND.correction_shift[j] as u128;
-        let mut i = 0;
-        while i < MODULI {
-            total += n[i] as u128 * EXPAND.matrix[i][j] as u128;
-            i += 1;
-        }
+        let total = convert_column(&n, &EXPAND, (k & MASK, k >> WORD), j);
         let total = (total % q as u128) as u64;
         residues[j] = mul_mod(total, radix_inverse(q, M.inverse[j]), q);
         residues[MODULI + j] = n[j];
@@ -324,6 +318,35 @@ const fn fold_bound(value: u128, modulus: u64) -> u128 {
     let complement = ((1 << BITS) - modulus) as u128;
     assert!((value >> BITS) * complement < 1 << WORD);
     (1 << BITS) - 1 + (value >> BITS) * complement
+}
+
+/// Returns `total` plus the largest conversion of first-basis quotient residues at most `2q` into
+/// second-basis residue `column`.
+const fn reduce_total(mut total: u128, column: usize) -> u128 {
+    let mut row = 0;
+    while row < MODULI {
+        total += TWICE_M[row] as u128 * REDUCE[row][column] as u128;
+        row += 1;
+    }
+    total
+}
+
+/// Returns the accumulation of residue `column` of a conversion of `input`, whose estimated
+/// quotient has the 52-bit digits `(low, high)`, before reduction.
+const fn convert_column(
+    input: &[u64; MODULI],
+    conversion: &Conversion,
+    (low, high): (u64, u64),
+    column: usize,
+) -> u128 {
+    let mut total = low as u128 * conversion.correction[column] as u128
+        + high as u128 * conversion.correction_shift[column] as u128;
+    let mut i = 0;
+    while i < MODULI {
+        total += input[i] as u128 * conversion.matrix[i][column] as u128;
+        i += 1;
+    }
+    total
 }
 
 /// Returns `floor(sum(input[i] * fraction[i]) / 2^64)`.
@@ -401,14 +424,7 @@ const fn check_conversion(maxima: &[u64; MODULI], conversion: &Conversion, desti
     let k = quotient(maxima, &conversion.fraction);
     let mut j = 0;
     while j < MODULI {
-        let mut total = 0u128;
-        let mut i = 0;
-        while i < MODULI {
-            total += maxima[i] as u128 * conversion.matrix[i][j] as u128;
-            i += 1;
-        }
-        total += MASK as u128 * conversion.correction[j] as u128;
-        total += (k >> WORD) as u128 * conversion.correction_shift[j] as u128;
+        let total = convert_column(maxima, conversion, (MASK, k >> WORD), j);
         let modulus = destination.moduli[j];
         assert!(fold_bound(reduce_bound(total, modulus), modulus) <= 2 * modulus as u128);
         j += 1;
@@ -426,12 +442,7 @@ const _: () = {
         assert!(reduce_bound(4 * q as u128 * q as u128, q) <= 2 * q as u128);
         // The second basis adds the converted quotient to its own product.
         let q = N.moduli[i];
-        let mut total = 4 * q as u128 * q as u128;
-        let mut row = 0;
-        while row < MODULI {
-            total += TWICE_M[row] as u128 * REDUCE[row][i] as u128;
-            row += 1;
-        }
+        let total = reduce_total(4 * q as u128 * q as u128, i);
         assert!(fold_bound(reduce_bound(total, q), q) <= 2 * q as u128);
         i += 1;
     }
@@ -470,12 +481,7 @@ const _: () = {
         assert!(fold_bound(reduce_bound(full_m, q_m), q_m) <= 2 * q_m as u128);
         assert!(fold_bound(reduce_bound(full_n, q_n), q_n) <= 2 * q_n as u128);
         // The second basis also adds the converted quotient.
-        let mut total = full_n;
-        let mut row = 0;
-        while row < MODULI {
-            total += TWICE_M[row] as u128 * REDUCE[row][i] as u128;
-            row += 1;
-        }
+        let total = reduce_total(full_n, i);
         assert!(fold_bound(reduce_bound(total, q_n), q_n) <= 2 * q_n as u128);
         // The bias covers the high word of a subtrahend of SUB_TERMS terms and adds less than
         // (SUB_TERMS + 1) q.
