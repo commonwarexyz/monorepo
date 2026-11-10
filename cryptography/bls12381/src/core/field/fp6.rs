@@ -227,7 +227,7 @@ impl<F> Fp6<F> {
         let v1 = self.c1.product(simd, y1);
         // (x0 + x1)(y0 + y1) - x0 y0 - x1 y1.
         let cross = sum(simd, self.c0, self.c1).product(simd, sum(simd, y0, y1));
-        let c1 = Fp2::<F>::product_sub(simd, Fp2::<F>::product_sub(simd, cross, v0), v1);
+        let c1 = cross_term::<S, F>(simd, cross, v0, v1);
         Fp6 {
             c0: Fp2::<F>::accumulate(
                 simd,
@@ -402,9 +402,9 @@ fn combine<S: Simd, F: Field<S>>(
     sums: [fp2::Product<F, S>; 3],
 ) -> Product<F, S> {
     // The cross terms a0 b1 + a1 b0, a0 b2 + a2 b0, and a1 b2 + a2 b1.
-    let c01 = difference::<S, F>(simd, sums[0], v[0], v[1]);
-    let c02 = difference::<S, F>(simd, sums[1], v[0], v[2]);
-    let c12 = difference::<S, F>(simd, sums[2], v[1], v[2]);
+    let c01 = cross_term::<S, F>(simd, sums[0], v[0], v[1]);
+    let c02 = cross_term::<S, F>(simd, sums[1], v[0], v[2]);
+    let c12 = cross_term::<S, F>(simd, sums[2], v[1], v[2]);
     Fp6 {
         c0: Fp2::<F>::accumulate(simd, v[0], Fp2::<F>::product_mul_by_nonresidue(simd, c12)),
         c1: Fp2::<F>::accumulate(simd, c01, Fp2::<F>::product_mul_by_nonresidue(simd, v[2])),
@@ -412,9 +412,10 @@ fn combine<S: Simd, F: Field<S>>(
     }
 }
 
-/// Returns `sum - a - b` for products, without a bias.
+/// Returns `sum - a - b` for products, without a bias: Karatsuba's cross term, given the product
+/// of sums and the two products it covers.
 #[cfg_attr(not(debug_assertions), inline(always))]
-fn difference<S: Simd, F: Field<S>>(
+pub(super) fn cross_term<S: Simd, F: Field<S>>(
     simd: S,
     sum: fp2::Product<F, S>,
     a: fp2::Product<F, S>,

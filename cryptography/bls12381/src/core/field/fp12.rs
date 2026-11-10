@@ -808,11 +808,8 @@ fn square_pair<S: Simd, F: Field<S>>(
     let sum = x.add(simd, y).carry(simd);
     let real = Fp2::<F>::accumulate(simd, xx, Fp2::<F>::product_mul_by_nonresidue(simd, yy));
     // (x + y)^2 - x^2 - y^2.
-    let imaginary = Fp2::<F>::product_sub(
-        simd,
-        Fp2::<F>::product_sub(simd, sum.square_product::<{ 2 * BOUND + 1 }, S>(simd), xx),
-        yy,
-    );
+    let square = sum.square_product::<{ 2 * BOUND + 1 }, S>(simd);
+    let imaginary = fp6::cross_term::<S, F>(simd, square, xx, yy);
     (
         Fp2::<F>::carry_product(simd, real),
         Fp2::<F>::carry_product(simd, imaginary),
