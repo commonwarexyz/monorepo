@@ -1771,38 +1771,6 @@ fn test_model_retries_payments() {
     );
 }
 
-/// A payment attempt, a deposit, a soft withdrawal, and a forced withdrawal racing a cut over
-/// two epochs settle as the queues and the balances dictate.
-#[test_group("slow")]
-#[test]
-fn test_model_races_withdrawals_around_a_cut() {
-    check(
-        workload(
-            2,
-            Budget {
-                sends: 1,
-                deposits: 1,
-                soft: 1,
-                forced: 1,
-                ..NOTHING
-            },
-        ),
-        &[
-            "every epoch posts",
-            "a payment is admitted while the last close awaits its post",
-            "a soft withdrawal is collected while a close awaits its post",
-            "a soft withdrawal for a closed epoch is refused",
-            "a forced withdrawal is queued while the last close awaits its post",
-            "a forced withdrawal queued after the cut is required of the next close",
-            "a close defers a queued request",
-            "a close must process a forced withdrawal queued before the last post",
-            "a soft and a forced withdrawal of one account settle in one close",
-            "a payout is capped by the balance",
-            "a payout proven again is refused",
-        ],
-    );
-}
-
 /// A payment attempt and a forced withdrawal over two epochs, while the operator may forget an
 /// admission and the deployment may halt, end in challenges, claims, and payouts that drain the
 /// custody.
@@ -1857,7 +1825,8 @@ fn test_model_rebuilds_on_the_posted_row() {
 }
 
 /// A payment attempt, a deposit, a soft withdrawal, and a forced withdrawal over two epochs while
-/// the deployment may halt at any point. Whatever the queues and the operator hold at the halt,
+/// the deployment may halt at any point. Without a halt, the requests race the cuts and settle as
+/// the queues and the balances dictate. Whatever the queues and the operator hold at a halt,
 /// claims and payout withdrawals recover every unit the ledger holds.
 #[test_group("slow")]
 #[test]
@@ -1875,6 +1844,16 @@ fn test_model_recovers_funds_after_a_halt() {
             },
         ),
         &[
+            "every epoch posts",
+            "a payment is admitted while the last close awaits its post",
+            "a soft withdrawal is collected while a close awaits its post",
+            "a soft withdrawal for a closed epoch is refused",
+            "a forced withdrawal is queued while the last close awaits its post",
+            "a forced withdrawal queued after the cut is required of the next close",
+            "a close defers a queued request",
+            "a close must process a forced withdrawal queued before the last post",
+            "a soft and a forced withdrawal of one account settle in one close",
+            "a payout is capped by the balance",
             "the ledger halts while a close awaits its post",
             "the ledger halts with deposits queued",
             "the ledger halts with a forced withdrawal queued",
