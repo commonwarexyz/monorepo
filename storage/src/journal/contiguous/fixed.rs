@@ -1886,6 +1886,17 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         Ok(())
     }
 
+    /// The byte ranges, within their blob, holding `group`'s items, given the blob's first
+    /// position: one range per run of consecutive positions, which are stored back to back.
+    fn byte_runs(group: &[u64], first: u64) -> Result<Vec<(u64, usize)>, Error> {
+        let mut runs = Vec::with_capacity(group.len());
+        for run in group.chunk_by(|&a, &b| a.checked_add(1) == Some(b)) {
+            let offset = Inner::<E, A>::items_to_bytes(run[0] - first)?;
+            runs.push((offset, run.len() * A::SIZE));
+        }
+        Ok(runs)
+    }
+
     /// The byte offsets, within their blob, of `run`'s items, given the blob's first position.
     fn byte_offsets(run: &[u64], first: u64) -> Result<Vec<u64>, Error> {
         let mut offsets = Vec::with_capacity(run.len());
@@ -2024,15 +2035,25 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
             };
             let base = start + run.start;
             let group = &valid[run];
-            let Ok(blob_offsets) = Self::byte_offsets(group, first) else {
-                continue;
-            };
             let Some(blob) = self.blobs.get(blob_num) else {
                 continue;
             };
             let buf = &mut buf[..group.len() * A::SIZE];
-            let misses =
-                blob.try_read_many_sync_into(buf, &blob_offsets, Inner::<E, A>::CHUNK_SIZE);
+
+            // Read each run of consecutive items as one range. If any range misses, read the
+            // group item by item instead, so a partly cached run still serves its cached items.
+            // Either way, misses are reported per item.
+            let Ok(runs) = Self::byte_runs(group, first) else {
+                continue;
+            };
+            let mut misses = blob.try_read_ranges_sync_into(buf, &runs);
+            if !misses.is_empty() && runs.len() < group.len() {
+                let Ok(blob_offsets) = Self::byte_offsets(group, first) else {
+                    continue;
+                };
+                misses =
+                    blob.try_read_many_sync_into(buf, &blob_offsets, Inner::<E, A>::CHUNK_SIZE);
+            }
             let mut misses = misses.into_iter().peekable();
             #[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
             for (idx, slice) in buf.chunks_exact(A::SIZE).enumerate() {
@@ -2470,6 +2491,42 @@ mod tests {
             assert!(pruned);
             pending.await;
             assert_eq!(journal.read(12).await.unwrap(), test_digest(12));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_probe_serves_cached_part_of_a_run() {
+        deterministic::Runner::default().start(|context| async move {
+            let cache = CacheRef::new(PAGE_SIZE, NZUsize!(256));
+            let cfg = Config {
+                page_cache: cache.clone(),
+                ..test_cfg(NZU64!(40))
+            };
+            let mut journal = Journal::<_, Digest>::init(context.child("journal"), cfg)
+                .await
+                .unwrap();
+            for i in 0..90u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+
+            // Only the page holding item 0 is cached, so a run of consecutive items is partly
+            // cached. Probing the run, or scattered items with no runs, serves exactly the items
+            // probing each alone serves.
+            cache.clear();
+            assert_eq!(journal.read(0).await.unwrap(), test_digest(0));
+            for positions in [(0..40).collect::<Vec<u64>>(), (0..40).step_by(2).collect()] {
+                let batched = journal.try_read_many_sync(&positions);
+                let alone: Vec<_> = positions
+                    .iter()
+                    .map(|&pos| journal.try_read_many_sync(&[pos]).remove(0))
+                    .collect();
+                assert_eq!(batched, alone);
+                assert_eq!(batched[0], Some(test_digest(0)));
+                assert!(batched.iter().any(Option::is_none));
+            }
 
             journal.destroy().await.unwrap();
         });
