@@ -597,12 +597,6 @@ def emit(tables: Tables) -> str:
 
 use super::{{Basis, Conversion, MODULI, WORDS}};
 
-/// The modulus `p` as little-endian 64-bit words.
-pub(crate) const MODULUS: [u64; WORDS] = {fmt_array(words(p), '')};
-
-/// `-p^(-1) mod 2^64`, the word Montgomery constant of the canonical conversion.
-pub(crate) const MODULUS_N0: u64 = 0x{(-pow(p, -1, 1 << 64)) % (1 << 64):016x};
-
 /// `floor(M / p)` for the product `M` of the first basis.
 pub(crate) const M_OVER_P: u64 = {tables.big_m // p};
 
