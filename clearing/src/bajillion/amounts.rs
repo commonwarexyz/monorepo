@@ -26,9 +26,20 @@ pub enum AmountsError {
     Overflow,
 }
 
+/// Computes the leaf committing to `amount` for `account`, encoding the amount into `scratch`.
+fn leaf_with<H: Hasher, P: PublicKey, A: Amount>(
+    account: &P,
+    amount: A,
+    scratch: &mut Vec<u8>,
+) -> H::Digest {
+    scratch.clear();
+    amount.write(scratch);
+    H::hash(&[account.as_ref(), scratch])
+}
+
 /// Computes the leaf committing to `amount` for `account`.
 pub(crate) fn leaf<H: Hasher, P: PublicKey, A: Amount>(account: &P, amount: A) -> H::Digest {
-    H::hash(&[account.as_ref(), amount.encode().as_ref()])
+    leaf_with::<H, P, A>(account, amount, &mut Vec::with_capacity(A::SIZE))
 }
 
 /// Nonzero amounts per account, sorted by account.
@@ -144,8 +155,9 @@ impl<P: PublicKey, A: Amount> Amounts<P, A> {
     /// Builds the tree committing to the entries.
     pub(crate) fn tree<H: Hasher>(&self) -> Tree<H::Digest> {
         let mut builder = Builder::<H>::new(self.entries.len());
+        let mut scratch = Vec::with_capacity(A::SIZE);
         for (account, amount) in &self.entries {
-            builder.add(&leaf::<H, P, A>(account, *amount));
+            builder.add(&leaf_with::<H, P, A>(account, *amount, &mut scratch));
         }
         builder.build()
     }

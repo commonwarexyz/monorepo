@@ -371,7 +371,7 @@ fn test_ledger_vector() {
             1,
             account(0),
             amounts(&[(1, 5), (2, 7)]),
-            &Amounts::empty(),
+            None,
             &empty_root(),
         )
         .unwrap();

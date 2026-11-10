@@ -256,13 +256,16 @@ impl<S: Signer, O: PublicKey, H: Hasher, A: Amount> Sender<S, O, H, A> {
 
         // The states extend the epoch's latest countersigned map on top of the root S1 names, and
         // the request is persisted before it is returned for sending (S3).
-        let empty = Amounts::empty();
-        let payments = self.payments(epoch).unwrap_or(&empty);
+        let latest = self
+            .persisted
+            .countersigned
+            .get(&epoch)
+            .map(|countersigned| (&countersigned.state, &countersigned.payments));
         let states = Request::states::<H>(
             epoch,
             self.account.clone(),
             batch,
-            payments,
+            latest,
             &self.previous(epoch),
         )?;
         let request = states.sign(&self.signer, &self.namespace);

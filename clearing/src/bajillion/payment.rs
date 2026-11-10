@@ -30,6 +30,10 @@ pub enum RequestError {
     /// The next epoch, an amount, or the payment map does not fit while deriving the states.
     #[error("arithmetic overflow")]
     Overflow,
+    /// The latest state does not commit to the map given with it. Its root is that of the map with
+    /// the batch added, so both states derived from the pair could settle.
+    #[error("latest state does not commit to its map")]
+    InvalidLatest,
 }
 
 /// Why a challenge is refused.
@@ -230,36 +234,62 @@ pub struct Request<P: PublicKey, D: Digest, A: Amount> {
 }
 
 impl<P: PublicKey, D: Digest, A: Amount> Request<P, D, A> {
-    /// Derives the states of `account`'s request to pay `batch` in `epoch`, where `latest` is its
-    /// latest countersigned map of `epoch`. The state of `epoch` adds `batch` to `latest` on top of
-    /// `previous`, and the state of the next epoch pays only `batch` on top of `latest`. When
-    /// extending a countersigned map, `previous` must remain the root its state builds on.
+    /// Derives the states of `account`'s request to pay `batch` in `epoch`. `latest` is its latest
+    /// countersigned state of `epoch` with the map that state commits to, or `None` if it has paid
+    /// nothing in `epoch`. The state of `epoch` adds `batch` to that map, or to the empty map, on
+    /// top of `previous`, and the state of the next epoch pays only `batch` on top of that map.
+    /// When extending a countersigned map, `previous` must remain the root its state builds on.
+    ///
+    /// The latest state's root is taken as its map's root. A root that already holds the batch is
+    /// refused, because both states derived from it could settle.
+    #[allow(clippy::type_complexity)]
     pub fn states<H: Hasher<Digest = D>>(
         epoch: Epoch,
         account: P,
         batch: Amounts<P, A>,
-        latest: &Amounts<P, A>,
+        latest: Option<(&State<P, D>, &Amounts<P, A>)>,
         previous: &D,
     ) -> Result<States<P, D, A>, RequestError> {
         if batch.is_empty() {
             return Err(RequestError::NoReceivers);
         }
+
+        // The latest state holds the root of its map, and a map that starts with the batch has the
+        // batch's root, so each map is hashed at most once.
         let next = State {
             epoch: epoch.checked_add(1).ok_or(RequestError::Overflow)?,
             account: account.clone(),
             payments: batch.root::<H>(),
-            previous: latest.root::<H>(),
+            previous: latest.map_or_else(
+                || Amounts::<P, A>::empty().root::<H>(),
+                |(state, _)| state.payments,
+            ),
         };
-        let extended = latest.combine(&batch).map_err(|_| RequestError::Overflow)?;
+        let (payments, root) = match latest {
+            Some((_, payments)) => {
+                let payments = payments
+                    .combine(&batch)
+                    .map_err(|_| RequestError::Overflow)?;
+                let root = payments.root::<H>();
+                (payments, root)
+            }
+            None => (batch.clone(), next.payments),
+        };
+
+        // A next state that builds on the map the current state pays could settle after it and
+        // pay the batch twice.
+        if next.previous == root {
+            return Err(RequestError::InvalidLatest);
+        }
         Ok(States {
             batch,
             current: State {
                 epoch,
                 account,
-                payments: extended.root::<H>(),
+                payments: root,
                 previous: *previous,
             },
-            payments: extended,
+            payments,
             next,
         })
     }
@@ -700,6 +730,20 @@ mod tests {
     type TestRequest = Request<PublicKey, Digest, u64>;
     type TestStates = States<PublicKey, Digest, u64>;
 
+    /// Returns alice's countersigned state of epoch 2 committing to `payments` on top of
+    /// `previous`, or `None` if she has paid nothing in the epoch.
+    fn latest(
+        payments: &Amounts<PublicKey, u64>,
+        previous: Digest,
+    ) -> Option<State<PublicKey, Digest>> {
+        (!payments.is_empty()).then(|| State {
+            epoch: 2,
+            account: account(0),
+            payments: payments.root::<Sha256>(),
+            previous,
+        })
+    }
+
     /// Returns the states alice signs to pay `batch` in epoch 2 on top of `previous`, where
     /// `payments` is her latest countersigned map of epoch 2.
     fn states(
@@ -707,7 +751,9 @@ mod tests {
         payments: &Amounts<PublicKey, u64>,
         previous: Digest,
     ) -> TestStates {
-        TestRequest::states::<Sha256>(2, account(0), amounts(batch), payments, &previous).unwrap()
+        let latest = latest(payments, previous);
+        let latest = latest.as_ref().map(|state| (state, payments));
+        TestRequest::states::<Sha256>(2, account(0), amounts(batch), latest, &previous).unwrap()
     }
 
     /// Returns a receipt from a payment map paying two receivers.
@@ -751,19 +797,11 @@ mod tests {
             assert!(TestRequest::decode_cfg(encoded.slice(..encoded.len() - 1), &2).is_err());
 
             // In its own epoch, the request extends the sender's latest map.
-            let latest = (!payments.is_empty()).then(|| {
-                let state = State {
-                    epoch: 2,
-                    account: account(0),
-                    payments: payments.root::<Sha256>(),
-                    previous,
-                };
-                (state, payments.clone())
-            });
+            let latest = latest(&payments, previous);
             let admission = request
                 .verify::<Sha256>(&namespace, 2)
                 .unwrap()
-                .admit::<Sha256>(latest.as_ref().map(|(s, p)| (s, p)), &previous)
+                .admit::<Sha256>(latest.as_ref().map(|state| (state, &payments)), &previous)
                 .unwrap();
             assert_eq!(
                 admission,
@@ -828,17 +866,12 @@ mod tests {
         );
     }
 
-    /// States do not derive from an empty batch, an epoch with no successor, or an overflowing map.
+    /// States do not derive from an empty batch, an epoch with no successor, an overflowing map, or
+    /// a latest state whose root already holds the batch.
     #[test]
     fn test_states_refuse_unpayable_batches() {
         assert!(matches!(
-            TestRequest::states::<Sha256>(
-                2,
-                account(0),
-                Amounts::empty(),
-                &Amounts::empty(),
-                &empty_root(),
-            ),
+            TestRequest::states::<Sha256>(2, account(0), Amounts::empty(), None, &empty_root()),
             Err(RequestError::NoReceivers)
         ));
         assert!(matches!(
@@ -846,20 +879,37 @@ mod tests {
                 Epoch::MAX,
                 account(0),
                 amounts(&[(1, 1)]),
-                &Amounts::empty(),
+                None,
                 &empty_root(),
             ),
             Err(RequestError::Overflow)
         ));
+        let full = amounts(&[(1, u64::MAX)]);
+        let state = latest(&full, empty_root()).unwrap();
         assert!(matches!(
             TestRequest::states::<Sha256>(
                 2,
                 account(0),
                 amounts(&[(1, 1)]),
-                &amounts(&[(1, u64::MAX)]),
+                Some((&state, &full)),
                 &empty_root(),
             ),
             Err(RequestError::Overflow)
+        ));
+
+        // A state that commits to the map with the batch added, given with the map before it, would
+        // make the next state build on the map the current state pays.
+        let (paid, batch) = (amounts(&[(1, 2)]), amounts(&[(1, 3)]));
+        let state = latest(&paid.combine(&batch).unwrap(), empty_root()).unwrap();
+        assert!(matches!(
+            TestRequest::states::<Sha256>(
+                2,
+                account(0),
+                batch,
+                Some((&state, &paid)),
+                &empty_root(),
+            ),
+            Err(RequestError::InvalidLatest)
         ));
     }
 

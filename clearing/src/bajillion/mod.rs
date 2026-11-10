@@ -166,7 +166,7 @@
 //! If close(e) settles M, the operator can admit state(e+1) in epoch e+1. The sender learns which
 //! happened from the row root [Opening::verify_row] proves under each post's matrix root.
 //!
-//! - **S1.** Derive a request's states from the latest countersigned map of its epoch, keeping
+//! - **S1.** Derive a request's states from the latest countersigned state of its epoch, keeping
 //!   that state's `previous` root. When starting an epoch's map, use the row root the post of the
 //!   epoch before proves (S5), if recorded, or the root of its latest countersigned map otherwise.
 //!   Use the empty map's root when there is none. Changing the predecessor of an existing map can
