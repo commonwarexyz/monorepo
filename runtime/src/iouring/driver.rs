@@ -2846,8 +2846,8 @@ pub mod tests {
     fn test_foreign_durability_release_wakes_closed_worker_park() {
         let (directory, file) = make_file("closed_permit_wake");
         let permit = file.durability.clone().try_lock_owned().unwrap();
-        let mailbox = Arc::new(Mailbox::new());
-        let parker = mailbox.parker();
+        let (mailbox, parker) = Mailbox::new();
+        let mailbox = Arc::new(mailbox);
         let mut driver = Driver::new(
             &RingConfig {
                 size: 2,

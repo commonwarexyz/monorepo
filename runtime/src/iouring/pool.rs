@@ -150,8 +150,9 @@
 use super::{
     idle::Idle,
     mailbox::{Mailbox, Message},
+    park::Parker,
     queue::{self, CAPACITY, Overflow, Push, STEALABLE},
-    runtime::{Panic, Role, Shared, Worker},
+    runtime::{Panic, Shared, Start, Worker},
     task::{Ready, Runnable},
 };
 use crate::utils::Panicker;
@@ -618,18 +619,24 @@ pub struct Threads {
 
 impl Threads {
     /// Start every worker after worker zero, waiting for each to create its
-    /// io_uring ring before starting the next. Every failure of a started
-    /// worker is sent to `failures`, which interrupts the root while it runs.
-    /// The runner collects a later one after joining the pool.
+    /// io_uring ring before starting the next. `parkers` holds the parkers of
+    /// those workers in index order. Every failure of a started worker is sent
+    /// to `failures`, which interrupts the root while it runs. The runner
+    /// collects a later one after joining the pool.
     ///
     /// Worker zero must call this once, after it enters the shutdown barrier.
     /// Panics with the first startup failure, after which worker zero's
     /// cleanup stops the workers already started.
-    pub fn start(&mut self, shared: &Arc<Shared>, failures: &Panicker) {
+    pub fn start(&mut self, shared: &Arc<Shared>, failures: &Panicker, parkers: Vec<Parker>) {
         let count = shared.pool.workers();
+        assert_eq!(
+            parkers.len(),
+            count - 1,
+            "every pool worker after worker zero needs its parker"
+        );
         self.handles.reserve(count - 1);
 
-        for index in 1..count {
+        for (index, parker) in (1..count).zip(parkers) {
             #[cfg(test)]
             let _fault = super::runtime::tests::before_pool_worker(shared, index);
             let (ready, started) = mpsc::channel();
@@ -638,7 +645,7 @@ impl Threads {
             let handle = thread::Builder::new()
                 .name(format!("iouring-pool-{index}"))
                 .stack_size(shared.cfg.thread_stack_size())
-                .spawn(move || run(shared, index as u32, ready, failures))
+                .spawn(move || run(shared, index as u32, parker, ready, failures))
                 .expect("pool worker thread must spawn");
 
             // Keep the handle before waiting, so a worker that fails at startup
@@ -698,6 +705,7 @@ impl Drop for Threads {
 fn run(
     shared: Arc<Shared>,
     index: u32,
+    parker: Parker,
     ready: mpsc::Sender<Result<(), Panic>>,
     failures: Panicker,
 ) {
@@ -711,7 +719,7 @@ fn run(
     let result = catch_unwind(AssertUnwindSafe(|| {
         let (mut worker, _) = Worker::run(
             shared,
-            Role::Pool(index),
+            Start::Pool(index, parker),
             || {
                 let _ = ready.take().unwrap().send(Ok(()));
 
@@ -812,9 +820,21 @@ pub mod tests {
         }
     }
 
-    /// A pool of `workers` workers with no runner.
+    /// A pool of `workers` workers with no runner, whose workers never wait.
     pub fn pool(workers: usize) -> Pool {
-        Pool::new((0..workers).map(|_| Arc::new(Mailbox::new())).collect())
+        pool_with_parkers(workers).0
+    }
+
+    /// A pool of `workers` workers with no runner, and the parker of each
+    /// worker's mailbox, in worker order.
+    pub fn pool_with_parkers(workers: usize) -> (Pool, Vec<Parker>) {
+        let (mailboxes, parkers) = (0..workers)
+            .map(|_| {
+                let (mailbox, parker) = Mailbox::new();
+                (Arc::new(mailbox), parker)
+            })
+            .unzip();
+        (Pool::new(mailboxes), parkers)
     }
 
     /// The owner's end of worker `index`'s run queue.
