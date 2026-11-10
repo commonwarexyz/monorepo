@@ -624,7 +624,7 @@ pub(crate) const TO_CANONICAL: [[u64; WORDS]; MODULI] = {fmt_matrix(tables.to_ca
 /// `-N mod p`, scaled like [`TO_CANONICAL`].
 pub(crate) const CANONICAL_CORRECTION: [u64; WORDS] = {fmt_array(tables.canonical_correction, '')};
 
-/// The residues of the integer `p` in each basis.
+/// The residues of `p` in each basis, times the basis's residue scale.
 pub(crate) const ENCODED_P: [[u64; MODULI]; 2] = {fmt_matrix(tables.encoded_p, '')};
 """
 
