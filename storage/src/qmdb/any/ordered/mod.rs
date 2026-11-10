@@ -190,6 +190,36 @@ where
             .map(|res| res.map(|(data, _)| (data.value, data.next_key)))
     }
 
+    /// Return a future that reads into the page cache the applied operations a batch reads to
+    /// link the keys it creates or deletes into the key order: those of the translated key
+    /// before each of `writes` absent from the index, and before each of `deletes`.
+    ///
+    /// A key's predecessor is in its own translated key or the one before it, and
+    /// [Self::prefetch] of the batch's keys warms the former, so a batch that creates or deletes
+    /// keys needs both. Lookups are candidate-based: a write whose translated key collides with
+    /// an indexed key's is taken for an update, and nothing is read for it. Predecessors are found
+    /// in the applied state, so keys that unapplied batches create or delete are not considered.
+    ///
+    /// Otherwise behaves like [Self::prefetch].
+    pub fn prefetch_neighbors(
+        &self,
+        writes: &[&K],
+        deletes: &[&K],
+    ) -> impl Future<Output = ()> + Send + 'static + use<F, E, K, V, C, I, H, N, S> {
+        let creates = writes
+            .iter()
+            .filter(|key| self.snapshot.get(key).next().is_none());
+        let mut positions = Vec::new();
+        for key in creates.chain(deletes) {
+            if let Some((locs, _)) = self.snapshot.prev_translated_key(key) {
+                positions.extend(locs.map(|loc| **loc));
+            }
+        }
+        positions.sort_unstable();
+        positions.dedup();
+        self.log.prefetch(&positions)
+    }
+
     /// Returns the key data for `key` with its location, or None if the key is not active.
     // Explicit Send avoids the borrowed-iterator inference limitation (rust-lang/rust#100013).
     #[allow(clippy::manual_async_fn, clippy::type_complexity)]
