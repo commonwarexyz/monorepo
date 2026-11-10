@@ -27,6 +27,13 @@
 //! output as it forms, so no sum is ever combined with another.
 //!
 //! Lines multiply with the same contract for their coefficients, but within [`LINE_BOUND`].
+//!
+//! # Kernels
+//!
+//! Every operation runs as its own kernel: arithmetic so that callers share one copy, and
+//! conversions and constants so that callers outside kernels run them with the backend's
+//! instructions. Operations that update an element replace it in place, so that a chain of
+//! operations copies nothing.
 
 use super::{
     MAX_LANES,
@@ -158,8 +165,6 @@ impl<F> Fp12<F> {
     /// Loads up to one element per lane, filling the remaining lanes with `fill`.
     ///
     /// Interprets each component modulo `p` and returns the base field's initial bounds.
-    /// Runs as its own kernel, so that callers outside kernels convert with the backend's
-    /// instructions.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn load<S: Simd>(simd: S, elements: &[[u8; BYTES]], fill: &[u8; BYTES]) -> Self
     where
@@ -184,9 +189,6 @@ impl<F> Fp12<F> {
     }
 
     /// Returns one in every lane.
-    ///
-    /// Runs as its own kernel, so that callers outside kernels build it with the backend's
-    /// instructions.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn one<S: Simd>(simd: S) -> Self
     where
@@ -217,7 +219,6 @@ impl<F> Fp12<F> {
     /// Stores the canonical value of each lane, dropping lanes beyond `elements`.
     ///
     /// Requires valid value bounds. Entries beyond [`Field::LANES`] are unchanged.
-    /// Runs as its own kernel, as [`Self::load`] does.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn store<S: Simd>(self, simd: S, elements: &mut [[u8; BYTES]])
     where
@@ -244,9 +245,6 @@ impl<F> Fp12<F> {
     /// Multiplies by `rhs` in place, with Karatsuba's three products over `Fp6`, eighteen
     /// extension products in all, or every product of two coefficients for
     /// [`Field::SCHOOLBOOK`].
-    ///
-    /// Runs as its own kernel, so callers share one copy, and replaces the value in place, so
-    /// that a chain of operations copies nothing.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn mul<S: Simd>(&mut self, simd: S, rhs: &Self)
     where
@@ -303,8 +301,6 @@ impl<F> Fp12<F> {
 
     /// Squares in place: `c0^2 + v c1^2 + ((c0 + c1)^2 - c0^2 - c1^2) w`, with three squarings over
     /// `Fp6`, or every product of two coefficients for [`Field::SCHOOLBOOK`].
-    ///
-    /// Runs as its own kernel, so callers share one copy, and replaces the value in place.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn square<S: Simd>(&mut self, simd: S)
     where
@@ -389,7 +385,6 @@ impl<F> Fp12<F> {
     /// As an element, the line is `(l0 + l2 v) + l3 v w`, so Karatsuba's products over `Fp6` are
     /// sparse: thirteen extension products in all, or eighteen for [`Field::SCHOOLBOOK`]. Every
     /// line component must have limb bound `1` and integer bound at most [`LINE_BOUND`].
-    /// Runs as its own kernel, so callers share one copy, and replaces the value in place.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn mul_by_line<S: Simd>(&mut self, simd: S, line: &[Fp2<F>; 3])
     where
@@ -451,7 +446,6 @@ impl<F> Fp12<F> {
     /// times a part of the square of such a pair, plus or minus twice an input coefficient. That
     /// takes nine extension squarings, or six squarings and six products accumulated as they form
     /// for [`Field::SCHOOLBOOK`]. The result is unspecified outside the subgroup.
-    /// Runs as its own kernel, so callers share one copy, and replaces the value in place.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn cyclotomic_square<S: Simd>(&mut self, simd: S)
     where
@@ -534,7 +528,6 @@ impl<F> Fp12<F> {
     /// subgroup.
     ///
     /// Reduces the negated coefficient tightly, so the result stays within [`BOUND`].
-    /// Runs as its own kernel, so callers share one copy.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn conjugate<S: Simd>(&self, simd: S) -> Self
     where
@@ -555,8 +548,6 @@ impl<F> Fp12<F> {
     /// Loads the factors `(1 + i)^(j (p - 1) / 6)` for `j` from `1` to `5` in every lane.
     ///
     /// Components have the base field's initial bounds.
-    /// Runs as its own kernel, so that callers outside kernels load them with the backend's
-    /// instructions.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn frobenius_coefficients<S: Simd>(simd: S) -> [Fp2<F>; 5]
     where
@@ -579,7 +570,6 @@ impl<F> Fp12<F> {
     ///
     /// Conjugates every coefficient of `w^j` and multiplies it by `(1 + i)^(j (p - 1) / 6)`.
     /// Requires the factors returned by [`Self::frobenius_coefficients`].
-    /// Runs as its own kernel, so callers share one copy.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn frobenius<S: Simd>(&self, simd: S, coefficients: &[Fp2<F>; 5]) -> Self
     where
@@ -605,7 +595,6 @@ impl<F> Fp12<F> {
     /// Returns the inverse `(c0 - c1 w) / (c0^2 - v c1^2)`, or zero for zero.
     ///
     /// Inverts the norm in `Fp6` with [`Fp6::invert`].
-    /// Runs as its own kernel, so callers share one copy.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn invert<S: Simd>(&self, simd: S) -> Self
     where
@@ -633,7 +622,6 @@ impl<F> Fp12<F> {
     ///
     /// Multiplies halves of the lanes together until one remains, moving elements between lanes
     /// through their encodings. A representation holding one element returns it as is.
-    /// Runs as its own kernel, so callers share one copy.
     pub fn product_of_lanes<S: Simd>(self, simd: S) -> Self
     where
         F: Field<S>,

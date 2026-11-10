@@ -28,6 +28,12 @@
 //! sums.
 //! [`invert`](Fp6::invert) accepts components with limb bound `1` and integer bound at most
 //! [`TIGHT`] and returns tight components.
+//!
+//! # Kernels
+//!
+//! [`product`](Fp6::product) and [`square_product`](Fp6::square_product) run through
+//! [`Field::kernel`], as their own kernels unless the representation inlines them.
+//! [`invert`](Fp6::invert) runs as its own kernel, so callers share one copy.
 
 use super::{
     MAX_LANES,
@@ -156,7 +162,6 @@ impl<F> Fp6<F> {
     /// Forms the product `self * rhs` with Karatsuba's six extension products.
     ///
     /// Every component of both factors must have limb bound `1`.
-    /// Runs through [`Field::kernel`].
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn product<S: Simd>(&self, simd: S, rhs: &Self) -> Product<F, S>
     where
@@ -185,7 +190,6 @@ impl<F> Fp6<F> {
     /// Forms the product `self * self` with six extension squarings.
     ///
     /// Every component must have limb bound `1` and integer bound at most [`SQUARE_BOUND`].
-    /// Runs through [`Field::kernel`].
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn square_product<S: Simd>(&self, simd: S) -> Product<F, S>
     where
@@ -341,7 +345,6 @@ impl<F> Fp6<F> {
     /// The adjugate `c` satisfies `self * c = d` for `d` in `Fp2`, which [`Fp2::invert`] inverts.
     /// Every component must have limb bound `1` and integer bound at most [`TIGHT`]; so does every
     /// component of the result.
-    /// Runs as its own kernel, so callers share one copy.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn invert<S: Simd>(self, simd: S) -> Self
     where

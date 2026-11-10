@@ -56,6 +56,13 @@
 //!
 //! Debug builds keep products and reductions as calls so that chained arithmetic fits in a stack
 //! frame.
+//!
+//! # Kernels
+//!
+//! Products ([`product`](Fp2::product), [`product_schoolbook`](Fp2::product_schoolbook), and
+//! [`square_product`](Fp2::square_product)) and reductions ([`reduce`](Fp2::reduce) and
+//! [`reduce_tight`](Fp2::reduce_tight)) run through [`Field::kernel`], as their own kernels unless
+//! the representation inlines them.
 
 use super::{
     MAX_LANES,
@@ -314,7 +321,6 @@ impl<F> Fp2<F> {
     /// This is [`Field::quadratic`]: the real component is `a0 b0` less `a1 b1`, and the imaginary
     /// component comes from [`Field::cross`], which reuses both known products. Both factors'
     /// components must have limb bound `1`.
-    /// Runs through [`Field::kernel`], as its own kernel unless the representation inlines it.
     #[inline(always)]
     pub fn product<S: Simd>(self, simd: S, rhs: Self) -> Product<F, S>
     where
@@ -374,7 +380,6 @@ impl<F> Fp2<F> {
     /// of components, so large factors keep smaller positional bounds at the cost of one more
     /// positional product; residues form the same products either way. Every factor must be
     /// ready, as for [`Field::product`].
-    /// Runs through [`Field::kernel`], as its own kernel unless the representation inlines it.
     #[inline(always)]
     pub fn product_schoolbook<S: Simd>(self, simd: S, rhs: Self) -> Product<F, S>
     where
@@ -403,7 +408,6 @@ impl<F> Fp2<F> {
     /// The real component is `(c0 + c1)(c0 - c1)` and the imaginary component is `(2 c0) c1`.
     /// Both components must have limb bound `1`, and the bias `K` must cover `c1` as for
     /// [`Field::sub`].
-    /// Runs through [`Field::kernel`], as its own kernel unless the representation inlines it.
     #[inline(always)]
     pub fn square_product<const K: u64, S: Simd>(self, simd: S) -> Product<F, S>
     where
@@ -524,7 +528,6 @@ impl<F> Fp2<F> {
     }
 
     /// Reduces both components of a product, as for [`Field::reduce_signed`] with the bias `K`.
-    /// Runs through [`Field::kernel`], as its own kernel unless the representation inlines it.
     #[inline(always)]
     pub fn reduce<const K: u64, S: Simd>(simd: S, product: Product<F, S>) -> Self
     where
@@ -575,7 +578,6 @@ impl<F> Fp2<F> {
 
     /// Reduces both components of a product to integer bound at most [`TIGHT`], as for
     /// [`Field::reduce_signed_tight`] with the bias `K`.
-    /// Runs through [`Field::kernel`], as its own kernel unless the representation inlines it.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn reduce_tight<const K: u64, S: Simd>(simd: S, product: Product<F, S>) -> Self
     where
