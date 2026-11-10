@@ -76,7 +76,7 @@ pub fn pairing(p: &G1, q: &G2) -> GT {
 /// Pairs one pair per lane. Outputs beyond the pairs are unchanged, and pairs beyond the outputs
 /// are ignored.
 pub fn pairings(pairs: &[(G1, G2)], outputs: &mut [GT]) {
-    Each(pairs, outputs).dispatch();
+    Pairings(pairs, outputs).dispatch();
 }
 
 /// Returns the product of the pairings of `pairs`, with one shared final exponentiation, or
@@ -85,7 +85,7 @@ pub fn pairings(pairs: &[(G1, G2)], outputs: &mut [GT]) {
 /// A product of pairings is cheaper than the pairings it multiplies, so checks such as
 /// `e(a, b) = e(c, d)` should compare `multi_pairing(&[(a, b), (-c, d)])` with [`GT::ONE`].
 pub fn multi_pairing(pairs: &[(G1, G2)]) -> GT {
-    Pairings(pairs).dispatch()
+    MultiPairing(pairs).dispatch()
 }
 
 /// Multiplies two elements of GT.
@@ -108,9 +108,9 @@ impl Kernel for Product {
 
 /// Multiplies the pairings of pairs of elements.
 #[derive(Clone, Copy)]
-struct Pairings<'a>(&'a [(G1, G2)]);
+struct MultiPairing<'a>(&'a [(G1, G2)]);
 
-impl Pairings<'_> {
+impl MultiPairing<'_> {
     /// Returns the product of the Miller loops of the pairs without an identity, as its canonical
     /// encoding, or `None` when there are none.
     ///
@@ -169,7 +169,7 @@ fn fill() -> (G1Affine, G2Affine) {
     ([[0; FP_BYTES]; 2], [x, y])
 }
 
-impl Kernel for Pairings<'_> {
+impl Kernel for MultiPairing<'_> {
     type Output = GT;
 
     #[inline(always)]
@@ -181,9 +181,9 @@ impl Kernel for Pairings<'_> {
 }
 
 /// Computes the pairing of each pair, one pair per lane.
-struct Each<'a>(&'a [(G1, G2)], &'a mut [GT]);
+struct Pairings<'a>(&'a [(G1, G2)], &'a mut [GT]);
 
-impl Kernel for Each<'_> {
+impl Kernel for Pairings<'_> {
     type Output = ();
 
     // Debug builds keep this a call so that each representation's frame stays separate.
@@ -372,7 +372,7 @@ pub mod fuzz {
 
         fn run<S: Simd, F: Field<S>>(self, simd: S) -> Vec<GT> {
             let mut outputs = vec![GT::ONE; self.0.len()];
-            Each(self.0, &mut outputs).run::<S, F>(simd);
+            Pairings(self.0, &mut outputs).run::<S, F>(simd);
             outputs
         }
     }
@@ -432,7 +432,7 @@ pub mod fuzz {
                     let count = longest - u.int_in_range(0..=longest)?;
                     let (pairs, _) = pairs(u, count)?;
                     match kind {
-                        0 => check_representations(u, Pairings(&pairs))?,
+                        0 => check_representations(u, MultiPairing(&pairs))?,
                         1 => check_representations(u, Separate(&pairs))?,
                         _ => {
                             let product = Product(GT::arbitrary(u)?, GT::arbitrary(u)?);
