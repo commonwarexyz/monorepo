@@ -333,16 +333,16 @@ impl<S: Scheme, C: Digest> State<S, C> {
         }
     }
 
-    pub(super) fn fetch_all_if_permitted<R>(&self, resolver: &mut R, fetches: Vec<Request<C>>)
-    where
+    pub(super) fn fetch_finalizations_if_permitted<R>(
+        &self,
+        resolver: &mut R,
+        mut heights: Vec<Height>,
+    ) where
         R: Resolver<Key = Key<C>, Subscriber = Annotation>,
     {
-        let fetches: Vec<_> = fetches
-            .into_iter()
-            .filter(|fetch| self.permits(fetch))
-            .collect();
-        if !fetches.is_empty() {
-            resolver.fetch_all(fetches);
+        heights.retain(|height| self.permits(&Request::finalized(*height)));
+        if !heights.is_empty() {
+            resolver.fetch_all(heights.into_iter().map(Request::finalized));
         }
     }
 }
@@ -388,7 +388,7 @@ mod tests {
             Feedback::Ok
         }
 
-        fn fetch_all<F>(&mut self, fetches: Vec<F>) -> Feedback
+        fn fetch_all<F>(&mut self, fetches: impl IntoIterator<Item = F>) -> Feedback
         where
             F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
         {

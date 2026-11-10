@@ -1,0 +1,324 @@
+//! Compiles the native wake routing and sleep state machine with Loom synchronization.
+//!
+//! Queues model release publication, acquire observation, and exclusive removal, the boundary the
+//! sleep protocol assumes. The injection entry points are reimplemented over these queues.
+//!
+//! Worker deque pushes, queue allocation, latch setting, and the worker's choice of a Local job or
+//! continuation remain covered by the native tests. A Local idle exit starts after that choice,
+//! before the idle count is decremented. Running job bodies are outside the model.
+//!
+//! The models use two or three groups, at most four threads, one Wide job, and a preemption
+//! bound of three. They check finite wake handoffs under eventual scheduling of runnable workers.
+//! They do not model unbounded job streams or progress through blocking job bodies.
+
+#![allow(
+    clippy::duplicate_mod,
+    reason = "The native and modeled modules bind different synchronization types."
+)]
+
+use crate::rayon::{
+    latch::{self, AsCoreLatch, OnceLatch},
+    registry::Tag,
+};
+use loom::{
+    sync::{
+        self, Arc,
+        atomic::{AtomicUsize, Ordering, fence},
+    },
+    thread::{self as loom_thread, JoinHandle},
+};
+
+// Loom's yield prunes stale reads across the yield. Native yields have no memory
+// ordering, so the sleep protocol's yields are empty steps in the model.
+mod thread {
+    pub(super) const fn yield_now() {}
+}
+
+#[allow(
+    dead_code,
+    reason = "The models exercise the sleep and wake transitions."
+)]
+#[path = "sleep/mod.rs"]
+mod sleep;
+use sleep::{IdleState, ROUNDS_UNTIL_SLEEPY, Sleep};
+
+#[path = "registry/wake.rs"]
+mod wake;
+
+/// Atomic publication and exclusive removal, without queue payloads or allocation.
+#[derive(Default)]
+struct Queue {
+    jobs: AtomicUsize,
+}
+
+impl Queue {
+    /// Publishes one job.
+    fn push(&self) {
+        self.jobs.fetch_add(1, Ordering::Release);
+    }
+
+    /// Whether no published job remains.
+    fn is_empty(&self) -> bool {
+        self.jobs.load(Ordering::Acquire) == 0
+    }
+
+    /// Consumes one published job, if any remains.
+    fn take(&self) -> bool {
+        // Competing searches may observe one publication, but only one can consume it.
+        let mut jobs = self.jobs.load(Ordering::Acquire);
+        while jobs != 0 {
+            match self.jobs.compare_exchange_weak(
+                jobs,
+                jobs - 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(current) => jobs = current,
+            }
+        }
+        false
+    }
+}
+
+/// Sleep counters for one worker group.
+struct Group {
+    sleep: Sleep,
+}
+
+/// The incoming queues exposed to the shared registry code: one Local queue per group, then the
+/// Wide queue.
+struct Injector {
+    queues: Vec<Queue>,
+}
+
+impl Injector {
+    /// The index of the Wide queue.
+    fn wide(&self) -> usize {
+        self.queues.len() - 1
+    }
+
+    /// Whether `queue` holds no job.
+    fn is_empty(&self, queue: usize) -> bool {
+        self.queues[queue].is_empty()
+    }
+}
+
+/// Per-worker Wide queue exposed to the shared registry code.
+struct ThreadInfo {
+    wide: Queue,
+}
+
+/// Queue and group state consumed by the native wake-routing methods.
+struct Registry {
+    groups: Vec<Group>,
+    thread_infos: Vec<ThreadInfo>,
+    injector: Injector,
+}
+
+impl Registry {
+    /// Builds the declared groups with every worker initially outside the idle loop.
+    fn new(widths: &[usize]) -> Arc<Self> {
+        // Group capacity includes the busy workers that the scenario never lets search.
+        Arc::new(Self {
+            groups: widths
+                .iter()
+                .map(|&width| Group {
+                    sleep: Sleep::new(width),
+                })
+                .collect(),
+            thread_infos: (0..widths.iter().sum())
+                .map(|_| ThreadInfo {
+                    wide: Queue::default(),
+                })
+                .collect(),
+            injector: Injector {
+                queues: (0..=widths.len()).map(|_| Queue::default()).collect(),
+            },
+        })
+    }
+
+    /// Publishes one Wide job offered first to group `near` and routes its wakeup natively.
+    fn inject_wide(&self, near: usize) {
+        let wide = &self.injector.queues[self.injector.wide()];
+        let queue_was_empty = wide.is_empty();
+        wide.push();
+        self.new_injected_wide_job(near, queue_was_empty);
+    }
+
+    /// Publishes one Local job for `group` and wakes the group natively.
+    fn inject_local(&self, group: usize) {
+        let queue = &self.injector.queues[group];
+        let queue_was_empty = queue.is_empty();
+        queue.push();
+        self.groups[group]
+            .sleep
+            .new_injected_jobs(1, queue_was_empty);
+    }
+
+    /// Takes one job for a worker of `group`, from its group's Local queue first and then from
+    /// any Wide queue.
+    fn find_work(&self, group: usize) -> Option<Tag> {
+        // A worker counted as coverage for Wide work may choose a Local job first.
+        if self.injector.queues[group].take() {
+            Some(Tag::Local)
+        } else if self.thread_infos.iter().any(|info| info.wide.take())
+            || self.injector.queues[self.injector.wide()].take()
+        {
+            Some(Tag::Wide)
+        } else {
+            None
+        }
+    }
+}
+
+/// Explores the interleavings of `f` under Loom with a preemption bound of three.
+fn model(f: impl Fn() + Send + Sync + 'static) {
+    let mut builder = loom::model::Builder::new();
+    builder.preemption_bound = Some(3);
+    builder.check(f);
+}
+
+/// Searches until one job is taken, including the native idle-exit wake handoff.
+fn worker(registry: &Arc<Registry>, group: usize, offset: usize) -> JoinHandle<Tag> {
+    let registry = Arc::clone(registry);
+    loom_thread::spawn(move || {
+        // This latch stays on one thread and is never set. The worker must leave idle by
+        // finding work, with the sleep protocol providing any wakeup.
+        let sleep = &registry.groups[group].sleep;
+        let mut idle = sleep.start_looking(offset);
+        let latch = OnceLatch::new();
+        loop {
+            if let Some(tag) = registry.find_work(group) {
+                registry.work_found(group, tag);
+                return tag;
+            }
+
+            // The initial rounds only yield, so skip them and keep the announcement and final
+            // search.
+            idle.rounds = idle.rounds.max(ROUNDS_UNTIL_SLEEPY);
+            sleep.no_work_found(&mut idle, latch.as_core_latch(), || {
+                registry.has_injected_job(group)
+            });
+        }
+    })
+}
+
+/// Waits for a registered sleeper before the scenario starts its race.
+fn wait_for_sleep(registry: &Registry, group: usize) {
+    let sleep = &registry.groups[group].sleep;
+    loop {
+        if sleep.sleeping_threads() != 0 {
+            return;
+        }
+        loom_thread::yield_now();
+    }
+}
+
+/// Selects Local work but leaves the worker registered idle for a later `work_found` call.
+fn select_local(registry: &Registry, group: usize, offset: usize) -> IdleState {
+    let idle = registry.groups[group].sleep.start_looking(offset);
+    registry.inject_local(group);
+    assert_eq!(registry.find_work(group), Some(Tag::Local));
+    idle
+}
+
+/// A Wide injection cannot leave its only available worker asleep.
+#[test]
+fn injection_races_sleep() {
+    for groups in [2, 3] {
+        for prior_work in [false, true] {
+            model(move || {
+                // The last group supplies the only worker available to take the job.
+                let registry = Registry::new(&vec![1; groups]);
+
+                // Completed work leaves the jobs event counter active, so publication does not
+                // have to increment it.
+                if prior_work {
+                    let _idle = select_local(&registry, groups - 1, 0);
+                    registry.work_found(groups - 1, Tag::Local);
+                }
+
+                // Publish concurrently with the worker's searches and sleep transitions.
+                let searching = worker(&registry, groups - 1, 0);
+                registry.inject_wide(0);
+
+                // Joining requires the worker to find and consume the injected job.
+                assert_eq!(searching.join().unwrap(), Tag::Wide);
+                assert!(registry.injector.is_empty(registry.injector.wide()));
+            });
+        }
+    }
+}
+
+/// A Local idle exit transfers concurrent Wide work to an available group.
+#[test]
+fn injection_races_local_idle_exit() {
+    for groups in [2, 3] {
+        model(move || {
+            // Park the last group's worker, then stop group 0's worker between selecting
+            // Local work and leaving idle. No other worker can take the Wide job.
+            let registry = Registry::new(&vec![1; groups]);
+            let remote = worker(&registry, groups - 1, 0);
+            wait_for_sleep(&registry, groups - 1);
+            let _idle = select_local(&registry, 0, 0);
+
+            // Race the idle decrement and Wide queue check against publication.
+            let leaving = {
+                let registry = Arc::clone(&registry);
+                loom_thread::spawn(move || registry.work_found(0, Tag::Local))
+            };
+
+            registry.inject_wide(0);
+            leaving.join().unwrap();
+
+            // Once both actions finish, the last group's sleeper must have received the
+            // handoff. Joining then checks that it actually consumes the job.
+            assert_eq!(
+                registry.groups[groups - 1].sleep.sleeping_threads(),
+                0,
+                "the local idle exit must hand off the injected job"
+            );
+            assert_eq!(remote.join().unwrap(), Tag::Wide);
+            assert!(registry.injector.is_empty(registry.injector.wide()));
+        });
+    }
+}
+
+/// A woken peer that chooses Local work still passes Wide work to another group.
+#[test]
+fn injection_races_local_wake_handoff() {
+    model(|| {
+        // Park group 0's second worker and the last group's worker. The middle group
+        // stays occupied, so Wide coverage may need to pass through two Local exits.
+        let registry = Registry::new(&[2, 1, 1]);
+        let local = worker(&registry, 0, 1);
+        let remote = worker(&registry, 2, 0);
+        wait_for_sleep(&registry, 0);
+        wait_for_sleep(&registry, 2);
+        let _idle = select_local(&registry, 0, 0);
+
+        // The first worker has selected a Local job. Its peer can take the next one.
+        registry.inject_local(0);
+
+        // Race the first Local exit with publication while its peer can wake and
+        // select the second Local job. Either Local exit may carry the handoff.
+        let leaving = {
+            let registry = Arc::clone(&registry);
+            loom_thread::spawn(move || registry.work_found(0, Tag::Local))
+        };
+        registry.inject_wide(0);
+        leaving.join().unwrap();
+
+        // Completing Local work cannot discharge the Wide job, so the last group's sleeper
+        // must also be woken and consume it.
+        assert_eq!(local.join().unwrap(), Tag::Local);
+        assert_eq!(
+            registry.groups[2].sleep.sleeping_threads(),
+            0,
+            "a local wake must retain the wide handoff obligation"
+        );
+        assert_eq!(remote.join().unwrap(), Tag::Wide);
+        assert!(registry.injector.is_empty(registry.injector.wide()));
+    });
+}

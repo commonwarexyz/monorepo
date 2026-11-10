@@ -197,7 +197,10 @@ runs:
         shim="$RUNNER_TEMP/kache-shim"
         mkdir -p "$shim"
         # cc-rs recognizes the compiler wrapper by its file name, so the shim is named kache.
-        printf '#!/bin/sh\nexec env -u GITHUB_ACTIONS "%s" "$@"\n' "$real" >"$shim/kache"
+        # The daemon uploads each entry as it stores it and drains its queue when it stops, so
+        # the action's post-step `kache sync --push` finds nothing to push. It still lists every
+        # key in the remote first, which takes over a minute, so the shim skips it.
+        printf '#!/bin/sh\nif [ "$1" = sync ] && [ "$2" = --push ]; then exit 0; fi\nexec env -u GITHUB_ACTIONS "%s" "$@"\n' "$real" >"$shim/kache"
         chmod +x "$shim/kache"
         "$shim/kache" daemon stop >/dev/null
         "$shim/kache" daemon start >/dev/null

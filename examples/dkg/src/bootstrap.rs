@@ -80,7 +80,7 @@ pub async fn run(context: tokio::Context, args: Bootstrap) {
         node.dial,
         bootstrappers,
         max_peers_per_set,
-        max_message_size(&[payload]),
+        max_message_size([payload]),
         MAILBOX_SIZE,
     );
 

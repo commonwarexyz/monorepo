@@ -2315,8 +2315,8 @@ where
         let missing = self
             .finalized_blocks
             .missing_items(start, self.max_repair.get());
-        let requests = missing.into_iter().map(Request::finalized).collect();
-        self.floor.fetch_all_if_permitted(resolver, requests);
+        self.floor
+            .fetch_finalizations_if_permitted(resolver, missing);
 
         (self, wrote)
     }

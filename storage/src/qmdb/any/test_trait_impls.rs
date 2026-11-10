@@ -1,7 +1,6 @@
 //! Test trait implementations for the Any QMDB.
 
 use super::{
-    ValueEncoding,
     batch::{MerkleizedBatch, UnmerkleizedBatch},
     db::Db,
     operation::{Operation, Update, update},
@@ -15,13 +14,13 @@ use crate::{
     index::{Ordered as OrderedIndex, Unordered as UnorderedIndex},
     journal::contiguous::Mutable,
     merkle::{Family, Location, Proof},
-    qmdb::{Error, floor::Policy, operation::Key},
+    qmdb::{Error, floor::Policy, operation::Key, value::ValueEncoding},
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_runtime::Handle;
-use core::num::NonZeroU64;
+use core::{borrow::Borrow, num::NonZeroU64};
 use std::{future::Future, ops::Range, sync::Arc};
 
 impl<F, K, V, H, E, C, I, const N: usize, S>
@@ -39,22 +38,25 @@ where
     Operation<F, update::Unordered<K, V>>: Codec,
 {
     type Family = F;
-    type K = K;
-    type V = V::Value;
+    type Key = K;
+    type Value = V::Value;
     type Metadata = V::Value;
     type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>;
+
+    fn with_metadata(self, metadata: impl Into<Option<V::Value>>) -> Self {
+        Self::with_metadata(self, metadata)
+    }
 
     fn write(self, key: K, value: Option<V::Value>) -> Self {
         Self::write(self, key, value)
     }
 
-    fn merkleize<P: Policy<F, K, V::Value> + Send>(
+    fn merkleize_with<P: Policy<F, K, V::Value> + Send>(
         self,
         db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
-        metadata: Option<V::Value>,
         policy: &mut P,
     ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error<F>>> {
-        self.merkleize(db, metadata, policy)
+        self.merkleize_with(db, policy)
     }
 }
 
@@ -73,22 +75,25 @@ where
     Operation<F, update::Ordered<K, V>>: Codec,
 {
     type Family = F;
-    type K = K;
-    type V = V::Value;
+    type Key = K;
+    type Value = V::Value;
     type Metadata = V::Value;
     type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>;
+
+    fn with_metadata(self, metadata: impl Into<Option<V::Value>>) -> Self {
+        Self::with_metadata(self, metadata)
+    }
 
     fn write(self, key: K, value: Option<V::Value>) -> Self {
         Self::write(self, key, value)
     }
 
-    fn merkleize<P: Policy<F, K, V::Value> + Send>(
+    fn merkleize_with<P: Policy<F, K, V::Value> + Send>(
         self,
         db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
-        metadata: Option<V::Value>,
         policy: &mut P,
     ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error<F>>> {
-        self.merkleize(db, metadata, policy)
+        self.merkleize_with(db, policy)
     }
 }
 
@@ -117,15 +122,15 @@ where
     UnmerkleizedBatch<F, H, U, S>: UnmerkleizedBatchTrait<
             Self,
             Family = F,
-            K = U::Key,
-            V = U::Value,
+            Key = U::Key,
+            Value = U::Value,
             Metadata = U::Value,
             Merkleized = Arc<MerkleizedBatch<F, H::Digest, U, S>>,
         >,
 {
     type Family = F;
-    type K = U::Key;
-    type V = U::Value;
+    type Key = U::Key;
+    type Value = U::Value;
     type Merkleized = Arc<MerkleizedBatch<F, H::Digest, U, S>>;
     type Batch = UnmerkleizedBatch<F, H, U, S>;
 
@@ -141,7 +146,7 @@ where
     }
 }
 
-impl<F, E, C, I, H, U, const N: usize, S> DbAny<F> for Db<F, E, C, I, H, U, N, S>
+impl<F, E, C, I, H, U, const N: usize, S> DbAny for Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
     E: Context,
@@ -151,17 +156,18 @@ where
     U: Update,
     S: Strategy,
     Operation<F, U>: Codec,
-    Self: BatchableDb<Family = F, K = U::Key, V = U::Value>,
+    Self: BatchableDb<Family = F, Key = U::Key, Value = U::Value>,
 {
-    type Key = U::Key;
-    type Value = U::Value;
     type Digest = H::Digest;
 
     async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error<F>> {
         Self::get(self, key).await
     }
 
-    async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
+    async fn get_many<Q: Borrow<U::Key> + Sync>(
+        &self,
+        keys: &[Q],
+    ) -> Result<Vec<Option<U::Value>>, Error<F>> {
         Self::get_many(self, keys).await
     }
 
@@ -197,8 +203,8 @@ where
         Self::destroy(self).await
     }
 
-    fn inactivity_floor_loc(&self) -> Location<F> {
-        Self::inactivity_floor_loc(self)
+    fn inactivity_floor(&self) -> Location<F> {
+        Self::inactivity_floor(self)
     }
 
     fn sync_boundary(&self) -> Location<F> {
@@ -206,7 +212,7 @@ where
     }
 }
 
-impl<F, E, C, I, H, U, const N: usize, S> Provable<F> for Db<F, E, C, I, H, U, N, S>
+impl<F, E, C, I, H, U, const N: usize, S> Provable for Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
     E: Context,
@@ -216,7 +222,7 @@ where
     U: Update,
     S: Strategy,
     Operation<F, U>: Codec,
-    Self: BatchableDb<Family = F, K = U::Key, V = U::Value>,
+    Self: BatchableDb<Family = F, Key = U::Key, Value = U::Value>,
 {
     type Operation = Operation<F, U>;
 

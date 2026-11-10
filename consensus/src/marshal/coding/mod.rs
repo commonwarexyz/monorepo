@@ -365,7 +365,7 @@ mod tests {
             Feedback::Ok
         }
 
-        fn fetch_all<F>(&mut self, fetches: Vec<F>) -> Feedback
+        fn fetch_all<F>(&mut self, fetches: impl IntoIterator<Item = F>) -> Feedback
         where
             F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
         {
@@ -396,12 +396,12 @@ mod tests {
 
         fn fetch_all_targeted<F>(
             &mut self,
-            fetches: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
+            fetches: impl IntoIterator<Item = (F, NonEmptyVec<Self::PublicKey>)>,
         ) -> Feedback
         where
             F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
         {
-            self.fetch_all(fetches.into_iter().map(|(fetch, _)| fetch).collect())
+            self.fetch_all(fetches.into_iter().map(|(fetch, _)| fetch))
         }
     }
 

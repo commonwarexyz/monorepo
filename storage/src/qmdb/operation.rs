@@ -24,7 +24,7 @@ impl<T> Key for T where
 pub trait Floored<F: Family> {
     /// The inactivity floor location if this operation is a commit operation with a floor value,
     /// None otherwise.
-    fn has_floor(&self) -> Option<Location<F>>;
+    fn inactivity_floor(&self) -> Option<Location<F>>;
 }
 
 /// An operation that can be applied to a database.

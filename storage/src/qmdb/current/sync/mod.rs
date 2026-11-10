@@ -1,7 +1,7 @@
 //! Shared synchronization logic for [crate::qmdb::current] databases.
 //!
 //! Contains the implementation of [crate::qmdb::sync::Database] for
-//! [Db](crate::qmdb::current::db::Db), covering every variant (ordered/unordered,
+//! [Db](crate::qmdb::current::Db), covering every variant (ordered/unordered,
 //! fixed/variable, any snapshot index).
 //!
 //! The canonical root of a `current` database combines the ops root, grafted root, and optional
@@ -9,7 +9,7 @@
 //! the module documentation). The sync engine operates on the **ops root**, not the canonical root:
 //! it downloads operations and verifies each batch against the ops root using ops-tree range proofs
 //! (identical to `any` sync). Callers that verify current ops proofs directly should use
-//! [crate::qmdb::verify_proof]. [crate::qmdb::current::proof::OpsRootWitness] can be used by
+//! [crate::qmdb::ProofExt::verify]. [crate::qmdb::current::proof::OpsRootWitness] can be used by
 //! callers that need to authenticate the synced ops root against a trusted canonical root; the sync
 //! engine does not perform this check itself.
 //!
@@ -17,8 +17,7 @@
 //! from the operations. The canonical root is then computed from the ops root, the reconstructed
 //! grafted root, and any pending or partial chunk digests.
 //!
-//! The [Database]`::`[root()](crate::qmdb::sync::Database::root) implementation returns the **ops
-//! root** (not the canonical root) because that is what the sync engine verifies against.
+//! [`Database::ops_root`] returns the ops root used by the sync engine.
 //!
 //! For pruned databases (`range.start > 0`), grafted pinned nodes for the pruned region are read
 //! directly from the ops tree after it is built. This works because of the zero-chunk identity: for
@@ -37,7 +36,7 @@ use crate::{
     qmdb::{
         self,
         any::{
-            db::Db as AnyDb,
+            Db as AnyDb,
             operation::{Operation, update::Update},
         },
         bitmap::Shared,
@@ -62,11 +61,11 @@ impl<T: Translator, J: Clone, S: Strategy, B> Config for super::Config<T, J, S, 
     type JournalConfig = J;
 
     fn journal_config(&self) -> Self::JournalConfig {
-        self.journal_config.clone()
+        self.log.clone()
     }
 }
 
-/// Shared helper to build a `current::db::Db` from sync components.
+/// Shared helper to build a `current::Db` from sync components.
 ///
 /// This follows the same pattern as `any/sync/mod.rs::build_db` but additionally:
 /// * Builds the activity bitmap by replaying the operations log.
@@ -168,15 +167,14 @@ where
         pinned_nodes
     };
 
-    // Rebuild the grafted tree, graft roots, and canonical root from the synced `any` state.
-    // The canonical root is deterministic because the engine authenticates the ops and the
+    // Rebuild the grafted tree, graft roots, and ops root witness from the synced `any` state. The
+    // resulting canonical root is deterministic because the engine authenticates the ops and the
     // bitmap is derived from them.
-    let (grafted_tree, graft_roots, root) = db::rebuild_grafted_tree::<F, H, S, N>(
+    let (grafted_tree, graft_roots, ops_root_witness) = db::rebuild_grafted_tree::<F, H, S, N>(
         any.bitmap.as_ref(),
         &grafted_pinned_nodes,
         &any.log.merkle,
         any.inactivity_floor_loc,
-        any.root(),
         &strategy,
     )
     .await?;
@@ -186,6 +184,7 @@ where
         db::init_metadata::<F, E, DigestOf<H>>(context.child("metadata"), &metadata_partition)
             .await?;
 
+    let root = ops_root_witness.root::<H>(&any.root());
     let metrics = db::Metrics::new(context);
     let current_db = db::Db {
         any,
@@ -194,6 +193,7 @@ where
         metadata,
         strategy,
         root,
+        ops_root_witness,
         metrics,
         #[cfg(test)]
         halt_before_prune_log: false,
@@ -240,10 +240,10 @@ where
         range: NonEmptyRange<Location<F>>,
         apply_batch_size: NonZeroU64,
     ) -> Result<Self, qmdb::Error<F>> {
-        let strategy = config.merkle_config.strategy.clone();
+        let strategy = config.merkle.strategy.clone();
         build_db::<F, _, U, _, H, _, N, _>(
             context,
-            config.merkle_config,
+            config.merkle,
             log,
             config.translator,
             pinned_nodes,
@@ -281,7 +281,7 @@ where
 
         qmdb::sync::local_pinned_nodes::<F, _, H, S>(
             context,
-            config.merkle_config.clone(),
+            config.merkle.clone(),
             target,
             inactivity_floor,
         )
@@ -290,8 +290,8 @@ where
 
     /// Returns the ops root (not the canonical root), since the sync engine verifies
     /// batches against the ops tree.
-    fn root(&self) -> Self::Digest {
-        self.any.root()
+    fn ops_root(&self) -> Self::Digest {
+        Self::ops_root(self)
     }
 }
 

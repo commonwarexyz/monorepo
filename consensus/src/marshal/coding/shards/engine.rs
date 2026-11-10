@@ -1972,7 +1972,7 @@ mod tests {
         Manager as _, TrackedPeers,
         simulated::{self, Control, Link, Oracle},
     };
-    use commonware_parallel::{Rayon, Sequential, mocks::Explorer};
+    use commonware_parallel::{Rayon, Sequential, mocks::Explorer, rayon::ThreadPoolBuilder};
     use commonware_runtime::{Quota, Runner, Supervisor as _, deterministic, utils::reschedule};
     use commonware_utils::{
         N3f1, NZU16, NZU32, NZUsize, Participant, channel::oneshot::error::TryRecvError,
@@ -2020,7 +2020,7 @@ mod tests {
         // `CodingB` supplies the context type the coding variant requires. The bound uses the
         // encoded size of the largest `B`.
         simulated::Config {
-            max_size: commonware_p2p::max_message_size(&[
+            max_size: commonware_p2p::max_message_size([
                 <Coding<CodingB, C, H, P> as Variant>::max_buffer_payload_size(
                     u32::try_from(participants).unwrap(),
                     B::max_encode_size(&()),
@@ -6380,7 +6380,9 @@ mod tests {
                 scheme_provider: MultiEpochProvider::single(scheme),
                 blocker: control,
                 block_codec_config: (),
-                strategy: Explorer::parallel(&Rayon::new(NZUsize!(2)).unwrap()),
+                strategy: Explorer::parallel(
+                    &Rayon::new(ThreadPoolBuilder::new(NZUsize!(2))).unwrap(),
+                ),
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
                 records: NZUsize!(16),
@@ -6559,7 +6561,8 @@ mod tests {
             let peer_keys: Vec<P> = private_keys.iter().map(|key| key.public_key()).collect();
 
             // Every job hands off to the pool.
-            let strategy = Explorer::parallel(&Rayon::new(NZUsize!(2)).unwrap());
+            let strategy =
+                Explorer::parallel(&Rayon::new(ThreadPoolBuilder::new(NZUsize!(2))).unwrap());
             let (mut engine, mut sender) =
                 unstarted(&context, &oracle, &private_keys, 0, NZUsize!(16), strategy).await;
             let coding_config = coding_config_for_participants(peer_keys.len() as u16);

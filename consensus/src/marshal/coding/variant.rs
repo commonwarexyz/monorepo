@@ -208,7 +208,6 @@ mod tests {
     use commonware_math::algebra::Random;
     use commonware_parallel::{Sequential, mocks::explore};
     use commonware_utils::{NZU16, test_rng};
-    use futures::executor::block_on;
 
     type TestCommitment = Commitment<NoCloneBlock, ReedSolomon<Sha256>, Sha256>;
     type TestContext = Context<TestCommitment, PublicKey>;
@@ -346,13 +345,14 @@ mod tests {
         let encoded = coded.encode();
         explore(|strategy| {
             // An untrusted commitment is recomputed, so the decoded block already holds its shards.
-            let decoded = block_on(TestVariant::decode_block(
-                encoded.clone(),
-                &(),
-                ExpectedCommitment::Untrusted(expected),
-                strategy,
-            ))
-            .unwrap();
+            let decoded = strategy
+                .block_on(TestVariant::decode_block(
+                    encoded.clone(),
+                    &(),
+                    ExpectedCommitment::Untrusted(expected),
+                    strategy,
+                ))
+                .unwrap();
             assert_eq!(TestVariant::commitment(&decoded), expected);
             assert!(decoded.shard(0).is_some());
 
@@ -364,21 +364,23 @@ mod tests {
                 CONFIG,
             ));
             assert!(
-                block_on(TestVariant::decode_block(
+                strategy
+                    .block_on(TestVariant::decode_block(
+                        encoded.clone(),
+                        &(),
+                        ExpectedCommitment::Untrusted(other),
+                        strategy,
+                    ))
+                    .is_err()
+            );
+            let trusted = strategy
+                .block_on(TestVariant::decode_block(
                     encoded.clone(),
                     &(),
-                    ExpectedCommitment::Untrusted(other),
+                    ExpectedCommitment::Trusted(other),
                     strategy,
                 ))
-                .is_err()
-            );
-            let trusted = block_on(TestVariant::decode_block(
-                encoded.clone(),
-                &(),
-                ExpectedCommitment::Trusted(other),
-                strategy,
-            ))
-            .unwrap();
+                .unwrap();
             assert_eq!(TestVariant::commitment(&trusted), other);
             assert!(trusted.shard(0).is_none());
 
@@ -386,13 +388,14 @@ mod tests {
             let mut extended = encoded.to_vec();
             extended.push(0);
             assert!(
-                block_on(TestVariant::decode_block(
-                    extended,
-                    &(),
-                    ExpectedCommitment::Untrusted(expected),
-                    strategy,
-                ))
-                .is_err()
+                strategy
+                    .block_on(TestVariant::decode_block(
+                        extended,
+                        &(),
+                        ExpectedCommitment::Untrusted(expected),
+                        strategy,
+                    ))
+                    .is_err()
             );
 
             // Every shape must decode to the same commitments.
@@ -422,13 +425,14 @@ mod tests {
             ExpectedCommitment::Untrusted(other),
         ] {
             assert!(
-                block_on(TestVariant::decode_block(
-                    encoded.clone(),
-                    &(),
-                    expected,
-                    &Sequential
-                ))
-                .is_err()
+                Sequential
+                    .block_on(TestVariant::decode_block(
+                        encoded.clone(),
+                        &(),
+                        expected,
+                        &Sequential
+                    ))
+                    .is_err()
             );
         }
     }

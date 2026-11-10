@@ -22,12 +22,12 @@ env:
   __CARGO_TEMPORARY_BUILD_DIR_NEW_LAYOUT_OPT_OUT: 1
 
 jobs:
-  # Every coverage partition runs from one instrumented build. Partitions run cargo-llvm-cov with
-  # the same workspace, Cargo home, and target directory as the build so the report excludes the
-  # same paths.
+  # Every coverage partition runs from one instrumented build, on a larger runner. Partitions run
+  # cargo-llvm-cov with the same workspace, Cargo home, and target directory as the build so the
+  # report excludes the same paths.
   Build:
     name: "Coverage (build)"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-16
     timeout-minutes: 90
     steps:
     - name: Checkout repository
@@ -131,7 +131,7 @@ jobs:
         name: coverage-tests
         path: ${{ runner.temp }}
     - name: Generate coverage report
-      run: cargo +${{ env.NIGHTLY_VERSION }} llvm-cov nextest --branch --archive-file "$RUNNER_TEMP/coverage.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" --lcov --output-path lcov-${{ matrix.partition }}.info --partition hash:${{ matrix.partition }}/20 --profile all
+      run: cargo +${{ env.NIGHTLY_VERSION }} llvm-cov nextest --branch --archive-file "$RUNNER_TEMP/coverage.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" --lcov --output-path lcov-${{ matrix.partition }}.info --partition slice:${{ matrix.partition }}/20 --profile all
     - name: Store coverage report
       uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
       with:

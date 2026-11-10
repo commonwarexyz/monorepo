@@ -17,13 +17,13 @@ use commonware_storage::{
     merkle::{Family, Location},
     qmdb::{
         Error,
-        any::value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
         immutable::{
             CompactDb, CompactMerkleizedBatch, CompactUnmerkleizedBatch, Operation, fixed,
             initial_root, variable,
         },
         operation::Key,
         sync,
+        value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
     },
 };
 use commonware_utils::{
@@ -33,7 +33,7 @@ use commonware_utils::{
 use std::{ops::Deref, sync::Arc};
 
 /// A speculative batch of new keyed values over a shared compact immutable database.
-pub struct ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S>
+pub struct ImmutableCompactUnmerkleized<F, E, K, V, H, S>
 where
     F: Family,
     E: Context,
@@ -46,11 +46,9 @@ where
 {
     batch: CompactUnmerkleizedBatch<F, H, K, V, S>,
     db: Shared<CompactDb<F, E, K, V, H, S>>,
-    metadata: Option<V::Value>,
-    inactivity_floor: Option<Location<F>>,
 }
 
-impl<F, E, K, V, H, S> Deref for ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S>
+impl<F, E, K, V, H, S> Deref for ImmutableCompactUnmerkleized<F, E, K, V, H, S>
 where
     F: Family,
     E: Context,
@@ -68,7 +66,7 @@ where
     }
 }
 
-impl<F, E, K, V, H, S> ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S>
+impl<F, E, K, V, H, S> ImmutableCompactUnmerkleized<F, E, K, V, H, S>
 where
     F: Family,
     E: Context,
@@ -79,16 +77,17 @@ where
     Operation<F, K, V>: CodecRead,
     S: Strategy,
 {
-    /// Sets the metadata committed by [`merkleize`](UnmerkleizedTrait::merkleize).
-    pub fn with_metadata(mut self, metadata: V::Value) -> Self {
-        self.metadata = Some(metadata);
+    /// Sets the metadata committed by [`merkleize`](UnmerkleizedTrait::merkleize). `None` clears
+    /// it.
+    pub fn with_metadata(mut self, metadata: impl Into<Option<V::Value>>) -> Self {
+        self.batch = self.batch.with_metadata(metadata);
         self
     }
 
     /// Sets the inactivity floor committed by [`merkleize`](UnmerkleizedTrait::merkleize)
-    /// (location 0 when unset).
-    pub const fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
-        self.inactivity_floor = Some(floor);
+    /// (inherited from the database or parent batch when unset).
+    pub fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
+        self.batch = self.batch.with_inactivity_floor(floor);
         self
     }
 
@@ -100,7 +99,7 @@ where
 }
 
 /// A sealed compact immutable batch with a computed root.
-pub struct ImmutableUnjournaledMerkleized<F, E, K, V, H, S>
+pub struct ImmutableCompactMerkleized<F, E, K, V, H, S>
 where
     F: Family,
     E: Context,
@@ -115,7 +114,7 @@ where
     db: Shared<CompactDb<F, E, K, V, H, S>>,
 }
 
-impl<F, E, K, V, H, S> Clone for ImmutableUnjournaledMerkleized<F, E, K, V, H, S>
+impl<F, E, K, V, H, S> Clone for ImmutableCompactMerkleized<F, E, K, V, H, S>
 where
     F: Family,
     E: Context,
@@ -134,7 +133,7 @@ where
     }
 }
 
-impl<F, E, K, V, H, S> Deref for ImmutableUnjournaledMerkleized<F, E, K, V, H, S>
+impl<F, E, K, V, H, S> Deref for ImmutableCompactMerkleized<F, E, K, V, H, S>
 where
     F: Family,
     E: Context,
@@ -152,7 +151,7 @@ where
     }
 }
 
-impl<F, E, K, V, H, S> UnmerkleizedTrait for ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S>
+impl<F, E, K, V, H, S> UnmerkleizedTrait for ImmutableCompactUnmerkleized<F, E, K, V, H, S>
 where
     F: Family,
     E: Context,
@@ -163,27 +162,20 @@ where
     Operation<F, K, V>: CodecRead,
     S: Strategy,
 {
-    type Merkleized = ImmutableUnjournaledMerkleized<F, E, K, V, H, S>;
+    type Merkleized = ImmutableCompactMerkleized<F, E, K, V, H, S>;
     type Error = Error<F>;
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
         let db = self.db.read().await;
-        let merkleized = self
-            .batch
-            .merkleize(
-                &db,
-                self.metadata,
-                self.inactivity_floor.unwrap_or_default(),
-            )
-            .await?;
-        Ok(ImmutableUnjournaledMerkleized {
+        let merkleized = self.batch.merkleize(&db).await?;
+        Ok(ImmutableCompactMerkleized {
             inner: merkleized,
             db: self.db.clone(),
         })
     }
 }
 
-impl<F, E, K, V, H, S> MerkleizedTrait for ImmutableUnjournaledMerkleized<F, E, K, V, H, S>
+impl<F, E, K, V, H, S> MerkleizedTrait for ImmutableCompactMerkleized<F, E, K, V, H, S>
 where
     F: Family,
     E: Context,
@@ -195,18 +187,16 @@ where
     S: Strategy,
 {
     type Digest = H::Digest;
-    type Unmerkleized = ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S>;
+    type Unmerkleized = ImmutableCompactUnmerkleized<F, E, K, V, H, S>;
 
     fn root(&self) -> H::Digest {
         self.inner.root()
     }
 
     fn new_batch(&self) -> Self::Unmerkleized {
-        ImmutableUnjournaledUnmerkleized {
+        ImmutableCompactUnmerkleized {
             batch: self.inner.new_batch::<H>(),
             db: self.db.clone(),
-            metadata: None,
-            inactivity_floor: None,
         }
     }
 }
@@ -221,8 +211,8 @@ where
     S: Strategy,
     Operation<F, K, FixedEncoding<V>>: EncodeShared + CodecRead<Cfg = ()>,
 {
-    type Unmerkleized = ImmutableUnjournaledUnmerkleized<F, E, K, FixedEncoding<V>, H, S>;
-    type Merkleized = ImmutableUnjournaledMerkleized<F, E, K, FixedEncoding<V>, H, S>;
+    type Unmerkleized = ImmutableCompactUnmerkleized<F, E, K, FixedEncoding<V>, H, S>;
+    type Merkleized = ImmutableCompactMerkleized<F, E, K, FixedEncoding<V>, H, S>;
     type Error = Error<F>;
     type Config = fixed::CompactConfig<S>;
     type SyncTarget = sync::CompactTarget<F, H::Digest>;
@@ -247,11 +237,9 @@ where
 
     fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
         let (database, shared) = database.into_parts();
-        ImmutableUnjournaledUnmerkleized {
+        ImmutableCompactUnmerkleized {
             batch: database.new_batch(),
             db: shared,
-            metadata: None,
-            inactivity_floor: None,
         }
     }
 
@@ -286,8 +274,8 @@ where
     Operation<F, K, VariableEncoding<V>>: EncodeShared + CodecRead,
     S: Strategy,
 {
-    type Unmerkleized = ImmutableUnjournaledUnmerkleized<F, E, K, VariableEncoding<V>, H, S>;
-    type Merkleized = ImmutableUnjournaledMerkleized<F, E, K, VariableEncoding<V>, H, S>;
+    type Unmerkleized = ImmutableCompactUnmerkleized<F, E, K, VariableEncoding<V>, H, S>;
+    type Merkleized = ImmutableCompactMerkleized<F, E, K, VariableEncoding<V>, H, S>;
     type Error = Error<F>;
     type Config =
         variable::CompactConfig<<Operation<F, K, VariableEncoding<V>> as CodecRead>::Cfg, S>;
@@ -313,11 +301,9 @@ where
 
     fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
         let (database, shared) = database.into_parts();
-        ImmutableUnjournaledUnmerkleized {
+        ImmutableCompactUnmerkleized {
             batch: database.new_batch(),
             db: shared,
-            metadata: None,
-            inactivity_floor: None,
         }
     }
 
@@ -453,7 +439,7 @@ mod tests {
         fixed::CompactConfig {
             strategy: Sequential,
             witness: commonware_storage::journal::contiguous::variable::Config {
-                partition: format!("stateful-immutable-unjournaled-{suffix}-witness"),
+                partition: format!("stateful-immutable-compact-{suffix}-witness"),
                 items_per_section: NZU64!(64),
                 compression: None,
                 codec_config: (),
@@ -468,7 +454,7 @@ mod tests {
     fn full_fixed_config(suffix: &str) -> fixed::Config<TwoCap, Sequential> {
         let page_cache = CacheRef::new(NZU16!(101), NZUsize!(11));
         fixed::Config {
-            merkle_config: MerkleConfig {
+            merkle: MerkleConfig {
                 journal_partition: format!("stateful-immutable-full-journal-{suffix}"),
                 metadata_partition: format!("stateful-immutable-full-metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
@@ -529,7 +515,75 @@ mod tests {
     }
 
     #[test]
-    fn immutable_unjournaled_trait_impls_compile() {
+    fn unset_inactivity_floor_inherits_parent_floor() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_config("inherit-parent-floor");
+            let db = FixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
+            let db = Shared::new("test", db);
+
+            let parent = db
+                .new_batch_for_test::<_>()
+                .await
+                .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
+                .with_inactivity_floor(mmr::Location::new(1));
+            let parent = crate::stateful::db::Unmerkleized::merkleize(parent)
+                .await
+                .unwrap();
+            let child = MerkleizedTrait::new_batch(&parent)
+                .set(Sha256::hash(&[&[3]]), Sha256::hash(&[&[4]]));
+            let child = crate::stateful::db::Unmerkleized::merkleize(child)
+                .await
+                .unwrap();
+            assert_eq!(child.bounds().inactivity_floor, mmr::Location::new(1));
+        });
+    }
+
+    #[test]
+    fn unset_inactivity_floor_inherits_applied_floor() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_config("inherit-applied-floor");
+            let db = FixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
+            let db = Shared::new("test", db);
+
+            let first = db
+                .new_batch_for_test::<_>()
+                .await
+                .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
+                .with_inactivity_floor(mmr::Location::new(1));
+            let first = crate::stateful::db::Unmerkleized::merkleize(first)
+                .await
+                .unwrap();
+            {
+                let (slot, database) = db.write().await;
+                let database = <FixedDb as ManagedDb<_>>::apply(database, first)
+                    .await
+                    .unwrap();
+                slot.put(database);
+            }
+
+            let next = db
+                .new_batch_for_test::<_>()
+                .await
+                .set(Sha256::hash(&[&[3]]), Sha256::hash(&[&[4]]));
+            let next = crate::stateful::db::Unmerkleized::merkleize(next)
+                .await
+                .unwrap();
+            assert_eq!(next.bounds().inactivity_floor, mmr::Location::new(1));
+            let (slot, database) = db.write().await;
+            let database = <FixedDb as ManagedDb<_>>::apply(database, next)
+                .await
+                .unwrap();
+            assert_eq!(database.inactivity_floor(), mmr::Location::new(1));
+            slot.put(database);
+        });
+    }
+
+    #[test]
+    fn immutable_compact_trait_impls_compile() {
         assert_managed_db::<FixedDb>();
         assert_managed_db::<VariableDb>();
         assert_state_sync_db::<FixedDb, Arc<FixedDb>>();
@@ -537,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_db_apply_and_finalize_persists_fixed_immutable_unjournaled_batches() {
+    fn managed_db_apply_and_finalize_persists_fixed_immutable_compact_batches() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("managed-db");
             let db = FixedDb::init(context.child("db"), config, None)
@@ -687,11 +741,11 @@ mod tests {
                 .await
                 .unwrap();
             let metadata = Sha256::hash(&[&[3]]);
-            let floor = source.inactivity_floor_loc();
             let batch = source
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
-                .merkleize(&source, Some(metadata), floor)
+                .with_metadata(Some(metadata))
+                .merkleize(&source)
                 .await
                 .unwrap();
             let source = source.apply_batch(batch).await.unwrap();
@@ -725,11 +779,11 @@ mod tests {
             let source = FullFixedDb::init(source_context, source_config, None)
                 .await
                 .unwrap();
-            let floor = source.inactivity_floor_loc();
             let batch = source
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
-                .merkleize(&source, Some(Sha256::hash(&[&[3]])), floor)
+                .with_metadata(Some(Sha256::hash(&[&[3]])))
+                .merkleize(&source)
                 .await
                 .unwrap();
             let source = source.apply_batch(batch).await.unwrap();
@@ -815,11 +869,11 @@ mod tests {
                     .await
                     .unwrap();
 
-            let floor = source.inactivity_floor_loc();
             let batch = source
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
-                .merkleize(&source, Some(Sha256::hash(&[&[9]])), floor)
+                .with_metadata(Some(Sha256::hash(&[&[9]])))
+                .merkleize(&source)
                 .await
                 .unwrap();
             let source = source.apply_batch(batch).await.unwrap();
@@ -829,11 +883,11 @@ mod tests {
                 size: source.bounds().end,
             };
 
-            let floor = source.inactivity_floor_loc();
             let batch = source
                 .new_batch()
                 .set(Sha256::hash(&[&[3]]), Sha256::hash(&[&[4]]))
-                .merkleize(&source, Some(Sha256::hash(&[&[10]])), floor)
+                .with_metadata(Some(Sha256::hash(&[&[10]])))
+                .merkleize(&source)
                 .await
                 .unwrap();
             let source = source.apply_batch(batch).await.unwrap();
@@ -886,18 +940,18 @@ mod tests {
     }
 
     #[test]
-    fn managed_db_initializes_fixed_immutable_unjournaled_multiple_commit_ranges() {
+    fn managed_db_initializes_fixed_immutable_compact_multiple_commit_ranges() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("bounded-init");
             let db = FixedDb::init(context.child("db"), config.clone(), None)
                 .await
                 .unwrap();
 
-            let floor = db.inactivity_floor_loc();
             let batch = db
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
-                .merkleize(&db, Some(Sha256::hash(&[&[11]])), floor)
+                .with_metadata(Some(Sha256::hash(&[&[11]])))
+                .merkleize(&db)
                 .await
                 .unwrap();
             let mut db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
@@ -905,11 +959,11 @@ mod tests {
 
             // Add two ranges so reopening at the first target spans multiple commits.
             for i in [3u8, 5] {
-                let floor = db.inactivity_floor_loc();
                 let batch = db
                     .new_batch()
                     .set(Sha256::hash(&[&[i]]), Sha256::hash(&[&[i + 1]]))
-                    .merkleize(&db, Some(Sha256::hash(&[&[i * 11]])), floor)
+                    .with_metadata(Some(Sha256::hash(&[&[i * 11]])))
+                    .merkleize(&db)
                     .await
                     .unwrap();
                 db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
@@ -933,7 +987,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_db_prune_bounds_fixed_immutable_unjournaled_bounded_initialization_history() {
+    fn managed_db_prune_bounds_fixed_immutable_compact_bounded_initialization_history() {
         deterministic::Runner::default().start(|context| async move {
             // One witness entry per section so pruning takes effect at entry granularity.
             let mut config = fixed_config("prune");
@@ -945,11 +999,11 @@ mod tests {
             // Commit three ranges, recording each target.
             let mut targets = Vec::new();
             for i in [1u8, 3, 5] {
-                let floor = db.inactivity_floor_loc();
                 let batch = db
                     .new_batch()
                     .set(Sha256::hash(&[&[i]]), Sha256::hash(&[&[i + 1]]))
-                    .merkleize(&db, Some(Sha256::hash(&[&[i * 11]])), floor)
+                    .with_metadata(Some(Sha256::hash(&[&[i * 11]])))
+                    .merkleize(&db)
                     .await
                     .unwrap();
                 db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();

@@ -3100,7 +3100,7 @@ pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization:
             context.child("network"),
             NZUsize!(3),
             participants.clone(),
-            commonware_p2p::max_message_size(&[payload]),
+            commonware_p2p::max_message_size([payload]),
         )
         .await;
 

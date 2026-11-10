@@ -4,7 +4,7 @@
 
 use crate::{
     journal::contiguous::variable::{self, Config as JournalConfig},
-    qmdb::{any::value::VariableEncoding, keyless::operation::Operation as BaseOperation},
+    qmdb::{keyless::operation::Operation as BaseOperation, value::VariableEncoding},
 };
 
 /// Keyless operation for variable-length values.
@@ -12,7 +12,7 @@ pub type Operation<F, V> = BaseOperation<F, VariableEncoding<V>>;
 
 /// A keyless authenticated database for variable-length data.
 pub type Db<F, E, V, H, S> =
-    super::Keyless<F, E, VariableEncoding<V>, variable::Journal<E, Operation<F, V>>, H, S>;
+    super::Db<F, E, VariableEncoding<V>, variable::Journal<E, Operation<F, V>>, H, S>;
 
 /// A compact keyless authenticated db for variable-length data.
 pub type CompactDb<F, E, V, H, S> = super::CompactDb<F, E, VariableEncoding<V>, H, S>;
@@ -205,7 +205,8 @@ mod tests {
                         ));
                 }
                 let new_commit_loc = db.bounds().end + 3;
-                let merkleized = batch.merkleize(&db, None, new_commit_loc).await.unwrap();
+                let batch = batch.with_inactivity_floor(new_commit_loc);
+                let merkleized = batch.merkleize(&db).await.unwrap();
                 db = db.apply_batch(merkleized).await.unwrap();
             }
 
@@ -252,19 +253,20 @@ mod tests {
         let v2 = b"world".to_vec();
         let metadata = b"metadata".to_vec();
 
-        let floor = db.inactivity_floor_loc();
         let retained = db
             .new_batch()
             .append(v1.clone())
             .append(v2.clone())
-            .merkleize(&db, Some(metadata.clone()), floor)
+            .with_metadata(Some(metadata.clone()))
+            .merkleize(&db)
             .await
             .unwrap();
         let compact_batch = compact
             .new_batch()
             .append(v1)
             .append(v2)
-            .merkleize(&compact, Some(metadata.clone()), floor)
+            .with_metadata(Some(metadata.clone()))
+            .merkleize(&compact)
             .await
             .unwrap();
 

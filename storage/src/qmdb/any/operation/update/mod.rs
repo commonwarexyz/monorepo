@@ -1,4 +1,4 @@
-use crate::qmdb::{any::value::ValueEncoding, operation::Key};
+use crate::qmdb::{operation::Key, value::ValueEncoding};
 use commonware_codec::CodecShared;
 use std::fmt;
 
@@ -65,8 +65,8 @@ pub(crate) trait Parts: Update {
 #[cfg(test)]
 mod tests {
     use super::ordered::Update as OrderedUpdate;
-    use crate::qmdb::any::{
-        unordered::Update as UnorderedUpdate,
+    use crate::qmdb::{
+        any::unordered::Update as UnorderedUpdate,
         value::{FixedEncoding, VariableEncoding},
     };
     use commonware_codec::{Codec, RangeCfg, Read};

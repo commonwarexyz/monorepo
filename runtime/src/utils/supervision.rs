@@ -222,8 +222,14 @@ impl Drop for Tree {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{telemetry::metrics::raw::Gauge, utils::MetricHandle};
-    use futures::future::{AbortHandle, Abortable, pending};
+    use crate::{
+        telemetry::metrics::raw::Gauge,
+        utils::{
+            MetricHandle,
+            abort::{AbortHandle, Abortable},
+        },
+    };
+    use futures::future::pending;
 
     fn aborter() -> (Aborter, Abortable<futures::future::Pending<()>>) {
         let gauge = Gauge::default();

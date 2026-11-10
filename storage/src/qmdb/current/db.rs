@@ -40,7 +40,7 @@ use commonware_utils::{
     bitmap::{self, Readable as _},
     sequence::prefixed_u64::U64,
 };
-use core::num::NonZeroU64;
+use core::{borrow::Borrow, num::NonZeroU64};
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::Arc,
@@ -226,7 +226,7 @@ pub struct Db<
     /// An authenticated database that provides the ability to prove whether a key ever had a
     /// specific value. Owns the activity-status bitmap (`any.bitmap`) that this layer reads to
     /// install grafted-tree updates and serve proofs.
-    pub(super) any: any::db::Db<F, E, C, I, H, U, N, S>,
+    pub(super) any: any::Db<F, E, C, I, H, U, N, S>,
 
     /// Each leaf corresponds to a complete bitmap chunk at the grafting height.
     /// See the [grafted leaf formula](super) in the module documentation.
@@ -256,6 +256,9 @@ pub struct Db<
     /// See the [Root structure](super) section in the module documentation.
     pub(super) root: DigestOf<H>,
 
+    /// Witness binding the ops root to `root`.
+    pub(super) ops_root_witness: OpsRootWitness<F, H::Digest>,
+
     /// Metrics for the Current layer.
     pub(super) metrics: Metrics<E>,
 
@@ -279,7 +282,7 @@ where
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Db")
             .field("bounds", &self.bounds())
-            .field("inactivity_floor_loc", &self.any.inactivity_floor_loc)
+            .field("inactivity_floor", &self.inactivity_floor())
             .finish_non_exhaustive()
     }
 }
@@ -298,9 +301,11 @@ where
 {
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive.
-    #[cfg(any(test, feature = "test-traits"))]
-    pub(crate) const fn inactivity_floor_loc(&self) -> Location<F> {
-        self.any.inactivity_floor_loc()
+    ///
+    /// [`Self::prune`] and sync accept locations only up to [`Self::sync_boundary`], which can be
+    /// below this floor.
+    pub const fn inactivity_floor(&self) -> Location<F> {
+        self.any.inactivity_floor()
     }
 
     /// Whether the snapshot currently has no active keys.
@@ -319,7 +324,10 @@ where
     }
 
     /// Batch read multiple keys, returning results in the same order as the input keys.
-    pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
+    pub async fn get_many(
+        &self,
+        keys: &[impl Borrow<U::Key> + Sync],
+    ) -> Result<Vec<Option<U::Value>>, Error<F>> {
         self.any.get_many(keys).await
     }
 
@@ -338,18 +346,6 @@ where
     /// pruned or out-of-bounds location panics.
     pub fn bitmap(&self) -> &impl bitmap::Readable<N> {
         self.any.bitmap.as_ref()
-    }
-
-    /// Return true if the given sequence of `ops` were applied starting at location `start_loc`
-    /// in the log with the provided `root`, having the activity status described by `chunks`.
-    pub fn verify_range_proof(
-        proof: &RangeProof<F, H::Digest>,
-        start_loc: Location<F>,
-        ops: &[Operation<F, U>],
-        chunks: &[[u8; N]],
-        root: &H::Digest,
-    ) -> bool {
-        proof.verify::<H, _, N>(start_loc, ops, chunks, root)
     }
 
     /// Returns a virtual [`crate::merkle::storage::Storage`] view over the grafted tree and ops
@@ -390,20 +386,9 @@ where
         self.any.root()
     }
 
-    /// Returns a witness that this database's canonical root commits to its ops root.
-    ///
-    /// This can be used to authenticate an ops root against a trusted canonical `current` root.
-    pub async fn ops_root_witness(&self) -> Result<OpsRootWitness<F, H::Digest>, Error<F>> {
-        let storage = self.grafted_storage();
-        let ops_size = storage.size();
-        let ops_leaves = Location::<F>::try_from(ops_size)?;
-        compute_ops_root_witness::<F, H, _, _, N>(
-            self.any.bitmap.as_ref(),
-            &storage,
-            ops_leaves,
-            self.any.inactivity_floor_loc,
-        )
-        .await
+    /// Returns the cached witness binding [`Self::ops_root`] to [`Self::root`].
+    pub const fn ops_root_witness(&self) -> &OpsRootWitness<F, H::Digest> {
+        &self.ops_root_witness
     }
 
     /// Snapshot of the grafted tree for use in batch chains.
@@ -500,7 +485,7 @@ where
     ///
     /// Unlike [`range_proof`](Self::range_proof) which returns grafted proofs incorporating the
     /// activity bitmap, this returns ops-tree Merkle proofs suitable for state sync. Direct
-    /// verifiers should use [`crate::qmdb::verify_proof`].
+    /// verifiers should use [`crate::qmdb::ProofExt::verify`].
     pub async fn ops_historical_proof(
         &self,
         historical_size: Location<F>,
@@ -512,8 +497,10 @@ where
             .await
     }
 
-    /// Return the pinned nodes for a lower operation boundary of `loc`.
-    pub async fn pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<H::Digest>, Error<F>> {
+    /// Return ops-tree pinned nodes for a lower operation boundary of `loc`.
+    ///
+    /// These belong to the operations tree authenticated by [`Self::ops_root`].
+    pub async fn ops_pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<H::Digest>, Error<F>> {
         self.any.pinned_nodes_at(loc).await
     }
 
@@ -705,7 +692,7 @@ where
     /// plus a best-effort attempt to bound the recovery needed on startup.
     /// Bitmap metadata is not persisted by this call or by [Self::commit]. A new sync waits for
     /// the prior sync before starting. Failures surface as described on
-    /// [`any::Db::start_sync`](crate::qmdb::any::db::Db::start_sync).
+    /// [`any::Db::start_sync`](crate::qmdb::any::Db::start_sync).
     #[tracing::instrument(name = "qmdb.current.db.start_sync", level = "info", skip_all)]
     #[boxed]
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
@@ -792,6 +779,7 @@ where
             .release_below_floor::<N>(self.any.inactivity_floor_loc);
         Arc::make_mut(&mut self.grafted_tree).apply_batch(&batch.grafted)?;
         self.root = batch.canonical_root;
+        self.ops_root_witness = batch.ops_root_witness.clone();
         self.update_metrics();
         Ok(self)
     }
@@ -1007,16 +995,23 @@ pub(super) async fn compute_ops_root_witness<
     })
 }
 
-/// Rebuild the grafted overlay tree and compute the canonical db root from the ops tree and
-/// bitmap. Returns the grafted tree, the retained graft roots, and the db root.
+/// Rebuild the grafted overlay tree from the ops tree and bitmap, and compute the witness that
+/// binds the ops root to the canonical db root. Returns the grafted tree, the retained graft roots,
+/// and the witness.
 pub(super) async fn rebuild_grafted_tree<F, H, S, const N: usize>(
     bitmap: &impl bitmap::Readable<N>,
     pinned_nodes: &[H::Digest],
     ops_tree: &impl MerkleStorage<F, Digest = H::Digest>,
     inactivity_floor: Location<F>,
-    ops_root: H::Digest,
     strategy: &S,
-) -> Result<(Mem<F, H::Digest>, GraftRoots<H::Digest>, H::Digest), Error<F>>
+) -> Result<
+    (
+        Mem<F, H::Digest>,
+        GraftRoots<H::Digest>,
+        OpsRootWitness<F, H::Digest>,
+    ),
+    Error<F>,
+>
 where
     F: merkle::Graftable,
     H: Hasher,
@@ -1029,11 +1024,10 @@ where
     graft_roots.release_below_floor::<N>(inactivity_floor);
     let storage =
         grafting::Storage::<F, H, _, _>::new(&grafted_tree, grafting::height::<N>(), ops_tree);
-    let root =
+    let witness =
         compute_ops_root_witness::<F, H, _, _, N>(bitmap, &storage, ops_leaves, inactivity_floor)
-            .await?
-            .root::<H>(&ops_root);
-    Ok((grafted_tree, graft_roots, root))
+            .await?;
+    Ok((grafted_tree, graft_roots, witness))
 }
 
 /// Compute the root of the grafted structure represented by `storage`.
@@ -1266,7 +1260,6 @@ mod tests {
                 traits::{DbAny, UnmerkleizedBatch as _},
             },
             current::{tests::fixed_config, unordered::fixed},
-            floor::Proportional,
         },
         translator::OneCap,
     };
@@ -1462,7 +1455,7 @@ mod tests {
     async fn populate_fixed_db<F, DB>(db: DB, start: u64, count: u64) -> DB
     where
         F: merkle::Graftable,
-        DB: DbAny<F, Key = sha256::Digest, Value = sha256::Digest>,
+        DB: DbAny<Family = F, Key = sha256::Digest, Value = sha256::Digest>,
     {
         let mut batch = db.new_batch();
         for idx in start..start + count {
@@ -1470,7 +1463,7 @@ mod tests {
             let value = Sha256::hash(&[&(idx + count).to_be_bytes()]);
             batch = batch.write(key, Some(value));
         }
-        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+        let merkleized = batch.merkleize(&db).await.unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
     }
@@ -1502,7 +1495,7 @@ mod tests {
             let parent = db
                 .new_batch()
                 .write(hot, Some(parent_write))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
 
@@ -1522,11 +1515,7 @@ mod tests {
 
             // No batch in the chain writes key 2, so the database answers it.
             assert_eq!(read_pre, Some(Sha256::hash(&[&42u64.to_be_bytes()])));
-            let root_pre = child_pre
-                .merkleize(&db, None, &mut Proportional)
-                .await
-                .unwrap()
-                .root();
+            let root_pre = child_pre.merkleize(&db).await.unwrap().root();
 
             // Apply the parent.
             let db = db.apply_batch(parent.clone()).await.unwrap();
@@ -1538,10 +1527,7 @@ mod tests {
                 read_pre, read_post,
                 "a database read must not change when the parent is applied"
             );
-            let child_post = child_post
-                .merkleize(&db, None, &mut Proportional)
-                .await
-                .unwrap();
+            let child_post = child_post.merkleize(&db).await.unwrap();
             assert_eq!(
                 root_pre,
                 child_post.root(),
@@ -1578,13 +1564,13 @@ mod tests {
             let winner = db
                 .new_batch()
                 .write(hot, Some(Sha256::hash(&[b"winner"])))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let loser = db
                 .new_batch()
                 .write(hot, Some(Sha256::hash(&[b"loser"])))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
             assert_ne!(winner.root(), loser.root());
@@ -1596,10 +1582,7 @@ mod tests {
 
             assert!(matches!(child.get(&hot, &db).await, Err(Error::StaleRead)));
             assert!(matches!(loser.get(&hot, &db).await, Err(Error::StaleRead)));
-            assert!(matches!(
-                child.merkleize(&db, None, &mut Proportional).await,
-                Err(Error::StaleBatch)
-            ));
+            assert!(matches!(child.merkleize(&db).await, Err(Error::StaleBatch)));
 
             db.destroy().await.unwrap();
         });
@@ -1630,10 +1613,7 @@ mod tests {
                 let key = Sha256::hash(&[&idx.to_be_bytes()]);
                 parent = parent.write(key, Some(Sha256::hash(&[b"rewrite"])));
             }
-            let parent = parent
-                .merkleize(&db, None, &mut Proportional)
-                .await
-                .unwrap();
+            let parent = parent.merkleize(&db).await.unwrap();
 
             // Two identical children built before the apply.
             let build =
@@ -1646,11 +1626,7 @@ mod tests {
                     child
                 };
             let child = build(&parent);
-            let expected = build(&parent)
-                .merkleize(&db, None, &mut Proportional)
-                .await
-                .unwrap()
-                .root();
+            let expected = build(&parent).merkleize(&db).await.unwrap().root();
 
             // Apply the parent and prune past the chain's recorded boundary.
             let db = db.apply_batch(parent).await.unwrap();
@@ -1661,7 +1637,7 @@ mod tests {
             assert!(*db.bounds().start > 0, "the prune must remove history");
 
             // The child built before the apply still merkleizes to the same root.
-            let merkleized = child.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let merkleized = child.merkleize(&db).await.unwrap();
             assert_eq!(merkleized.root(), expected);
 
             db.destroy().await.unwrap();
@@ -1738,7 +1714,7 @@ mod tests {
                     Some(Sha256::hash(&[&round.to_be_bytes()])),
                 );
             }
-            let parent = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let parent = batch.merkleize(&db).await.unwrap();
 
             // Apply a child of the unapplied parent after dropping the parent. Applying the child
             // also retains the roots the parent made graftable.
@@ -1748,7 +1724,7 @@ mod tests {
                     Sha256::hash(&[b"child"]),
                     Some(Sha256::hash(&[&round.to_be_bytes()])),
                 )
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
             drop(parent);
@@ -1829,10 +1805,7 @@ mod tests {
         for &key in &keys {
             parent = parent.write(key, Some(Sha256::hash(&[b"parent"])));
         }
-        let parent = parent
-            .merkleize(&db, None, &mut Proportional)
-            .await
-            .unwrap();
+        let parent = parent.merkleize(&db).await.unwrap();
 
         // Rewriting every key deactivates the parent's operations. That dirties every chunk the
         // parent made graftable, and the database retains none of their roots yet.
@@ -1841,7 +1814,7 @@ mod tests {
             child = child.write(key, Some(Sha256::hash(&[b"child"])));
         }
         assert_eq!(db.graft_roots.end(), 0);
-        let child = child.merkleize(&db, None, &mut Proportional).await.unwrap();
+        let child = child.merkleize(&db).await.unwrap();
         let root = child.root();
 
         // Applying the chain and reopening both reproduce the child's merkleized root.
@@ -1892,7 +1865,7 @@ mod tests {
                 let value = Sha256::hash(&[&(idx + 100).to_be_bytes()]);
                 batch = batch.write(key, Some(value));
             }
-            let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let merkleized = batch.merkleize(&db).await.unwrap();
             let (start, ops) = merkleized.operations();
             let applied_start = db.bounds().end;
             let db = db.apply_batch(merkleized).await.unwrap();
@@ -1956,7 +1929,7 @@ mod tests {
         // Establish a durable state, then apply (but do not commit) a batch that advances the
         // in-memory floor well past the durable commit's floor.
         let db = populate_fixed_db::<mmr::Family, _>(db, 0, 512).await;
-        let durable_floor = db.inactivity_floor_loc();
+        let durable_floor = db.inactivity_floor();
         let keys: Vec<_> = (0..512u64)
             .map(|idx| Sha256::hash(&[&idx.to_be_bytes()]))
             .collect();
@@ -1969,7 +1942,7 @@ mod tests {
             });
             let merkleized = db
                 .new_batch()
-                .merkleize(&db, None, &mut policy)
+                .merkleize_with(&db, &mut policy)
                 .await
                 .unwrap();
             let mut visited: Vec<_> = policy.visited.iter().map(|(_, key, _)| *key).collect();
@@ -1989,7 +1962,7 @@ mod tests {
                 .fold(db.new_batch(), |batch, (key, value)| {
                     batch.write(*key, *value)
                 })
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
             (merkleized, expected)
@@ -2002,7 +1975,7 @@ mod tests {
         }
         db.assert_exact().await;
         let bounds = db.bounds();
-        let floor = db.inactivity_floor_loc();
+        let floor = db.inactivity_floor();
         let root = db.root();
 
         // Drop the production prune future while it is parked after the metadata sync, before
@@ -2026,7 +1999,7 @@ mod tests {
             .await
             .expect("prune crash must leave the db recoverable");
         assert_eq!(db.bounds(), bounds);
-        assert_eq!(db.inactivity_floor_loc(), floor);
+        assert_eq!(db.inactivity_floor(), floor);
         assert_eq!(db.root(), root);
         assert!(db.any.bitmap.pruned_bits() > *durable_floor);
         for (key, value) in &expected {
@@ -2070,7 +2043,7 @@ mod tests {
                 db = populate_fixed_db::<mmr::Family, _>(db, next_idx, 1).await;
                 next_idx += 1;
             }
-            let witness = db.ops_root_witness().await.unwrap();
+            let witness = db.ops_root_witness().clone();
             let ops_root = db.ops_root();
             let canonical_root = db.root();
 
@@ -2101,7 +2074,7 @@ mod tests {
             .await
             .unwrap();
             let db = populate_fixed_db::<mmb::Family, _>(db, 0, 260).await;
-            let witness = db.ops_root_witness().await.unwrap();
+            let witness = db.ops_root_witness().clone();
             let ops_root = db.ops_root();
             let canonical_root = db.root();
 
@@ -2129,43 +2102,6 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_ops_root_witness_verifies_with_pruned_db() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            let mut db = MmrDb::init(
-                ctx.child("storage"),
-                fixed_config::<OneCap>("ops-root-witness-pruned"),
-                None,
-            )
-            .await
-            .unwrap();
-
-            // Churn the same keys repeatedly to drive the inactivity floor past chunk boundaries.
-            for _ in 0..5 {
-                db = populate_fixed_db::<mmr::Family, _>(db, 0, 512).await;
-            }
-            let boundary = db.sync_boundary();
-            let db = db.prune(boundary).await.unwrap();
-            assert!(
-                db.any.bitmap.pruned_chunks() > 0,
-                "test requires at least one pruned chunk to exercise the zero-chunk path"
-            );
-            let witness = db.ops_root_witness().await.unwrap();
-            let ops_root = db.ops_root();
-            let canonical_root = db.root();
-
-            assert!(witness.verify::<Sha256>(&ops_root, &canonical_root));
-
-            let wrong_canonical_root = Sha256::hash(&[b"wrong canonical root"]);
-            assert!(!witness.verify::<Sha256>(&ops_root, &wrong_canonical_root));
-
-            let mut tampered = witness;
-            tampered.grafted_root = Sha256::hash(&[b"wrong grafted root"]);
-            assert!(!tampered.verify::<Sha256>(&ops_root, &canonical_root));
-        });
-    }
-
-    #[test_traced]
     fn test_ops_root_witness_verifies_on_fresh_db() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
@@ -2176,7 +2112,7 @@ mod tests {
             )
             .await
             .unwrap();
-            let witness = db.ops_root_witness().await.unwrap();
+            let witness = db.ops_root_witness();
             let ops_root = db.ops_root();
             let canonical_root = db.root();
 

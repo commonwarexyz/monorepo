@@ -692,6 +692,24 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
         None
     }
 
+    /// Iterate the nodes this batch appended or overwrote relative to its parent batch.
+    #[cfg(feature = "std")]
+    pub(crate) fn local_nodes(&self) -> impl Iterator<Item = (Position<F>, D)> + '_ {
+        self.data
+            .overwrites
+            .iter()
+            .map(|(&pos, &digest)| (pos, digest))
+            .chain(
+                self.data
+                    .appended
+                    .iter()
+                    .enumerate()
+                    .map(|(index, &digest)| {
+                        (Position::new(*self.data.parent_size + index as u64), digest)
+                    }),
+            )
+    }
+
     /// Compute the root digest after this batch's mutations using `inactive_peaks` and the bagging
     /// carried by `hasher`.
     pub fn root(
@@ -861,8 +879,8 @@ mod tests {
             let proof = applied.proof(&hasher, loc, 0).unwrap();
             assert!(proof.verify_element_inclusion(
                 &hasher,
-                &element,
                 loc,
+                &element,
                 &batch_root(&merkleized, &hasher)
             ));
         });
@@ -940,8 +958,8 @@ mod tests {
                 let proof = applied.proof(&hasher, loc, 0).unwrap();
                 assert!(proof.verify_element_inclusion(
                     &hasher,
-                    &element,
                     loc,
+                    &element,
                     &batch_root(&mb, &hasher)
                 ));
             }
@@ -1045,8 +1063,8 @@ mod tests {
             let proof = applied.proof(&hasher, loc, 0).unwrap();
             assert!(proof.verify_element_inclusion(
                 &hasher,
-                &element,
                 loc,
+                &element,
                 &batch_root(&m, &hasher)
             ));
             let range = Location::<F>::new(50)..Location::new(55);
@@ -1056,8 +1074,8 @@ mod tests {
                 .collect();
             assert!(rp.verify_range_inclusion(
                 &hasher,
-                &elements,
                 range.start,
+                &elements,
                 &batch_root(&m, &hasher)
             ));
         });
@@ -1083,13 +1101,13 @@ mod tests {
             let loc = Location::<F>::new(52);
             let element = hasher.digest(&52u64.to_be_bytes());
             let proof = m.proof(&base, &hasher, loc, 0).unwrap();
-            assert!(proof.verify_element_inclusion(&hasher, &element, loc, &expected_root));
+            assert!(proof.verify_element_inclusion(&hasher, loc, &element, &expected_root));
 
             // A committed leaf: the path needs committed siblings as well as committed peaks.
             let loc = Location::<F>::new(49);
             let element = hasher.digest(&49u64.to_be_bytes());
             let proof = m.proof(&base, &hasher, loc, 0).unwrap();
-            assert!(proof.verify_element_inclusion(&hasher, &element, loc, &expected_root));
+            assert!(proof.verify_element_inclusion(&hasher, loc, &element, &expected_root));
 
             // A range of new leaves and a range spanning the fork boundary.
             for range in [
@@ -1100,7 +1118,7 @@ mod tests {
                     .map(|i| hasher.digest(&i.to_be_bytes()))
                     .collect();
                 let rp = m.range_proof(&base, &hasher, range.clone(), 0).unwrap();
-                assert!(rp.verify_range_inclusion(&hasher, &elements, range.start, &expected_root));
+                assert!(rp.verify_range_inclusion(&hasher, range.start, &elements, &expected_root));
             }
         });
     }
@@ -1186,7 +1204,7 @@ mod tests {
             let loc = Location::<F>::new(80);
             let element = hasher.digest(&80u64.to_be_bytes());
             let proof = applied.proof(&hasher, loc, 0).unwrap();
-            assert!(proof.verify_element_inclusion(&hasher, &element, loc, &expected_root));
+            assert!(proof.verify_element_inclusion(&hasher, loc, &element, &expected_root));
             assert!(matches!(
                 applied.proof(&hasher, Location::new(0), 0),
                 Err(Error::ElementPruned(_))
@@ -1722,7 +1740,7 @@ mod tests {
                     assert_eq!(rebuilt.root(&hasher, inactive_peaks).unwrap(), root);
 
                     let proof = rebuilt.proof(&hasher, boundary, inactive_peaks).unwrap();
-                    assert!(proof.verify_range_inclusion(&hasher, &[element], boundary, &root));
+                    assert!(proof.verify_range_inclusion(&hasher, boundary, &[element], &root));
                 }
             }
         });

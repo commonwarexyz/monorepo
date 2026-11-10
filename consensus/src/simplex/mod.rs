@@ -1211,7 +1211,7 @@ mod tests {
         let (network, oracle) = Network::new_with_peers(
             context.child("network"),
             Config {
-                max_size: max_message_size(&[max_payload_size::<S, Sha256Digest>(
+                max_size: max_message_size([max_payload_size::<S, Sha256Digest>(
                     u32::try_from(peers.len()).unwrap(),
                 )]),
                 // Some tests replace the initial set with the committee plus one injector.
@@ -1244,7 +1244,7 @@ mod tests {
         let (network, oracle) = Network::new_with_split_peers(
             context.child("network"),
             Config {
-                max_size: max_message_size(&[max_payload_size::<S, Sha256Digest>(
+                max_size: max_message_size([max_payload_size::<S, Sha256Digest>(
                     u32::try_from(primary.len()).unwrap(),
                 )]),
                 max_peers_per_set: NZUsize!(primary.len() + secondary.len()),
