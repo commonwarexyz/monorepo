@@ -402,7 +402,7 @@ mod tests {
     use commonware_math::algebra::Random as _;
     use commonware_resolver::Fetch;
     use commonware_utils::{NZU64, sync::Mutex};
-    use std::{fmt::Debug, num::NonZeroU64, sync::Arc};
+    use std::{fmt::Debug, num::NonZeroU64, ops::RangeInclusive, sync::Arc};
 
     type TestDigest = <Sha256 as commonware_cryptography::Hasher>::Digest;
     type TestScheme = simplex_ed25519::Scheme;
@@ -676,40 +676,46 @@ mod tests {
         }
     }
 
-    /// Asserts that `retained_from` keeps each window without a spare epoch for rounds witnessed in
-    /// the first `epochs` epochs of `epocher`.
-    fn assert_keeps_window_without_spare_epoch<E: Epocher + Debug>(epocher: &E, epochs: u64) {
+    /// Checks that `retained_from` keeps every window in `windows` behind each view in `views` of
+    /// the first `epochs` epochs, and keeps no more earlier epochs than it needs.
+    fn assert_keeps_window<E: Epocher + Debug>(
+        epocher: &E,
+        epochs: u64,
+        windows: RangeInclusive<u64>,
+        views: RangeInclusive<u64>,
+    ) {
         let heights = |epoch: u64| {
             let epoch = Epoch::new(epoch);
             epocher.last(epoch).unwrap().get() - epocher.first(epoch).unwrap().get() + 1
         };
-        for retention in 1..=13 {
+        for window in windows {
             for epoch in 0..epochs {
-                for view in 0..=15 {
+                for view in views.clone() {
                     let witnessed = Round::new(Epoch::new(epoch), View::new(view));
-                    let retained = retained_from(epocher, witnessed, ViewDelta::new(retention));
+                    let retained = retained_from(epocher, witnessed, ViewDelta::new(window));
 
                     // Within the witnessed epoch, exactly the window stays.
-                    if view >= retention {
-                        let expected = Round::new(witnessed.epoch(), View::new(view - retention));
+                    if view >= window {
+                        let expected = Round::new(witnessed.epoch(), View::new(view - window));
                         assert_eq!(retained, expected);
                         continue;
                     }
 
-                    // Below it, whole epochs stay. Counted at one view per height, they must cover
-                    // the rest of the window unless they reach genesis, and fall short of it
-                    // without the lowest epoch.
+                    // When the window reaches past the start of the epoch, earlier epochs stay
+                    // whole. Their heights must cover the missing views unless they reach genesis,
+                    // and must fall short without the lowest kept epoch.
                     assert_eq!(retained.view(), View::zero());
+                    let missing = window - view;
                     let lowest = retained.epoch().get();
-                    let kept: u64 = (lowest..epoch).map(heights).sum();
-                    let window = format!("{retention} views behind {witnessed} under {epocher:?}");
+                    let covered: u64 = (lowest..epoch).map(heights).sum();
+                    let case = format!("{window} views behind {witnessed} under {epocher:?}");
                     assert!(
-                        lowest == 0 || kept + view >= retention,
-                        "the kept epochs must span {window}"
+                        lowest == 0 || covered >= missing,
+                        "the kept epochs must span {case}"
                     );
                     assert!(
-                        lowest == epoch || kept - heights(lowest) + view < retention,
-                        "the lowest kept epoch must be needed for {window}"
+                        lowest == epoch || covered - heights(lowest) < missing,
+                        "the lowest kept epoch must be needed for {case}"
                     );
                 }
             }
@@ -720,16 +726,16 @@ mod tests {
     fn retained_from_keeps_the_window_without_a_spare_epoch() {
         for length in 2..=6 {
             let epocher = FixedEpocher::new(NonZeroU64::new(length).unwrap());
-            assert_keeps_window_without_spare_epoch(&epocher, 9);
+            assert_keeps_window(&epocher, 9, 1..=13, 0..=15);
         }
     }
 
     #[test]
     fn retained_from_keeps_the_window_across_uneven_epochs() {
-        // Single-height epochs sit between longer ones, and epoch six holds more heights than
-        // any window in the sweep.
+        // Single-height epochs sit between longer ones, and epoch six holds more heights than the
+        // largest window.
         let epocher = UnevenEpocher::new(&[3, 1, 6, 1, 1, 4, 14, 2, 5]);
-        assert_keeps_window_without_spare_epoch(&epocher, 9);
+        assert_keeps_window(&epocher, 9, 1..=13, 0..=15);
     }
 
     fn floor() -> State<TestScheme, TestDigest> {
