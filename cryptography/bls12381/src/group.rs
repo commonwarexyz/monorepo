@@ -4,6 +4,7 @@
 mod g1;
 mod g2;
 mod kernel;
+mod msm;
 mod pairing;
 mod scalar;
 #[cfg(test)]
@@ -15,7 +16,8 @@ use commonware_parallel::Strategy;
 use core::{fmt, num::NonZeroUsize};
 pub use g1::G1;
 pub use g2::G2;
-use kernel::{Group, Kernel, Msm};
+use kernel::{Group, Kernel};
+use msm::Msm;
 pub use pairing::{GT, multi_pairing, pairing, pairings};
 pub use scalar::Scalar;
 
@@ -64,7 +66,8 @@ fn fmt_coordinates<const N: usize>(
 pub mod fuzz {
     use super::{
         MSM_BATCH, Scalar,
-        kernel::{self, Add, Double, Group, Kernel, MAX_LANES, Msm, Multiply, MultiplyEach, Sum},
+        kernel::{Add, Double, Group, Kernel, MAX_LANES, Multiply, MultiplyEach, Sum},
+        msm::{self, Msm},
     };
     pub use super::{pairing::fuzz as pairing, scalar::fuzz as scalar};
     use crate::core::{
@@ -90,7 +93,7 @@ pub mod fuzz {
     /// Most elements of a slice operation, more than the lanes of the widest representation.
     const SLICE: usize = 2 * MAX_LANES + 3;
 
-    /// Widest window of a drawn [`kernel::Method`]; wider ones only add buckets.
+    /// Widest window of a drawn [`msm::Method`]; wider ones only add buckets.
     const WIDEST: u32 = 8;
 
     /// A group under test.
@@ -189,14 +192,14 @@ pub mod fuzz {
     }
 
     /// Draws the method of a multi-scalar multiplication, or `None` for the one chosen by cost.
-    fn method(u: &mut Unstructured<'_>) -> arbitrary::Result<Option<kernel::Method>> {
+    fn method(u: &mut Unstructured<'_>) -> arbitrary::Result<Option<msm::Method>> {
         Ok(match u.int_in_range(0u8..=2)? {
             0 => None,
-            1 => Some(kernel::Method::Straus {
+            1 => Some(msm::Method::Straus {
                 width: u.int_in_range(2..=WIDEST)?,
                 split: u.arbitrary()?,
             }),
-            _ => Some(kernel::Method::Pippenger(u.int_in_range(2..=WIDEST)?)),
+            _ => Some(msm::Method::Pippenger(u.int_in_range(2..=WIDEST)?)),
         })
     }
 
@@ -347,8 +350,8 @@ pub mod fuzz {
                             let lanes = *u.choose(&[1, 4, 8, 16])?;
                             let crossover = (1..)
                                 .find(|&n| {
-                                    let method = kernel::Method::choose::<G>(n, lanes);
-                                    matches!(method, kernel::Method::Pippenger(_))
+                                    let method = msm::Method::choose::<G>(n, lanes);
+                                    matches!(method, msm::Method::Pippenger(_))
                                 })
                                 .expect("Pippenger's method costs less for many elements");
                             crossover - u.int_in_range(0..=1)?
