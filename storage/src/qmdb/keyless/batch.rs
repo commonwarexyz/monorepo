@@ -300,7 +300,7 @@ where
         if locs.is_empty() {
             return Ok(Vec::new());
         }
-        super::check_locations(locs, self.size())?;
+        super::db::check_locations(locs, self.size())?;
         check_floor(locs[0], self.floor(&*db))?;
         let mut results = Vec::with_capacity(locs.len());
         let mut db_indices = Vec::new();
@@ -567,7 +567,7 @@ where
         if locs.is_empty() {
             return Ok(Vec::new());
         }
-        super::check_locations(locs, self.bounds.tip.size)?;
+        super::db::check_locations(locs, self.bounds.tip.size)?;
         check_floor(locs[0], self.bounds.inactivity_floor)?;
         let mut results = Vec::with_capacity(locs.len());
         let mut db_indices = Vec::new();

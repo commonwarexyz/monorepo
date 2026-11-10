@@ -7,7 +7,8 @@ use crate::{
     },
     qmdb::{
         self, Error,
-        immutable::{self, CompactDb, Metrics, Operation},
+        immutable::{self, CompactDb, Operation},
+        metrics::Metrics,
         operation::Key,
         sync,
         value::ValueEncoding,
@@ -96,7 +97,7 @@ where
             crate::qmdb::find_inactivity_floor_at::<F, _>(&journal.journal, size).await?;
 
         // Replay the log from the inactivity floor to build the snapshot.
-        let snapshot = immutable::build_snapshot(
+        let snapshot = immutable::db::build_snapshot(
             context.child("snapshot"),
             db_config.translator,
             inactivity_floor_loc,

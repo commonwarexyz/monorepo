@@ -7,7 +7,8 @@ use crate::{
     },
     qmdb::{
         self,
-        keyless::{CompactDb, Db, Metrics, Operation, operation::OperationCodec},
+        keyless::{CompactDb, Db, Operation, operation::OperationCodec},
+        metrics::Metrics,
         sync,
     },
 };
