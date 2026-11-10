@@ -31,7 +31,7 @@ use crate::core::{
         MAX_LANES,
         arithmetic::{Field, Signed},
         fp::{self, MINUS_ONE, ONE},
-        fp2::{BYTES, Fp2, Product, encode},
+        fp2::{self, BYTES, Fp2, Product, encode},
     },
 };
 use commonware_formatting::hex;
@@ -41,11 +41,7 @@ use commonware_simd::Simd;
 pub type Coordinates = [[u8; BYTES]; 3];
 
 /// The identity `(0 : 1 : 0)` as projective coordinates.
-pub const IDENTITY: Coordinates = {
-    let mut identity = [[0; BYTES]; 3];
-    identity[1][BYTES - 1] = 1;
-    identity
-};
+pub const IDENTITY: Coordinates = [[0; BYTES], fp2::ONE, [0; BYTES]];
 
 /// The generator in projective coordinates, with `Z = 1`. Each coordinate is `c1` followed by
 /// `c0`.
@@ -58,11 +54,7 @@ pub const GENERATOR: Coordinates = [
         "0606c4a02ea734cc32acd2b02bc28b99cb3e287e85a763af267492ab572e99ab3f370d275cec1da1aaa9075ff05f79be"
         "0ce5d527727d6e118cc9cdc6da2e351aadfd9baa8cbdd3a76d429a695160d12c923ac9cc3baca289e193548608b82801"
     ),
-    {
-        let mut one = [0; BYTES];
-        one[BYTES - 1] = 1;
-        one
-    },
+    fp2::ONE,
 ];
 
 /// Largest integer bound of a coordinate component, in units of `p`.
