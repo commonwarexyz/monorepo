@@ -939,6 +939,33 @@ mod tests {
         });
     }
 
+    /// Staging payouts commits with the log's inactivity floor at zero, and fails on a log whose
+    /// floor a commit has raised.
+    #[test]
+    fn test_stage_keeps_the_floor_at_zero() {
+        deterministic::Runner::default().start(|context| async move {
+            let log = open_log(context.child("log"), "floor", None).await;
+            let payouts = amounts(&[(0, 4), (2, 30)]);
+            let batch = Payout::stage(&log, &payouts).await.unwrap();
+            let log = log.apply_batch(batch).await.unwrap();
+            assert_eq!(log.inactivity_floor(), Location::new(0));
+
+            // A commit that raises the floor leaves the log unable to stage a close's payouts.
+            let raised = log
+                .new_batch()
+                .with_inactivity_floor(Location::new(1))
+                .merkleize(&log)
+                .await
+                .unwrap();
+            let log = log.apply_batch(raised).await.unwrap();
+            assert_eq!(log.inactivity_floor(), Location::new(1));
+            assert!(matches!(
+                Payout::stage(&log, &payouts).await,
+                Err(qmdb::Error::FloorRegressed(..))
+            ));
+        });
+    }
+
     /// A proposal applies only as the posted close, on the databases it settled on. A refused apply
     /// leaves both databases as they were.
     #[test]
