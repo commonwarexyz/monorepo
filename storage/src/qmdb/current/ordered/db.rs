@@ -19,7 +19,7 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use core::ops::RangeBounds;
+use core::{future::Future, ops::RangeBounds};
 use futures::stream::Stream;
 
 /// The generic Db type for ordered Current QMDB variants.
@@ -68,6 +68,17 @@ where
     /// or `None` if `key` is not active.
     pub async fn get_with_next_key(&self, key: &K) -> Result<Option<(V::Value, K)>, Error<F>> {
         self.any.get_with_next_key(key).await
+    }
+
+    /// Return a future that reads into the page cache the applied operations a batch reads to
+    /// link the keys it creates or deletes into the key order. See
+    /// [crate::qmdb::any::db::Db::prefetch_neighbors].
+    pub fn prefetch_neighbors(
+        &self,
+        writes: &[&K],
+        deletes: &[&K],
+    ) -> impl Future<Output = ()> + Send + 'static + use<F, E, C, K, V, I, H, N, S> {
+        self.any.prefetch_neighbors(writes, deletes)
     }
 
     /// Streams active (key, value) pairs in ascending key order within `range`.
