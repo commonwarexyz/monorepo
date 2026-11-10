@@ -456,79 +456,102 @@ pub mod fuzz {
         }
     }
 
-    /// Defines a test of each [`Plan`] variant on a group.
     #[cfg(test)]
-    macro_rules! tests {
-        ($group:ty) => {
-            use crate::group::fuzz::Plan;
-            use commonware_invariants::minifuzz;
+    mod tests {
+        use super::*;
+        use crate::group::{G1, G2};
+        use commonware_invariants::minifuzz;
 
-            // Most cases multiply several times, so debug builds run few of them.
+        // Most cases multiply several times, so debug builds run few of them.
 
-            #[test]
-            fn minifuzz_additive() {
-                minifuzz::Builder::default()
-                    .with_min_iterations(16)
-                    .test(|u| Plan::Additive.run::<$group>(u));
-            }
+        #[test]
+        fn minifuzz_additive() {
+            minifuzz::Builder::default()
+                .with_min_iterations(16)
+                .test(|u| {
+                    Plan::Additive.run::<G1>(u)?;
+                    Plan::Additive.run::<G2>(u)
+                });
+        }
 
-            #[test]
-            fn minifuzz_space() {
-                minifuzz::Builder::default()
-                    .with_min_iterations(4)
-                    .test(|u| Plan::Space.run::<$group>(u));
-            }
+        #[test]
+        fn minifuzz_space() {
+            minifuzz::Builder::default()
+                .with_min_iterations(4)
+                .test(|u| {
+                    Plan::Space.run::<G1>(u)?;
+                    Plan::Space.run::<G2>(u)
+                });
+        }
 
-            #[test]
-            fn minifuzz_multiples() {
-                minifuzz::Builder::default()
-                    .with_min_iterations(8)
-                    .test(|u| Plan::Multiples.run::<$group>(u));
-            }
+        #[test]
+        fn minifuzz_multiples() {
+            minifuzz::Builder::default()
+                .with_min_iterations(8)
+                .test(|u| {
+                    Plan::Multiples.run::<G1>(u)?;
+                    Plan::Multiples.run::<G2>(u)
+                });
+        }
 
-            #[test]
-            fn minifuzz_msm() {
-                minifuzz::Builder::default()
-                    .with_min_iterations(8)
-                    .test(|u| Plan::Msm.run::<$group>(u));
-            }
+        #[test]
+        fn minifuzz_msm() {
+            minifuzz::Builder::default()
+                .with_min_iterations(8)
+                .test(|u| {
+                    Plan::Msm.run::<G1>(u)?;
+                    Plan::Msm.run::<G2>(u)
+                });
+        }
 
-            #[test]
-            fn minifuzz_batches() {
-                minifuzz::Builder::default()
-                    .with_min_iterations(1)
-                    .test(|u| Plan::Batches.run::<$group>(u));
-            }
+        #[test]
+        fn minifuzz_batches() {
+            minifuzz::Builder::default()
+                .with_min_iterations(1)
+                .test(|u| {
+                    Plan::Batches.run::<G1>(u)?;
+                    Plan::Batches.run::<G2>(u)
+                });
+        }
 
-            #[test]
-            fn minifuzz_sum() {
-                minifuzz::Builder::default()
-                    .with_min_iterations(16)
-                    .test(|u| Plan::Sum.run::<$group>(u));
-            }
+        #[test]
+        fn minifuzz_sum() {
+            minifuzz::Builder::default()
+                .with_min_iterations(16)
+                .test(|u| {
+                    Plan::Sum.run::<G1>(u)?;
+                    Plan::Sum.run::<G2>(u)
+                });
+        }
 
-            #[test]
-            fn minifuzz_mul_each() {
-                minifuzz::Builder::default()
-                    .with_min_iterations(4)
-                    .test(|u| Plan::MulEach.run::<$group>(u));
-            }
+        #[test]
+        fn minifuzz_mul_each() {
+            minifuzz::Builder::default()
+                .with_min_iterations(4)
+                .test(|u| {
+                    Plan::MulEach.run::<G1>(u)?;
+                    Plan::MulEach.run::<G2>(u)
+                });
+        }
 
-            #[test]
-            fn minifuzz_endomorphism() {
-                minifuzz::Builder::default()
-                    .with_min_iterations(16)
-                    .test(|u| Plan::Endomorphism.run::<$group>(u));
-            }
+        #[test]
+        fn minifuzz_endomorphism() {
+            minifuzz::Builder::default()
+                .with_min_iterations(16)
+                .test(|u| {
+                    Plan::Endomorphism.run::<G1>(u)?;
+                    Plan::Endomorphism.run::<G2>(u)
+                });
+        }
 
-            #[test]
-            fn minifuzz_representations() {
-                minifuzz::Builder::default()
-                    .with_min_iterations(4)
-                    .test(|u| Plan::Representations.run::<$group>(u));
-            }
-        };
+        #[test]
+        fn minifuzz_representations() {
+            minifuzz::Builder::default()
+                .with_min_iterations(4)
+                .test(|u| {
+                    Plan::Representations.run::<G1>(u)?;
+                    Plan::Representations.run::<G2>(u)
+                });
+        }
     }
-    #[cfg(test)]
-    pub(crate) use tests;
 }
