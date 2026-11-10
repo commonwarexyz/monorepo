@@ -36,7 +36,7 @@ fn msm<G: Group + Additive>(points: &[G], scalars: &[Scalar], strategy: &impl St
                     Msm {
                         elements: &points[range.clone()],
                         scalars: &scalars[range],
-                        plan: None,
+                        method: None,
                     }
                     .dispatch()
                 },
@@ -90,7 +90,7 @@ pub mod fuzz {
     /// Most elements of a slice operation, more than the lanes of the widest representation.
     const SLICE: usize = 2 * MAX_LANES + 3;
 
-    /// Widest window of a drawn [`kernel::Plan`]; wider ones only add buckets.
+    /// Widest window of a drawn [`kernel::Method`]; wider ones only add buckets.
     const WIDEST: u32 = 8;
 
     /// A group under test.
@@ -189,14 +189,14 @@ pub mod fuzz {
     }
 
     /// Draws the method of a multi-scalar multiplication, or `None` for the one chosen by cost.
-    fn method(u: &mut Unstructured<'_>) -> arbitrary::Result<Option<kernel::Plan>> {
+    fn method(u: &mut Unstructured<'_>) -> arbitrary::Result<Option<kernel::Method>> {
         Ok(match u.int_in_range(0u8..=2)? {
             0 => None,
-            1 => Some(kernel::Plan::Straus {
+            1 => Some(kernel::Method::Straus {
                 width: u.int_in_range(2..=WIDEST)?,
                 split: u.arbitrary()?,
             }),
-            _ => Some(kernel::Plan::Pippenger(u.int_in_range(2..=WIDEST)?)),
+            _ => Some(kernel::Method::Pippenger(u.int_in_range(2..=WIDEST)?)),
         })
     }
 
@@ -341,14 +341,14 @@ pub mod fuzz {
                     assert_eq!(p.scale(&words), p * &Scalar::from_words_wide(&words));
                 }
                 Self::Msm => {
-                    let plan = method(u)?;
+                    let method = method(u)?;
                     let count = match u.int_in_range(0u8..=7)? {
                         0 => {
                             let lanes = *u.choose(&[1, 4, 8, 16])?;
                             let crossover = (1..)
                                 .find(|&n| {
-                                    let plan = kernel::Plan::choose::<G>(n, lanes);
-                                    matches!(plan, kernel::Plan::Pippenger(_))
+                                    let method = kernel::Method::choose::<G>(n, lanes);
+                                    matches!(method, kernel::Method::Pippenger(_))
                                 })
                                 .expect("Pippenger's method costs less for many elements");
                             crossover - u.int_in_range(0..=1)?
@@ -363,17 +363,17 @@ pub mod fuzz {
                     };
                     let (elements, logarithms) = elements::<G>(u, count + extra_elements)?;
                     let scalars = scalars(u, count + extra_scalars)?;
-                    let actual = match plan {
+                    let actual = match method {
                         None => G::msm(&elements, &scalars, &Sequential),
-                        plan => Msm {
+                        method => Msm {
                             elements: &elements[..count],
                             scalars: &scalars[..count],
-                            plan,
+                            method,
                         }
                         .dispatch(),
                     };
                     let expected = generator * &dot(&logarithms[..count], &scalars[..count]);
-                    assert_eq!(actual, expected, "{plan:?} for {count} elements");
+                    assert_eq!(actual, expected, "{method:?} for {count} elements");
                 }
                 Self::Batches => {
                     const WORKERS: NonZeroUsize = NonZeroUsize::new(2).unwrap();
@@ -440,14 +440,14 @@ pub mod fuzz {
                     let count = length(u, MAX_LANES + 3)?;
                     let (elements, _) = elements::<G>(u, count.max(2))?;
                     let scalars = scalars(u, count.max(1))?;
-                    let plan = method(u)?;
+                    let method = method(u)?;
                     match kind {
                         0 => check_representations(
                             u,
                             Msm {
                                 elements: &elements[..count],
                                 scalars: &scalars[..count],
-                                plan,
+                                method,
                             },
                         )?,
                         1 => check_representations(u, Sum(&elements[..count]))?,
