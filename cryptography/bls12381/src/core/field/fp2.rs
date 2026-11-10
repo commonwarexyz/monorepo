@@ -42,8 +42,8 @@
 //! sum's integer bound plus `K` with limb bound `1`. A wide negative sum must be at most `295936`,
 //! and the positive sum plus `295936` at most `645173`; the component reduces to at most `17`.
 //! Components without negative sums reduce without the bias. [`mul::<K>`](Fp2::mul) reduces a
-//! product with the bias `K`, and [`square`](Fp2::square) and [`mul_base`](Fp2::mul_base) reduce
-//! products without negative sums.
+//! product with the bias `K`, and [`mul_base`](Fp2::mul_base) reduces a product without negative
+//! sums.
 //! [`reduce_tight::<K>`](Fp2::reduce_tight) applies [`Field::reduce_signed_tight`] instead, so the
 //! same requirements return components with integer bound at most [`TIGHT`], and
 //! [`carry_product`](Fp2::carry_product) carries every sum as for [`Field::carry_product`].
@@ -422,22 +422,6 @@ impl<F> Fp2<F> {
                 }
             },
         )
-    }
-
-    /// Returns `self * self`, under the requirements of [`Self::square_product`].
-    #[cfg_attr(
-        not(any(test, feature = "fuzz")),
-        expect(
-            dead_code,
-            reason = "Completes the documented arithmetic, which the tests check."
-        )
-    )]
-    #[inline(always)]
-    pub fn square<const K: u64, S: Simd>(self, simd: S) -> Self
-    where
-        F: Field<S>,
-    {
-        Self::reduce_positive(simd, self.square_product::<K, S>(simd))
     }
 
     /// Forms the product of `self` and a base field value.
@@ -995,7 +979,12 @@ pub mod fuzz {
             "i * a",
             reference::mul(i, ra),
         );
-        assert_value(simd, a.square::<3, S>(simd), "a^2", reference::mul(ra, ra));
+        assert_value(
+            simd,
+            Fp2::<F>::reduce_positive(simd, a.square_product::<3, S>(simd)),
+            "a^2",
+            reference::mul(ra, ra),
+        );
         assert_value(
             simd,
             a.mul_base(simd, b.c0),
@@ -1089,7 +1078,8 @@ pub mod fuzz {
                 .mul_by_nonresidue::<{ BOUND + 1 }, S>(simd)
                 .carry(simd);
             expected = reference::mul(expected, reference::NONRESIDUE);
-            value = value.square::<{ 2 * BOUND + 1 }, S>(simd);
+            value =
+                Fp2::<F>::reduce_positive(simd, value.square_product::<{ 2 * BOUND + 1 }, S>(simd));
             expected = reference::mul(expected, expected);
             value = value.conjugate::<{ BOUND + 1 }, S>(simd).carry(simd);
             expected = reference::conjugate(expected);
