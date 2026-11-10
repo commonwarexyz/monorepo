@@ -142,8 +142,7 @@ impl<P: PublicKey> Tracker<P> {
         }
     }
 
-    /// Returns a tracker that starts with the same peer sets. Subscribers stay with this tracker,
-    /// so the fork has none.
+    /// Returns a tracker that starts with the same peer sets and has no subscribers.
     fn fork(&self) -> Self {
         Self {
             sets: self.sets.clone(),
@@ -604,9 +603,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 }
             }
             ingress::Message::ResetPeerSets { owner } => {
-                // Replace the peer's tracker. Its subscriptions close with it, so no subscriber
-                // sees peer set ids start over. Then broadcast updated tracked membership to
-                // SubscribePeers subscribers.
+                // Dropping the peer's tracker ends its subscriptions. Broadcast updated tracked
+                // membership to SubscribePeers subscribers.
                 *self.tracker_mut(Some(&owner)).await = Tracker::new();
                 self.broadcast_peer_list();
             }
