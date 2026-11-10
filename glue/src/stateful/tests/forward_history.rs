@@ -8,8 +8,10 @@
 //! public input event: the leader's proposal and notarization of the candidate `C = B(D+1)`.
 //!
 //! Peers answer Marshal block requests through real resolver P2P engines over simulated links
-//! with fixed latency. Out-of-order and tail scenarios hold one response at the producer.
-//! Each run prints one machine-readable line prefixed by `E2E_FORWARD_HISTORY`.
+//! with fixed latency. Out-of-order and tail scenarios hold one response at the producer. Sparse
+//! scenarios send the voter only the parent's notarization, so the history it supplies is a
+//! suffix and Marshal discovers the commitments below the parent from block bodies. Each run
+//! prints one machine-readable line prefixed by `E2E_FORWARD_HISTORY`.
 //!
 //! "Cold" means a cold in-memory application backlog above finality on a live node. No
 //! scenario performs a persisted restart.
@@ -130,6 +132,9 @@ impl Kind {
 #[derive(Clone, Copy, Debug)]
 struct Scenario {
     kind: Kind,
+    /// Whether the voter receives a notarization for the parent `BD` alone. Otherwise it
+    /// receives one for each of `B1..BD`.
+    sparse: bool,
     seed: u64,
     depth: u64,
     window: usize,
@@ -142,6 +147,7 @@ impl Scenario {
     const fn new(kind: Kind) -> Self {
         Self {
             kind,
+            sparse: false,
             seed: 0,
             depth: 8,
             window: 3,
@@ -151,11 +157,20 @@ impl Scenario {
         }
     }
 
+    /// Returns the scenario with only the parent's notarization sent to the voter.
+    const fn sparse(mut self) -> Self {
+        self.sparse = true;
+        self
+    }
+
     /// Applies optional FH_* environment overrides.
     fn with_env(mut self) -> Self {
         let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
         if let Some(kind) = var("FH_SCENARIO") {
             self.kind = Kind::parse(&kind);
+        }
+        if let Some(certificates) = var("FH_CERTIFICATES") {
+            self.sparse = certificates == "sparse";
         }
         if let Some(seed) = var("FH_SEED") {
             self.seed = seed.parse().expect("FH_SEED");
@@ -385,6 +400,14 @@ impl<'a> Measured<'a> {
         let opt = |value: Option<u128>| value.map_or_else(|| "null".to_string(), |v| v.to_string());
         let fields = [
             format!("\"scenario\":\"{}\"", scenario.kind.name()),
+            format!(
+                "\"certificates\":\"{}\"",
+                if scenario.sparse {
+                    "sparse"
+                } else {
+                    "complete"
+                }
+            ),
             format!("\"seed\":{}", scenario.seed),
             format!("\"depth\":{depth}"),
             format!("\"window\":{}", scenario.window),
@@ -1266,10 +1289,16 @@ fn run(scenario: Scenario) {
         );
         let _engine_handle = engine.start(vote_network, certificate_network, resolver_network);
 
-        // Select B1..BD through the real voter with valid notarizations from three peers.
+        // Select B1..BD through the real voter with valid notarizations from three peers. A
+        // sparse scenario sends only BD's, so every older link stays missing.
         let signers = &peers[..3];
         let sender = peers[0];
-        for block in selected {
+        let certified = if scenario.sparse {
+            &selected[selected.len() - 1..]
+        } else {
+            selected
+        };
+        for block in certified {
             let certificate = Certificate::Notarization(notarization(&schemes, signers, block));
             peer_certificates.get_mut(&sender).unwrap().send(
                 Recipients::One(public_key.clone()),
@@ -1428,7 +1457,9 @@ fn run(scenario: Scenario) {
         }
 
         if scenario.assert_pipeline {
-            if missing.len() >= 2 && scenario.window >= 2 {
+            // Below a suffix, each commitment is discovered from the body above it, so missing
+            // bodies are requested one at a time.
+            if missing.len() >= 2 && scenario.window >= 2 && !scenario.sparse {
                 assert!(
                     measured.inflight_before_first_arrival >= 2,
                     "missing bodies were not requested concurrently"
@@ -1478,6 +1509,16 @@ fn forward_history_out_of_order() {
 #[test]
 fn forward_history_tail() {
     run(Scenario::new(Kind::Tail));
+}
+
+#[test]
+fn forward_history_sparse_local() {
+    run(Scenario::new(Kind::Local).sparse());
+}
+
+#[test]
+fn forward_history_sparse_cold() {
+    run(Scenario::new(Kind::Cold).sparse());
 }
 
 /// Entry point for repeated measurement runs driven by FH_* variables.
