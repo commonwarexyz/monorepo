@@ -1,9 +1,9 @@
 //! Helpers shared by the unit tests, and the test vector for implementations of the ledger.
 
 use super::{
-    Amounts, ApplyError, Balances, CheckError, Checked, Checkpoint, Close, Deposit, Epoch,
-    ForcedWithdrawal, Matrix, Namespace, Payout, PayoutProof, Payouts, Proposal, Queue, Receipt,
-    Request, Row, SettleError, State, Summary, Withdrawal,
+    Amounts, ApplyError, BalanceProof, Balances, CheckError, Checked, Checkpoint, Close, Deposit,
+    Epoch, ForcedWithdrawal, Matrix, Namespace, Payout, PayoutProof, Payouts, Proposal, Queue,
+    Receipt, Request, Row, SettleError, State, Summary, Withdrawal,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{
@@ -331,9 +331,10 @@ pub(crate) fn chain<R: Encode>(hash: Digest, requests: &[R]) -> Digest {
 
 /// Pins the digests, roots, and encodings an implementation of the ledger must compute, for
 /// SHA-256, Ed25519 keys, and `u64` amounts, and a deposit running hash that validators compute.
-/// Alice pays bob 5 and carol 7 in epoch 1, and the close of epoch 1 settles her map and processes
-/// bob's deposit of 5. A close then appends payouts of 3 to bob and 4 to carol to the empty payout
-/// log.
+/// Alice pays bob 5 and carol 7 in epoch 1. The close of epoch 1 settles her map, processes bob's
+/// deposit of 5 and alice's of 20, and pays out 3 to bob and 4 to carol on their forced
+/// withdrawals. The close of epoch 2 pays out 1 to alice and 2 to bob, and the payout log then
+/// has three peaks.
 #[test]
 fn test_ledger_vector() {
     deterministic::Runner::default().start(|context| async move {
@@ -355,12 +356,10 @@ fn test_ledger_vector() {
             "dc78896a8eab075c7672d704b58798ff2687447dc6132852a86f007847bf5af0"
         );
 
-        // The deposit queue's running hash after bob's deposit, chained from genesis.
-        let deposit = Deposit {
-            account: account(1),
-            amount: 5u64,
-        };
-        let deposits = genesis.deposits.next::<Sha256, _>(&[deposit]);
+        // The deposit queue's running hash after bob's deposit, chained from genesis. Alice's
+        // deposit follows it in the queue, beside the forced withdrawals of bob and carol.
+        let queued = queue(1, &[(1, 5), (0, 20)], &[(1, 3), (2, 4)]);
+        let deposits = genesis.deposits.next::<Sha256, _>(&queued.deposits[..1]);
         assert_eq!(
             hex(deposits.hash.as_ref()),
             "e3a81ed35a6c131dc7ea391436b14bc6bc9882a0cf7d815fbd936179601427b4"
@@ -409,8 +408,8 @@ fn test_ledger_vector() {
             1,
             vec![row(1, 0, states.payments, empty_root())],
             Vec::new(),
-            1,
-            0,
+            2,
+            2,
         );
         let matrix = close.matrix::<Sha256>(&Sequential);
         let member = matrix.open(&account(0), &account(1));
@@ -450,15 +449,50 @@ fn test_ledger_vector() {
             )
         );
 
-        // The payout log after a close that pays out 3 to bob and 4 to carol, and the proof of
-        // bob's payout at index 1.
-        let batch = Payout::stage(&store.log, &amounts(&[(1, 3), (2, 4)]))
-            .await
-            .unwrap();
-        let log = store.log.apply_batch(batch).await.unwrap();
-        let (root, size) = (log.root(), log.bounds().end);
-        let (proof, _) = log.proof(Location::new(1), NZU64!(1)).await.unwrap();
-        let proof = PayoutProof {
+        // The summary of the close of epoch 1. The close processes both queues in full.
+        let start = Checkpoint {
+            summary: genesis,
+            matrix: Matrix::empty(),
+        };
+        let (store, first) = post(store, &start, close, &queued).await;
+        assert_eq!(
+            hex(first.summary.encode().as_ref()),
+            concat!(
+                "0000000000000001dc78896a8eab075c7672d704b58798ff2687447dc6132852",
+                "a86f007847bf5af0bb7e4f8026a16dea4b1b699ee9a17fa361272f269a044f05",
+                "32c3fae7729b059ccbeaa33ee0fadca40a7a84e3ef4538a6d5a9225c44b2e85f",
+                "c27c58fc0dde40f50451b5519948527b730a86197f813f51283fa3545ca2b6c7",
+                "4ca20596b4f4461fec02f90c99746c6dc051366862ffe2d129f1729cb9134387",
+                "158fe590c943d69f55e902e9e2c7b054fce05131d767f27fe4b9b130cf6fd441",
+                "14d394fbf97853f27ef05d",
+            )
+        );
+        assert_eq!(
+            hex(first.summary.digest().as_ref()),
+            "4ea46f121bbf323e7dd93e6c34665a9cc8f3b0cd117b950586426d44729165ae"
+        );
+
+        // Bob's balance under the balances root of that summary, as a claim after a halt proves it.
+        let (proof, balance) = store.balances.key_value_proof(&account(1)).await.unwrap();
+        let proof = BalanceProof { balance, proof };
+        assert!(proof.verify::<Sha256, _>(&first.summary.balances, &account(1)));
+        assert_eq!(proof.balance, 7);
+        assert_eq!(
+            hex(proof.encode().as_ref()),
+            concat!(
+                "0000000000000007043c00000000000000000000000000000000000000000000",
+                "000000000000000000060002e8deb066466eaf1b04f892d6986303eb407d463a",
+                "51b4739a8c2513ac826becca71e1ff83de02f877f9e2c800a2502f61e761b10a",
+                "0432c6703d620d79f7a9318c00011aee11ebaa71f4483e3129068f72caf28d4c",
+                "1b4faa01f6b925e7fe97c2493636199f565a0c239b645ac33ac70a041ffda7cf",
+                "66adc2e76d88454be81900cd252a",
+            )
+        );
+
+        // The payout log after that close, and the proof of bob's payout at index 1.
+        let payouts = first.summary.payouts;
+        let (proof, _) = store.log.proof(Location::new(1), NZU64!(1)).await.unwrap();
+        let early = PayoutProof {
             index: Location::new(1),
             payout: Payout {
                 account: account(1),
@@ -466,17 +500,46 @@ fn test_ledger_vector() {
             },
             proof,
         };
-        assert!(proof.verify::<Sha256>(&root));
-        assert_eq!(size, 4);
+        assert!(early.verify::<Sha256>(&payouts.root));
+        assert_eq!(payouts.size, 4);
         assert_eq!(
-            hex(root.as_ref()),
+            hex(payouts.root.as_ref()),
             "51b5519948527b730a86197f813f51283fa3545ca2b6c74ca20596b4f4461fec"
         );
         assert_eq!(
-            hex(proof.encode().as_ref()),
+            hex(early.encode().as_ref()),
             concat!(
                 "01478b8e507e0bb2b18c0f9e0824769e8562d10df9abe2e774896f82b4b44052",
                 "66000000000000000304000266b4a8b2a17f0463f7427c0239106eaf710ea712",
+                "9f42d184a58c50cdff614ba4c9b32f58d153a4f26cb6078783a7d3a6cfab16d8",
+                "f6fcedaa19ed63c338e2a9ce",
+            )
+        );
+
+        // The close of epoch 2 pays out 1 to alice and 2 to bob, so the log holds three peaks. The
+        // proof of bob's first payout under the new root folds the two later peaks.
+        let queued = queue(2, &[], &[(0, 1), (1, 2)]);
+        let close = sign_close(&operator_key(), 2, Vec::new(), Vec::new(), 0, 2);
+        let (store, second) = post(store, &first, close, &queued).await;
+        let payouts = second.summary.payouts;
+        let (proof, _) = store.log.proof(Location::new(1), NZU64!(1)).await.unwrap();
+        let late = PayoutProof {
+            proof,
+            ..early.clone()
+        };
+        assert!(late.verify::<Sha256>(&payouts.root));
+        assert!(!early.verify::<Sha256>(&payouts.root));
+        assert_eq!(payouts.size, 7);
+        assert_eq!(
+            hex(payouts.root.as_ref()),
+            "540a194296da3b72974ec85cba28b56ce0cae59481844b2480db323061d7554d"
+        );
+        assert_eq!(
+            hex(late.encode().as_ref()),
+            concat!(
+                "01478b8e507e0bb2b18c0f9e0824769e8562d10df9abe2e774896f82b4b44052",
+                "6600000000000000030700038a4c9a9db0462d62f8c5467b7d7ae30b90514a34",
+                "7f1abb4265e7184ec9052e4266b4a8b2a17f0463f7427c0239106eaf710ea712",
                 "9f42d184a58c50cdff614ba4c9b32f58d153a4f26cb6078783a7d3a6cfab16d8",
                 "f6fcedaa19ed63c338e2a9ce",
             )
