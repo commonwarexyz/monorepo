@@ -130,19 +130,17 @@ impl MultiPairing<'_> {
             .collect();
         let affine = to_affine::<S, F>(simd, &points);
         let mut prepared = [Pair::<F>::load(simd, &[], &FILL); SHARED];
-        let mut count = 0;
         let mut product: Option<Fp12<F>> = None;
-        let mut groups = affine.chunks(F::LANES).peekable();
-        while let Some(group) = groups.next() {
-            prepared[count] = Pair::load(simd, group, &FILL);
-            count += 1;
-            if count == SHARED || groups.peek().is_none() {
-                let lines = miller_loop(simd, &prepared[..count]);
-                match &mut product {
-                    Some(product) => product.mul(simd, &lines),
-                    None => product = Some(lines),
-                }
-                count = 0;
+        for batch in affine.chunks(SHARED * F::LANES) {
+            let groups = batch.chunks(F::LANES);
+            let count = groups.len();
+            for (prepared, group) in prepared.iter_mut().zip(groups) {
+                *prepared = Pair::load(simd, group, &FILL);
+            }
+            let lines = miller_loop(simd, &prepared[..count]);
+            match &mut product {
+                Some(product) => product.mul(simd, &lines),
+                None => product = Some(lines),
             }
         }
         let mut output = [fp12::ONE];
