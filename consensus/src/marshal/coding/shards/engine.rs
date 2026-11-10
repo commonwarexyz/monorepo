@@ -48,9 +48,11 @@
 //!
 //! Once its roots bind, a record keeps every chunk it ingests. Of the honest participants whose
 //! votes notarize a commitment, the first to bind its roots therefore keeps every chunk the others
-//! relay, since they bind later and relay only after binding. Either it collects enough shards to
-//! reconstruct the block, or the proposer, which holds the block, is one of those voters. A node
-//! that binds too late to collect the relays fetches the block from one that has it.
+//! relay. They bind later and relay after binding, unless a relay before naming stands in, and such
+//! a relay that arrived before the first one bound was still in its rings then (see Relaying Before
+//! Naming). Either it collects enough shards to reconstruct the block, or the proposer, which holds
+//! the block, is one of those voters. A node that binds too late to collect the relays fetches the
+//! block from one that has it.
 //!
 //! # Where Data Waits
 //!
@@ -100,6 +102,49 @@
 //!   with other senders' shards until enough are available to decode, and a reconstruction job
 //!   checks only the shards decoding needs.
 //!
+//! # Relaying Before Naming
+//!
+//! [`Config::leader`] can name a round's leader before consensus names the round's commitment, as
+//! a [`Scheduled`](crate::simplex::elector::Scheduled) elector does (see
+//! [`scheduled_leader`](super::scheduled_leader)). A participant then relays each chunk at its
+//! index as soon as that leader sends it, so its peers collect each segment while the leader is
+//! still streaming later ones.
+//!
+//! ```text
+//!   time -------------------------------------------------------------------------------------->
+//!
+//!   leader L         (0, i)         (1, i)           ...        (S-1, i)         roots R
+//!                       |              |                            |               |
+//!                       v              v                            v               v
+//!   participant i    check,         check,           ...         check,          ring[L]
+//!                     relay          relay                        relay
+//!                       |              |                            |
+//!                       v              v                            v
+//!   peers            (0, i)         (1, i)           ...        (S-1, i)
+//! ```
+//!
+//! Let H be [`Config::records`] and S the most segments a block at the
+//! [`Config::block_codec_config`] bound codes into. A node relays a chunk before naming only when
+//! the chunk is at the node's index, comes from the sender [`Config::leader`] names for the
+//! chunk's round, claims a round at most H views past the highest round consensus has signaled or
+//! among the first H views of the next epoch, and verifies against the root it claims. A chunk
+//! from that sender that fails verification blocks it, since no honest sender sends one.
+//!
+//! Each round relays at most 2S chunks this way in total, two blocks' worth for a prepared build
+//! and the proposal that replaces it. At most 2H + 2 rounds are open to such relays at a time, so
+//! a node relays at most 2S(2H + 2) chunks ahead of consensus.
+//!
+//! A relayed chunk counts toward nothing until consensus names its commitment and the roots bind,
+//! and until then each peer holds it only in its ring. Once the chunk verifies against the bound
+//! roots, the node relays it again if it has since sent at least 2(S + 1) later messages. That is
+//! the most an honest sender sends a peer for one round, so a ring sized as
+//! [`Config::peer_buffer_size`] asks still holds the earlier relay while fewer have been sent. A
+//! peer that bound the roots before this node did therefore holds the earlier relay in its record.
+//!
+//! A wrong leader from [`Config::leader`], or a leader that streams a block consensus never names,
+//! therefore costs at most those relays and blocks no honest sender. While [`Config::leader`]
+//! names no leader, or before consensus signals any round, nothing is relayed before naming.
+//!
 //! # Peer Validation and Blocking Rules
 //!
 //! The engine enforces strict validation to prevent Byzantine attacks:
@@ -114,17 +159,19 @@
 //!   config, for a segment of a block at the [`BoundedBlock::max_encode_size`] bound of
 //!   [`Config::block_codec_config`].
 //! - Roots for a named commitment MUST hash to its coding root.
+//! - A chunk relayed before naming MUST verify against the root it claims.
 //! - Each shard index contributes at most ONE shard per commitment. A sender's shard is assembled
 //!   from the first chunk of each segment the record ingests from it, so a later chunk for the same
 //!   segment is ignored.
 //!
 //! Peers found violating these rules are blocked via the [`Blocker`] trait. The width rule is
-//! enforced on receipt of every message. The other rules apply only once a named commitment's bound
-//! roots cover a chunk. Until the leader is known, a chunk at an index other than its sender's
-//! stays in the ring, since it may be this node's assigned chunk. Once the leader is known, any
-//! other index blocks its sender. Once a block is cached, its record keeps the assigned chunks
-//! collected so far but no other chunks or shards, and only completes verification of a late
-//! assigned shard.
+//! enforced on receipt of every message, and a chunk relayed before naming is checked on arrival.
+//! The other rules apply only once a named commitment's bound roots cover a chunk. Until the
+//! leader is known, a chunk at an index other than its sender's stays in the ring, since it may
+//! be this node's assigned chunk. Once the leader is known, any other index blocks its sender.
+//!
+//! Once a block is cached, its record keeps the assigned chunks collected so far but no other
+//! chunks or shards, and only completes verification of a late assigned shard.
 //!
 //! # Record Window
 //!
@@ -137,12 +184,14 @@
 //!
 //! For each candidate of a round, an honest sender sends a peer at most S + 1 messages, where S is
 //! the number of segments in a block. They are its chunk of every segment and one roots message,
-//! whether it leads the round or relays. [`Config::peer_buffer_size`] sizes rings from that bound.
-//! A ring must hold a chunk only until its commitment binds, since the record keeps what it
-//! ingests. Chunks evicted before their commitment binds are lost to the stream, and the node
-//! fetches that block from a peer that reconstructed it.
+//! whether it leads the round or relays. [`Config::peer_buffer_size`] sizes rings from that bound,
+//! including the 2(S + 1) more messages a ring needs with [`Config::leader`] set. A ring must hold
+//! a chunk only until its commitment binds, since the record keeps what it ingests. Chunks evicted
+//! before their commitment binds are lost to the stream, and the node fetches that block from a
+//! peer that reconstructed it.
 
 use super::{
+    leader::RoundLeader,
     mailbox::{Mailbox, Message},
     metrics::ShardMetrics,
 };
@@ -385,9 +434,12 @@ where
     /// For each candidate of a round, an honest sender sends a peer at most S + 1 messages, where
     /// S is the number of segments in a block at the bound of `block_codec_config`. Size the ring
     /// for S + 1 messages times the number of rounds a node can trail its peers by, and double it
-    /// if a leader can replace a candidate within a round. A ring too small for a distant or slow
-    /// node evicts chunks before they are needed, and the node then fetches those blocks from
-    /// peers that reconstructed them.
+    /// if a leader can replace a candidate within a round. With [`Config::leader`] set, add
+    /// 2(S + 1) messages, since a peer must still hold a chunk relayed before naming when its
+    /// commitment is named.
+    ///
+    /// A ring too small for a distant or slow node evicts chunks before they are needed, and the
+    /// node then fetches those blocks from peers that reconstructed them.
     pub peer_buffer_size: NonZeroUsize,
 
     /// The maximum number of commitment records retained.
@@ -396,6 +448,9 @@ where
     /// signal at or below the lowest retained round creates no record. Must be at least
     /// `2 * (max(1, optimistic_views) + 2)`, where `optimistic_views` is
     /// [`crate::simplex::elector::Terms::optimistic_views`].
+    ///
+    /// It is also how many views past the highest round consensus has signaled a chunk may claim
+    /// to be relayed before its commitment is named (see [`Config::leader`]).
     pub records: NonZeroUsize,
 
     /// Provider for peer set information. Messages are buffered per peer only while that peer is a
@@ -403,6 +458,34 @@ where
     /// [`commonware_broadcast::buffered::Engine`]. Broadcast delivery uses the whole
     /// [`commonware_p2p::PeerSetUpdate::all`] union.
     pub peer_provider: D,
+
+    /// Names the leader of a round before consensus names the round's commitment, or `None` while
+    /// it is not known. [`scheduled_leader`](super::scheduled_leader) builds one from a scheduled
+    /// elector.
+    ///
+    /// The answer gates only the relay of chunks at this node's index before the commitment is
+    /// named, and a chunk chosen for that relay must verify or its sender is blocked. Admission and
+    /// classification after naming use the leader consensus names, so a wrong answer costs at most
+    /// those relays. Setting it requires room for more messages in each ring
+    /// ([`Config::peer_buffer_size`]).
+    pub leader: RoundLeader<P>,
+}
+
+/// The number of candidates one round may carry: a prepared build and the proposal that replaces
+/// it. A round relays at most this many blocks' worth of chunks before naming, and an honest
+/// sender sends a peer at most this many candidates' chunks and roots for one round.
+const RELAY_CANDIDATES: usize = 2;
+
+/// Returns whether `round` is `anchor` or at most `horizon` views after it in the same epoch, or
+/// among the first `horizon` views of the next epoch.
+fn within_horizon(anchor: Round, round: Round, horizon: u64) -> bool {
+    if round.epoch() == anchor.epoch() {
+        round.view() >= anchor.view()
+            && round.view().get() <= anchor.view().get().saturating_add(horizon)
+    } else {
+        round.epoch().get() == anchor.epoch().get().saturating_add(1)
+            && round.view().get() <= horizon
+    }
 }
 
 /// The data currently owned for a consensus commitment.
@@ -681,6 +764,31 @@ where
     /// The roots of the segments this node streamed for the block it is building, keyed by
     /// round, in segment order.
     streamed: BTreeMap<Round, Vec<C::Commitment>>,
+
+    /// Names a round's leader before consensus names its commitment.
+    leader: RoundLeader<P>,
+
+    /// The most segments a block at the bound of the block codec config codes into.
+    max_segments: u16,
+
+    /// The highest round consensus has signaled. A chunk relayed before naming must claim a round
+    /// [`within_horizon`] of it.
+    signaled: Option<Round>,
+
+    /// An upper bound on the number of messages this node has sent any one peer.
+    ///
+    /// Each broadcast and each streamed segment counts once, since a peer receives at most one
+    /// chunk of a segment. Over-counting only repeats a relay peers still hold, while
+    /// under-counting could skip one they dropped, so every send must count.
+    sent: u64,
+
+    /// The most messages an honest sender sends a peer for one round, [`RELAY_CANDIDATES`]
+    /// candidates' chunks and roots.
+    span: u64,
+
+    /// The segment, root, and value of [`Self::sent`] of each chunk at this node's index relayed
+    /// before its commitment was named, keyed by the round the chunk claims.
+    relayed: BTreeMap<Round, Vec<(u16, C::Commitment, u64)>>,
 }
 
 impl<E, S, X, D, C, H, B, P, T> Engine<E, S, X, D, C, H, B, P, T>
@@ -700,6 +808,10 @@ where
     pub fn new(context: E, config: Config<P, S, X, D, B, T>) -> (Self, Mailbox<B, C, H, P>) {
         let metrics = ShardMetrics::new(&context);
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
+        let max_segments = C::segments(CodedBlock::<B, C, H>::max_coded_size(B::max_encode_size(
+            &config.block_codec_config,
+        )));
+        let span = Widen::widen(RELAY_CANDIDATES * (usize::from(max_segments) + 1));
         (
             Self {
                 context: ContextCell::new(context),
@@ -720,6 +832,12 @@ where
                 jobs: AbortablePool::default(),
                 metrics,
                 streamed: BTreeMap::new(),
+                leader: config.leader,
+                max_segments,
+                signaled: None,
+                sent: 0,
+                span,
+                relayed: BTreeMap::new(),
             },
             Mailbox::new(sender),
         )
@@ -862,9 +980,9 @@ where
 
     /// Handles a chunk or roots message received from the network.
     ///
-    /// The message joins its sender's ring first. A chunk is then ingested by every named
-    /// commitment whose bound roots cover it, and roots bind the commitment they claim if
-    /// consensus has named it.
+    /// The message joins its sender's ring first. A chunk is then relayed if it qualifies for
+    /// relay before naming, and ingested by every named commitment whose bound roots cover it.
+    /// Roots bind the commitment they claim if consensus has named it.
     fn handle_network_message<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, ShardMessage<B, C, H>>,
@@ -875,6 +993,7 @@ where
         match message {
             ShardMessage::Stream(chunk) => {
                 self.metrics.shards_received.get_or_create_by(&peer).inc();
+                self.relay_early(sender, &peer, &chunk);
                 for commitment in self.commitments_covering(chunk.segment, &chunk.root) {
                     self.ingest_chunk(sender, commitment, &peer, &chunk);
                 }
@@ -884,6 +1003,84 @@ where
                     self.ingest_buffered_chunks(sender, roots.commitment);
                 }
             }
+        }
+    }
+
+    /// Relays a chunk at this node's index that the round's leader sends before consensus names
+    /// its commitment, so peers collect each segment while the leader still streams later ones.
+    ///
+    /// The chunk must claim a round [`within_horizon`] of the highest round consensus has signaled,
+    /// with [`Config::records`] as the horizon. It must also come from the sender
+    /// [`Config::leader`] names for that round and verify against the root it claims, and a chunk
+    /// from that sender that fails verification blocks it. A round relays at most
+    /// [`RELAY_CANDIDATES`] blocks' worth of chunks this way. The ledger entry lets the relay after
+    /// naming skip the chunk while peers still hold this relay.
+    fn relay_early<Sr: Sender<PublicKey = P>>(
+        &mut self,
+        sender: &mut WrappedSender<Sr, ShardMessage<B, C, H>>,
+        peer: &P,
+        chunk: &StreamChunk<C>,
+    ) {
+        let round = chunk.round;
+        let horizon: u64 = Widen::widen(self.window.get());
+        if !self
+            .signaled
+            .is_some_and(|anchor| within_horizon(anchor, round, horizon))
+        {
+            return;
+        }
+        let Some(scheme) = self.scheme_provider.scheme(round.epoch()) else {
+            return;
+        };
+        let Some(local) = scheme.me().map(|m| {
+            u16::try_from(m.index().get()).expect("participant index impossibly out of bounds")
+        }) else {
+            return;
+        };
+        let participants =
+            u16::try_from(scheme.participants().len()).expect("too many participants");
+        if chunk.index != local
+            || chunk.segment >= self.max_segments
+            || chunk.config != coding_config_for_participants(participants)
+        {
+            return;
+        }
+        if self.relayed.get(&round).is_some_and(|relayed| {
+            relayed.len() >= RELAY_CANDIDATES * usize::from(self.max_segments)
+                || relayed
+                    .iter()
+                    .any(|&(segment, root, _)| segment == chunk.segment && root == chunk.root)
+        }) {
+            return;
+        }
+        if (self.leader)(round).as_ref() != Some(peer) {
+            return;
+        }
+        if C::check_chunk(
+            &chunk.config,
+            &chunk.root,
+            chunk.index,
+            chunk.segment,
+            &chunk.chunk,
+        )
+        .is_err()
+        {
+            commonware_p2p::block!(self.blocker, peer.clone(), "invalid stream chunk received");
+            return;
+        }
+        self.sent += 1;
+        self.relayed
+            .entry(round)
+            .or_default()
+            .push((chunk.segment, chunk.root, self.sent));
+        let _ = sender.send(Recipients::All, chunk.clone().into(), true);
+        self.metrics.chunks_forwarded.inc();
+    }
+
+    /// Records that consensus signaled `round`.
+    fn signal(&mut self, round: Round) {
+        if self.signaled.is_none_or(|anchor| anchor < round) {
+            self.signaled = Some(round);
         }
     }
 
@@ -944,6 +1141,7 @@ where
                 round,
                 roots,
             };
+            self.sent += 1;
             let _ = sender.send(Recipients::All, message.into(), true);
         }
         true
@@ -1124,10 +1322,20 @@ where
             );
             return;
         }
-        if is_participant {
+
+        // A relay before naming stands in for this one while fewer than a round's worth of later
+        // messages could have pushed it out of the peers' rings.
+        let relayed_early = self.relayed.get(&chunk.round).is_some_and(|relayed| {
+            relayed.iter().any(|&(segment, root, sent)| {
+                segment == chunk.segment && root == chunk.root && self.sent - sent < self.span
+            })
+        });
+        if is_participant && !relayed_early {
+            self.sent += 1;
             let _ = sender.send(Recipients::All, chunk.clone().into(), true);
             self.metrics.chunks_forwarded.inc();
         }
+
         let Some(shard) = state.add_assigned_chunk(segment, chunk.chunk.clone()) else {
             return;
         };
@@ -1327,6 +1535,7 @@ where
         leader: P,
         round: Round,
     ) {
+        self.signal(round);
         let Some(scheme) = self.scheme_provider.scheme(round.epoch()) else {
             warn!(%commitment, "no scheme for epoch, ignoring external proposal");
             return;
@@ -1406,6 +1615,7 @@ where
         commitment: Commitment<B, C, H>,
         round: Round,
     ) {
+        self.signal(round);
         let Some(status) = self.observe_existing_commitment(commitment, round) else {
             return;
         };
@@ -1533,6 +1743,15 @@ where
         while self.streamed.len() > self.window.get() {
             self.streamed.pop_first();
         }
+
+        // A round at or above the anchor keeps its allowance of relays before naming. A round
+        // below it is kept only while its newest relay may still stand in for the relay after
+        // naming.
+        let (anchor, sent, span) = (self.signaled, self.sent, self.span);
+        self.relayed.retain(|round, relayed| {
+            anchor.is_none_or(|anchor| *round >= anchor)
+                || relayed.last().is_some_and(|&(_, _, at)| sent - at < span)
+        });
     }
 
     /// Removes the record for `commitment` without closing any subscription.
@@ -1592,6 +1811,7 @@ where
         round: Round,
         block: Arc<CodedBlock<B, C, H>>,
     ) {
+        self.signal(round);
         let commitment = block.commitment();
 
         if let Some(record) = self.records.get(&commitment)
@@ -1663,6 +1883,7 @@ where
             round,
             roots,
         };
+        self.sent += 1;
         let _ = sender.send(Recipients::All, message.into(), true);
         self.finish_broadcast(round, block);
     }
@@ -1693,6 +1914,7 @@ where
         round: Round,
         segment: StreamedSegment<C>,
     ) {
+        self.signal(round);
         let Some(scheme) = self.scheme_provider.scheme(round.epoch()) else {
             warn!(%round, "no scheme available, cannot stream segment");
             return;
@@ -1731,13 +1953,14 @@ where
     /// Sends every other participant its chunk of `segment`, and sends the chunk at this node's
     /// index to every peer in aggregate membership that is not a participant.
     fn send_segment<Sr: Sender<PublicKey = P>>(
-        &self,
+        &mut self,
         sender: &mut WrappedSender<Sr, ShardMessage<B, C, H>>,
         round: Round,
         participants: &Set<P>,
         my_index: usize,
         segment: StreamedSegment<C>,
     ) {
+        self.sent += 1;
         let n_participants = u16::try_from(participants.len()).expect("too many participants");
         let config = coding_config_for_participants(n_participants);
         let non_participants: Vec<P> = self
@@ -2619,6 +2842,21 @@ mod tests {
         }
     }
 
+    /// Makes the engine's [`Config::leader`] name `leader` for every round.
+    fn elect<S: Segmentable, T: Strategy>(engine: &mut ShardEngine<S, T>, leader: &P) {
+        let leader = leader.clone();
+        engine.leader = Arc::new(move |_| Some(leader.clone()));
+    }
+
+    /// Returns a block that shares no segment with the other test blocks. A test notarizes its
+    /// commitment to give consensus a signaled round.
+    fn unrelated() -> CodedBlock<B, SC, H> {
+        encode_block::<B, SC, H>(
+            B::new(Sha256::hash(&[b"unrelated"]), Height::new(1), 1),
+            coding_config_for_participants(4),
+        )
+    }
+
     /// Waits for the next message sent to `observer`, or `None` if none arrives within a few
     /// link latencies.
     async fn next_message<S: Segmentable>(
@@ -2783,6 +3021,9 @@ mod tests {
         peer_buffer_size: NonZeroUsize,
         /// Maximum number of commitment records each engine retains.
         records: NonZeroUsize,
+        /// Index of the primary peer every engine's [`Config::leader`] names for every round, or
+        /// `None` for engines that learn leaders only from consensus.
+        round_leader: Option<usize>,
         /// Marker for the coding scheme type parameter.
         _marker: PhantomData<S>,
     }
@@ -2798,6 +3039,7 @@ mod tests {
                 link: DEFAULT_LINK,
                 peer_buffer_size: NZUsize!(64),
                 records: NZUsize!(16),
+                round_leader: None,
                 _marker: PhantomData,
             }
         }
@@ -2824,6 +3066,13 @@ mod tests {
                 let peer_keys: Vec<P> = private_keys.iter().map(|c| c.public_key()).collect();
 
                 let participants: Set<P> = Set::from_iter_dedup(peer_keys.clone());
+                let round_leader: RoundLeader<P> = match self.round_leader {
+                    Some(index) => {
+                        let leader = peer_keys[index].clone();
+                        Arc::new(move |_| Some(leader.clone()))
+                    }
+                    None => Arc::new(|_| None),
+                };
 
                 let mut np_private_keys = (0..self.num_secondary_peers)
                     .map(|i| PrivateKey::from_seed((self.num_primary_peers + i) as u64))
@@ -2912,6 +3161,7 @@ mod tests {
                         peer_buffer_size: self.peer_buffer_size,
                         records: self.records,
                         peer_provider: oracle.manager(),
+                        leader: round_leader.clone(),
                     };
 
                     let (engine, mailbox) = ShardEngine::new(engine_context, config);
@@ -2954,6 +3204,7 @@ mod tests {
                         peer_buffer_size: self.peer_buffer_size,
                         records: self.records,
                         peer_provider: oracle.manager(),
+                        leader: round_leader.clone(),
                     };
 
                     let (engine, mailbox) = ShardEngine::new(engine_context, config);
@@ -3024,6 +3275,7 @@ mod tests {
             peer_buffer_size: NZUsize!(4),
             records,
             peer_provider: oracle.manager(),
+            leader: Arc::new(|_| None),
         };
         let (mut engine, _) = ShardEngine::new(context.child("engine"), config);
         engine.update_primary_peers(participants);
@@ -6693,6 +6945,7 @@ mod tests {
                 peer_buffer_size: NZUsize!(64),
                 records: NZUsize!(16),
                 peer_provider: oracle.manager(),
+                leader: Arc::new(|_| None),
             };
 
             let (engine, mailbox) = ShardEngine::new(context.child("receiver"), config);
@@ -6809,9 +7062,10 @@ mod tests {
             )
             .expect("signer scheme must be created");
 
-            // Discovery, binding the leader's roots, and ingesting the leader's chunk each look up
-            // the epoch's scheme once. Any later lookup churns to None.
-            let broadcaster_provider = ChurningProvider::new(broadcaster_scheme, 3);
+            // Discovery, the check of whether to relay the leader's chunk before naming, binding
+            // the leader's roots, and ingesting the leader's chunk each look up the epoch's scheme
+            // once. Any later lookup churns to None.
+            let broadcaster_provider = ChurningProvider::new(broadcaster_scheme, 4);
             let broadcaster_config: Config<_, _, _, _, _, _> = Config {
                 scheme_provider: broadcaster_provider,
                 blocker: broadcaster_control.clone(),
@@ -6821,6 +7075,7 @@ mod tests {
                 peer_buffer_size: NZUsize!(64),
                 records: NZUsize!(16),
                 peer_provider: oracle.manager(),
+                leader: Arc::new(|_| None),
             };
             let (broadcaster_engine, broadcaster_mailbox) =
                 ChurningShardEngine::new(context.child("broadcaster"), broadcaster_config);
@@ -6842,6 +7097,7 @@ mod tests {
                 peer_buffer_size: NZUsize!(64),
                 records: NZUsize!(16),
                 peer_provider: oracle.manager(),
+                leader: Arc::new(|_| None),
             };
             let (receiver_engine, receiver_mailbox) =
                 ShardEngine::new(context.child("receiver"), receiver_config);
@@ -6939,6 +7195,7 @@ mod tests {
                 peer_buffer_size: NZUsize!(64),
                 records: NZUsize!(16),
                 peer_provider: oracle.manager(),
+                leader: Arc::new(|_| None),
             };
             let (engine, mailbox) =
                 Engine::<_, _, _, _, Gated, H, B, P, _>::new(context.child("receiver"), config);
@@ -8178,6 +8435,7 @@ mod tests {
                 peer_buffer_size: NZUsize!(64),
                 records: NZUsize!(16),
                 peer_provider: oracle.manager(),
+                leader: Arc::new(|_| None),
             };
             let (engine, mailbox) = ShardEngine::new(context.child("receiver"), config);
             engine.start((sender_handle, receiver_handle));
@@ -8352,6 +8610,7 @@ mod tests {
                 peer_buffer_size: NZUsize!(4),
                 records: NZUsize!(16),
                 peer_provider: oracle.manager(),
+                leader: Arc::new(|_| None),
             };
             let (mut engine, _mailbox) = ShardEngine::new(context.child("engine"), config);
             engine.update_primary_peers(Set::from_iter_dedup([sender_pk.clone()]));
@@ -8465,6 +8724,7 @@ mod tests {
                 peer_buffer_size: NZUsize!(64),
                 records: NZUsize!(16),
                 peer_provider: oracle.manager(),
+                leader: Arc::new(|_| None),
             };
             let (engine, mailbox) = ShardEngine::new(context.child("receiver"), config);
             engine.start((sender_handle, receiver_handle));
@@ -8571,6 +8831,7 @@ mod tests {
                 peer_buffer_size: NZUsize!(64),
                 records: NZUsize!(16),
                 peer_provider: oracle.manager(),
+                leader: Arc::new(|_| None),
             };
             let (engine, mailbox) = ShardEngine::new(context.child("evicted"), config);
             engine.start((evicted_sender, evicted_receiver));
@@ -8825,6 +9086,8 @@ mod tests {
             } = chunk_setup(&context, &oracle).await;
             let commitment = block.commitment();
             let leader = peer_keys[1].clone();
+
+            // Discovery and the leader's roots bind the commitment, and the roots are relayed.
             engine.handle_external_proposal(&mut sender, commitment, leader.clone(), round);
             receive(
                 &mut engine,
@@ -8834,9 +9097,11 @@ mod tests {
             );
             let relayed = next_message::<SC>(&context, &mut observer).await;
             assert!(relayed == Some(ShardMessage::Roots(roots_of(&block, round))));
+            assert_eq!(engine.sent, 1);
+
+            // Each assigned chunk is relayed as it verifies, and the shard verifies with the last.
             let (response, mut verified) = oneshot::channel();
             engine.handle_assigned_shard_verified_subscription(commitment, response);
-
             let assigned = stream_of(&block, round, 0);
             for chunk in &assigned {
                 assert!(
@@ -8857,6 +9122,7 @@ mod tests {
                 assert!(next_message::<SC>(&context, &mut observer).await.is_none());
             }
             assert!(matches!(verified.try_recv(), Ok(())));
+            assert_eq!(engine.sent, assigned.len() as u64 + 1);
 
             // Repeats after the shard verified are not relayed either.
             receive(
@@ -9629,10 +9895,938 @@ mod tests {
         });
     }
 
-    /// Chunks and roots that arrive before consensus names their commitment wait in their
-    /// senders' rings, which keep them after binding. Discovery binds the roots and relays them,
-    /// relays the leader's chunks in segment order as they verify the assigned shard, and
-    /// reconstructs the block.
+    /// Once consensus has signaled a round, a participant relays each chunk at its index from the
+    /// leader [`Config::leader`] names for a round within the horizon, as the chunk arrives and
+    /// before any roots. Chunks other participants relay are not relayed. Once consensus names the
+    /// commitment, the roots bind and the block reconstructs.
+    #[test_traced]
+    fn test_leader_chunks_relayed_before_roots_once_consensus_signals() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
+                context.child("network"),
+                network_config(4),
+            );
+            network.start();
+            let ChunkSetup {
+                mut engine,
+                mut sender,
+                peer_keys,
+                mut observer,
+                block,
+                round,
+                ..
+            } = chunk_setup(&context, &oracle).await;
+
+            // Peer 1 leads every round.
+            let leader = peer_keys[1].clone();
+            elect(&mut engine, &leader);
+            let next = Round::new(Epoch::zero(), View::new(2));
+            let commitment = block.commitment();
+
+            // Consensus notarizes an unrelated block at view 1, and view 2's leader then streams.
+            // Each of its chunks is relayed on arrival, while the chunks peers 2 and 3 relay are
+            // not.
+            engine.handle_notarized_commitment(&mut sender, unrelated().commitment(), round);
+            for chunk in stream_of(&block, next, 0) {
+                receive(&mut engine, &mut sender, &leader, [chunk.clone().into()]);
+                let relayed = next_message::<SC>(&context, &mut observer)
+                    .await
+                    .expect("the leader's chunk must be relayed on arrival");
+                assert!(relayed == ShardMessage::Stream(chunk));
+            }
+            assert!(!engine.records.contains_key(&commitment));
+            for index in [2u16, 3] {
+                receive(
+                    &mut engine,
+                    &mut sender,
+                    &peer_keys[usize::from(index)],
+                    relayed(&block, next, index),
+                );
+            }
+            assert!(next_message::<SC>(&context, &mut observer).await.is_none());
+
+            // Discovery names the commitment and binds the leader's roots, and the engine relays
+            // them.
+            let (response, mut verified) = oneshot::channel();
+            engine.handle_assigned_shard_verified_subscription(commitment, response);
+            receive(
+                &mut engine,
+                &mut sender,
+                &leader,
+                [roots_of(&block, next).into()],
+            );
+            engine.handle_external_proposal(&mut sender, commitment, leader.clone(), next);
+            assert!(matches!(verified.try_recv(), Ok(())));
+            let relayed = next_message::<SC>(&context, &mut observer).await;
+            assert!(relayed == Some(ShardMessage::Roots(roots_of(&block, next))));
+            let reconstructed = finished(&mut engine).await;
+            engine.complete(reconstructed);
+            assert!(
+                engine
+                    .records
+                    .get(&commitment)
+                    .and_then(CommitmentRecord::block)
+                    .is_some()
+            );
+            assert!(oracle.blocked().await.unwrap().is_empty());
+        });
+    }
+
+    /// Nothing is relayed before naming while consensus has signaled no round, even from the leader
+    /// [`Config::leader`] names, or while [`Config::leader`] answers `None` for the chunk's round.
+    /// Once consensus names a commitment, its roots and then its chunks are relayed as the chunks
+    /// verify.
+    #[test_traced]
+    fn test_no_relay_before_naming_without_a_signal_or_an_answer() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
+                context.child("network"),
+                network_config(4),
+            );
+            network.start();
+            let ChunkSetup {
+                mut engine,
+                mut sender,
+                peer_keys,
+                mut observer,
+                block,
+                other,
+                round,
+            } = chunk_setup(&context, &oracle).await;
+
+            // The leader hook names peer 1 for view 1 and answers `None` for every other round.
+            let leader = peer_keys[1].clone();
+            let named = leader.clone();
+            engine.leader = Arc::new(move |asked| (asked == round).then(|| named.clone()));
+
+            // Before any consensus signal, the leader's chunks and roots only wait in its ring.
+            let own = stream_of(&block, round, 0);
+            receive(
+                &mut engine,
+                &mut sender,
+                &leader,
+                assigned(&block, round, 0),
+            );
+            assert!(next_message::<SC>(&context, &mut observer).await.is_none());
+
+            // Discovery names the commitment, so its roots and then its chunks are relayed.
+            engine.handle_external_proposal(&mut sender, block.commitment(), leader.clone(), round);
+            let relay = next_message::<SC>(&context, &mut observer).await;
+            assert!(relay == Some(ShardMessage::Roots(roots_of(&block, round))));
+            for chunk in &own {
+                let relay = next_message::<SC>(&context, &mut observer).await;
+                assert!(relay == Some(ShardMessage::Stream(chunk.clone())));
+            }
+
+            // The hook answers `None` for view 2, so its leader's chunks wait.
+            let next = Round::new(Epoch::zero(), View::new(2));
+            receive(&mut engine, &mut sender, &leader, relayed(&other, next, 0));
+            assert!(next_message::<SC>(&context, &mut observer).await.is_none());
+            assert!(oracle.blocked().await.unwrap().is_empty());
+        });
+    }
+
+    /// A wrong [`Config::leader`] answer blocks no one and still delivers the block. With the hook
+    /// naming peer 3 while peer 1 leads, the leader's chunks wait for naming, and peer 3's valid
+    /// chunks of an unrelated block at this node's index are relayed within the round's bound.
+    /// Once consensus names the leader's commitment, its chunks verify and are relayed, and the
+    /// block reconstructs.
+    #[test_traced]
+    fn test_wrong_leader_answer_blocks_no_one_and_the_block_is_still_delivered() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
+                context.child("network"),
+                network_config(4),
+            );
+            network.start();
+            let ChunkSetup {
+                mut engine,
+                mut sender,
+                peer_keys,
+                mut observer,
+                block,
+                round,
+                ..
+            } = chunk_setup(&context, &oracle).await;
+
+            // The leader hook names peer 3 for every round while peer 1 leads view 2, and consensus
+            // has notarized view 1.
+            let leader = peer_keys[1].clone();
+            elect(&mut engine, &peer_keys[3]);
+            let next = Round::new(Epoch::zero(), View::new(2));
+            let commitment = block.commitment();
+            engine.handle_notarized_commitment(&mut sender, unrelated().commitment(), round);
+
+            // The leader streams the local shard and its roots, and peer 2 relays its own chunks.
+            // None of them is relayed before naming.
+            receive(&mut engine, &mut sender, &leader, assigned(&block, next, 0));
+            receive(
+                &mut engine,
+                &mut sender,
+                &peer_keys[2],
+                relayed(&block, next, 2),
+            );
+            assert!(next_message::<SC>(&context, &mut observer).await.is_none());
+
+            // Peer 3 streams an unrelated block's chunks at this node's index. They verify against
+            // their own roots and are relayed.
+            let junk = stream_of(&unrelated(), next, 0);
+            receive(
+                &mut engine,
+                &mut sender,
+                &peer_keys[3],
+                junk.iter().cloned().map(ShardMessage::from),
+            );
+            for chunk in &junk {
+                let relay = next_message::<SC>(&context, &mut observer).await;
+                assert!(relay == Some(ShardMessage::Stream(chunk.clone())));
+            }
+            assert!(oracle.blocked().await.unwrap().is_empty());
+
+            // Discovery names the leader's commitment. Its roots and chunks are relayed, the
+            // assigned shard verifies, and the block reconstructs.
+            let (response, mut verified) = oneshot::channel();
+            engine.handle_assigned_shard_verified_subscription(commitment, response);
+            engine.handle_external_proposal(&mut sender, commitment, leader, next);
+            assert!(matches!(verified.try_recv(), Ok(())));
+            let relay = next_message::<SC>(&context, &mut observer).await;
+            assert!(relay == Some(ShardMessage::Roots(roots_of(&block, next))));
+            for chunk in stream_of(&block, next, 0) {
+                let relay = next_message::<SC>(&context, &mut observer).await;
+                assert!(relay == Some(ShardMessage::Stream(chunk)));
+            }
+            let reconstructed = finished(&mut engine).await;
+            engine.complete(reconstructed);
+            assert!(
+                engine
+                    .records
+                    .get(&commitment)
+                    .and_then(CommitmentRecord::block)
+                    .is_some()
+            );
+            assert!(oracle.blocked().await.unwrap().is_empty());
+        });
+    }
+
+    /// Before naming, a round relays at most two blocks' worth of chunks in total, whatever roots
+    /// the leader's chunks claim, and each round has its own allowance.
+    #[test_traced]
+    fn test_relays_before_naming_are_capped_per_round() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
+                context.child("network"),
+                network_config(4),
+            );
+            network.start();
+            let ChunkSetup {
+                mut engine,
+                mut sender,
+                peer_keys,
+                mut observer,
+                round,
+                ..
+            } = chunk_setup(&context, &oracle).await;
+
+            // Peer 1 leads every round, consensus has notarized view 1, and a round may relay two
+            // blocks' worth of chunks before naming.
+            let leader = peer_keys[1].clone();
+            elect(&mut engine, &leader);
+            engine.handle_notarized_commitment(&mut sender, unrelated().commitment(), round);
+            let cap = 2 * usize::from(engine.max_segments);
+
+            // The leader streams the chunks of `cap + 1` candidates for view 2, more chunks than
+            // the cap, each candidate under its own roots.
+            let next = Round::new(Epoch::zero(), View::new(2));
+            let candidates: Vec<_> = (0..=cap as u64)
+                .map(|id| {
+                    encode_block::<B, SC, H>(
+                        B::new(Sha256::hash(&[&id.to_be_bytes()]), Height::new(1), id),
+                        coding_config_for_participants(4),
+                    )
+                })
+                .collect();
+            for candidate in &candidates {
+                receive(
+                    &mut engine,
+                    &mut sender,
+                    &leader,
+                    relayed(candidate, next, 0),
+                );
+            }
+            let mut relays = 0;
+            while next_message::<SC>(&context, &mut observer).await.is_some() {
+                relays += 1;
+            }
+            assert_eq!(relays, cap);
+
+            // View 3 has its own allowance.
+            let later = Round::new(Epoch::zero(), View::new(3));
+            receive(
+                &mut engine,
+                &mut sender,
+                &leader,
+                [stream_of(&candidates[0], later, 0).remove(0).into()],
+            );
+            assert!(next_message::<SC>(&context, &mut observer).await.is_some());
+            assert!(oracle.blocked().await.unwrap().is_empty());
+        });
+    }
+
+    /// A chunk relayed before naming is relayed once, and a repeat from the leader is not relayed
+    /// again, even after a trim. After naming and relaying the roots, an earlier chunk relay stands
+    /// in for the relay after naming while fewer than a round's worth of messages have been sent
+    /// since it, even if consensus has signaled a later round.
+    #[test_traced]
+    fn test_chunks_relayed_before_naming_are_not_relayed_again() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
+                context.child("network"),
+                network_config(4),
+            );
+            network.start();
+            let ChunkSetup {
+                mut engine,
+                mut sender,
+                peer_keys,
+                mut observer,
+                block,
+                other,
+                round,
+            } = chunk_setup(&context, &oracle).await;
+
+            // Peer 1 leads every round, and consensus has notarized view 1.
+            let leader = peer_keys[1].clone();
+            elect(&mut engine, &leader);
+            engine.handle_notarized_commitment(&mut sender, unrelated().commitment(), round);
+            let next = Round::new(Epoch::zero(), View::new(2));
+            let own = stream_of(&block, next, 0);
+
+            // The leader streams the local shard for view 2, and each chunk is relayed once.
+            receive(
+                &mut engine,
+                &mut sender,
+                &leader,
+                own.iter().cloned().map(ShardMessage::from),
+            );
+            for _ in &own {
+                assert!(next_message::<SC>(&context, &mut observer).await.is_some());
+            }
+            assert_eq!(engine.sent, own.len() as u64);
+
+            // View 2 is above the signaled view 1, so a trim keeps its relays and a repeat from the
+            // leader is not relayed.
+            engine.trim();
+            receive(
+                &mut engine,
+                &mut sender,
+                &leader,
+                own.iter().cloned().map(ShardMessage::from),
+            );
+            assert!(next_message::<SC>(&context, &mut observer).await.is_none());
+            assert_eq!(engine.sent, own.len() as u64);
+
+            // Consensus signals view 3. A trim still keeps the relays of view 2, since this node
+            // has sent fewer messages since then than one round may take.
+            let later = Round::new(Epoch::zero(), View::new(3));
+            engine.handle_notarized_commitment(&mut sender, other.commitment(), later);
+            engine.trim();
+
+            // Naming the commitment verifies the assigned shard and relays only the roots.
+            let (response, mut verified) = oneshot::channel();
+            engine.handle_assigned_shard_verified_subscription(block.commitment(), response);
+            engine.handle_external_proposal(&mut sender, block.commitment(), leader.clone(), next);
+            receive(
+                &mut engine,
+                &mut sender,
+                &leader,
+                [roots_of(&block, next).into()],
+            );
+            assert!(matches!(verified.try_recv(), Ok(())));
+            let relay = next_message::<SC>(&context, &mut observer).await;
+            assert!(relay == Some(ShardMessage::Roots(roots_of(&block, next))));
+            assert!(next_message::<SC>(&context, &mut observer).await.is_none());
+            assert_eq!(engine.sent, own.len() as u64 + 1);
+            assert_eq!(
+                gauges(&context.encode(), "chunks_forwarded"),
+                vec![own.len() as i64]
+            );
+            assert!(oracle.blocked().await.unwrap().is_empty());
+        });
+    }
+
+    /// Chunks are relayed before naming only for rounds from the highest round consensus has
+    /// signaled to [`Config::records`] views past it, or among the first that many views of the
+    /// next epoch. [`Config::leader`] is consulted only for chunks at this node's index.
+    #[test_traced]
+    fn test_rounds_outside_the_relay_horizon_are_not_relayed_early() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
+                context.child("network"),
+                network_config(4),
+            );
+            network.start();
+            let ChunkSetup {
+                mut engine,
+                mut sender,
+                peer_keys,
+                mut observer,
+                block,
+                ..
+            } = chunk_setup(&context, &oracle).await;
+
+            // This node holds a scheme for epochs 0 and 1, and the leader hook names peer 1 for
+            // every round and counts the times it is asked.
+            let mut private_keys: Vec<PrivateKey> = (0..4).map(PrivateKey::from_seed).collect();
+            private_keys.sort_by_key(|key| key.public_key());
+            let participants: Set<P> = Set::from_iter_dedup(peer_keys.clone());
+            let signer = || {
+                Scheme::signer(
+                    SCHEME_NAMESPACE,
+                    participants.clone(),
+                    private_keys[0].clone(),
+                )
+                .expect("signer scheme must be created")
+            };
+            engine.scheme_provider =
+                MultiEpochProvider::single(signer()).with_epoch(Epoch::new(1), signer());
+            let leader = peer_keys[1].clone();
+            let asked = Arc::new(AtomicIsize::new(0));
+            let named = leader.clone();
+            let counter = asked.clone();
+            engine.leader = Arc::new(move |_| {
+                counter.fetch_add(1, Ordering::Relaxed);
+                Some(named.clone())
+            });
+            let horizon = engine.window.get() as u64;
+            let at = |epoch, view| Round::new(Epoch::new(epoch), View::new(view));
+
+            // Consensus signals view 10 of epoch 0, and the leader's chunk is relayed early only
+            // for rounds inside the horizon.
+            engine.handle_notarized_commitment(&mut sender, unrelated().commitment(), at(0, 10));
+            for (round, relays) in [
+                (at(0, 9), false),
+                (at(0, 10), true),
+                (at(0, 10 + horizon), true),
+                (at(0, 11 + horizon), false),
+                (at(1, horizon), true),
+                (at(1, horizon + 1), false),
+                (at(2, 0), false),
+            ] {
+                receive(
+                    &mut engine,
+                    &mut sender,
+                    &leader,
+                    [stream_of(&block, round, 0).remove(0).into()],
+                );
+                let relayed = next_message::<SC>(&context, &mut observer).await.is_some();
+                assert_eq!(
+                    relayed, relays,
+                    "a chunk of round {round} must be relayed early only inside the horizon"
+                );
+            }
+
+            // A chunk at another index never reaches the hook.
+            let before = asked.load(Ordering::Relaxed);
+            receive(
+                &mut engine,
+                &mut sender,
+                &leader,
+                [stream_of(&block, at(0, 11), 2).remove(0).into()],
+            );
+            assert_eq!(asked.load(Ordering::Relaxed), before);
+            assert!(oracle.blocked().await.unwrap().is_empty());
+        });
+    }
+
+    /// Checks that every honest participant reconstructs a notarized target whose relays before
+    /// naming have left every peer's ring.
+    ///
+    /// The leader sends each honest participant its chunk of the target's first segment before
+    /// consensus reaches the target's round, and each relays it before naming. Later traffic pushes
+    /// that relay out of every ring, sized to one round's messages. With `flood` the traffic is
+    /// other rounds' relays before naming, and otherwise the blocks of the intervening rounds. The
+    /// leader then delivers the target's assigned shards to only two participants.
+    fn early_relay_evicted_before_naming(flood: bool) {
+        // Every ring holds one round's worth of messages from each sender, and every engine's
+        // leader hook names participant 0 for every round.
+        let max_segments = SC::segments(CodedBlock::<B, SC, H>::max_coded_size(
+            B::max_encode_size(&()),
+        ));
+        let span = RELAY_CANDIDATES * (usize::from(max_segments) + 1);
+        let fixture: Fixture<SC> = Fixture {
+            peer_buffer_size: NonZeroUsize::new(span).expect("a ring must hold a message"),
+            round_leader: Some(0),
+            ..Default::default()
+        };
+        fixture.start(
+            |config, context, oracle, mut peers, _, coding_config| async move {
+                // The target block is proposed in a later round than consensus has reached.
+                let at = |view| Round::new(Epoch::zero(), View::new(view));
+                let target_round = at(if flood { 4 } else { 12 });
+                let target = encode_block::<B, SC, H>(
+                    B::new(Sha256::hash(&[b"target"]), Height::new(12), 1_000),
+                    coding_config,
+                );
+                let commitment = target.commitment();
+                let leader = peers[0].public_key.clone();
+
+                // Every participant has seen consensus notarize view 1.
+                for peer in &peers {
+                    peer.mailbox.notarized(unrelated().commitment(), at(1));
+                }
+                context.sleep(config.link.latency).await;
+
+                // The leader sends each honest participant its chunk of the target's first
+                // segment, and each relays it before naming.
+                for index in 1..4u16 {
+                    let recipient = peers[usize::from(index)].public_key.clone();
+                    send(
+                        &mut peers[0].sender,
+                        &recipient,
+                        [stream_of(&target, target_round, index).remove(0).into()],
+                    );
+                }
+                context.sleep(config.link.latency * 4).await;
+                let relays = gauges(&context.encode(), "chunks_forwarded");
+                assert_eq!(relays.iter().filter(|&&count| count == 1).count(), 3);
+
+                if flood {
+                    // The leader spends the allowance of three later rounds on chunks of other
+                    // blocks, and every honest participant relays them before naming.
+                    let cap = RELAY_CANDIDATES * usize::from(max_segments);
+                    for view in [8u64, 12, 16] {
+                        for candidate in 0..cap as u64 {
+                            let other = encode_block::<B, SC, H>(
+                                B::new(
+                                    Sha256::hash(&[&view.to_be_bytes(), &candidate.to_be_bytes()]),
+                                    Height::new(1),
+                                    candidate,
+                                ),
+                                coding_config,
+                            );
+                            for index in 1..4u16 {
+                                let recipient = peers[usize::from(index)].public_key.clone();
+                                send(
+                                    &mut peers[0].sender,
+                                    &recipient,
+                                    [stream_of(&other, at(view), index).remove(0).into()],
+                                );
+                            }
+                        }
+                    }
+                    context.sleep(config.link.latency * 4).await;
+                    let relays = gauges(&context.encode(), "chunks_forwarded");
+                    let expected = (1 + 3 * cap) as i64;
+                    assert_eq!(relays.iter().filter(|&&count| count == expected).count(), 3);
+                } else {
+                    // Honest participants take turns proposing the blocks of views 2 through 10,
+                    // and every honest participant reconstructs each of them.
+                    for view in 2..=10u64 {
+                        let block = encode_block::<B, SC, H>(
+                            B::new(
+                                Sha256::hash(&[&view.to_be_bytes()]),
+                                Height::new(view),
+                                view,
+                            ),
+                            coding_config,
+                        );
+                        let proposer = 1 + view as usize % 3;
+                        let proposer_key = peers[proposer].public_key.clone();
+                        peers[proposer].mailbox.proposed(at(view), block.clone());
+                        for peer in &peers {
+                            peer.mailbox.discovered(
+                                block.commitment(),
+                                proposer_key.clone(),
+                                at(view),
+                            );
+                        }
+                        context.sleep(config.link.latency * 5).await;
+                        for peer in &peers[1..] {
+                            assert!(
+                                peer.mailbox.get(block.commitment()).await.is_some(),
+                                "every honest participant must reconstruct view {view}"
+                            );
+                        }
+                    }
+                }
+
+                // The leader delivers the target's assigned shards and roots to participants 1 and
+                // 2 only. Once consensus names the target, both are ready to vote for it.
+                let mut first = peers[1]
+                    .mailbox
+                    .subscribe_assigned_shard_verified(commitment);
+                let mut second = peers[2]
+                    .mailbox
+                    .subscribe_assigned_shard_verified(commitment);
+                for index in 1..=2u16 {
+                    let recipient = peers[usize::from(index)].public_key.clone();
+                    send(
+                        &mut peers[0].sender,
+                        &recipient,
+                        assigned(&target, target_round, index),
+                    );
+                }
+                for peer in &peers[1..] {
+                    peer.mailbox
+                        .discovered(commitment, leader.clone(), target_round);
+                }
+                context.sleep(config.link.latency * 5).await;
+                assert!(matches!(first.try_recv(), Ok(())));
+                assert!(matches!(second.try_recv(), Ok(())));
+
+                // Once the target is notarized, every honest participant reconstructs it.
+                for peer in &peers[1..] {
+                    peer.mailbox.notarized(commitment, target_round);
+                }
+                context.sleep(config.link.latency * 5).await;
+                for peer in &peers[1..] {
+                    assert!(
+                        peer.mailbox.get(commitment).await.is_some(),
+                        "every honest participant must reconstruct the notarized target"
+                    );
+                }
+                assert!(oracle.blocked().await.unwrap().is_empty());
+            },
+        );
+    }
+
+    /// A participant whose relay before naming was pushed out of its peers' rings by the blocks
+    /// of later rounds relays the chunk again after naming, so a target delivered to only two
+    /// participants is still reconstructed by every honest participant.
+    #[test_traced]
+    fn test_relay_before_naming_evicted_by_later_blocks_is_repeated_after_naming() {
+        early_relay_evicted_before_naming(false);
+    }
+
+    /// A participant whose relay before naming was pushed out of its peers' rings by later
+    /// rounds' relays before naming relays the chunk again after naming, so a target delivered
+    /// to only two participants is still reconstructed by every honest participant.
+    #[test_traced]
+    fn test_relay_before_naming_evicted_by_other_early_relays_is_repeated_after_naming() {
+        early_relay_evicted_before_naming(true);
+    }
+
+    /// When the leader [`Config::leader`] names sends a chunk at this node's index that fails its
+    /// check against the root it claims, the chunk blocks the leader and is not relayed.
+    #[test_traced]
+    fn test_invalid_chunk_from_the_named_leader_blocks_it_and_is_not_relayed() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
+                context.child("network"),
+                network_config(4),
+            );
+            network.start();
+            let ChunkSetup {
+                mut engine,
+                mut sender,
+                peer_keys,
+                mut observer,
+                block,
+                other,
+                round,
+            } = chunk_setup(&context, &oracle).await;
+
+            // Peer 1 leads every round, and consensus has notarized view 1.
+            let leader = peer_keys[1].clone();
+            elect(&mut engine, &leader);
+            engine.handle_notarized_commitment(&mut sender, unrelated().commitment(), round);
+
+            // The leader's chunk for view 2 carries another block's data under this block's root.
+            let next = Round::new(Epoch::zero(), View::new(2));
+            let own = stream_of(&block, next, 0);
+            let foreign = stream_of(&other, next, 0);
+            let segment = (0..own.len())
+                .find(|&segment| own[segment].root != foreign[segment].root)
+                .expect("the blocks must differ in some segment");
+            let forged = StreamChunk {
+                chunk: foreign[segment].chunk.clone(),
+                ..own[segment].clone()
+            };
+
+            // The chunk blocks the leader and is not relayed.
+            receive(&mut engine, &mut sender, &leader, [forged.into()]);
+            assert_blocked(&oracle, &peer_keys[0], &leader).await;
+            assert!(next_message::<SC>(&context, &mut observer).await.is_none());
+        });
+    }
+
+    /// While a retained record is observed at ever later rounds and each next round relays a
+    /// chunk before naming, the ledger of relays keeps no more rounds than the messages one round
+    /// may take, however long the record stays.
+    #[test_traced]
+    fn test_relay_ledger_stays_bounded_while_the_anchor_advances() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
+                context.child("network"),
+                network_config(4),
+            );
+            network.start();
+            let ChunkSetup {
+                mut engine,
+                mut sender,
+                peer_keys,
+                block,
+                other,
+                round,
+                ..
+            } = chunk_setup(&context, &oracle).await;
+
+            // Peer 1 leads every round, consensus has notarized view 1, and one round's messages
+            // bound the rounds the ledger may keep.
+            let leader = peer_keys[1].clone();
+            elect(&mut engine, &leader);
+            engine.handle_notarized_commitment(&mut sender, unrelated().commitment(), round);
+            engine.trim();
+            let span = RELAY_CANDIDATES * (usize::from(engine.max_segments) + 1);
+
+            for view in 2..102 {
+                // A later observation of the retained block advances the anchor.
+                let observed = Round::new(Epoch::zero(), View::new(view));
+                engine.handle_notarized_commitment(&mut sender, block.commitment(), observed);
+                engine.trim();
+
+                // The next round's leader sends a chunk at this node's index, and it is relayed.
+                let next = Round::new(Epoch::zero(), View::new(view + 1));
+                receive(
+                    &mut engine,
+                    &mut sender,
+                    &leader,
+                    [stream_of(&other, next, 0).remove(0).into()],
+                );
+                engine.trim();
+                assert!(engine.relayed.len() <= span);
+            }
+            assert_eq!(engine.records.len(), 2);
+            assert!(oracle.blocked().await.unwrap().is_empty());
+        });
+    }
+
+    /// With every engine's [`Config::leader`] naming the proposer, the other participants relay
+    /// their chunks while the proposer streams, before consensus names the block. The proposer
+    /// caches the block and counts its assigned shard as verified. Once the block is named
+    /// elsewhere, the other participants verify their assigned shards, all recipients reconstruct
+    /// the block, and no chunk is relayed twice.
+    #[test_traced]
+    fn test_e2e_chunks_relayed_before_naming_reconstruct_everywhere() {
+        let fixture: Fixture<SC> = Fixture {
+            num_primary_peers: 10,
+            num_secondary_peers: 1,
+            round_leader: Some(0),
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, oracle, mut peers, non_participants, coding_config| async move {
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
+                let coded_block = encode_block::<B, SC, H>(inner, coding_config);
+                let commitment = coded_block.commitment();
+                let segments = stream_of(&coded_block, Round::new(Epoch::zero(), View::new(2)), 0)
+                    .len() as i64;
+                let leader = peers[0].public_key.clone();
+
+                // Every engine has seen consensus notarize view 1 before the leader of view 2
+                // proposes.
+                let signaled = Round::new(Epoch::zero(), View::new(1));
+                for peer in peers.iter() {
+                    peer.mailbox.notarized(unrelated().commitment(), signaled);
+                }
+                for np in non_participants.iter() {
+                    np.mailbox.notarized(unrelated().commitment(), signaled);
+                }
+
+                // The leader of view 2 proposes, and each of the nine other participants relays its
+                // chunk of every segment before naming.
+                let round = Round::new(Epoch::zero(), View::new(2));
+                peers[0].mailbox.proposed(round, coded_block.clone());
+                context.sleep(config.link.latency * 3).await;
+                let forwarded = gauges(&context.encode(), "chunks_forwarded");
+                assert_eq!(
+                    forwarded.iter().filter(|&&count| count == segments).count(),
+                    9
+                );
+
+                // Discovery names the block at every other participant and the non-participant.
+                for peer in peers[1..].iter_mut() {
+                    peer.mailbox.discovered(commitment, leader.clone(), round);
+                }
+                for np in non_participants.iter() {
+                    np.mailbox.discovered(commitment, leader.clone(), round);
+                }
+                context.sleep(config.link.latency * 3).await;
+
+                // Every participant's assigned shard is ready. The proposer retains its cached
+                // block, the other participants and the non-participant reconstruct the block, and
+                // no chunk is relayed again.
+                for peer in peers.iter_mut() {
+                    peer.mailbox
+                        .subscribe_assigned_shard_verified(commitment)
+                        .await
+                        .expect("participant shard subscription should complete");
+                    let reconstructed = peer
+                        .mailbox
+                        .get(commitment)
+                        .await
+                        .expect("the participant must reconstruct the block");
+                    assert_eq!(reconstructed.commitment(), commitment);
+                }
+                for np in non_participants.iter() {
+                    let reconstructed = np
+                        .mailbox
+                        .get(commitment)
+                        .await
+                        .expect("the non-participant must reconstruct the block");
+                    assert_eq!(reconstructed.commitment(), commitment);
+                }
+                assert_eq!(gauges(&context.encode(), "chunks_forwarded"), forwarded);
+                assert!(oracle.blocked().await.unwrap().is_empty());
+            },
+        );
+    }
+
+    /// A record keeps every chunk it ingests once its roots bind, even after later traffic pushes
+    /// the chunk out of its sender's ring. Every other participant binds the roots of view 4 while
+    /// the relays before naming of the first segment are fresh, and relays of other blocks then
+    /// push those relays out of every ring. Once the leader completes the assigned shards of
+    /// participants 1 and 2 only and consensus notarizes the block, every other participant still
+    /// reconstructs it.
+    #[test_traced]
+    fn test_bound_record_keeps_relays_before_naming_through_later_traffic() {
+        // Each ring holds two rounds' worth of a sender's messages, and participant 0 leads every
+        // round.
+        let max_segments = SC::segments(CodedBlock::<B, SC, H>::max_coded_size(
+            B::max_encode_size(&()),
+        ));
+        let span = RELAY_CANDIDATES * (usize::from(max_segments) + 1);
+        let fixture: Fixture<SC> = Fixture {
+            peer_buffer_size: NonZeroUsize::new(2 * span).expect("a ring must hold a message"),
+            round_leader: Some(0),
+            ..Default::default()
+        };
+        fixture.start(
+            |config, context, oracle, mut peers, _, coding_config| async move {
+                let at = |view| Round::new(Epoch::zero(), View::new(view));
+                let round = at(4);
+                let block = encode_block::<B, SC, H>(
+                    B::new(Sha256::hash(&[b"target"]), Height::new(12), 1_000),
+                    coding_config,
+                );
+                let commitment = block.commitment();
+                let leader = peers[0].public_key.clone();
+
+                // Every participant has seen consensus notarize view 1.
+                for peer in &peers {
+                    peer.mailbox.notarized(unrelated().commitment(), at(1));
+                }
+                context.sleep(config.link.latency).await;
+
+                // The leader of view 4 sends every other participant its chunk of the first
+                // segment, and each relays it before naming.
+                for index in 1..4u16 {
+                    let recipient = peers[usize::from(index)].public_key.clone();
+                    let chunk = stream_of(&block, round, index).remove(0);
+                    send(&mut peers[0].sender, &recipient, [chunk.into()]);
+                }
+                context.sleep(config.link.latency * 4).await;
+                let relays = gauges(&context.encode(), "chunks_forwarded");
+                assert_eq!(relays.iter().filter(|&&count| count == 1).count(), 3);
+
+                // Discovery names the block at every other participant, and the roots reach
+                // participants 1 and 2 from the leader and participant 3 from their relays. Each
+                // binds them while the relays are fresh and relays no chunk again.
+                for peer in &peers[1..] {
+                    peer.mailbox.discovered(commitment, leader.clone(), round);
+                }
+                for index in 1..=2usize {
+                    let recipient = peers[index].public_key.clone();
+                    send(
+                        &mut peers[0].sender,
+                        &recipient,
+                        [roots_of(&block, round).into()],
+                    );
+                }
+                context.sleep(config.link.latency * 5).await;
+                assert_eq!(gauges(&context.encode(), "chunks_forwarded"), relays);
+
+                // The leader spends the relay allowance of views 8, 12, and 16 on the first
+                // segments of other blocks, and every other participant relays them, pushing the
+                // relays of the block out of every ring.
+                let cap = RELAY_CANDIDATES * usize::from(max_segments);
+                for view in [8u64, 12, 16] {
+                    for candidate in 0..cap as u64 {
+                        let other = encode_block::<B, SC, H>(
+                            B::new(
+                                Sha256::hash(&[&view.to_be_bytes(), &candidate.to_be_bytes()]),
+                                Height::new(1),
+                                candidate,
+                            ),
+                            coding_config,
+                        );
+                        for index in 1..4u16 {
+                            let recipient = peers[usize::from(index)].public_key.clone();
+                            let chunk = stream_of(&other, at(view), index).remove(0);
+                            send(&mut peers[0].sender, &recipient, [chunk.into()]);
+                        }
+                    }
+                }
+                context.sleep(config.link.latency * 4).await;
+                let flooded = (1 + 3 * cap) as i64;
+                assert!(2 * span < 3 * cap);
+                assert_eq!(
+                    gauges(&context.encode(), "chunks_forwarded")
+                        .iter()
+                        .filter(|&&count| count == flooded)
+                        .count(),
+                    3
+                );
+
+                // The leader completes the assigned shards of participants 1 and 2 only, and both
+                // verify.
+                let mut first = peers[1]
+                    .mailbox
+                    .subscribe_assigned_shard_verified(commitment);
+                let mut second = peers[2]
+                    .mailbox
+                    .subscribe_assigned_shard_verified(commitment);
+                for index in 1..=2u16 {
+                    let recipient = peers[usize::from(index)].public_key.clone();
+                    send(
+                        &mut peers[0].sender,
+                        &recipient,
+                        assigned(&block, round, index),
+                    );
+                }
+                context.sleep(config.link.latency * 5).await;
+                assert!(matches!(first.try_recv(), Ok(())));
+                assert!(matches!(second.try_recv(), Ok(())));
+
+                // Once consensus notarizes the block, every other participant reconstructs it from
+                // the shards of participants 1 and 2, and no peer is blocked.
+                for peer in &peers[1..] {
+                    peer.mailbox.notarized(commitment, round);
+                }
+                context.sleep(config.link.latency * 5).await;
+                for peer in &peers[1..] {
+                    assert!(
+                        peer.mailbox.get(commitment).await.is_some(),
+                        "every other participant must reconstruct the block"
+                    );
+                }
+                assert!(oracle.blocked().await.unwrap().is_empty());
+            },
+        );
+    }
+
+    /// Chunks and roots that arrive before consensus names their commitment wait in their senders'
+    /// rings and stay there after the roots bind. Discovery binds and relays the roots, relays each
+    /// of the leader's chunks in segment order as it verifies, and reconstructs the block.
     #[test_traced]
     fn test_chunks_and_roots_wait_in_rings_until_discovery() {
         let executor = deterministic::Runner::default();
@@ -9794,8 +10988,11 @@ mod tests {
             let (response, mut verified) = oneshot::channel();
             engine.handle_assigned_shard_verified_subscription(commitment, response);
 
+            // Peer 2 receives its chunk of every segment in order, then the roots, and each
+            // segment and the roots count as one message sent.
             engine.broadcast_shards(&mut sender, round, Arc::new(block.clone()));
-            for chunk in stream_of(&block, round, 2) {
+            let segments = stream_of(&block, round, 2);
+            for chunk in segments.iter().cloned() {
                 let sent = next_message::<SC>(&context, &mut observer)
                     .await
                     .expect("every segment's chunk must be sent");
@@ -9809,7 +11006,9 @@ mod tests {
                 .expect("the roots must follow the chunks");
             assert!(sent == ShardMessage::Roots(roots_of(&block, round)));
             assert!(next_message::<SC>(&context, &mut observer).await.is_none());
+            assert_eq!(engine.sent, segments.len() as u64 + 1);
 
+            // The proposer caches the block and counts its assigned shard as verified.
             assert!(matches!(verified.try_recv(), Ok(())));
             let record = &engine.records[&commitment];
             assert!(record.block().is_some());
@@ -9840,6 +11039,8 @@ mod tests {
             let shards: Vec<_> = (0..4)
                 .map(|index| stream_of(&block, round, index))
                 .collect();
+
+            // Each segment reaches peer 2 as it is coded, and each counts as one message sent.
             for (segment, chunk) in shards[2].iter().enumerate() {
                 engine.stream_segment(
                     &mut sender,
@@ -9858,13 +11059,17 @@ mod tests {
                     .expect("each segment's chunk must be sent as it is coded");
                 assert!(sent == ShardMessage::Stream(chunk.clone()));
             }
+            assert_eq!(engine.sent, shards[2].len() as u64);
 
+            // Proposing the block sealed from those segments sends only its roots and caches the
+            // block.
             engine.broadcast_shards(&mut sender, round, Arc::new(block.clone()));
             let sent = next_message::<SC>(&context, &mut observer)
                 .await
                 .expect("the roots must be sent");
             assert!(sent == ShardMessage::Roots(roots_of(&block, round)));
             assert!(next_message::<SC>(&context, &mut observer).await.is_none());
+            assert_eq!(engine.sent, shards[2].len() as u64 + 1);
             assert!(
                 engine
                     .records

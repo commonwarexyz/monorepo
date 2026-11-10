@@ -2868,6 +2868,7 @@ impl TestHarness for CodingHarness {
             peer_buffer_size: NZUsize!(64),
             records: RECORDS,
             peer_provider: oracle.manager(),
+            leader: Arc::new(|_| None),
         };
         let (shard_engine, shard_mailbox) =
             shards::Engine::new(context.child("shards"), shard_config);
@@ -3056,6 +3057,7 @@ impl TestHarness for CodingHarness {
             peer_buffer_size: NZUsize!(64),
             records: RECORDS,
             peer_provider: oracle.manager(),
+            leader: Arc::new(|_| None),
         };
         let (shard_engine, shard_mailbox) =
             shards::Engine::new(context.child("shards"), shard_config);
