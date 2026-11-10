@@ -26,12 +26,13 @@ use crate::core::{
 };
 use alloc::{vec, vec::Vec};
 use commonware_simd::{Operation, Simd, X86V4C};
+use core::{fmt::Debug, ops::RangeInclusive};
 
 /// Largest lane count of any representation.
 pub const MAX_LANES: usize = 16;
 
 /// Width in bits of the signed scalar windows of [`multiply`].
-const WINDOW_BITS: usize = 5;
+const WINDOW_BITS: u32 = 5;
 
 /// Entries of a table of multiples: a signed window selects a multiple by `1` through this.
 const TABLE: usize = 1 << (WINDOW_BITS - 1);
@@ -40,18 +41,18 @@ const TABLE: usize = 1 << (WINDOW_BITS - 1);
 pub const MAX_COMPONENTS: usize = 4;
 
 /// Most windows of [`WINDOW_BITS`] bits in a component, for the halves of a scalar split by the
-/// endomorphism of G1.
+/// endomorphism of G1. [`digits`] checks that it covers every group.
 const MAX_WINDOWS: usize = 26;
 
 /// Signed digits of a scalar, by component then by window from the least significant.
 type Digits = [[i16; MAX_WINDOWS]; MAX_COMPONENTS];
 
 /// Window widths that [`Method::choose`] considers for Straus's method.
-const STRAUS_WIDTHS: core::ops::RangeInclusive<u32> = 2..=8;
+const STRAUS_WIDTHS: RangeInclusive<u32> = 2..=8;
 
 /// Window widths that [`Method::choose`] considers for Pippenger's method. The widest bounds the
 /// buckets at `2^11` points per lane.
-const PIPPENGER_WIDTHS: core::ops::RangeInclusive<u32> = 2..=12;
+const PIPPENGER_WIDTHS: RangeInclusive<u32> = 2..=12;
 
 /// Estimated cost of an addition of points, in units of [`Method::cost`].
 const ADD_COST: usize = 10;
@@ -99,13 +100,10 @@ pub trait Kernel: Sized {
             where
                 S: X86V4C,
             {
-                {
-                    let this = self.0;
-                    if this.batch() {
-                        this.run::<S, Unsat49<S>>(simd)
-                    } else {
-                        this.run::<S, Rns<S>>(simd)
-                    }
+                if self.0.batch() {
+                    self.0.run::<S, Unsat49<S>>(simd)
+                } else {
+                    self.0.run::<S, Rns<S>>(simd)
                 }
             }
         }
@@ -117,7 +115,7 @@ pub trait Kernel: Sized {
 /// A group whose elements cross kernel boundaries as canonical projective coordinates.
 pub trait Group: Copy + Send + Sync {
     /// Canonical projective coordinates of one element.
-    type Coordinates: Copy + Send + Sync + PartialEq + ::core::fmt::Debug;
+    type Coordinates: Copy + Send + Sync + PartialEq + Debug;
 
     /// Elements of the group, one per lane of the representation `F`.
     type Points<S: Simd, F: Field<S>>: Points<S, Coordinates = Self::Coordinates>;
@@ -159,6 +157,12 @@ pub trait Group: Copy + Send + Sync {
 #[inline(always)]
 fn splat<S: Simd, F: Field<S>, G: Group>(simd: S, element: &G) -> G::Points<S, F> {
     G::Points::<S, F>::load(simd, &[], element.coordinates())
+}
+
+/// Loads the identity into every lane.
+#[inline(always)]
+fn identity<S: Simd, F: Field<S>, G: Group>(simd: S) -> G::Points<S, F> {
+    G::Points::<S, F>::load(simd, &[], &G::IDENTITY)
 }
 
 /// Returns the element in the first lane.
@@ -233,17 +237,13 @@ const fn windows<G: Group>(width: u32) -> usize {
 /// sum over components `c` and windows `w` of `digits[c][w] 2^(WINDOW_BITS w) psi^c(P)` for
 /// the endomorphism `psi`. Each digit's magnitude is at most [`TABLE`].
 fn digits<G: Group>(scalar: &Scalar) -> Digits {
+    const { assert!(windows::<G>(WINDOW_BITS) <= MAX_WINDOWS) };
     let components = G::components(scalar);
     let mut digits = [[0; MAX_WINDOWS]; MAX_COMPONENTS];
-    let windows = windows::<G>(WINDOW_BITS as u32);
+    let windows = windows::<G>(WINDOW_BITS);
     for (c, (digits, component)) in digits.iter_mut().zip(components).enumerate() {
         if c < G::COMPONENTS {
-            signed_digits(
-                &component,
-                WINDOW_BITS as u32,
-                c % 2 == 1,
-                &mut digits[..windows],
-            );
+            signed_digits(&component, WINDOW_BITS, c % 2 == 1, &mut digits[..windows]);
         }
     }
     digits
@@ -349,7 +349,7 @@ fn products<S: Simd, F: Field<S>, G: Group>(
         digits[lane] = self::digits::<G>(scalar);
     }
     let base = load_each::<S, F, G>(simd, elements);
-    let windows = windows::<G>(WINDOW_BITS as u32);
+    let windows = windows::<G>(WINDOW_BITS);
     multiply(simd, base, identity, G::COMPONENTS, windows, |c, w| {
         digits.map(|digits| digits[c][w])
     })
@@ -397,10 +397,10 @@ impl<G: Group> Kernel for Multiply<G> {
     // Debug builds keep this a call so that each representation's frame stays separate.
     #[cfg_attr(not(debug_assertions), inline(always))]
     fn run<S: Simd, F: Field<S>>(self, simd: S) -> G {
-        let identity = G::Points::<S, F>::load(simd, &[], &G::IDENTITY);
+        let identity = identity::<S, F, G>(simd);
         let base = splat::<S, F, G>(simd, &self.element);
         let digits = digits::<G>(&self.scalar);
-        let windows = windows::<G>(WINDOW_BITS as u32);
+        let windows = windows::<G>(WINDOW_BITS);
         let product = multiply(simd, base, identity, G::COMPONENTS, windows, |c, w| {
             [digits[c][w]; MAX_LANES]
         });
@@ -422,7 +422,7 @@ impl<G: Group> Kernel for Sum<'_, G> {
     // Debug builds keep this a call so that each representation's frame stays separate.
     #[cfg_attr(not(debug_assertions), inline(always))]
     fn run<S: Simd, F: Field<S>>(self, simd: S) -> G {
-        let mut total = G::Points::<S, F>::load(simd, &[], &G::IDENTITY);
+        let mut total = identity::<S, F, G>(simd);
         for elements in self.0.chunks(F::LANES) {
             total = total.add(simd, load_each::<S, F, G>(simd, elements));
         }
@@ -449,7 +449,7 @@ impl<G: Group> Kernel for MultiplyEach<'_, G> {
     #[cfg_attr(not(debug_assertions), inline(always))]
     fn run<S: Simd, F: Field<S>>(self, simd: S) {
         const { assert!(F::LANES <= MAX_LANES) };
-        let identity = G::Points::<S, F>::load(simd, &[], &G::IDENTITY);
+        let identity = identity::<S, F, G>(simd);
         let count = self.elements.len().min(self.scalars.len());
         for (elements, scalars) in self.elements[..count]
             .chunks_mut(F::LANES)
@@ -484,21 +484,21 @@ pub enum Method {
 impl Method {
     /// Returns the method of least estimated cost for `count` elements of `G` on `lanes` lanes.
     pub fn choose<G: Group>(count: usize, lanes: usize) -> Self {
-        let methods = STRAUS_WIDTHS
+        STRAUS_WIDTHS
             .flat_map(|width| [false, true].map(|split| Self::Straus { width, split }))
-            .chain(PIPPENGER_WIDTHS.map(Self::Pippenger));
-        let mut best = Self::Straus {
-            width: *STRAUS_WIDTHS.start(),
-            split: false,
-        };
-        let mut least = usize::MAX;
-        for method in methods {
-            let cost = method.cost::<G>(count, lanes);
-            if cost < least {
-                (best, least) = (method, cost);
-            }
+            .chain(PIPPENGER_WIDTHS.map(Self::Pippenger))
+            .min_by_key(|method| method.cost::<G>(count, lanes))
+            .expect("the widths are not empty")
+    }
+
+    /// Returns the components and windows of `width` bits that Straus's method takes from each
+    /// scalar: every component with `split`, and otherwise the whole scalar as one.
+    const fn shape<G: Group>(width: u32, split: bool) -> (usize, usize) {
+        if split {
+            (G::COMPONENTS, windows::<G>(width))
+        } else {
+            (1, SCALAR_BITS.div_ceil(width) as usize)
         }
-        best
     }
 
     /// Returns the estimated cost of the method, counting the additions, doublings, negations, and
@@ -508,11 +508,7 @@ impl Method {
             Self::Straus { width, split } => {
                 // Each group of lanes builds a table of its multiples, the images of every
                 // entry, and their negations, then adds one entry per component and window.
-                let (components, windows) = if split {
-                    (G::COMPONENTS, windows::<G>(width))
-                } else {
-                    (1, SCALAR_BITS.div_ceil(width) as usize)
-                };
+                let (components, windows) = Self::shape::<G>(width, split);
                 let groups = count.div_ceil(lanes);
                 let entries = 1 << (width - 1);
                 ADD_COST * groups * (entries - 1 + components * windows)
@@ -651,13 +647,9 @@ fn straus<S: Simd, F: Field<S>, G: Group>(
     width: u32,
     split: bool,
 ) -> G {
-    let identity = G::Points::<S, F>::load(simd, &[], &G::IDENTITY);
+    let identity = identity::<S, F, G>(simd);
     let zero = first_raw::<S, F, G>(simd, identity);
-    let (components, windows) = if split {
-        (G::COMPONENTS, windows::<G>(width))
-    } else {
-        (1, SCALAR_BITS.div_ceil(width) as usize)
-    };
+    let (components, windows) = Method::shape::<G>(width, split);
     let digits = component_digits::<G>(scalars, width, windows, split);
     let entries = 1 << (width - 1);
 
@@ -744,7 +736,7 @@ fn pippenger<S: Simd, F: Field<S>, G: Group>(
     scalars: &[Scalar],
     width: u32,
 ) -> G {
-    let identity = G::Points::<S, F>::load(simd, &[], &G::IDENTITY);
+    let identity = identity::<S, F, G>(simd);
     let zero = first_raw::<S, F, G>(simd, identity);
     let groups = windows::<G>(width).div_ceil(F::LANES);
     let span = groups * F::LANES;
@@ -787,6 +779,11 @@ fn pippenger<S: Simd, F: Field<S>, G: Group>(
             }
         }
 
+        if started {
+            for _ in 0..width as usize * F::LANES {
+                total = outlined_double(simd, total);
+            }
+        }
         // The running sum adds each bucket once it is reached from the top, so the window sum
         // counts bucket b + 1 times.
         if used > 0 {
@@ -797,19 +794,12 @@ fn pippenger<S: Simd, F: Field<S>, G: Group>(
                 running = outlined_add(simd, running, bucket);
                 window = outlined_add(simd, window, running);
             }
-            if started {
-                for _ in 0..width as usize * F::LANES {
-                    total = outlined_double(simd, total);
-                }
-                total = outlined_add(simd, total, window);
+            total = if started {
+                outlined_add(simd, total, window)
             } else {
-                total = window;
-                started = true;
-            }
-        } else if started {
-            for _ in 0..width as usize * F::LANES {
-                total = outlined_double(simd, total);
-            }
+                window
+            };
+            started = true;
         }
     }
 
