@@ -930,16 +930,17 @@ impl Future for Sleep {
             State::Done => Poll::Ready(()),
             State::Registered(sleeper) => {
                 let outcome = std::task::ready!(sleeper.poll(cx));
-                let deadline = sleeper.deadline;
-                this.state = State::Done;
 
                 // A closed worker discarded the registration, which may have
                 // fired or not. Only a deadline that has passed, as every
-                // fired one's has, may still complete.
+                // fired one's has, may still complete. Until it has, the sleep
+                // stays registered, so every poll observes the closure again,
+                // and its drop finds nothing in the closed timers.
                 assert!(
-                    outcome == Outcome::Fired || deadline <= Instant::now(),
+                    outcome == Outcome::Fired || sleeper.deadline <= Instant::now(),
                     "io_uring sleep polled after its worker closed"
                 );
+                this.state = State::Done;
                 Poll::Ready(())
             }
             State::Unregistered(deadline) => {
@@ -1563,6 +1564,42 @@ pub mod tests {
 
         // Neither drop finds anything left to release.
         drop(passed);
+        drop(ahead);
+        assert_eq!(timers.live(), 0);
+        assert_eq!(Arc::strong_count(&count), 2);
+    }
+
+    #[test]
+    fn test_closed_sleep_ahead_of_its_deadline_never_completes() {
+        // No service pass ran on this thread, so polls take the lock.
+        assert!(turn().is_none());
+
+        // A pending registration whose deadline is ahead closes.
+        let timers = Arc::new(Timers::new());
+        let (count, waker) = counter();
+        let mut ahead = registered(&timers, Instant::now() + Duration::from_secs(60), &waker);
+        let mut deferred = Deferred::default();
+        timers.close(&mut deferred);
+        run(&mut deferred);
+        assert_eq!(count.get(), 1);
+
+        // The sleep has no error output, so every poll before its deadline
+        // panics, including one that follows a caught panic, and each one
+        // observes the closure under the lock.
+        let mut cx = Context::from_waker(&waker);
+        for _ in 0..3 {
+            let before = locks();
+            let panic = catch_unwind(AssertUnwindSafe(|| ahead.poll_unpin(&mut cx)))
+                .expect_err("a closed sleep completed before its deadline");
+            assert!(
+                extract_panic_message(&*panic)
+                    .starts_with("io_uring sleep polled after its worker closed")
+            );
+            assert_eq!(locks() - before, 1);
+            assert!(matches!(ahead.state, State::Registered(_)));
+        }
+
+        // Its drop finds nothing left to release.
         drop(ahead);
         assert_eq!(timers.live(), 0);
         assert_eq!(Arc::strong_count(&count), 2);
