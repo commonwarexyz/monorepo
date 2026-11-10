@@ -93,10 +93,6 @@ tokio-console = [ "dep:console-subscriber", "tokio/tracing" ]
 [lib]
 bench = false
 
-[[test]]
-name = "iouring_private_futex_hash"
-harness = false
-
 [[bench]]
 name = "storage"
 harness = false

@@ -7,48 +7,51 @@
 //!
 //! # Idle state and parker
 //!
-//! On a kick, through [`Idle::notify`], or a push into the global queue,
-//! through [`Idle::notify_global`], [`Idle`] decides whether to wake a pool
-//! worker and which one. A successful claim clears that worker's idle bit and
-//! transfers a reserved search count, then calls [`Unparker::unpark`] on the
-//! worker's mailbox. The unpark advances the sequence of the worker's word,
-//! which its next wait compares against, and wakes it if it is armed.
-//! Mailbox messages and driver permit grants unpark the same word without
-//! going through [`Idle`].
+//! [`Idle`] decides whether to wake a pool worker, and which one, on a kick
+//! through [`Idle::notify`] and on a push into the global queue through
+//! [`Idle::notify_global`]. A successful claim clears that worker's idle bit
+//! and transfers a reserved search count, then unparks the worker through its
+//! mailbox's [`Unparker`].
+//!
+//! The unpark advances the sequence of the worker's futex word, which its next
+//! wait compares against, and wakes an armed worker unless another
+//! notification already did. Mailbox messages and driver permit grants unpark
+//! the same word without going through [`Idle`].
 //!
 //! A pool worker publishes its idle bit, returns any held search count, and
 //! fences before its last look for work. If it proceeds to wait, the
 //! publication stays live until withdrawal, even if a claim clears the bit.
 //!
-//! The worker observes its word's sequence through its [`Parker`] before
-//! its last look for work. With unfinished I/O requests, [`Driver::park`]
-//! arms the word before waiting on it in the io_uring ring. Otherwise,
-//! [`Parker::park`] arms it after any unsuccessful spin and waits on it with
-//! a thread futex wait. Both paths block only while the armed word still
-//! carries the observed sequence, so an early unpark prevents blocking. After
-//! spinning or waiting, even if it did not block, the worker ends its
-//! publication through [`Searcher::finish_park`] before user code and keeps
-//! the count a claim brought.
+//! With unfinished I/O requests, [`Driver::park`] arms the worker's word
+//! before waiting on it in the io_uring ring. Otherwise, [`Parker::park`] arms
+//! it after any unsuccessful spin and waits with a thread futex wait. Both
+//! paths block only while the armed word still carries the sequence that the
+//! worker's [`Parker`] observed before its last look, so an early unpark can
+//! prevent blocking. After spinning or waiting, even if it did not block, the
+//! worker ends its publication through [`Searcher::finish_park`] before user
+//! code and keeps the count a claim brought.
 //!
 //! [`Driver::park`]: super::driver::Driver::park
 //! [`Parker`]: super::park::Parker
 //! [`Parker::park`]: super::park::Parker::park
-//! [`Unparker::unpark`]: super::park::Unparker::unpark
+//! [`Unparker`]: super::park::Unparker
 //!
 //! # Waking a parked worker
 //!
-//! [`Idle`] holds the idle set and the search count on one cache line for
-//! pool wake selection. The idle set is one `u64` with a bit per worker,
-//! which is why a pool has at most [`MAX_WORKERS`] workers. A worker's bit is
-//! set while it is published as parked or about to park and no wake has
-//! claimed it. Claiming a worker clears its bit, so each publication is claimed
-//! at most once. The search count tracks responsibility for finding work or
-//! handing the search on. A worker keeps its count across a search until it
-//! parks or leaves searching. A wake reserves a count before claiming a bit,
-//! transferring it to the claimed worker or returning it if the claim fails.
-//! Thus a count can belong to a wake still attempting its claim, as well as to
-//! a worker. The idle-bit exchange transfers the count, not the notification.
-//! A late notification from an earlier claim cannot transfer another count.
+//! [`Idle`] holds the idle set and the search count on one cache line for pool
+//! wake selection. The idle set is one `u64` with a bit per worker, so a pool
+//! has at most [`MAX_WORKERS`] workers. A worker's bit is set while it is
+//! published as parked or about to park and no wake has claimed it. Claiming a
+//! worker clears its bit, so each publication is claimed at most once.
+//!
+//! The search count is the number of workers and wakes responsible for finding
+//! work or handing the search on. A worker keeps its count across a search
+//! until it parks or leaves searching. A wake reserves a count before claiming
+//! a bit. A successful claim transfers the count to the claimed worker, and a
+//! wake whose claim fails returns it. So a count can belong to a wake still
+//! attempting its claim, as well as to a worker. The idle-bit exchange
+//! transfers the count, not the notification. A late notification from an
+//! earlier claim cannot transfer another count.
 //!
 //! A push into the global queue fences and claims the lowest published worker,
 //! even while another worker searches, so a burst of spawns wakes a worker per
@@ -99,19 +102,23 @@
 //!
 //! Each side fences between its store and its loads, so one of them sees the
 //! other's store. A kick that sees a count is covered by the fence after the
-//! last return of a count, whose look or wake follows the kick. A push that
-//! sees no idle bit missed only workers that fence after it, whose last look
-//! sees the push, and workers that were claimed or withdrew and run again. A
-//! push into the global queue is therefore never left queued with every worker
-//! asleep, and a stealable backlog that persists is taken or offered to a
-//! parked worker. A take queues its share without a kick. A look that reads the
-//! length the take left, or a later one, sees the share, and a worker that
-//! parked on a zero from before the push that filled the queue was seen by that
-//! push, which wakes a worker for it. A notification that arrives before the
-//! worker arms its wait moves the sequence the wait compares against, so the
-//! wait returns at once. A claimed worker withdraws its bit as soon as its
-//! wait returns, before it runs any callback, and a withdrawal reports a claim
-//! only when it ends a live publication.
+//! last return of a count. That fence, and the look or wake after it, follow
+//! the kick. A push that sees no idle bit missed only workers that fence after
+//! it and workers that were claimed or withdrew and run again. A worker that
+//! fences after the push sees it in its last look. A push into the global queue
+//! is therefore never left queued with every worker asleep, and a stealable
+//! backlog that persists is taken or offered to a parked worker.
+//!
+//! A take queues its share without a kick. A look that reads the length the
+//! take left, or a later one, sees the share. A worker that parked on a zero
+//! from before the push that filled the queue was seen by that push, and that
+//! push wakes a worker for it.
+//!
+//! A notification that arrives before the worker arms its wait moves the
+//! sequence the wait compares against, so the wait returns at once. A claimed
+//! worker withdraws its bit as soon as its wait returns, before it runs any
+//! callback, and a withdrawal reports a claim only when it ends a live
+//! publication.
 //!
 //! The fences carry most of the argument. When two sides each store, pass a
 //! sequentially consistent fence, and then load what the other side stores, the
@@ -300,14 +307,15 @@ impl Idle {
         // Clearing a worker's idle bit claims it, so a wake that loses the
         // exchange to another retries with the bits that remain, and each
         // publication is claimed at most once. The exchange can also fail
-        // spuriously or because a worker published or withdrew its bit, and
-        // the retry uses the set as it is now.
+        // spuriously or because a worker published or withdrew its bit, and the
+        // retry uses the current set.
         //
-        // The exchange releases the reserved count to the claimed worker,
-        // whose withdrawal acquires it, so the worker's later return of that
-        // count follows the reservation in the count's modification order,
-        // even when its wait returns before this wake unparks it. A failed
-        // exchange only yields the set to retry with, so it is relaxed.
+        // The exchange releases the reserved count to the claimed worker, and
+        // the worker's withdrawal acquires it. The worker's later return of
+        // that count therefore follows the reservation in the count's
+        // modification order, even when its wait returns before this wake
+        // unparks it. A failed exchange only yields the set to retry with, so
+        // it is relaxed.
         while idle != 0 {
             // Claim the lowest published worker.
             let index = idle.trailing_zeros();
