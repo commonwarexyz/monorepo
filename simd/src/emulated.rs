@@ -698,8 +698,7 @@ mod test_utils {
 
     /// Checks the widening split through its inverse, which suffices for any lane pairing.
     fn widening_split<S: Simd>(simd: S) {
-        assert!(S::U32_LANES <= 2 * S::U64_LANES);
-        let split = S::U32_LANES.min(S::U64_LANES);
+        assert_eq!(S::U32_LANES, 2 * S::U64_LANES);
         let distinct = |seed: u32| -> Vec<u32> {
             (0..S::U32_LANES as u32)
                 .map(|i| {
@@ -735,12 +734,6 @@ mod test_utils {
                     .iter()
                     .map(|p| (*p >> 32) as u32)
                     .collect::<Vec<_>>()
-            );
-            assert!(longs(simd, first)[split..].iter().all(|lane| *lane == 0));
-            assert!(
-                longs(simd, second)[S::U32_LANES - split..]
-                    .iter()
-                    .all(|lane| *lane == 0)
             );
             assert_eq!(
                 words(simd, simd.u32_mul_lo(av, bv)),
