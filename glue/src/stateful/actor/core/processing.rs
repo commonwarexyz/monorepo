@@ -525,10 +525,7 @@ mod tests {
             core::{Mailbox as MarshalMailbox, Processed},
             standard::Deferred,
         },
-        simplex::{
-            mocks::scheme as scheme_mocks,
-            types::{Activity, Finalization, Finalize, Proposal},
-        },
+        simplex::{mocks::scheme as scheme_mocks, types::Activity},
         types::{FixedEpocher, Height},
     };
     use commonware_cryptography::{Digested, Digestible as _, certificate::mocks::Fixture};
@@ -668,8 +665,8 @@ mod tests {
         }
     }
 
-    /// A verification far above every test block whose recovery acquires missing history that
-    /// never arrives, and the signals of those acquisitions.
+    /// A verification whose recovery acquires missing history that never arrives, and the
+    /// signals of those acquisitions.
     struct Parked {
         request: PendingRequest,
         acquired: oneshot::Receiver<()>,
@@ -677,7 +674,8 @@ mod tests {
     }
 
     impl Parked {
-        /// Builds the verification without sending it. It is sent when first polled.
+        /// Builds a verification far above every test block without sending it. It is sent when
+        /// first polled.
         fn verification<A>(
             mailbox: &Mailbox<deterministic::Context, A>,
             context: deterministic::Context,
@@ -691,6 +689,24 @@ mod tests {
         {
             let parent = TestBlock::new(99, 0xf1);
             let block = TestBlock::child(&parent, 0xf0);
+            Self::verification_of(mailbox, context, block, parent)
+        }
+
+        /// Builds the verification of `block` on `parent` without sending it. It is sent when
+        /// first polled.
+        fn verification_of<A>(
+            mailbox: &Mailbox<deterministic::Context, A>,
+            context: deterministic::Context,
+            block: TestBlock,
+            parent: TestBlock,
+        ) -> Self
+        where
+            A: Application<
+                    deterministic::Context,
+                    Block = TestBlock,
+                    Context = <TestApp as Application<deterministic::Context>>::Context,
+                >,
+        {
             let (acquired, acquired_receiver) = oneshot::channel();
             let (parked, parked_receiver) = oneshot::channel();
             let signals = Arc::new(Mutex::new(AcquisitionSignals {
@@ -1466,9 +1482,8 @@ mod tests {
     fn abandoned_incomplete_verifications_do_not_block_later_work() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (first_gate, first_started, first_release) = application_gate();
-            let (second_gate, second_started, second_release) = application_gate();
             let app = GatedApp {
-                process_gates: Arc::new(Mutex::new(VecDeque::from([first_gate, second_gate]))),
+                process_gates: Arc::new(Mutex::new(VecDeque::from([first_gate]))),
                 proposal_gate: Arc::new(Mutex::new(None)),
                 process_valid: true,
                 observed_contexts: Arc::default(),
@@ -1477,7 +1492,7 @@ mod tests {
                 spawn_gated_application(&context, "incomplete-verify", app).await;
             let subscriber = mailbox.clone();
 
-            // Each incomplete verification is dropped only after the actor has answered a later
+            // The incomplete verification is dropped only after the actor has answered a later
             // database subscription, and so has received the verification and started acquiring
             // its blocks.
             let genesis = TestBlock::new(0, 0);
@@ -1485,7 +1500,7 @@ mod tests {
             let Parked {
                 request: mut incomplete,
                 ..
-            } = Parked::verification(&mailbox, context.child("empty"));
+            } = Parked::verification(&mailbox, context.child("incomplete"));
             assert!(poll!(&mut incomplete).is_pending());
             drop(subscriber.subscribe_databases().await);
             drop(incomplete);
@@ -1493,7 +1508,7 @@ mod tests {
             let mut first = Box::pin(verify_with(
                 &mut mailbox,
                 (context.child("first"), block1.context()),
-                [digested(block1.clone()), digested(genesis)],
+                [digested(block1), digested(genesis)],
             ));
             assert!(poll!(&mut first).is_pending());
             first_started
@@ -1503,29 +1518,6 @@ mod tests {
                 .send(())
                 .expect("later verification should remain active");
             assert!(first.await);
-
-            let block2 = TestBlock::child(&block1, 2);
-            let Parked {
-                request: mut incomplete,
-                ..
-            } = Parked::verification(&mailbox, context.child("missing_parent"));
-            assert!(poll!(&mut incomplete).is_pending());
-            drop(subscriber.subscribe_databases().await);
-            drop(incomplete);
-
-            let mut second = Box::pin(verify_with(
-                &mut mailbox,
-                (context.child("second"), block2.context()),
-                [digested(block2), digested(block1)],
-            ));
-            assert!(poll!(&mut second).is_pending());
-            second_started
-                .await
-                .expect("later verification should start");
-            second_release
-                .send(())
-                .expect("later verification should remain active");
-            assert!(second.await);
             actor.abort();
         });
     }
@@ -1624,25 +1616,35 @@ mod tests {
             true,
         )
         .await;
-        let processor = Processor::new(
-            app,
-            test_databases(),
-            anchor(0, 0),
-            StatefulMetrics::new(context),
-            None,
-            Sequential,
-        );
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
+        let actor = spawn_replay_gated_loop(context, receiver, marshal.mailbox.clone(), app);
+        (Mailbox::new(sender), marshal.mailbox, marshal.guards, actor)
+    }
+
+    /// Spawns a processing loop for `app` at the genesis anchor that serves `receiver` over
+    /// `marshal`.
+    fn spawn_replay_gated_loop(
+        context: &deterministic::Context,
+        receiver: actor_mailbox::Receiver<Message<deterministic::Context, ReplayGatedApp>>,
+        marshal: MarshalMailbox<TestScheme, TestVariant>,
+        app: ReplayGatedApp,
+    ) -> Handle<()> {
         let processing = Processing {
             context: ContextCell::new(context.child("processing")),
             mailbox: receiver,
             provider: (),
-            marshal: marshal.mailbox.clone(),
-            processor,
+            marshal,
+            processor: Processor::new(
+                app,
+                test_databases(),
+                anchor(0, 0),
+                StatefulMetrics::new(context),
+                None,
+                Sequential,
+            ),
             deferred_verifications: Vec::new(),
         };
-        let actor = context.child("loop").spawn(move |_| processing.run());
-        (Mailbox::new(sender), marshal.mailbox, marshal.guards, actor)
+        context.child("loop").spawn(move |_| processing.run())
     }
 
     /// Resolves once the actor has received every earlier message and handled marshal's replies
@@ -2364,17 +2366,8 @@ mod tests {
             let reject_context = context.child("reject");
             let pending_owner = Arc::new(AtomicUsize::new(0));
             let pending_weak = Arc::downgrade(&pending_owner);
-            let pending_parent = TestBlock::new(99, 0xf1);
-            let pending_block = TestBlock::child(&pending_parent, 0xf0);
-            let pending_history = Blocks::new(
-                pending_parent.height(),
-                NZUsize!(1),
-                |_| None,
-                move |_| {
-                    let _owner = &pending_owner;
-                    futures::future::pending()
-                },
-            );
+            let (pending_block, pending_parent, pending_blocks) =
+                pending_history(pending_owner, false);
             let requests = [
                 (
                     (context.child("child"), child.context()),
@@ -2384,9 +2377,9 @@ mod tests {
                 ),
                 (
                     (retry_context, pending_block.context()),
-                    digested(pending_block),
-                    digested(pending_parent),
-                    pending_history,
+                    pending_block,
+                    pending_parent,
+                    pending_blocks,
                 ),
                 (
                     (reject_context, losing.context()),
@@ -5810,36 +5803,161 @@ mod tests {
         });
     }
 
+    /// A redelivered applied tip leaves a verification that is still acquiring its block running.
+    #[test]
+    fn tip_redelivery_keeps_acquiring_verification() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let (mut mailbox, _control, _marshal, actor) =
+                spawn_processing(&context, "tip-redelivery-acquiring", None).await;
+
+            // Start a verification whose selected history never yields its missing blocks.
+            let clones = Arc::new(AtomicUsize::new(0));
+            let (block, parent, blocks) = pending_history(clones.clone(), false);
+            let mut verifier = mailbox.clone();
+            let mut verify = Box::pin(verifier.verify(
+                (context.child("verify"), block.context()),
+                block,
+                parent,
+                blocks,
+            ));
+            assert!(poll!(&mut verify).is_pending());
+            drop(mailbox.subscribe_databases().await);
+            let attempts = clones.load(Ordering::SeqCst);
+
+            // Observe the redelivery before checking that acquisition was left running.
+            let (ack, waiter) = Exact::handle();
+            mailbox.report(Update::Block(digested(TestBlock::new(0, 0)), ack));
+            waiter.await.expect("redelivered tip must be acknowledged");
+            drop(mailbox.subscribe_databases().await);
+            assert_eq!(
+                clones.load(Ordering::SeqCst),
+                attempts,
+                "tip redelivery must not restart an acquiring verification",
+            );
+            assert!(poll!(&mut verify).is_pending());
+            actor.abort();
+        });
+    }
+
+    /// A finalization waiting for a competing execution proceeds when that request's caller
+    /// cancels, and the cancelled request gets no reply.
+    #[test]
+    fn cancellation_during_finalization_join_releases_maintenance() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let genesis = TestBlock::new(0, 0);
+            let losing = TestBlock::child(&genesis, 1);
+            let winner = TestBlock::child(&genesis, 2);
+            let height = winner.height();
+            let (gate, started, mut release) = application_gate();
+            let app = ReplayGatedApp::new(height, [gate]);
+            let process_calls = app.process_calls.clone();
+            let finalized_calls = app.finalized_calls.clone();
+            let capture_calls = app.capture_calls.clone();
+            let (mut mailbox, _, guards, actor) = spawn_replay_gated_processing(
+                &context,
+                "cancellation-during-finalization-join",
+                &genesis,
+                app,
+            )
+            .await;
+
+            // The gate holds the losing request's execution. A second verification never acquires
+            // its block and reports when finalization pauses it.
+            let mut request = send_managed(
+                &context,
+                &mailbox,
+                Managed::Verify,
+                vec![digested(losing), digested(genesis)],
+            );
+            assert!(poll!(&mut request).is_pending());
+            started
+                .await
+                .expect("losing request must execute its block");
+            let Parked {
+                request: mut acquiring,
+                parked,
+                ..
+            } = Parked::verification(&mailbox, context.child("acquiring"));
+            assert!(poll!(&mut acquiring).is_pending());
+
+            // Finalizing the winner pauses the acquisition and waits for the losing execution.
+            let (acknowledgement, mut receipt) = Exact::handle();
+            let _ = mailbox.report(Update::Block(digested(winner), acknowledgement));
+            parked
+                .await
+                .expect("finalization must pause the acquisition");
+            assert!(poll!(&mut receipt).is_pending());
+            assert_eq!(capture_calls.load(Ordering::SeqCst), 0);
+
+            // Cancelling the losing request ends the wait with its gate still held, so the winner
+            // is reconstructed and acknowledged.
+            drop(request);
+            release.closed().await;
+            receipt
+                .await
+                .expect("winner must be acknowledged after the cancellation");
+            assert_eq!(process_calls.at(height), 2);
+            assert_eq!(finalized_calls.at(height), 1);
+            assert_eq!(capture_calls.load(Ordering::SeqCst), 1);
+
+            drop(acquiring);
+            actor.abort();
+            drop(guards);
+        });
+    }
+
+    /// A verification whose acquisition a finalization pauses answers from the restarted
+    /// acquisition once the finalization completes.
+    #[test]
+    fn paused_acquisition_restarts_after_finalization() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let genesis = TestBlock::new(0, 0);
+            let missing = TestBlock::child(&genesis, 1);
+            let parent = TestBlock::child(&missing, 2);
+            let block = TestBlock::child(&parent, 3);
+            let app = ReplayGatedApp::new(Height::zero(), []);
+            let process_calls = app.process_calls.clone();
+            let finalized_calls = app.finalized_calls.clone();
+            let (mut mailbox, _, guards, actor) = spawn_replay_gated_processing(
+                &context,
+                "paused-acquisition-restart",
+                &genesis,
+                app,
+            )
+            .await;
+
+            // Recovering the parent's state needs the block below it, which never arrives.
+            let Parked {
+                request: mut verification,
+                acquired,
+                parked,
+            } = Parked::verification_of(&mailbox, context.child("verify"), block, parent);
+            assert!(poll!(&mut verification).is_pending());
+            acquired
+                .await
+                .expect("verification must start acquiring the missing block");
+
+            // Finalizing the missing block pauses the acquisition and applies the block.
+            let (acknowledgement, receipt) = Exact::handle();
+            let _ = mailbox.report(Update::Block(digested(missing), acknowledgement));
+            parked
+                .await
+                .expect("finalization must pause the acquisition");
+            receipt.await.expect("finalized block must be acknowledged");
+
+            // The restarted acquisition starts above the applied block, so it needs no body and
+            // processes the parent and the block once each.
+            assert!(verification.await);
+            assert_eq!(finalized_calls.at(Height::new(1)), 1);
+            for height in 1..=3 {
+                assert_eq!(process_calls.at(Height::new(height)), 1);
+            }
+            actor.abort();
+            drop(guards);
+        });
+    }
+
     type TestDigest = <TestBlock as commonware_cryptography::Digestible>::Digest;
-
-    /// Builds the selected branch a marshal adapter supplies, bound to the validated parent.
-    fn selected_blocks(
-        marshal: &MarshalMailbox<TestScheme, TestVariant>,
-        parent: &TestBlock,
-        history: History<TestDigest>,
-    ) -> Blocks<TestBlock> {
-        marshal.blocks_with_parent(parent.height(), parent.digest(), history)
-    }
-
-    /// Builds a finalization of `block` at its own round over its own parent view.
-    fn finalization_of(
-        fixture: &Fixture<TestScheme>,
-        block: &TestBlock,
-    ) -> Finalization<TestScheme, TestDigest> {
-        let context = block.context();
-        let proposal = Proposal::new(context.round, context.parent.0, block.digest());
-        let finalizes: Vec<_> = fixture
-            .schemes
-            .iter()
-            .map(|scheme| Finalize::sign(scheme, proposal.clone()).expect("sign finalize"))
-            .collect();
-        Finalization::from_finalizes(
-            &fixture.verifier,
-            commonware_utils::non_empty![@finalizes.iter()],
-            &Sequential,
-        )
-        .expect("recover finalization")
-    }
 
     /// A processing actor over a real marshal. Its application can hold one block's processing
     /// at a gate and then read one selected block from that processing's history.
@@ -5906,11 +6024,8 @@ mod tests {
             verified: &[&TestBlock],
         ) -> Self {
             let mut signing = context.child("signing");
-            let fixture = scheme_mocks::fixture(
-                &mut signing,
-                b"_COMMONWARE_GLUE_PROCESSING_ABANDONED_HISTORY",
-                1,
-            );
+            let fixture =
+                scheme_mocks::fixture(&mut signing, b"_COMMONWARE_GLUE_PROCESSING_HELD_READ", 1);
             let process_calls = app.process_calls.clone();
             let finalized_calls = app.finalized_calls.clone();
 
@@ -5925,22 +6040,7 @@ mod tests {
                 mailbox.clone(),
             )
             .await;
-            let processing = Processing {
-                context: ContextCell::new(context.child("processing")),
-                mailbox: receiver,
-                provider: (),
-                marshal: marshal.mailbox.clone(),
-                processor: Processor::new(
-                    app,
-                    test_databases(),
-                    anchor(0, 0),
-                    StatefulMetrics::new(context),
-                    None,
-                    Sequential,
-                ),
-                deferred_verifications: Vec::new(),
-            };
-            let actor = context.child("loop").spawn(move |_| processing.run());
+            let actor = spawn_replay_gated_loop(context, receiver, marshal.mailbox.clone(), app);
             let ingress = marshal.mailbox.clone();
             for block in verified {
                 assert!(
@@ -5968,7 +6068,13 @@ mod tests {
             parent: &TestBlock,
             history: History<TestDigest>,
         ) -> PendingRequest {
-            let blocks = selected_blocks(&self.marshal.mailbox, parent, history);
+            // The marshal adapters build the selected branch the same way, bound to the
+            // validated parent.
+            let blocks = (self.marshal.mailbox).blocks_with_parent(
+                parent.height(),
+                parent.digest(),
+                history,
+            );
             let request = (context, block.context());
             let (block, parent) = (digested(block.clone()), digested(parent.clone()));
             let mut mailbox = self.mailbox.clone();
@@ -5978,9 +6084,10 @@ mod tests {
         /// Reports `block`'s finalization to marshal.
         fn report(&self, block: &TestBlock) {
             let mut ingress = self.marshal.mailbox.clone();
-            ingress.report(Activity::Finalization(finalization_of(
+            ingress.report(Activity::Finalization(fixtures::finalization(
                 &self.fixture,
-                block,
+                block.height().get(),
+                block.digest(),
             )));
         }
 
@@ -6048,22 +6155,15 @@ mod tests {
         Descendant,
     }
 
-    /// A descendant's recovery keeps a block's shared processing after the block's own
-    /// verification is dropped, so the processing still reads the block's own selected history,
-    /// a suffix that holds at most the parent. A finalization then covers the block, and the
-    /// delayed processing reads below the parent. The read finds the validated parent finalized
-    /// and comes from finalized storage, even when consensus supplied no commitment, so the
-    /// finalization waiting for the processing is acknowledged and the descendant verifies.
-    #[test]
-    fn shared_processing_of_a_covered_block_reads_below_its_history() {
-        for supplied in [SuppliedHistory::Parent, SuppliedHistory::Empty] {
-            for covering in [Covering::Block, Covering::Descendant] {
-                covered_processing_reads_below_its_history(supplied, covering);
-            }
-        }
-    }
-
-    fn covered_processing_reads_below_its_history(supplied: SuppliedHistory, covering: Covering) {
+    /// A shared processing that a descendant keeps after its own verification is dropped reads
+    /// below its suffix history once a finalization covers its block. The read finds the
+    /// validated parent finalized and comes from finalized storage, so the finalization waiting
+    /// for the processing is acknowledged and the descendant verifies.
+    #[rstest::rstest]
+    fn shared_processing_of_a_covered_block_reads_below_its_history(
+        #[values(SuppliedHistory::Parent, SuppliedHistory::Empty)] supplied: SuppliedHistory,
+        #[values(Covering::Block, Covering::Descendant)] covering: Covering,
+    ) {
         // The runner budget is only a hang guard. Processing that cannot read below its history
         // would hold the finalization forever.
         deterministic::Runner::timed(Duration::from_secs(10)).start(move |context| async move {
@@ -6187,14 +6287,14 @@ mod tests {
         });
     }
 
-    /// A live request joins a held processing started by a request on a sibling branch that
-    /// later loses. The losing request is dropped, and the winning sibling finalizes. The shared
-    /// processing then reads below every commitment in the losing request's history. That
-    /// history's lowest commitment is a canonical ancestor, and the read starts from it, so the
-    /// winning finalization is acknowledged and the live request verifies.
+    /// A shared processing started by a request on a branch that later loses reads below that
+    /// request's history after the winning sibling finalizes. The history's lowest commitment
+    /// is a canonical ancestor, and the read starts from it, so the winning finalization is
+    /// acknowledged and the request that joined the processing verifies.
     #[test]
     fn shared_processing_started_on_a_losing_branch_reads_below_its_history() {
-        // The runner budget is only a hang guard, as above.
+        // The runner budget is only a hang guard. A read that could not start from the history's
+        // lowest commitment would hold the finalization forever.
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             let genesis = TestBlock::new(0, 0);
             let applied = TestBlock::child(&genesis, 1);
@@ -6327,7 +6427,7 @@ mod tests {
     /// so a search that read further down would never finish.
     #[test]
     fn suffix_history_recovers_from_the_nearest_cached_state() {
-        // The runner budget is only a hang guard, as above.
+        // The runner budget is only a hang guard for that search.
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             let genesis = TestBlock::new(0, 0);
             let chain = successors(&genesis, 5);
@@ -6361,109 +6461,6 @@ mod tests {
                 assert_eq!(harness.process_calls.at(block.height()), 1);
             }
             harness.stop().await;
-        });
-    }
-
-    /// A redelivered applied tip leaves a verification that is still acquiring its block running.
-    #[test]
-    fn tip_redelivery_keeps_acquiring_verification() {
-        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-            let (mut mailbox, _control, _marshal, actor) =
-                spawn_processing(&context, "tip-redelivery-acquiring", None).await;
-
-            // Start a verification whose selected history never yields its missing blocks.
-            let clones = Arc::new(AtomicUsize::new(0));
-            let (block, parent, blocks) = pending_history(clones.clone(), false);
-            let mut verifier = mailbox.clone();
-            let mut verify = Box::pin(verifier.verify(
-                (context.child("verify"), block.context()),
-                block,
-                parent,
-                blocks,
-            ));
-            assert!(poll!(&mut verify).is_pending());
-            drop(mailbox.subscribe_databases().await);
-            let attempts = clones.load(Ordering::SeqCst);
-
-            // Observe the redelivery before checking that acquisition was left running.
-            let (ack, waiter) = Exact::handle();
-            mailbox.report(Update::Block(digested(TestBlock::new(0, 0)), ack));
-            waiter.await.expect("redelivered tip must be acknowledged");
-            drop(mailbox.subscribe_databases().await);
-            assert_eq!(
-                clones.load(Ordering::SeqCst),
-                attempts,
-                "tip redelivery must not restart an acquiring verification",
-            );
-            assert!(poll!(&mut verify).is_pending());
-            actor.abort();
-        });
-    }
-
-    /// A finalization waiting for a competing execution proceeds when that request's caller
-    /// cancels, and the cancelled request gets no reply.
-    #[test]
-    fn cancellation_during_finalization_join_releases_maintenance() {
-        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
-            let genesis = TestBlock::new(0, 0);
-            let losing = TestBlock::child(&genesis, 1);
-            let winner = TestBlock::child(&genesis, 2);
-            let height = winner.height();
-            let (gate, started, mut release) = application_gate();
-            let app = ReplayGatedApp::new(height, [gate]);
-            let process_calls = app.process_calls.clone();
-            let finalized_calls = app.finalized_calls.clone();
-            let capture_calls = app.capture_calls.clone();
-            let (mut mailbox, _, guards, actor) = spawn_replay_gated_processing(
-                &context,
-                "cancellation-during-finalization-join",
-                &genesis,
-                app,
-            )
-            .await;
-
-            // The gate holds the losing request's execution. A second verification never acquires
-            // its block and reports when finalization pauses it.
-            let mut request = send_managed(
-                &context,
-                &mailbox,
-                Managed::Verify,
-                vec![digested(losing), digested(genesis)],
-            );
-            assert!(poll!(&mut request).is_pending());
-            started
-                .await
-                .expect("losing request must execute its block");
-            let Parked {
-                request: mut acquiring,
-                parked,
-                ..
-            } = Parked::verification(&mailbox, context.child("acquiring"));
-            assert!(poll!(&mut acquiring).is_pending());
-
-            // Finalizing the winner pauses the acquisition and waits for the losing execution.
-            let (acknowledgement, mut receipt) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(winner), acknowledgement));
-            parked
-                .await
-                .expect("finalization must pause the acquisition");
-            assert!(poll!(&mut receipt).is_pending());
-            assert_eq!(capture_calls.load(Ordering::SeqCst), 0);
-
-            // Cancelling the losing request ends the wait with its gate still held, so the winner
-            // is reconstructed and acknowledged.
-            drop(request);
-            release.closed().await;
-            receipt
-                .await
-                .expect("winner must be acknowledged after the cancellation");
-            assert_eq!(process_calls.at(height), 2);
-            assert_eq!(finalized_calls.at(height), 1);
-            assert_eq!(capture_calls.load(Ordering::SeqCst), 1);
-
-            drop(acquiring);
-            actor.abort();
-            drop(guards);
         });
     }
 

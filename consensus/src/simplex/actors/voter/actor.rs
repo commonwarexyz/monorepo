@@ -1258,7 +1258,8 @@ impl<
                         epoch = round.epoch().traced(),
                         view = view.traced()
                     );
-                    let receiver = span.in_scope(|| self.automaton.certify(round, proposal.payload, ancestry));
+                    let receiver = span
+                        .in_scope(|| self.automaton.certify(round, proposal.payload, ancestry));
                     let handle = certify_pool.push(async move { (round, span, receiver.await) });
                     self.state.set_certify_handle(view, handle);
                 }

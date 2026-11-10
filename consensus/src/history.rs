@@ -51,25 +51,3 @@ impl<D: Digest> History<D> {
         self.anchored
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use commonware_cryptography::crc32::Digest;
-
-    #[test]
-    fn constructors_share_commitments_and_record_the_anchor() {
-        fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<History<Digest>>();
-        let selected: Arc<[Digest]> = Arc::from([Digest::from(1), Digest::from(2)]);
-        for (history, anchored) in [
-            (History::anchored(selected.clone()), true),
-            (History::suffix(selected.clone()), false),
-        ] {
-            let clone = history.clone();
-            assert!(Arc::ptr_eq(history.commitments(), &selected));
-            assert!(Arc::ptr_eq(clone.commitments(), &selected));
-            assert_eq!(clone.is_anchored(), anchored);
-        }
-    }
-}

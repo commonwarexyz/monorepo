@@ -233,13 +233,19 @@ mod tests {
     use commonware_runtime::{Clock, Runner as _, deterministic};
     use commonware_utils::sync::Mutex;
     use futures::FutureExt;
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
 
     type TestBlock = EmptyBlock<Sha256>;
     type TestVariant = Standard<TestBlock>;
     type TestWaiters = AbortablePool<'static, Option<Digested<TestBlock>>>;
     type Subscriber = oneshot::Sender<Digested<TestBlock>>;
     type Subscribers = Arc<Mutex<Vec<Subscriber>>>;
+
+    /// Delay before a test cancels a caller, so the cleanup under test is already waiting.
+    const CANCEL_DELAY: Duration = Duration::from_millis(1);
+
+    /// Time a cancellation has to wake the cleanup that waits on it.
+    const WAKE_TIMEOUT: Duration = Duration::from_secs(1);
 
     #[derive(Clone, Default)]
     struct TestBuffer {
@@ -287,6 +293,41 @@ mod tests {
         Digested::precomputed(block, digest)
     }
 
+    /// Subscriptions that wait on a recording buffer.
+    struct Fixture {
+        buffer: TestBuffer,
+        waiters: TestWaiters,
+        subscriptions: Subscriptions<TestVariant>,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            Self {
+                buffer: TestBuffer::default(),
+                waiters: TestWaiters::default(),
+                subscriptions: Subscriptions::new(),
+            }
+        }
+
+        /// Registers a caller for `commitment`, which fetches it when `fetch` is set.
+        fn subscribe(
+            &mut self,
+            commitment: Digest,
+            fetch: bool,
+        ) -> oneshot::Receiver<Digested<TestBlock>> {
+            let (sender, receiver) = oneshot::channel();
+            self.subscriptions.insert(
+                Span::none(),
+                commitment,
+                fetch,
+                sender,
+                &mut self.waiters,
+                &self.buffer,
+            );
+            receiver
+        }
+    }
+
     fn assert_receives(
         receiver: oneshot::Receiver<Digested<TestBlock>>,
         expected: &Digested<TestBlock>,
@@ -300,38 +341,18 @@ mod tests {
 
     #[test]
     fn insert_coalesces_duplicate_keys() {
-        let test_buffer = TestBuffer::default();
-        let buffer = test_buffer.clone();
-        let mut waiters = TestWaiters::default();
-        let mut subscriptions = Subscriptions::<TestVariant>::new();
+        let mut fixture = Fixture::new();
         let block = block(1, 10);
+        let first_receiver = fixture.subscribe(block.digest(), true);
+        let second_receiver = fixture.subscribe(block.digest(), true);
 
-        let (first_sender, first_receiver) = oneshot::channel();
-        subscriptions.insert(
-            Span::none(),
-            block.digest(),
-            true,
-            first_sender,
-            &mut waiters,
-            &buffer,
-        );
-        let (second_sender, second_receiver) = oneshot::channel();
-        subscriptions.insert(
-            Span::none(),
-            block.digest(),
-            true,
-            second_sender,
-            &mut waiters,
-            &buffer,
-        );
+        assert_eq!(fixture.buffer.commitment_subscription_count(), 1);
+        assert_eq!(fixture.subscriptions.entries.len(), 1);
 
-        assert_eq!(test_buffer.commitment_subscription_count(), 1);
-        assert_eq!(subscriptions.entries.len(), 1);
-
-        assert!(subscriptions.notify(&block));
+        assert!(fixture.subscriptions.notify(&block));
         assert_receives(first_receiver, &block);
         assert_receives(second_receiver, &block);
-        assert!(subscriptions.entries.is_empty());
+        assert!(fixture.subscriptions.entries.is_empty());
     }
 
     #[test]
@@ -364,11 +385,11 @@ mod tests {
             select! {
                 _ = subscriptions.closed() => {},
                 _ = async {
-                    context.sleep(std::time::Duration::from_millis(1)).await;
+                    context.sleep(CANCEL_DELAY).await;
                     drop(receiver);
                     std::future::pending::<()>().await;
                 } => unreachable!(),
-                _ = context.sleep(std::time::Duration::from_secs(1)) => {
+                _ = context.sleep(WAKE_TIMEOUT) => {
                     panic!("cancellation must wake finalized waiter cleanup");
                 },
             }
@@ -378,41 +399,23 @@ mod tests {
 
     #[test]
     fn retain_open_drops_closed_subscribers_and_keeps_open_ones() {
-        let buffer = TestBuffer::default();
-        let mut waiters = TestWaiters::default();
-        let mut subscriptions = Subscriptions::<TestVariant>::new();
+        let mut fixture = Fixture::new();
         let block = block(3, 30);
-
-        let (closed_sender, closed_receiver) = oneshot::channel();
-        subscriptions.insert(
-            Span::none(),
-            block.digest(),
-            true,
-            closed_sender,
-            &mut waiters,
-            &buffer,
-        );
-        let (open_sender, open_receiver) = oneshot::channel();
-        subscriptions.insert(
-            Span::none(),
-            block.digest(),
-            true,
-            open_sender,
-            &mut waiters,
-            &buffer,
-        );
+        let closed_receiver = fixture.subscribe(block.digest(), true);
+        let open_receiver = fixture.subscribe(block.digest(), true);
         drop(closed_receiver);
 
-        assert!(subscriptions.retain_open().is_empty());
-        let subscription = subscriptions
+        assert!(fixture.subscriptions.retain_open().is_empty());
+        let subscription = fixture
+            .subscriptions
             .entries
             .get(&block.digest())
             .expect("open subscriber should remain");
         assert_eq!(subscription.fetching.len(), 1);
 
-        assert!(subscriptions.notify(&block));
+        assert!(fixture.subscriptions.notify(&block));
         assert_receives(open_receiver, &block);
-        assert!(subscriptions.entries.is_empty());
+        assert!(fixture.subscriptions.entries.is_empty());
     }
 
     #[test]
@@ -445,140 +448,87 @@ mod tests {
     #[test]
     fn shared_cancellation_wakes_when_last_caller_closes() {
         deterministic::Runner::default().start(|context| async move {
-            let buffer = TestBuffer::default();
-            let mut waiters = TestWaiters::default();
-            let mut subscriptions = Subscriptions::<TestVariant>::new();
+            let mut fixture = Fixture::new();
             let commitment = block(6, 60).digest();
-            let (first_sender, first_receiver) = oneshot::channel();
-            let (second_sender, second_receiver) = oneshot::channel();
-            subscriptions.insert(
-                Span::none(),
-                commitment,
-                true,
-                first_sender,
-                &mut waiters,
-                &buffer,
-            );
-            subscriptions.insert(
-                Span::none(),
-                commitment,
-                true,
-                second_sender,
-                &mut waiters,
-                &buffer,
-            );
-            assert_eq!(buffer.commitment_subscription_count(), 1);
+            let first_receiver = fixture.subscribe(commitment, true);
+            let second_receiver = fixture.subscribe(commitment, true);
+            assert_eq!(fixture.buffer.commitment_subscription_count(), 1);
 
             drop(first_receiver);
-            assert!(subscriptions.closed().now_or_never().is_none());
-            assert!(subscriptions.entries.contains_key(&commitment));
-            assert!(!buffer.commitment_subscribers.lock()[0].is_closed());
+            assert!(fixture.subscriptions.closed().now_or_never().is_none());
+            assert!(fixture.subscriptions.entries.contains_key(&commitment));
+            assert!(!fixture.buffer.commitment_subscribers.lock()[0].is_closed());
 
             select! {
-                removed = subscriptions.closed() => {
+                removed = fixture.subscriptions.closed() => {
                     assert_eq!(removed, vec![commitment]);
                 },
                 _ = async {
-                    context.sleep(std::time::Duration::from_millis(1)).await;
+                    context.sleep(CANCEL_DELAY).await;
                     drop(second_receiver);
                     std::future::pending::<()>().await;
                 } => unreachable!(),
-                _ = context.sleep(std::time::Duration::from_secs(1)) => {
+                _ = context.sleep(WAKE_TIMEOUT) => {
                     panic!("last cancellation must wake subscription cleanup");
                 },
             }
-            assert!(!subscriptions.entries.contains_key(&commitment));
-            assert!(waiters.next_completed().await.is_err());
-            assert!(buffer.commitment_subscribers.lock()[0].is_closed());
-            assert!(subscriptions.retain_open().is_empty());
+            assert!(!fixture.subscriptions.entries.contains_key(&commitment));
+            assert!(fixture.waiters.next_completed().await.is_err());
+            assert!(fixture.buffer.commitment_subscribers.lock()[0].is_closed());
+            assert!(fixture.subscriptions.retain_open().is_empty());
         });
     }
 
     #[test]
     fn closed_reports_only_the_last_fetching_caller() {
         deterministic::Runner::default().start(|context| async move {
-            let buffer = TestBuffer::default();
-            let mut waiters = TestWaiters::default();
-            let mut subscriptions = Subscriptions::<TestVariant>::new();
+            let mut fixture = Fixture::new();
             let commitment = block(8, 80).digest();
-            let (waiting_sender, waiting_receiver) = oneshot::channel();
-            let (fetching_sender, fetching_receiver) = oneshot::channel();
-            subscriptions.insert(
-                Span::none(),
-                commitment,
-                false,
-                waiting_sender,
-                &mut waiters,
-                &buffer,
-            );
-            assert!(!subscriptions.fetching(&commitment));
-            subscriptions.insert(
-                Span::none(),
-                commitment,
-                true,
-                fetching_sender,
-                &mut waiters,
-                &buffer,
-            );
-            assert!(subscriptions.fetching(&commitment));
-            assert_eq!(buffer.commitment_subscription_count(), 1);
+            let waiting_receiver = fixture.subscribe(commitment, false);
+            assert!(!fixture.subscriptions.fetching(&commitment));
+            let fetching_receiver = fixture.subscribe(commitment, true);
+            assert!(fixture.subscriptions.fetching(&commitment));
+            assert_eq!(fixture.buffer.commitment_subscription_count(), 1);
 
             // Canceling the only fetching caller ends peer demand but keeps the local wait.
             select! {
-                ended = subscriptions.closed() => {
+                ended = fixture.subscriptions.closed() => {
                     assert_eq!(ended, vec![commitment]);
                 },
                 _ = async {
-                    context.sleep(std::time::Duration::from_millis(1)).await;
+                    context.sleep(CANCEL_DELAY).await;
                     drop(fetching_receiver);
                     std::future::pending::<()>().await;
                 } => unreachable!(),
-                _ = context.sleep(std::time::Duration::from_secs(1)) => {
+                _ = context.sleep(WAKE_TIMEOUT) => {
                     panic!("canceling the last fetching caller must be reported");
                 },
             }
-            assert!(!subscriptions.fetching(&commitment));
-            assert!(subscriptions.entries.contains_key(&commitment));
-            assert!(!buffer.commitment_subscribers.lock()[0].is_closed());
+            assert!(!fixture.subscriptions.fetching(&commitment));
+            assert!(fixture.subscriptions.entries.contains_key(&commitment));
+            assert!(!fixture.buffer.commitment_subscribers.lock()[0].is_closed());
 
             // Canceling the remaining wait removes the subscription without reporting it.
             drop(waiting_receiver);
-            assert!(subscriptions.retain_open().is_empty());
-            assert!(!subscriptions.entries.contains_key(&commitment));
-            assert!(waiters.next_completed().await.is_err());
-            assert!(buffer.commitment_subscribers.lock()[0].is_closed());
+            assert!(fixture.subscriptions.retain_open().is_empty());
+            assert!(!fixture.subscriptions.entries.contains_key(&commitment));
+            assert!(fixture.waiters.next_completed().await.is_err());
+            assert!(fixture.buffer.commitment_subscribers.lock()[0].is_closed());
         });
     }
 
     #[test]
     fn buffer_closure_keeps_shared_subscription_until_delivery_or_cancellation() {
         deterministic::Runner::default().start(|_| async move {
-            let buffer = TestBuffer::default();
-            let mut waiters = TestWaiters::default();
-            let mut subscriptions = Subscriptions::<TestVariant>::new();
+            let mut fixture = Fixture::new();
             let block = block(7, 70);
             let commitment = block.digest();
-            let (first_sender, mut first_receiver) = oneshot::channel();
-            let (second_sender, mut second_receiver) = oneshot::channel();
-            subscriptions.insert(
-                Span::none(),
-                commitment,
-                true,
-                first_sender,
-                &mut waiters,
-                &buffer,
-            );
-            subscriptions.insert(
-                Span::none(),
-                commitment,
-                true,
-                second_sender,
-                &mut waiters,
-                &buffer,
-            );
+            let mut first_receiver = fixture.subscribe(commitment, true);
+            let mut second_receiver = fixture.subscribe(commitment, true);
 
-            buffer.commitment_subscribers.lock().clear();
-            let closed = waiters
+            fixture.buffer.commitment_subscribers.lock().clear();
+            let closed = fixture
+                .waiters
                 .next_completed()
                 .await
                 .expect("waiter was not aborted");
@@ -592,11 +542,11 @@ mod tests {
                 Err(oneshot::error::TryRecvError::Empty)
             ));
             drop(first_receiver);
-            assert!(subscriptions.retain_open().is_empty());
-            assert!(subscriptions.entries.contains_key(&commitment));
-            assert!(subscriptions.notify(&block));
+            assert!(fixture.subscriptions.retain_open().is_empty());
+            assert!(fixture.subscriptions.entries.contains_key(&commitment));
+            assert!(fixture.subscriptions.notify(&block));
             assert_receives(second_receiver, &block);
-            assert!(!subscriptions.entries.contains_key(&commitment));
+            assert!(!fixture.subscriptions.entries.contains_key(&commitment));
         });
     }
 }

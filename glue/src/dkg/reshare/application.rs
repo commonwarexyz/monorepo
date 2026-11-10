@@ -916,57 +916,30 @@ mod tests {
         });
     }
 
-    #[test]
-    fn proposal_preserves_legitimate_no_artifact_final_block() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let parent = mocks::genesis_block(leader().public_key());
-            let mut app = wrapper(&context, EpochInfoResponse::Available(None));
-            let inner = app.inner.clone();
-
-            let proposed = app
-                .propose(
-                    (context.child("app"), block_context(&parent, 1)),
-                    mocks::ready(parent.clone()),
-                    mocks::blocks([mocks::ready(parent)]),
-                    (),
-                )
-                .await
-                .expect("proposal should be built");
-
-            assert!(proposed.inner().payload().is_none());
-            let proposed_payloads = inner.proposed();
-            assert_eq!(proposed_payloads.len(), 1);
-            assert!(proposed_payloads[0].is_none());
-        });
-    }
-
+    /// A final-block proposal carries exactly the payload the actor makes
+    /// available, including no payload after a failed one-shot DKG.
     #[test]
     fn proposal_includes_available_final_epoch_info() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let parent = mocks::genesis_block(leader().public_key());
-            let payload = epoch_payload(7);
-            let mut app = wrapper(
-                &context,
-                EpochInfoResponse::Available(Some(payload.clone())),
-            );
-            let inner = app.inner.clone();
+            for payload in [None, Some(epoch_payload(7))] {
+                let parent = mocks::genesis_block(leader().public_key());
+                let mut app = wrapper(&context, EpochInfoResponse::Available(payload.clone()));
+                let inner = app.inner.clone();
 
-            let proposed = app
-                .propose(
-                    (context.child("app"), block_context(&parent, 1)),
-                    mocks::ready(parent.clone()),
-                    mocks::blocks([mocks::ready(parent)]),
-                    (),
-                )
-                .await
-                .expect("proposal should be built");
+                let proposed = app
+                    .propose(
+                        (context.child("app"), block_context(&parent, 1)),
+                        mocks::ready(parent.clone()),
+                        mocks::blocks([mocks::ready(parent)]),
+                        (),
+                    )
+                    .await
+                    .expect("proposal must be built");
 
-            assert!(proposed.inner().payload() == Some(payload.clone()));
-            let proposed_payloads = inner.proposed();
-            assert_eq!(proposed_payloads.len(), 1);
-            assert!(proposed_payloads[0] == Some(payload));
+                assert!(proposed.inner().payload() == payload);
+                assert!(inner.proposed() == [payload]);
+            }
         });
     }
 
@@ -998,7 +971,7 @@ mod tests {
                 ..
             }) = receiver.recv().await
             else {
-                panic!("verification should request final epoch info");
+                panic!("verification must request final epoch info");
             };
             assert_eq!(blocks.tip(), Height::zero());
             assert_eq!(blocks.digest(Height::zero()), Some(expected_parent));
@@ -1018,54 +991,31 @@ mod tests {
         });
     }
 
-    #[test]
-    fn verification_accepts_legitimate_no_artifact_final_block() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let parent = mocks::genesis_block(leader().public_key());
-            let parent = mocks::ready(parent.clone());
-            let tip = final_block(&parent, None);
-            let mut app = wrapper(&context, EpochInfoResponse::Available(None));
-            let inner = app.inner.clone();
-
-            let verified = app
-                .verify(
-                    (context.child("app"), block_context(&parent, 1)),
-                    tip,
-                    parent.clone(),
-                    mocks::blocks([parent.clone()]),
-                )
-                .await;
-
-            assert!(verified);
-            assert_eq!(inner.verify_count(), 1);
-        });
-    }
-
     /// Verification accepts a final block whose payload equals the derived one,
     /// including no payload after a failed one-shot DKG.
     #[test]
     fn verification_accepts_equal_final_epoch_info() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let parent = mocks::genesis_block(leader().public_key());
-            let parent = mocks::ready(parent.clone());
-            let payload = epoch_payload(2);
-            let tip = final_block(&parent, Some(payload.clone()));
-            let mut app = wrapper(&context, EpochInfoResponse::Available(Some(payload)));
-            let inner = app.inner.clone();
+            for payload in [None, Some(epoch_payload(2))] {
+                let parent = mocks::genesis_block(leader().public_key());
+                let parent = mocks::ready(parent.clone());
+                let tip = final_block(&parent, payload.clone());
+                let mut app = wrapper(&context, EpochInfoResponse::Available(payload));
+                let inner = app.inner.clone();
 
-            let verified = app
-                .verify(
-                    (context.child("app"), block_context(&parent, 1)),
-                    tip,
-                    parent.clone(),
-                    mocks::blocks([parent.clone()]),
-                )
-                .await;
+                let verified = app
+                    .verify(
+                        (context.child("app"), block_context(&parent, 1)),
+                        tip,
+                        parent.clone(),
+                        mocks::blocks([parent.clone()]),
+                    )
+                    .await;
 
-            assert!(verified);
-            assert_eq!(inner.verify_count(), 1);
+                assert!(verified);
+                assert_eq!(inner.verify_count(), 1);
+            }
         });
     }
 

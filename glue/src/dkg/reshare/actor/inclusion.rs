@@ -2812,6 +2812,8 @@ mod tests {
         });
     }
 
+    /// When the final block's parent is the finalized tip, the scan accepts a branch that ends
+    /// at that parent and rejects a parent that conflicts with the tip.
     #[test]
     fn pending_logs_authenticates_a_fully_finalized_parent() {
         let executor = deterministic::Runner::default();
@@ -2831,35 +2833,30 @@ mod tests {
                 7,
             ));
             assert_ne!(canonical.digest(), detached.digest());
-
-            let scan = |digest| PendingLogScan {
+            let tip = FinalizedTip {
+                height: Height::new(6),
+                digest: canonical.digest(),
+            };
+            let scan = || PendingLogScan {
                 epoch: Epoch::zero(),
                 info: &info,
                 epocher: FixedEpocher::new(NZU64!(8)),
-                finalized_tip: Some(FinalizedTip {
-                    height: Height::new(6),
-                    digest,
-                }),
+                finalized_tip: Some(tip),
                 final_height: Height::new(7),
             };
 
+            // A branch that ends at the finalized parent holds no pending log.
             assert!(
-                pending_logs(
-                    scan(canonical.digest()),
-                    mocks::blocks([canonical.clone()]),
-                    context.stopped(),
-                )
-                .await
-                .is_some_and(|logs| logs.is_empty())
+                pending_logs(scan(), mocks::blocks([canonical]), context.stopped())
+                    .await
+                    .is_some_and(|logs| logs.is_empty())
             );
+
+            // A parent that conflicts with the finalized tip is rejected.
             assert!(
-                pending_logs(
-                    scan(canonical.digest()),
-                    mocks::blocks([detached]),
-                    context.stopped(),
-                )
-                .await
-                .is_none()
+                pending_logs(scan(), mocks::blocks([detached]), context.stopped())
+                    .await
+                    .is_none()
             );
         });
     }

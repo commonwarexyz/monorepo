@@ -3,7 +3,7 @@
 
 use super::relay::Relay;
 use crate::{
-    Automaton as Au, CertifiableAutomaton as CAu, Handoff, Relay as Re,
+    Automaton as Au, CertifiableAutomaton as CAu, Handoff, History, Relay as Re,
     simplex::{Plan, types::Context},
     types::{Epoch, Round},
 };
@@ -30,24 +30,24 @@ use tracing::debug;
 pub enum Message<D: Digest, P: PublicKey> {
     Prepare {
         context: Context<D, P>,
-        ancestry: crate::History<D>,
+        ancestry: History<D>,
         response: oneshot::Sender<Handoff<D>>,
     },
     Propose {
         context: Context<D, P>,
-        ancestry: crate::History<D>,
+        ancestry: History<D>,
         response: oneshot::Sender<D>,
     },
     Verify {
         context: Context<D, P>,
-        ancestry: crate::History<D>,
         payload: D,
+        ancestry: History<D>,
         response: oneshot::Sender<bool>,
     },
     Certify {
         round: Round,
         payload: D,
-        ancestry: crate::History<D>,
+        ancestry: History<D>,
         response: oneshot::Sender<bool>,
     },
     Broadcast {
@@ -74,7 +74,7 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
     fn propose(
         &mut self,
         context: Self::Context,
-        ancestry: crate::History<Self::Digest>,
+        ancestry: History<Self::Digest>,
     ) -> oneshot::Receiver<Self::Digest> {
         let (response, receiver) = oneshot::channel();
         self.sender.send_lossy(Message::Propose {
@@ -89,13 +89,13 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
         &mut self,
         context: Self::Context,
         payload: Self::Digest,
-        ancestry: crate::History<Self::Digest>,
+        ancestry: History<Self::Digest>,
     ) -> oneshot::Receiver<bool> {
         let (response, receiver) = oneshot::channel();
         self.sender.send_lossy(Message::Verify {
             context,
-            ancestry,
             payload,
+            ancestry,
             response,
         });
         receiver
@@ -106,7 +106,7 @@ impl<D: Digest, P: PublicKey> CAu for Mailbox<D, P> {
     fn prepare(
         &mut self,
         context: Self::Context,
-        ancestry: crate::History<Self::Digest>,
+        ancestry: History<Self::Digest>,
     ) -> oneshot::Receiver<Handoff<Self::Digest>> {
         let (response, receiver) = oneshot::channel();
         self.sender.send_lossy(Message::Prepare {
@@ -121,7 +121,7 @@ impl<D: Digest, P: PublicKey> CAu for Mailbox<D, P> {
         &mut self,
         round: Round,
         payload: Self::Digest,
-        ancestry: crate::History<Self::Digest>,
+        ancestry: History<Self::Digest>,
     ) -> oneshot::Receiver<bool> {
         let (tx, rx) = oneshot::channel();
         self.sender.send_lossy(Message::Certify {
@@ -169,9 +169,9 @@ type VerifyObserver<H, P> =
     Box<dyn Fn(Context<<H as Hasher>::Digest, P>, <H as Hasher>::Digest) + Send + 'static>;
 
 /// Observer invoked with the history of every proposal, prepare, and verification request.
-pub type HistoryObserver<D> = Box<dyn Fn(Round, &crate::History<D>) + Send + 'static>;
+pub type HistoryObserver<D> = Box<dyn Fn(Round, &History<D>) + Send + 'static>;
 
-type AncestryCertifier<D> = Box<dyn Fn(Round, D, &crate::History<D>) -> bool + Send + 'static>;
+type AncestryCertifier<D> = Box<dyn Fn(Round, D, &History<D>) -> bool + Send + 'static>;
 
 /// Callback that receives a certification request's round, payload, and response sender.
 type CertificationController<D> = Box<dyn Fn(Round, D, oneshot::Sender<bool>) + Send + 'static>;
@@ -355,7 +355,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
         self.history_observer = Some(observer);
     }
 
-    fn observe_history(&self, round: Round, ancestry: &crate::History<H::Digest>) {
+    fn observe_history(&self, round: Round, ancestry: &History<H::Digest>) {
         if let Some(observer) = &self.history_observer {
             observer(round, ancestry);
         }
@@ -450,7 +450,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
         round: Round,
         payload: H::Digest,
         _contents: Bytes,
-        ancestry: crate::History<H::Digest>,
+        ancestry: History<H::Digest>,
         response: oneshot::Sender<bool>,
     ) {
         // Simulate the certify latency
@@ -579,8 +579,8 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                     }
                     Message::Verify {
                         context,
-                        ancestry,
                         payload,
+                        ancestry,
                         response,
                     } => {
                         self.observe_history(context.round, &ancestry);

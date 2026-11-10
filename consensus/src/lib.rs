@@ -547,8 +547,8 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         ///
         /// This future should not resolve until the implementation can produce a stable verdict.
         /// Return `false` only when the block is permanently invalid for the supplied context and
-        /// selected history. If validity may still change as additional information becomes available,
-        /// continue waiting instead of returning `false`.
+        /// selected history. If validity may still change as additional information becomes
+        /// available, continue waiting instead of returning `false`.
         ///
         /// In other words, to abstain from voting, do not resolve this future yet. Keep it
         /// pending until the implementation can either prove the block valid, prove it invalid,

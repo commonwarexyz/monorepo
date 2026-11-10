@@ -1619,12 +1619,14 @@ mod tests {
         let drained = drain(&mut overflow);
         assert_eq!(drained.len(), 3);
         assert!(matches!(drained[0], TestMessage::Prune { .. }));
-        assert!(
-            matches!(drained[1], TestMessage::Acquire { commitment: found, .. } if found == commitment(1))
-        );
-        assert!(
-            matches!(drained[2], TestMessage::Acquire { commitment: found, .. } if found == commitment(3))
-        );
+        assert!(matches!(
+            drained[1],
+            TestMessage::Acquire { commitment: found, .. } if found == commitment(1)
+        ));
+        assert!(matches!(
+            drained[2],
+            TestMessage::Acquire { commitment: found, .. } if found == commitment(3)
+        ));
         assert!(matches!(
             first_receiver.try_recv(),
             Err(TryRecvError::Empty)
@@ -1664,11 +1666,13 @@ mod tests {
         ));
         let drained = drain(&mut overflow);
         assert_eq!(drained.len(), 3);
-        assert!(
-            matches!(drained[1], TestMessage::AwaitFinalized { height, .. } if height == Height::new(4))
-        );
-        assert!(
-            matches!(drained[2], TestMessage::AwaitFinalized { height, .. } if height == Height::new(5))
-        );
+        assert!(matches!(
+            drained[1],
+            TestMessage::AwaitFinalized { height, .. } if height == Height::new(4)
+        ));
+        assert!(matches!(
+            drained[2],
+            TestMessage::AwaitFinalized { height, .. } if height == Height::new(5)
+        ));
     }
 }

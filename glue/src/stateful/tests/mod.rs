@@ -25,7 +25,7 @@ use crate::{
 };
 use commonware_actor::Feedback;
 use commonware_consensus::{
-    Application as _, CertifiableAutomaton as _, Reporter,
+    Application as _, CertifiableAutomaton as _, History, Reporter,
     marshal::{
         self,
         blocks::Blocks,
@@ -541,6 +541,15 @@ where
         .unwrap();
 }
 
+/// A reliable link slow enough that a crash plan fires before the network catches up.
+fn crash_plan_link() -> Link {
+    Link {
+        latency: Duration::from_millis(100),
+        jitter: Duration::ZERO,
+        success_rate: probability!(1.0),
+    }
+}
+
 fn run_random_crashes<D>(engine: D)
 where
     D: EngineDefinition<PublicKey = ed25519::PublicKey>,
@@ -549,11 +558,7 @@ where
 {
     PlanBuilder::new(engine)
         .seeds(0..5)
-        .link(Link {
-            latency: Duration::from_millis(100),
-            jitter: Duration::ZERO,
-            success_rate: probability!(1.0),
-        })
+        .link(crash_plan_link())
         .crash(Crash::Random {
             frequency: Duration::from_millis(1500),
             downtime: Duration::from_secs(1),
@@ -573,11 +578,7 @@ where
 {
     PlanBuilder::new(engine)
         .seeds(0..5)
-        .link(Link {
-            latency: Duration::from_millis(100),
-            jitter: Duration::ZERO,
-            success_rate: probability!(1.0),
-        })
+        .link(crash_plan_link())
         .crash(Crash::Random {
             frequency: Duration::from_secs(5),
             downtime: Duration::from_secs(1),
@@ -777,11 +778,7 @@ where
 {
     let results = PlanBuilder::new(engine)
         .seeds(0..5)
-        .link(Link {
-            latency: Duration::from_millis(100),
-            jitter: Duration::ZERO,
-            success_rate: probability!(1.0),
-        })
+        .link(crash_plan_link())
         .crash(Crash::Random {
             frequency: Duration::from_millis(500),
             downtime: Duration::from_millis(100),
@@ -1291,7 +1288,7 @@ fn out_of_order_certifications_complete_on_qmdb() {
             certifications.push(deferred.certify(
                 block.context.round,
                 block.digest(),
-                commonware_consensus::History::anchored(Arc::from(&ancestor_commitments[..=index])),
+                History::anchored(Arc::from(&ancestor_commitments[..=index])),
             ));
         }
 
@@ -1465,7 +1462,7 @@ fn finalizations_and_certifications_complete_during_proposal_parent_lookup_on_qm
             certifications.push(deferred.certify(
                 block.context.round,
                 block.digest(),
-                commonware_consensus::History::anchored(Arc::from(&ancestor_commitments[..=index])),
+                History::anchored(Arc::from(&ancestor_commitments[..=index])),
             ));
         }
         for result in futures::future::join_all(certifications).await {
@@ -1808,7 +1805,7 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             let certification = deferred.certify(
                 block.context.round,
                 block.digest(),
-                commonware_consensus::History::anchored(Arc::from(&ancestor_commitments[..=index])),
+                History::anchored(Arc::from(&ancestor_commitments[..=index])),
             );
             assert!(
                 certification
@@ -1833,9 +1830,7 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
                 deferred.certify(
                     block.context.round,
                     block.digest(),
-                    commonware_consensus::History::anchored(Arc::from(
-                        &ancestor_commitments[..=index],
-                    )),
+                    History::anchored(Arc::from(&ancestor_commitments[..=index])),
                 ),
             ));
         }
@@ -2056,7 +2051,7 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
             let certification = deferred.certify(
                 block.context.round,
                 block.digest(),
-                commonware_consensus::History::anchored(Arc::from(&ancestor_commitments[..=index])),
+                History::anchored(Arc::from(&ancestor_commitments[..=index])),
             );
             assert!(
                 certification
@@ -2108,9 +2103,7 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
                 deferred.certify(
                     block.context.round,
                     block.digest(),
-                    commonware_consensus::History::anchored(Arc::from(
-                        &ancestor_commitments[..=index],
-                    )),
+                    History::anchored(Arc::from(&ancestor_commitments[..=index])),
                 ),
             ));
         }
@@ -2308,7 +2301,7 @@ fn pruning_joins_verification_on_real_qmdbs() {
             let certification = deferred.certify(
                 block.context.round,
                 block.digest(),
-                commonware_consensus::History::anchored(Arc::from(&ancestor_commitments[..=index])),
+                History::anchored(Arc::from(&ancestor_commitments[..=index])),
             );
             assert!(
                 certification
@@ -2350,7 +2343,7 @@ fn pruning_joins_verification_on_real_qmdbs() {
         let mut certification = deferred.certify(
             block.context.round,
             block.digest(),
-            commonware_consensus::History::anchored(Arc::from(&ancestor_commitments[..=4])),
+            History::anchored(Arc::from(&ancestor_commitments[..=4])),
         );
         first_started
             .await

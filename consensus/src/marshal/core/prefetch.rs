@@ -197,9 +197,16 @@ mod tests {
     use commonware_macros::select;
     use commonware_runtime::{Clock, Runner as _, deterministic};
     use futures::FutureExt;
+    use std::time::Duration;
 
     type TestBlock = EmptyBlock<Sha256>;
     type TestPrefetches = Prefetches<Standard<TestBlock>>;
+
+    /// Delay before a test cancels a lease, so the scheduler under test is already waiting.
+    const CANCEL_DELAY: Duration = Duration::from_millis(1);
+
+    /// Time a cancellation has to wake the scheduler that waits on it.
+    const WAKE_TIMEOUT: Duration = Duration::from_secs(1);
 
     fn block(height: u64) -> Digested<TestBlock> {
         ready(TestBlock::new(Sha256::fill(0), Height::new(height), height))
@@ -387,11 +394,11 @@ mod tests {
             select! {
                 removed = prefetch.closed() => assert_eq!(removed, vec![first]),
                 _ = async {
-                    context.sleep(std::time::Duration::from_millis(1)).await;
+                    context.sleep(CANCEL_DELAY).await;
                     drop(receiver);
                     std::future::pending::<()>().await;
                 } => unreachable!(),
-                _ = context.sleep(std::time::Duration::from_secs(1)) => {
+                _ = context.sleep(WAKE_TIMEOUT) => {
                     panic!("lease cancellation must wake the scheduler");
                 },
             }

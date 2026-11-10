@@ -6,7 +6,7 @@ use super::{
     types::{Ack, Activity, Error, Item, TipAck},
 };
 use crate::{
-    Automaton, Monitor, Reporter,
+    Automaton, History, Monitor, Reporter,
     aggregation::{scheme, types::Certificate},
     types::{Epoch, EpochDelta, Height, HeightDelta, Participant},
 };
@@ -711,7 +711,7 @@ impl<
         let mut automaton = self.automaton.clone();
         let timer = self.metrics.digest_duration.timer(self.context.as_ref());
         self.digest_requests.push(async move {
-            let receiver = automaton.propose(height, crate::History::anchored(Arc::from([])));
+            let receiver = automaton.propose(height, History::anchored(Arc::from([])));
             let result = receiver.await.map_err(Error::AppProposeCanceled);
             DigestRequest {
                 height,

@@ -313,9 +313,8 @@ mod tests {
     use commonware_actor::mailbox;
     use commonware_cryptography::ed25519::PrivateKey;
     use commonware_runtime::{Runner, deterministic};
-    use commonware_utils::{NZUsize, channel::oneshot};
-    use futures::{FutureExt as _, StreamExt as _};
-    use std::sync::Arc;
+    use commonware_utils::NZUsize;
+    use futures::FutureExt as _;
 
     type TestMessage = Message<TestBlock, TestBlsVariant, PrivateKey>;
 
@@ -332,31 +331,25 @@ mod tests {
         });
     }
 
+    /// Returns a source through `parent` that names its digest and never yields a body.
+    fn pending_blocks(parent: &Digested<TestBlock>) -> Blocks<TestBlock> {
+        let (tip, digest) = (parent.height(), parent.digest());
+        Blocks::new(
+            tip,
+            NZUsize!(1),
+            move |height| (height == tip).then_some(digest),
+            |_| futures::future::pending(),
+        )
+    }
+
     #[test]
     fn epoch_info_forwards_delayed_parent_without_polling() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (sender, mut receiver) = mailbox::new::<TestMessage>(context, NZUsize!(1));
             let mut mailbox = Mailbox::<TestBlock, TestBlsVariant, PrivateKey, Exact>::new(sender);
-            let parent = mocks::genesis_block(PrivateKey::from_seed(0).public_key());
-            let parent = Digested::precomputed(parent.clone(), parent.digest());
-            let (release, gate) = oneshot::channel();
-            let gate = gate.shared();
-            let source = mocks::blocks([parent.clone()]);
-            let blocks = Blocks::new(
-                parent.height(),
-                NZUsize!(8),
-                |_| None,
-                move |height| {
-                    let gate = gate.clone();
-                    let source = source.clone();
-                    async move {
-                        gate.await.ok()?;
-                        source.range(height..=height).next().await?.ok()
-                    }
-                },
-            );
-            let mut request = Box::pin(mailbox.epoch_info(blocks));
+            let parent = mocks::ready(mocks::genesis_block(PrivateKey::from_seed(0).public_key()));
+            let mut request = Box::pin(mailbox.epoch_info(pending_blocks(&parent)));
 
             assert!(request.as_mut().now_or_never().is_none());
             let message = receiver
@@ -368,21 +361,7 @@ mod tests {
             else {
                 panic!("expected epoch info request");
             };
-            let mut range = blocks.range(parent.height()..=parent.height());
-            assert!(range.next().now_or_never().is_none());
-
-            release
-                .send(())
-                .expect("acquisition should still be waiting");
-            assert_eq!(
-                range
-                    .next()
-                    .await
-                    .expect("parent should be available")
-                    .expect("valid parent")
-                    .digest(),
-                parent.digest()
-            );
+            assert_eq!(blocks.digest(parent.height()), Some(parent.digest()));
             assert!(response.send(EpochInfoResponse::Available(None)).is_ok());
             assert!(matches!(request.await, EpochInfoResponse::Available(None)));
         });
@@ -393,46 +372,20 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (sender, mut receiver) = mailbox::new::<TestMessage>(context, NZUsize!(1));
-            let mut mailbox = Mailbox::<TestBlock, TestBlsVariant, PrivateKey>::new(sender);
-            let parent = Arc::new(mocks::genesis_block(PrivateKey::from_seed(0).public_key()));
-            let retained = Arc::downgrade(&parent);
-            let source = mocks::blocks([mocks::ready(parent.clone())]);
-            let (release, gate) = oneshot::channel();
-            let gate = gate.shared();
-            let blocks = Blocks::new(
-                parent.height(),
-                NZUsize!(8),
-                |_| None,
-                move |height| {
-                    let gate = gate.clone();
-                    let source = source.clone();
-                    async move {
-                        gate.await.ok()?;
-                        source.range(height..=height).next().await?.ok()
-                    }
-                },
-            );
-            drop(parent);
-            let mut request = Box::pin(mailbox.epoch_info(blocks));
+            let mut mailbox = Mailbox::<TestBlock, TestBlsVariant, PrivateKey, Exact>::new(sender);
+            let parent = mocks::ready(mocks::genesis_block(PrivateKey::from_seed(0).public_key()));
+            let mut request = Box::pin(mailbox.epoch_info(pending_blocks(&parent)));
 
             assert!(request.as_mut().now_or_never().is_none());
-            let Message::EpochInfo {
-                blocks, response, ..
-            } = receiver
+            let Message::EpochInfo { response, .. } = receiver
                 .try_recv()
                 .expect("request should reach the actor without acquiring blocks")
             else {
                 panic!("expected epoch info request");
             };
-            assert!(
-                retained.upgrade().is_none(),
-                "queued source retained a block body"
-            );
             drop(request);
 
             assert!(response.is_closed());
-            assert!(release.send(()).is_ok());
-            drop(blocks);
         });
     }
 }

@@ -137,7 +137,7 @@ mod tests {
             for (kind, comparisons) in ["absent", "present"].into_iter().zip(counts) {
                 assert!(
                     comparisons <= 64 * size,
-                    "{kind} lookup comparison budget exceeded: size={size}, comparisons={comparisons}, small={small:?}, large={large:?}",
+                    "{kind} lookups over {size} entries made {comparisons} comparisons",
                 );
             }
         }

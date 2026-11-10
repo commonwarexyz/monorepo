@@ -1263,7 +1263,7 @@ mod tests {
         Application, Finality, Input, Proposed, PruneConfig,
         actor::metrics::Metrics as StatefulMetrics,
         db::{Anchor, Barrier, DatabaseSet, Merkleized as _, Shared, Unmerkleized as _},
-        tests::mocks::digested,
+        tests::{fixtures, mocks::digested},
     };
     use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
     use commonware_consensus::{
@@ -1531,15 +1531,8 @@ mod tests {
 
     /// Returns selected history ending at `block`'s parent that the application never reads.
     fn unread_history(block: &Digested<Block>) -> Blocks<Block> {
-        Blocks::new(
-            block
-                .height()
-                .previous()
-                .expect("processed block must have a parent"),
-            NZUsize!(1),
-            |_| None,
-            |_| futures::future::pending(),
-        )
+        let parent = block.height().previous();
+        fixtures::pending_blocks(parent.expect("processed block must have a parent"))
     }
 
     /// Awaits the shared candidate processing of `block`, or returns `Ok(())` at once if the
@@ -3554,7 +3547,7 @@ mod tests {
     }
 
     #[test]
-    fn execution_rebuild_pending_does_not_retry_closed_provider_forever() {
+    fn execution_rebuild_pending_does_not_retry_closed_source_forever() {
         deterministic::Runner::default().start(|context| async move {
             let mut harness = Harness::new(context.child("harness")).await;
             let genesis = Block::genesis();

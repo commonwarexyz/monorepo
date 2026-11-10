@@ -75,7 +75,7 @@ mod tests {
     pub(super) use crate::marshal::mocks::block::ready;
     use crate::{
         Application as ConsensusApplication, Automaton, CertifiableAutomaton, Handoff, Heightable,
-        Relay, Reporter, Viewable,
+        History, Relay, Reporter, Viewable,
         marshal::{
             Identifier, Update,
             application::{
@@ -225,7 +225,7 @@ mod tests {
                         marshal.clone(),
                     );
                     let digest = wrapper
-                        .propose(block_context, crate::History::anchored(Arc::from([parent])))
+                        .propose(block_context, anchored([parent]))
                         .await
                         .expect("proposal must build a block");
                     assert_eq!(counter.count(), built, "{kind:?} proposal hashing");
@@ -237,7 +237,7 @@ mod tests {
                     );
                     assert!(
                         wrapper
-                            .certify(round, digest, crate::History::anchored(Arc::from([parent])))
+                            .certify(round, digest, anchored([parent]))
                             .await
                             .unwrap()
                     );
@@ -266,11 +266,8 @@ mod tests {
                     digests.push(digest);
                 }
 
-                let blocks = marshal.blocks_with_parent(
-                    Height::new(3),
-                    parent,
-                    crate::History::anchored(Arc::from(digests.clone())),
-                );
+                let blocks =
+                    marshal.blocks_with_parent(Height::new(3), parent, anchored(digests.clone()));
                 let mut range = blocks.range(Height::new(1)..=Height::new(3));
                 for expected in 1..=3 {
                     let block = range.next().await.unwrap().unwrap();
@@ -313,6 +310,28 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct VerifierProvider {
+        scheme: Arc<S>,
+    }
+
+    impl VerifierProvider {
+        fn new(scheme: S) -> Self {
+            Self {
+                scheme: Arc::new(scheme),
+            }
+        }
+    }
+
+    impl Provider for VerifierProvider {
+        type Scope = Epoch;
+        type Scheme = S;
+
+        fn scoped(&self, _: Epoch) -> Option<Scoped<S>> {
+            Some(Scoped::verifier(self.scheme.clone()))
+        }
+    }
+
     /// A signing provider whose scopes each survive a fixed number of lookups
     /// and then retire, modeling an application that prunes an epoch between a
     /// delivery's admission and its batched verification.
@@ -348,60 +367,6 @@ mod tests {
                 .ok()?;
             Some(Scoped::scheme(Arc::clone(scheme)))
         }
-    }
-
-    #[derive(Clone)]
-    struct VerifierProvider {
-        scheme: Arc<S>,
-    }
-
-    impl VerifierProvider {
-        fn new(scheme: S) -> Self {
-            Self {
-                scheme: Arc::new(scheme),
-            }
-        }
-    }
-
-    impl Provider for VerifierProvider {
-        type Scope = Epoch;
-        type Scheme = S;
-
-        fn scoped(&self, _: Epoch) -> Option<Scoped<S>> {
-            Some(Scoped::verifier(self.scheme.clone()))
-        }
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_acquire_fetches_by_commitment() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let buffer = RecordingBuffer::default();
-            let (mailbox, buffer, _resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
-                "standard-provider-parent-commitment",
-                ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
-                Some(buffer),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
-            )
-            .await;
-            let buffer = buffer.expect("buffer was provided");
-
-            let parent = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
-            let child = make_raw_block(parent.digest(), Height::new(2), 200);
-            let subscription = mailbox.acquire(child.parent);
-
-            context.sleep(Duration::from_millis(100)).await;
-            assert_eq!(
-                buffer.commitment_subscription_count(),
-                1,
-                "acquisition should use the standard parent commitment"
-            );
-            drop(subscription);
-        });
     }
 
     fn assert_finalize_deterministic<H: TestHarness>(
@@ -3121,7 +3086,7 @@ mod tests {
             }
         }
 
-        fn propose(&mut self, context: Ctx, ancestry: crate::History<D>) -> oneshot::Receiver<D> {
+        fn propose(&mut self, context: Ctx, ancestry: History<D>) -> oneshot::Receiver<D> {
             match self {
                 Self::Inline(inline) => inline.propose(context, ancestry),
                 Self::Deferred(deferred) => deferred.propose(context, ancestry),
@@ -3132,7 +3097,7 @@ mod tests {
             &mut self,
             context: Ctx,
             digest: D,
-            ancestry: crate::History<D>,
+            ancestry: History<D>,
         ) -> oneshot::Receiver<bool> {
             match self {
                 Self::Inline(inline) => inline.verify(context, digest, ancestry),
@@ -3144,7 +3109,7 @@ mod tests {
             &mut self,
             round: Round,
             digest: D,
-            ancestry: crate::History<D>,
+            ancestry: History<D>,
         ) -> oneshot::Receiver<bool> {
             match self {
                 Self::Inline(inline) => inline.certify(round, digest, ancestry),
@@ -3160,7 +3125,7 @@ mod tests {
         fn propose(
             &mut self,
             context: Self::Context,
-            ancestry: crate::History<D>,
+            ancestry: History<D>,
         ) -> oneshot::Receiver<Self::Digest> {
             Self::propose(self, context, ancestry)
         }
@@ -3169,7 +3134,7 @@ mod tests {
             &mut self,
             context: Self::Context,
             digest: Self::Digest,
-            ancestry: crate::History<D>,
+            ancestry: History<D>,
         ) -> oneshot::Receiver<bool> {
             Self::verify(self, context, digest, ancestry)
         }
@@ -3179,7 +3144,7 @@ mod tests {
         fn prepare(
             &mut self,
             context: Self::Context,
-            ancestry: crate::History<D>,
+            ancestry: History<D>,
         ) -> oneshot::Receiver<Handoff<Self::Digest>> {
             match self {
                 Self::Inline(inline) => inline.prepare(context, ancestry),
@@ -3191,7 +3156,7 @@ mod tests {
             &mut self,
             round: Round,
             digest: Self::Digest,
-            ancestry: crate::History<D>,
+            ancestry: History<D>,
         ) -> oneshot::Receiver<bool> {
             Self::certify(self, round, digest, ancestry)
         }
@@ -3307,8 +3272,16 @@ mod tests {
             // until the leader's block arrives. A notarization can arrive in
             // this window, causing Simplex's sole `certify` request to consume
             // and await that still-pending gate.
-            let verify_rx = wrapper.verify(conflicting_context, digest, crate::History::anchored(Arc::from([genesis.digest(), certified_digest])));
-            let certify_rx = wrapper.certify(round, digest, crate::History::anchored(Arc::from([genesis.digest(), certified_digest, skipped_digest])));
+            let verify_rx = wrapper.verify(
+                conflicting_context,
+                digest,
+                anchored([genesis.digest(), certified_digest]),
+            );
+            let certify_rx = wrapper.certify(
+                round,
+                digest,
+                anchored([genesis.digest(), certified_digest, skipped_digest]),
+            );
             assert!(
                 buffer
                     .broadcast(Recipients::Some(vec![]), ready(block))
@@ -3727,7 +3700,7 @@ mod tests {
                     .verify(
                         target_ctx,
                         target_digest,
-                        crate::History::anchored(Arc::from([genesis.digest(), parent_digest]))
+                        anchored([genesis.digest(), parent_digest])
                     )
                     .await
                     .unwrap()
@@ -3754,7 +3727,7 @@ mod tests {
                 .certify(
                     target_round,
                     target_digest,
-                    crate::History::anchored(Arc::from([genesis.digest(), parent_digest])),
+                    anchored([genesis.digest(), parent_digest]),
                 )
                 .await
                 .expect("certify result")
@@ -3950,11 +3923,7 @@ mod tests {
                 context.sleep(Duration::from_millis(10)).await;
 
                 let verify_result = wrapper
-                    .verify(
-                        block_context,
-                        digest,
-                        crate::History::anchored(Arc::from([genesis.digest()])),
-                    )
+                    .verify(block_context, digest, anchored([genesis.digest()]))
                     .await
                     .expect("verify result missing");
                 assert!(
@@ -3963,11 +3932,7 @@ mod tests {
                 );
 
                 let certify_result = wrapper
-                    .certify(
-                        round,
-                        digest,
-                        crate::History::anchored(Arc::from([genesis.digest()])),
-                    )
+                    .certify(round, digest, anchored([genesis.digest()]))
                     .await
                     .expect("certify result missing");
                 assert!(
@@ -4056,7 +4021,7 @@ mod tests {
                             assert!(marshal.verified(round, ready(block)).await);
                             assert_eq!(
                                 wrapper
-                                    .verify(block_context, digest, crate::History::anchored(Arc::from([parent.1])))
+                                    .verify(block_context, digest, anchored([parent.1]))
                                     .await
                                     .expect("verify result missing"),
                                 kind == WrapperKind::Deferred,
@@ -4076,7 +4041,7 @@ mod tests {
                                     .await;
                                 assert!(
                                     !wrapper
-                                        .certify(round, digest, crate::History::anchored(Arc::from([parent.1])))
+                                        .certify(round, digest, anchored([parent.1]))
                                         .await
                                         .expect("certify result missing"),
                                     "{kind:?}: Byzantine block at {round} should not certify"
@@ -4100,14 +4065,14 @@ mod tests {
                         assert!(marshal.verified(round, ready(block)).await);
                         assert!(
                             wrapper
-                                .verify(block_context, digest, crate::History::anchored(Arc::from([parent.1])))
+                                .verify(block_context, digest, anchored([parent.1]))
                                 .await
                                 .expect("verify result missing"),
                             "{kind:?}: block at {round} should verify"
                         );
                         assert!(
                             wrapper
-                                .certify(round, digest, crate::History::anchored(Arc::from([parent.1])))
+                                .certify(round, digest, anchored([parent.1]))
                                 .await
                                 .expect("certify result missing"),
                             "{kind:?}: block at {round} should certify"
@@ -4179,11 +4144,8 @@ mod tests {
                     parent: (View::zero(), genesis.digest()),
                 };
                 let missing = Sha256::hash(&[b"missing candidate"]);
-                let mut verify = wrapper.verify(
-                    consensus_context,
-                    missing,
-                    crate::History::anchored(Arc::from([genesis.digest()])),
-                );
+                let mut verify =
+                    wrapper.verify(consensus_context, missing, anchored([genesis.digest()]));
 
                 context.sleep(Duration::from_millis(50)).await;
                 assert!(
@@ -4254,11 +4216,7 @@ mod tests {
                 let block = B::new::<Sha256>(block_context, genesis.digest(), Height::new(1), 100);
                 let digest = block.digest();
                 resolver.respond_to_next_fetch(block.encode());
-                let certify = wrapper.certify(
-                    round,
-                    digest,
-                    crate::History::anchored(Arc::from([genesis.digest()])),
-                );
+                let certify = wrapper.certify(round, digest, anchored([genesis.digest()]));
 
                 let result = certify.await.expect("certify result missing");
                 assert!(
@@ -4270,13 +4228,7 @@ mod tests {
                     "{kind:?}: block delivery should validate"
                 );
                 assert!(
-                    resolver.fetches().iter().any(|fetch| matches!(
-                        (&fetch.key, &fetch.subscriber),
-                        (
-                            handler::Key::Block(commitment),
-                            handler::Annotation::Subscription,
-                        ) if *commitment == digest
-                    )),
+                    resolver.subscriptions(digest) > 0,
                     "{kind:?}: certify should fetch the candidate commitment"
                 );
 
@@ -4364,9 +4316,9 @@ mod tests {
                 case.resolver.respond_to_next_fetch(case.block.encode());
                 let block_context = case.block_context.clone();
                 let ancestry: Arc<[D]> = Arc::from([block_context.parent.1]);
-                let verify_rx = case
-                    .wrapper
-                    .verify(block_context, digest, crate::History::anchored(Arc::clone(&ancestry)));
+                let verify_rx =
+                    case.wrapper
+                        .verify(block_context, digest, anchored(ancestry.clone()));
 
                 // The mailbox barrier follows verification's local wait.
                 case.marshal.get_processed().await;
@@ -4374,7 +4326,7 @@ mod tests {
                     case.resolver.fetches().is_empty(),
                     "{kind:?}: verification must wait for the candidate without fetching it"
                 );
-                let certify_rx = case.wrapper.certify(round, digest, crate::History::anchored(ancestry));
+                let certify_rx = case.wrapper.certify(round, digest, anchored(ancestry));
 
                 select! {
                     result = verify_rx => {
@@ -4385,7 +4337,7 @@ mod tests {
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
                         panic!(
-                            "{kind:?}: verify must resolve after certification fetches the candidate"
+                            "{kind:?}: verify must resolve once certification fetches the candidate"
                         );
                     },
                 }
@@ -4402,13 +4354,7 @@ mod tests {
                 }
 
                 assert!(
-                    case.resolver.fetches().iter().any(|fetch| matches!(
-                        (&fetch.key, &fetch.subscriber),
-                        (
-                            handler::Key::Block(commitment),
-                            handler::Annotation::Subscription,
-                        ) if *commitment == digest
-                    )),
+                    case.resolver.subscriptions(digest) > 0,
                     "{kind:?}: certification must fetch the exact candidate"
                 );
             });
@@ -4438,13 +4384,11 @@ mod tests {
                 let verify_rx = case.wrapper.verify(
                     block_context,
                     digest,
-                    crate::History::anchored(Arc::from([case.block_context.parent.1])),
+                    anchored([case.block_context.parent.1]),
                 );
-                let certify_rx = case.wrapper.certify(
-                    round,
-                    digest,
-                    crate::History::anchored(Arc::from([case.block_context.parent.1])),
-                );
+                let certify_rx =
+                    case.wrapper
+                        .certify(round, digest, anchored([case.block_context.parent.1]));
 
                 // The mailbox barrier follows acquisition of the transient body.
                 case.marshal.get_processed().await;
@@ -4524,20 +4468,12 @@ mod tests {
                 B::new::<Sha256>(block_context.clone(), genesis.digest(), Height::new(1), 100);
             let digest = block.digest();
 
-            let verify_rx = wrapper.verify(
-                block_context,
-                digest,
-                crate::History::anchored(Arc::from([genesis.digest()])),
-            );
+            let verify_rx = wrapper.verify(block_context, digest, anchored([genesis.digest()]));
             drop(verify_rx);
             context.sleep(Duration::from_millis(10)).await;
 
             resolver.respond_to_next_fetch(block.encode());
-            let certify_rx = wrapper.certify(
-                round,
-                digest,
-                crate::History::anchored(Arc::from([genesis.digest()])),
-            );
+            let certify_rx = wrapper.certify(round, digest, anchored([genesis.digest()]));
 
             select! {
                 result = certify_rx => {
@@ -4555,13 +4491,7 @@ mod tests {
                 "block delivery should validate"
             );
             assert!(
-                resolver.fetches().iter().any(|fetch| matches!(
-                    (&fetch.key, &fetch.subscriber),
-                    (
-                        handler::Key::Block(commitment),
-                            handler::Annotation::Subscription,
-                        ) if *commitment == digest
-                )),
+                resolver.subscriptions(digest) > 0,
                 "certify must recover by fetching the candidate commitment"
             );
         });
@@ -4618,29 +4548,26 @@ mod tests {
                 let child_digest = child.digest();
                 assert!(marshal.verified(child_round, ready(child)).await);
 
-                let verify = wrapper.verify(child_context, child_digest, crate::History::anchored(Arc::from([genesis.digest(), parent_digest])));
+                let verify = wrapper.verify(
+                    child_context,
+                    child_digest,
+                    anchored([genesis.digest(), parent_digest]),
+                );
                 wait_until(
                     &context,
                     Duration::from_secs(5),
                     "exact parent commitment fetch",
-                    || {
-                        resolver.fetches().iter().any(|fetch| {
-                            matches!(
-                                fetch.key,
-                                handler::Key::Block(commitment) if commitment == parent_digest
-                            ) && matches!(
-                                fetch.subscriber,
-                                handler::Annotation::Subscription
-                            )
-                        })
-                    },
+                    || resolver.subscriptions(parent_digest) > 0,
                 )
                 .await;
 
-                assert!(resolver.fetches().iter().all(|fetch| {
-                    matches!(fetch.key, handler::Key::Block(commitment) if commitment == parent_digest)
-                        && matches!(fetch.subscriber, handler::Annotation::Subscription)
-                }), "{kind:?}: malicious child height must not select a different parent");
+                assert!(
+                    resolver.fetches().iter().all(|fetch| {
+                        fetch.key == handler::Key::Block(parent_digest)
+                            && fetch.subscriber == handler::Annotation::Subscription
+                    }),
+                    "{kind:?}: malicious child height must not select a different parent"
+                );
 
                 assert!(marshal.verified(parent_round, ready(parent)).await);
                 let verify_result = verify.await.expect("verify result missing");
@@ -4654,7 +4581,11 @@ mod tests {
                         verify_result,
                         "deferred verify should optimistically pass pre-checks"
                     );
-                    let certify = wrapper.certify(child_round, child_digest, crate::History::anchored(Arc::from([genesis.digest(), parent_digest])));
+                    let certify = wrapper.certify(
+                        child_round,
+                        child_digest,
+                        anchored([genesis.digest(), parent_digest]),
+                    );
                     assert!(
                         !certify.await.expect("certify result missing"),
                         "deferred certify should reject non-contiguous ancestry"
@@ -4776,11 +4707,19 @@ mod tests {
                     mock_app,
                     victim_mailbox.clone(),
                 );
-                let verify = wrapper.verify(child_context, child_digest, crate::History::anchored(Arc::from([genesis.digest(), parent_digest])));
+                let verify = wrapper.verify(
+                    child_context,
+                    child_digest,
+                    anchored([genesis.digest(), parent_digest]),
+                );
                 let verify_or_certify = if kind == WrapperKind::Deferred {
                     let optimistic = verify.await.expect("verify result missing");
                     assert!(optimistic, "deferred verify should optimistically succeed");
-                    wrapper.certify(child_round, child_digest, crate::History::anchored(Arc::from([genesis.digest(), parent_digest])))
+                    wrapper.certify(
+                        child_round,
+                        child_digest,
+                        anchored([genesis.digest(), parent_digest]),
+                    )
                 } else {
                     verify
                 };
@@ -4861,6 +4800,11 @@ mod tests {
         commitments.into()
     }
 
+    /// Returns the anchored history that holds `commitments`.
+    fn anchored(commitments: impl Into<Arc<[D]>>) -> History<D> {
+        History::anchored(commitments.into())
+    }
+
     #[test_traced("WARN")]
     fn test_propose_paths() {
         for kind in wrapper_kinds() {
@@ -4908,10 +4852,8 @@ mod tests {
                     leader: me.clone(),
                     parent: (View::zero(), genesis.digest()),
                 };
-                let proposal_rx = wrapper.propose(
-                    non_boundary_context.clone(),
-                    crate::History::anchored(Arc::from([genesis.digest()])),
-                );
+                let proposal_rx =
+                    wrapper.propose(non_boundary_context.clone(), anchored([genesis.digest()]));
                 assert!(
                     proposal_rx.await.is_err(),
                     "{kind:?}: proposal should be dropped when application returns no block"
@@ -4928,10 +4870,8 @@ mod tests {
                 let failing_app = MockVerifyingApp::new().with_handoff(Handoff::Stage(()));
                 let mut failing =
                     Wrapper::new(kind, context.child("failed"), failing_app, marshal.clone());
-                let handoff_rx = failing.prepare(
-                    non_boundary_context.clone(),
-                    crate::History::anchored(Arc::from([genesis.digest()])),
-                );
+                let handoff_rx =
+                    failing.prepare(non_boundary_context.clone(), anchored([genesis.digest()]));
                 assert_eq!(
                     handoff_rx.await.expect("handoff decision missing"),
                     Handoff::Wait,
@@ -4944,10 +4884,8 @@ mod tests {
                     .with_proposal_gate();
                 let mut gated =
                     Wrapper::new(kind, context.child("cancelled"), gated_app, marshal.clone());
-                let response = gated.prepare(
-                    non_boundary_context.clone(),
-                    crate::History::anchored(Arc::from([genesis.digest()])),
-                );
+                let response =
+                    gated.prepare(non_boundary_context.clone(), anchored([genesis.digest()]));
                 started.await.expect("handoff build should start");
                 drop(response);
                 assert!(dropped.await.is_err(), "handoff build should be cancelled");
@@ -4966,10 +4904,7 @@ mod tests {
                     leader: me,
                     parent: (View::new(boundary_height.get()), boundary_digest),
                 };
-                let reproposal_rx = wrapper.propose(
-                    reproposal_context,
-                    crate::History::anchored(Arc::clone(&selected)),
-                );
+                let reproposal_rx = wrapper.propose(reproposal_context, anchored(selected.clone()));
                 assert_eq!(
                     reproposal_rx.await.expect("reproposal result missing"),
                     boundary_digest,
@@ -4981,7 +4916,7 @@ mod tests {
                 let certify_rx = wrapper.certify(
                     reproposal_round,
                     boundary_digest,
-                    crate::History::anchored(Arc::clone(&selected)),
+                    anchored(selected.clone()),
                 );
                 assert!(
                     certify_rx.await.expect("certify result missing"),
@@ -5017,20 +4952,15 @@ mod tests {
                     pipeline_app,
                     marshal.clone(),
                 );
-                let pipeline_rx = pipeline.prepare(
-                    pipeline_context.clone(),
-                    crate::History::anchored(Arc::clone(&selected)),
-                );
+                let pipeline_rx =
+                    pipeline.prepare(pipeline_context.clone(), anchored(selected.clone()));
                 assert_eq!(
                     pipeline_rx.await.expect("pipeline result missing"),
                     Handoff::Stage(boundary_digest),
                     "{kind:?}: a re-proposed boundary block is staged regardless of the decision"
                 );
-                let certify_rx = pipeline.certify(
-                    pipeline_round,
-                    boundary_digest,
-                    crate::History::anchored(Arc::clone(&selected)),
-                );
+                let certify_rx =
+                    pipeline.certify(pipeline_round, boundary_digest, anchored(selected.clone()));
                 assert!(
                     certify_rx.await.expect("pipeline certify result missing"),
                     "{kind:?}: pipelined boundary re-proposal must certify"
@@ -5130,7 +5060,7 @@ mod tests {
                 let mut wrapper =
                     Wrapper::new(kind, context.child("wrapper"), app, marshal.clone());
                 let digest = wrapper
-                    .propose(ctx, crate::History::anchored(Arc::from([genesis.digest()])))
+                    .propose(ctx, anchored([genesis.digest()]))
                     .await
                     .expect("propose must return a digest");
                 assert_eq!(
@@ -5141,11 +5071,7 @@ mod tests {
                 let _ = wrapper.broadcast(digest, Plan::Propose { round });
                 assert!(
                     wrapper
-                        .certify(
-                            round,
-                            digest,
-                            crate::History::anchored(Arc::from([genesis.digest()]))
-                        )
+                        .certify(round, digest, anchored([genesis.digest()]))
                         .await
                         .expect("certify result missing"),
                     "{kind:?}: the fresh block must certify through the relay handshake"
@@ -5178,11 +5104,7 @@ mod tests {
                     Wrapper::new(kind, context.child("certifier"), app, setup.mailbox.clone());
                 assert!(
                     certifier
-                        .certify(
-                            round,
-                            fresh_digest,
-                            crate::History::anchored(Arc::from([genesis.digest()]))
-                        )
+                        .certify(round, fresh_digest, anchored([genesis.digest()]))
                         .await
                         .expect("certify result missing"),
                     "{kind:?}: the fresh block must certify from storage after a restart"
@@ -5251,10 +5173,8 @@ mod tests {
                     MockVerifyingApp::<B, S>::new(),
                     marshal.clone(),
                 );
-                let response = declining.prepare(
-                    handoff_context.clone(),
-                    crate::History::anchored(Arc::from([genesis.digest()])),
-                );
+                let response =
+                    declining.prepare(handoff_context.clone(), anchored([genesis.digest()]));
                 assert_eq!(
                     response.await.expect("prepare decision missing"),
                     Handoff::Wait,
@@ -5302,10 +5222,7 @@ mod tests {
                     rebuilding_app,
                     marshal.clone(),
                 );
-                let response = rebuilding.prepare(
-                    rebuilt_context,
-                    crate::History::anchored(Arc::from([genesis.digest()])),
-                );
+                let response = rebuilding.prepare(rebuilt_context, anchored([genesis.digest()]));
                 assert_eq!(
                     response.await.expect("prepare decision missing"),
                     Handoff::Vote(rebuilt.digest()),
@@ -5321,10 +5238,8 @@ mod tests {
                         .with_propose_result(child.clone());
                     let mut building =
                         Wrapper::new(kind, context.child(label), building_app, marshal.clone());
-                    let response = building.prepare(
-                        handoff_context.clone(),
-                        crate::History::anchored(Arc::from([genesis.digest()])),
-                    );
+                    let response =
+                        building.prepare(handoff_context.clone(), anchored([genesis.digest()]));
                     assert_eq!(
                         response.await.expect("prepare decision missing"),
                         decision.map(|()| child.digest()),
@@ -5418,10 +5333,7 @@ mod tests {
                     marshal.clone(),
                 );
                 let response = deferred
-                    .prepare(
-                        handoff_context,
-                        crate::History::anchored(Arc::from([genesis.digest(), tip.digest()])),
-                    )
+                    .prepare(handoff_context, anchored([genesis.digest(), tip.digest()]))
                     .await;
                 let expected = if built {
                     Handoff::Stage(child.digest())
@@ -5491,7 +5403,7 @@ mod tests {
                         .verify(
                             valid_reproposal_context,
                             boundary_digest,
-                            crate::History::anchored(Arc::clone(&selected))
+                            anchored(selected.clone())
                         )
                         .await
                         .expect("verify result missing"),
@@ -5515,7 +5427,7 @@ mod tests {
                         .verify(
                             invalid_reproposal_context,
                             non_boundary_digest,
-                            crate::History::anchored(non_boundary_selected)
+                            anchored(non_boundary_selected)
                         )
                         .await
                         .expect("verify result missing"),
@@ -5533,7 +5445,7 @@ mod tests {
                         .verify(
                             cross_epoch_context,
                             boundary_digest,
-                            crate::History::anchored(Arc::clone(&selected))
+                            anchored(selected.clone())
                         )
                         .await
                         .expect("verify result missing"),
@@ -5547,7 +5459,7 @@ mod tests {
                         .certify(
                             certify_only_round,
                             boundary_digest,
-                            crate::History::anchored(Arc::clone(&selected)),
+                            anchored(selected.clone()),
                         )
                         .await;
                     assert!(
@@ -5625,7 +5537,7 @@ mod tests {
                     .verify(
                         malformed_context.clone(),
                         malformed_digest,
-                        crate::History::anchored(Arc::from([genesis.digest()])),
+                        anchored([genesis.digest()]),
                     )
                     .await
                     .expect("verify result missing");
@@ -5644,7 +5556,7 @@ mod tests {
                     let certify = wrapper.certify(
                         malformed_round,
                         malformed_digest,
-                        crate::History::anchored(Arc::from([genesis.digest()])),
+                        anchored([genesis.digest()]),
                     );
                     assert!(
                         !certify.await.expect("certify result missing"),
@@ -5691,7 +5603,7 @@ mod tests {
                     .verify(
                         mismatched_context,
                         mismatched_digest,
-                        crate::History::anchored(Arc::from([genesis.digest(), parent_digest])),
+                        anchored([genesis.digest(), parent_digest]),
                     )
                     .await
                     .expect("verify result missing");
@@ -5710,7 +5622,7 @@ mod tests {
                     let certify = wrapper.certify(
                         mismatch_round,
                         mismatched_digest,
-                        crate::History::anchored(Arc::from([genesis.digest(), parent_digest])),
+                        anchored([genesis.digest(), parent_digest]),
                     );
                     assert!(
                         !certify.await.expect("certify result missing"),
@@ -5782,7 +5694,7 @@ mod tests {
                 //    - Inline fails in `verify` and still certifies, trusting the notarization.
                 //    - Deferred returns optimistic success and fails in `certify`.
                 let verify_result = wrapper
-                    .verify(verify_context, digest, crate::History::anchored(Arc::from([genesis.digest(), parent_digest])))
+                    .verify(verify_context, digest, anchored([genesis.digest(), parent_digest]))
                     .await
                     .expect("verify result missing");
                 if kind == WrapperKind::Inline {
@@ -5791,7 +5703,7 @@ mod tests {
                         "inline verify should return application-level failure"
                     );
                     let certify = wrapper
-                        .certify(round, digest, crate::History::anchored(Arc::from([genesis.digest(), parent_digest])));
+                        .certify(round, digest, anchored([genesis.digest(), parent_digest]));
                     assert!(
                         certify.await.expect("certify result missing"),
                         "inline certify should trust the notarization"
@@ -5801,7 +5713,8 @@ mod tests {
                         verify_result,
                         "deferred verify should pass pre-checks and schedule deferred verification"
                     );
-                    let certify = wrapper.certify(round, digest, crate::History::anchored(Arc::from([genesis.digest(), parent_digest])));
+                    let certify =
+                        wrapper.certify(round, digest, anchored([genesis.digest(), parent_digest]));
                     assert!(
                         !certify.await.expect("certify result missing"),
                         "deferred certify should propagate deferred application verification failure"
@@ -6155,52 +6068,27 @@ mod tests {
             let mut second = mailbox.acquire(commitment);
             assert!(mailbox.get_block(&commitment).await.is_none());
             assert_eq!(buffer.commitment_subscription_count(), 1);
-            let is_acquisition = |fetch: &FetchRecord| {
-                fetch.key == handler::Key::Block(commitment)
-                    && fetch.subscriber == handler::Annotation::Subscription
-            };
-            assert_eq!(
-                resolver
-                    .fetches()
-                    .iter()
-                    .filter(|f| is_acquisition(f))
-                    .count(),
-                1
-            );
+            assert_eq!(resolver.subscriptions(commitment), 1);
 
             // Only cancellation can wake cleanup after this point: neither mailbox
             // traffic nor a block arrival can hide a missing cancellation wakeup.
             drop(first);
             context.sleep(Duration::from_millis(100)).await;
             assert!(matches!(second.try_recv(), Err(TryRecvError::Empty)));
-            assert_eq!(
-                resolver
-                    .active_fetches()
-                    .iter()
-                    .filter(|f| is_acquisition(f))
-                    .count(),
-                1
-            );
-            assert!(!buffer.commitment_subscriptions.lock()[0].is_closed());
+            assert!(resolver.active_subscription(commitment).is_some());
+            assert!(!buffer.commitment_subscription_closed(0));
             drop(second);
             wait_until(
                 &context,
                 Duration::from_secs(1),
                 "idle acquisition cancellation",
                 || {
-                    !resolver.active_fetches().iter().any(is_acquisition)
-                        && buffer.commitment_subscriptions.lock()[0].is_closed()
+                    resolver.active_subscription(commitment).is_none()
+                        && buffer.commitment_subscription_closed(0)
                 },
             )
             .await;
-            assert_eq!(
-                resolver
-                    .fetches()
-                    .iter()
-                    .filter(|f| is_acquisition(f))
-                    .count(),
-                1
-            );
+            assert_eq!(resolver.subscriptions(commitment), 1);
         });
     }
 
@@ -6210,24 +6098,15 @@ mod tests {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let (finalizations, blocks) = prunable_finalized_stores(&context, PARTITION).await;
-            let mut config = test_config(
-                PARTITION,
-                ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
-            );
-            config.max_repair = NZUsize!(1);
-            let (actor, mailbox, _) = Actor::init(
-                context.child("actor"), finalizations, blocks, config,
-            ).await;
-            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let buffer = RecordingBuffer::default();
-            let application = Application::<B>::manual_ack();
-            let _actor = actor.start(application.clone(), buffer.clone(),
-                (resolver_rx, resolver.clone()));
-            wait_until(&context, Duration::from_secs(1), "held genesis acknowledgement", || {
-                application.pending_ack_heights() == vec![Height::zero()]
-            }).await;
+            let (mailbox, resolver, buffer, application, _actor) =
+                start_capped_actor(&context, PARTITION, &schemes, NZUsize!(1)).await;
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "held genesis acknowledgement",
+                || application.pending_ack_heights() == vec![Height::zero()],
+            )
+            .await;
             let _ = mailbox.get_processed().await;
 
             let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
@@ -6236,338 +6115,193 @@ mod tests {
             let second = Sha256::hash(&[b"queued behind first prefetch"]);
             let second_key = handler::Key::Block(second);
             let old = mailbox.prefetch(Arc::from([first.digest(), second]), 0..2);
-            wait_until(&context, Duration::from_secs(1), "first speculative request", || {
-                resolver.active_fetches().iter().any(|fetch| fetch.key == first_key)
-            }).await;
-            assert!(!resolver.fetches().iter().any(|fetch| fetch.key == second_key));
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "first speculative request",
+                || {
+                    resolver
+                        .active_fetches()
+                        .iter()
+                        .any(|fetch| fetch.key == first_key)
+                },
+            )
+            .await;
+            assert!(
+                !resolver
+                    .fetches()
+                    .iter()
+                    .any(|fetch| fetch.key == second_key)
+            );
 
-            let queued = mailbox.prefetch(Arc::from([
-                Sha256::hash(&[b"unused queued prefetch one"]),
-                Sha256::hash(&[b"unused queued prefetch two"]),
-            ]), 0..2);
+            let queued = mailbox.prefetch(
+                Arc::from([
+                    Sha256::hash(&[b"unused queued prefetch one"]),
+                    Sha256::hash(&[b"unused queued prefetch two"]),
+                ]),
+                0..2,
+            );
             let _ = mailbox.get_processed().await;
             let retains = resolver.retain_count();
             drop(queued);
             let _ = mailbox.get_processed().await;
             assert_eq!(
-                resolver.retain_count(), retains,
+                resolver.retain_count(),
+                retains,
                 "discarding queued metadata must not scan active resolver requests",
             );
 
             let mut direct = mailbox.acquire(first.digest());
-            wait_until(&context, Duration::from_secs(1), "direct claim releases speculative capacity", || {
-                resolver.active_fetches().iter().any(|fetch| fetch.key == second_key)
-            }).await;
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "direct claim releases speculative capacity",
+                || {
+                    resolver
+                        .active_fetches()
+                        .iter()
+                        .any(|fetch| fetch.key == second_key)
+                },
+            )
+            .await;
             let duplicate = mailbox.prefetch(Arc::from([first.digest()]), 0..1);
             let _ = mailbox.get_processed().await;
-            assert_eq!(resolver.fetches().iter().filter(|fetch| fetch.key == first_key).count(), 1);
+            assert_eq!(
+                resolver
+                    .fetches()
+                    .iter()
+                    .filter(|fetch| fetch.key == first_key)
+                    .count(),
+                1
+            );
 
             // Both lease closures are the only actor inputs until the second
             // request is retired; the first request now belongs to its caller.
             drop(old);
             drop(duplicate);
-            wait_until(&context, Duration::from_secs(1), "old leases release only speculative request", || {
-                !resolver.active_fetches().iter().any(|fetch| fetch.key == second_key)
-            }).await;
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "old leases release only speculative request",
+                || {
+                    !resolver
+                        .active_fetches()
+                        .iter()
+                        .any(|fetch| fetch.key == second_key)
+                },
+            )
+            .await;
             assert!(matches!(direct.try_recv(), Err(TryRecvError::Empty)));
-            assert!(!buffer.commitment_subscriptions.lock()[0].is_closed());
-            let fetch = resolver.active_fetches().into_iter()
-                .find(|fetch| fetch.key == first_key).expect("direct request canceled by old lease");
+            assert!(!buffer.commitment_subscription_closed(0));
+            let fetch = resolver
+                .active_fetches()
+                .into_iter()
+                .find(|fetch| fetch.key == first_key)
+                .expect("direct request canceled by old lease");
             assert_eq!(fetch.subscriber, handler::Annotation::Subscription);
             deliver_acquisition_test_block(&resolver, fetch, &first).await;
             select! {
                 result = direct => assert_eq!(result.unwrap().digest(), first.digest()),
-                _ = context.sleep(Duration::from_secs(1)) => panic!("direct caller did not receive its block"),
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("direct caller did not receive its block");
+                },
             }
 
             let inverse = Sha256::hash(&[b"direct before speculative lease"]);
             let inverse_key = handler::Key::Block(inverse);
             let direct = mailbox.acquire(inverse);
-            wait_until(&context, Duration::from_secs(1), "inverse direct request", || {
-                resolver.active_fetches().iter().any(|fetch| fetch.key == inverse_key)
-            }).await;
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "inverse direct request",
+                || {
+                    resolver
+                        .active_fetches()
+                        .iter()
+                        .any(|fetch| fetch.key == inverse_key)
+                },
+            )
+            .await;
             let old = mailbox.prefetch(Arc::from([inverse]), 0..1);
             let _ = mailbox.get_processed().await;
-            assert_eq!(resolver.fetches().iter().filter(|fetch| fetch.key == inverse_key).count(), 1);
+            assert_eq!(
+                resolver
+                    .fetches()
+                    .iter()
+                    .filter(|fetch| fetch.key == inverse_key)
+                    .count(),
+                1
+            );
 
             // A best-effort lease cannot extend a direct caller's lifetime.
             // No mailbox traffic or body delivery drives cancellation here.
             drop(direct);
-            wait_until(&context, Duration::from_secs(1), "last direct caller cancels despite lease", || {
-                !resolver.active_fetches().iter().any(|fetch| fetch.key == inverse_key)
-                    && buffer.commitment_subscriptions.lock().iter().all(|sender| sender.is_closed())
-            }).await;
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "last direct caller cancels despite lease",
+                || {
+                    !resolver
+                        .active_fetches()
+                        .iter()
+                        .any(|fetch| fetch.key == inverse_key)
+                        && buffer
+                            .commitment_subscriptions
+                            .lock()
+                            .iter()
+                            .all(|sender| sender.is_closed())
+                },
+            )
+            .await;
 
             let mut renewed = mailbox.prefetch(Arc::from([inverse]), 0..1);
-            wait_until(&context, Duration::from_secs(1), "renewed speculative request", || {
-                resolver.active_fetches().iter().any(|fetch| fetch.key == inverse_key)
-            }).await;
-            assert_eq!(resolver.fetches().iter().filter(|fetch| fetch.key == inverse_key).count(), 2);
-            drop(old);
-            context.sleep(Duration::from_millis(100)).await;
-            assert!(resolver.active_fetches().iter().any(|fetch| fetch.key == inverse_key));
-            assert!(matches!(renewed.try_recv(), Err(TryRecvError::Empty)));
-            drop(renewed);
-            wait_until(&context, Duration::from_secs(1), "renewed lease owns cancellation", || {
-                !resolver.active_fetches().iter().any(|fetch| fetch.key == inverse_key)
-            }).await;
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_acquire_cancellation_preserves_shared_finality_request() {
-        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
-            let application = Application::<B>::manual_ack();
-            let (mut mailbox, buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
-                "acquire-cancel-preserves-finality",
-                ConstantProvider::new(schemes[0].clone()),
-                application.clone(),
-                Some(RecordingBuffer::default()),
-                Start::Genesis(genesis.clone()),
-            )
-            .await;
-            let buffer = buffer.unwrap();
-            assert_eq!(application.acknowledged().await, Height::zero());
-            let block = make_raw_block(genesis.digest(), Height::new(1), 100);
-            let commitment = block.digest();
-            let round = Round::new(Epoch::zero(), View::new(1));
-            let acquisition = mailbox.acquire(commitment);
-            StandardHarness::report_finalization(
-                &mut mailbox,
-                StandardHarness::make_finalization(
-                    Proposal::new(round, View::zero(), commitment),
-                    &schemes,
-                    QUORUM,
-                ),
-            )
-            .await;
-            let is_finality = |fetch: &FetchRecord| {
-                fetch.key == handler::Key::Block(commitment)
-                    && fetch.subscriber == handler::Annotation::Round(round)
-            };
-            let is_acquisition = |fetch: &FetchRecord| {
-                fetch.key == handler::Key::Block(commitment)
-                    && fetch.subscriber == handler::Annotation::Subscription
-            };
             wait_until(
                 &context,
                 Duration::from_secs(1),
-                "shared acquisition and finality",
-                || {
-                    let active = resolver.active_fetches();
-                    active.iter().any(is_finality) && active.iter().any(is_acquisition)
-                },
-            )
-            .await;
-            context.sleep(Duration::from_millis(100)).await;
-            assert_eq!(buffer.commitment_subscription_count(), 1);
-            assert!(!buffer.commitment_subscriptions.lock()[0].is_closed());
-
-            drop(acquisition);
-            wait_until(
-                &context,
-                Duration::from_secs(1),
-                "independent finality retention",
-                || {
-                    let active = resolver.active_fetches();
-                    active.iter().any(is_finality)
-                        && !active.iter().any(is_acquisition)
-                        && buffer.commitment_subscriptions.lock()[0].is_closed()
-                },
-            )
-            .await;
-            let fetch = resolver
-                .active_fetches()
-                .into_iter()
-                .find(is_finality)
-                .unwrap();
-            deliver_acquisition_test_block(&resolver, fetch, &block).await;
-            wait_until(
-                &context,
-                Duration::from_secs(1),
-                "finalized body after acquisition cancellation",
-                || application.pending_ack_heights() == vec![Height::new(1)],
-            )
-            .await;
-            assert_eq!(application.blocks()[&Height::new(1)].digest(), commitment);
-            assert_eq!(
-                mailbox
-                    .get_finalization(Height::new(1))
-                    .await
-                    .unwrap()
-                    .proposal
-                    .payload,
-                commitment
-            );
-        });
-    }
-
-    /// An exact resolver delivery leaves its caller-owned demand for the delivery verdict to retire,
-    /// while local ingress retires the demand itself.
-    #[test_traced("WARN")]
-    fn test_standard_acquire_delivery_leaves_demand_to_verdict() {
-        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
-            let (mailbox, _, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
-                "acquire-delivery-verdict",
-                ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::default(),
-                Some(RecordingBuffer::default()),
-                Start::Genesis(genesis.clone()),
-            )
-            .await;
-            let is_acquisition = |fetch: &FetchRecord, block: &B| {
-                fetch.key == handler::Key::Block(block.digest())
-                    && fetch.subscriber == handler::Annotation::Subscription
-            };
-
-            // The resolver must still hold the demand when the delivery verdict resolves, so the
-            // verdict reaches the resolver and retires it.
-            let delivered = make_raw_block(genesis.digest(), Height::new(1), 100);
-            let acquisition = mailbox.acquire(delivered.digest());
-            wait_until(
-                &context,
-                Duration::from_secs(1),
-                "delivered acquisition",
+                "renewed speculative request",
                 || {
                     resolver
                         .active_fetches()
                         .iter()
-                        .any(|fetch| is_acquisition(fetch, &delivered))
+                        .any(|fetch| fetch.key == inverse_key)
                 },
             )
             .await;
-            let fetch = resolver
-                .active_fetches()
-                .into_iter()
-                .find(|fetch| is_acquisition(fetch, &delivered))
-                .unwrap();
-            deliver_acquisition_test_block(&resolver, fetch, &delivered).await;
+            assert_eq!(
+                resolver
+                    .fetches()
+                    .iter()
+                    .filter(|fetch| fetch.key == inverse_key)
+                    .count(),
+                2
+            );
+            drop(old);
+            context.sleep(Duration::from_millis(100)).await;
             assert!(
                 resolver
                     .active_fetches()
                     .iter()
-                    .any(|fetch| is_acquisition(fetch, &delivered)),
-                "resolver delivery must not cancel demand before its verdict"
+                    .any(|fetch| fetch.key == inverse_key)
             );
-            assert_eq!(acquisition.await.unwrap().digest(), delivered.digest());
-
-            // A locally verified block satisfies its caller without a resolver verdict.
-            let verified = make_raw_block(genesis.digest(), Height::new(1), 200);
-            let acquisition = mailbox.acquire(verified.digest());
+            assert!(matches!(renewed.try_recv(), Err(TryRecvError::Empty)));
+            drop(renewed);
             wait_until(
                 &context,
                 Duration::from_secs(1),
-                "verified acquisition",
+                "renewed lease owns cancellation",
                 || {
-                    resolver
+                    !resolver
                         .active_fetches()
                         .iter()
-                        .any(|fetch| is_acquisition(fetch, &verified))
+                        .any(|fetch| fetch.key == inverse_key)
                 },
             )
             .await;
-            assert!(
-                mailbox
-                    .verified(
-                        Round::new(Epoch::zero(), View::new(1)),
-                        ready(verified.clone())
-                    )
-                    .await
-            );
-            assert_eq!(acquisition.await.unwrap().digest(), verified.digest());
-            assert!(
-                !resolver
-                    .active_fetches()
-                    .iter()
-                    .any(|fetch| is_acquisition(fetch, &verified)),
-                "local ingress must retire satisfied demand"
-            );
-        });
-    }
-
-    /// A block acquired while marshal holds its notarization is stored, so its finalization is
-    /// served without requesting the block again.
-    #[test_traced("WARN")]
-    fn test_standard_acquired_notarized_block_is_stored() {
-        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
-            let application = Application::<B>::default();
-            let (mut mailbox, _, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
-                "acquired-notarized-block",
-                ConstantProvider::new(schemes[0].clone()),
-                application.clone(),
-                Some(RecordingBuffer::default()),
-                Start::Genesis(genesis.clone()),
-            )
-            .await;
-
-            // Marshal holds the notarization but not the block it names.
-            let block = make_raw_block(genesis.digest(), Height::new(1), 100);
-            let proposal = Proposal::new(
-                Round::new(Epoch::zero(), View::new(1)),
-                View::zero(),
-                block.digest(),
-            );
-            StandardHarness::report_notarization(
-                &mut mailbox,
-                StandardHarness::make_notarization(proposal.clone(), &schemes, QUORUM),
-            )
-            .await;
-
-            // The block arrives through an exact acquisition.
-            let is_acquisition = |fetch: &FetchRecord| {
-                fetch.key == handler::Key::Block(block.digest())
-                    && fetch.subscriber == handler::Annotation::Subscription
-            };
-            let acquisition = mailbox.acquire(block.digest());
-            wait_until(&context, Duration::from_secs(1), "acquisition", || {
-                resolver.active_fetches().iter().any(is_acquisition)
-            })
-            .await;
-            let fetch = resolver
-                .active_fetches()
-                .into_iter()
-                .find(is_acquisition)
-                .unwrap();
-            deliver_acquisition_test_block(&resolver, fetch, &block).await;
-            assert_eq!(acquisition.await.unwrap().digest(), block.digest());
-            assert!(
-                mailbox.get_block(&block.digest()).await.is_some(),
-                "a delivered block that a held notarization backs must be stored"
-            );
-
-            // The finalization finds the block in storage.
-            let fetched = resolver.fetches().len();
-            StandardHarness::report_finalization(
-                &mut mailbox,
-                StandardHarness::make_finalization(proposal, &schemes, QUORUM),
-            )
-            .await;
-            wait_until(&context, Duration::from_secs(1), "finalized block", || {
-                application.blocks().contains_key(&Height::new(1))
-            })
-            .await;
-            assert_eq!(
-                resolver.fetches().len(),
-                fetched,
-                "a stored block must not be requested again"
-            );
         });
     }
 
     #[test_traced("WARN")]
-    fn test_standard_finalized_waiter_survives_sibling_cancel_and_gap_repair_with_held_ack() {
+    fn test_standard_finalized_waiter_survives_sibling_cancel_and_gap_repair() {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
@@ -6580,20 +6314,27 @@ mod tests {
                 application.clone(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(genesis.clone()),
-            ).await;
+            )
+            .await;
             assert_eq!(application.acknowledged().await, Height::zero());
             let first_round = Round::new(Epoch::zero(), View::new(1));
             let first = make_raw_block(genesis.digest(), Height::new(1), 100);
             assert!(mailbox.verified(first_round, ready(first.clone())).await);
-            StandardHarness::report_finalization(&mut mailbox,
-                StandardHarness::make_finalization(
-                    Proposal::new(first_round, View::zero(), first.digest()),
-                    &schemes, QUORUM,
-                ),
-            ).await;
-            wait_until(&context, Duration::from_secs(1), "held height one ack", || {
-                application.pending_ack_heights() == vec![Height::new(1)]
-            }).await;
+            report_finalized(
+                &mut mailbox,
+                &schemes,
+                first_round,
+                View::zero(),
+                first.digest(),
+            )
+            .await;
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "held height one ack",
+                || application.pending_ack_heights() == vec![Height::new(1)],
+            )
+            .await;
             let missing = make_raw_block(first.digest(), Height::new(2), 200);
             let upper = make_raw_block(missing.digest(), Height::new(3), 300);
             let fetches_before = resolver.fetches().len();
@@ -6607,352 +6348,53 @@ mod tests {
 
             let upper_round = Round::new(Epoch::zero(), View::new(3));
             assert!(mailbox.verified(upper_round, ready(upper.clone())).await);
-            StandardHarness::report_finalization(&mut mailbox,
-                StandardHarness::make_finalization(
-                    Proposal::new(upper_round, View::new(2), upper.digest()),
-                    &schemes, QUORUM,
-                ),
-            ).await;
+            report_finalized(
+                &mut mailbox,
+                &schemes,
+                upper_round,
+                View::new(2),
+                upper.digest(),
+            )
+            .await;
             let is_repair = |fetch: &FetchRecord| {
                 fetch.key == handler::Key::Block(missing.digest())
                     && fetch.subscriber == handler::Annotation::Height(Height::new(2))
             };
-            wait_until(&context, Duration::from_secs(1), "missing parent repair", || {
-                resolver.active_fetches().iter().any(is_repair)
-            }).await;
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "missing parent repair",
+                || resolver.active_fetches().iter().any(is_repair),
+            )
+            .await;
             assert!(matches!(survivor.try_recv(), Err(TryRecvError::Empty)));
             assert!(mailbox.get_block(Height::new(2)).await.is_none());
             assert_eq!(application.pending_ack_heights(), vec![Height::new(1)]);
-            let fetch = resolver.active_fetches().into_iter().find(is_repair).unwrap();
+            let fetch = resolver
+                .active_fetches()
+                .into_iter()
+                .find(is_repair)
+                .unwrap();
             deliver_acquisition_test_block(&resolver, fetch, &missing).await;
             select! {
                 result = survivor => {
-                    assert_eq!(result.expect("finalized sibling canceled survivor").digest(), missing.digest());
+                    let block = result.expect("finalized sibling canceled survivor");
+                    assert_eq!(block.digest(), missing.digest());
                 },
                 _ = context.sleep(Duration::from_secs(1)) => {
                     panic!("gap repair did not wake preregistered finalized-height waiter");
                 },
             }
-            assert_eq!(mailbox.get_processed().await, Some(Processed::Block(Height::zero())));
-            assert_eq!(application.pending_ack_heights(), vec![Height::new(1)]);
-            assert!(!application.blocks().contains_key(&Height::new(2)));
-            assert_eq!(mailbox.get_block(Height::new(2)).await.unwrap().digest(), missing.digest());
-        });
-    }
-
-    /// A floor closes skipped canonical waits while exact callers retain their demand.
-    #[test_traced("WARN")]
-    fn test_standard_floor_closes_missing_predecessor_waiter() {
-        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let application = Application::<B>::manual_ack();
-            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
-                "floor-closes-missing-predecessor",
-                ConstantProvider::new(schemes[0].clone()),
-                application.clone(),
-                Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
-            )
-            .await;
-            assert_eq!(application.acknowledged().await, Height::zero());
-            while mailbox.get_processed().await != Some(Processed::Block(Height::zero())) {
-                reschedule().await;
-            }
-
-            let missing_height = Height::new(4);
-            let missing = make_raw_block(Sha256::hash(&[b"missing-parent"]), missing_height, 400);
-            let anchor = make_raw_block(missing.digest(), Height::new(5), 500);
-            let mut finalized = mailbox.finalized(missing_height);
-            let source = mailbox.blocks_with_parent(
-                anchor.height(),
-                anchor.digest(),
-                crate::History::anchored(Arc::from([anchor.digest()])),
-            );
-            let mut range = source.range(missing_height..=missing_height);
-            let mut read = Box::pin(range.next());
-            assert!(read.as_mut().now_or_never().is_none());
-            let mut exact = mailbox.acquire(missing.digest());
-
-            // FIFO processing registers both canonical waits and the independent exact caller.
             assert_eq!(
                 mailbox.get_processed().await,
                 Some(Processed::Block(Height::zero()))
             );
-            assert!(matches!(finalized.try_recv(), Err(TryRecvError::Empty)));
-            assert!(matches!(exact.try_recv(), Err(TryRecvError::Empty)));
-            let fetch = resolver
-                .active_fetches()
-                .into_iter()
-                .find(|fetch| {
-                    fetch.key == handler::Key::Block(missing.digest())
-                        && fetch.subscriber == handler::Annotation::Subscription
-                })
-                .expect("exact predecessor demand missing");
-
-            let round = Round::new(Epoch::zero(), View::new(5));
-            assert!(mailbox.verified(round, ready(anchor.clone())).await);
-            mailbox.set_floor(StandardHarness::make_finalization(
-                Proposal::new(round, View::new(4), anchor.digest()),
-                &schemes,
-                QUORUM,
-            ));
+            assert_eq!(application.pending_ack_heights(), vec![Height::new(1)]);
+            assert!(!application.blocks().contains_key(&Height::new(2)));
             assert_eq!(
-                mailbox.get_processed().await,
-                Some(Processed::Absent(missing_height))
+                mailbox.get_block(Height::new(2)).await.unwrap().digest(),
+                missing.digest()
             );
-            assert_eq!(
-                mailbox
-                    .get_anchor()
-                    .await
-                    .map(|(processed, block)| (processed, block.digest())),
-                Some((Processed::Absent(missing_height), anchor.digest())),
-            );
-            assert_eq!(application.pending_ack_heights(), vec![anchor.height()]);
-            assert!(mailbox.get_block(missing_height).await.is_none());
-
-            select! {
-                result = finalized => assert!(result.is_err(), "skipped predecessor must close"),
-                _ = context.sleep(Duration::from_secs(1)) => {
-                    panic!("floor stranded the pre-existing missing-predecessor waiter");
-                },
-            }
-            select! {
-                result = read => assert!(matches!(
-                    result, Some(Err(crate::marshal::blocks::Error::Unavailable))
-                )),
-                _ = context.sleep(Duration::from_secs(1)) => {
-                    panic!("floor stranded the canonical range at its missing predecessor");
-                },
-            }
-            assert!(range.next().await.is_none());
-            assert!(mailbox.finalized(missing_height).await.is_err());
-            assert_eq!(
-                mailbox.finalized(anchor.height()).await.unwrap().digest(),
-                anchor.digest()
-            );
-            assert!(matches!(exact.try_recv(), Err(TryRecvError::Empty)));
-            assert!(resolver.active_fetches().iter().any(|current| {
-                current.key == fetch.key && current.subscriber == fetch.subscriber
-            }));
-
-            // A canonical skip does not prevent later exact-body ingress for a live caller.
-            deliver_acquisition_test_block(&resolver, fetch, &missing).await;
-            select! {
-                result = exact => assert_eq!(result.unwrap().digest(), missing.digest()),
-                _ = context.sleep(Duration::from_secs(1)) => panic!("floor canceled exact demand"),
-            }
-            assert_eq!(
-                mailbox.get_processed().await,
-                Some(Processed::Absent(missing_height))
-            );
-            assert_eq!(application.pending_ack_heights(), vec![anchor.height()]);
-        });
-    }
-
-    /// Canonical floor storage wakes anchor waiters and frees the speculative body slot.
-    #[test_traced("WARN")]
-    fn test_standard_prefetched_floor_notifies_finalized_and_releases_capacity() {
-        const PARTITION: &str = "prefetched-floor-capacity";
-        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let (finalizations, blocks) = prunable_finalized_stores(&context, PARTITION).await;
-            let mut config = test_config(
-                PARTITION,
-                ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
-            );
-            config.max_repair = NZUsize!(1);
-            let (actor, mailbox, _) = Actor::init(
-                context.child("actor"), finalizations, blocks, config,
-            ).await;
-            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let application = Application::<B>::manual_ack();
-            let _actor_handle = actor.start(
-                application.clone(), RecordingBuffer::default(), (resolver_rx, resolver.clone()),
-            );
-            assert_eq!(application.acknowledged().await, Height::zero());
-            while mailbox.get_processed().await != Some(Processed::Block(Height::zero())) {
-                reschedule().await;
-            }
-
-            let anchor = make_raw_block(Sha256::hash(&[b"floor-predecessor"]), Height::new(5), 500);
-            let next = make_raw_block(anchor.digest(), Height::new(6), 600);
-            let parked = make_raw_block(Sha256::hash(&[b"parked-parent"]), Height::new(3), 300);
-            let anchor_key = handler::Key::Block(anchor.digest());
-            let next_key = handler::Key::Block(next.digest());
-            let parked_key = handler::Key::Block(parked.digest());
-            let mut finalized = mailbox.finalized(anchor.height());
-            let mut lease = mailbox.prefetch(Arc::from([anchor.digest(), next.digest()]), 0..2);
-            wait_until(&context, Duration::from_secs(1), "speculative anchor fetch", || {
-                resolver.active_fetches().iter().any(|fetch| {
-                    fetch.key == anchor_key && fetch.subscriber == handler::Annotation::Subscription
-                })
-            }).await;
-            let fetch = resolver.active_fetches().into_iter().find(|fetch| {
-                fetch.key == anchor_key && fetch.subscriber == handler::Annotation::Subscription
-            }).unwrap();
-            let mut parked_lease = mailbox.prefetch(Arc::from([parked.digest()]), 0..1);
-            assert_eq!(mailbox.get_processed().await, Some(Processed::Block(Height::zero())));
-            assert!(matches!(finalized.try_recv(), Err(TryRecvError::Empty)));
-            assert!(!resolver.fetches().iter().any(|fetch| fetch.key == next_key || fetch.key == parked_key));
-
-            let round = Round::new(Epoch::zero(), View::new(5));
-            mailbox.set_floor(StandardHarness::make_finalization(
-                Proposal::new(round, View::new(4), anchor.digest()), &schemes, QUORUM,
-            ));
-            assert_eq!(mailbox.get_processed().await, Some(Processed::Block(Height::zero())));
-            deliver_acquisition_test_block(&resolver, fetch, &anchor).await;
-            assert_eq!(mailbox.get_processed().await, Some(Processed::Absent(Height::new(4))));
-            assert_eq!(
-                mailbox.get_anchor().await.map(|(processed, block)| (processed, block.digest())),
-                Some((Processed::Absent(Height::new(4)), anchor.digest())),
-            );
-            assert_eq!(application.pending_ack_heights(), vec![anchor.height()]);
-            select! {
-                result = finalized => assert_eq!(result.unwrap().digest(), anchor.digest()),
-                _ = context.sleep(Duration::from_secs(1)) => panic!("floor did not notify the anchor waiter"),
-            }
-            wait_until(&context, Duration::from_secs(1), "floor releases the speculative slot", || {
-                resolver.active_fetches().iter().any(|fetch| {
-                    fetch.key == next_key && fetch.subscriber == handler::Annotation::Subscription
-                })
-            }).await;
-            assert!(matches!(lease.try_recv(), Err(TryRecvError::Empty)));
-            assert!(matches!(parked_lease.try_recv(), Err(TryRecvError::Empty)));
-
-            // A ready next body occupies the only slot until its direct caller consumes it.
-            let fetch = resolver.active_fetches().into_iter().find(|fetch| fetch.key == next_key).unwrap();
-            deliver_acquisition_test_block(&resolver, fetch, &next).await;
-            let _ = mailbox.get_processed().await;
-            assert!(!resolver.fetches().iter().any(|fetch| fetch.key == parked_key));
-            assert_eq!(mailbox.acquire(next.digest()).await.unwrap().digest(), next.digest());
-            wait_until(&context, Duration::from_secs(1), "below-floor lease retains its queued demand", || {
-                resolver.active_fetches().iter().any(|fetch| {
-                    fetch.key == parked_key && fetch.subscriber == handler::Annotation::Subscription
-                })
-            }).await;
-            assert!(matches!(parked_lease.try_recv(), Err(TryRecvError::Empty)));
-            assert_eq!(application.pending_ack_heights(), vec![anchor.height()]);
-            drop(parked_lease);
-            drop(lease);
-            wait_until(&context, Duration::from_secs(1), "parked lease cancellation", || {
-                !resolver.active_fetches().iter().any(|fetch| fetch.key == parked_key)
-            }).await;
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_finalized_delivery_retires_only_exact_acquisition() {
-        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
-            let (mailbox, _, mut resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
-                "finalized-delivery-demand",
-                ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
-                Some(RecordingBuffer::default()),
-                Start::Genesis(genesis.clone()),
-            )
-            .await;
-            let height = Height::new(1);
-            let block = make_raw_block(genesis.digest(), height, 100);
-            let commitment = block.digest();
-            let acquisition = mailbox.acquire(commitment);
-            let other = make_raw_block(genesis.digest(), height, 200);
-            let other_commitment = other.digest();
-            let _other_acquisition = mailbox.acquire(other_commitment);
-            mailbox.hint_finalized(height, NonEmptyVec::new(participants[1].clone()));
-            let _ = mailbox.get_processed().await;
-            let finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    Round::new(Epoch::zero(), View::new(1)),
-                    View::zero(),
-                    commitment,
-                ),
-                &schemes,
-                QUORUM,
-            );
-            let observed = resolver.clone();
-            let is_active = |key, subscriber| {
-                observed
-                    .active_fetches()
-                    .iter()
-                    .any(|fetch| fetch.key == key && fetch.subscriber == subscriber)
-            };
-            assert!(is_active(
-                handler::Key::Block(commitment),
-                handler::Annotation::Subscription
-            ));
-            assert!(is_active(
-                handler::Key::Finalized { height },
-                handler::Annotation::Height(height)
-            ));
-            let retained_round = Round::new(Epoch::zero(), View::new(10));
-            resolver.fetch(handler::Request::new(
-                commitment,
-                handler::Annotation::Height(height),
-            ));
-            resolver.fetch(handler::Request::new(
-                commitment,
-                handler::Annotation::Round(retained_round),
-            ));
-            let (response, response_rx) = oneshot::channel();
-            assert!(
-                resolver
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: handler::Key::Finalized { height },
-                            subscribers: NonEmptyVec::new((
-                                handler::Annotation::Height(height),
-                                tracing::Span::none()
-                            )),
-                        },
-                        value: (finalization, block.clone()).encode(),
-                        response,
-                    })
-                    .accepted()
-            );
-            assert_eq!(
-                response_rx.await.unwrap(),
-                Outcome::Resolved(Resolution::Complete)
-            );
-            let _ = mailbox.get_processed().await;
-            assert_eq!(acquisition.await.unwrap().digest(), block.digest());
-
-            assert!(
-                !is_active(
-                    handler::Key::Block(commitment),
-                    handler::Annotation::Subscription
-                ),
-                "height delivery must retire the satisfied independent exact acquisition"
-            );
-            assert!(
-                is_active(
-                    handler::Key::Finalized { height },
-                    handler::Annotation::Height(height)
-                ),
-                "height delivery must preserve its own request for its verdict"
-            );
-            assert!(is_active(
-                handler::Key::Block(commitment),
-                handler::Annotation::Height(height)
-            ));
-            assert!(is_active(
-                handler::Key::Block(commitment),
-                handler::Annotation::Round(retained_round)
-            ));
-            assert!(is_active(
-                handler::Key::Block(other_commitment),
-                handler::Annotation::Subscription
-            ));
         });
     }
 
@@ -7058,10 +6500,10 @@ mod tests {
             self.sends.lock().push((round, block, recipients));
         }
     }
+    type TargetedFetch = (handler::Key<D>, NonEmptyVec<PublicKey>);
 
     /// Recorded `fetch` call on the [`RecordingResolver`].
     type FetchRecord = Fetch<handler::Key<D>, handler::Annotation>;
-    type TargetedFetch = (handler::Key<D>, NonEmptyVec<PublicKey>);
 
     /// A resolver that records each fetch invocation; other methods are no-ops.
     ///
@@ -7126,6 +6568,11 @@ mod tests {
             );
         }
 
+        /// Returns whether an automatic delivery was made.
+        fn delivered(&self) -> bool {
+            !self.delivery_responses.lock().is_empty()
+        }
+
         /// Returns whether marshal accepted the newest automatic delivery.
         async fn wait_for_delivery_response(&self) -> bool {
             let response = self
@@ -7151,6 +6598,27 @@ mod tests {
 
         fn active_fetches(&self) -> Vec<FetchRecord> {
             self.active_fetches.lock().clone()
+        }
+
+        /// Returns whether `fetch` is an exact-body request for `commitment`.
+        fn is_subscription(fetch: &FetchRecord, commitment: D) -> bool {
+            fetch.key == handler::Key::Block(commitment)
+                && fetch.subscriber == handler::Annotation::Subscription
+        }
+
+        /// Returns the active exact-body request for `commitment`, if any.
+        fn active_subscription(&self, commitment: D) -> Option<FetchRecord> {
+            let mut active = self.active_fetches().into_iter();
+            active.find(|fetch| Self::is_subscription(fetch, commitment))
+        }
+
+        /// Returns how many exact-body requests for `commitment` were made.
+        fn subscriptions(&self, commitment: D) -> usize {
+            let fetches = self.fetches();
+            let requests = fetches.iter();
+            requests
+                .filter(|fetch| Self::is_subscription(fetch, commitment))
+                .count()
         }
 
         fn retain_count(&self) -> usize {
@@ -7208,6 +6676,34 @@ mod tests {
         }
     }
 
+    impl TargetedResolver for RecordingResolver {
+        type PublicKey = PublicKey;
+
+        fn fetch_targeted(
+            &mut self,
+            fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+            targets: NonEmptyVec<Self::PublicKey>,
+        ) -> Feedback {
+            let fetch = fetch.into();
+            self.targeted.lock().push((fetch.key, targets));
+            self.record_fetch(fetch);
+            Feedback::Ok
+        }
+
+        fn fetch_all_targeted<F>(
+            &mut self,
+            fetches: impl IntoIterator<Item = (F, NonEmptyVec<Self::PublicKey>)>,
+        ) -> Feedback
+        where
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
+            for (fetch, targets) in fetches {
+                self.fetch_targeted(fetch, targets);
+            }
+            Feedback::Ok
+        }
+    }
+
     #[derive(Clone)]
     struct NoopConsumer;
 
@@ -7249,34 +6745,6 @@ mod tests {
                 sender.send_lossy(self.value.clone());
             }
             receiver
-        }
-    }
-
-    impl TargetedResolver for RecordingResolver {
-        type PublicKey = PublicKey;
-
-        fn fetch_targeted(
-            &mut self,
-            fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-            targets: NonEmptyVec<Self::PublicKey>,
-        ) -> Feedback {
-            let fetch = fetch.into();
-            self.targeted.lock().push((fetch.key, targets));
-            self.record_fetch(fetch);
-            Feedback::Ok
-        }
-
-        fn fetch_all_targeted<F>(
-            &mut self,
-            fetches: impl IntoIterator<Item = (F, NonEmptyVec<Self::PublicKey>)>,
-        ) -> Feedback
-        where
-            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-        {
-            for (fetch, targets) in fetches {
-                self.fetch_targeted(fetch, targets);
-            }
-            Feedback::Ok
         }
     }
 
@@ -8932,13 +8400,12 @@ mod tests {
             // round-floor side effect is covered separately from ack handling.
             let stale_floor_round = Round::new(Epoch::zero(), View::new(5));
             let missing = Sha256::hash(&[b"missing-before-stale-lower-floor"]);
-            StandardHarness::report_finalization(
+            report_finalized(
                 &mut mailbox.clone(),
-                StandardHarness::make_finalization(
-                    Proposal::new(stale_floor_round, View::zero(), missing),
-                    &schemes,
-                    QUORUM,
-                ),
+                &schemes,
+                stale_floor_round,
+                View::zero(),
+                missing,
             )
             .await;
             wait_until(
@@ -9165,13 +8632,12 @@ mod tests {
 
             let floor_round = Round::new(Epoch::zero(), View::new(5));
             let missing = Sha256::hash(&[b"missing-before-stale-floor"]);
-            StandardHarness::report_finalization(
+            report_finalized(
                 &mut mailbox.clone(),
-                StandardHarness::make_finalization(
-                    Proposal::new(floor_round, View::zero(), missing),
-                    &schemes,
-                    QUORUM,
-                ),
+                &schemes,
+                floor_round,
+                View::zero(),
+                missing,
             )
             .await;
             wait_until(
@@ -9211,17 +8677,12 @@ mod tests {
             .await;
 
             let fetches_before = resolver.fetches().len();
-            StandardHarness::report_finalization(
+            report_finalized(
                 &mut mailbox.clone(),
-                StandardHarness::make_finalization(
-                    Proposal::new(
-                        floor_round,
-                        View::zero(),
-                        Sha256::hash(&[b"missing-after-stale-floor"]),
-                    ),
-                    &schemes,
-                    QUORUM,
-                ),
+                &schemes,
+                floor_round,
+                View::zero(),
+                Sha256::hash(&[b"missing-after-stale-floor"]),
             )
             .await;
             let barrier = make_raw_block(block.digest(), Height::new(2), 200);
@@ -9317,81 +8778,10 @@ mod tests {
         });
     }
 
-    #[test_traced("WARN")]
-    fn test_standard_block_delivery_wakes_commitment_subscriber() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-
-            let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
-
-            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
-                "block-delivery-wakes-subscriber",
-                ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
-                Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
-            )
-            .await;
-
-            let subscription = mailbox.acquire(block.digest());
-
-            wait_until(
-                &context,
-                Duration::from_secs(5),
-                "commitment request",
-                || {
-                    resolver.fetches().iter().any(|fetch| {
-                        matches!(
-                            (&fetch.key, &fetch.subscriber),
-                            (
-                                handler::Key::Block(commitment),
-                                handler::Annotation::Subscription,
-                            ) if *commitment == block.digest()
-                        )
-                    })
-                },
-            )
-            .await;
-
-            let (response, response_rx) = oneshot::channel();
-            assert!(
-                resolver
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: handler::Key::Block(block.digest()),
-                            subscribers: NonEmptyVec::new((
-                                handler::Annotation::Subscription,
-                                tracing::Span::none(),
-                            )),
-                        },
-                        value: block.encode(),
-                        response,
-                    })
-                    .accepted()
-            );
-            assert_eq!(
-                response_rx.await.expect("delivery response missing"),
-                Outcome::Resolved(Resolution::Complete),
-                "block delivery should validate"
-            );
-
-            select! {
-                result = subscription => {
-                    let delivered = result.expect("block subscription should resolve");
-                    assert_eq!(delivered.digest(), block.digest());
-                },
-                _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("block delivery did not wake block subscriber");
-                },
-            }
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_finalized_commitment_delivery_survives_recovery() {
+    /// A delivered finalized block is dispatched and is durable with its finalization. The
+    /// finalization arrives with the block, or `body_only` delivers the block alone for a
+    /// finalization that was reported first.
+    fn finalized_delivery_survives_recovery(body_only: bool) {
         const PARTITION_PREFIX: &str = "finalized-delivery-verify-only";
 
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -9417,105 +8807,27 @@ mod tests {
             )
             .await;
 
-            StandardHarness::report_finalization(&mut mailbox.clone(), finalization.clone()).await;
-            let _ = mailbox.get_processed().await;
+            let (key, value) = if body_only {
+                let mut reporter = mailbox.clone();
+                StandardHarness::report_finalization(&mut reporter, finalization.clone()).await;
+                let _ = mailbox.get_processed().await;
+                (handler::Key::Block(block.digest()), block.encode())
+            } else {
+                let value = (finalization.clone(), block.clone()).encode();
+                (handler::Key::Finalized { height }, value)
+            };
             let (response, response_rx) = oneshot::channel();
             assert!(
                 resolver
                     .enqueue(handler::Message::Deliver {
                         delivery: Delivery {
-                            key: handler::Key::Block(block.digest()),
+                            key,
                             subscribers: NonEmptyVec::new((
                                 handler::Annotation::Height(height),
                                 tracing::Span::none(),
                             )),
                         },
-                        value: block.encode(),
-                        response,
-                    })
-                    .accepted()
-            );
-            assert_eq!(
-                response_rx.await.expect("delivery response missing"),
-                Outcome::Resolved(Resolution::Complete),
-                "body matching the locally finalized commitment should be accepted"
-            );
-            assert_eq!(application.acknowledged().await, Height::zero());
-            assert_eq!(application.acknowledged().await, height);
-            assert_eq!(
-                application.blocks().get(&height).unwrap().digest(),
-                block.digest()
-            );
-
-            actor_handle.abort();
-            drop(mailbox);
-            (verifier, block, finalization)
-        });
-
-        deterministic::Runner::from(checkpoint).start(|context| async move {
-            let (verifier, block, finalization) = fixture;
-            let (mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
-                context.child("recovered"),
-                PARTITION_PREFIX,
-                VerifierProvider::new(verifier),
-                Application::<B>::default(),
-                Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
-            )
-            .await;
-
-            let recovered_block = mailbox
-                .get_block(Height::new(1))
-                .await
-                .expect("delivered finalized block must be durable");
-            assert_eq!(recovered_block.digest(), block.digest());
-            let recovered_finalization = mailbox
-                .get_finalization(Height::new(1))
-                .await
-                .expect("delivered finalization must be durable");
-            assert_eq!(recovered_finalization.proposal, finalization.proposal);
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_finalized_delivery_verifies_with_verify_only_scope() {
-        const PARTITION_PREFIX: &str = "finalized-delivery-verify-only";
-
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        let (fixture, checkpoint) = runner.start_and_recover(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-
-            let height = Height::new(1);
-            let round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(Sha256::hash(&[b""]), height, 100);
-            let proposal = Proposal::new(round, View::zero(), block.digest());
-            let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
-            let verifier = schemes[0].clone();
-            let application = Application::<B>::manual_ack();
-
-            let (mailbox, _buffer, resolver, actor_handle) = start_standard_actor(
-                context.child("validator"),
-                PARTITION_PREFIX,
-                VerifierProvider::new(verifier.clone()),
-                application.clone(),
-                Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
-            )
-            .await;
-
-            let (response, response_rx) = oneshot::channel();
-            assert!(
-                resolver
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: handler::Key::Finalized { height },
-                            subscribers: NonEmptyVec::new((
-                                handler::Annotation::Height(height),
-                                tracing::Span::none(),
-                            )),
-                        },
-                        value: (finalization.clone(), block.clone()).encode(),
+                        value,
                         response,
                     })
                     .accepted()
@@ -9564,206 +8876,13 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_standard_finalized_delivery_rejects_unbound_response() {
-        for case in ["height", "digest", "trailing", "truncated-certificate"] {
-            deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
-                let Fixture {
-                    participants,
-                    schemes,
-                    ..
-                } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-                let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
-                let height = Height::new(1);
-                let valid = make_raw_block(genesis.digest(), height, 100);
-                let offered = match case {
-                    "height" => make_raw_block(valid.digest(), Height::new(2), 200),
-                    "digest" => make_raw_block(genesis.digest(), height, 300),
-                    "trailing" | "truncated-certificate" => valid.clone(),
-                    _ => unreachable!(),
-                };
-                let certify = |block: &B| finalize_test_block(&schemes, block);
-                let finalization = certify(&valid);
-                let certificate = if case == "height" {
-                    certify(&offered)
-                } else {
-                    finalization.clone()
-                };
-                let application = Application::<B>::manual_ack();
-                let (mailbox, _buffer, resolver, _actor) = start_standard_actor(
-                    context.child("validator"),
-                    &format!("finalized-unbound-{case}"),
-                    ConstantProvider::new(schemes[0].clone()),
-                    application.clone(),
-                    Some(RecordingBuffer::default()),
-                    Start::Genesis(genesis),
-                )
-                .await;
-                assert_eq!(application.acknowledged().await, Height::zero());
-                let mut exact = mailbox.acquire(offered.digest());
-                let mut canonical = mailbox.finalized(height);
-                mailbox.hint_finalized(height, NonEmptyVec::new(participants[1].clone()));
-                assert!(mailbox.get_block(height).await.is_none());
-
-                let mut value = if case == "truncated-certificate" {
-                    let mut encoded = certificate.encode().to_vec();
-                    encoded.pop().unwrap();
-                    encoded
-                } else {
-                    (certificate, offered.clone()).encode().to_vec()
-                };
-                if case == "trailing" {
-                    value.push(0);
-                }
-                let (response, response_rx) = oneshot::channel();
-                assert!(
-                    resolver
-                        .enqueue(handler::Message::Deliver {
-                            delivery: Delivery {
-                                key: handler::Key::Finalized { height },
-                                subscribers: NonEmptyVec::new((
-                                    handler::Annotation::Height(height),
-                                    tracing::Span::none(),
-                                )),
-                            },
-                            value: Bytes::from(value),
-                            response,
-                        })
-                        .accepted()
-                );
-                let verdict = response_rx.await.expect("finalized response missing");
-                let stored = mailbox.get_block(height).await;
-                let archived = mailbox.get_finalization(height).await;
-                let exact_pending = matches!(exact.try_recv(), Err(TryRecvError::Empty));
-                let canonical_pending = matches!(canonical.try_recv(), Err(TryRecvError::Empty));
-                assert!(
-                    verdict == Outcome::Invalid
-                        && stored.is_none()
-                        && archived.is_none()
-                        && exact_pending
-                        && canonical_pending,
-                    "{case} response must be rejected without publishing data: verdict={verdict:?}, stored={}, archived={}, exact_pending={exact_pending}, canonical_pending={canonical_pending}",
-                    stored.is_some(),
-                    archived.is_some(),
-                );
-                assert!(mailbox.get_block(offered.height()).await.is_none());
-                assert!(!application.blocks().contains_key(&height));
-
-                let valid_exact = mailbox.acquire(valid.digest());
-                deliver_finalized_test_block(&resolver, finalization.clone(), &valid).await;
-                assert_eq!(valid_exact.await.unwrap().digest(), valid.digest());
-                assert_eq!(canonical.await.unwrap().digest(), valid.digest());
-                assert_eq!(
-                    mailbox.get_block(height).await.unwrap().digest(),
-                    valid.digest()
-                );
-                assert_eq!(
-                    mailbox.get_finalization(height).await.unwrap().proposal,
-                    finalization.proposal
-                );
-                if offered.digest() == valid.digest() {
-                    assert_eq!(exact.await.unwrap().digest(), valid.digest());
-                } else {
-                    assert!(matches!(exact.try_recv(), Err(TryRecvError::Empty)));
-                }
-            });
-        }
+    fn test_standard_finalized_delivery_verifies_with_verify_only_scope() {
+        finalized_delivery_survives_recovery(false);
     }
 
-    /// A valid certificate only authorizes the bytes whose digest it commits to.
     #[test_traced("WARN")]
-    fn test_standard_finalized_delivery_rejects_different_block_bytes() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
-            let height = Height::new(1);
-            let round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(genesis.digest(), height, 100);
-            let other = make_raw_block(genesis.digest(), height, 200);
-            let digest = block.digest();
-            let other_digest = other.digest();
-            assert_eq!(block.height(), other.height());
-            assert_ne!(digest, other_digest);
-            let finalization = StandardHarness::make_finalization(
-                Proposal::new(round, View::zero(), digest),
-                &schemes,
-                QUORUM,
-            );
-            let application = Application::<B>::manual_ack();
-            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
-                "finalized-delivery-different-bytes",
-                ConstantProvider::new(schemes[0].clone()),
-                application.clone(),
-                Some(RecordingBuffer::default()),
-                Start::Genesis(genesis),
-            )
-            .await;
-            assert_eq!(application.acknowledged().await, Height::zero());
-            let mut subscriber = mailbox.subscribe(digest);
-            let mut other_subscriber = mailbox.subscribe(other_digest);
-
-            let (response, response_rx) = oneshot::channel();
-            assert!(
-                resolver
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: handler::Key::Finalized { height },
-                            subscribers: NonEmptyVec::new((
-                                handler::Annotation::Height(height),
-                                tracing::Span::none(),
-                            )),
-                        },
-                        value: (finalization.clone(), other).encode(),
-                        response,
-                    })
-                    .accepted()
-            );
-            assert_eq!(
-                response_rx.await.expect("delivery response missing"),
-                Outcome::Invalid
-            );
-            assert!(mailbox.get_block(height).await.is_none());
-            assert!(mailbox.get_block(&digest).await.is_none());
-            assert!(mailbox.get_block(&other_digest).await.is_none());
-            assert!(mailbox.get_finalization(height).await.is_none());
-            assert!(!application.blocks().contains_key(&height));
-            assert!(application.tip().is_none());
-            assert!(matches!(subscriber.try_recv(), Err(TryRecvError::Empty)));
-            assert!(matches!(
-                other_subscriber.try_recv(),
-                Err(TryRecvError::Empty)
-            ));
-
-            // The same certificate accepts its own block, isolating the rejected byte binding.
-            let (response, response_rx) = oneshot::channel();
-            assert!(
-                resolver
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: handler::Key::Finalized { height },
-                            subscribers: NonEmptyVec::new((
-                                handler::Annotation::Height(height),
-                                tracing::Span::none(),
-                            )),
-                        },
-                        value: (finalization, block.clone()).encode(),
-                        response,
-                    })
-                    .accepted()
-            );
-            assert_eq!(
-                response_rx.await.expect("delivery response missing"),
-                Outcome::Resolved(Resolution::Complete)
-            );
-            assert_eq!(subscriber.await.unwrap().inner(), &block);
-            assert_eq!(application.acknowledged().await, height);
-            assert!(matches!(
-                other_subscriber.try_recv(),
-                Err(TryRecvError::Empty)
-            ));
-        });
+    fn test_standard_finalized_commitment_delivery_survives_recovery() {
+        finalized_delivery_survives_recovery(true);
     }
 
     /// Identity work must finish before the block is published.
@@ -10159,7 +9278,7 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_standard_processed_round_skips_fetch_and_preserves_subscription() {
+    fn test_standard_processed_round_skips_stale_fetch_and_serves_acquisition() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
@@ -10204,17 +9323,12 @@ mod tests {
             .await;
 
             let fetches_before = resolver.fetches().len();
-            StandardHarness::report_finalization(
+            report_finalized(
                 &mut mailbox.clone(),
-                StandardHarness::make_finalization(
-                    Proposal::new(
-                        round,
-                        View::zero(),
-                        Sha256::hash(&[b"missing-at-processed-round"]),
-                    ),
-                    &schemes,
-                    QUORUM,
-                ),
+                &schemes,
+                round,
+                View::zero(),
+                Sha256::hash(&[b"missing-at-processed-round"]),
             )
             .await;
             let _ = mailbox.get_processed().await;
@@ -10433,17 +9547,12 @@ mod tests {
             let buffer = buffer.expect("buffer was provided");
 
             let fetches_before = resolver.fetches().len();
-            StandardHarness::report_finalization(
+            report_finalized(
                 &mut mailbox.clone(),
-                StandardHarness::make_finalization(
-                    Proposal::new(
-                        round,
-                        View::zero(),
-                        Sha256::hash(&[b"missing-after-restart"]),
-                    ),
-                    &schemes,
-                    QUORUM,
-                ),
+                &schemes,
+                round,
+                View::zero(),
+                Sha256::hash(&[b"missing-after-restart"]),
             )
             .await;
             let _ = mailbox.get_processed().await;
@@ -10642,17 +9751,12 @@ mod tests {
             .await;
 
             let fetches_before = resolver.fetches().len();
-            StandardHarness::report_finalization(
+            report_finalized(
                 &mut mailbox.clone(),
-                StandardHarness::make_finalization(
-                    Proposal::new(
-                        floor_round,
-                        View::zero(),
-                        Sha256::hash(&[b"stale-finality-before-anchor-ack"]),
-                    ),
-                    &schemes,
-                    QUORUM,
-                ),
+                &schemes,
+                floor_round,
+                View::zero(),
+                Sha256::hash(&[b"stale-finality-before-anchor-ack"]),
             )
             .await;
             let _ = mailbox.get_processed().await;
@@ -10702,17 +9806,16 @@ mod tests {
             )
             .await;
             let missing = Sha256::hash(&[b"missing-before-set-floor"]);
-            StandardHarness::report_finalization(&mut mailbox.clone(), StandardHarness::make_finalization(
-                Proposal::new(round, View::zero(), missing), &schemes, QUORUM,
-            )).await;
+            report_finalized(&mut mailbox.clone(), &schemes, round, View::zero(), missing).await;
             wait_until(
                 &context,
                 Duration::from_secs(5),
                 "round-bound fetch",
                 || {
-                    resolver.active_fetches().iter().any(|fetch| {
-                        matches!(fetch.key, handler::Key::Block(commitment) if commitment == missing)
-                    })
+                    resolver
+                        .active_fetches()
+                        .iter()
+                        .any(|fetch| fetch.key == handler::Key::Block(missing))
                 },
             )
             .await;
@@ -10724,23 +9827,30 @@ mod tests {
                 Duration::from_secs(5),
                 "round-bound prune",
                 || {
-                    resolver.active_fetches().iter().all(|fetch| {
-                        !matches!(fetch.key, handler::Key::Block(commitment) if commitment == missing)
-                    })
+                    resolver
+                        .active_fetches()
+                        .iter()
+                        .all(|fetch| fetch.key != handler::Key::Block(missing))
                 },
             )
             .await;
             assert!(
-                resolver.active_fetches().iter().all(|fetch| {
-                    !matches!(fetch.key, handler::Key::Block(commitment) if commitment == missing)
-                }),
+                resolver
+                    .active_fetches()
+                    .iter()
+                    .all(|fetch| { fetch.key != handler::Key::Block(missing) }),
                 "processed finalization after set_floor must prune existing round-bound fetches"
             );
 
             let fetches_before = resolver.fetches().len();
-            StandardHarness::report_finalization(&mut mailbox.clone(), StandardHarness::make_finalization(
-                Proposal::new(round, View::zero(), Sha256::hash(&[b"missing-after-set-floor"])), &schemes, QUORUM,
-            )).await;
+            report_finalized(
+                &mut mailbox.clone(),
+                &schemes,
+                round,
+                View::zero(),
+                Sha256::hash(&[b"missing-after-set-floor"]),
+            )
+            .await;
             let barrier = make_raw_block(block.digest(), Height::new(2), 200);
 
             assert!(
@@ -11600,16 +10710,14 @@ mod tests {
             let above = make_raw_block(next.digest(), Height::new(3), 300);
             for block in [&next, &above] {
                 let round = Round::new(Epoch::zero(), View::new(block.height().get()));
-                StandardHarness::report_finalization(&mut mailbox, StandardHarness::make_finalization(
-                    Proposal::new(round, View::zero(), block.digest()), &schemes, QUORUM,
-                )).await;
+                report_finalized(&mut mailbox, &schemes, round, View::zero(), block.digest()).await;
             }
             let _ = mailbox.get_processed().await;
             for block in [&next, &above] {
-                assert!(resolver.fetches().iter().any(|fetch| matches!(
-                    (&fetch.key, &fetch.subscriber),
-                    (handler::Key::Block(commitment), handler::Annotation::Round(_)) if *commitment == block.digest()
-                )));
+                assert!(resolver.fetches().iter().any(|fetch| {
+                    fetch.key == handler::Key::Block(block.digest())
+                        && matches!(fetch.subscriber, handler::Annotation::Round(_))
+                }));
             }
 
             // Enqueue all deliveries back-to-back (no intervening await) so
@@ -11835,1118 +10943,6 @@ mod tests {
         });
     }
 
-    #[test_traced("WARN")]
-    fn test_standard_local_gap_repair_retires_speculative_fetch() {
-        const PARTITION: &str = "local-gap-repair-retires-prefetch";
-        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let (finalizations, blocks) = prunable_finalized_stores(&context, PARTITION).await;
-            let mut config = test_config(
-                PARTITION,
-                ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
-            );
-            config.max_repair = NZUsize!(1);
-            let (actor, mut mailbox, _) =
-                Actor::init(context.child("actor"), finalizations, blocks, config).await;
-            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let buffer = RecordingBuffer::default();
-            let application = Application::<B>::manual_ack();
-            let _actor = actor.start(
-                application.clone(),
-                buffer.clone(),
-                (resolver_rx, resolver.clone()),
-            );
-            wait_until(
-                &context,
-                Duration::from_secs(1),
-                "held genesis acknowledgement",
-                || application.pending_ack_heights() == vec![Height::zero()],
-            )
-            .await;
-
-            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
-            let parent = make_raw_block(genesis.digest(), Height::new(1), 100);
-            let child = make_raw_block(parent.digest(), Height::new(2), 101);
-            let next = Sha256::hash(&[b"prefetch after locally repaired parent"]);
-            let mut lease = mailbox.prefetch(Arc::from([parent.digest(), next]), 0..2);
-            let parent_fetch = |fetch: &FetchRecord| {
-                fetch.key == handler::Key::Block(parent.digest())
-                    && fetch.subscriber == handler::Annotation::Subscription
-            };
-            wait_until(
-                &context,
-                Duration::from_secs(1),
-                "speculative parent fetch",
-                || resolver.active_fetches().iter().any(parent_fetch),
-            )
-            .await;
-            assert_eq!(buffer.commitment_subscription_count(), 0);
-
-            // Speculation has no buffer waiter. Canonical repair must retire its
-            // resolver request when the parent becomes available locally.
-            buffer.insert(parent.clone());
-            buffer.insert(child.clone());
-            let finalized_parent = mailbox.finalized(parent.height());
-            StandardHarness::report_finalization(
-                &mut mailbox,
-                StandardHarness::make_finalization(
-                    Proposal::new(
-                        Round::new(Epoch::zero(), View::new(2)),
-                        View::new(1),
-                        child.digest(),
-                    ),
-                    &schemes,
-                    QUORUM,
-                ),
-            )
-            .await;
-            assert_eq!(finalized_parent.await.unwrap().digest(), parent.digest());
-            wait_until(
-                &context,
-                Duration::from_secs(1),
-                "local repair releases speculative capacity",
-                || {
-                    resolver.active_fetches().iter().any(|fetch| {
-                        fetch.key == handler::Key::Block(next)
-                            && fetch.subscriber == handler::Annotation::Subscription
-                    })
-                },
-            )
-            .await;
-            assert!(
-                !resolver.active_fetches().iter().any(parent_fetch),
-                "locally repaired parent still has an unresolved speculative fetch",
-            );
-            assert!(matches!(lease.try_recv(), Err(TryRecvError::Empty)));
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_finalization_reuses_ready_prefetch_without_refetch() {
-        const PARTITION: &str = "finalization-reuses-ready-prefetch";
-        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let (finalizations, blocks) = prunable_finalized_stores(&context, PARTITION).await;
-            let mut config = test_config(
-                PARTITION,
-                ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
-            );
-            config.max_repair = NZUsize!(1);
-            let (actor, mut mailbox, _) =
-                Actor::init(context.child("actor"), finalizations, blocks, config).await;
-            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let application = Application::<B>::manual_ack();
-            let _actor = actor.start(
-                application.clone(),
-                RecordingBuffer::default(),
-                (resolver_rx, resolver.clone()),
-            );
-            assert_eq!(application.acknowledged().await, Height::zero());
-
-            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
-            let block = make_raw_block(genesis.digest(), Height::new(1), 100);
-            let commitment = block.digest();
-            resolver.respond_to_next_fetch(block.encode());
-            let mut lease = mailbox.prefetch(Arc::from([commitment]), 0..1);
-            wait_until(
-                &context,
-                Duration::from_secs(1),
-                "prefetched body delivered",
-                || !resolver.delivery_responses.lock().is_empty(),
-            )
-            .await;
-            assert!(resolver.wait_for_delivery_response().await);
-            assert_eq!(resolver.fetches().len(), 1);
-            assert!(matches!(lease.try_recv(), Err(TryRecvError::Empty)));
-
-            // The resolver's one response is exhausted. Finality must find the
-            // completed body while its speculative lease still owns it.
-            let finalized = mailbox.finalized(Height::new(1));
-            let round = Round::new(Epoch::zero(), View::new(1));
-            StandardHarness::report_finalization(
-                &mut mailbox,
-                StandardHarness::make_finalization(
-                    Proposal::new(round, View::zero(), commitment),
-                    &schemes,
-                    QUORUM,
-                ),
-            )
-            .await;
-            let _ = mailbox.get_processed().await;
-            assert_eq!(
-                resolver.fetches().len(),
-                1,
-                "finalization must reuse the completed prefetch without another network request"
-            );
-            select! {
-                result = finalized => {
-                    assert_eq!(result.expect("finalized waiter canceled").digest(), commitment);
-                },
-                _ = context.sleep(Duration::from_secs(1)) => {
-                    panic!("finalization could not find the completed prefetched body");
-                },
-            }
-            assert!(matches!(lease.try_recv(), Err(TryRecvError::Empty)));
-
-            let next = Sha256::hash(&[b"next speculative commitment"]);
-            let mut next_lease = mailbox.prefetch(Arc::from([next]), 0..1);
-            wait_until(
-                &context,
-                Duration::from_secs(1),
-                "canonical storage releases prefetch capacity",
-                || {
-                    resolver
-                        .fetches()
-                        .iter()
-                        .any(|fetch| fetch.key == handler::Key::Block(next))
-                },
-            )
-            .await;
-            assert!(matches!(lease.try_recv(), Err(TryRecvError::Empty)));
-            assert!(matches!(next_lease.try_recv(), Err(TryRecvError::Empty)));
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_wait_only_subscriber_preserves_prefetch() {
-        const PARTITION: &str = "review-waiting-subscriber-prefetch";
-        for subscribe_first in [true, false] {
-            deterministic::Runner::timed(Duration::from_secs(30)).start(
-                move |mut context| async move {
-                    let Fixture { schemes, .. } = bls12381_threshold_vrf::fixture::<V, _>(
-                        &mut context,
-                        NAMESPACE,
-                        NUM_VALIDATORS,
-                    );
-                    let (finalizations, blocks) =
-                        prunable_finalized_stores(&context, PARTITION).await;
-                    let mut config = test_config(
-                        PARTITION,
-                        ConstantProvider::new(schemes[0].clone()),
-                        NZUsize!(1),
-                    );
-                    config.max_repair = NZUsize!(1);
-                    let (actor, mailbox, _) =
-                        Actor::init(context.child("actor"), finalizations, blocks, config).await;
-                    let (resolver_rx, resolver) =
-                        RecordingResolver::holding(context.child("resolver"));
-                    let application = Application::<B>::manual_ack();
-                    let _actor = actor.start(
-                        application.clone(),
-                        RecordingBuffer::default(),
-                        (resolver_rx, resolver.clone()),
-                    );
-                    assert_eq!(application.acknowledged().await, Height::zero());
-
-                    let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
-                    let block = make_raw_block(genesis.digest(), Height::new(1), 100);
-                    let commitment = block.digest();
-
-                    // A wait-only caller (e.g. verification) and a prefetch range want the same body.
-                    let waiter = subscribe_first.then(|| mailbox.subscribe(commitment));
-                    resolver.respond_to_next_fetch(block.encode());
-                    let _lease = mailbox.prefetch(Arc::from([commitment]), 0..1);
-                    wait_until(
-                        &context,
-                        Duration::from_secs(1),
-                        "prefetched body delivered",
-                        || !resolver.delivery_responses.lock().is_empty(),
-                    )
-                    .await;
-                    assert!(resolver.wait_for_delivery_response().await);
-                    let waiter = waiter.unwrap_or_else(|| mailbox.subscribe(commitment));
-                    assert_eq!(waiter.await.expect("waiter").digest(), commitment);
-                    assert_eq!(resolver.fetches().len(), 1);
-
-                    // The range's forward reader now acquires the same commitment.
-                    let acquired = mailbox.acquire(commitment);
-                    let _ = mailbox.get_processed().await;
-                    assert_eq!(
-                        resolver.fetches().len(),
-                        1,
-                        "prefetched body was dropped; acquire fetched it again"
-                    );
-                    select! {
-                        result = acquired => {
-                            assert_eq!(result.expect("acquire canceled").digest(), commitment);
-                        },
-                        _ = context.sleep(Duration::from_secs(1)) => {
-                            panic!("acquire did not find the prefetched body");
-                        },
-                    }
-                },
-            );
-        }
-    }
-
-    /// A speculative fetch that finds its body only in the buffer keeps it in the reserved
-    /// slot, so a later exact acquisition needs no peer fetch after the buffer evicts it.
-    #[test_traced("WARN")]
-    fn test_standard_prefetch_retains_buffer_hit_after_eviction() {
-        const PARTITION: &str = "prefetch-retains-buffer-hit";
-        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let (finalizations, blocks) = prunable_finalized_stores(&context, PARTITION).await;
-            let mut config = test_config(
-                PARTITION,
-                ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
-            );
-            config.max_repair = NZUsize!(1);
-            let (actor, mailbox, _) =
-                Actor::init(context.child("actor"), finalizations, blocks, config).await;
-            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let application = Application::<B>::manual_ack();
-            let buffer = RecordingBuffer::default();
-            let _actor = actor.start(
-                application.clone(),
-                buffer.clone(),
-                (resolver_rx, resolver.clone()),
-            );
-            assert_eq!(application.acknowledged().await, Height::zero());
-
-            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
-            let block = make_raw_block(genesis.digest(), Height::new(1), 100);
-            let commitment = block.digest();
-
-            // The buffer serves the body once, then evicts it.
-            buffer.insert_transient(block);
-            let _lease = mailbox.prefetch(Arc::from([commitment]), 0..1);
-            wait_until(
-                &context,
-                Duration::from_secs(1),
-                "prefetch consumed the buffered body",
-                || !buffer.contains(commitment),
-            )
-            .await;
-
-            let acquired = mailbox.acquire(commitment);
-            let _ = mailbox.get_processed().await;
-            assert!(
-                resolver.fetches().is_empty(),
-                "prefetch dropped a buffered body; acquire fetched it from peers"
-            );
-            select! {
-                result = acquired => {
-                    assert_eq!(result.expect("acquire canceled").digest(), commitment);
-                },
-                _ = context.sleep(Duration::from_secs(1)) => {
-                    panic!("acquire did not find the prefetched body");
-                },
-            }
-        });
-    }
-
-    /// Stored bodies and later local writes release speculative capacity without an acquire.
-    /// Pruned writes must preserve the Ready body when storage cannot serve it.
-    #[test_traced("WARN")]
-    fn test_standard_prefetch_durable_body_does_not_occupy_slot() {
-        for (writer, pruned) in [
-            ("stored", false),
-            ("verified", false),
-            ("proposed", false),
-            ("certified", false),
-            ("notarization", false),
-            ("verified", true),
-        ] {
-            deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
-                let Fixture { schemes, .. } =
-                    bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-                let partition = format!("prefetch-durable-{writer}-{pruned}");
-                let (finalizations, blocks) = prunable_finalized_stores(&context, &partition).await;
-                let mut config = test_config(
-                    &partition,
-                    ConstantProvider::new(schemes[0].clone()),
-                    NZUsize!(1),
-                );
-                config.max_repair = NZUsize!(1);
-                let (actor, mut mailbox, _) =
-                    Actor::init(context.child("actor"), finalizations, blocks, config).await;
-                let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-                let application = Application::<B>::manual_ack();
-                let buffer = RecordingBuffer::default();
-                let _actor = actor.start(
-                    application.clone(),
-                    buffer.clone(),
-                    (resolver_rx, resolver.clone()),
-                );
-                assert_eq!(application.acknowledged().await, Height::zero());
-
-                let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
-                if pruned {
-                    // Processing two newer rounds prunes the old candidate's round.
-                    let mut parent = genesis.digest();
-                    for height in 1..=2 {
-                        let block = make_raw_block(parent, Height::new(height), height);
-                        parent = block.digest();
-                        buffer.insert(block.clone());
-                        let round = Round::new(Epoch::zero(), View::new(19 + height));
-                        let finalization = StandardHarness::make_finalization(
-                            Proposal::new(round, View::zero(), block.digest()),
-                            &schemes,
-                            QUORUM,
-                        );
-                        StandardHarness::report_finalization(&mut mailbox, finalization).await;
-                        assert_eq!(application.acknowledged().await, Height::new(height));
-                        wait_until(
-                            &context,
-                            Duration::from_secs(1),
-                            "processed finalization",
-                            || parse_processed_height(&context.encode()) == Some(height),
-                        )
-                        .await;
-                    }
-                }
-                let stored = make_raw_block(genesis.digest(), Height::new(3), 100);
-                let missing = make_raw_block(stored.digest(), Height::new(4), 200);
-                let round = Round::new(Epoch::zero(), View::new(1));
-                if writer == "stored" {
-                    assert!(mailbox.verified(round, ready(stored.clone())).await);
-                    buffer.insert(stored.clone());
-                } else {
-                    buffer.insert_transient(stored.clone());
-                }
-                let _lease = mailbox.prefetch(Arc::from([stored.digest(), missing.digest()]), 0..2);
-                if writer != "stored" {
-                    wait_until(
-                        &context,
-                        Duration::from_secs(1),
-                        "prefetch consumed transient body",
-                        || !buffer.contains(stored.digest()),
-                    )
-                    .await;
-                    assert!(resolver.fetches().is_empty());
-                    match writer {
-                        "verified" => assert!(mailbox.verified(round, ready(stored.clone())).await),
-                        "proposed" => {
-                            let (ack, persisted) = oneshot::channel();
-                            mailbox.proposed(round, ready(stored.clone()), Recipients::All, ack);
-                            assert!(persisted.await.unwrap().durable(round, "proposed").await);
-                        }
-                        "certified" => assert!(mailbox.certified(round, ready(stored.clone())).await),
-                        "notarization" => {
-                            let notarization = StandardHarness::make_notarization(
-                                Proposal::new(round, View::zero(), stored.digest()),
-                                &schemes,
-                                QUORUM,
-                            );
-                            StandardHarness::report_notarization(&mut mailbox, notarization).await;
-                            let _ = mailbox.get_processed().await;
-                        }
-                        _ => unreachable!(),
-                    }
-                }
-                if pruned {
-                    assert!(
-                        mailbox.get_block(&stored.digest()).await.is_none(),
-                        "pruned write stored a body"
-                    );
-                    context.sleep(Duration::from_millis(100)).await;
-                    assert!(
-                        resolver.fetches().is_empty(),
-                        "pruned write released the only Ready body"
-                    );
-                    let acquired = mailbox.acquire(stored.digest());
-                    let _ = mailbox.get_processed().await;
-                    assert!(
-                        !resolver
-                            .fetches()
-                            .iter()
-                            .any(|fetch| fetch.key == handler::Key::Block(stored.digest())),
-                        "acquire fetched the retained body externally"
-                    );
-                    select! {
-                        result = acquired => assert_eq!(result.unwrap().digest(), stored.digest()),
-                        _ = context.sleep(Duration::from_secs(1)) => panic!("Ready body lost after pruned {writer}"),
-                    }
-                } else {
-                    wait_until(
-                        &context,
-                        Duration::from_secs(1),
-                        "durable body releases the only speculative slot",
-                        || {
-                            resolver.active_fetches().iter().any(|fetch| {
-                                fetch.key == handler::Key::Block(missing.digest())
-                                    && fetch.subscriber == handler::Annotation::Subscription
-                            })
-                        },
-                    )
-                    .await;
-                }
-                assert!(
-                    !resolver
-                        .fetches()
-                        .iter()
-                        .any(|fetch| fetch.key == handler::Key::Block(stored.digest())),
-                    "local body was fetched from peers ({writer}, pruned={pruned})"
-                );
-            });
-        }
-    }
-
-    /// Only active speculative demand owns a resolver request, so retiring queued or completed
-    /// demand needs no resolver cancellation, and a resolver delivery leaves its own request to
-    /// the delivery verdict.
-    #[test_traced("WARN")]
-    fn test_standard_prefetch_demand_cancels_resolver_only_while_active() {
-        const PARTITION: &str = "prefetch-cancels-only-active";
-        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let (finalizations, blocks) = prunable_finalized_stores(&context, PARTITION).await;
-            let mut config = test_config(
-                PARTITION,
-                ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
-            );
-            config.max_repair = NZUsize!(1);
-            let (actor, mailbox, _) =
-                Actor::init(context.child("actor"), finalizations, blocks, config).await;
-            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let application = Application::<B>::manual_ack();
-            let buffer = RecordingBuffer::default();
-            let _actor = actor.start(
-                application.clone(),
-                buffer.clone(),
-                (resolver_rx, resolver.clone()),
-            );
-            assert_eq!(application.acknowledged().await, Height::zero());
-
-            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
-            let active_fetch = |key| {
-                resolver.active_fetches().into_iter().find(|fetch| {
-                    fetch.key == key && fetch.subscriber == handler::Annotation::Subscription
-                })
-            };
-
-            // A body ingested locally while its speculative request is active retires that
-            // request. Consuming the completed body afterwards needs no cancellation.
-            let local = make_raw_block(genesis.digest(), Height::new(1), 100);
-            let local_key = handler::Key::Block(local.digest());
-            let _local_lease = mailbox.prefetch(Arc::from([local.digest()]), 0..1);
-            wait_until(
-                &context,
-                Duration::from_secs(1),
-                "active local prefetch",
-                || active_fetch(local_key).is_some(),
-            )
-            .await;
-            let retains = resolver.retain_count();
-            let round = Round::new(Epoch::zero(), View::new(1));
-            assert!(mailbox.verified(round, ready(local.clone())).await);
-            assert_eq!(resolver.retain_count(), retains + 1);
-            assert!(active_fetch(local_key).is_none());
-            assert_eq!(
-                mailbox.acquire(local.digest()).await.unwrap().digest(),
-                local.digest()
-            );
-            assert_eq!(resolver.retain_count(), retains + 1);
-
-            // A resolver delivery, a local body for queued demand, a local re-ingest of a
-            // completed body, and its consumption each leave the resolver untouched.
-            let completed = make_raw_block(local.digest(), Height::new(2), 200);
-            let queued = make_raw_block(completed.digest(), Height::new(3), 300);
-            let ready_key = handler::Key::Block(completed.digest());
-            let queued_key = handler::Key::Block(queued.digest());
-            let _lease = mailbox.prefetch(Arc::from([completed.digest(), queued.digest()]), 0..2);
-            wait_until(
-                &context,
-                Duration::from_secs(1),
-                "active ready prefetch",
-                || active_fetch(ready_key).is_some(),
-            )
-            .await;
-            assert!(
-                !resolver
-                    .fetches()
-                    .iter()
-                    .any(|fetch| fetch.key == queued_key)
-            );
-            let retains = resolver.retain_count();
-            let fetch = active_fetch(ready_key).unwrap();
-            deliver_acquisition_test_block(&resolver, fetch, &completed).await;
-            assert_eq!(resolver.retain_count(), retains, "resolver delivery");
-            let round = Round::new(Epoch::zero(), View::new(3));
-            assert!(mailbox.verified(round, ready(queued.clone())).await);
-            assert_eq!(resolver.retain_count(), retains, "queued demand");
-            let round = Round::new(Epoch::zero(), View::new(2));
-            assert!(mailbox.verified(round, ready(completed.clone())).await);
-            assert_eq!(resolver.retain_count(), retains, "completed body re-ingest");
-            assert_eq!(
-                mailbox.acquire(completed.digest()).await.unwrap().digest(),
-                completed.digest()
-            );
-            assert_eq!(
-                resolver.retain_count(),
-                retains,
-                "completed body consumption"
-            );
-            assert!(
-                !resolver
-                    .fetches()
-                    .iter()
-                    .any(|fetch| fetch.key == queued_key)
-            );
-
-            // An acquire can find a newly buffered body while its peer request is still
-            // active. It must cancel that request and release the slot for queued demand.
-            let buffered = make_raw_block(queued.digest(), Height::new(4), 400);
-            let next = make_raw_block(buffered.digest(), Height::new(5), 500);
-            let buffered_key = handler::Key::Block(buffered.digest());
-            let next_key = handler::Key::Block(next.digest());
-            let fetches = resolver.fetches().len();
-            let _buffered_lease =
-                mailbox.prefetch(Arc::from([buffered.digest(), next.digest()]), 0..2);
-            wait_until(
-                &context,
-                Duration::from_secs(1),
-                "active buffered prefetch",
-                || active_fetch(buffered_key).is_some(),
-            )
-            .await;
-            assert_eq!(resolver.fetches().len(), fetches + 1);
-            assert!(active_fetch(next_key).is_none());
-            let retains = resolver.retain_count();
-            buffer.insert(buffered.clone());
-            assert_eq!(
-                mailbox.acquire(buffered.digest()).await.unwrap().digest(),
-                buffered.digest()
-            );
-            assert_eq!(resolver.retain_count(), retains + 1);
-            assert!(active_fetch(buffered_key).is_none());
-            wait_until(
-                &context,
-                Duration::from_secs(1),
-                "buffered acquire releases the speculative slot",
-                || active_fetch(next_key).is_some(),
-            )
-            .await;
-            let recorded = resolver.fetches();
-            assert_eq!(recorded.len(), fetches + 2);
-            for key in [buffered_key, next_key] {
-                assert_eq!(
-                    recorded.iter().filter(|fetch| fetch.key == key).count(),
-                    1,
-                    "each commitment must be fetched exactly once"
-                );
-            }
-            assert_eq!(resolver.retain_count(), retains + 1);
-        });
-    }
-
-    fn finalize_test_block(schemes: &[S], block: &B) -> Finalization<S, D> {
-        StandardHarness::make_finalization(
-            Proposal::new(
-                Round::new(Epoch::zero(), View::new(block.height().get())),
-                View::new(block.height().previous().unwrap().get()),
-                block.digest(),
-            ),
-            schemes,
-            QUORUM,
-        )
-    }
-
-    async fn deliver_finalized_test_block(
-        resolver: &RecordingResolver,
-        finalization: Finalization<S, D>,
-        block: &B,
-    ) {
-        let (response, response_rx) = oneshot::channel();
-        assert!(
-            resolver
-                .enqueue(handler::Message::Deliver {
-                    delivery: Delivery {
-                        key: handler::Key::Finalized {
-                            height: block.height(),
-                        },
-                        subscribers: NonEmptyVec::new((
-                            handler::Annotation::Height(block.height()),
-                            tracing::Span::none(),
-                        )),
-                    },
-                    value: (finalization, block.clone()).encode(),
-                    response,
-                })
-                .accepted()
-        );
-        assert_eq!(
-            response_rx
-                .await
-                .expect("finalized delivery verdict missing"),
-            Outcome::Resolved(Resolution::Complete)
-        );
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_finalized_delivery_satisfies_prefetch_demand() {
-        const PARTITION: &str = "finalized-prefetch-demand";
-        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let (finalizations, blocks) = prunable_finalized_stores(&context, PARTITION).await;
-            let mut config = test_config(
-                PARTITION,
-                ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
-            );
-            config.max_repair = NZUsize!(1);
-            let (actor, mailbox, _) =
-                Actor::init(context.child("actor"), finalizations, blocks, config).await;
-            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let application = Application::<B>::manual_ack();
-            let _actor = actor.start(
-                application.clone(),
-                RecordingBuffer::default(),
-                (resolver_rx, resolver.clone()),
-            );
-            assert_eq!(application.acknowledged().await, Height::zero());
-            let finalization = |block: &B| finalize_test_block(&schemes, block);
-            let active = |block: &B| {
-                resolver.active_fetches().into_iter().find(|fetch| {
-                    fetch.key == handler::Key::Block(block.digest())
-                        && fetch.subscriber == handler::Annotation::Subscription
-                })
-            };
-            let fetched = |block: &B| {
-                resolver.fetches().iter().any(|fetch| {
-                    fetch.key == handler::Key::Block(block.digest())
-                        && fetch.subscriber == handler::Annotation::Subscription
-                })
-            };
-            let anchor = make_raw_block(Sha256::hash(&[b"predecessor"]), Height::new(5), 500);
-            let next = make_raw_block(anchor.digest(), Height::new(6), 600);
-            let queued = make_raw_block(next.digest(), Height::new(7), 700);
-            let lease = mailbox.prefetch(
-                Arc::from([anchor.digest(), next.digest(), queued.digest()]),
-                0..3,
-            );
-            wait_until(
-                &context,
-                Duration::from_secs(1),
-                "active anchor prefetch",
-                || active(&anchor).is_some(),
-            )
-            .await;
-            let canonical = mailbox.finalized(anchor.height());
-            mailbox.set_floor(finalization(&anchor));
-            mailbox.hint_finalized(anchor.height(), NonEmptyVec::new(participants[1].clone()));
-            let _ = mailbox.get_processed().await;
-            deliver_finalized_test_block(&resolver, finalization(&anchor), &anchor).await;
-            assert_eq!(
-                mailbox.get_processed().await,
-                Some(Processed::Absent(Height::new(4)))
-            );
-            assert_eq!(canonical.await.unwrap().digest(), anchor.digest());
-            assert!(
-                active(&anchor).is_none(),
-                "finalized anchor must cancel active exact demand"
-            );
-            assert!(resolver.active_fetches().iter().any(|fetch| {
-                fetch.key
-                    == handler::Key::Finalized {
-                        height: anchor.height(),
-                    }
-                    && fetch.subscriber == handler::Annotation::Height(anchor.height())
-            }));
-            wait_until(
-                &context,
-                Duration::from_secs(1),
-                "anchor releases prefetch slot",
-                || active(&next).is_some(),
-            )
-            .await;
-
-            // Queued demand owns no request; a finalized body retires it locally.
-            assert!(!fetched(&queued));
-            mailbox.hint_finalized(queued.height(), NonEmptyVec::new(participants[1].clone()));
-            let _ = mailbox.get_processed().await;
-            let retains = resolver.retain_count();
-            deliver_finalized_test_block(&resolver, finalization(&queued), &queued).await;
-            let _ = mailbox.get_processed().await;
-            assert_eq!(resolver.retain_count(), retains, "queued finalized demand");
-            assert!(!fetched(&queued));
-            drop(lease);
-            wait_until(&context, Duration::from_secs(1), "old lease closes", || {
-                active(&next).is_none()
-            })
-            .await;
-
-            // A verdict-completed body occupies capacity until canonical storage claims it.
-            let completed = make_raw_block(queued.digest(), Height::new(8), 800);
-            let tail = make_raw_block(completed.digest(), Height::new(9), 900);
-            let _lease = mailbox.prefetch(Arc::from([completed.digest(), tail.digest()]), 0..2);
-            wait_until(
-                &context,
-                Duration::from_secs(1),
-                "ready body prefetch",
-                || active(&completed).is_some(),
-            )
-            .await;
-            let fetch = active(&completed).unwrap();
-            deliver_acquisition_test_block(&resolver, fetch.clone(), &completed).await;
-            resolver.complete(&fetch);
-            let _ = mailbox.get_processed().await;
-            assert!(!fetched(&tail));
-            mailbox.hint_finalized(
-                completed.height(),
-                NonEmptyVec::new(participants[1].clone()),
-            );
-            let _ = mailbox.get_processed().await;
-            let retains = resolver.retain_count();
-            deliver_finalized_test_block(&resolver, finalization(&completed), &completed).await;
-            let _ = mailbox.get_processed().await;
-            assert_eq!(resolver.retain_count(), retains, "ready finalized demand");
-            wait_until(
-                &context,
-                Duration::from_secs(1),
-                "canonical storage releases ready slot",
-                || active(&tail).is_some(),
-            )
-            .await;
-            assert!(!fetched(&queued));
-            assert_eq!(
-                mailbox.acquire(completed.digest()).await.unwrap().digest(),
-                completed.digest()
-            );
-            assert_eq!(resolver.retain_count(), retains);
-        });
-    }
-
-    fn independent_acquisition_with_parked_request(speculative: bool) {
-        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let partition = format!("independent-acquisition-{speculative}");
-            let (finalizations, blocks) = prunable_finalized_stores(&context, &partition).await;
-            let mut config = test_config(
-                &partition,
-                ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
-            );
-            config.max_repair = NZUsize!(1);
-            let (actor, mailbox, _) = Actor::init(
-                context.child("actor"), finalizations, blocks, config,
-            ).await;
-            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let application = Application::<B>::manual_ack();
-            let _actor = actor.start(application.clone(), RecordingBuffer::default(),
-                (resolver_rx, resolver.clone()));
-            assert_eq!(application.acknowledged().await, Height::zero());
-
-            let withheld = Sha256::hash(&[b"indefinitely withheld"]);
-            let mut lease = speculative.then(|| mailbox.prefetch(Arc::from([withheld]), 0..1));
-            let mut caller = (!speculative).then(|| mailbox.acquire(withheld));
-            wait_until(&context, Duration::from_secs(1), "first request occupies capacity", || {
-                resolver.fetches().iter().any(|fetch| fetch.key == handler::Key::Block(withheld))
-            }).await;
-
-            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
-            let available = make_raw_block(genesis.digest(), Height::new(1), 100);
-            resolver.respond_to_next_fetch(available.encode());
-            let independent = mailbox.acquire(available.digest());
-            select! {
-                result = independent => {
-                    assert_eq!(result.expect("independent acquisition canceled").digest(), available.digest());
-                },
-                _ = context.sleep(Duration::from_secs(1)) => {
-                    panic!("parked request blocked independent acquisition (speculative={speculative})");
-                },
-            }
-            assert!(resolver.wait_for_delivery_response().await);
-            assert!(resolver.fetches().iter().any(|fetch| fetch.key == handler::Key::Block(available.digest())));
-            if let Some(lease) = &mut lease {
-                assert!(matches!(lease.try_recv(), Err(TryRecvError::Empty)));
-            }
-            if let Some(caller) = &mut caller {
-                assert!(matches!(caller.try_recv(), Err(TryRecvError::Empty)));
-            }
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_parked_prefetch_does_not_block_direct_acquisition() {
-        independent_acquisition_with_parked_request(true);
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_parked_direct_caller_does_not_block_independent_acquisition() {
-        independent_acquisition_with_parked_request(false);
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_ranges_use_max_repair_with_parked_leases() {
-        const LENGTH: u64 = 10;
-        for max_repair in [NZUsize!(1), NZUsize!(3)] {
-            deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
-                let Fixture { schemes, .. } = bls12381_threshold_vrf::fixture::<V, _>(
-                    &mut context,
-                    NAMESPACE,
-                    NUM_VALIDATORS,
-                );
-                let partition = format!("range-window-{max_repair}");
-                let (finalizations, stored) = prunable_finalized_stores(&context, &partition).await;
-                let mut config = test_config(
-                    &partition,
-                    ConstantProvider::new(schemes[0].clone()),
-                    NZUsize!(1),
-                );
-                config.max_repair = max_repair;
-                let (actor, mailbox, _) =
-                    Actor::init(context.child("actor"), finalizations, stored, config).await;
-                let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-                let (application, started) = HoldingBlockReporter::new();
-                let _actor = actor.start(
-                    application,
-                    RecordingBuffer::default(),
-                    (resolver_rx, resolver.clone()),
-                );
-                assert_eq!(started.await.unwrap(), Height::zero());
-                let _ = mailbox.get_processed().await;
-
-                // An unrelated lease occupies the shared speculative capacity.
-                // The selected range must use its own window of max_repair bodies.
-                let parked: Arc<[_]> = (0..max_repair.get())
-                    .map(|index| Sha256::hash(&[b"parked dependency", &index.to_be_bytes()]))
-                    .collect();
-                let parked_keys: Vec<_> = parked.iter().copied().map(handler::Key::Block).collect();
-                let mut lease = mailbox.prefetch(parked, 0..max_repair.get());
-                wait_until(&context, Duration::from_secs(1), "parked prefetch", || {
-                    resolver.active_fetches().len() == max_repair.get()
-                })
-                .await;
-
-                let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
-                let mut selected = vec![genesis.digest()];
-                let blocks: Vec<_> = (1..=LENGTH)
-                    .map(|height| {
-                        let block =
-                            make_raw_block(*selected.last().unwrap(), Height::new(height), height);
-                        selected.push(block.digest());
-                        block
-                    })
-                    .collect();
-                let source = mailbox.blocks_with_parent(
-                    Height::new(LENGTH),
-                    *selected.last().unwrap(),
-                    crate::History::anchored(Arc::from(selected)),
-                );
-                let mut range = source.range(Height::new(1)..=Height::new(LENGTH));
-                assert!(range.next().now_or_never().is_none());
-                let _ = mailbox.get_processed().await;
-
-                let fetched_keys = || {
-                    resolver
-                        .fetches()
-                        .iter()
-                        .map(|fetch| fetch.key)
-                        .collect::<Vec<_>>()
-                };
-                let mut expected = parked_keys.clone();
-                expected.extend(
-                    blocks[..max_repair.get()]
-                        .iter()
-                        .map(|block| handler::Key::Block(block.digest())),
-                );
-                assert_eq!(fetched_keys(), expected);
-                assert_eq!(
-                    resolver
-                        .active_fetches()
-                        .iter()
-                        .map(|fetch| fetch.key)
-                        .collect::<Vec<_>>(),
-                    expected
-                );
-
-                // Completed positions still occupy the window until the head
-                // is consumed, even when their bodies arrive in reverse order.
-                for block in blocks[1..max_repair.get()].iter().rev() {
-                    let fetch = resolver
-                        .active_fetches()
-                        .into_iter()
-                        .find(|fetch| fetch.key == handler::Key::Block(block.digest()))
-                        .expect("selected request missing");
-                    deliver_acquisition_test_block(&resolver, fetch.clone(), block).await;
-                    resolver.complete(&fetch);
-                    assert!(range.next().now_or_never().is_none());
-                    let _ = mailbox.get_processed().await;
-                    assert_eq!(fetched_keys(), expected);
-                }
-
-                assert!(range.next().now_or_never().is_none());
-                let _ = mailbox.get_processed().await;
-                assert_eq!(fetched_keys(), expected);
-
-                let head = &blocks[0];
-                let fetch = resolver
-                    .active_fetches()
-                    .into_iter()
-                    .find(|fetch| fetch.key == handler::Key::Block(head.digest()))
-                    .expect("head request missing");
-                deliver_acquisition_test_block(&resolver, fetch.clone(), head).await;
-                resolver.complete(&fetch);
-                assert_eq!(range.next().await.unwrap().unwrap().digest(), head.digest());
-                let _ = mailbox.get_processed().await;
-                assert_eq!(fetched_keys(), expected);
-
-                for block in &blocks[1..max_repair.get()] {
-                    assert_eq!(
-                        range
-                            .next()
-                            .now_or_never()
-                            .unwrap()
-                            .unwrap()
-                            .unwrap()
-                            .digest(),
-                        block.digest()
-                    );
-                }
-                assert!(range.next().now_or_never().is_none());
-                let next_key = handler::Key::Block(blocks[max_repair.get()].digest());
-                wait_until(
-                    &context,
-                    Duration::from_secs(1),
-                    "range window advances",
-                    || {
-                        resolver
-                            .active_fetches()
-                            .iter()
-                            .any(|fetch| fetch.key == next_key)
-                    },
-                )
-                .await;
-                let _ = mailbox.get_processed().await;
-                expected.extend(
-                    blocks[max_repair.get()..2 * max_repair.get()]
-                        .iter()
-                        .map(|block| handler::Key::Block(block.digest())),
-                );
-                assert_eq!(fetched_keys(), expected);
-
-                drop(range);
-                wait_until(
-                    &context,
-                    Duration::from_secs(1),
-                    "range cancellation preserves parked lease",
-                    || {
-                        resolver
-                            .active_fetches()
-                            .iter()
-                            .map(|fetch| fetch.key)
-                            .collect::<Vec<_>>()
-                            == parked_keys
-                    },
-                )
-                .await;
-                assert!(matches!(lease.try_recv(), Err(TryRecvError::Empty)));
-                let _ = mailbox.get_processed().await;
-                drop(lease);
-                wait_until(
-                    &context,
-                    Duration::from_secs(1),
-                    "parked lease cancellation",
-                    || resolver.active_fetches().is_empty(),
-                )
-                .await;
-                let _ = mailbox.get_processed().await;
-                assert_eq!(fetched_keys(), expected);
-            });
-        }
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_parked_local_range_bounds_body_reads() {
-        const PARTITION: &str = "parked-local-range-body-reads";
-        const LENGTH: u64 = 64;
-        const BODY_WINDOW: usize = 8;
-        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let (finalizations, mut stored) = prunable_finalized_stores(&context, PARTITION).await;
-            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
-            let mut selected = vec![genesis.digest()];
-            for height in 1..=LENGTH {
-                let block = Arc::new(make_raw_block(
-                    *selected.last().unwrap(),
-                    Height::new(height),
-                    height,
-                ));
-                selected.push(block.digest());
-                stored = stored
-                    .put_sync(height, block.digest(), &block)
-                    .await
-                    .unwrap();
-            }
-            let stored = Recording::new(stored, |block: &Arc<B>| Arc::as_ptr(block).addr());
-            let operations = stored.ops();
-            let mut config = test_config(
-                PARTITION,
-                ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
-            );
-            config.max_repair = NZUsize!(BODY_WINDOW);
-            assert!(LENGTH as usize > config.max_repair.get());
-            let (actor, mailbox, _) =
-                Actor::init(context.child("actor"), finalizations, stored, config).await;
-            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let application = Application::<B>::manual_ack();
-            let _actor = actor.start(
-                application.clone(),
-                RecordingBuffer::default(),
-                (resolver_rx, resolver.clone()),
-            );
-            wait_until(
-                &context,
-                Duration::from_secs(1),
-                "held genesis acknowledgement",
-                || application.pending_ack_heights() == vec![Height::zero()],
-            )
-            .await;
-            let _ = mailbox.get_processed().await;
-            operations.lock().clear();
-
-            let expected = selected[1];
-            let source = mailbox.blocks_with_parent(
-                Height::new(LENGTH),
-                *selected.last().unwrap(),
-                crate::History::anchored(Arc::from(selected)),
-            );
-            let mut range = source.range(Height::new(1)..=Height::new(LENGTH));
-            let first = range.next().await.unwrap().unwrap();
-            assert_eq!(first.digest(), expected);
-
-            // Keep the range alive without polling again. Speculative scheduling
-            // must use metadata while the application holds its first body.
-            context.sleep(Duration::from_millis(100)).await;
-            let reads = operations
-                .lock()
-                .iter()
-                .filter(|op| matches!(op, Op::Get(None)))
-                .count();
-            assert!(
-                reads <= BODY_WINDOW,
-                "parked range decoded {reads} stored bodies for a {BODY_WINDOW}-body window"
-            );
-            assert!(
-                reads > 0,
-                "the range must acquire bodies from recorded storage"
-            );
-            assert!(
-                resolver.fetches().is_empty(),
-                "locally stored bodies must not be fetched"
-            );
-            assert_eq!(application.pending_ack_heights(), vec![Height::zero()]);
-            drop(range);
-        });
-    }
-
     /// Dispatch preserves the buffered block object without rereading it from the archive.
     #[test_traced("WARN")]
     fn test_standard_dispatch_delivers_staged_block_without_archive_read() {
@@ -13024,299 +11020,6 @@ mod tests {
             assert!(
                 !ops[written..].contains(&Op::Get(Some(Height::new(1)))),
                 "dispatch must not read the finalized block back from the archive: {ops:?}"
-            );
-        });
-    }
-
-    /// Forward repair fills internal gaps in height order within each pass's request bound.
-    #[test_traced("WARN")]
-    fn test_standard_forward_gap_repair_batches_lowest_missing_heights() {
-        for floor in [false, true] {
-            deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
-                let Fixture { schemes, .. } = bls12381_threshold_vrf::fixture::<V, _>(
-                    &mut context,
-                    NAMESPACE,
-                    NUM_VALIDATORS,
-                );
-                let partition = format!("forward-repair-batches-{floor}");
-                let (finalizations, blocks) = prunable_finalized_stores(&context, &partition).await;
-                let mut config = test_config(
-                    &partition,
-                    ConstantProvider::new(schemes[0].clone()),
-                    NZUsize!(1),
-                );
-                config.max_repair = if floor { NZUsize!(3) } else { NZUsize!(4) };
-                let max_repair = config.max_repair.get();
-                let (actor, mut mailbox, _) =
-                    Actor::init(context.child("actor"), finalizations, blocks, config).await;
-                let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-                let buffer = RecordingBuffer::default();
-                let application = Application::<B>::manual_ack();
-                let _actor = actor.start(
-                    application.clone(),
-                    buffer.clone(),
-                    (resolver_rx, resolver.clone()),
-                );
-                assert_eq!(application.acknowledged().await, Height::zero());
-                while mailbox.get_processed().await != Some(Processed::Block(Height::zero())) {
-                    reschedule().await;
-                }
-                let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
-                let mut chain = vec![genesis.inner().clone()];
-                for height in 1..=9 {
-                    chain.push(make_raw_block(
-                        chain.last().unwrap().digest(),
-                        Height::new(height),
-                        height,
-                    ));
-                }
-                let certify = |block: &B| finalize_test_block(&schemes, block);
-                let processed = if floor { 4 } else { 0 };
-                let assert_batches = |offset: usize, expected: &[u64], last: u64| {
-                    let batches = resolver.fetch_batches.lock();
-                    let observed = &batches[offset..];
-                    if expected.is_empty() {
-                        assert!(
-                            observed.is_empty(),
-                            "a repaired archive must not fetch trailing heights"
-                        );
-                        return;
-                    }
-                    assert!(!observed.is_empty(), "missing forward repair batch");
-                    for batch in observed {
-                        assert!(
-                            batch.len() <= max_repair,
-                            "forward repair exceeded its per-pass bound"
-                        );
-                        let heights: Vec<_> = batch
-                            .iter()
-                            .map(|fetch| {
-                                let handler::Key::Finalized { height } = fetch.key else {
-                                    panic!("forward batch must contain finalized-height requests");
-                                };
-                                assert_eq!(fetch.subscriber, handler::Annotation::Height(height));
-                                assert!(height.get() > processed && height.get() < last);
-                                height.get()
-                            })
-                            .collect();
-                        assert_eq!(
-                            heights, expected,
-                            "forward repair must select the lowest missing heights"
-                        );
-                    }
-                };
-
-                if floor {
-                    buffer.insert(chain[5].clone());
-                    mailbox.set_floor(certify(&chain[5]));
-                    assert_eq!(
-                        mailbox.get_processed().await,
-                        Some(Processed::Absent(Height::new(4)))
-                    );
-                } else {
-                    let offset = resolver.fetch_batches.lock().len();
-                    buffer.insert(chain[4].clone());
-                    StandardHarness::report_finalization(&mut mailbox, certify(&chain[4])).await;
-                    assert!(mailbox.get_block(Height::new(4)).await.is_some());
-                    assert_batches(offset, &[1, 2, 3], 4);
-                }
-
-                let offset = resolver.fetch_batches.lock().len();
-                buffer.insert(chain[9].clone());
-                StandardHarness::report_finalization(&mut mailbox, certify(&chain[9])).await;
-                assert!(mailbox.get_block(Height::new(9)).await.is_some());
-                assert_batches(offset, if floor { &[6, 7, 8] } else { &[1, 2, 3, 5] }, 9);
-
-                let deliveries: Vec<(usize, &[u64])> = if floor {
-                    vec![(6, &[7, 8]), (7, &[8]), (8, &[])]
-                } else {
-                    vec![
-                        (1, &[2, 3, 5, 6]),
-                        (2, &[3, 5, 6, 7]),
-                        (3, &[5, 6, 7, 8]),
-                        (5, &[6, 7, 8]),
-                        (6, &[7, 8]),
-                        (7, &[8]),
-                        (8, &[]),
-                    ]
-                };
-                for (height, expected) in deliveries {
-                    let offset = resolver.fetch_batches.lock().len();
-                    let block = &chain[height];
-                    deliver_finalized_test_block(&resolver, certify(block), block).await;
-                    assert_eq!(
-                        mailbox.get_block(block.height()).await.unwrap().digest(),
-                        block.digest()
-                    );
-                    assert_batches(offset, expected, 9);
-                }
-            });
-        }
-    }
-
-    /// Exact deliveries unrelated to finalized gap repair do not read the gap's boundary block.
-    #[test_traced("WARN")]
-    fn test_standard_unrelated_deliveries_skip_gap_boundary_read() {
-        const PARTITION_PREFIX: &str = "unrelated-delivery-gap-boundary";
-        const DELIVERIES: u64 = 5;
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let (finalizations_by_height, finalized_blocks) =
-                prunable_finalized_stores(&context, PARTITION_PREFIX).await;
-            let finalized_blocks =
-                Recording::new(finalized_blocks, |block: &Arc<B>| Arc::as_ptr(block).addr());
-            let ops = finalized_blocks.ops();
-            let (actor, mut mailbox, _) = Actor::init(
-                context.child("actor"),
-                finalizations_by_height,
-                finalized_blocks,
-                test_config(
-                    PARTITION_PREFIX,
-                    ConstantProvider::new(schemes[0].clone()),
-                    NZUsize!(1),
-                ),
-            )
-            .await;
-            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let buffer = RecordingBuffer::default();
-            let _actor_handle = actor.start(
-                Application::<B>::default(),
-                buffer.clone(),
-                (resolver_rx, resolver.clone()),
-            );
-
-            // Finalize the tip of a chain whose ancestors are missing, opening a gap below it.
-            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
-            let mut parent = genesis.digest();
-            let mut chain = Vec::new();
-            for height in 1..=6 {
-                let block = make_raw_block(parent, Height::new(height), height);
-                parent = block.digest();
-                chain.push(block);
-            }
-            let boundary = chain[5].clone();
-            buffer.insert(boundary.clone());
-            StandardHarness::report_finalization(
-                &mut mailbox,
-                StandardHarness::make_finalization(
-                    Proposal::new(
-                        Round::new(Epoch::zero(), View::new(6)),
-                        View::new(5),
-                        boundary.digest(),
-                    ),
-                    &schemes,
-                    QUORUM,
-                ),
-            )
-            .await;
-            let is_repair = |fetch: &FetchRecord, block: &B| {
-                fetch.key == handler::Key::Block(block.digest())
-                    && fetch.subscriber == handler::Annotation::Height(block.height())
-            };
-            wait_until(
-                &context,
-                Duration::from_secs(1),
-                "gap repair request",
-                || {
-                    resolver
-                        .active_fetches()
-                        .iter()
-                        .any(|fetch| is_repair(fetch, &chain[4]))
-                },
-            )
-            .await;
-
-            // Acquire unfinalized blocks above the gap.
-            let unrelated: Vec<_> = (0..DELIVERIES)
-                .map(|i| make_raw_block(genesis.digest(), Height::new(10 + i), 1000 + i))
-                .collect();
-            let acquisitions: Vec<_> = unrelated
-                .iter()
-                .map(|block| mailbox.acquire(block.digest()))
-                .collect();
-            wait_until(
-                &context,
-                Duration::from_secs(1),
-                "unrelated acquisitions",
-                || {
-                    let active = resolver.active_fetches();
-                    unrelated.iter().all(|block| {
-                        active
-                            .iter()
-                            .any(|fetch| fetch.key == handler::Key::Block(block.digest()))
-                    })
-                },
-            )
-            .await;
-
-            // Deliver every unrelated block in one resolver batch. Only the batch's gap repair
-            // pass may read the boundary.
-            ops.lock().clear();
-            let responses: Vec<_> = unrelated
-                .iter()
-                .map(|block| {
-                    let (response, response_rx) = oneshot::channel();
-                    assert!(
-                        resolver
-                            .enqueue(handler::Message::Deliver {
-                                delivery: Delivery {
-                                    key: handler::Key::Block(block.digest()),
-                                    subscribers: NonEmptyVec::new((
-                                        handler::Annotation::Subscription,
-                                        tracing::Span::none(),
-                                    )),
-                                },
-                                value: block.encode(),
-                                response,
-                            })
-                            .accepted()
-                    );
-                    response_rx
-                })
-                .collect();
-            for response in responses {
-                assert_eq!(
-                    response.await.unwrap(),
-                    Outcome::Resolved(Resolution::Complete)
-                );
-            }
-            for (acquisition, block) in acquisitions.into_iter().zip(&unrelated) {
-                assert_eq!(acquisition.await.unwrap().digest(), block.digest());
-            }
-            let reads = ops
-                .lock()
-                .iter()
-                .filter(|op| **op == Op::Get(Some(boundary.height())))
-                .count();
-            assert!(
-                reads <= 1,
-                "boundary read {reads} times for unrelated deliveries"
-            );
-
-            // The requested gap parent is still archived, so repair advances to its parent.
-            let fetch = resolver
-                .active_fetches()
-                .into_iter()
-                .find(|fetch| is_repair(fetch, &chain[4]))
-                .unwrap();
-            deliver_acquisition_test_block(&resolver, fetch, &chain[4]).await;
-            wait_until(
-                &context,
-                Duration::from_secs(1),
-                "next gap repair request",
-                || {
-                    resolver
-                        .active_fetches()
-                        .iter()
-                        .any(|fetch| is_repair(fetch, &chain[3]))
-                },
-            )
-            .await;
-            assert_eq!(
-                mailbox.get_block(Height::new(5)).await.unwrap().digest(),
-                chain[4].digest()
             );
         });
     }
@@ -14253,7 +11956,7 @@ mod tests {
                 StandardHarness::report_notarization(&mut marshal, notarization).await;
                 assert!(
                     wrapper
-                        .certify(boundary_round, digest, crate::History::anchored(below))
+                        .certify(boundary_round, digest, anchored(below))
                         .await
                         .unwrap(),
                     "{kind:?}: boundary must certify"
@@ -14271,11 +11974,7 @@ mod tests {
                 };
                 assert!(
                     wrapper
-                        .verify(
-                            outgoing_context,
-                            digest,
-                            crate::History::anchored(Arc::clone(&selected))
-                        )
+                        .verify(outgoing_context, digest, anchored(selected.clone()))
                         .await
                         .unwrap(),
                     "{kind:?}: the outgoing boundary re-proposal must verify"
@@ -14289,10 +11988,7 @@ mod tests {
                 };
                 assert_eq!(
                     wrapper
-                        .prepare(
-                            held_context.clone(),
-                            crate::History::anchored(Arc::clone(&selected))
-                        )
+                        .prepare(held_context.clone(), anchored(selected.clone()))
                         .await
                         .unwrap(),
                     Handoff::Stage(digest),
@@ -14320,10 +12016,7 @@ mod tests {
                 assert_ne!(held_context.parent, replacement_context.parent);
                 assert_eq!(
                     wrapper
-                        .propose(
-                            replacement_context,
-                            crate::History::anchored(Arc::clone(&selected))
-                        )
+                        .propose(replacement_context, anchored(selected.clone()))
                         .await
                         .unwrap(),
                     digest,
@@ -14348,7 +12041,7 @@ mod tests {
                 // Certification must await the replacement stage's durability acknowledgement.
                 assert!(
                     wrapper
-                        .certify(round, digest, crate::History::anchored(selected))
+                        .certify(round, digest, anchored(selected))
                         .await
                         .unwrap(),
                     "{kind:?}: the replacement durability gate must complete"
@@ -14622,105 +12315,6 @@ mod tests {
         });
     }
 
-    #[test_traced("WARN")]
-    fn test_standard_rejected_overflow_prune_preserves_canonical_waiters() {
-        for prune_first in [true, false] {
-            deterministic::Runner::timed(Duration::from_secs(30)).start(
-                move |mut context| async move {
-                    const PREFIX: &str = "rejected-overflow-prune";
-                    let Fixture { schemes, .. } =
-                        bls12381_threshold_vrf::fixture::<V, _>(
-                            &mut context, NAMESPACE, NUM_VALIDATORS,
-                        );
-                    let (finalizations, blocks) =
-                        prunable_finalized_stores(&context, PREFIX).await;
-                    let mut config = test_config(
-                        PREFIX,
-                        ConstantProvider::new(schemes[0].clone()),
-                        NZUsize!(1),
-                    );
-                    config.mailbox_size = NZUsize!(1);
-                    let (actor, mut mailbox, floor) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
-                        context.child("actor"), finalizations, blocks, config,
-                    ).await;
-                    assert_eq!(floor.processed(), None);
-
-                    let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
-                    let height = Height::new(1);
-                    let round = Round::new(Epoch::zero(), View::new(1));
-                    let block = make_raw_block(genesis.digest(), height, 100);
-                    let finalization = StandardHarness::make_finalization(
-                        Proposal::new(round, View::zero(), block.digest()),
-                        &schemes,
-                        QUORUM,
-                    );
-
-                    // The actor has not started, so this live request fills ready capacity.
-                    let pending = mailbox.acquire(genesis.digest());
-                    if prune_first {
-                        mailbox.prune(Height::new(10));
-                    }
-                    let mut direct = mailbox.finalized(height);
-                    let source = mailbox.finalized_blocks(height);
-                    let mut range = source.range(height..=height);
-                    let mut read = Box::pin(range.next());
-                    let early = read.as_mut().now_or_never();
-                    let mut canceled = mailbox.finalized(Height::new(10));
-                    assert!(matches!(canceled.try_recv(), Err(TryRecvError::Empty)));
-                    drop(canceled);
-                    if !prune_first {
-                        mailbox.prune(Height::new(10));
-                    }
-
-                    let (resolver_rx, resolver) =
-                        RecordingResolver::holding(context.child("resolver"));
-                    let _actor = actor.start_unbuffered(
-                        Application::<B>::manual_ack(),
-                        (resolver_rx, resolver),
-                    );
-
-                    // This read follows the overflowed prune in the actor mailbox.
-                    assert!(mailbox.get_verified(round).await.is_none());
-                    assert_eq!(pending.await.unwrap().digest(), genesis.digest());
-                    assert_eq!(mailbox.get_processed().await, None);
-                    assert_eq!(
-                        mailbox.get_block(Height::zero()).await.unwrap().digest(),
-                        genesis.digest(),
-                    );
-                    assert!(mailbox.get_block(height).await.is_none());
-                    assert!(mailbox.get_finalization(height).await.is_none());
-                    let direct_before = direct.try_recv();
-                    let canonical_before = early.or_else(|| read.as_mut().now_or_never());
-
-                    assert!(mailbox.verified(round, ready(block.clone())).await);
-                    assert!(mailbox.get_block(height).await.is_none());
-                    StandardHarness::report_finalization(&mut mailbox, finalization).await;
-                    assert_eq!(
-                        mailbox.get_finalization(height).await.unwrap().proposal.payload,
-                        block.digest(),
-                    );
-                    assert_eq!(
-                        mailbox.get_block(height).await.unwrap().digest(),
-                        block.digest(),
-                    );
-                    assert_eq!(mailbox.get_processed().await, None);
-
-                    assert!(
-                        canonical_before.is_none(),
-                        "canonical request terminated before finalization (prune_first={prune_first}): {canonical_before:?}",
-                    );
-                    assert!(
-                        matches!(direct_before, Err(TryRecvError::Empty)),
-                        "live finalized waiter closed before finalization (prune_first={prune_first})",
-                    );
-                    assert_eq!(direct.await.unwrap().digest(), block.digest());
-                    assert_eq!(read.await.unwrap().unwrap().digest(), block.digest());
-                    assert!(range.next().await.is_none());
-                },
-            );
-        }
-    }
-
     /// `Prune` for a height above the floor must be rejected (warn + continue)
     /// and must not advance the floor or alter the finalized archive contents.
     #[test_traced("WARN")]
@@ -14765,137 +12359,6 @@ mod tests {
             // The finalized block and its finalization must still be retrievable.
             assert!(mailbox.get_block(Height::new(1)).await.is_some());
             assert!(mailbox.get_finalization(Height::new(1)).await.is_some());
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_catch_up_gap_latency() {
-        const HEIGHTS: u64 = 64;
-        const LATENCY: Duration = Duration::from_millis(100);
-        const SAMPLE: Duration = Duration::from_millis(1);
-        let runner = deterministic::Runner::new(
-            deterministic::Config::new()
-                .with_seed(42)
-                .with_timeout(Some(Duration::from_secs(120))),
-        );
-        runner.start(|mut context| async move {
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let peers = vec![participants[0].clone(), participants[1].clone()];
-            let mut oracle = setup_network_with_participants(
-                context.child("network"),
-                NZUsize!(1),
-                peers.clone(),
-            1024 * 1024,
-)
-            .await;
-            let peer = StandardHarness::setup_validator(
-                context.child("peer"),
-                &mut oracle,
-                peers[1].clone(),
-                ConstantProvider::new(schemes[1].clone()),
-            )
-            .await;
-            let mut peer_handle: ValidatorHandle<StandardHarness> = ValidatorHandle {
-                mailbox: peer.mailbox,
-                extra: peer.extra,
-            };
-            let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
-            let mut parent = StandardHarness::genesis_block(NUM_VALIDATORS as u16).digest();
-            let mut tip_finalization = None;
-            for height in 1..=HEIGHTS {
-                let block = ready(make_raw_block(parent, Height::new(height), height));
-                parent = block.digest();
-                let round = Round::new(
-                    epocher.containing(Height::new(height)).unwrap().epoch(),
-                    View::new(height),
-                );
-                StandardHarness::propose(&mut peer_handle, round, &block).await;
-                StandardHarness::verify(&mut peer_handle, round, &block, &mut []).await;
-                let proposal = Proposal::new(
-                    round,
-                    View::new(height - 1),
-                    block.digest(),
-                );
-                let notarization =
-                    StandardHarness::make_notarization(proposal.clone(), &schemes, QUORUM);
-                StandardHarness::report_notarization(&mut peer_handle.mailbox, notarization)
-                    .await;
-                let finalization =
-                    StandardHarness::make_finalization(proposal, &schemes, QUORUM);
-                StandardHarness::report_finalization(
-                    &mut peer_handle.mailbox,
-                    finalization.clone(),
-                )
-                .await;
-                while peer_handle.mailbox.get_processed().await.map(Processed::height) != Some(Height::new(height)) {
-                    context.sleep(SAMPLE).await;
-                }
-                assert!(peer_handle.mailbox.get_finalization(Height::new(height)).await.is_some());
-                tip_finalization = Some(finalization);
-            }
-
-            let victim = StandardHarness::setup_validator(
-                context.child("victim"),
-                &mut oracle,
-                peers[0].clone(),
-                ConstantProvider::new(schemes[0].clone()),
-            )
-            .await;
-            let mut victim_mailbox = victim.mailbox;
-            while victim_mailbox.get_processed().await.map(Processed::height) != Some(Height::zero()) {
-                context.sleep(SAMPLE).await;
-            }
-            assert_eq!(victim.application.blocks().len(), 1);
-            let link = commonware_p2p::simulated::Link {
-                latency: LATENCY,
-                jitter: Duration::ZERO,
-                success_rate: probability!(1.0),
-            };
-            setup_network_links(&mut oracle, &peers, link).await;
-
-            let started = context.current();
-            StandardHarness::report_finalization(
-                &mut victim_mailbox,
-                tip_finalization.unwrap(),
-            )
-            .await;
-            let mut max_active = 0u64;
-            let mut max_pending = 0u64;
-            loop {
-                for line in context.encode().lines() {
-                    let mut fields = line.split_whitespace();
-                    let Some(name) = fields.next() else { continue };
-                    if !name.starts_with("victim_") {
-                        continue;
-                    }
-                    if name.ends_with("_fetch_active") || name.ends_with("_fetch_pending") {
-                        let value = fields.next().unwrap().parse::<u64>().unwrap();
-                        if name.ends_with("_fetch_active") {
-                            max_active = max_active.max(value);
-                        } else {
-                            max_pending = max_pending.max(value);
-                        }
-                    }
-                }
-                if victim_mailbox.get_processed().await.map(Processed::height) == Some(Height::new(HEIGHTS)) {
-                    break;
-                }
-                context.sleep(SAMPLE).await;
-            }
-            let elapsed = context.current().duration_since(started).unwrap();
-            assert!(max_active > 0, "resolver metrics must be sampled");
-            assert_eq!(victim.application.blocks().len(), HEIGHTS as usize + 1);
-            for height in 0..=HEIGHTS {
-                assert!(victim.application.blocks().contains_key(&Height::new(height)));
-            }
-            println!(
-                "catch_up_gap_latency heights={HEIGHTS} max_repair=10 one_way_latency={LATENCY:?} elapsed={elapsed:?} max_active={max_active} max_pending={max_pending}"
-            );
-            assert!(elapsed < Duration::from_secs(2), "cold gap repair exceeded ten response waves: {elapsed:?}");
         });
     }
 
@@ -17092,6 +14555,2159 @@ mod tests {
                 Height::new(21),
             )
             .await;
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_acquire_cancellation_preserves_shared_finality_request() {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let application = Application::<B>::manual_ack();
+            let (mut mailbox, buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "acquire-cancel-preserves-finality",
+                ConstantProvider::new(schemes[0].clone()),
+                application.clone(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(genesis.clone()),
+            )
+            .await;
+            let buffer = buffer.unwrap();
+            assert_eq!(application.acknowledged().await, Height::zero());
+            let block = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let commitment = block.digest();
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let acquisition = mailbox.acquire(commitment);
+            report_finalized(&mut mailbox, &schemes, round, View::zero(), commitment).await;
+            let is_finality = |fetch: &FetchRecord| {
+                fetch.key == handler::Key::Block(commitment)
+                    && fetch.subscriber == handler::Annotation::Round(round)
+            };
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "shared acquisition and finality",
+                || {
+                    resolver.active_fetches().iter().any(is_finality)
+                        && resolver.active_subscription(commitment).is_some()
+                },
+            )
+            .await;
+            context.sleep(Duration::from_millis(100)).await;
+            assert_eq!(buffer.commitment_subscription_count(), 1);
+            assert!(!buffer.commitment_subscription_closed(0));
+
+            drop(acquisition);
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "independent finality retention",
+                || {
+                    resolver.active_fetches().iter().any(is_finality)
+                        && resolver.active_subscription(commitment).is_none()
+                        && buffer.commitment_subscription_closed(0)
+                },
+            )
+            .await;
+            let fetch = resolver
+                .active_fetches()
+                .into_iter()
+                .find(is_finality)
+                .unwrap();
+            deliver_acquisition_test_block(&resolver, fetch, &block).await;
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "finalized body after acquisition cancellation",
+                || application.pending_ack_heights() == vec![Height::new(1)],
+            )
+            .await;
+            assert_eq!(application.blocks()[&Height::new(1)].digest(), commitment);
+            assert_eq!(
+                mailbox
+                    .get_finalization(Height::new(1))
+                    .await
+                    .unwrap()
+                    .proposal
+                    .payload,
+                commitment
+            );
+        });
+    }
+
+    /// An exact resolver delivery leaves its caller-owned demand for the delivery verdict to
+    /// retire, while local ingress retires the demand itself.
+    #[test_traced("WARN")]
+    fn test_standard_acquire_delivery_leaves_demand_to_verdict() {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let (mailbox, _, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "acquire-delivery-verdict",
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::default(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(genesis.clone()),
+            )
+            .await;
+
+            // The resolver must still hold the demand when the delivery verdict resolves, so the
+            // verdict reaches the resolver and retires it.
+            let delivered = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let acquisition = mailbox.acquire(delivered.digest());
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "delivered acquisition",
+                || resolver.active_subscription(delivered.digest()).is_some(),
+            )
+            .await;
+            let fetch = resolver.active_subscription(delivered.digest()).unwrap();
+            deliver_acquisition_test_block(&resolver, fetch, &delivered).await;
+            assert!(
+                resolver.active_subscription(delivered.digest()).is_some(),
+                "resolver delivery must not cancel demand before its verdict"
+            );
+            assert_eq!(acquisition.await.unwrap().digest(), delivered.digest());
+
+            // A locally verified block satisfies its caller without a resolver verdict.
+            let verified = make_raw_block(genesis.digest(), Height::new(1), 200);
+            let acquisition = mailbox.acquire(verified.digest());
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "verified acquisition",
+                || resolver.active_subscription(verified.digest()).is_some(),
+            )
+            .await;
+            assert!(
+                mailbox
+                    .verified(
+                        Round::new(Epoch::zero(), View::new(1)),
+                        ready(verified.clone())
+                    )
+                    .await
+            );
+            assert_eq!(acquisition.await.unwrap().digest(), verified.digest());
+            assert!(
+                resolver.active_subscription(verified.digest()).is_none(),
+                "local ingress must retire satisfied demand"
+            );
+        });
+    }
+
+    /// A block acquired while marshal holds its notarization is stored, so its finalization is
+    /// served without requesting the block again.
+    #[test_traced("WARN")]
+    fn test_standard_acquired_notarized_block_is_stored() {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let application = Application::<B>::default();
+            let (mut mailbox, _, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "acquired-notarized-block",
+                ConstantProvider::new(schemes[0].clone()),
+                application.clone(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(genesis.clone()),
+            )
+            .await;
+
+            // Marshal holds the notarization but not the block it names.
+            let block = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let proposal = Proposal::new(
+                Round::new(Epoch::zero(), View::new(1)),
+                View::zero(),
+                block.digest(),
+            );
+            StandardHarness::report_notarization(
+                &mut mailbox,
+                StandardHarness::make_notarization(proposal.clone(), &schemes, QUORUM),
+            )
+            .await;
+
+            // The block arrives through an exact acquisition.
+            let acquisition = mailbox.acquire(block.digest());
+            wait_until(&context, Duration::from_secs(1), "acquisition", || {
+                resolver.active_subscription(block.digest()).is_some()
+            })
+            .await;
+            let fetch = resolver.active_subscription(block.digest()).unwrap();
+            deliver_acquisition_test_block(&resolver, fetch, &block).await;
+            assert_eq!(acquisition.await.unwrap().digest(), block.digest());
+            assert!(
+                mailbox.get_block(&block.digest()).await.is_some(),
+                "a delivered block that a held notarization backs must be stored"
+            );
+
+            // The finalization finds the block in storage.
+            let fetched = resolver.fetches().len();
+            StandardHarness::report_finalization(
+                &mut mailbox,
+                StandardHarness::make_finalization(proposal, &schemes, QUORUM),
+            )
+            .await;
+            wait_until(&context, Duration::from_secs(1), "finalized block", || {
+                application.blocks().contains_key(&Height::new(1))
+            })
+            .await;
+            assert_eq!(
+                resolver.fetches().len(),
+                fetched,
+                "a stored block must not be requested again"
+            );
+        });
+    }
+
+    /// A floor closes skipped canonical waits while exact callers retain their demand.
+    #[test_traced("WARN")]
+    fn test_standard_floor_closes_missing_predecessor_waiter() {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let application = Application::<B>::manual_ack();
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "floor-closes-missing-predecessor",
+                ConstantProvider::new(schemes[0].clone()),
+                application.clone(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+            assert_eq!(application.acknowledged().await, Height::zero());
+            while mailbox.get_processed().await != Some(Processed::Block(Height::zero())) {
+                reschedule().await;
+            }
+
+            let missing_height = Height::new(4);
+            let missing = make_raw_block(Sha256::hash(&[b"missing-parent"]), missing_height, 400);
+            let anchor = make_raw_block(missing.digest(), Height::new(5), 500);
+            let mut finalized = mailbox.finalized(missing_height);
+            let source = mailbox.blocks_with_parent(
+                anchor.height(),
+                anchor.digest(),
+                anchored([anchor.digest()]),
+            );
+            let mut range = source.range(missing_height..=missing_height);
+            let mut read = Box::pin(range.next());
+            assert!(read.as_mut().now_or_never().is_none());
+            let mut exact = mailbox.acquire(missing.digest());
+
+            // FIFO processing registers both canonical waits and the independent exact caller.
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::zero()))
+            );
+            assert!(matches!(finalized.try_recv(), Err(TryRecvError::Empty)));
+            assert!(matches!(exact.try_recv(), Err(TryRecvError::Empty)));
+            let fetch = resolver
+                .active_subscription(missing.digest())
+                .expect("exact predecessor demand missing");
+
+            let round = Round::new(Epoch::zero(), View::new(5));
+            assert!(mailbox.verified(round, ready(anchor.clone())).await);
+            mailbox.set_floor(StandardHarness::make_finalization(
+                Proposal::new(round, View::new(4), anchor.digest()),
+                &schemes,
+                QUORUM,
+            ));
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Absent(missing_height))
+            );
+            assert_eq!(
+                mailbox
+                    .get_anchor()
+                    .await
+                    .map(|(processed, block)| (processed, block.digest())),
+                Some((Processed::Absent(missing_height), anchor.digest())),
+            );
+            assert_eq!(application.pending_ack_heights(), vec![anchor.height()]);
+            assert!(mailbox.get_block(missing_height).await.is_none());
+
+            select! {
+                result = finalized => assert!(result.is_err(), "skipped predecessor must close"),
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("floor stranded the pre-existing missing-predecessor waiter");
+                },
+            }
+            select! {
+                result = read => assert!(matches!(
+                    result, Some(Err(crate::marshal::blocks::Error::Unavailable))
+                )),
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("floor stranded the canonical range at its missing predecessor");
+                },
+            }
+            assert!(range.next().await.is_none());
+            assert!(mailbox.finalized(missing_height).await.is_err());
+            assert_eq!(
+                mailbox.finalized(anchor.height()).await.unwrap().digest(),
+                anchor.digest()
+            );
+            assert!(matches!(exact.try_recv(), Err(TryRecvError::Empty)));
+            assert!(resolver.active_fetches().iter().any(|current| {
+                current.key == fetch.key && current.subscriber == fetch.subscriber
+            }));
+
+            // A canonical skip does not prevent later exact-body ingress for a live caller.
+            deliver_acquisition_test_block(&resolver, fetch, &missing).await;
+            select! {
+                result = exact => assert_eq!(result.unwrap().digest(), missing.digest()),
+                _ = context.sleep(Duration::from_secs(1)) => panic!("floor canceled exact demand"),
+            }
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Absent(missing_height))
+            );
+            assert_eq!(application.pending_ack_heights(), vec![anchor.height()]);
+        });
+    }
+
+    /// Canonical floor storage wakes anchor waiters and frees the speculative body slot.
+    #[test_traced("WARN")]
+    fn test_standard_prefetched_floor_notifies_finalized_and_releases_capacity() {
+        const PARTITION: &str = "prefetched-floor-capacity";
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (mailbox, resolver, _, application, _actor_handle) =
+                start_capped_actor(&context, PARTITION, &schemes, NZUsize!(1)).await;
+            assert_eq!(application.acknowledged().await, Height::zero());
+            while mailbox.get_processed().await != Some(Processed::Block(Height::zero())) {
+                reschedule().await;
+            }
+
+            let anchor = make_raw_block(Sha256::hash(&[b"floor-predecessor"]), Height::new(5), 500);
+            let next = make_raw_block(anchor.digest(), Height::new(6), 600);
+            let parked = make_raw_block(Sha256::hash(&[b"parked-parent"]), Height::new(3), 300);
+            let next_key = handler::Key::Block(next.digest());
+            let parked_key = handler::Key::Block(parked.digest());
+            let mut finalized = mailbox.finalized(anchor.height());
+            let mut lease = mailbox.prefetch(Arc::from([anchor.digest(), next.digest()]), 0..2);
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "speculative anchor fetch",
+                || resolver.active_subscription(anchor.digest()).is_some(),
+            )
+            .await;
+            let fetch = resolver.active_subscription(anchor.digest()).unwrap();
+            let mut parked_lease = mailbox.prefetch(Arc::from([parked.digest()]), 0..1);
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::zero()))
+            );
+            assert!(matches!(finalized.try_recv(), Err(TryRecvError::Empty)));
+            assert!(
+                !resolver
+                    .fetches()
+                    .iter()
+                    .any(|fetch| fetch.key == next_key || fetch.key == parked_key)
+            );
+
+            let round = Round::new(Epoch::zero(), View::new(5));
+            mailbox.set_floor(StandardHarness::make_finalization(
+                Proposal::new(round, View::new(4), anchor.digest()),
+                &schemes,
+                QUORUM,
+            ));
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::zero()))
+            );
+            deliver_acquisition_test_block(&resolver, fetch, &anchor).await;
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Absent(Height::new(4)))
+            );
+            assert_eq!(
+                mailbox
+                    .get_anchor()
+                    .await
+                    .map(|(processed, block)| (processed, block.digest())),
+                Some((Processed::Absent(Height::new(4)), anchor.digest())),
+            );
+            assert_eq!(application.pending_ack_heights(), vec![anchor.height()]);
+            select! {
+                result = finalized => assert_eq!(result.unwrap().digest(), anchor.digest()),
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("floor did not notify the anchor waiter");
+                },
+            }
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "floor releases the speculative slot",
+                || resolver.active_subscription(next.digest()).is_some(),
+            )
+            .await;
+            assert!(matches!(lease.try_recv(), Err(TryRecvError::Empty)));
+            assert!(matches!(parked_lease.try_recv(), Err(TryRecvError::Empty)));
+
+            // A ready next body occupies the only slot until its direct caller consumes it.
+            let fetch = resolver.active_subscription(next.digest()).unwrap();
+            deliver_acquisition_test_block(&resolver, fetch, &next).await;
+            let _ = mailbox.get_processed().await;
+            assert!(
+                !resolver
+                    .fetches()
+                    .iter()
+                    .any(|fetch| fetch.key == parked_key)
+            );
+            assert_eq!(
+                mailbox.acquire(next.digest()).await.unwrap().digest(),
+                next.digest()
+            );
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "below-floor lease retains its queued demand",
+                || resolver.active_subscription(parked.digest()).is_some(),
+            )
+            .await;
+            assert!(matches!(parked_lease.try_recv(), Err(TryRecvError::Empty)));
+            assert_eq!(application.pending_ack_heights(), vec![anchor.height()]);
+            drop(parked_lease);
+            drop(lease);
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "parked lease cancellation",
+                || {
+                    !resolver
+                        .active_fetches()
+                        .iter()
+                        .any(|fetch| fetch.key == parked_key)
+                },
+            )
+            .await;
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_finalized_delivery_retires_only_exact_acquisition() {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let (mailbox, _, mut resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "finalized-delivery-demand",
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(genesis.clone()),
+            )
+            .await;
+            let height = Height::new(1);
+            let block = make_raw_block(genesis.digest(), height, 100);
+            let commitment = block.digest();
+            let acquisition = mailbox.acquire(commitment);
+            let other = make_raw_block(genesis.digest(), height, 200);
+            let other_commitment = other.digest();
+            let _other_acquisition = mailbox.acquire(other_commitment);
+            mailbox.hint_finalized(height, NonEmptyVec::new(participants[1].clone()));
+            let _ = mailbox.get_processed().await;
+            let finalization = finalize_test_block(&schemes, &block);
+            let observed = resolver.clone();
+            let is_active = |key, subscriber| {
+                observed
+                    .active_fetches()
+                    .iter()
+                    .any(|fetch| fetch.key == key && fetch.subscriber == subscriber)
+            };
+            assert!(is_active(
+                handler::Key::Block(commitment),
+                handler::Annotation::Subscription
+            ));
+            assert!(is_active(
+                handler::Key::Finalized { height },
+                handler::Annotation::Height(height)
+            ));
+            let retained_round = Round::new(Epoch::zero(), View::new(10));
+            resolver.fetch(handler::Request::new(
+                commitment,
+                handler::Annotation::Height(height),
+            ));
+            resolver.fetch(handler::Request::new(
+                commitment,
+                handler::Annotation::Round(retained_round),
+            ));
+            deliver_finalized_test_block(&resolver, finalization, &block).await;
+            let _ = mailbox.get_processed().await;
+            assert_eq!(acquisition.await.unwrap().digest(), block.digest());
+
+            assert!(
+                !is_active(
+                    handler::Key::Block(commitment),
+                    handler::Annotation::Subscription
+                ),
+                "height delivery must retire the satisfied independent exact acquisition"
+            );
+            assert!(
+                is_active(
+                    handler::Key::Finalized { height },
+                    handler::Annotation::Height(height)
+                ),
+                "height delivery must preserve its own request for its verdict"
+            );
+            assert!(is_active(
+                handler::Key::Block(commitment),
+                handler::Annotation::Height(height)
+            ));
+            assert!(is_active(
+                handler::Key::Block(commitment),
+                handler::Annotation::Round(retained_round)
+            ));
+            assert!(is_active(
+                handler::Key::Block(other_commitment),
+                handler::Annotation::Subscription
+            ));
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_finalized_delivery_rejects_unbound_response() {
+        for case in ["height", "digest", "trailing", "truncated-certificate"] {
+            deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+                let height = Height::new(1);
+                let valid = make_raw_block(genesis.digest(), height, 100);
+                let offered = match case {
+                    "height" => make_raw_block(valid.digest(), Height::new(2), 200),
+                    "digest" => make_raw_block(genesis.digest(), height, 300),
+                    "trailing" | "truncated-certificate" => valid.clone(),
+                    _ => unreachable!(),
+                };
+                let finalization = finalize_test_block(&schemes, &valid);
+                let certificate = if case == "height" {
+                    finalize_test_block(&schemes, &offered)
+                } else {
+                    finalization.clone()
+                };
+                let application = Application::<B>::manual_ack();
+                let (mailbox, _buffer, resolver, _actor) = start_standard_actor(
+                    context.child("validator"),
+                    &format!("finalized-unbound-{case}"),
+                    ConstantProvider::new(schemes[0].clone()),
+                    application.clone(),
+                    Some(RecordingBuffer::default()),
+                    Start::Genesis(genesis),
+                )
+                .await;
+                assert_eq!(application.acknowledged().await, Height::zero());
+                let mut exact = mailbox.acquire(offered.digest());
+                let mut canonical = mailbox.finalized(height);
+                mailbox.hint_finalized(height, NonEmptyVec::new(participants[1].clone()));
+                assert!(mailbox.get_block(height).await.is_none());
+
+                let mut value = if case == "truncated-certificate" {
+                    let mut encoded = certificate.encode().to_vec();
+                    encoded.pop().unwrap();
+                    encoded
+                } else {
+                    (certificate, offered.clone()).encode().to_vec()
+                };
+                if case == "trailing" {
+                    value.push(0);
+                }
+                let (response, response_rx) = oneshot::channel();
+                assert!(
+                    resolver
+                        .enqueue(handler::Message::Deliver {
+                            delivery: Delivery {
+                                key: handler::Key::Finalized { height },
+                                subscribers: NonEmptyVec::new((
+                                    handler::Annotation::Height(height),
+                                    tracing::Span::none(),
+                                )),
+                            },
+                            value: Bytes::from(value),
+                            response,
+                        })
+                        .accepted()
+                );
+                let verdict = response_rx.await.expect("finalized response missing");
+                assert_eq!(verdict, Outcome::Invalid, "{case}");
+
+                // A rejected response publishes nothing.
+                assert!(mailbox.get_block(height).await.is_none(), "{case}");
+                assert!(
+                    mailbox.get_block(offered.height()).await.is_none(),
+                    "{case}"
+                );
+                assert!(
+                    mailbox.get_block(&offered.digest()).await.is_none(),
+                    "{case}"
+                );
+                assert!(mailbox.get_finalization(height).await.is_none(), "{case}");
+                assert!(
+                    matches!(exact.try_recv(), Err(TryRecvError::Empty)),
+                    "{case}"
+                );
+                assert!(
+                    matches!(canonical.try_recv(), Err(TryRecvError::Empty)),
+                    "{case}"
+                );
+                assert!(!application.blocks().contains_key(&height), "{case}");
+                assert!(application.tip().is_none(), "{case}");
+
+                let valid_exact = mailbox.acquire(valid.digest());
+                deliver_finalized_test_block(&resolver, finalization.clone(), &valid).await;
+                assert_eq!(valid_exact.await.unwrap().digest(), valid.digest());
+                assert_eq!(canonical.await.unwrap().digest(), valid.digest());
+                assert_eq!(
+                    mailbox.get_block(height).await.unwrap().digest(),
+                    valid.digest()
+                );
+                assert_eq!(
+                    mailbox.get_finalization(height).await.unwrap().proposal,
+                    finalization.proposal
+                );
+                if offered.digest() == valid.digest() {
+                    assert_eq!(exact.await.unwrap().digest(), valid.digest());
+                } else {
+                    assert!(matches!(exact.try_recv(), Err(TryRecvError::Empty)));
+                }
+            });
+        }
+    }
+
+    /// Starts a marshal actor on prunable stores whose speculative capacity is `max_repair`,
+    /// with a recording resolver and buffer and an application that holds acknowledgements.
+    async fn start_capped_actor(
+        context: &deterministic::Context,
+        partition: &str,
+        schemes: &[S],
+        max_repair: NonZeroUsize,
+    ) -> (
+        Mailbox<S, Standard<B>>,
+        RecordingResolver,
+        RecordingBuffer,
+        Application<B>,
+        Handle<()>,
+    ) {
+        let (finalizations, blocks) = prunable_finalized_stores(context, partition).await;
+        let provider = ConstantProvider::new(schemes[0].clone());
+        let mut config = test_config(partition, provider, NZUsize!(1));
+        config.max_repair = max_repair;
+        let (actor, mailbox, _) =
+            Actor::init(context.child("actor"), finalizations, blocks, config).await;
+        let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+        let buffer = RecordingBuffer::default();
+        let application = Application::<B>::manual_ack();
+        let handle = actor.start(
+            application.clone(),
+            buffer.clone(),
+            (resolver_rx, resolver.clone()),
+        );
+        (mailbox, resolver, buffer, application, handle)
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_local_gap_repair_retires_speculative_fetch() {
+        const PARTITION: &str = "local-gap-repair-retires-prefetch";
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (mut mailbox, resolver, buffer, application, _actor) =
+                start_capped_actor(&context, PARTITION, &schemes, NZUsize!(1)).await;
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "held genesis acknowledgement",
+                || application.pending_ack_heights() == vec![Height::zero()],
+            )
+            .await;
+
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let parent = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let child = make_raw_block(parent.digest(), Height::new(2), 101);
+            let next = Sha256::hash(&[b"prefetch after locally repaired parent"]);
+            let mut lease = mailbox.prefetch(Arc::from([parent.digest(), next]), 0..2);
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "speculative parent fetch",
+                || resolver.active_subscription(parent.digest()).is_some(),
+            )
+            .await;
+            assert_eq!(buffer.commitment_subscription_count(), 0);
+
+            // Speculation has no buffer waiter. Canonical repair must retire its
+            // resolver request when the parent becomes available locally.
+            buffer.insert(parent.clone());
+            buffer.insert(child.clone());
+            let finalized_parent = mailbox.finalized(parent.height());
+            report_finalized(
+                &mut mailbox,
+                &schemes,
+                Round::new(Epoch::zero(), View::new(2)),
+                View::new(1),
+                child.digest(),
+            )
+            .await;
+            assert_eq!(finalized_parent.await.unwrap().digest(), parent.digest());
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "local repair releases speculative capacity",
+                || resolver.active_subscription(next).is_some(),
+            )
+            .await;
+            assert!(
+                resolver.active_subscription(parent.digest()).is_none(),
+                "locally repaired parent still has an unresolved speculative fetch",
+            );
+            assert!(matches!(lease.try_recv(), Err(TryRecvError::Empty)));
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_finalization_reuses_ready_prefetch_without_refetch() {
+        const PARTITION: &str = "finalization-reuses-ready-prefetch";
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (mut mailbox, resolver, _, application, _actor) =
+                start_capped_actor(&context, PARTITION, &schemes, NZUsize!(1)).await;
+            assert_eq!(application.acknowledged().await, Height::zero());
+
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let block = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let commitment = block.digest();
+            resolver.respond_to_next_fetch(block.encode());
+            let mut lease = mailbox.prefetch(Arc::from([commitment]), 0..1);
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "prefetched body delivered",
+                || resolver.delivered(),
+            )
+            .await;
+            assert!(resolver.wait_for_delivery_response().await);
+            assert_eq!(resolver.fetches().len(), 1);
+            assert!(matches!(lease.try_recv(), Err(TryRecvError::Empty)));
+
+            // The resolver's one response is exhausted. Finality must find the
+            // completed body while its speculative lease still owns it.
+            let finalized = mailbox.finalized(Height::new(1));
+            let round = Round::new(Epoch::zero(), View::new(1));
+            report_finalized(&mut mailbox, &schemes, round, View::zero(), commitment).await;
+            let _ = mailbox.get_processed().await;
+            assert_eq!(
+                resolver.fetches().len(),
+                1,
+                "finalization must reuse the completed prefetch without another network request"
+            );
+            select! {
+                result = finalized => {
+                    assert_eq!(result.expect("finalized waiter canceled").digest(), commitment);
+                },
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("finalization could not find the completed prefetched body");
+                },
+            }
+            assert!(matches!(lease.try_recv(), Err(TryRecvError::Empty)));
+
+            let next = Sha256::hash(&[b"next speculative commitment"]);
+            let mut next_lease = mailbox.prefetch(Arc::from([next]), 0..1);
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "canonical storage releases prefetch capacity",
+                || {
+                    resolver
+                        .fetches()
+                        .iter()
+                        .any(|fetch| fetch.key == handler::Key::Block(next))
+                },
+            )
+            .await;
+            assert!(matches!(lease.try_recv(), Err(TryRecvError::Empty)));
+            assert!(matches!(next_lease.try_recv(), Err(TryRecvError::Empty)));
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_wait_only_subscriber_preserves_prefetch() {
+        const PARTITION: &str = "wait-only-subscriber-prefetch";
+        for subscribe_first in [true, false] {
+            deterministic::Runner::timed(Duration::from_secs(30)).start(
+                move |mut context| async move {
+                    let Fixture { schemes, .. } = bls12381_threshold_vrf::fixture::<V, _>(
+                        &mut context,
+                        NAMESPACE,
+                        NUM_VALIDATORS,
+                    );
+                    let (mailbox, resolver, _, application, _actor) =
+                        start_capped_actor(&context, PARTITION, &schemes, NZUsize!(1)).await;
+                    assert_eq!(application.acknowledged().await, Height::zero());
+
+                    let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+                    let block = make_raw_block(genesis.digest(), Height::new(1), 100);
+                    let commitment = block.digest();
+
+                    // A wait-only caller and a prefetch range want the same body.
+                    let waiter = subscribe_first.then(|| mailbox.subscribe(commitment));
+                    resolver.respond_to_next_fetch(block.encode());
+                    let _lease = mailbox.prefetch(Arc::from([commitment]), 0..1);
+                    wait_until(
+                        &context,
+                        Duration::from_secs(1),
+                        "prefetched body delivered",
+                        || resolver.delivered(),
+                    )
+                    .await;
+                    assert!(resolver.wait_for_delivery_response().await);
+                    let waiter = waiter.unwrap_or_else(|| mailbox.subscribe(commitment));
+                    assert_eq!(waiter.await.expect("waiter").digest(), commitment);
+                    assert_eq!(resolver.fetches().len(), 1);
+
+                    // The range's forward reader now acquires the same commitment.
+                    let acquired = mailbox.acquire(commitment);
+                    let _ = mailbox.get_processed().await;
+                    assert_eq!(
+                        resolver.fetches().len(),
+                        1,
+                        "prefetched body was dropped; acquire fetched it again"
+                    );
+                    select! {
+                        result = acquired => {
+                            assert_eq!(result.expect("acquire canceled").digest(), commitment);
+                        },
+                        _ = context.sleep(Duration::from_secs(1)) => {
+                            panic!("acquire did not find the prefetched body");
+                        },
+                    }
+                },
+            );
+        }
+    }
+
+    /// A speculative fetch that finds its body only in the buffer keeps it in the reserved
+    /// slot, so a later exact acquisition needs no peer fetch after the buffer evicts it.
+    #[test_traced("WARN")]
+    fn test_standard_prefetch_retains_buffer_hit_after_eviction() {
+        const PARTITION: &str = "prefetch-retains-buffer-hit";
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (mailbox, resolver, buffer, application, _actor) =
+                start_capped_actor(&context, PARTITION, &schemes, NZUsize!(1)).await;
+            assert_eq!(application.acknowledged().await, Height::zero());
+
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let block = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let commitment = block.digest();
+
+            // The buffer serves the body once, then evicts it.
+            buffer.insert_transient(block);
+            let _lease = mailbox.prefetch(Arc::from([commitment]), 0..1);
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "prefetch consumed the buffered body",
+                || !buffer.contains(commitment),
+            )
+            .await;
+
+            let acquired = mailbox.acquire(commitment);
+            let _ = mailbox.get_processed().await;
+            assert!(
+                resolver.fetches().is_empty(),
+                "prefetch dropped a buffered body; acquire fetched it from peers"
+            );
+            select! {
+                result = acquired => {
+                    assert_eq!(result.expect("acquire canceled").digest(), commitment);
+                },
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("acquire did not find the prefetched body");
+                },
+            }
+        });
+    }
+
+    /// Stored bodies and later local writes release speculative capacity without an acquire.
+    /// Pruned writes must preserve the Ready body when storage cannot serve it.
+    #[test_traced("WARN")]
+    fn test_standard_prefetch_durable_body_does_not_occupy_slot() {
+        for (writer, pruned) in [
+            ("stored", false),
+            ("verified", false),
+            ("proposed", false),
+            ("certified", false),
+            ("notarization", false),
+            ("verified", true),
+        ] {
+            deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+                let Fixture { schemes, .. } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let partition = format!("prefetch-durable-{writer}-{pruned}");
+                let (mut mailbox, resolver, buffer, application, _actor) =
+                    start_capped_actor(&context, &partition, &schemes, NZUsize!(1)).await;
+                assert_eq!(application.acknowledged().await, Height::zero());
+
+                let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+                if pruned {
+                    // Processing two newer rounds prunes the old candidate's round.
+                    let mut parent = genesis.digest();
+                    for height in 1..=2 {
+                        let block = make_raw_block(parent, Height::new(height), height);
+                        parent = block.digest();
+                        buffer.insert(block.clone());
+                        let round = Round::new(Epoch::zero(), View::new(19 + height));
+                        let finalization = StandardHarness::make_finalization(
+                            Proposal::new(round, View::zero(), block.digest()),
+                            &schemes,
+                            QUORUM,
+                        );
+                        StandardHarness::report_finalization(&mut mailbox, finalization).await;
+                        assert_eq!(application.acknowledged().await, Height::new(height));
+                        wait_until(
+                            &context,
+                            Duration::from_secs(1),
+                            "processed finalization",
+                            || parse_processed_height(&context.encode()) == Some(height),
+                        )
+                        .await;
+                    }
+                }
+                let stored = make_raw_block(genesis.digest(), Height::new(3), 100);
+                let missing = make_raw_block(stored.digest(), Height::new(4), 200);
+                let round = Round::new(Epoch::zero(), View::new(1));
+                if writer == "stored" {
+                    assert!(mailbox.verified(round, ready(stored.clone())).await);
+                    buffer.insert(stored.clone());
+                } else {
+                    buffer.insert_transient(stored.clone());
+                }
+                let _lease = mailbox.prefetch(Arc::from([stored.digest(), missing.digest()]), 0..2);
+                if writer != "stored" {
+                    wait_until(
+                        &context,
+                        Duration::from_secs(1),
+                        "prefetch consumed transient body",
+                        || !buffer.contains(stored.digest()),
+                    )
+                    .await;
+                    assert!(resolver.fetches().is_empty());
+                    match writer {
+                        "verified" => assert!(mailbox.verified(round, ready(stored.clone())).await),
+                        "proposed" => {
+                            let (ack, persisted) = oneshot::channel();
+                            mailbox.proposed(round, ready(stored.clone()), Recipients::All, ack);
+                            assert!(persisted.await.unwrap().durable(round, "proposed").await);
+                        }
+                        "certified" => {
+                            assert!(mailbox.certified(round, ready(stored.clone())).await)
+                        }
+                        "notarization" => {
+                            let notarization = StandardHarness::make_notarization(
+                                Proposal::new(round, View::zero(), stored.digest()),
+                                &schemes,
+                                QUORUM,
+                            );
+                            StandardHarness::report_notarization(&mut mailbox, notarization).await;
+                            let _ = mailbox.get_processed().await;
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                if pruned {
+                    assert!(
+                        mailbox.get_block(&stored.digest()).await.is_none(),
+                        "pruned write stored a body"
+                    );
+                    context.sleep(Duration::from_millis(100)).await;
+                    assert!(
+                        resolver.fetches().is_empty(),
+                        "pruned write released the only Ready body"
+                    );
+                    let acquired = mailbox.acquire(stored.digest());
+                    let _ = mailbox.get_processed().await;
+                    assert!(
+                        !resolver
+                            .fetches()
+                            .iter()
+                            .any(|fetch| fetch.key == handler::Key::Block(stored.digest())),
+                        "acquire fetched the retained body externally"
+                    );
+                    select! {
+                        result = acquired => assert_eq!(result.unwrap().digest(), stored.digest()),
+                        _ = context.sleep(Duration::from_secs(1)) => {
+                            panic!("Ready body lost after pruned {writer}");
+                        },
+                    }
+                } else {
+                    wait_until(
+                        &context,
+                        Duration::from_secs(1),
+                        "durable body releases the only speculative slot",
+                        || resolver.active_subscription(missing.digest()).is_some(),
+                    )
+                    .await;
+                }
+                assert!(
+                    !resolver
+                        .fetches()
+                        .iter()
+                        .any(|fetch| fetch.key == handler::Key::Block(stored.digest())),
+                    "local body was fetched from peers ({writer}, pruned={pruned})"
+                );
+            });
+        }
+    }
+
+    /// Only active speculative demand owns a resolver request, so retiring queued or completed
+    /// demand needs no resolver cancellation, and a resolver delivery leaves its own request to
+    /// the delivery verdict.
+    #[test_traced("WARN")]
+    fn test_standard_prefetch_demand_cancels_resolver_only_while_active() {
+        const PARTITION: &str = "prefetch-cancels-only-active";
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (mailbox, resolver, buffer, application, _actor) =
+                start_capped_actor(&context, PARTITION, &schemes, NZUsize!(1)).await;
+            assert_eq!(application.acknowledged().await, Height::zero());
+
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let active_fetch = |key| {
+                resolver.active_fetches().into_iter().find(|fetch| {
+                    fetch.key == key && fetch.subscriber == handler::Annotation::Subscription
+                })
+            };
+
+            // A body ingested locally while its speculative request is active retires that
+            // request. Consuming the completed body afterwards needs no cancellation.
+            let local = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let local_key = handler::Key::Block(local.digest());
+            let _local_lease = mailbox.prefetch(Arc::from([local.digest()]), 0..1);
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "active local prefetch",
+                || active_fetch(local_key).is_some(),
+            )
+            .await;
+            let retains = resolver.retain_count();
+            let round = Round::new(Epoch::zero(), View::new(1));
+            assert!(mailbox.verified(round, ready(local.clone())).await);
+            assert_eq!(resolver.retain_count(), retains + 1);
+            assert!(active_fetch(local_key).is_none());
+            assert_eq!(
+                mailbox.acquire(local.digest()).await.unwrap().digest(),
+                local.digest()
+            );
+            assert_eq!(resolver.retain_count(), retains + 1);
+
+            // A resolver delivery, a local body for queued demand, a local re-ingest of a
+            // completed body, and its consumption each leave the resolver untouched.
+            let completed = make_raw_block(local.digest(), Height::new(2), 200);
+            let queued = make_raw_block(completed.digest(), Height::new(3), 300);
+            let ready_key = handler::Key::Block(completed.digest());
+            let queued_key = handler::Key::Block(queued.digest());
+            let _lease = mailbox.prefetch(Arc::from([completed.digest(), queued.digest()]), 0..2);
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "active ready prefetch",
+                || active_fetch(ready_key).is_some(),
+            )
+            .await;
+            assert!(
+                !resolver
+                    .fetches()
+                    .iter()
+                    .any(|fetch| fetch.key == queued_key)
+            );
+            let retains = resolver.retain_count();
+            let fetch = active_fetch(ready_key).unwrap();
+            deliver_acquisition_test_block(&resolver, fetch, &completed).await;
+            assert_eq!(resolver.retain_count(), retains, "resolver delivery");
+            let round = Round::new(Epoch::zero(), View::new(3));
+            assert!(mailbox.verified(round, ready(queued.clone())).await);
+            assert_eq!(resolver.retain_count(), retains, "queued demand");
+            let round = Round::new(Epoch::zero(), View::new(2));
+            assert!(mailbox.verified(round, ready(completed.clone())).await);
+            assert_eq!(resolver.retain_count(), retains, "completed body re-ingest");
+            assert_eq!(
+                mailbox.acquire(completed.digest()).await.unwrap().digest(),
+                completed.digest()
+            );
+            assert_eq!(
+                resolver.retain_count(),
+                retains,
+                "completed body consumption"
+            );
+            assert!(
+                !resolver
+                    .fetches()
+                    .iter()
+                    .any(|fetch| fetch.key == queued_key)
+            );
+
+            // An acquire can find a newly buffered body while its peer request is still
+            // active. It must cancel that request and release the slot for queued demand.
+            let buffered = make_raw_block(queued.digest(), Height::new(4), 400);
+            let next = make_raw_block(buffered.digest(), Height::new(5), 500);
+            let buffered_key = handler::Key::Block(buffered.digest());
+            let next_key = handler::Key::Block(next.digest());
+            let fetches = resolver.fetches().len();
+            let _buffered_lease =
+                mailbox.prefetch(Arc::from([buffered.digest(), next.digest()]), 0..2);
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "active buffered prefetch",
+                || active_fetch(buffered_key).is_some(),
+            )
+            .await;
+            assert_eq!(resolver.fetches().len(), fetches + 1);
+            assert!(active_fetch(next_key).is_none());
+            let retains = resolver.retain_count();
+            buffer.insert(buffered.clone());
+            assert_eq!(
+                mailbox.acquire(buffered.digest()).await.unwrap().digest(),
+                buffered.digest()
+            );
+            assert_eq!(resolver.retain_count(), retains + 1);
+            assert!(active_fetch(buffered_key).is_none());
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "buffered acquire releases the speculative slot",
+                || active_fetch(next_key).is_some(),
+            )
+            .await;
+            let recorded = resolver.fetches();
+            assert_eq!(recorded.len(), fetches + 2);
+            for key in [buffered_key, next_key] {
+                assert_eq!(
+                    recorded.iter().filter(|fetch| fetch.key == key).count(),
+                    1,
+                    "each commitment must be fetched exactly once"
+                );
+            }
+            assert_eq!(resolver.retain_count(), retains + 1);
+        });
+    }
+
+    fn finalize_test_block(schemes: &[S], block: &B) -> Finalization<S, D> {
+        StandardHarness::make_finalization(
+            Proposal::new(
+                Round::new(Epoch::zero(), View::new(block.height().get())),
+                View::new(block.height().previous().unwrap().get()),
+                block.digest(),
+            ),
+            schemes,
+            QUORUM,
+        )
+    }
+
+    /// Reports the finalization of `payload` at `round`, whose proposal names the view `parent`.
+    async fn report_finalized(
+        mailbox: &mut Mailbox<S, Standard<B>>,
+        schemes: &[S],
+        round: Round,
+        parent: View,
+        payload: D,
+    ) {
+        let proposal = Proposal::new(round, parent, payload);
+        let finalization = StandardHarness::make_finalization(proposal, schemes, QUORUM);
+        StandardHarness::report_finalization(mailbox, finalization).await;
+    }
+
+    async fn deliver_finalized_test_block(
+        resolver: &RecordingResolver,
+        finalization: Finalization<S, D>,
+        block: &B,
+    ) {
+        let (response, response_rx) = oneshot::channel();
+        assert!(
+            resolver
+                .enqueue(handler::Message::Deliver {
+                    delivery: Delivery {
+                        key: handler::Key::Finalized {
+                            height: block.height(),
+                        },
+                        subscribers: NonEmptyVec::new((
+                            handler::Annotation::Height(block.height()),
+                            tracing::Span::none(),
+                        )),
+                    },
+                    value: (finalization, block.clone()).encode(),
+                    response,
+                })
+                .accepted()
+        );
+        assert_eq!(
+            response_rx
+                .await
+                .expect("finalized delivery verdict missing"),
+            Outcome::Resolved(Resolution::Complete)
+        );
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_finalized_delivery_satisfies_prefetch_demand() {
+        const PARTITION: &str = "finalized-prefetch-demand";
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (mailbox, resolver, _, application, _actor) =
+                start_capped_actor(&context, PARTITION, &schemes, NZUsize!(1)).await;
+            assert_eq!(application.acknowledged().await, Height::zero());
+            let finalization = |block: &B| finalize_test_block(&schemes, block);
+            let active = |block: &B| resolver.active_subscription(block.digest());
+            let fetched = |block: &B| resolver.subscriptions(block.digest()) > 0;
+            let anchor = make_raw_block(Sha256::hash(&[b"predecessor"]), Height::new(5), 500);
+            let next = make_raw_block(anchor.digest(), Height::new(6), 600);
+            let queued = make_raw_block(next.digest(), Height::new(7), 700);
+            let lease = mailbox.prefetch(
+                Arc::from([anchor.digest(), next.digest(), queued.digest()]),
+                0..3,
+            );
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "active anchor prefetch",
+                || active(&anchor).is_some(),
+            )
+            .await;
+            let canonical = mailbox.finalized(anchor.height());
+            mailbox.set_floor(finalization(&anchor));
+            mailbox.hint_finalized(anchor.height(), NonEmptyVec::new(participants[1].clone()));
+            let _ = mailbox.get_processed().await;
+            deliver_finalized_test_block(&resolver, finalization(&anchor), &anchor).await;
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Absent(Height::new(4)))
+            );
+            assert_eq!(canonical.await.unwrap().digest(), anchor.digest());
+            assert!(
+                active(&anchor).is_none(),
+                "finalized anchor must cancel active exact demand"
+            );
+            assert!(resolver.active_fetches().iter().any(|fetch| {
+                fetch.key
+                    == handler::Key::Finalized {
+                        height: anchor.height(),
+                    }
+                    && fetch.subscriber == handler::Annotation::Height(anchor.height())
+            }));
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "anchor releases prefetch slot",
+                || active(&next).is_some(),
+            )
+            .await;
+
+            // Queued demand owns no request; a finalized body retires it locally.
+            assert!(!fetched(&queued));
+            mailbox.hint_finalized(queued.height(), NonEmptyVec::new(participants[1].clone()));
+            let _ = mailbox.get_processed().await;
+            let retains = resolver.retain_count();
+            deliver_finalized_test_block(&resolver, finalization(&queued), &queued).await;
+            let _ = mailbox.get_processed().await;
+            assert_eq!(resolver.retain_count(), retains, "queued finalized demand");
+            assert!(!fetched(&queued));
+            drop(lease);
+            wait_until(&context, Duration::from_secs(1), "old lease closes", || {
+                active(&next).is_none()
+            })
+            .await;
+
+            // A verdict-completed body occupies capacity until canonical storage claims it.
+            let completed = make_raw_block(queued.digest(), Height::new(8), 800);
+            let tail = make_raw_block(completed.digest(), Height::new(9), 900);
+            let _lease = mailbox.prefetch(Arc::from([completed.digest(), tail.digest()]), 0..2);
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "ready body prefetch",
+                || active(&completed).is_some(),
+            )
+            .await;
+            let fetch = active(&completed).unwrap();
+            deliver_acquisition_test_block(&resolver, fetch.clone(), &completed).await;
+            resolver.complete(&fetch);
+            let _ = mailbox.get_processed().await;
+            assert!(!fetched(&tail));
+            mailbox.hint_finalized(
+                completed.height(),
+                NonEmptyVec::new(participants[1].clone()),
+            );
+            let _ = mailbox.get_processed().await;
+            let retains = resolver.retain_count();
+            deliver_finalized_test_block(&resolver, finalization(&completed), &completed).await;
+            let _ = mailbox.get_processed().await;
+            assert_eq!(resolver.retain_count(), retains, "ready finalized demand");
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "canonical storage releases ready slot",
+                || active(&tail).is_some(),
+            )
+            .await;
+            assert!(!fetched(&queued));
+            assert_eq!(
+                mailbox.acquire(completed.digest()).await.unwrap().digest(),
+                completed.digest()
+            );
+            assert_eq!(resolver.retain_count(), retains);
+        });
+    }
+
+    fn independent_acquisition_with_parked_request(speculative: bool) {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let partition = format!("independent-acquisition-{speculative}");
+            let (mailbox, resolver, _, application, _actor) =
+                start_capped_actor(&context, &partition, &schemes, NZUsize!(1)).await;
+            assert_eq!(application.acknowledged().await, Height::zero());
+
+            let withheld = Sha256::hash(&[b"indefinitely withheld"]);
+            let mut lease = speculative.then(|| mailbox.prefetch(Arc::from([withheld]), 0..1));
+            let mut caller = (!speculative).then(|| mailbox.acquire(withheld));
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "first request occupies capacity",
+                || {
+                    resolver
+                        .fetches()
+                        .iter()
+                        .any(|fetch| fetch.key == handler::Key::Block(withheld))
+                },
+            )
+            .await;
+
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let available = make_raw_block(genesis.digest(), Height::new(1), 100);
+            resolver.respond_to_next_fetch(available.encode());
+            let independent = mailbox.acquire(available.digest());
+            select! {
+                result = independent => {
+                    let block = result.expect("independent acquisition canceled");
+                    assert_eq!(block.digest(), available.digest());
+                },
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("parked request blocked an independent acquisition ({speculative})");
+                },
+            }
+            assert!(resolver.wait_for_delivery_response().await);
+            assert!(
+                resolver
+                    .fetches()
+                    .iter()
+                    .any(|fetch| fetch.key == handler::Key::Block(available.digest()))
+            );
+            if let Some(lease) = &mut lease {
+                assert!(matches!(lease.try_recv(), Err(TryRecvError::Empty)));
+            }
+            if let Some(caller) = &mut caller {
+                assert!(matches!(caller.try_recv(), Err(TryRecvError::Empty)));
+            }
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_parked_prefetch_does_not_block_direct_acquisition() {
+        independent_acquisition_with_parked_request(true);
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_parked_direct_caller_does_not_block_independent_acquisition() {
+        independent_acquisition_with_parked_request(false);
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_ranges_use_max_repair_with_parked_leases() {
+        const LENGTH: u64 = 10;
+        for max_repair in [NZUsize!(1), NZUsize!(3)] {
+            deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+                let Fixture { schemes, .. } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let partition = format!("range-window-{max_repair}");
+                let (finalizations, stored) = prunable_finalized_stores(&context, &partition).await;
+                let mut config = test_config(
+                    &partition,
+                    ConstantProvider::new(schemes[0].clone()),
+                    NZUsize!(1),
+                );
+                config.max_repair = max_repair;
+                let (actor, mailbox, _) =
+                    Actor::init(context.child("actor"), finalizations, stored, config).await;
+                let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+                let (application, started) = HoldingBlockReporter::new();
+                let _actor = actor.start(
+                    application,
+                    RecordingBuffer::default(),
+                    (resolver_rx, resolver.clone()),
+                );
+                assert_eq!(started.await.unwrap(), Height::zero());
+                let _ = mailbox.get_processed().await;
+
+                // An unrelated lease occupies the shared speculative capacity.
+                // The selected range must use its own window of max_repair bodies.
+                let parked: Arc<[_]> = (0..max_repair.get())
+                    .map(|index| Sha256::hash(&[b"parked dependency", &index.to_be_bytes()]))
+                    .collect();
+                let parked_keys: Vec<_> = parked.iter().copied().map(handler::Key::Block).collect();
+                let mut lease = mailbox.prefetch(parked, 0..max_repair.get());
+                wait_until(&context, Duration::from_secs(1), "parked prefetch", || {
+                    resolver.active_fetches().len() == max_repair.get()
+                })
+                .await;
+
+                let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+                let mut selected = vec![genesis.digest()];
+                let blocks: Vec<_> = (1..=LENGTH)
+                    .map(|height| {
+                        let block =
+                            make_raw_block(*selected.last().unwrap(), Height::new(height), height);
+                        selected.push(block.digest());
+                        block
+                    })
+                    .collect();
+                let source = mailbox.blocks_with_parent(
+                    Height::new(LENGTH),
+                    *selected.last().unwrap(),
+                    anchored(selected),
+                );
+                let mut range = source.range(Height::new(1)..=Height::new(LENGTH));
+                assert!(range.next().now_or_never().is_none());
+                let _ = mailbox.get_processed().await;
+
+                let fetched_keys = || {
+                    resolver
+                        .fetches()
+                        .iter()
+                        .map(|fetch| fetch.key)
+                        .collect::<Vec<_>>()
+                };
+                let mut expected = parked_keys.clone();
+                expected.extend(
+                    blocks[..max_repair.get()]
+                        .iter()
+                        .map(|block| handler::Key::Block(block.digest())),
+                );
+                assert_eq!(fetched_keys(), expected);
+                assert_eq!(
+                    resolver
+                        .active_fetches()
+                        .iter()
+                        .map(|fetch| fetch.key)
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+
+                // Completed positions still occupy the window until the head
+                // is consumed, even when their bodies arrive in reverse order.
+                for block in blocks[1..max_repair.get()].iter().rev() {
+                    let fetch = resolver
+                        .active_fetches()
+                        .into_iter()
+                        .find(|fetch| fetch.key == handler::Key::Block(block.digest()))
+                        .expect("selected request missing");
+                    deliver_acquisition_test_block(&resolver, fetch.clone(), block).await;
+                    resolver.complete(&fetch);
+                    assert!(range.next().now_or_never().is_none());
+                    let _ = mailbox.get_processed().await;
+                    assert_eq!(fetched_keys(), expected);
+                }
+
+                assert!(range.next().now_or_never().is_none());
+                let _ = mailbox.get_processed().await;
+                assert_eq!(fetched_keys(), expected);
+
+                let head = &blocks[0];
+                let fetch = resolver
+                    .active_fetches()
+                    .into_iter()
+                    .find(|fetch| fetch.key == handler::Key::Block(head.digest()))
+                    .expect("head request missing");
+                deliver_acquisition_test_block(&resolver, fetch.clone(), head).await;
+                resolver.complete(&fetch);
+                assert_eq!(range.next().await.unwrap().unwrap().digest(), head.digest());
+                let _ = mailbox.get_processed().await;
+                assert_eq!(fetched_keys(), expected);
+
+                for block in &blocks[1..max_repair.get()] {
+                    assert_eq!(
+                        range
+                            .next()
+                            .now_or_never()
+                            .unwrap()
+                            .unwrap()
+                            .unwrap()
+                            .digest(),
+                        block.digest()
+                    );
+                }
+                assert!(range.next().now_or_never().is_none());
+                let next_key = handler::Key::Block(blocks[max_repair.get()].digest());
+                wait_until(
+                    &context,
+                    Duration::from_secs(1),
+                    "range window advances",
+                    || {
+                        resolver
+                            .active_fetches()
+                            .iter()
+                            .any(|fetch| fetch.key == next_key)
+                    },
+                )
+                .await;
+                let _ = mailbox.get_processed().await;
+                expected.extend(
+                    blocks[max_repair.get()..2 * max_repair.get()]
+                        .iter()
+                        .map(|block| handler::Key::Block(block.digest())),
+                );
+                assert_eq!(fetched_keys(), expected);
+
+                drop(range);
+                wait_until(
+                    &context,
+                    Duration::from_secs(1),
+                    "range cancellation preserves parked lease",
+                    || {
+                        resolver
+                            .active_fetches()
+                            .iter()
+                            .map(|fetch| fetch.key)
+                            .collect::<Vec<_>>()
+                            == parked_keys
+                    },
+                )
+                .await;
+                assert!(matches!(lease.try_recv(), Err(TryRecvError::Empty)));
+                let _ = mailbox.get_processed().await;
+                drop(lease);
+                wait_until(
+                    &context,
+                    Duration::from_secs(1),
+                    "parked lease cancellation",
+                    || resolver.active_fetches().is_empty(),
+                )
+                .await;
+                let _ = mailbox.get_processed().await;
+                assert_eq!(fetched_keys(), expected);
+            });
+        }
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_parked_local_range_bounds_body_reads() {
+        const PARTITION: &str = "parked-local-range-body-reads";
+        const LENGTH: u64 = 64;
+        const BODY_WINDOW: usize = 8;
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (finalizations, mut stored) = prunable_finalized_stores(&context, PARTITION).await;
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let mut selected = vec![genesis.digest()];
+            for height in 1..=LENGTH {
+                let block = Arc::new(make_raw_block(
+                    *selected.last().unwrap(),
+                    Height::new(height),
+                    height,
+                ));
+                selected.push(block.digest());
+                stored = stored
+                    .put_sync(height, block.digest(), &block)
+                    .await
+                    .unwrap();
+            }
+            let stored = Recording::new(stored, |block: &Arc<B>| Arc::as_ptr(block).addr());
+            let operations = stored.ops();
+            let mut config = test_config(
+                PARTITION,
+                ConstantProvider::new(schemes[0].clone()),
+                NZUsize!(1),
+            );
+            config.max_repair = NZUsize!(BODY_WINDOW);
+            assert!(LENGTH as usize > config.max_repair.get());
+            let (actor, mailbox, _) =
+                Actor::init(context.child("actor"), finalizations, stored, config).await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::manual_ack();
+            let _actor = actor.start(
+                application.clone(),
+                RecordingBuffer::default(),
+                (resolver_rx, resolver.clone()),
+            );
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "held genesis acknowledgement",
+                || application.pending_ack_heights() == vec![Height::zero()],
+            )
+            .await;
+            let _ = mailbox.get_processed().await;
+            operations.lock().clear();
+
+            let expected = selected[1];
+            let source = mailbox.blocks_with_parent(
+                Height::new(LENGTH),
+                *selected.last().unwrap(),
+                anchored(selected),
+            );
+            let mut range = source.range(Height::new(1)..=Height::new(LENGTH));
+            let first = range.next().await.unwrap().unwrap();
+            assert_eq!(first.digest(), expected);
+
+            // Keep the range alive without polling again. Speculative scheduling
+            // must use metadata while the application holds its first body.
+            context.sleep(Duration::from_millis(100)).await;
+            let reads = operations
+                .lock()
+                .iter()
+                .filter(|op| matches!(op, Op::Get(None)))
+                .count();
+            assert!(
+                reads <= BODY_WINDOW,
+                "parked range decoded {reads} stored bodies for a {BODY_WINDOW}-body window"
+            );
+            assert!(
+                reads > 0,
+                "the range must acquire bodies from recorded storage"
+            );
+            assert!(
+                resolver.fetches().is_empty(),
+                "locally stored bodies must not be fetched"
+            );
+            assert_eq!(application.pending_ack_heights(), vec![Height::zero()]);
+            drop(range);
+        });
+    }
+
+    /// Forward repair fills internal gaps in height order within each pass's request bound.
+    #[test_traced("WARN")]
+    fn test_standard_forward_gap_repair_batches_lowest_missing_heights() {
+        for floor in [false, true] {
+            deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+                let Fixture { schemes, .. } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let partition = format!("forward-repair-batches-{floor}");
+                let max_repair = if floor { 3 } else { 4 };
+                let (mut mailbox, resolver, buffer, application, _actor) =
+                    start_capped_actor(&context, &partition, &schemes, NZUsize!(max_repair)).await;
+                assert_eq!(application.acknowledged().await, Height::zero());
+                while mailbox.get_processed().await != Some(Processed::Block(Height::zero())) {
+                    reschedule().await;
+                }
+                let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+                let mut chain = vec![genesis.inner().clone()];
+                for height in 1..=9 {
+                    chain.push(make_raw_block(
+                        chain.last().unwrap().digest(),
+                        Height::new(height),
+                        height,
+                    ));
+                }
+                let finalize = |block: &B| finalize_test_block(&schemes, block);
+                let processed = if floor { 4 } else { 0 };
+                let assert_batches = |offset: usize, expected: &[u64], last: u64| {
+                    let batches = resolver.fetch_batches.lock();
+                    let observed = &batches[offset..];
+                    if expected.is_empty() {
+                        assert!(
+                            observed.is_empty(),
+                            "a repaired archive must not fetch trailing heights"
+                        );
+                        return;
+                    }
+                    assert!(!observed.is_empty(), "missing forward repair batch");
+                    for batch in observed {
+                        assert!(
+                            batch.len() <= max_repair,
+                            "forward repair exceeded its per-pass bound"
+                        );
+                        let heights: Vec<_> = batch
+                            .iter()
+                            .map(|fetch| {
+                                let handler::Key::Finalized { height } = fetch.key else {
+                                    panic!("forward batch must contain finalized-height requests");
+                                };
+                                assert_eq!(fetch.subscriber, handler::Annotation::Height(height));
+                                assert!(height.get() > processed && height.get() < last);
+                                height.get()
+                            })
+                            .collect();
+                        assert_eq!(
+                            heights, expected,
+                            "forward repair must select the lowest missing heights"
+                        );
+                    }
+                };
+
+                if floor {
+                    buffer.insert(chain[5].clone());
+                    mailbox.set_floor(finalize(&chain[5]));
+                    assert_eq!(
+                        mailbox.get_processed().await,
+                        Some(Processed::Absent(Height::new(4)))
+                    );
+                } else {
+                    let offset = resolver.fetch_batches.lock().len();
+                    buffer.insert(chain[4].clone());
+                    StandardHarness::report_finalization(&mut mailbox, finalize(&chain[4])).await;
+                    assert!(mailbox.get_block(Height::new(4)).await.is_some());
+                    assert_batches(offset, &[1, 2, 3], 4);
+                }
+
+                let offset = resolver.fetch_batches.lock().len();
+                buffer.insert(chain[9].clone());
+                StandardHarness::report_finalization(&mut mailbox, finalize(&chain[9])).await;
+                assert!(mailbox.get_block(Height::new(9)).await.is_some());
+                assert_batches(offset, if floor { &[6, 7, 8] } else { &[1, 2, 3, 5] }, 9);
+
+                let deliveries: Vec<(usize, &[u64])> = if floor {
+                    vec![(6, &[7, 8]), (7, &[8]), (8, &[])]
+                } else {
+                    vec![
+                        (1, &[2, 3, 5, 6]),
+                        (2, &[3, 5, 6, 7]),
+                        (3, &[5, 6, 7, 8]),
+                        (5, &[6, 7, 8]),
+                        (6, &[7, 8]),
+                        (7, &[8]),
+                        (8, &[]),
+                    ]
+                };
+                for (height, expected) in deliveries {
+                    let offset = resolver.fetch_batches.lock().len();
+                    let block = &chain[height];
+                    deliver_finalized_test_block(&resolver, finalize(block), block).await;
+                    assert_eq!(
+                        mailbox.get_block(block.height()).await.unwrap().digest(),
+                        block.digest()
+                    );
+                    assert_batches(offset, expected, 9);
+                }
+            });
+        }
+    }
+
+    /// Exact deliveries unrelated to finalized gap repair do not read the gap's boundary block.
+    #[test_traced("WARN")]
+    fn test_standard_unrelated_deliveries_skip_gap_boundary_read() {
+        const PARTITION_PREFIX: &str = "unrelated-delivery-gap-boundary";
+        const DELIVERIES: u64 = 5;
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (finalizations_by_height, finalized_blocks) =
+                prunable_finalized_stores(&context, PARTITION_PREFIX).await;
+            let finalized_blocks =
+                Recording::new(finalized_blocks, |block: &Arc<B>| Arc::as_ptr(block).addr());
+            let ops = finalized_blocks.ops();
+            let (actor, mut mailbox, _) = Actor::init(
+                context.child("actor"),
+                finalizations_by_height,
+                finalized_blocks,
+                test_config(
+                    PARTITION_PREFIX,
+                    ConstantProvider::new(schemes[0].clone()),
+                    NZUsize!(1),
+                ),
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let buffer = RecordingBuffer::default();
+            let _actor_handle = actor.start(
+                Application::<B>::default(),
+                buffer.clone(),
+                (resolver_rx, resolver.clone()),
+            );
+
+            // Finalize the tip of a chain whose ancestors are missing, opening a gap below it.
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let mut parent = genesis.digest();
+            let mut chain = Vec::new();
+            for height in 1..=6 {
+                let block = make_raw_block(parent, Height::new(height), height);
+                parent = block.digest();
+                chain.push(block);
+            }
+            let boundary = chain[5].clone();
+            buffer.insert(boundary.clone());
+            report_finalized(
+                &mut mailbox,
+                &schemes,
+                Round::new(Epoch::zero(), View::new(6)),
+                View::new(5),
+                boundary.digest(),
+            )
+            .await;
+            let is_repair = |fetch: &FetchRecord, block: &B| {
+                fetch.key == handler::Key::Block(block.digest())
+                    && fetch.subscriber == handler::Annotation::Height(block.height())
+            };
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "gap repair request",
+                || {
+                    resolver
+                        .active_fetches()
+                        .iter()
+                        .any(|fetch| is_repair(fetch, &chain[4]))
+                },
+            )
+            .await;
+
+            // Acquire unfinalized blocks above the gap.
+            let unrelated: Vec<_> = (0..DELIVERIES)
+                .map(|i| make_raw_block(genesis.digest(), Height::new(10 + i), 1000 + i))
+                .collect();
+            let acquisitions: Vec<_> = unrelated
+                .iter()
+                .map(|block| mailbox.acquire(block.digest()))
+                .collect();
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "unrelated acquisitions",
+                || {
+                    let active = resolver.active_fetches();
+                    unrelated.iter().all(|block| {
+                        active
+                            .iter()
+                            .any(|fetch| fetch.key == handler::Key::Block(block.digest()))
+                    })
+                },
+            )
+            .await;
+
+            // Deliver every unrelated block in one resolver batch. Only the batch's gap repair
+            // pass may read the boundary.
+            ops.lock().clear();
+            let responses: Vec<_> = unrelated
+                .iter()
+                .map(|block| {
+                    let (response, response_rx) = oneshot::channel();
+                    assert!(
+                        resolver
+                            .enqueue(handler::Message::Deliver {
+                                delivery: Delivery {
+                                    key: handler::Key::Block(block.digest()),
+                                    subscribers: NonEmptyVec::new((
+                                        handler::Annotation::Subscription,
+                                        tracing::Span::none(),
+                                    )),
+                                },
+                                value: block.encode(),
+                                response,
+                            })
+                            .accepted()
+                    );
+                    response_rx
+                })
+                .collect();
+            for response in responses {
+                assert_eq!(
+                    response.await.unwrap(),
+                    Outcome::Resolved(Resolution::Complete)
+                );
+            }
+            for (acquisition, block) in acquisitions.into_iter().zip(&unrelated) {
+                assert_eq!(acquisition.await.unwrap().digest(), block.digest());
+            }
+            let reads = ops
+                .lock()
+                .iter()
+                .filter(|op| **op == Op::Get(Some(boundary.height())))
+                .count();
+            assert!(
+                reads <= 1,
+                "boundary read {reads} times for unrelated deliveries"
+            );
+
+            // The requested gap parent is still archived, so repair advances to its parent.
+            let fetch = resolver
+                .active_fetches()
+                .into_iter()
+                .find(|fetch| is_repair(fetch, &chain[4]))
+                .unwrap();
+            deliver_acquisition_test_block(&resolver, fetch, &chain[4]).await;
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "next gap repair request",
+                || {
+                    resolver
+                        .active_fetches()
+                        .iter()
+                        .any(|fetch| is_repair(fetch, &chain[3]))
+                },
+            )
+            .await;
+            assert_eq!(
+                mailbox.get_block(Height::new(5)).await.unwrap().digest(),
+                chain[4].digest()
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_rejected_overflow_prune_preserves_canonical_waiters() {
+        for prune_first in [true, false] {
+            deterministic::Runner::timed(Duration::from_secs(30)).start(
+                move |mut context| async move {
+                    const PREFIX: &str = "rejected-overflow-prune";
+                    let Fixture { schemes, .. } = bls12381_threshold_vrf::fixture::<V, _>(
+                        &mut context,
+                        NAMESPACE,
+                        NUM_VALIDATORS,
+                    );
+                    let (finalizations, blocks) = prunable_finalized_stores(&context, PREFIX).await;
+                    let mut config = test_config(
+                        PREFIX,
+                        ConstantProvider::new(schemes[0].clone()),
+                        NZUsize!(1),
+                    );
+                    config.mailbox_size = NZUsize!(1);
+                    let (actor, mut mailbox, floor) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                        context.child("actor"),
+                        finalizations,
+                        blocks,
+                        config,
+                    )
+                    .await;
+                    assert_eq!(floor.processed(), None);
+
+                    let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+                    let height = Height::new(1);
+                    let round = Round::new(Epoch::zero(), View::new(1));
+                    let block = make_raw_block(genesis.digest(), height, 100);
+                    let finalization = StandardHarness::make_finalization(
+                        Proposal::new(round, View::zero(), block.digest()),
+                        &schemes,
+                        QUORUM,
+                    );
+
+                    // The actor has not started, so this live request fills ready capacity.
+                    let pending = mailbox.acquire(genesis.digest());
+                    if prune_first {
+                        mailbox.prune(Height::new(10));
+                    }
+                    let mut direct = mailbox.finalized(height);
+                    let source = mailbox.finalized_blocks(height);
+                    let mut range = source.range(height..=height);
+                    let mut read = Box::pin(range.next());
+                    let early = read.as_mut().now_or_never();
+                    let mut canceled = mailbox.finalized(Height::new(10));
+                    assert!(matches!(canceled.try_recv(), Err(TryRecvError::Empty)));
+                    drop(canceled);
+                    if !prune_first {
+                        mailbox.prune(Height::new(10));
+                    }
+
+                    let (resolver_rx, resolver) =
+                        RecordingResolver::holding(context.child("resolver"));
+                    let _actor = actor
+                        .start_unbuffered(Application::<B>::manual_ack(), (resolver_rx, resolver));
+
+                    // This read follows the overflowed prune in the actor mailbox.
+                    assert!(mailbox.get_verified(round).await.is_none());
+                    assert_eq!(pending.await.unwrap().digest(), genesis.digest());
+                    assert_eq!(mailbox.get_processed().await, None);
+                    assert_eq!(
+                        mailbox.get_block(Height::zero()).await.unwrap().digest(),
+                        genesis.digest(),
+                    );
+                    assert!(mailbox.get_block(height).await.is_none());
+                    assert!(mailbox.get_finalization(height).await.is_none());
+                    let direct_before = direct.try_recv();
+                    let canonical_before = early.or_else(|| read.as_mut().now_or_never());
+
+                    assert!(mailbox.verified(round, ready(block.clone())).await);
+                    assert!(mailbox.get_block(height).await.is_none());
+                    StandardHarness::report_finalization(&mut mailbox, finalization).await;
+                    assert_eq!(
+                        mailbox
+                            .get_finalization(height)
+                            .await
+                            .unwrap()
+                            .proposal
+                            .payload,
+                        block.digest(),
+                    );
+                    assert_eq!(
+                        mailbox.get_block(height).await.unwrap().digest(),
+                        block.digest(),
+                    );
+                    assert_eq!(mailbox.get_processed().await, None);
+
+                    assert!(
+                        canonical_before.is_none(),
+                        "canonical read ended early ({prune_first}): {canonical_before:?}",
+                    );
+                    assert!(
+                        matches!(direct_before, Err(TryRecvError::Empty)),
+                        "finalized waiter closed early (prune_first={prune_first})",
+                    );
+                    assert_eq!(direct.await.unwrap().digest(), block.digest());
+                    assert_eq!(read.await.unwrap().unwrap().digest(), block.digest());
+                    assert!(range.next().await.is_none());
+                },
+            );
+        }
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_catch_up_gap_latency() {
+        const HEIGHTS: u64 = 64;
+        const LATENCY: Duration = Duration::from_millis(100);
+        const SAMPLE: Duration = Duration::from_millis(1);
+        deterministic::Runner::timed(Duration::from_secs(120)).start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let peers = vec![participants[0].clone(), participants[1].clone()];
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                peers.clone(),
+                1024 * 1024,
+            )
+            .await;
+            let peer = StandardHarness::setup_validator(
+                context.child("peer"),
+                &mut oracle,
+                peers[1].clone(),
+                ConstantProvider::new(schemes[1].clone()),
+            )
+            .await;
+            let mut peer_handle: ValidatorHandle<StandardHarness> = ValidatorHandle {
+                mailbox: peer.mailbox,
+                extra: peer.extra,
+            };
+            let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
+            let mut parent = StandardHarness::genesis_block(NUM_VALIDATORS as u16).digest();
+            let mut tip_finalization = None;
+            for height in 1..=HEIGHTS {
+                let block = ready(make_raw_block(parent, Height::new(height), height));
+                parent = block.digest();
+                let round = Round::new(
+                    epocher.containing(Height::new(height)).unwrap().epoch(),
+                    View::new(height),
+                );
+                StandardHarness::propose(&mut peer_handle, round, &block).await;
+                StandardHarness::verify(&mut peer_handle, round, &block, &mut []).await;
+                let proposal = Proposal::new(round, View::new(height - 1), block.digest());
+                let notarization =
+                    StandardHarness::make_notarization(proposal.clone(), &schemes, QUORUM);
+                StandardHarness::report_notarization(&mut peer_handle.mailbox, notarization).await;
+                let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
+                StandardHarness::report_finalization(
+                    &mut peer_handle.mailbox,
+                    finalization.clone(),
+                )
+                .await;
+                let processed = Some(Height::new(height));
+                while peer_handle
+                    .mailbox
+                    .get_processed()
+                    .await
+                    .map(Processed::height)
+                    != processed
+                {
+                    context.sleep(SAMPLE).await;
+                }
+                let stored = peer_handle
+                    .mailbox
+                    .get_finalization(Height::new(height))
+                    .await;
+                assert!(stored.is_some());
+                tip_finalization = Some(finalization);
+            }
+
+            let victim = StandardHarness::setup_validator(
+                context.child("victim"),
+                &mut oracle,
+                peers[0].clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let mut victim_mailbox = victim.mailbox;
+            let at_genesis = Some(Height::zero());
+            while victim_mailbox.get_processed().await.map(Processed::height) != at_genesis {
+                context.sleep(SAMPLE).await;
+            }
+            assert_eq!(victim.application.blocks().len(), 1);
+            let link = commonware_p2p::simulated::Link {
+                latency: LATENCY,
+                jitter: Duration::ZERO,
+                success_rate: probability!(1.0),
+            };
+            setup_network_links(&mut oracle, &peers, link).await;
+
+            let started = context.current();
+            StandardHarness::report_finalization(&mut victim_mailbox, tip_finalization.unwrap())
+                .await;
+            let caught_up = Some(Height::new(HEIGHTS));
+            while victim_mailbox.get_processed().await.map(Processed::height) != caught_up {
+                context.sleep(SAMPLE).await;
+            }
+            let elapsed = context.current().duration_since(started).unwrap();
+            assert_eq!(victim.application.blocks().len(), HEIGHTS as usize + 1);
+            for height in 0..=HEIGHTS {
+                assert!(
+                    victim
+                        .application
+                        .blocks()
+                        .contains_key(&Height::new(height))
+                );
+            }
+            assert!(
+                elapsed < Duration::from_secs(2),
+                "cold gap repair exceeded ten response waves: {elapsed:?}"
+            );
         });
     }
 }

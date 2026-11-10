@@ -940,7 +940,11 @@ mod tests {
                 parent: (View::new(boundary_height.get()), boundary_digest),
             };
 
-            let verify_rx = inline.verify(reproposal_context.clone(), boundary_digest, History::anchored(Arc::from([reproposal_context.parent.1])));
+            let verify_rx = inline.verify(
+                reproposal_context.clone(),
+                boundary_digest,
+                History::anchored(Arc::from([reproposal_context.parent.1])),
+            );
             assert!(
                 verify_rx.await.unwrap(),
                 "verify should accept a valid boundary re-proposal"
@@ -950,7 +954,11 @@ mod tests {
             drop(marshal);
             context.sleep(Duration::from_millis(1)).await;
 
-            let certify_rx = inline.certify(reproposal_round, boundary_digest, History::suffix(Arc::from([])));
+            let certify_rx = inline.certify(
+                reproposal_round,
+                boundary_digest,
+                History::suffix(Arc::from([])),
+            );
             select! {
                 result = certify_rx => {
                     assert!(
@@ -1428,7 +1436,11 @@ mod tests {
                 "buffer broadcast for child should be accepted"
             );
 
-            let verify_rx = inline.verify(child_ctx.clone(), child_digest, History::anchored(Arc::from([child_ctx.parent.1])));
+            let verify_rx = inline.verify(
+                child_ctx.clone(),
+                child_digest,
+                History::anchored(Arc::from([child_ctx.parent.1])),
+            );
 
             // Application verification is now blocked. The store request runs concurrently
             // with it, so the block is locally queryable even though the notarize vote has
@@ -1448,7 +1460,8 @@ mod tests {
                 verify_rx.await.expect("verify result missing"),
                 "inline verify should pass once verification is released"
             );
-            let certify_rx = inline.certify(child_round, child_digest, History::suffix(Arc::from([])));
+            let certify_rx =
+                inline.certify(child_round, child_digest, History::suffix(Arc::from([])));
             select! {
                 result = certify_rx => {
                     assert!(
@@ -1559,7 +1572,11 @@ mod tests {
                 leader,
                 parent: (View::new(1), certified_digest),
             };
-            let verify_rx = inline.verify(equivocating_ctx.clone(), digest, History::anchored(Arc::from([equivocating_ctx.parent.1])));
+            let verify_rx = inline.verify(
+                equivocating_ctx.clone(),
+                digest,
+                History::anchored(Arc::from([equivocating_ctx.parent.1])),
+            );
             assert!(
                 !verify_rx.await.expect("verify result missing"),
                 "the equivocating proposal must not be notarized"

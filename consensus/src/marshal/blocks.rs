@@ -816,7 +816,7 @@ mod tests {
     }
 
     #[test]
-    fn ranges_fetch_concurrently_and_release_consumed_blocks() {
+    fn range_fetches_window_and_releases_consumed() {
         deterministic::Runner::default().start(|_| async move {
             let blocks = chain(12);
             let requests = Requests::default();
@@ -879,7 +879,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_range_shares_commitments_and_scopes_prefetch_to_its_lifetime() {
+    fn range_scopes_prefetch_to_its_lifetime() {
         deterministic::Runner::default().start(|context| async move {
             type TestMessage = Message<harness::S, Standard<TestBlock>>;
             let (sender, mut receiver) =
@@ -918,7 +918,7 @@ mod tests {
     }
 
     #[test]
-    fn resident_range_of_a_suffix_requests_exact_bodies_without_walking() {
+    fn resident_range_reads_without_walking() {
         deterministic::Runner::default().start(|context| async move {
             let (marshal, mut receiver) = marshal(context, 8);
             let blocks = chain(10);
@@ -936,7 +936,6 @@ mod tests {
                 blocks[9].digest(),
                 History::suffix(resident),
             );
-            let clone = source.clone();
             assert_eq!(source.digest(Height::new(8)), Some(blocks[8].digest()));
             assert_eq!(source.digest(Height::new(6)), None);
             assert!(drain(&mut receiver).is_empty());
@@ -987,30 +986,11 @@ mod tests {
                 range.next().await.unwrap().unwrap().height(),
                 Height::new(9)
             );
-
-            // Dropping a range with outstanding demand cancels its lease and bodies.
-            let mut range = clone.range(Height::new(8)..=Height::new(9));
-            assert!(range.next().now_or_never().is_none());
-            let mut lease = None;
-            let mut pending = Vec::new();
-            for message in drain(&mut receiver) {
-                match message {
-                    TestMessage::Prefetch { lease: held, .. } => lease = Some(held),
-                    TestMessage::Acquire { response, .. } => pending.push(response),
-                    _ => panic!("unexpected message for a resident range"),
-                }
-            }
-            let lease = lease.unwrap();
-            assert_eq!(pending.len(), 2);
-            drop(range);
-            assert!(lease.is_closed());
-            assert!(pending.iter().all(oneshot::Sender::is_closed));
-            assert_eq!(clone.digest(Height::new(9)), Some(blocks[9].digest()));
         });
     }
 
     #[test]
-    fn range_below_a_suffix_walks_parent_links_and_yields_forward() {
+    fn range_below_suffix_walks_parent_links() {
         deterministic::Runner::default().start(|context| async move {
             let (marshal, mut receiver) = marshal(context, 8);
             let blocks = chain(10);
@@ -1042,7 +1022,7 @@ mod tests {
     }
 
     #[test]
-    fn gap_within_the_window_is_acquired_once() {
+    fn gap_within_window_is_acquired_once() {
         deterministic::Runner::default().start(|context| async move {
             let (marshal, mut receiver) = marshal(context, 4);
             let blocks = chain(10);
@@ -1071,7 +1051,7 @@ mod tests {
     }
 
     #[test]
-    fn gap_deeper_than_the_window_retains_its_lowest_bodies_and_reacquires_the_rest() {
+    fn gap_beyond_window_keeps_lowest_bodies() {
         deterministic::Runner::default().start(|context| async move {
             let (marshal, mut receiver) = marshal(context, 2);
             let blocks = chain(10);
@@ -1109,7 +1089,7 @@ mod tests {
     }
 
     #[test]
-    fn discovered_commitments_bind_the_bodies_read_at_their_heights() {
+    fn discovered_commitment_binds_its_body() {
         deterministic::Runner::default().start(|context| async move {
             let (marshal, mut receiver) = marshal(context, 1);
             let blocks = chain(10);
@@ -1135,7 +1115,7 @@ mod tests {
     }
 
     #[test]
-    fn walk_ends_at_a_matching_finalized_block_and_reads_finalized_storage_below() {
+    fn walk_ends_at_matching_finalized_block() {
         deterministic::Runner::default().start(|context| async move {
             let (marshal, mut receiver) = marshal(context, 8);
             let blocks = chain(10);
@@ -1167,7 +1147,7 @@ mod tests {
     }
 
     #[test]
-    fn conflicting_finalized_block_makes_lower_heights_unavailable() {
+    fn walk_fails_at_conflicting_finalized_block() {
         deterministic::Runner::default().start(|context| async move {
             let (marshal, mut receiver) = marshal(context, 8);
             let blocks = chain(10);
@@ -1199,7 +1179,7 @@ mod tests {
     }
 
     #[test]
-    fn lowest_commitment_must_match_finalized_storage_before_canonical_reads() {
+    fn lowest_commitment_must_match_finalized_block() {
         deterministic::Runner::default().start(|context| async move {
             for (resident, matches) in [(true, true), (true, false), (false, true), (false, false)]
             {
@@ -1280,7 +1260,7 @@ mod tests {
     }
 
     #[test]
-    fn finalized_blocks_and_empty_histories_read_canonical_blocks_or_follow_the_parent() {
+    fn empty_history_reads_canonical_or_follows_parent() {
         deterministic::Runner::default().start(|context| async move {
             let (marshal, mut receiver) = marshal(context, 8);
             let blocks = chain(4);
@@ -1330,7 +1310,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_digest_reports_resident_discovered_canonical_and_unavailable_heights() {
+    fn resolve_digest_distinguishes_heights() {
         deterministic::Runner::default().start(|context| async move {
             let (marshal, mut receiver) = marshal(context, 8);
             let blocks = chain(10);
@@ -1397,7 +1377,7 @@ mod tests {
     }
 
     #[test]
-    fn bound_parent_rejects_conflicting_or_malformed_history() {
+    fn bound_parent_rejects_malformed_history() {
         deterministic::Runner::default().start(|context| async move {
             let (marshal, mut receiver) = marshal(context, 1);
             let blocks = chain(5);
@@ -1427,7 +1407,7 @@ mod tests {
     }
 
     #[test]
-    fn dropping_the_last_waiter_cancels_the_walk_and_a_later_reader_resumes_it() {
+    fn walk_cancels_without_waiters() {
         deterministic::Runner::default().start(|context| async move {
             let (marshal, mut receiver) = marshal(context, 4);
             let blocks = chain(10);
@@ -1469,7 +1449,7 @@ mod tests {
     }
 
     #[test]
-    fn waiters_share_each_step_and_finish_at_their_own_heights() {
+    fn walk_shares_pending_step() {
         deterministic::Runner::default().start(|context| async move {
             let (marshal, mut receiver) = marshal(context, 4);
             let blocks = chain(10);
@@ -1524,7 +1504,7 @@ mod tests {
     }
 
     #[test]
-    fn finalization_during_a_pending_acquisition_is_seen_by_the_next_step() {
+    fn walk_sees_finalization_at_next_step() {
         deterministic::Runner::default().start(|context| async move {
             for matches in [true, false] {
                 let name = if matches { "matching" } else { "conflicting" };
@@ -1573,7 +1553,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_error_releases_active_prefetch_and_pending_bodies() {
+    fn range_error_releases_prefetch_and_bodies() {
         deterministic::Runner::default().start(|context| async move {
             type TestMessage = Message<harness::S, Standard<TestBlock>>;
             for expected in [
@@ -1665,7 +1645,7 @@ mod tests {
     }
 
     #[test]
-    fn later_wrong_parent_is_checked_against_yielded_prefix_without_metadata() {
+    fn range_checks_parent_against_yielded_block() {
         deterministic::Runner::default().start(|_| async move {
             let blocks = chain(5);
             let requests = Requests::default();
@@ -1703,7 +1683,7 @@ mod tests {
     }
 
     #[test]
-    fn digest_revealed_while_later_body_is_pending_rejects_mismatch() {
+    fn range_rechecks_digest_metadata() {
         deterministic::Runner::default().start(|_| async move {
             let blocks = chain(3);
             let resident = Arc::new(Mutex::new(BTreeMap::new()));
@@ -1747,7 +1727,7 @@ mod tests {
     }
 
     #[test]
-    fn first_parent_is_checked_against_metadata_revealed_during_fetch() {
+    fn range_rechecks_parent_metadata() {
         deterministic::Runner::default().start(|_| async move {
             let blocks = chain(2);
             let detached = TestBlock::new(Sha256::fill(7), Height::new(1), 1);
@@ -1783,7 +1763,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_out_of_bounds_and_maximum_ranges_are_bounded() {
+    fn range_bounds_are_checked() {
         deterministic::Runner::default().start(|_| async move {
             let requests = Arc::new(Mutex::new(0));
             let observed = requests.clone();

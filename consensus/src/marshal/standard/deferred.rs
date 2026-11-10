@@ -967,7 +967,7 @@ mod tests {
                 "Block B certification should succeed"
             );
 
-            // Step 4: Certify block A at view 5 - should succeed
+            // Step 4: Certify block A at view 5 and expect success
             let certify_a =
                 marshaled.certify(round_a, commitment_a, History::suffix(Arc::from([])));
 
@@ -1373,7 +1373,11 @@ mod tests {
 
             // Kick off the optimistic verify, which spawns `deferred_verify`. Its gated
             // `app.verify` blocks until we release it.
-            let optimistic_rx = marshaled.verify(child_ctx.clone(), child_digest, History::anchored(Arc::from([child_ctx.parent.1])));
+            let optimistic_rx = marshaled.verify(
+                child_ctx.clone(),
+                child_digest,
+                History::anchored(Arc::from([child_ctx.parent.1])),
+            );
             assert!(
                 optimistic_rx
                     .await
@@ -1394,7 +1398,8 @@ mod tests {
 
             // Releasing verification lets certification succeed (valid and durable).
             release_verify.send_lossy(());
-            let certify_rx = marshaled.certify(child_round, child_digest, History::suffix(Arc::from([])));
+            let certify_rx =
+                marshaled.certify(child_round, child_digest, History::suffix(Arc::from([])));
             select! {
                 result = certify_rx => {
                     assert!(
@@ -1479,7 +1484,8 @@ mod tests {
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
             );
 
-            let digest_rx = marshaled.propose(ctx.clone(), History::anchored(Arc::from([ctx.parent.1])));
+            let digest_rx =
+                marshaled.propose(ctx.clone(), History::anchored(Arc::from([ctx.parent.1])));
             let digest = digest_rx.await.expect("propose must return a digest");
             assert_eq!(
                 digest, boundary_digest,
@@ -1740,9 +1746,11 @@ mod tests {
         runner.start(|mut context| async move {
             let mut fixture = equivocation_fixture(&mut context, MockVerifyingApp::new()).await;
 
-            let verify_rx = fixture
-                .marshaled
-                .verify(fixture.equivocating_ctx.clone(), fixture.digest, History::anchored(Arc::from([fixture.equivocating_ctx.parent.1])));
+            let verify_rx = fixture.marshaled.verify(
+                fixture.equivocating_ctx.clone(),
+                fixture.digest,
+                History::anchored(Arc::from([fixture.equivocating_ctx.parent.1])),
+            );
             assert!(
                 !verify_rx.await.expect("verify result missing"),
                 "the equivocating proposal must not be notarized"
