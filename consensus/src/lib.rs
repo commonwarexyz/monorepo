@@ -146,10 +146,9 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     /// and verifying payloads proposed by other participants.
     ///
     /// Each request synchronously dispatches work and returns a response receiver. Perform
-    /// application work, including [`History::resolve`], behind the receiver:
-    /// history resolution may require consensus progress. When the receiver closes, cancel
-    /// work owned only by that request. Work with an independent owner may continue.
-    /// This contract also applies to [`CertifiableAutomaton`] requests.
+    /// application work behind the receiver. When the receiver closes, cancel work owned only
+    /// by that request. Work with an independent owner may continue. This contract also
+    /// applies to [`CertifiableAutomaton`] requests.
     pub trait Automaton: Clone + Send + 'static {
         /// Context is metadata provided by the consensus engine associated with a given payload.
         ///
@@ -177,11 +176,11 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// rather than rebuilding them from current local state. If consensus
         /// later abandons a dependency, it also abandons the proposal.
         ///
-        /// `ancestry` resolves to immutable commitments on the selected parent branch in
-        /// forward order, ending at the parent and excluding the new payload.
-        /// For parent-linked consensus it begins at a finalized or genesis
-        /// anchor; applications may resolve older canonical history as needed.
-        /// Consecutive re-proposals of one payload contribute one commitment.
+        /// `ancestry` holds the commitments consensus has on the selected parent branch at
+        /// dispatch, in forward order, ending at the parent and excluding the new payload.
+        /// Consecutive re-proposals of one payload contribute one commitment. An anchored
+        /// history begins at a finalized or genesis anchor. A suffix, possibly empty, holds
+        /// only the newest commitments, and consensus fetches no certificate to extend it.
         ///
         /// Closing the response declines this request, which consensus may
         /// treat as final for the context. Keep the response pending when
@@ -213,7 +212,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ///
         /// The future-context requirement on [`Self::propose`] applies here
         /// too: the context's dependencies may not be resolvable locally yet.
-        /// `ancestry` has the same ordering and availability contract as
+        /// `ancestry` has the same ordering and anchoring as
         /// [`Self::propose`] and excludes `payload`.
         fn verify(
             &mut self,
@@ -308,7 +307,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// certifying. The request then waits as if the application had returned
         /// [`Handoff::Wait`].
         ///
-        /// `ancestry` has the same ordering and availability contract as
+        /// `ancestry` has the same ordering and anchoring as
         /// [`Automaton::propose`].
         ///
         /// # Request Contract
@@ -337,7 +336,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ///
         /// Certification may be requested without prior local verification.
         /// `ancestry` supplies the selected parent branch independently of
-        /// verification, with the same ordering and availability contract as
+        /// verification, with the same ordering and anchoring as
         /// [`Automaton::propose`], and excludes `payload`.
         ///
         /// Like [`Automaton::verify`], payloads produced by [`Automaton::propose`] are certifiable-by-construction.

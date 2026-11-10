@@ -1,15 +1,16 @@
-//! Bounded forward access to a selected branch and its finalized prefix.
+//! Bounded forward access to a selected branch and the history below it.
 
 use super::core::{Mailbox, Variant};
 use crate::{Block, Heightable, History, types::Height};
 use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
-use commonware_utils::channel::oneshot;
+use commonware_utils::{channel::oneshot, sync::Mutex};
 use futures::{
     FutureExt as _, Stream,
-    future::{BoxFuture, Shared},
+    future::{BoxFuture, WeakShared},
     stream::FuturesOrdered,
 };
 use std::{
+    collections::BTreeMap,
     future::Future,
     num::NonZeroUsize,
     ops::RangeInclusive,
@@ -25,14 +26,16 @@ trait Source<B: Block>: Send + Sync {
 
     fn fetch(self: Arc<Self>, height: Height) -> BoxFuture<'static, Result<Digested<B>, Error>>;
 
-    fn resolve(&self) -> Option<BoxFuture<'static, bool>> {
-        None
+    /// Returns the digest selected at `height`, discovering it when the source can.
+    fn resolve(
+        self: Arc<Self>,
+        height: Height,
+    ) -> BoxFuture<'static, Result<Option<B::Digest>, Error>> {
+        let digest = self.digest(height);
+        Box::pin(async move { Ok(digest) })
     }
 
-    fn prefetch(
-        &self,
-        _heights: RangeInclusive<Height>,
-    ) -> Option<BoxFuture<'static, Option<oneshot::Receiver<()>>>> {
+    fn prefetch(&self, _heights: RangeInclusive<Height>) -> Option<oneshot::Receiver<()>> {
         None
     }
 }
@@ -82,7 +85,8 @@ fn check_block<B: Block>(
 /// A failure to acquire a block on the selected branch.
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 pub enum Error {
-    /// The source closed before the requested block became available.
+    /// The block cannot be acquired: the source closed, holds no commitment to start from, or
+    /// selects a branch that conflicts with finalized history.
     #[error("block unavailable")]
     Unavailable,
     /// A block or requested range is outside its expected heights.
@@ -98,10 +102,22 @@ pub enum Error {
 
 /// Access to blocks on one selected branch, ending at the proposal's parent.
 ///
-/// Clones share commitment metadata and the acquisition service. They retain no
-/// block bodies and do not start requests. Each [`range`](Self::range) owns its
-/// cursor and bounds both pending acquisitions and completed bodies awaiting
-/// consumption. Dropping a range cancels its remaining demand.
+/// Clones share commitment metadata and the acquisition service, and start no requests. Each
+/// [`range`](Self::range) owns its cursor and bounds both pending acquisitions and completed
+/// bodies awaiting consumption. Dropping a range cancels its remaining demand.
+///
+/// A source that [`Mailbox::blocks`] builds over a [`History`] suffix discovers the commitments
+/// below it by following parent links through block bodies. Every clone and range of the source
+/// shares one such walk. It advances only while a caller waits on it and acquires one body at a
+/// time. Dropping every waiter cancels that acquisition, and the commitments discovered so far
+/// stay with the source.
+///
+/// The walk retains the lowest bodies it read, at most a range's window of them, until a range
+/// takes them or the source drops. A range over a gap no deeper than the window therefore
+/// acquires each body once.
+///
+/// Later finalization or pruning does not redirect an acquisition that is already pending. It
+/// stays pending until the body arrives, every waiter drops, or marshal shuts down.
 pub struct Blocks<B: Block> {
     tip: Height,
     source: Arc<dyn Source<B>>,
@@ -137,90 +153,86 @@ fn suffix_at<C: Copy>(tip: Height, commitments: &[C], height: Height) -> Option<
 impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Provides selected history whose parent has already been acquired and validated.
     ///
-    /// `parent` is the exact commitment bound by the request's context at `parent_height`.
-    /// It supplies the resident parent when `history` has no resident suffix, without polling
-    /// its resolver. This preserves the parent identity needed to authenticate canonical reads
-    /// after consensus retires that resolver. Conflicting or malformed resident metadata makes
-    /// the source unavailable. Body acquisition still uses the full commitment.
-    /// When no suffix was resident, an empty, conflicting, or malformed resolved history is
-    /// treated as retired; the bound parent's canonical proof then controls older reads.
+    /// `parent` is the exact commitment bound by the request's context at `parent_height`. An
+    /// empty `history` selects that parent alone and keeps its anchor. Below the parent, an
+    /// anchored history reads canonical finalized blocks and a suffix follows the parent's links.
+    /// A history that ends at another commitment, or that holds more commitments than the branch
+    /// has heights, makes the source unavailable.
     pub fn blocks_with_parent(
         &self,
         parent_height: Height,
         parent: V::Commitment,
         history: History<V::Commitment>,
     ) -> Blocks<V::ApplicationBlock> {
-        match history.peek() {
-            Some(resident) if !resident.is_empty() => {
-                if suffix_start(parent_height, resident.len()).is_none()
-                    || resident.last() != Some(&parent)
-                {
-                    return self.blocks(parent_height, History::new(async { None }));
-                }
-                self.blocks(parent_height, history)
-            }
-            _ => self.blocks(
-                parent_height,
-                History::pending(Arc::from([parent]), async move {
-                    let resolved = history.resolve().await?;
-                    // The original empty suffix could not authenticate this overlap.
-                    // An empty finalized result instead uses the canonical parent proof.
-                    (suffix_start(parent_height, resolved.len()).is_some()
-                        && resolved.last() == Some(&parent))
-                    .then_some(resolved)
-                }),
-            ),
-        }
+        let commitments = match history.commitments().last() {
+            None => Arc::from([parent]),
+            Some(last) if *last == parent => history.commitments().clone(),
+            Some(_) => return self.selected(parent_height, Arc::from([]), false),
+        };
+        self.selected(parent_height, commitments, history.is_anchored())
     }
 
     /// Provides forward access to a selected branch ending at `parent_height`.
     ///
-    /// `history` supplies the consensus-selected commitment suffix in increasing height order.
-    /// Consecutive re-proposals occupy one entry. Older heights are supplied by canonical
-    /// finalized storage. Neither this call nor its clones await or poll `history`; the
-    /// suffix is consulted by [`Blocks::digest`] when already resident. A polled range or
-    /// [`Blocks::resolve_digest`] can resolve a missing prefix.
-    /// Originally resident commitments remain accessible after consensus retires the resolver.
-    /// Older reads then wait for the lowest resident commitment to match finalized storage;
-    /// recovery can therefore wait for that ancestor to finalize. The ancestor must remain
-    /// available in finalized storage until this proof completes.
+    /// `history` supplies the consensus-selected commitments in increasing height order, ending
+    /// at `parent_height`. Consecutive re-proposals occupy one entry. Neither this call nor its
+    /// clones start a request.
     ///
-    /// A polled range keeps its remaining selected suffix prefetched in forward order, within
-    /// the capacity shared by all ranges ([`Config::max_repair`](super::Config)). Each range's
-    /// window of pending acquisitions and buffered bodies is additional to that capacity.
+    /// Heights below the commitments are read according to the history:
+    ///
+    /// - Anchored: they are canonical and come from finalized storage. An empty anchored history
+    ///   reads every height through `parent_height` that way.
+    /// - Suffix: their commitments are discovered by walking down from the lowest known
+    ///   commitment, one parent link per step. An empty suffix has no commitment to start from,
+    ///   so every height is [`Error::Unavailable`].
+    ///
+    /// A step first asks marshal for the finalized block it stores at the lowest known height. A
+    /// matching digest makes every lower height canonical, and those heights then come from
+    /// finalized storage. A different digest means the branch conflicts with finalized history,
+    /// and lower heights are [`Error::Unavailable`].
+    ///
+    /// With no finalized block stored there, the step acquires the body by its commitment and
+    /// takes the parent it names as the next commitment. Finalized storage is sampled once per
+    /// step and never awaited for a height that is not known to be finalized.
+    ///
+    /// A polled range keeps the part of its remaining heights that `history` covers prefetched
+    /// in forward order, within the capacity shared by all ranges
+    /// ([`Config::max_repair`](super::Config)). Each range's window of pending acquisitions and
+    /// buffered bodies is additional to that capacity, as are the bodies a walk retains.
     pub fn blocks(
         &self,
         parent_height: Height,
         history: History<V::Commitment>,
     ) -> Blocks<V::ApplicationBlock> {
-        let resident = history.peek().cloned().unwrap_or_default();
-        let anchor = suffix_start(parent_height, resident.len()).and_then(|height| {
-            resident
-                .first()
-                .copied()
-                .map(|commitment| (Height::new(height), V::commitment_to_inner(commitment)))
-        });
-        let marshal = self.clone();
-        // Only the prefix below the resident suffix needs canonical proof. A later
-        // selected descendant may lose its branch while this ancestor stays canonical.
-        let prefix_canonical = async move {
-            let Some((height, digest)) = anchor else {
-                return false;
-            };
-            marshal
-                .finalized(height)
-                .await
-                .is_ok_and(|block| V::into_shared(block).digest() == digest)
-        }
-        .boxed()
-        .shared();
+        self.selected(
+            parent_height,
+            history.commitments().clone(),
+            history.is_anchored(),
+        )
+    }
+
+    fn selected(
+        &self,
+        parent_height: Height,
+        commitments: Arc<[V::Commitment]>,
+        anchored: bool,
+    ) -> Blocks<V::ApplicationBlock> {
+        let first = suffix_start(parent_height, commitments.len());
+        let (commitments, below) = match (first, commitments.first().copied()) {
+            (None, _) => (Arc::from([]), Below::Unknown),
+            (Some(_), _) if anchored => (commitments, Below::Canonical),
+            (Some(first), Some(commitment)) => {
+                let walk = Walk::new(Height::new(first), commitment);
+                (commitments, Below::Walked(Arc::new(Mutex::new(walk))))
+            }
+            (Some(_), None) => (commitments, Below::Unknown),
+        };
         Blocks {
             tip: parent_height,
             source: Arc::new(SelectedSource {
                 parent_height,
-                history,
-                resident,
-                prefix_canonical,
+                commitments,
+                below,
                 marshal: self.clone(),
             }),
             window: self.max_repair.get(),
@@ -228,21 +240,163 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     }
 }
 
-/// Consensus-selected history and the mailbox that serves its bodies.
+/// Consensus-selected commitments and the mailbox that serves their bodies.
 struct SelectedSource<S: Scheme, V: Variant> {
     parent_height: Height,
-    history: History<V::Commitment>,
-    /// Selected metadata remains valid independently of the resolver's lifetime.
-    resident: Arc<[V::Commitment]>,
-    /// Shared proof of canonical ancestry, polled only after terminal history loss.
-    prefix_canonical: Shared<BoxFuture<'static, bool>>,
+    /// Commitments consensus selected, ending at `parent_height`.
+    commitments: Arc<[V::Commitment]>,
+    below: Below<V>,
     marshal: Mailbox<S, V>,
+}
+
+/// How a selected source reads the heights below its commitments.
+enum Below<V: Variant> {
+    /// They are canonical and come from finalized storage.
+    Canonical,
+    /// Their commitments are discovered by following parent links.
+    Walked(Arc<Mutex<Walk<V>>>),
+    /// No commitment identifies them.
+    Unknown,
+}
+
+/// Discovery of the commitments below a suffix, shared by every user of its source.
+struct Walk<V: Variant> {
+    /// Height of the suffix's first commitment.
+    start: Height,
+    /// Commitments from `start` downward: the suffix's first, then each discovered parent.
+    known: Vec<V::Commitment>,
+    /// The lowest bodies the walk read, until a range takes them.
+    bodies: BTreeMap<Height, V::Block>,
+    /// Why the walk stopped at its lowest known commitment, once it has.
+    end: Option<End>,
+    /// The step in flight, owned by the callers awaiting it.
+    step: Option<WeakShared<BoxFuture<'static, ()>>>,
+}
+
+/// Why a walk takes no further step.
+#[derive(Clone, Copy)]
+enum End {
+    /// Its lowest known block is finalized, so every lower height is canonical.
+    Junction,
+    /// Lower heights cannot be read.
+    Failed(Error),
+}
+
+impl<V: Variant> Walk<V> {
+    fn new(start: Height, commitment: V::Commitment) -> Self {
+        Self {
+            start,
+            known: vec![commitment],
+            bodies: BTreeMap::new(),
+            end: None,
+            step: None,
+        }
+    }
+
+    /// Returns the known commitment at `height`.
+    fn commitment(&self, height: Height) -> Option<V::Commitment> {
+        let depth = usize::try_from(self.start.get().checked_sub(height.get())?).ok()?;
+        self.known.get(depth).copied()
+    }
+
+    /// Returns the lowest known height and its commitment.
+    fn lowest(&self) -> (Height, V::Commitment) {
+        let depth = self.known.len() - 1;
+        (
+            Height::new(self.start.get() - depth as u64),
+            self.known[depth],
+        )
+    }
+
+    /// Takes one step from the lowest known commitment. The outcome is recorded before the
+    /// step completes, so progress never depends on which caller observes it.
+    async fn step<S: Scheme>(walk: Arc<Mutex<Self>>, marshal: Mailbox<S, V>) {
+        let (height, commitment) = walk.lock().lowest();
+        let outcome = match marshal.get_info(height).await {
+            Some((_, digest)) if digest == V::commitment_to_inner(commitment) => Err(End::Junction),
+            Some(_) => Err(End::Failed(Error::Unavailable)),
+            None => match marshal.acquire(commitment).await {
+                Ok(block) if block.height() == height => Ok(block),
+                Ok(_) => Err(End::Failed(Error::InvalidHeight)),
+                Err(_) => Err(End::Failed(Error::Unavailable)),
+            },
+        };
+        let mut walk = walk.lock();
+        walk.step = None;
+        match outcome {
+            Ok(block) => {
+                // The next commitment is the parent this body names. Consensus may have
+                // selected another parent, because a notarized block can name one parent in
+                // its header and another in the context it embeds. Such a block fails its own
+                // certification at every honest validator, and certification of its
+                // descendants waits on it. A walk through it therefore wastes work without
+                // producing a verdict that can finalize.
+                walk.known.push(V::parent_commitment(&block));
+                walk.bodies.insert(height, block);
+                if walk.bodies.len() > marshal.max_repair.get() {
+                    walk.bodies.pop_last();
+                }
+            }
+            Err(end) => walk.end = Some(end),
+        }
+    }
+}
+
+impl<S: Scheme, V: Variant> SelectedSource<S, V> {
+    /// Returns the commitment selected at `height`, or `None` when the height is canonical
+    /// finalized history, walking parent links until the height is reached.
+    async fn discover(&self, height: Height) -> Result<Option<V::Commitment>, Error> {
+        if let Some(commitment) = suffix_at(self.parent_height, &self.commitments, height) {
+            return Ok(Some(commitment));
+        }
+        let walk = match &self.below {
+            Below::Canonical => return Ok(None),
+            Below::Walked(walk) => walk,
+            Below::Unknown => return Err(Error::Unavailable),
+        };
+        loop {
+            // Every caller awaits the same step and then checks its own height, so a caller
+            // finishes as soon as its height is known, whatever deeper callers wait for.
+            let step = {
+                let mut state = walk.lock();
+                if let Some(commitment) = state.commitment(height) {
+                    return Ok(Some(commitment));
+                }
+                match state.end {
+                    Some(End::Junction) => return Ok(None),
+                    Some(End::Failed(error)) => return Err(error),
+                    None => {}
+                }
+                let live = state.step.as_ref().and_then(WeakShared::upgrade);
+                live.unwrap_or_else(|| {
+                    let step = Walk::step(walk.clone(), self.marshal.clone())
+                        .boxed()
+                        .shared();
+                    state.step = step.downgrade();
+                    step
+                })
+            };
+            step.await;
+        }
+    }
+
+    /// Takes the body a walk retained for `height`, if any.
+    fn take(&self, height: Height) -> Option<V::Block> {
+        let Below::Walked(walk) = &self.below else {
+            return None;
+        };
+        walk.lock().bodies.remove(&height)
+    }
 }
 
 impl<S: Scheme, V: Variant> Source<V::ApplicationBlock> for SelectedSource<S, V> {
     fn digest(&self, height: Height) -> Option<<V::ApplicationBlock as Digestible>::Digest> {
-        let commitments = self.history.peek().unwrap_or(&self.resident);
-        suffix_at(self.parent_height, commitments, height).map(V::commitment_to_inner)
+        suffix_at(self.parent_height, &self.commitments, height)
+            .or_else(|| match &self.below {
+                Below::Walked(walk) => walk.lock().commitment(height),
+                Below::Canonical | Below::Unknown => None,
+            })
+            .map(V::commitment_to_inner)
     }
 
     fn fetch(
@@ -250,23 +404,11 @@ impl<S: Scheme, V: Variant> Source<V::ApplicationBlock> for SelectedSource<S, V>
         height: Height,
     ) -> BoxFuture<'static, Result<Digested<V::ApplicationBlock>, Error>> {
         Box::pin(async move {
-            // Use a resident commitment without resolving the missing prefix.
-            let commitments = self.history.peek().unwrap_or(&self.resident);
-            let resident = suffix_at(self.parent_height, commitments, height);
-            let commitment = match resident {
-                Some(commitment) => Some(commitment),
-                None => match self.history.clone().resolve().await {
-                    Some(commitments) => {
-                        suffix_start(self.parent_height, commitments.len())
-                            .ok_or(Error::Unavailable)?;
-                        suffix_at(self.parent_height, &commitments, height)
-                    }
-                    None if self.prefix_canonical.clone().await => None,
-                    None => return Err(Error::Unavailable),
+            let block = match self.discover(height).await? {
+                Some(commitment) => match self.take(height) {
+                    Some(block) => Ok(block),
+                    None => self.marshal.acquire(commitment).await,
                 },
-            };
-            let block = match commitment {
-                Some(commitment) => self.marshal.acquire(commitment).await,
                 None => self.marshal.finalized(height).await,
             }
             .map_err(|_| Error::Unavailable)?;
@@ -274,43 +416,29 @@ impl<S: Scheme, V: Variant> Source<V::ApplicationBlock> for SelectedSource<S, V>
         })
     }
 
-    fn resolve(&self) -> Option<BoxFuture<'static, bool>> {
-        let history = self.history.clone();
-        let prefix_canonical = self.prefix_canonical.clone();
-        Some(Box::pin(async move {
-            history.resolve().await.is_some() || prefix_canonical.await
-        }))
+    fn resolve(
+        self: Arc<Self>,
+        height: Height,
+    ) -> BoxFuture<'static, Result<Option<<V::ApplicationBlock as Digestible>::Digest>, Error>>
+    {
+        Box::pin(async move {
+            let commitment = self.discover(height).await?;
+            Ok(commitment.map(V::commitment_to_inner))
+        })
     }
 
-    fn prefetch(
-        &self,
-        heights: RangeInclusive<Height>,
-    ) -> Option<BoxFuture<'static, Option<oneshot::Receiver<()>>>> {
-        let history = self.history.clone();
-        let marshal = self.marshal.clone();
-        let parent_height = self.parent_height;
-        Some(Box::pin(async move {
-            // Resolve only when the range extends below the resident suffix.
-            let resident = history.peek().cloned().filter(|commitments| {
-                suffix_start(parent_height, commitments.len())
-                    .is_some_and(|first| heights.start().get() >= first)
-            });
-            let commitments = match resident {
-                Some(commitments) => commitments,
-                None => history.resolve().await?,
-            };
-            let first = suffix_start(parent_height, commitments.len())?;
-            let start = heights.start().get().max(first);
-            let end = heights.end().get().min(parent_height.get());
-            let range = if start > end || commitments.is_empty() {
-                0..0
-            } else {
-                let start = usize::try_from(start - first).ok()?;
-                let end = usize::try_from(end - first).ok()?.checked_add(1)?;
-                start..end
-            };
-            Some(marshal.prefetch(commitments, range))
-        }))
+    fn prefetch(&self, heights: RangeInclusive<Height>) -> Option<oneshot::Receiver<()>> {
+        let first = suffix_start(self.parent_height, self.commitments.len())?;
+        let start = heights.start().get().max(first);
+        let end = heights.end().get().min(self.parent_height.get());
+        let range = if start > end || self.commitments.is_empty() {
+            0..0
+        } else {
+            let start = usize::try_from(start - first).ok()?;
+            let end = usize::try_from(end - first).ok()?.checked_add(1)?;
+            start..end
+        };
+        Some(self.marshal.prefetch(self.commitments.clone(), range))
     }
 }
 
@@ -358,11 +486,11 @@ impl<B: Block> Blocks<B> {
         }
     }
 
-    /// Returns the selected digest when its commitment is resident.
+    /// Returns the selected digest at `height` when its commitment is resident: supplied with
+    /// the source or already discovered below it.
     ///
-    /// Originally resident commitments remain accessible after their resolver retires.
-    /// Older finalized history may require storage access and returns `None`.
-    /// This lookup does not acquire a block.
+    /// Canonical finalized history and heights not yet discovered return `None`. This lookup
+    /// starts no request.
     pub fn digest(&self, height: Height) -> Option<B::Digest> {
         if height > self.tip {
             return None;
@@ -370,30 +498,27 @@ impl<B: Block> Blocks<B> {
         self.source.digest(height)
     }
 
-    /// Returns the selected digest at `height`, resolving selected history if it is not resident.
+    /// Returns the selected digest at `height`, discovering it if it is not resident.
     ///
-    /// Returns `None` for heights above [`Self::tip`] and for older canonical finalized history,
-    /// which is not part of the selected suffix. Resident digests return without polling
-    /// history, including originally resident commitments after their resolver retires.
-    /// A missing prefix after retirement waits for the lowest originally resident commitment
-    /// to finalize and checks its canonical digest before allowing older finalized reads.
-    /// This may acquire that ancestor and delay recovery until it finalizes. Returns
-    /// [`Error::Unavailable`] if it conflicts or neither history nor that proof can be obtained.
-    /// Other users and retained `Blocks` clones can keep shared resolution alive after this
-    /// lookup is dropped.
+    /// Heights above [`Self::tip`] return `None`. Resident digests return without a request.
+    ///
+    /// A source from [`Mailbox::blocks`] returns `None` for canonical finalized history: below
+    /// an anchored history, or below the finalized block its walk reached. For any other height
+    /// it acquires the bodies above that height to follow their parent links, and the digest
+    /// stays resident afterwards. It returns [`Error::Unavailable`] if the branch conflicts with
+    /// finalized history, has no commitment to start from, or marshal shuts down, and
+    /// [`Error::InvalidHeight`] if a body is not at the height its child implies.
+    ///
+    /// A source from [`Self::new`] returns what its `digest` callback returns and fetches
+    /// nothing. Its `None` says only that the callback has no digest for the height.
+    ///
+    /// Dropping this lookup leaves the commitments discovered so far with the source, where
+    /// other clones and later lookups continue from them.
     pub async fn resolve_digest(&self, height: Height) -> Result<Option<B::Digest>, Error> {
-        if let Some(digest) = self.digest(height) {
-            return Ok(Some(digest));
-        }
         if height > self.tip {
             return Ok(None);
         }
-        if let Some(resolve) = self.source.resolve()
-            && !resolve.await
-        {
-            return Err(Error::Unavailable);
-        }
-        Ok(self.digest(height))
+        self.source.clone().resolve(height).await
     }
 
     /// Acquires an inclusive range in increasing height order.
@@ -406,7 +531,7 @@ impl<B: Block> Blocks<B> {
     ///
     /// Blocks are checked against resident commitments and preceding blocks.
     /// Consumers must also check linkage to their application state when the
-    /// preceding commitment is outside the resident suffix.
+    /// preceding commitment is not resident.
     pub fn range(&self, heights: RangeInclusive<Height>) -> BlockRange<B> {
         let start = *heights.start();
         let end = *heights.end();
@@ -431,11 +556,9 @@ pub struct BlockRange<B: Block> {
     lease: Lease,
 }
 
-/// Forward demand held by a range. Dropping it cancels both a pending registration and
-/// an active lease.
+/// Forward demand held by a range. Dropping an active lease cancels it.
 enum Lease {
     Idle,
-    Registering(BoxFuture<'static, Option<oneshot::Receiver<()>>>),
     Active { _lease: oneshot::Receiver<()> },
     Released,
 }
@@ -453,14 +576,12 @@ impl<B: Block> Stream for BlockRange<B> {
         }
         if matches!(this.lease, Lease::Idle)
             && let Some(height) = this.next
-            && let Some(demand) = this.blocks.source.prefetch(height..=this.end)
         {
-            this.lease = Lease::Registering(demand);
-        }
-        if let Lease::Registering(registration) = &mut this.lease
-            && let Poll::Ready(lease) = registration.as_mut().poll(cx)
-        {
-            this.lease = lease.map_or(Lease::Released, |lease| Lease::Active { _lease: lease });
+            this.lease = this
+                .blocks
+                .source
+                .prefetch(height..=this.end)
+                .map_or(Lease::Released, |lease| Lease::Active { _lease: lease });
         }
         while this.pending.len() < this.blocks.window {
             let Some(height) = this.next else {
@@ -475,7 +596,7 @@ impl<B: Block> Stream for BlockRange<B> {
             return Poll::Ready(None);
         };
         let result = result.and_then(|block| {
-            // The preceding digest may only be resident once history has resolved.
+            // The preceding digest may have become resident while this block was acquired.
             let previous = this.previous.or_else(|| {
                 block
                     .height()
@@ -503,17 +624,21 @@ impl<B: Block> Stream for BlockRange<B> {
 mod tests {
     use super::*;
     use crate::marshal::{
+        Identifier,
         core::mailbox::Message,
         mocks::{block::EmptyBlock, harness},
         standard::Standard,
     };
-    use commonware_cryptography::sha256::Sha256;
+    use commonware_actor::mailbox;
+    use commonware_cryptography::sha256::{Digest as Sha256Digest, Sha256};
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_utils::{NZUsize, channel::oneshot, sync::Mutex};
     use futures::{FutureExt, StreamExt};
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, ops::Range};
 
     type TestBlock = EmptyBlock<Sha256>;
+    type TestMessage = Message<harness::S, Standard<TestBlock>>;
+    type TestMailbox = Mailbox<harness::S, Standard<TestBlock>>;
     type Requests = Arc<Mutex<BTreeMap<Height, oneshot::Sender<Digested<TestBlock>>>>>;
 
     fn digested(block: impl Into<Arc<TestBlock>>) -> Digested<TestBlock> {
@@ -533,6 +658,10 @@ mod tests {
             .collect()
     }
 
+    fn digests(blocks: &[TestBlock]) -> Arc<[Sha256Digest]> {
+        blocks.iter().map(Digestible::digest).collect()
+    }
+
     fn pending_source<D>(
         tip: Height,
         window: NonZeroUsize,
@@ -547,6 +676,139 @@ mod tests {
             assert!(requests.lock().insert(height, sender).is_none());
             async move { receiver.await.ok() }
         })
+    }
+
+    /// Returns a marshal mailbox whose ranges and walks use `window`, and the receiver that a
+    /// test answers in marshal's place.
+    fn marshal(
+        context: deterministic::Context,
+        window: usize,
+    ) -> (TestMailbox, mailbox::Receiver<TestMessage>) {
+        let (sender, receiver) = mailbox::new::<TestMessage>(context, NZUsize!(64));
+        let window = NonZeroUsize::new(window).unwrap();
+        (Mailbox::new(sender, NZUsize!(1), window), receiver)
+    }
+
+    /// Marshal as a test scripts it. It holds blocks, records the requests it receives, and
+    /// keeps open the requests it cannot answer.
+    #[derive(Default)]
+    struct Scripted {
+        finalized: BTreeMap<Height, TestBlock>,
+        bodies: BTreeMap<Sha256Digest, Arc<TestBlock>>,
+        infos: Vec<Height>,
+        acquired: Vec<Sha256Digest>,
+        awaited: Vec<Height>,
+        prefetched: Vec<Range<usize>>,
+        open: Vec<oneshot::Sender<Digested<TestBlock>>>,
+        leases: Vec<oneshot::Sender<()>>,
+    }
+
+    impl Scripted {
+        /// Serves `blocks` to acquisitions by commitment.
+        fn serve(&mut self, blocks: &[TestBlock]) {
+            for block in blocks {
+                self.bodies.insert(block.digest(), Arc::new(block.clone()));
+            }
+        }
+
+        /// Stores `blocks` as finalized at their heights.
+        fn finalize(&mut self, blocks: &[TestBlock]) {
+            for block in blocks {
+                self.finalized.insert(block.height, block.clone());
+            }
+        }
+
+        /// Answers every queued request and returns how many there were.
+        fn answer(&mut self, receiver: &mut mailbox::Receiver<TestMessage>) -> usize {
+            let mut answered = 0;
+            while let Some(Some(message)) = receiver.recv().now_or_never() {
+                answered += 1;
+                match message {
+                    TestMessage::GetInfo {
+                        identifier: Identifier::Height(height),
+                        response,
+                        ..
+                    } => {
+                        self.infos.push(height);
+                        let stored = self.finalized.get(&height);
+                        let _ = response.send(stored.map(|block| (height, block.digest())));
+                    }
+                    TestMessage::Acquire {
+                        commitment,
+                        response,
+                        ..
+                    } => {
+                        self.acquired.push(commitment);
+                        match self.bodies.get(&commitment) {
+                            Some(block) => drop(response.send(digested(block.clone()))),
+                            None => self.open.push(response),
+                        }
+                    }
+                    TestMessage::AwaitFinalized {
+                        height, response, ..
+                    } => {
+                        self.awaited.push(height);
+                        match self.finalized.get(&height) {
+                            Some(block) => drop(response.send(digested(block.clone()))),
+                            None => self.open.push(response),
+                        }
+                    }
+                    TestMessage::Prefetch { range, lease, .. } => {
+                        self.prefetched.push(range);
+                        self.leases.push(lease);
+                    }
+                    _ => panic!("test must script every marshal request"),
+                }
+            }
+            answered
+        }
+
+        /// Polls `future` to completion, answering the requests it sends.
+        fn drive<T>(
+            &mut self,
+            receiver: &mut mailbox::Receiver<TestMessage>,
+            future: impl Future<Output = T>,
+        ) -> T {
+            let mut future = Box::pin(future);
+            loop {
+                if let Some(output) = future.as_mut().now_or_never() {
+                    return output;
+                }
+                assert!(self.answer(receiver) > 0, "pending without a request");
+            }
+        }
+
+        /// Reads `expected` from `range` in order, then its end.
+        fn read(
+            &mut self,
+            receiver: &mut mailbox::Receiver<TestMessage>,
+            range: &mut BlockRange<TestBlock>,
+            expected: &[TestBlock],
+        ) {
+            for block in expected {
+                let read = self.drive(receiver, range.next()).unwrap().unwrap();
+                assert_eq!(read.digest(), block.digest());
+            }
+            assert!(self.drive(receiver, range.next()).is_none());
+        }
+
+        /// Returns the heights of served bodies that a walk or a range still holds.
+        fn held(&self) -> Vec<u64> {
+            let mut held: Vec<_> = self
+                .bodies
+                .values()
+                .filter(|block| Arc::strong_count(block) > 1)
+                .map(|block| block.height.get())
+                .collect();
+            held.sort_unstable();
+            held
+        }
+
+        /// Returns how many times `block` was acquired by its commitment.
+        fn acquisitions(&self, block: &TestBlock) -> usize {
+            let digest = block.digest();
+            self.acquired.iter().filter(|c| **c == digest).count()
+        }
     }
 
     #[test]
@@ -621,7 +883,7 @@ mod tests {
             let marshal = Mailbox::new(sender, NZUsize!(1), NZUsize!(8));
             let blocks = chain(10);
             let commitments: Arc<[_]> = blocks[4..].iter().map(Digestible::digest).collect();
-            let source = marshal.blocks(Height::new(9), History::ready(commitments.clone()));
+            let source = marshal.blocks(Height::new(9), History::anchored(commitments.clone()));
             let source_clone = source.clone();
             let mut range = source.range(Height::new(2)..=Height::new(7));
             assert!(receiver.recv().now_or_never().is_none());
@@ -648,76 +910,12 @@ mod tests {
     }
 
     #[test]
-    fn lazy_history_is_not_polled_until_range_and_drop_cancels_demand() {
+    fn resident_range_of_a_suffix_requests_exact_bodies_without_walking() {
         deterministic::Runner::default().start(|context| async move {
-            type TestMessage = Message<harness::S, Standard<TestBlock>>;
-            let (sender, mut receiver) =
-                commonware_actor::mailbox::new::<TestMessage>(context, NZUsize!(16));
-            let marshal = Mailbox::new(sender, NZUsize!(1), NZUsize!(8));
+            let (marshal, mut receiver) = marshal(context, 8);
             let blocks = chain(10);
-            let commitments: Arc<[_]> = blocks[4..].iter().map(Digestible::digest).collect();
-            let polled = Arc::new(Mutex::new(0));
-            let observed = polled.clone();
-            let (release, released) = oneshot::channel::<()>();
-            let supplied = commitments.clone();
-            let history = History::new(async move {
-                *observed.lock() += 1;
-                released.await.ok()?;
-                Some(supplied)
-            });
-            let source = marshal.blocks(Height::new(9), history);
-            let clone = source.clone();
-            assert_eq!(source.digest(Height::new(7)), None);
-            assert_eq!(*polled.lock(), 0);
-
-            // Polling a range awaits history but registers no demand until it resolves.
-            let mut range = source.range(Height::new(5)..=Height::new(7));
-            assert!(range.next().now_or_never().is_none());
-            assert!(receiver.recv().now_or_never().is_none());
-
-            // Dropping the range while history is pending leaves no demand behind.
-            drop(range);
-            release.send(()).unwrap();
-            assert!(receiver.recv().now_or_never().is_none());
-
-            // Resolved history exposes resident digests and registers demand for a new range.
-            let mut range = clone.range(Height::new(5)..=Height::new(7));
-            assert!(range.next().now_or_never().is_none());
-            assert_eq!(clone.digest(Height::new(7)), Some(blocks[7].digest()));
-            let TestMessage::Prefetch {
-                range: selected, ..
-            } = receiver.recv().await.unwrap()
-            else {
-                panic!("resolved history must register demand");
-            };
-            assert_eq!(selected, 1..4);
-        });
-    }
-
-    #[test]
-    fn resident_suffix_ranges_never_poll_history_and_gaps_wait_for_it() {
-        deterministic::Runner::default().start(|context| async move {
-            type TestMessage = Message<harness::S, Standard<TestBlock>>;
-            let (sender, mut receiver) =
-                commonware_actor::mailbox::new::<TestMessage>(context, NZUsize!(32));
-            let marshal = Mailbox::new(sender, NZUsize!(1), NZUsize!(8));
-            let blocks = chain(10);
-            let resident: Arc<[_]> = blocks[7..].iter().map(Digestible::digest).collect();
-            let full: Arc<[_]> = blocks.iter().map(Digestible::digest).collect();
-
-            // A resolver that counts its first poll and then stays pending forever.
-            let history = || {
-                let polls = Arc::new(Mutex::new(0usize));
-                let observed = polls.clone();
-                let full = full.clone();
-                let history = History::pending(resident.clone(), async move {
-                    *observed.lock() += 1;
-                    futures::future::pending::<()>().await;
-                    Some(full)
-                });
-                (history, polls)
-            };
-            let drain = |receiver: &mut commonware_actor::mailbox::Receiver<TestMessage>| {
+            let resident = digests(&blocks[7..]);
+            let drain = |receiver: &mut mailbox::Receiver<TestMessage>| {
                 let mut messages = Vec::new();
                 while let Some(Some(message)) = receiver.recv().now_or_never() {
                     messages.push(message);
@@ -725,9 +923,7 @@ mod tests {
                 messages
             };
 
-            // A range inside the resident suffix never polls the resolver.
-            let (history_a, polls_a) = history();
-            let source = marshal.blocks(Height::new(9), history_a);
+            let source = marshal.blocks(Height::new(9), History::suffix(resident));
             let clone = source.clone();
             assert_eq!(source.digest(Height::new(8)), Some(blocks[8].digest()));
             assert_eq!(source.digest(Height::new(6)), None);
@@ -760,9 +956,8 @@ mod tests {
             }
             let lease = lease.expect("resident range must register demand");
             assert_eq!(responses.len(), 2);
-            assert_eq!(*polls_a.lock(), 0);
 
-            // Out-of-order results are delivered in order, still without resolving history.
+            // Out-of-order results are delivered in order.
             responses
                 .remove(&blocks[9].digest())
                 .unwrap()
@@ -780,7 +975,6 @@ mod tests {
                 range.next().await.unwrap().unwrap().height(),
                 Height::new(9)
             );
-            assert_eq!(*polls_a.lock(), 0);
 
             // Dropping a range with outstanding demand cancels its lease and bodies.
             let mut range = clone.range(Height::new(8)..=Height::new(9));
@@ -800,300 +994,391 @@ mod tests {
             assert!(lease.is_closed());
             assert!(pending.iter().all(oneshot::Sender::is_closed));
             assert_eq!(clone.digest(Height::new(9)), Some(blocks[9].digest()));
-            assert_eq!(*polls_a.lock(), 0);
-
-            // A range reaching below the suffix starts the resolver and waits for it
-            // rather than guessing at canonical finalized history.
-            let (history_b, polls_b) = history();
-            let source = marshal.blocks(Height::new(9), history_b);
-            let mut range = source.range(Height::new(6)..=Height::new(8));
-            assert!(range.next().now_or_never().is_none());
-            assert_eq!(*polls_b.lock(), 1);
-            let mut bodies = Vec::new();
-            for message in drain(&mut receiver) {
-                match message {
-                    TestMessage::Acquire {
-                        commitment,
-                        response,
-                        ..
-                    } => bodies.push((commitment, response)),
-                    _ => panic!("gap must not request finalized or prefetch demand"),
-                }
-            }
-            // Only the resident heights are requested; they remain buffered behind the gap.
-            assert_eq!(bodies.len(), 2);
-            let mut bodies: BTreeMap<_, _> = bodies.into_iter().collect();
-            for height in [7, 8] {
-                bodies
-                    .remove(&blocks[height].digest())
-                    .unwrap()
-                    .send(digested(blocks[height].clone()))
-                    .unwrap();
-            }
-            assert!(range.next().now_or_never().is_none());
-            assert!(drain(&mut receiver).is_empty());
-            assert_eq!(*polls_b.lock(), 1);
-            drop(range);
-            assert!(drain(&mut receiver).is_empty());
         });
     }
 
     #[test]
-    fn resolve_digest_polls_history_only_for_nonresident_heights() {
+    fn range_below_a_suffix_walks_parent_links_and_yields_forward() {
         deterministic::Runner::default().start(|context| async move {
-            type TestMessage = Message<harness::S, Standard<TestBlock>>;
-            let (sender, _receiver) =
-                commonware_actor::mailbox::new::<TestMessage>(context, NZUsize!(32));
-            let marshal = Mailbox::new(sender, NZUsize!(1), NZUsize!(8));
+            let (marshal, mut receiver) = marshal(context, 8);
             let blocks = chain(10);
-            let resident: Arc<[_]> = blocks[7..].iter().map(Digestible::digest).collect();
-            let complete: Arc<[_]> = blocks[3..].iter().map(Digestible::digest).collect();
-            let polls = Arc::new(Mutex::new(0usize));
-            let observed = polls.clone();
-            let history = History::pending(resident, async move {
-                *observed.lock() += 1;
-                Some(complete)
-            });
-            let source = marshal.blocks(Height::new(9), history);
+            let mut scripted = Scripted::default();
+            scripted.serve(&blocks);
+            let source = marshal.blocks(Height::new(9), History::suffix(digests(&blocks[7..])));
 
-            // Resident and above-tip heights do not poll history.
-            let resident = source.resolve_digest(Height::new(8)).await;
-            assert_eq!(resident, Ok(Some(blocks[8].digest())));
-            assert_eq!(source.resolve_digest(Height::new(10)).await, Ok(None));
-            assert_eq!(*polls.lock(), 0);
+            let mut range = source.range(Height::new(3)..=Height::new(9));
+            scripted.read(&mut receiver, &mut range, &blocks[3..]);
 
-            // A gap resolves history once, while older canonical history stays absent.
-            let gap = source.resolve_digest(Height::new(5)).await;
-            assert_eq!(gap, Ok(Some(blocks[5].digest())));
-            assert_eq!(source.resolve_digest(Height::new(2)).await, Ok(None));
-            assert_eq!(*polls.lock(), 1);
+            // Demand covers only the supplied commitments.
+            assert_eq!(scripted.prefetched, vec![0..3]);
 
-            // Terminal history unavailability is surfaced.
-            let unavailable = marshal.blocks(Height::new(9), History::new(async { None }));
-            let result = unavailable.resolve_digest(Height::new(5)).await;
-            assert_eq!(result, Err(Error::Unavailable));
+            // Each step sampled finalized storage at the lowest known height, and no read
+            // waited on it.
+            assert_eq!(scripted.infos, [7, 6, 5, 4].map(Height::new));
+            assert!(scripted.awaited.is_empty());
+
+            // The discovered commitments are resident, and the walk stopped at the range.
+            for block in &blocks[3..7] {
+                assert_eq!(source.digest(block.height), Some(block.digest()));
+            }
+            assert_eq!(source.digest(Height::new(2)), None);
         });
     }
 
     #[test]
-    fn retired_history_requires_matching_canonical_anchor() {
+    fn gap_within_the_window_is_acquired_once() {
         deterministic::Runner::default().start(|context| async move {
-            type TestMessage = Message<harness::S, Standard<TestBlock>>;
+            let (marshal, mut receiver) = marshal(context, 4);
+            let blocks = chain(10);
+            let mut scripted = Scripted::default();
+            scripted.serve(&blocks);
+            let source = marshal.blocks(Height::new(9), History::suffix(digests(&blocks[9..])));
+
+            // Discovering a digest reads the bodies above it, and the walk retains them.
+            let digest = scripted.drive(&mut receiver, source.resolve_digest(Height::new(5)));
+            assert_eq!(digest, Ok(Some(blocks[5].digest())));
+            assert_eq!(scripted.held(), [6, 7, 8, 9]);
+
+            // A range takes the retained bodies, so none is acquired twice.
+            let mut range = source.range(Height::new(6)..=Height::new(9));
+            scripted.read(&mut receiver, &mut range, &blocks[6..]);
+            for block in &blocks[6..] {
+                assert_eq!(scripted.acquisitions(block), 1);
+            }
+            assert_eq!(scripted.acquisitions(&blocks[5]), 0);
+            assert!(scripted.held().is_empty());
+        });
+    }
+
+    #[test]
+    fn gap_deeper_than_the_window_retains_its_lowest_bodies_and_reacquires_the_rest() {
+        deterministic::Runner::default().start(|context| async move {
+            let (marshal, mut receiver) = marshal(context, 2);
+            let blocks = chain(10);
+            let mut scripted = Scripted::default();
+            scripted.serve(&blocks);
+            let source = marshal.blocks(Height::new(9), History::suffix(digests(&blocks[9..])));
+
+            // However deep the walk goes, it holds at most its window of bodies.
+            let mut discovery = Box::pin(source.resolve_digest(Height::new(3)));
+            let digest = loop {
+                if let Some(digest) = discovery.as_mut().now_or_never() {
+                    break digest;
+                }
+                assert!(scripted.held().len() <= 2);
+                assert!(scripted.answer(&mut receiver) > 0);
+            };
+            assert_eq!(digest, Ok(Some(blocks[3].digest())));
+            assert_eq!(scripted.held(), [4, 5]);
+
+            // The range takes the two lowest bodies and acquires the released ones again.
+            let mut range = source.range(Height::new(4)..=Height::new(9));
+            scripted.read(&mut receiver, &mut range, &blocks[4..]);
+            for block in &blocks[4..6] {
+                assert_eq!(scripted.acquisitions(block), 1);
+            }
+            for block in &blocks[6..] {
+                assert_eq!(scripted.acquisitions(block), 2);
+            }
+            assert!(scripted.awaited.is_empty());
+        });
+    }
+
+    #[test]
+    fn discovered_commitments_bind_the_bodies_read_at_their_heights() {
+        deterministic::Runner::default().start(|context| async move {
+            let (marshal, mut receiver) = marshal(context, 1);
+            let blocks = chain(10);
+            let mut scripted = Scripted::default();
+            scripted.serve(&blocks);
+            let source = marshal.blocks(Height::new(9), History::suffix(digests(&blocks[9..])));
+            let digest = scripted.drive(&mut receiver, source.resolve_digest(Height::new(7)));
+            assert_eq!(digest, Ok(Some(blocks[7].digest())));
+
+            // The body delivered for the discovered commitment is another block.
+            let impostor = TestBlock::new(blocks[6].digest(), Height::new(7), 99);
+            scripted
+                .bodies
+                .insert(blocks[7].digest(), Arc::new(impostor));
+            let mut range = source.range(Height::new(7)..=Height::new(8));
+            let read = scripted.drive(&mut receiver, range.next());
+            assert!(matches!(read, Some(Err(Error::InvalidDigest))));
+        });
+    }
+
+    #[test]
+    fn walk_ends_at_a_matching_finalized_block_and_reads_finalized_storage_below() {
+        deterministic::Runner::default().start(|context| async move {
+            let (marshal, mut receiver) = marshal(context, 8);
+            let blocks = chain(10);
+            let mut scripted = Scripted::default();
+            scripted.serve(&blocks);
+            scripted.finalize(&blocks[..=6]);
+            let source = marshal.blocks(Height::new(9), History::suffix(digests(&blocks[8..])));
+
+            let mut range = source.range(Height::new(3)..=Height::new(9));
+            scripted.read(&mut receiver, &mut range, &blocks[3..]);
+
+            // The walk read bodies down to the first finalized height and sampled nothing
+            // below it.
+            assert_eq!(scripted.infos, [8, 7, 6].map(Height::new));
+
+            // Only heights below that finalized block came from finalized storage. The block
+            // itself was acquired by its commitment.
+            scripted.awaited.sort_unstable();
+            assert_eq!(scripted.awaited, [3, 4, 5].map(Height::new));
+            assert_eq!(scripted.acquisitions(&blocks[6]), 1);
+            assert_eq!(scripted.acquisitions(&blocks[5]), 0);
+            assert_eq!(source.digest(Height::new(6)), Some(blocks[6].digest()));
+            assert_eq!(source.digest(Height::new(5)), None);
+        });
+    }
+
+    #[test]
+    fn conflicting_finalized_block_makes_lower_heights_unavailable() {
+        deterministic::Runner::default().start(|context| async move {
+            let (marshal, mut receiver) = marshal(context, 8);
+            let blocks = chain(10);
+            let mut scripted = Scripted::default();
+            scripted.serve(&blocks);
+
+            // Finalized storage holds another block at a height the walk reaches.
+            let canonical = TestBlock::new(blocks[5].digest(), Height::new(6), 99);
+            scripted.finalize(&[canonical]);
+            let source = marshal.blocks(Height::new(9), History::suffix(digests(&blocks[8..])));
+
+            let mut range = source.range(Height::new(5)..=Height::new(9));
+            let read = scripted.drive(&mut receiver, range.next());
+            assert!(matches!(read, Some(Err(Error::Unavailable))));
+            assert!(scripted.drive(&mut receiver, range.next()).is_none());
+            let below = scripted.drive(&mut receiver, source.resolve_digest(Height::new(5)));
+            assert_eq!(below, Err(Error::Unavailable));
+
+            // The commitments above the conflict stay readable by exact commitment.
+            assert_eq!(source.digest(Height::new(6)), Some(blocks[6].digest()));
+            let mut range = source.range(Height::new(6)..=Height::new(9));
+            scripted.read(&mut receiver, &mut range, &blocks[6..]);
+            assert!(scripted.awaited.is_empty());
+        });
+    }
+
+    #[test]
+    fn lowest_commitment_must_match_finalized_storage_before_canonical_reads() {
+        deterministic::Runner::default().start(|context| async move {
             for (resident, matches) in [(true, true), (true, false), (false, true), (false, false)]
             {
-                let (sender, mut receiver) = commonware_actor::mailbox::new::<TestMessage>(
+                let (marshal, mut receiver) = marshal(
                     context.child(match (resident, matches) {
                         (true, true) => "resident_matching",
                         (true, false) => "resident_conflicting",
                         (false, true) => "bound_matching",
                         (false, false) => "bound_conflicting",
                     }),
-                    NZUsize!(16),
+                    1,
                 );
-                let marshal = Mailbox::new(sender, NZUsize!(1), NZUsize!(1));
                 let blocks = chain(5);
-                let (retire, retired) = oneshot::channel::<()>();
-                let suffix: Arc<[_]> = if resident {
-                    Arc::from([blocks[2].digest(), blocks[3].digest()])
-                } else {
-                    Arc::from([])
-                };
-                let history = History::pending(suffix, async move {
-                    retired.await.ok()?;
-                    None
-                });
-                let original = if resident {
-                    marshal.blocks(Height::new(3), history)
-                } else {
-                    marshal.blocks_with_parent(Height::new(3), blocks[3].digest(), history)
-                };
-                assert_eq!(original.digest(Height::new(3)), Some(blocks[3].digest()));
-                let surviving = original.clone();
-                drop(original);
 
-                // A surviving user first resolves the old prefix after its request retires.
-                retire.send(()).unwrap();
-                assert!(receiver.recv().now_or_never().is_none());
-                // Processing height 2 sees history ending at 1, below the canonical anchor.
-                // The source's later selected tip can lose without invalidating this prefix.
-                let replay = surviving.ending_at(Height::new(1));
-                let mut resolved = Box::pin(replay.resolve_digest(Height::new(1)));
-                assert!(resolved.as_mut().now_or_never().is_none());
-                let TestMessage::AwaitFinalized {
-                    height, response, ..
-                } = receiver.recv().await.unwrap()
-                else {
-                    panic!("retired history must prove the selected anchor is canonical");
-                };
-                let anchor = if resident { 2 } else { 3 };
-                assert_eq!(height, Height::new(anchor as u64));
-                let canonical = if matches {
-                    blocks[anchor].clone()
+                // The source holds two commitments, or only the parent its request bound.
+                let (source, lowest) = if resident {
+                    let history = History::suffix(digests(&blocks[2..4]));
+                    (marshal.blocks(Height::new(3), history), 2)
                 } else {
-                    TestBlock::new(blocks[anchor - 1].digest(), Height::new(anchor as u64), 99)
+                    let history = History::suffix(Arc::from([]));
+                    let parent = blocks[3].digest();
+                    (
+                        marshal.blocks_with_parent(Height::new(3), parent, history),
+                        3,
+                    )
                 };
-                response.send(digested(canonical)).unwrap();
+                let mut scripted = Scripted::default();
+                scripted.serve(&blocks);
+                scripted.finalize(&blocks[..lowest]);
+                let canonical = if matches {
+                    blocks[lowest].clone()
+                } else {
+                    TestBlock::new(blocks[lowest - 1].digest(), Height::new(lowest as u64), 99)
+                };
+                scripted.finalize(&[canonical]);
+
+                // A view ending below every commitment reads through the source's lowest one.
+                let view = source.ending_at(Height::new(1));
+                let below = scripted.drive(&mut receiver, view.resolve_digest(Height::new(1)));
                 assert_eq!(
-                    resolved.await,
+                    below,
                     if matches {
                         Ok(None)
                     } else {
                         Err(Error::Unavailable)
                     }
                 );
-                assert_eq!(surviving.digest(Height::new(3)), Some(blocks[3].digest()));
+                assert_eq!(scripted.infos, [Height::new(lowest as u64)]);
+                assert!(scripted.acquired.is_empty());
 
-                let end = if resident { 2 } else { 1 };
-                let mut range = surviving.range(Height::new(1)..=Height::new(end));
+                let mut range = source.range(Height::new(1)..=Height::new(lowest as u64));
                 if matches {
-                    assert!(range.next().now_or_never().is_none());
-                    let TestMessage::AwaitFinalized {
-                        height, response, ..
-                    } = receiver.recv().await.unwrap()
-                    else {
-                        panic!("proven canonical prefix must use finalized storage");
-                    };
-                    assert_eq!(height, Height::new(1));
-                    response.send(digested(blocks[1].clone())).unwrap();
-                    assert_eq!(
-                        range.next().await.unwrap().unwrap().digest(),
-                        blocks[1].digest()
-                    );
-                    if resident {
-                        assert!(range.next().now_or_never().is_none());
-                        let TestMessage::Acquire {
-                            commitment,
-                            response,
-                            ..
-                        } = receiver.recv().await.unwrap()
-                        else {
-                            panic!("the anchor must still use its exact commitment");
-                        };
-                        assert_eq!(commitment, blocks[2].digest());
-                        response.send(digested(blocks[2].clone())).unwrap();
-                        assert_eq!(
-                            range.next().await.unwrap().unwrap().digest(),
-                            blocks[2].digest()
-                        );
-                    }
+                    // Heights below the matching block come from finalized storage, and the
+                    // block itself from its commitment.
+                    scripted.read(&mut receiver, &mut range, &blocks[1..=lowest]);
+                    scripted.awaited.sort_unstable();
+                    let finalized: Vec<_> = (1..lowest as u64).map(Height::new).collect();
+                    assert_eq!(scripted.awaited, finalized);
+                    assert_eq!(scripted.acquired, [blocks[lowest].digest()]);
                 } else {
-                    assert!(matches!(range.next().await, Some(Err(Error::Unavailable))));
+                    let read = scripted.drive(&mut receiver, range.next());
+                    assert!(matches!(read, Some(Err(Error::Unavailable))));
+                    assert!(scripted.drive(&mut receiver, range.next()).is_none());
+                    assert!(scripted.awaited.is_empty());
                 }
-                assert!(range.next().await.is_none());
-                assert!(receiver.recv().now_or_never().is_none());
 
-                // Retirement preserves exact resident acquisition even on a conflicting branch.
-                assert_eq!(
-                    surviving.resolve_digest(Height::new(3)).await,
-                    Ok(Some(blocks[3].digest()))
-                );
-                let mut resident = surviving.range(Height::new(3)..=Height::new(3));
-                assert!(resident.next().now_or_never().is_none());
-                let TestMessage::Acquire {
-                    commitment,
-                    fetch,
-                    response,
-                    ..
-                } = receiver.recv().await.unwrap()
-                else {
-                    panic!("retired resident history must acquire its original commitment");
-                };
-                assert_eq!(commitment, blocks[3].digest());
-                assert!(fetch);
-                response.send(digested(blocks[3].clone())).unwrap();
-                assert_eq!(resident.next().await.unwrap().unwrap().digest(), commitment);
-                assert!(resident.next().await.is_none());
-                assert!(receiver.recv().now_or_never().is_none());
+                // A conflict below does not disturb exact acquisition of the commitments held.
+                let parent = source.resolve_digest(Height::new(3)).now_or_never();
+                assert_eq!(parent, Some(Ok(Some(blocks[3].digest()))));
+                let mut range = source.range(Height::new(3)..=Height::new(3));
+                scripted.read(&mut receiver, &mut range, &blocks[3..4]);
+                assert_eq!(scripted.infos.len(), 1);
             }
         });
     }
 
     #[test]
-    fn bound_parent_rejects_conflicting_or_malformed_resident_history() {
+    fn empty_histories_read_canonical_blocks_or_nothing() {
         deterministic::Runner::default().start(|context| async move {
-            type TestMessage = Message<harness::S, Standard<TestBlock>>;
-            let (sender, mut receiver) =
-                commonware_actor::mailbox::new::<TestMessage>(context, NZUsize!(16));
-            let marshal = Mailbox::new(sender, NZUsize!(1), NZUsize!(1));
-            let blocks = chain(5);
-            let suffixes: [Arc<[_]>; 2] = [
-                Arc::from([blocks[2].digest()]),
-                Arc::from([blocks[3].digest(); 5]),
-            ];
-            for suffix in suffixes {
-                let source = marshal.blocks_with_parent(
-                    Height::new(3),
-                    blocks[3].digest(),
-                    History::pending(suffix, async {
-                        panic!("invalid history must not be polled")
-                    }),
-                );
-                assert_eq!(
-                    source.resolve_digest(Height::new(1)).await,
-                    Err(Error::Unavailable)
-                );
-                let mut range = source.range(Height::new(1)..=Height::new(1));
-                assert!(matches!(range.next().await, Some(Err(Error::Unavailable))));
-                assert!(range.next().await.is_none());
-                assert!(receiver.recv().now_or_never().is_none());
+            let (marshal, mut receiver) = marshal(context, 8);
+            let blocks = chain(4);
+            let mut scripted = Scripted::default();
+            scripted.finalize(&blocks);
+            for tip in [0, 3] {
+                // An empty anchored history reads every height through the tip from finalized
+                // storage.
+                let canonical = marshal.blocks(Height::new(tip), History::anchored(Arc::from([])));
+                assert_eq!(canonical.digest(Height::new(tip)), None);
+                let digest = canonical.resolve_digest(Height::new(tip)).now_or_never();
+                assert_eq!(digest, Some(Ok(None)));
+                let mut range = canonical.range(Height::zero()..=Height::new(tip));
+                scripted.read(&mut receiver, &mut range, &blocks[..=tip as usize]);
+
+                // An empty suffix has no commitment to start from.
+                let unknown = marshal.blocks(Height::new(tip), History::suffix(Arc::from([])));
+                assert_eq!(unknown.digest(Height::new(tip)), None);
+                let digest = unknown.resolve_digest(Height::new(tip)).now_or_never();
+                assert_eq!(digest, Some(Err(Error::Unavailable)));
+                let mut range = unknown.range(Height::zero()..=Height::new(tip));
+                let read = range.next().now_or_never();
+                assert!(matches!(read, Some(Some(Err(Error::Unavailable)))));
             }
+            scripted.awaited.sort_unstable();
+            assert_eq!(scripted.awaited, [0, 0, 1, 2, 3].map(Height::new));
+            assert!(scripted.infos.is_empty());
+            assert!(scripted.acquired.is_empty());
+            assert!(scripted.prefetched.is_empty());
+
+            // A bound parent seeds an empty anchored history. The parent is read by its
+            // commitment and everything below it from finalized storage.
+            scripted.serve(&blocks);
+            let parent = blocks[3].digest();
+            let history = History::anchored(Arc::from([]));
+            let anchored = marshal.blocks_with_parent(Height::new(3), parent, history);
+            assert_eq!(anchored.digest(Height::new(3)), Some(parent));
+            assert_eq!(anchored.digest(Height::new(2)), None);
+            scripted.awaited.clear();
+            let mut range = anchored.range(Height::new(2)..=Height::new(3));
+            scripted.read(&mut receiver, &mut range, &blocks[2..]);
+            assert_eq!(scripted.awaited, [Height::new(2)]);
+            assert_eq!(scripted.acquired, [parent]);
+            assert!(scripted.infos.is_empty());
+
+            // A bound parent seeds an empty suffix, and lower heights follow the parent's links.
+            let mut unfinalized = Scripted::default();
+            unfinalized.serve(&blocks);
+            let history = History::suffix(Arc::from([]));
+            let suffix = marshal.blocks_with_parent(Height::new(3), parent, history);
+            assert_eq!(suffix.digest(Height::new(3)), Some(parent));
+            let mut range = suffix.range(Height::new(1)..=Height::new(3));
+            unfinalized.read(&mut receiver, &mut range, &blocks[1..]);
+            assert_eq!(unfinalized.infos, [3, 2].map(Height::new));
+            assert!(unfinalized.awaited.is_empty());
         });
     }
 
     #[test]
-    fn bound_parent_checks_resolved_identity_before_canonical_reads() {
+    fn resolve_digest_reports_resident_discovered_canonical_and_unavailable_heights() {
         deterministic::Runner::default().start(|context| async move {
-            type TestMessage = Message<harness::S, Standard<TestBlock>>;
+            let (marshal, mut receiver) = marshal(context, 8);
+            let blocks = chain(10);
+            let resident = digests(&blocks[7..]);
+
+            // Resident heights, heights above the tip, and heights below an anchored history
+            // answer without a request.
+            let anchored = marshal.blocks(Height::new(9), History::anchored(resident.clone()));
+            let suffix = marshal.blocks(Height::new(9), History::suffix(resident.clone()));
+            for source in [&anchored, &suffix] {
+                let digest = source.resolve_digest(Height::new(8)).now_or_never();
+                assert_eq!(digest, Some(Ok(Some(blocks[8].digest()))));
+                let digest = source.resolve_digest(Height::new(10)).now_or_never();
+                assert_eq!(digest, Some(Ok(None)));
+            }
+            let digest = anchored.resolve_digest(Height::new(6)).now_or_never();
+            assert_eq!(digest, Some(Ok(None)));
+            assert!(receiver.recv().now_or_never().is_none());
+
+            // Below a suffix the digest is discovered and stays resident.
+            let mut scripted = Scripted::default();
+            scripted.serve(&blocks);
+            scripted.finalize(&blocks[..=3]);
+            let digest = scripted.drive(&mut receiver, suffix.resolve_digest(Height::new(5)));
+            assert_eq!(digest, Ok(Some(blocks[5].digest())));
+            assert_eq!(suffix.digest(Height::new(5)), Some(blocks[5].digest()));
+            let above = suffix.ending_at(Height::new(4));
+            let digest = above.resolve_digest(Height::new(5)).now_or_never();
+            assert_eq!(digest, Some(Ok(None)));
+
+            // Below the finalized block the walk reaches, history is canonical.
+            let digest = scripted.drive(&mut receiver, suffix.resolve_digest(Height::new(1)));
+            assert_eq!(digest, Ok(None));
+            assert_eq!(suffix.digest(Height::new(3)), Some(blocks[3].digest()));
+            assert_eq!(suffix.digest(Height::new(2)), None);
+            assert!(scripted.awaited.is_empty());
+
+            // A body at another height than its commitment selects ends the walk as invalid.
+            let misplaced = TestBlock::new(blocks[3].digest(), Height::new(4), 77);
+            scripted.serve(std::slice::from_ref(&misplaced));
+            let history = History::suffix(Arc::from([misplaced.digest()]));
+            let source = marshal.blocks(Height::new(9), history);
+            let digest = scripted.drive(&mut receiver, source.resolve_digest(Height::new(8)));
+            assert_eq!(digest, Err(Error::InvalidHeight));
+
+            // Once marshal stops, undiscovered heights are unavailable.
+            drop(receiver);
+            let source = marshal.blocks(Height::new(9), History::suffix(resident));
+            let digest = source.resolve_digest(Height::new(5)).now_or_never();
+            assert_eq!(digest, Some(Err(Error::Unavailable)));
+        });
+    }
+
+    #[test]
+    fn bound_parent_rejects_conflicting_or_malformed_history() {
+        deterministic::Runner::default().start(|context| async move {
+            let (marshal, mut receiver) = marshal(context, 1);
             let blocks = chain(5);
-            let resolutions: [Arc<[_]>; 3] = [
-                Arc::from([]),
+            let commitments: [Arc<[_]>; 2] = [
                 Arc::from([blocks[2].digest()]),
                 Arc::from([blocks[3].digest(); 5]),
             ];
-            for (case, resolved) in resolutions.into_iter().enumerate() {
-                for matches in [true, false] {
-                    let (sender, mut receiver) = commonware_actor::mailbox::new::<TestMessage>(
-                        context.child(match (case, matches) {
-                            (0, true) => "empty_matching",
-                            (0, false) => "empty_conflicting",
-                            (1, true) => "wrong_tip_matching",
-                            (1, false) => "wrong_tip_conflicting",
-                            (_, true) => "malformed_matching",
-                            (_, false) => "malformed_conflicting",
-                        }),
-                        NZUsize!(16),
-                    );
-                    let marshal = Mailbox::new(sender, NZUsize!(1), NZUsize!(1));
-                    let resolved = resolved.clone();
-                    let source = marshal.blocks_with_parent(
-                        Height::new(3),
-                        blocks[3].digest(),
-                        History::new(async move { Some(resolved) }),
-                    );
-                    let mut read = Box::pin(source.resolve_digest(Height::new(1)));
-                    assert!(read.as_mut().now_or_never().is_none());
-                    let TestMessage::AwaitFinalized {
-                        height, response, ..
-                    } = receiver.recv().await.unwrap()
-                    else {
-                        panic!("unbound resolution must prove the original parent");
-                    };
-                    assert_eq!(height, Height::new(3));
-                    let canonical = if matches {
-                        blocks[3].clone()
-                    } else {
-                        TestBlock::new(blocks[2].digest(), Height::new(3), 99)
-                    };
-                    response.send(digested(canonical)).unwrap();
+            for commitments in commitments {
+                for history in [
+                    History::anchored(commitments.clone()),
+                    History::suffix(commitments.clone()),
+                ] {
+                    let parent = blocks[3].digest();
+                    let source = marshal.blocks_with_parent(Height::new(3), parent, history);
+                    assert_eq!(source.digest(Height::new(3)), None);
                     assert_eq!(
-                        read.await,
-                        if matches {
-                            Ok(None)
-                        } else {
-                            Err(Error::Unavailable)
-                        }
+                        source.resolve_digest(Height::new(1)).await,
+                        Err(Error::Unavailable)
                     );
-                    assert_eq!(source.digest(Height::new(3)), Some(blocks[3].digest()));
+                    let mut range = source.range(Height::new(1)..=Height::new(1));
+                    assert!(matches!(range.next().await, Some(Err(Error::Unavailable))));
+                    assert!(range.next().await.is_none());
                     assert!(receiver.recv().now_or_never().is_none());
                 }
             }
@@ -1101,29 +1386,139 @@ mod tests {
     }
 
     #[test]
-    fn gap_range_drop_cancels_resident_body_demand() {
+    fn dropping_the_last_waiter_cancels_the_walk_and_a_later_reader_resumes_it() {
         deterministic::Runner::default().start(|context| async move {
-            type TestMessage = Message<harness::S, Standard<TestBlock>>;
-            let (sender, mut receiver) =
-                commonware_actor::mailbox::new::<TestMessage>(context, NZUsize!(32));
-            let marshal = Mailbox::new(sender, NZUsize!(1), NZUsize!(8));
+            let (marshal, mut receiver) = marshal(context, 4);
             let blocks = chain(10);
-            let resident: Arc<[_]> = blocks[7..].iter().map(Digestible::digest).collect();
-            let history = History::pending(resident, futures::future::pending());
-            let source = marshal.blocks(Height::new(9), history);
-            let mut range = source.range(Height::new(6)..=Height::new(8));
+
+            // No body is served, so every acquisition stays open.
+            let mut scripted = Scripted::default();
+            let source = marshal.blocks(Height::new(9), History::suffix(digests(&blocks[7..])));
+            let mut range = source.range(Height::new(5)..=Height::new(8));
             assert!(range.next().now_or_never().is_none());
-            let mut pending = Vec::new();
-            while let Some(Some(message)) = receiver.recv().now_or_never() {
-                let TestMessage::Acquire { response, .. } = message else {
-                    panic!("gap must not request finalized or prefetch demand");
-                };
-                pending.push(response);
-            }
-            assert_eq!(pending.len(), 2);
-            assert!(pending.iter().all(|response| !response.is_closed()));
+            assert_eq!(scripted.answer(&mut receiver), 4);
+            assert!(range.next().now_or_never().is_none());
+            assert_eq!(scripted.answer(&mut receiver), 1);
+
+            // The range holds its two resident bodies, and the walk its first step.
+            assert_eq!(scripted.prefetched, vec![0..2]);
+            assert_eq!(scripted.infos, [Height::new(7)]);
+            assert_eq!(scripted.acquisitions(&blocks[7]), 2);
+            assert_eq!(scripted.acquisitions(&blocks[8]), 1);
+            assert!(scripted.open.iter().all(|response| !response.is_closed()));
+
+            // An idle handle keeps none of it alive.
+            let idle = source.clone();
+            drop(source);
             drop(range);
-            assert!(pending.iter().all(oneshot::Sender::is_closed));
+            assert!(scripted.open.iter().all(oneshot::Sender::is_closed));
+            assert!(scripted.leases.iter().all(oneshot::Sender::is_closed));
+            assert_eq!(scripted.answer(&mut receiver), 0);
+
+            // A later reader starts the same step again.
+            scripted.serve(&blocks);
+            let digest = scripted.drive(&mut receiver, idle.resolve_digest(Height::new(6)));
+            assert_eq!(digest, Ok(Some(blocks[6].digest())));
+            assert_eq!(scripted.infos, [Height::new(7), Height::new(7)]);
+        });
+    }
+
+    #[test]
+    fn waiters_share_each_step_and_finish_at_their_own_heights() {
+        deterministic::Runner::default().start(|context| async move {
+            let (marshal, mut receiver) = marshal(context, 4);
+            let blocks = chain(10);
+
+            // Only the first body is served.
+            let mut scripted = Scripted::default();
+            scripted.serve(&blocks[9..]);
+            let source = marshal.blocks(Height::new(9), History::suffix(digests(&blocks[9..])));
+            let clone = source.clone();
+
+            // The deep waiter starts the walk, and the shallow waiter joins its step.
+            let mut deep = Box::pin(source.resolve_digest(Height::new(3)));
+            assert!(deep.as_mut().now_or_never().is_none());
+            let mut shallow = Box::pin(clone.resolve_digest(Height::new(8)));
+            assert!(shallow.as_mut().now_or_never().is_none());
+            assert_eq!(scripted.answer(&mut receiver), 1);
+
+            // The shallow waiter alone drives the step, and finishes at its own height.
+            assert!(shallow.as_mut().now_or_never().is_none());
+            assert_eq!(scripted.answer(&mut receiver), 1);
+            let digest = shallow.as_mut().now_or_never();
+            assert_eq!(digest, Some(Ok(Some(blocks[8].digest()))));
+            assert_eq!(scripted.answer(&mut receiver), 0);
+
+            // The deep waiter continues to a body that does not arrive.
+            assert!(deep.as_mut().now_or_never().is_none());
+            assert_eq!(scripted.answer(&mut receiver), 1);
+            assert!(deep.as_mut().now_or_never().is_none());
+            assert_eq!(scripted.answer(&mut receiver), 1);
+            assert_eq!(scripted.infos, [9, 8].map(Height::new));
+            assert_eq!(scripted.open.len(), 1);
+
+            // Resident digests stay readable while the acquisition is pending.
+            assert_eq!(clone.digest(Height::new(8)), Some(blocks[8].digest()));
+            assert_eq!(clone.digest(Height::new(7)), None);
+
+            // Another waiter joins the pending step, and the step survives its starter.
+            let mut joined = Box::pin(clone.resolve_digest(Height::new(7)));
+            assert!(joined.as_mut().now_or_never().is_none());
+            drop(deep);
+            assert_eq!(scripted.answer(&mut receiver), 0);
+            let response = scripted.open.pop().unwrap();
+            assert!(!response.is_closed());
+            response.send(digested(blocks[8].clone())).unwrap();
+            let digest = joined.as_mut().now_or_never();
+            assert_eq!(digest, Some(Ok(Some(blocks[7].digest()))));
+        });
+    }
+
+    #[test]
+    fn finalization_during_a_pending_acquisition_is_seen_by_the_next_step() {
+        deterministic::Runner::default().start(|context| async move {
+            for matches in [true, false] {
+                let name = if matches { "matching" } else { "conflicting" };
+                let (marshal, mut receiver) = marshal(context.child(name), 4);
+                let blocks = chain(10);
+                let mut scripted = Scripted::default();
+                let history = History::suffix(digests(&blocks[9..]));
+                let source = marshal.blocks(Height::new(9), history);
+
+                // The first step finds nothing finalized and waits for its body.
+                let mut discovery = Box::pin(source.resolve_digest(Height::new(6)));
+                assert!(discovery.as_mut().now_or_never().is_none());
+                assert_eq!(scripted.answer(&mut receiver), 1);
+                assert!(discovery.as_mut().now_or_never().is_none());
+                assert_eq!(scripted.answer(&mut receiver), 1);
+
+                // A block finalizes below. The pending acquisition is not redirected.
+                let canonical = if matches {
+                    blocks[8].clone()
+                } else {
+                    TestBlock::new(blocks[7].digest(), Height::new(8), 99)
+                };
+                scripted.finalize(&[canonical]);
+                assert!(discovery.as_mut().now_or_never().is_none());
+                assert_eq!(scripted.answer(&mut receiver), 0);
+                let response = scripted.open.pop().unwrap();
+                assert!(!response.is_closed());
+
+                // Once the body arrives, the next step samples storage and ends the walk.
+                response.send(digested(blocks[9].clone())).unwrap();
+                let below = scripted.drive(&mut receiver, discovery);
+                assert_eq!(
+                    below,
+                    if matches {
+                        Ok(None)
+                    } else {
+                        Err(Error::Unavailable)
+                    }
+                );
+                assert_eq!(scripted.infos, [9, 8].map(Height::new));
+                assert_eq!(scripted.acquired, [blocks[9].digest()]);
+                assert!(scripted.awaited.is_empty());
+            }
         });
     }
 
@@ -1159,7 +1554,7 @@ mod tests {
                     Error::Unavailable => blocks[1].clone(),
                 };
                 let commitments = blocks.iter().map(Digestible::digest).collect();
-                let source = marshal.blocks(Height::new(5), History::ready(commitments));
+                let source = marshal.blocks(Height::new(5), History::anchored(commitments));
                 let mut range = source.range(Height::new(1)..=Height::new(5));
                 assert!(range.next().now_or_never().is_none());
                 let TestMessage::Prefetch {

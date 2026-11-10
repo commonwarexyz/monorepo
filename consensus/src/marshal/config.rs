@@ -119,11 +119,14 @@ where
     /// Maximum combined number of speculative fetches and prefetched bodies.
     ///
     /// Also bounds the finalized heights requested in one forward gap-repair pass and the
-    /// number of resolver messages handled in one batch. Sources from
-    /// [`Mailbox::blocks`](super::core::Mailbox::blocks) give each range an additional
-    /// window of this size for pending acquisitions and buffered bodies.
-    /// Direct acquisitions are not limited by the shared capacity; each stays active until
-    /// its block is delivered or its receiver is dropped.
+    /// number of resolver messages handled in one batch. Direct acquisitions are not limited by
+    /// the shared capacity. Each stays active until its block is delivered or its receiver is
+    /// dropped.
+    ///
+    /// Sources from [`Mailbox::blocks`](super::core::Mailbox::blocks) give each range an
+    /// additional window of this size for pending acquisitions and buffered bodies. A source
+    /// that discovers commitments below a history suffix retains at most this many of the
+    /// bodies it reads.
     pub max_repair: NonZeroUsize,
 
     /// Maximum number of dispatched blocks awaiting application acknowledgement,

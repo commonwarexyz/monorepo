@@ -11,7 +11,7 @@ use bytes::Bytes;
 use commonware_actor::Feedback;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
-use commonware_macros::{select, select_loop};
+use commonware_macros::select_loop;
 use commonware_p2p::Recipients;
 use commonware_runtime::{Clock, ContextCell, Handle, Spawner, spawn_cell};
 use commonware_utils::channel::{
@@ -168,10 +168,10 @@ type HandoffController<D> =
 type VerifyObserver<H, P> =
     Box<dyn Fn(Context<<H as Hasher>::Digest, P>, <H as Hasher>::Digest) + Send + 'static>;
 
-/// Observes history resolved by a proposal, prepare, or verification response worker.
-pub type HistoryObserver<D> = Arc<dyn Fn(Round, Arc<[D]>) + Send + Sync + 'static>;
+/// Observer invoked with the history of every proposal, prepare, and verification request.
+pub type HistoryObserver<D> = Box<dyn Fn(Round, &crate::History<D>) + Send + 'static>;
 
-type AncestryCertifier<D> = Arc<dyn Fn(Round, D, Arc<[D]>) -> bool + Send + Sync + 'static>;
+type AncestryCertifier<D> = Box<dyn Fn(Round, D, &crate::History<D>) -> bool + Send + 'static>;
 
 /// Callback that receives a certification request's round, payload, and response sender.
 type CertificationController<D> = Box<dyn Fn(Round, D, oneshot::Sender<bool>) + Send + 'static>;
@@ -182,7 +182,7 @@ pub enum Certifier<D: Digest> {
     Always,
     /// A custom predicate function that receives the round and payload digest.
     Custom(Box<dyn Fn(Round, D) -> bool + Send + 'static>),
-    /// A custom predicate that also receives the selected parent commitments.
+    /// A custom predicate that also receives the request's history.
     WithAncestry(AncestryCertifier<D>),
     /// Lets a test decide when and how to complete each certification request.
     Controlled(CertificationController<D>),
@@ -351,38 +351,14 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
         self.verify_observer = Some(observer);
     }
 
-    /// Resolves proposal and verification histories in a worker before responding.
     pub fn set_history_observer(&mut self, observer: HistoryObserver<H::Digest>) {
         self.history_observer = Some(observer);
     }
 
-    fn history_response<T: Send + 'static>(
-        &self,
-        round: Round,
-        ancestry: crate::History<H::Digest>,
-        mut response: oneshot::Sender<T>,
-    ) -> oneshot::Sender<T> {
-        let Some(observer) = self.history_observer.clone() else {
-            return response;
-        };
-        let (sender, receiver) = oneshot::channel();
-        self.context
-            .child("response_history")
-            .spawn(move |_| async move {
-                select! {
-                    _ = response.closed() => {},
-                    value = async move {
-                        let ancestry = ancestry.resolve().await?;
-                        observer(round, ancestry);
-                        receiver.await.ok()
-                    } => {
-                        if let Some(value) = value {
-                            response.send_lossy(value);
-                        }
-                    },
-                }
-            });
-        sender
+    fn observe_history(&self, round: Round, ancestry: &crate::History<H::Digest>) {
+        if let Some(observer) = &self.history_observer {
+            observer(round, ancestry);
+        }
     }
 
     #[cfg(not(feature = "mocks"))]
@@ -492,20 +468,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                 response.send_lossy(func(round, payload));
             }
             Certifier::WithAncestry(func) => {
-                let func = Arc::clone(func);
-                self.context
-                    .child("certify_history")
-                    .spawn(move |_| async move {
-                        let mut response = response;
-                        select! {
-                            _ = response.closed() => {},
-                            ancestry = ancestry.resolve() => {
-                                if let Some(ancestry) = ancestry {
-                                    response.send_lossy(func(round, payload, ancestry));
-                                }
-                            },
-                        }
-                    });
+                response.send_lossy(func(round, payload, &ancestry));
             }
             Certifier::Controlled(controller) => controller(round, payload, response),
             Certifier::Cancel => {}
@@ -574,7 +537,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                         ancestry,
                         response,
                     } => {
-                        let response = self.history_response(context.round, ancestry, response);
+                        self.observe_history(context.round, &ancestry);
                         if let Some(observer) = &self.propose_observer {
                             observer(context.clone());
                         }
@@ -600,7 +563,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                         }
                     }
                     Message::Propose { context, ancestry, response } => {
-                        let response = self.history_response(context.round, ancestry, response);
+                        self.observe_history(context.round, &ancestry);
                         if let Some(observer) = &self.propose_observer {
                             observer(context.clone());
                         }
@@ -620,7 +583,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                         payload,
                         response,
                     } => {
-                        let response = self.history_response(context.round, ancestry, response);
+                        self.observe_history(context.round, &ancestry);
                         if let Some(observer) = &self.verify_observer {
                             observer(context.clone(), payload);
                         }

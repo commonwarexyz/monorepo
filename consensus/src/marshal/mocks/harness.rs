@@ -5192,9 +5192,10 @@ pub fn blocks_forward_range<H: TestHarness>() {
             parent_commitment = commitment;
         }
 
-        let blocks = handle
-            .mailbox
-            .blocks(Height::new(7), crate::History::ready(Arc::from(selected)));
+        let blocks = handle.mailbox.blocks(
+            Height::new(7),
+            crate::History::anchored(Arc::from(selected)),
+        );
         assert_eq!(blocks.tip(), Height::new(7));
         assert_eq!(blocks.digest(Height::new(7)), Some(parent));
         let fetched = blocks

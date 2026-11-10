@@ -185,11 +185,6 @@ pub struct State<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D:
     genesis: Option<D>,
     views: BTreeMap<View, Round<S, D>>,
 
-    /// Revision of the inputs read by `visit_ancestry`. Mutations to its anchor,
-    /// certificates, or local proposal and verification bindings must advance it
-    /// so blocked histories are rechecked.
-    ancestry_generation: u64,
-
     /// Monotone cursor for the oldest entered, unfinalized view (the anchor of
     /// the stall timeout). See [`Self::next_stall_timeout`].
     stall_anchor: View,
@@ -293,7 +288,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             last_finalized: GENESIS_VIEW,
             genesis: None,
             views: BTreeMap::new(),
-            ancestry_generation: 0,
             stall_anchor: GENESIS_VIEW,
             nullify_views: BTreeSet::new(),
             nullification_views: BTreeSet::new(),
@@ -310,21 +304,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
     /// Seeds the state machine with the genesis payload and advances into view 1.
     pub fn set_genesis(&mut self, genesis: D) {
-        if self.genesis != Some(genesis) {
-            self.genesis = Some(genesis);
-            self.invalidate_ancestry();
-        }
+        self.genesis = Some(genesis);
         self.enter_view(GENESIS_VIEW.next());
         self.set_leader(GENESIS_VIEW.next(), None);
-    }
-
-    /// Returns the generation of the inputs read by the ancestry suffix walkers.
-    pub(super) const fn ancestry_generation(&self) -> u64 {
-        self.ancestry_generation
-    }
-
-    const fn invalidate_ancestry(&mut self) {
-        self.ancestry_generation = self.ancestry_generation.wrapping_add(1);
     }
 
     /// Seeds the state machine from the configured floor.
@@ -646,7 +628,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         self.set_leader(view.next(), Some(&notarization.certificate));
         let result = self.create_round(view).add_notarization(notarization);
         if result.0 {
-            self.invalidate_ancestry();
             if view > self.last_finalized {
                 self.certification_candidates.insert(view);
             }
@@ -693,8 +674,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         finalization: Finalization<S, D>,
     ) -> (bool, Option<S::PublicKey>) {
         let view = finalization.view();
-        let anchor_changed = view > self.last_finalized;
-        if anchor_changed {
+        if view > self.last_finalized {
             self.last_finalized = view;
 
             // Finalization overrides local certification rejections at or
@@ -717,9 +697,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         self.enter_view(view.next());
         self.set_leader(view.next(), Some(&finalization.certificate));
         let result = self.create_round(view).add_finalization(finalization);
-        if anchor_changed || result.0 {
-            self.invalidate_ancestry();
-        }
         if result.0 {
             self.wake_certification_child(view);
             self.slide_optimistic_frontier(view);
@@ -778,7 +755,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             .views
             .get_mut(&view)
             .and_then(|round| round.construct_notarize().cloned())?;
-        self.invalidate_ancestry();
         self.prepare_optimistic_successor(view);
 
         // Signing can only fail if we are a verifier, so we don't need to worry about
@@ -921,7 +897,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             round.set_verifying(proposal, parent_payload);
         }
         if matches!(artifact, Artifact::Notarize(_)) {
-            self.invalidate_ancestry();
             self.prepare_optimistic_successor(artifact.view());
         }
     }
@@ -1150,7 +1125,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             return false;
         }
         round.set_verifying(proposal, parent_payload);
-        self.invalidate_ancestry();
         true
     }
 
@@ -1159,13 +1133,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// Returns true if the proposal should trigger verification, false otherwise.
     pub fn set_proposal(&mut self, view: View, proposal: &Proposal<D>) -> bool {
         self.prepare_optimistic_successor(view);
-        let round = self.create_round(view);
-        let was_unequivocated = round.has_unequivocated_proposal();
-        let added = round.set_proposal(proposal);
-        if added || was_unequivocated != round.has_unequivocated_proposal() {
-            self.invalidate_ancestry();
-        }
-        added
+        self.create_round(view).set_proposal(proposal)
     }
 
     /// Returns the ancestry fetch a verification error justifies, if any.
@@ -1262,7 +1230,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                 continue;
             }
             round.set_verifying(proposal.clone(), parent_payload);
-            self.invalidate_ancestry();
             return Verify::Ready(
                 Context {
                     round: proposal.round,
@@ -1299,11 +1266,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         if self.verification_matches(view) {
             return false;
         }
-        if let Some(round) = self.views.get_mut(&view)
-            && round.verifying().is_some()
-        {
+        if let Some(round) = self.views.get_mut(&view) {
             round.clear_verifying();
-            self.invalidate_ancestry();
         }
         true
     }
@@ -1313,15 +1277,10 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         if self.verification_is_stale(view) {
             return false;
         }
-        let verified = self
-            .views
+        self.views
             .get_mut(&view)
             .map(|round| round.verified())
-            .unwrap_or(false);
-        if verified {
-            self.invalidate_ancestry();
-        }
-        verified
+            .unwrap_or(false)
     }
 
     /// Latches `reason` after the automaton rejected or dropped a proposal.
@@ -1487,10 +1446,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     pub fn prune(&mut self) -> Vec<View> {
         let min = self.min_active();
         let kept = self.views.split_off(&min);
-        let removed: Vec<_> = replace(&mut self.views, kept).into_keys().collect();
-        if !removed.is_empty() {
-            self.invalidate_ancestry();
-        }
+        let removed = replace(&mut self.views, kept).into_keys().collect();
         self.nullification_views = self.nullification_views.split_off(&min);
         self.nullify_views = self.nullify_views.split_off(&min);
 
@@ -2371,7 +2327,7 @@ mod tests {
     }
 
     #[test]
-    fn ancestry_generation_tracks_proofs_and_local_votes() {
+    fn ancestry_follows_local_vote_then_certificates() {
         deterministic::Runner::default().start(|mut context| async move {
             let (
                 Fixture {
@@ -2388,74 +2344,52 @@ mod tests {
                 ViewDelta::new(2),
                 4,
             );
-            let generation = state.ancestry_generation();
-            assert_ne!(generation, 0);
-            state.set_genesis(test_genesis());
-            assert_eq!(state.ancestry_generation(), generation);
             let local = fetch_proposal(1, 0, 151);
             assert!(state.set_proposal(local.view(), &local));
-            assert_ne!(state.ancestry_generation(), generation);
-            let generation = state.ancestry_generation();
             assert!(!state.set_proposal(local.view(), &local));
             assert!(matches!(
                 state.ancestry_suffix(local.view()),
                 Ok((_, Some(_)))
             ));
             assert!(state.ancestry_suffix(GENESIS_VIEW).unwrap().1.is_none());
-            assert_eq!(state.ancestry_generation(), generation);
 
             assert!(matches!(state.try_verify(), Verify::Ready(..)));
-            assert_ne!(state.ancestry_generation(), generation);
-            let generation = state.ancestry_generation();
             assert!(state.verified(local.view()));
-            assert_ne!(state.ancestry_generation(), generation);
-            let generation = state.ancestry_generation();
             assert!(state.construct_notarize(local.view()).is_some());
-            assert_ne!(state.ancestry_generation(), generation);
             assert_eq!(
                 state.ancestry(local.view()).unwrap().as_ref(),
                 &[test_genesis(), local.payload]
             );
-            let generation = state.ancestry_generation();
             assert!(state.construct_notarize(local.view()).is_none());
             state.trigger_timeout(local.view(), TimeoutReason::Inactivity);
             assert!(state.add_nullification(build_nullification(&verifier, &schemes, local.round)));
-            assert_eq!(state.ancestry_generation(), generation);
 
             let selected = fetch_proposal(1, 0, 152);
             assert!(!state.set_proposal(selected.view(), &selected));
-            assert_ne!(state.ancestry_generation(), generation);
             assert_eq!(
                 state.ancestry(local.view()),
                 Err(AncestryError::Missing(local.view()))
             );
-            let generation = state.ancestry_generation();
             let notarization = build_notarization(&verifier, &schemes, &selected);
             assert!(state.add_notarization(notarization.clone()).0);
-            assert_ne!(state.ancestry_generation(), generation);
-            let generation = state.ancestry_generation();
             assert!(!state.add_notarization(notarization).0);
             assert!(state.certified(selected.view(), true).is_some());
-            assert_eq!(state.ancestry_generation(), generation);
             assert_eq!(
                 state.ancestry(selected.view()).unwrap().as_ref(),
                 &[test_genesis(), selected.payload]
             );
             let finalization = build_finalization(&verifier, &schemes, &selected);
             assert!(state.add_finalization(finalization.clone()).0);
-            assert_ne!(state.ancestry_generation(), generation);
-            let generation = state.ancestry_generation();
             assert!(!state.add_finalization(finalization).0);
             assert_eq!(
                 state.ancestry(selected.view()).unwrap().as_ref(),
                 &[selected.payload]
             );
-            assert_eq!(state.ancestry_generation(), generation);
         });
     }
 
     #[test]
-    fn ancestry_generation_tracks_local_build_and_replayed_vote() {
+    fn ancestry_includes_replayed_vote_on_genesis() {
         deterministic::Runner::default().start(|mut context| async move {
             let (Fixture { schemes, .. }, mut state) = setup_state_with(
                 &mut context,
@@ -2467,12 +2401,9 @@ mod tests {
                 ViewDelta::new(2),
                 4,
             );
-            let generation = state.ancestry_generation();
             let request = state.try_propose().expect("local leader");
-            assert_eq!(state.ancestry_generation(), generation);
             let proposal = fetch_proposal(1, 0, 153);
             assert!(state.proposed(request.context(), proposal.payload));
-            assert_ne!(state.ancestry_generation(), generation);
             let vote = state.construct_notarize(proposal.view()).unwrap();
             let mut recovered = build_state(
                 context.child("recovered"),
@@ -2483,9 +2414,7 @@ mod tests {
                 ViewDelta::new(2),
                 4,
             );
-            let generation = recovered.ancestry_generation();
             recovered.replay(&Artifact::Notarize(vote));
-            assert_ne!(recovered.ancestry_generation(), generation);
             assert_eq!(
                 recovered.ancestry(proposal.view()).unwrap().as_ref(),
                 &[test_genesis(), proposal.payload]
@@ -4348,9 +4277,7 @@ mod tests {
             state.add_finalization(finalization);
 
             // Update last finalize to be in the future
-            let generation = state.ancestry_generation();
             let removed = state.prune();
-            assert_ne!(state.ancestry_generation(), generation);
             assert_eq!(
                 removed,
                 vec![
@@ -4362,9 +4289,6 @@ mod tests {
                 ]
             );
             assert_eq!(state.views.len(), 2); // 20 and 21
-            let generation = state.ancestry_generation();
-            assert!(state.prune().is_empty());
-            assert_eq!(state.ancestry_generation(), generation);
         });
     }
 

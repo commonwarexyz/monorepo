@@ -7185,7 +7185,8 @@ mod tests {
             payload: Self::Digest,
             ancestry: crate::History<Self::Digest>,
         ) -> oneshot::Receiver<bool> {
-            assert!(ancestry.peek().is_none());
+            assert!(ancestry.commitments().is_empty());
+            assert!(!ancestry.is_anchored());
             self.0.certify(round, payload, ancestry)
         }
     }
@@ -7289,7 +7290,9 @@ mod tests {
         });
     }
 
-    fn application_repairs_unresolved_history(local_index: usize, prepare: bool) {
+    /// A request whose parent is certified above a missing certificate is dispatched with the
+    /// commitments consensus holds, and the voter requests no certificate on its behalf.
+    fn application_history_holds_resident_suffix(local_index: usize, prepare: bool) {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
             let epoch = Epoch::new(333);
             let Fixture {
@@ -7307,7 +7310,6 @@ mod tests {
                 true,
             )
             .await;
-            let genesis = mocks::application::genesis::<Sha256>(epoch);
             let missing = Proposal::new(
                 Round::new(epoch, View::new(1)),
                 View::zero(),
@@ -7318,11 +7320,9 @@ mod tests {
                 missing.view(),
                 Sha256::hash(&[b"parent"]),
             );
-            let repaired = Arc::new(Mutex::new(false));
-            let completed = Arc::new(Mutex::new(false));
-            let repair_observer = repaired.clone();
-            let completion_observer = completed.clone();
-            let expected = vec![genesis, missing.payload, parent.payload];
+            let observed = Arc::new(Mutex::new(false));
+            let observer = observed.clone();
+            let expected = [parent.payload];
             let elector = RoundRobin::<Sha256>::default().with_term(
                 TermLength::new(NZU32!(if prepare { 2 } else { 5 })),
                 Duration::from_secs(30),
@@ -7338,11 +7338,11 @@ mod tests {
                     local_index,
                     leader_timeout: Duration::from_secs(20),
                     handoff: Handoff::Vote(()),
-                    history_observer: Some(Arc::new(move |round, ancestry| {
+                    history_observer: Some(Box::new(move |round, ancestry| {
                         if round.view() == View::new(3) {
-                            assert!(*repair_observer.lock());
-                            assert_eq!(ancestry.as_ref(), expected.as_slice());
-                            *completion_observer.lock() = true;
+                            assert_eq!(ancestry.commitments().as_ref(), expected.as_slice());
+                            assert!(!ancestry.is_anchored());
+                            *observer.lock() = true;
                         }
                     })),
                     certifier: Certifier::Pending,
@@ -7352,7 +7352,6 @@ mod tests {
             .await;
             let peer_schemes = peers(&schemes, local_index);
             let (_, parent_certificate) = build_notarization(&peer_schemes, &parent, quorum(4));
-            let (_, missing_certificate) = build_notarization(&peer_schemes, &missing, quorum(4));
             mailbox.recovered(Certificate::Notarization(parent_certificate));
             if local_index == 1 {
                 let contents = (Round::new(epoch, View::new(3)), parent.payload, 1u64).encode();
@@ -7368,57 +7367,66 @@ mod tests {
                 );
                 mailbox.proposal(candidate);
             }
+            let history_request = |message: MailboxMessage<_, _>| {
+                matches!(
+                    message,
+                    MailboxMessage::Resolve { proposal, view, .. }
+                        if proposal == View::new(3) && view == missing.view()
+                )
+            };
             loop {
                 select! {
                     message = resolver.recv() => {
-                        if let MailboxMessage::Resolve {
-                            proposal, view, kind: Kind::Notarization, target: None, ..
-                        } = message.unwrap()
-                            && proposal == View::new(3) && view == missing.view()
-                        {
-                            assert!(!*repaired.lock());
-                            assert!(!*completed.lock(), "response must await history repair");
-                            *repaired.lock() = true;
-                            mailbox.recovered(Certificate::Notarization(missing_certificate.clone()));
-                        }
+                        assert!(
+                            !history_request(message.unwrap()),
+                            "history must not request certificates"
+                        );
                     },
                     message = batcher.recv() => {
                         if let batcher::Message::Constructed(Vote::Notarize(vote)) = message.unwrap()
                             && vote.view() == View::new(3)
                         {
-                            assert!(*repaired.lock());
-                            assert!(*completed.lock());
+                            assert!(*observed.lock());
                             assert_eq!(vote.proposal.parent, parent.view());
                             break;
                         }
                     },
                     _ = context.sleep(Duration::from_secs(10)) =>
-                        panic!("application response stalled on history"),
+                        panic!("a request missing an ancestor certificate must be answered"),
                 }
+            }
+            while let Some(message) = resolver.recv().now_or_never().flatten() {
+                assert!(
+                    !history_request(message),
+                    "history must not request certificates"
+                );
             }
         });
     }
 
     #[test]
-    fn test_propose_repairs_unresolved_history() {
-        application_repairs_unresolved_history(2, false);
+    fn test_propose_history_holds_resident_suffix() {
+        application_history_holds_resident_suffix(2, false);
     }
 
     #[test]
-    fn test_prepare_repairs_unresolved_history() {
-        application_repairs_unresolved_history(3, true);
+    fn test_prepare_history_holds_resident_suffix() {
+        application_history_holds_resident_suffix(3, true);
     }
 
     #[test]
-    fn test_verify_repairs_unresolved_history() {
-        application_repairs_unresolved_history(1, false);
+    fn test_verify_history_holds_resident_suffix() {
+        application_history_holds_resident_suffix(1, false);
     }
 
-    fn certification_repairs_cross_term_parent(conflicting_local_parent: bool) {
+    /// A term-start candidate whose parent in an earlier term has no certificate here is
+    /// certified on an empty history. The only request for that certificate is the targeted
+    /// one verification of the candidate makes.
+    fn certification_history_omits_uncertified_cross_term_parent(conflicting_local_parent: bool) {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
             let epoch = Epoch::new(333);
             let Fixture { participants, schemes, .. } =
-                ed25519::fixture(&mut context, b"_COMMONWARE_CONSENSUS_TEST_CERTIFICATION_PARENT_REPAIR", 4);
+                ed25519::fixture(&mut context, b"_COMMONWARE_CONSENSUS_TEST_CERTIFICATION_PARENT_HISTORY", 4);
             let oracle = start_test_network_with_peers(
                 context.child("network"), participants.clone(), true,
             ).await;
@@ -7430,11 +7438,8 @@ mod tests {
             let candidate = Proposal::new(
                 Round::new(epoch, View::new(6)), parent.view(), Sha256::hash(&[b"candidate-C"]),
             );
-            let repaired = Arc::new(Mutex::new(false));
             let observed = Arc::new(Mutex::new(0usize));
-            let repair_observer = repaired.clone();
             let call_observer = observed.clone();
-            let expected = vec![genesis, parent.payload];
             let candidate_view = candidate.view();
             let candidate_payload = candidate.payload;
             let elector = RoundRobin::<Sha256>::default().with_term(
@@ -7445,13 +7450,12 @@ mod tests {
                 VoterOptions {
                     local_index: 1,
                     leader_timeout: Duration::from_secs(20),
-                    certifier: mocks::application::Certifier::WithAncestry(Arc::new(
+                    certifier: mocks::application::Certifier::WithAncestry(Box::new(
                         move |round, payload, ancestry| {
                             if round.view() == candidate_view {
-                                assert!(*repair_observer.lock(),
-                                    "certification ran before its untargeted parent repair");
                                 assert_eq!(payload, candidate_payload);
-                                assert_eq!(&*ancestry, expected.as_slice());
+                                assert!(ancestry.commitments().is_empty());
+                                assert!(!ancestry.is_anchored());
                                 *call_observer.lock() += 1;
                             }
                             true
@@ -7494,8 +7498,6 @@ mod tests {
             let (_, skipped) = build_nullification(
                 &quorum_schemes, Round::new(epoch, View::new(2)), quorum(4),
             );
-            let (_, parent_certificate) =
-                build_notarization(&quorum_schemes, &parent, quorum(4));
             let (_, candidate_certificate) =
                 build_notarization(&quorum_schemes, &candidate, quorum(4));
             mailbox.recovered(Certificate::Nullification(skipped));
@@ -7504,21 +7506,11 @@ mod tests {
                 select! {
                     message = resolver.recv() => {
                         match message.unwrap() {
-                            MailboxMessage::Resolve {
-                                proposal, view,
-                                kind: crate::simplex::actors::Kind::Notarization,
-                                target: None, ..
-                            } if proposal == candidate.view() && view == parent.view() => {
-                                assert!(!*repaired.lock(), "repair must be deduplicated");
-                                assert_eq!(*observed.lock(), 0);
-                                *repaired.lock() = true;
-                                mailbox.recovered(Certificate::Notarization(
-                                    parent_certificate.clone(),
-                                ));
-                            }
+                            MailboxMessage::Resolve { view, target: None, .. }
+                                if view == parent.view() =>
+                                    panic!("history must not request the parent certificate"),
                             MailboxMessage::Certified { notarization, success, .. }
                                 if notarization.view() == candidate.view() => {
-                                    assert!(*repaired.lock());
                                     assert!(success);
                             }
                             _ => {}
@@ -7528,26 +7520,30 @@ mod tests {
                         if let batcher::Message::Constructed(Vote::Finalize(vote)) = message.unwrap()
                             && vote.view() == candidate.view()
                         {
-                            assert!(*repaired.lock());
                             assert_eq!(*observed.lock(), 1);
                             break;
                         }
                     },
                     _ = context.sleep(Duration::from_secs(10)) =>
-                        panic!("candidate failed to certify after exact parent repair"),
+                        panic!("the candidate must certify without its parent certificate"),
+                }
+            }
+            while let Some(message) = resolver.recv().now_or_never().flatten() {
+                if let MailboxMessage::Resolve { view, target: None, .. } = message {
+                    assert_ne!(view, parent.view(), "history must not request the parent certificate");
                 }
             }
         });
     }
 
     #[test]
-    fn test_certification_repairs_conflicting_cross_term_parent() {
-        certification_repairs_cross_term_parent(true);
+    fn test_certification_history_omits_conflicting_cross_term_parent() {
+        certification_history_omits_uncertified_cross_term_parent(true);
     }
 
     #[test]
-    fn test_certification_repairs_missing_cross_term_ancestry() {
-        certification_repairs_cross_term_parent(false);
+    fn test_certification_history_omits_missing_cross_term_parent() {
+        certification_history_omits_uncertified_cross_term_parent(false);
     }
 
     /// Tests that when proposal verification fails, the voter emits a nullify vote

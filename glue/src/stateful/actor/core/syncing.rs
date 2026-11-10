@@ -279,7 +279,7 @@ where
                         let Applied { prune, .. } = processor
                             .finalize(
                                 self.context.as_present(),
-                                || marshal.blocks(parent_height, History::ready(Arc::from([]))),
+                                || marshal.blocks(parent_height, History::anchored(Arc::from([]))),
                                 &block,
                                 false,
                             )

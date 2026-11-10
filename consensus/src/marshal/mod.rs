@@ -179,13 +179,15 @@
 //!
 //! ## Application History
 //!
-//! Simplex supplies commitments on the selected parent branch separately from its
-//! encoded context. Applications receive the parent and candidate explicitly and
-//! use [`blocks::Blocks`] to select the history they need. Selected ranges load
-//! bodies in increasing height order, including canonical finalized history below
-//! the consensus suffix. Range handles share commitment metadata without holding
-//! block bodies. Active ranges bound body retention and release unused demand
-//! when dropped.
+//! Simplex supplies the commitments it holds on the selected parent branch separately from its
+//! encoded context. Applications receive the parent and candidate explicitly and use
+//! [`blocks::Blocks`] to select the history they need. Selected ranges load bodies in increasing
+//! height order.
+//!
+//! Below the supplied commitments, ranges read canonical finalized history when the commitments
+//! are anchored. Otherwise they discover older commitments by following parent links through
+//! block bodies. Range handles share commitment metadata. Active ranges bound body retention and
+//! release unused demand when dropped, and discovery retains at most one range window of bodies.
 //!
 //! ## Limitations and Future Work
 //!

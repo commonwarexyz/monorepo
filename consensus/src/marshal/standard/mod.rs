@@ -225,7 +225,7 @@ mod tests {
                         marshal.clone(),
                     );
                     let digest = wrapper
-                        .propose(block_context, crate::History::ready(Arc::from([parent])))
+                        .propose(block_context, crate::History::anchored(Arc::from([parent])))
                         .await
                         .expect("proposal must build a block");
                     assert_eq!(counter.count(), built, "{kind:?} proposal hashing");
@@ -237,7 +237,7 @@ mod tests {
                     );
                     assert!(
                         wrapper
-                            .certify(round, digest, crate::History::ready(Arc::from([parent])))
+                            .certify(round, digest, crate::History::anchored(Arc::from([parent])))
                             .await
                             .unwrap()
                     );
@@ -268,7 +268,7 @@ mod tests {
 
                 let blocks = marshal.blocks(
                     Height::new(3),
-                    crate::History::ready(Arc::from(digests.clone())),
+                    crate::History::anchored(Arc::from(digests.clone())),
                 );
                 let mut range = blocks.range(Height::new(1)..=Height::new(3));
                 for expected in 1..=3 {
@@ -3306,8 +3306,8 @@ mod tests {
             // until the leader's block arrives. A notarization can arrive in
             // this window, causing Simplex's sole `certify` request to consume
             // and await that still-pending gate.
-            let verify_rx = wrapper.verify(conflicting_context, digest, crate::History::ready(Arc::from([genesis.digest(), certified_digest])));
-            let certify_rx = wrapper.certify(round, digest, crate::History::ready(Arc::from([genesis.digest(), certified_digest, skipped_digest])));
+            let verify_rx = wrapper.verify(conflicting_context, digest, crate::History::anchored(Arc::from([genesis.digest(), certified_digest])));
+            let certify_rx = wrapper.certify(round, digest, crate::History::anchored(Arc::from([genesis.digest(), certified_digest, skipped_digest])));
             assert!(
                 buffer
                     .broadcast(Recipients::Some(vec![]), ready(block))
@@ -3726,7 +3726,7 @@ mod tests {
                     .verify(
                         target_ctx,
                         target_digest,
-                        crate::History::ready(Arc::from([genesis.digest(), parent_digest]))
+                        crate::History::anchored(Arc::from([genesis.digest(), parent_digest]))
                     )
                     .await
                     .unwrap()
@@ -3753,7 +3753,7 @@ mod tests {
                 .certify(
                     target_round,
                     target_digest,
-                    crate::History::ready(Arc::from([genesis.digest(), parent_digest])),
+                    crate::History::anchored(Arc::from([genesis.digest(), parent_digest])),
                 )
                 .await
                 .expect("certify result")
@@ -3952,7 +3952,7 @@ mod tests {
                     .verify(
                         block_context,
                         digest,
-                        crate::History::ready(Arc::from([genesis.digest()])),
+                        crate::History::anchored(Arc::from([genesis.digest()])),
                     )
                     .await
                     .expect("verify result missing");
@@ -3965,7 +3965,7 @@ mod tests {
                     .certify(
                         round,
                         digest,
-                        crate::History::ready(Arc::from([genesis.digest()])),
+                        crate::History::anchored(Arc::from([genesis.digest()])),
                     )
                     .await
                     .expect("certify result missing");
@@ -4055,7 +4055,7 @@ mod tests {
                             assert!(marshal.verified(round, ready(block)).await);
                             assert_eq!(
                                 wrapper
-                                    .verify(block_context, digest, crate::History::ready(Arc::from([parent.1])))
+                                    .verify(block_context, digest, crate::History::anchored(Arc::from([parent.1])))
                                     .await
                                     .expect("verify result missing"),
                                 kind == WrapperKind::Deferred,
@@ -4075,7 +4075,7 @@ mod tests {
                                     .await;
                                 assert!(
                                     !wrapper
-                                        .certify(round, digest, crate::History::ready(Arc::from([parent.1])))
+                                        .certify(round, digest, crate::History::anchored(Arc::from([parent.1])))
                                         .await
                                         .expect("certify result missing"),
                                     "{kind:?}: Byzantine block at {round} should not certify"
@@ -4099,14 +4099,14 @@ mod tests {
                         assert!(marshal.verified(round, ready(block)).await);
                         assert!(
                             wrapper
-                                .verify(block_context, digest, crate::History::ready(Arc::from([parent.1])))
+                                .verify(block_context, digest, crate::History::anchored(Arc::from([parent.1])))
                                 .await
                                 .expect("verify result missing"),
                             "{kind:?}: block at {round} should verify"
                         );
                         assert!(
                             wrapper
-                                .certify(round, digest, crate::History::ready(Arc::from([parent.1])))
+                                .certify(round, digest, crate::History::anchored(Arc::from([parent.1])))
                                 .await
                                 .expect("certify result missing"),
                             "{kind:?}: block at {round} should certify"
@@ -4181,7 +4181,7 @@ mod tests {
                 let mut verify = wrapper.verify(
                     consensus_context,
                     missing,
-                    crate::History::ready(Arc::from([genesis.digest()])),
+                    crate::History::anchored(Arc::from([genesis.digest()])),
                 );
 
                 context.sleep(Duration::from_millis(50)).await;
@@ -4256,7 +4256,7 @@ mod tests {
                 let certify = wrapper.certify(
                     round,
                     digest,
-                    crate::History::ready(Arc::from([genesis.digest()])),
+                    crate::History::anchored(Arc::from([genesis.digest()])),
                 );
 
                 let result = certify.await.expect("certify result missing");
@@ -4365,7 +4365,7 @@ mod tests {
                 let ancestry: Arc<[D]> = Arc::from([block_context.parent.1]);
                 let verify_rx = case
                     .wrapper
-                    .verify(block_context, digest, Arc::clone(&ancestry).into());
+                    .verify(block_context, digest, crate::History::anchored(Arc::clone(&ancestry)));
 
                 // The mailbox barrier follows verification's local wait.
                 case.marshal.get_processed().await;
@@ -4373,7 +4373,7 @@ mod tests {
                     case.resolver.fetches().is_empty(),
                     "{kind:?}: verification must wait for the candidate without fetching it"
                 );
-                let certify_rx = case.wrapper.certify(round, digest, ancestry.into());
+                let certify_rx = case.wrapper.certify(round, digest, crate::History::anchored(ancestry));
 
                 select! {
                     result = verify_rx => {
@@ -4437,12 +4437,12 @@ mod tests {
                 let verify_rx = case.wrapper.verify(
                     block_context,
                     digest,
-                    crate::History::ready(Arc::from([case.block_context.parent.1])),
+                    crate::History::anchored(Arc::from([case.block_context.parent.1])),
                 );
                 let certify_rx = case.wrapper.certify(
                     round,
                     digest,
-                    crate::History::ready(Arc::from([case.block_context.parent.1])),
+                    crate::History::anchored(Arc::from([case.block_context.parent.1])),
                 );
 
                 // The mailbox barrier follows acquisition of the transient body.
@@ -4526,7 +4526,7 @@ mod tests {
             let verify_rx = wrapper.verify(
                 block_context,
                 digest,
-                crate::History::ready(Arc::from([genesis.digest()])),
+                crate::History::anchored(Arc::from([genesis.digest()])),
             );
             drop(verify_rx);
             context.sleep(Duration::from_millis(10)).await;
@@ -4535,7 +4535,7 @@ mod tests {
             let certify_rx = wrapper.certify(
                 round,
                 digest,
-                crate::History::ready(Arc::from([genesis.digest()])),
+                crate::History::anchored(Arc::from([genesis.digest()])),
             );
 
             select! {
@@ -4617,7 +4617,7 @@ mod tests {
                 let child_digest = child.digest();
                 assert!(marshal.verified(child_round, ready(child)).await);
 
-                let verify = wrapper.verify(child_context, child_digest, crate::History::ready(Arc::from([genesis.digest(), parent_digest])));
+                let verify = wrapper.verify(child_context, child_digest, crate::History::anchored(Arc::from([genesis.digest(), parent_digest])));
                 wait_until(
                     &context,
                     Duration::from_secs(5),
@@ -4653,7 +4653,7 @@ mod tests {
                         verify_result,
                         "deferred verify should optimistically pass pre-checks"
                     );
-                    let certify = wrapper.certify(child_round, child_digest, crate::History::ready(Arc::from([genesis.digest(), parent_digest])));
+                    let certify = wrapper.certify(child_round, child_digest, crate::History::anchored(Arc::from([genesis.digest(), parent_digest])));
                     assert!(
                         !certify.await.expect("certify result missing"),
                         "deferred certify should reject non-contiguous ancestry"
@@ -4775,11 +4775,11 @@ mod tests {
                     mock_app,
                     victim_mailbox.clone(),
                 );
-                let verify = wrapper.verify(child_context, child_digest, crate::History::ready(Arc::from([genesis.digest(), parent_digest])));
+                let verify = wrapper.verify(child_context, child_digest, crate::History::anchored(Arc::from([genesis.digest(), parent_digest])));
                 let verify_or_certify = if kind == WrapperKind::Deferred {
                     let optimistic = verify.await.expect("verify result missing");
                     assert!(optimistic, "deferred verify should optimistically succeed");
-                    wrapper.certify(child_round, child_digest, crate::History::ready(Arc::from([genesis.digest(), parent_digest])))
+                    wrapper.certify(child_round, child_digest, crate::History::anchored(Arc::from([genesis.digest(), parent_digest])))
                 } else {
                     verify
                 };
@@ -4909,7 +4909,7 @@ mod tests {
                 };
                 let proposal_rx = wrapper.propose(
                     non_boundary_context.clone(),
-                    crate::History::ready(Arc::from([genesis.digest()])),
+                    crate::History::anchored(Arc::from([genesis.digest()])),
                 );
                 assert!(
                     proposal_rx.await.is_err(),
@@ -4929,7 +4929,7 @@ mod tests {
                     Wrapper::new(kind, context.child("failed"), failing_app, marshal.clone());
                 let handoff_rx = failing.prepare(
                     non_boundary_context.clone(),
-                    crate::History::ready(Arc::from([genesis.digest()])),
+                    crate::History::anchored(Arc::from([genesis.digest()])),
                 );
                 assert_eq!(
                     handoff_rx.await.expect("handoff decision missing"),
@@ -4945,7 +4945,7 @@ mod tests {
                     Wrapper::new(kind, context.child("cancelled"), gated_app, marshal.clone());
                 let response = gated.prepare(
                     non_boundary_context.clone(),
-                    crate::History::ready(Arc::from([genesis.digest()])),
+                    crate::History::anchored(Arc::from([genesis.digest()])),
                 );
                 started.await.expect("handoff build should start");
                 drop(response);
@@ -4965,8 +4965,10 @@ mod tests {
                     leader: me,
                     parent: (View::new(boundary_height.get()), boundary_digest),
                 };
-                let reproposal_rx =
-                    wrapper.propose(reproposal_context, Arc::clone(&selected).into());
+                let reproposal_rx = wrapper.propose(
+                    reproposal_context,
+                    crate::History::anchored(Arc::clone(&selected)),
+                );
                 assert_eq!(
                     reproposal_rx.await.expect("reproposal result missing"),
                     boundary_digest,
@@ -4978,7 +4980,7 @@ mod tests {
                 let certify_rx = wrapper.certify(
                     reproposal_round,
                     boundary_digest,
-                    Arc::clone(&selected).into(),
+                    crate::History::anchored(Arc::clone(&selected)),
                 );
                 assert!(
                     certify_rx.await.expect("certify result missing"),
@@ -5014,8 +5016,10 @@ mod tests {
                     pipeline_app,
                     marshal.clone(),
                 );
-                let pipeline_rx =
-                    pipeline.prepare(pipeline_context.clone(), Arc::clone(&selected).into());
+                let pipeline_rx = pipeline.prepare(
+                    pipeline_context.clone(),
+                    crate::History::anchored(Arc::clone(&selected)),
+                );
                 assert_eq!(
                     pipeline_rx.await.expect("pipeline result missing"),
                     Handoff::Stage(boundary_digest),
@@ -5024,7 +5028,7 @@ mod tests {
                 let certify_rx = pipeline.certify(
                     pipeline_round,
                     boundary_digest,
-                    Arc::clone(&selected).into(),
+                    crate::History::anchored(Arc::clone(&selected)),
                 );
                 assert!(
                     certify_rx.await.expect("pipeline certify result missing"),
@@ -5125,7 +5129,7 @@ mod tests {
                 let mut wrapper =
                     Wrapper::new(kind, context.child("wrapper"), app, marshal.clone());
                 let digest = wrapper
-                    .propose(ctx, crate::History::ready(Arc::from([genesis.digest()])))
+                    .propose(ctx, crate::History::anchored(Arc::from([genesis.digest()])))
                     .await
                     .expect("propose must return a digest");
                 assert_eq!(
@@ -5139,7 +5143,7 @@ mod tests {
                         .certify(
                             round,
                             digest,
-                            crate::History::ready(Arc::from([genesis.digest()]))
+                            crate::History::anchored(Arc::from([genesis.digest()]))
                         )
                         .await
                         .expect("certify result missing"),
@@ -5176,7 +5180,7 @@ mod tests {
                         .certify(
                             round,
                             fresh_digest,
-                            crate::History::ready(Arc::from([genesis.digest()]))
+                            crate::History::anchored(Arc::from([genesis.digest()]))
                         )
                         .await
                         .expect("certify result missing"),
@@ -5248,7 +5252,7 @@ mod tests {
                 );
                 let response = declining.prepare(
                     handoff_context.clone(),
-                    crate::History::ready(Arc::from([genesis.digest()])),
+                    crate::History::anchored(Arc::from([genesis.digest()])),
                 );
                 assert_eq!(
                     response.await.expect("prepare decision missing"),
@@ -5299,7 +5303,7 @@ mod tests {
                 );
                 let response = rebuilding.prepare(
                     rebuilt_context,
-                    crate::History::ready(Arc::from([genesis.digest()])),
+                    crate::History::anchored(Arc::from([genesis.digest()])),
                 );
                 assert_eq!(
                     response.await.expect("prepare decision missing"),
@@ -5318,7 +5322,7 @@ mod tests {
                         Wrapper::new(kind, context.child(label), building_app, marshal.clone());
                     let response = building.prepare(
                         handoff_context.clone(),
-                        crate::History::ready(Arc::from([genesis.digest()])),
+                        crate::History::anchored(Arc::from([genesis.digest()])),
                     );
                     assert_eq!(
                         response.await.expect("prepare decision missing"),
@@ -5415,7 +5419,7 @@ mod tests {
                 let response = deferred
                     .prepare(
                         handoff_context,
-                        crate::History::ready(Arc::from([genesis.digest(), tip.digest()])),
+                        crate::History::anchored(Arc::from([genesis.digest(), tip.digest()])),
                     )
                     .await;
                 let expected = if built {
@@ -5486,7 +5490,7 @@ mod tests {
                         .verify(
                             valid_reproposal_context,
                             boundary_digest,
-                            Arc::clone(&selected).into()
+                            crate::History::anchored(Arc::clone(&selected))
                         )
                         .await
                         .expect("verify result missing"),
@@ -5510,7 +5514,7 @@ mod tests {
                         .verify(
                             invalid_reproposal_context,
                             non_boundary_digest,
-                            non_boundary_selected.into()
+                            crate::History::anchored(non_boundary_selected)
                         )
                         .await
                         .expect("verify result missing"),
@@ -5528,7 +5532,7 @@ mod tests {
                         .verify(
                             cross_epoch_context,
                             boundary_digest,
-                            Arc::clone(&selected).into()
+                            crate::History::anchored(Arc::clone(&selected))
                         )
                         .await
                         .expect("verify result missing"),
@@ -5542,7 +5546,7 @@ mod tests {
                         .certify(
                             certify_only_round,
                             boundary_digest,
-                            Arc::clone(&selected).into(),
+                            crate::History::anchored(Arc::clone(&selected)),
                         )
                         .await;
                     assert!(
@@ -5620,7 +5624,7 @@ mod tests {
                     .verify(
                         malformed_context.clone(),
                         malformed_digest,
-                        crate::History::ready(Arc::from([genesis.digest()])),
+                        crate::History::anchored(Arc::from([genesis.digest()])),
                     )
                     .await
                     .expect("verify result missing");
@@ -5639,7 +5643,7 @@ mod tests {
                     let certify = wrapper.certify(
                         malformed_round,
                         malformed_digest,
-                        crate::History::ready(Arc::from([genesis.digest()])),
+                        crate::History::anchored(Arc::from([genesis.digest()])),
                     );
                     assert!(
                         !certify.await.expect("certify result missing"),
@@ -5686,7 +5690,7 @@ mod tests {
                     .verify(
                         mismatched_context,
                         mismatched_digest,
-                        crate::History::ready(Arc::from([genesis.digest(), parent_digest])),
+                        crate::History::anchored(Arc::from([genesis.digest(), parent_digest])),
                     )
                     .await
                     .expect("verify result missing");
@@ -5705,7 +5709,7 @@ mod tests {
                     let certify = wrapper.certify(
                         mismatch_round,
                         mismatched_digest,
-                        crate::History::ready(Arc::from([genesis.digest(), parent_digest])),
+                        crate::History::anchored(Arc::from([genesis.digest(), parent_digest])),
                     );
                     assert!(
                         !certify.await.expect("certify result missing"),
@@ -5777,7 +5781,7 @@ mod tests {
                 //    - Inline fails in `verify` and still certifies, trusting the notarization.
                 //    - Deferred returns optimistic success and fails in `certify`.
                 let verify_result = wrapper
-                    .verify(verify_context, digest, crate::History::ready(Arc::from([genesis.digest(), parent_digest])))
+                    .verify(verify_context, digest, crate::History::anchored(Arc::from([genesis.digest(), parent_digest])))
                     .await
                     .expect("verify result missing");
                 if kind == WrapperKind::Inline {
@@ -5786,7 +5790,7 @@ mod tests {
                         "inline verify should return application-level failure"
                     );
                     let certify = wrapper
-                        .certify(round, digest, crate::History::ready(Arc::from([genesis.digest(), parent_digest])));
+                        .certify(round, digest, crate::History::anchored(Arc::from([genesis.digest(), parent_digest])));
                     assert!(
                         certify.await.expect("certify result missing"),
                         "inline certify should trust the notarization"
@@ -5796,7 +5800,7 @@ mod tests {
                         verify_result,
                         "deferred verify should pass pre-checks and schedule deferred verification"
                     );
-                    let certify = wrapper.certify(round, digest, crate::History::ready(Arc::from([genesis.digest(), parent_digest])));
+                    let certify = wrapper.certify(round, digest, crate::History::anchored(Arc::from([genesis.digest(), parent_digest])));
                     assert!(
                         !certify.await.expect("certify result missing"),
                         "deferred certify should propagate deferred application verification failure"
@@ -6589,7 +6593,7 @@ mod tests {
             let mut finalized = mailbox.finalized(missing_height);
             let source = mailbox.blocks(
                 anchor.height(),
-                crate::History::ready(Arc::from([anchor.digest()])),
+                crate::History::anchored(Arc::from([anchor.digest()])),
             );
             let mut range = source.range(missing_height..=missing_height);
             let mut read = Box::pin(range.next());
@@ -12656,7 +12660,7 @@ mod tests {
                     .collect();
                 let source = mailbox.blocks(
                     Height::new(LENGTH),
-                    crate::History::ready(Arc::from(selected)),
+                    crate::History::anchored(Arc::from(selected)),
                 );
                 let mut range = source.range(Height::new(1)..=Height::new(LENGTH));
                 assert!(range.next().now_or_never().is_none());
@@ -12835,7 +12839,7 @@ mod tests {
             let expected = selected[1];
             let source = mailbox.blocks(
                 Height::new(LENGTH),
-                crate::History::ready(Arc::from(selected)),
+                crate::History::anchored(Arc::from(selected)),
             );
             let mut range = source.range(Height::new(1)..=Height::new(LENGTH));
             let first = range.next().await.unwrap().unwrap();
@@ -14172,7 +14176,7 @@ mod tests {
                 StandardHarness::report_notarization(&mut marshal, notarization).await;
                 assert!(
                     wrapper
-                        .certify(boundary_round, digest, below.into())
+                        .certify(boundary_round, digest, crate::History::anchored(below))
                         .await
                         .unwrap(),
                     "{kind:?}: boundary must certify"
@@ -14190,7 +14194,11 @@ mod tests {
                 };
                 assert!(
                     wrapper
-                        .verify(outgoing_context, digest, Arc::clone(&selected).into())
+                        .verify(
+                            outgoing_context,
+                            digest,
+                            crate::History::anchored(Arc::clone(&selected))
+                        )
                         .await
                         .unwrap(),
                     "{kind:?}: the outgoing boundary re-proposal must verify"
@@ -14204,7 +14212,10 @@ mod tests {
                 };
                 assert_eq!(
                     wrapper
-                        .prepare(held_context.clone(), Arc::clone(&selected).into())
+                        .prepare(
+                            held_context.clone(),
+                            crate::History::anchored(Arc::clone(&selected))
+                        )
                         .await
                         .unwrap(),
                     Handoff::Stage(digest),
@@ -14232,7 +14243,10 @@ mod tests {
                 assert_ne!(held_context.parent, replacement_context.parent);
                 assert_eq!(
                     wrapper
-                        .propose(replacement_context, Arc::clone(&selected).into())
+                        .propose(
+                            replacement_context,
+                            crate::History::anchored(Arc::clone(&selected))
+                        )
                         .await
                         .unwrap(),
                     digest,
@@ -14257,7 +14271,7 @@ mod tests {
                 // Certification must await the replacement stage's durability acknowledgement.
                 assert!(
                     wrapper
-                        .certify(round, digest, selected.into())
+                        .certify(round, digest, crate::History::anchored(selected))
                         .await
                         .unwrap(),
                     "{kind:?}: the replacement durability gate must complete"
@@ -14570,7 +14584,7 @@ mod tests {
                         mailbox.prune(Height::new(10));
                     }
                     let mut direct = mailbox.finalized(height);
-                    let source = mailbox.blocks(height, crate::History::ready(Arc::from([])));
+                    let source = mailbox.blocks(height, crate::History::anchored(Arc::from([])));
                     let mut range = source.range(height..=height);
                     let mut read = Box::pin(range.next());
                     let early = read.as_mut().now_or_never();

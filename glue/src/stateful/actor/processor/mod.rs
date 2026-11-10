@@ -1158,11 +1158,14 @@ where
     /// cached or is the branch anchor, without forking database batches.
     ///
     /// `blocks` is the selected branch ending at `target`, which the caller holds and which is
-    /// never acquired. When cached states exist and a candidate's commitment is not resident, the
-    /// search resolves the selected history once, then restarts against the current branch anchor
-    /// and cache. Returns [`PrepareBatchesError::Invalid`] if `target` is at or below the branch
-    /// anchor's height, above the tip of `blocks`, or not the selected block at its height, or if
-    /// a cached ancestor has a different height. Returns [`PrepareBatchesError::Incomplete`] if the
+    /// never acquired. When cached states exist and the search reaches a height whose commitment
+    /// is not resident, it asks `blocks` to discover that digest and searches again against the
+    /// current branch anchor and cache, so recovery starts above the nearest cached ancestor.
+    /// When `blocks` selects no digest at that height, recovery starts above the branch anchor.
+    ///
+    /// Returns [`PrepareBatchesError::Invalid`] if `target` is at or below the branch anchor's
+    /// height, above the tip of `blocks`, or not the selected block at its height, or if a cached
+    /// ancestor has a different height. Returns [`PrepareBatchesError::Incomplete`] if the
     /// selected history is unavailable.
     async fn prepare_replay(
         &self,
@@ -1172,16 +1175,16 @@ where
     ) -> Result<Option<ReplayPath<A::Block>>, PrepareBatchesError> {
         let timer = self.metrics.rebuild_pending_duration.timer(context);
 
-        // Selected metadata below the resident suffix is resolved at most once. The search
-        // restarts afterwards to find cached ancestors in the newly resident metadata.
-        let mut resolved = false;
+        // Each missing height is discovered once. A search that still misses it has no selected
+        // digest left to match, and recovery starts above the branch anchor that search observed.
+        let mut discovered = None;
         let anchor = loop {
             match self.replay_start(blocks, &target)? {
                 ReplayStart::Known => return Ok(None),
                 ReplayStart::Above(anchor) => break anchor,
-                // After one resolution, recovery starts above the branch anchor observed by the
-                // search that still found the commitment missing.
-                ReplayStart::Missing { anchor, .. } if resolved => break anchor,
+                ReplayStart::Missing { height, anchor } if discovered == Some(height) => {
+                    break anchor;
+                }
                 ReplayStart::Missing { height, .. } => {
                     blocks
                         .resolve_digest(height)
@@ -1190,7 +1193,7 @@ where
                             BlocksError::Unavailable => PrepareBatchesError::Incomplete,
                             _ => PrepareBatchesError::Invalid,
                         })?;
-                    resolved = true;
+                    discovered = Some(height);
                 }
             }
         };
@@ -3585,5 +3588,59 @@ mod tests {
             assert_eq!(result, Err(PrepareBatchesError::Incomplete));
             assert_eq!(provider.fetches(), 1, "closed range should not be retried");
         });
+    }
+
+    #[test]
+    fn execution_rebuild_pending_starts_above_anchor_when_source_selects_no_digest() {
+        deterministic::Runner::timed(std::time::Duration::from_secs(5)).start(
+            |context| async move {
+                let mut harness = Harness::new(context.child("harness")).await;
+                let genesis = Block::genesis();
+                let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+                assert!(harness.finalize(block1.clone()).await);
+
+                let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
+                let block3 = harness.stage_pending_child(&block2, View::new(3)).await;
+                let block4 = harness.stage_pending_child(&block3, View::new(4)).await;
+                harness.processor.clear_pending();
+
+                // A cached state on another branch keeps the search looking for cached
+                // ancestors of the target.
+                harness.stage_pending_child(&block1, View::new(5)).await;
+
+                // The source serves every block and selects no digest, so the search cannot
+                // learn the digest it misses and recovery starts above the branch anchor.
+                let bodies: BTreeMap<_, _> = [&block2, &block3]
+                    .into_iter()
+                    .map(|block| (block.height(), block.clone()))
+                    .collect();
+                let fetches = Arc::new(AtomicUsize::new(0));
+                let counted = fetches.clone();
+                let source = Blocks::new(
+                    block4.height(),
+                    NZUsize!(8),
+                    |_| None,
+                    move |height| {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                        let block = bodies.get(&height).cloned();
+                        async move { block.map(digested) }
+                    },
+                );
+
+                let result = harness
+                    .processor
+                    .rebuild_pending(
+                        harness.context_cell.as_present(),
+                        source,
+                        digested(block4.clone()),
+                    )
+                    .await;
+                assert_eq!(result, Ok(()));
+                for block in [&block2, &block3, &block4] {
+                    assert!(harness.processor.pending_contains(&block.digest()));
+                }
+                assert_eq!(fetches.load(Ordering::SeqCst), 2);
+            },
+        );
     }
 }
