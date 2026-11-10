@@ -279,36 +279,30 @@ const fn bias_inner(basis: &Basis, encoded_p: &[u64; MODULI], k: u64) -> [u64; M
     bias
 }
 
-/// Diagonals of [`REDUCE`]: residue `j` of diagonal `d` is the coefficient from source residue
-/// `(j + d) mod MODULI` to destination residue `j`.
-const DIAGONALS: [[u64; MODULI]; MODULI] = {
+/// Returns the diagonals of `matrix`: residue `j` of diagonal `d` is the coefficient from
+/// source residue `(j + d) mod MODULI` to destination residue `j`.
+///
+/// Rotating the source residues by `d` lanes lines them up with diagonal `d`, so a conversion
+/// is one multiply-add per diagonal rather than a broadcast per source residue.
+const fn diagonals(matrix: &[[u64; MODULI]; MODULI]) -> [[u64; MODULI]; MODULI] {
     let mut diagonals = [[0; MODULI]; MODULI];
     let mut d = 0;
     while d < MODULI {
         let mut j = 0;
         while j < MODULI {
-            diagonals[d][j] = REDUCE[(j + d) % MODULI][j];
+            diagonals[d][j] = matrix[(j + d) % MODULI][j];
             j += 1;
         }
         d += 1;
     }
     diagonals
-};
+}
 
-/// Diagonals of the extension matrix of [`EXPAND`], as [`DIAGONALS`] are of [`REDUCE`].
-const EXPAND_DIAGONALS: [[u64; MODULI]; MODULI] = {
-    let mut diagonals = [[0; MODULI]; MODULI];
-    let mut d = 0;
-    while d < MODULI {
-        let mut j = 0;
-        while j < MODULI {
-            diagonals[d][j] = EXPAND.matrix[(j + d) % MODULI][j];
-            j += 1;
-        }
-        d += 1;
-    }
-    diagonals
-};
+/// Diagonals of [`REDUCE`].
+const DIAGONALS: [[u64; MODULI]; MODULI] = diagonals(&REDUCE);
+
+/// Diagonals of the extension matrix of [`EXPAND`].
+const EXPAND_DIAGONALS: [[u64; MODULI]; MODULI] = diagonals(&EXPAND.matrix);
 
 /// Largest output of [`reduce`] for an accumulated value at most `total`.
 const fn reduce_bound(total: u128, modulus: u64) -> u128 {
@@ -761,31 +755,19 @@ impl<S: X86V4C> Rns<S> {
         Self::convert(simd, &scalars(simd, n), digits, &EXPAND, &M)
     }
 
-    /// Accumulates the quotient rotated by `D` residues times diagonal `D` of [`REDUCE`].
+    /// Accumulates `residues` rotated by `D` lanes times diagonal `D` of `diagonals`.
     ///
-    /// Lane `j` receives quotient residue `(j + D) mod MODULI`.
+    /// Lane `j` receives residue `(j + D) mod MODULI`. Callers pass [`DIAGONALS`] or
+    /// [`EXPAND_DIAGONALS`], which inlining turns into a load of a constant.
     #[inline(always)]
     fn diagonal<const D: usize>(
         simd: S,
-        quotient: S::U64,
-        wide: (S::U64, S::U64),
-    ) -> (S::U64, S::U64) {
-        let rotated = simd.u64_rotate_lanes::<D>(quotient);
-        madd(simd, wide, rotated, constant(simd, &DIAGONALS[D]))
-    }
-
-    /// Accumulates the second-basis residues rotated by `D` times diagonal `D` of the
-    /// extension matrix of [`EXPAND`].
-    ///
-    /// Lane `j` receives residue `(j + D) mod MODULI`.
-    #[inline(always)]
-    fn expand_diagonal<const D: usize>(
-        simd: S,
+        diagonals: &'static [[u64; MODULI]; MODULI],
         residues: S::U64,
         wide: (S::U64, S::U64),
     ) -> (S::U64, S::U64) {
         let rotated = simd.u64_rotate_lanes::<D>(residues);
-        madd(simd, wide, rotated, constant(simd, &EXPAND_DIAGONALS[D]))
+        madd(simd, wide, rotated, constant(simd, &diagonals[D]))
     }
 
     /// Returns `self + rhs`.
@@ -886,8 +868,8 @@ impl<S: X86V4C> Rns<S> {
         let mut odd = (zero, zero);
         macro_rules! diagonals {
             ($($even:literal $odd:literal)*) => {$(
-                wide = Self::diagonal::<$even>(simd, quotient, wide);
-                odd = Self::diagonal::<$odd>(simd, quotient, odd);
+                wide = Self::diagonal::<$even>(simd, &DIAGONALS, quotient, wide);
+                odd = Self::diagonal::<$odd>(simd, &DIAGONALS, quotient, odd);
             )*};
         }
         const { assert!(MODULI == 8) };
@@ -1014,20 +996,21 @@ impl<S: X86V4C> Rns<S> {
                     },
                 );
 
-                // Each diagonal is a separate inlined call with a constant rotation.
+                // Each diagonal is a separate inlined call with a constant rotation, which keeps
+                // the residues in registers rather than broadcasting them from memory.
                 macro_rules! diagonals {
-                    ($($even:literal $odd:literal)*) => {$(
+                    ($table:expr, $residues:expr; $($even:literal $odd:literal)*) => {$(
                         unroll::<SUMS>(#[inline(always)] |i| {
-                            even[i] = Self::diagonal::<$even>(simd, quotients[i], even[i]);
+                            even[i] = Self::diagonal::<$even>(simd, $table, $residues[i], even[i]);
                         });
                         unroll::<SUMS>(#[inline(always)] |i| {
                             let chain = if split { &mut odd[i] } else { &mut even[i] };
-                            *chain = Self::diagonal::<$odd>(simd, quotients[i], *chain);
+                            *chain = Self::diagonal::<$odd>(simd, $table, $residues[i], *chain);
                         });
                     )*};
                 }
                 const { assert!(MODULI == 8) };
-                diagonals!(0 1 2 3 4 5 6 7);
+                diagonals!(&DIAGONALS, quotients; 0 1 2 3 4 5 6 7);
 
                 let (modulus, inverse) = (constant(simd, &N.moduli), constant(simd, &N.inverse));
                 let complement = constant(simd, &N.complement);
@@ -1049,20 +1032,7 @@ impl<S: X86V4C> Rns<S> {
                         odd[i] = (zero, zero);
                     },
                 );
-                // Each diagonal is a separate inlined call with a constant rotation, which keeps
-                // the residues in registers rather than broadcasting them from memory.
-                macro_rules! expand_diagonals {
-                    ($($even:literal $odd:literal)*) => {$(
-                        unroll::<SUMS>(#[inline(always)] |i| {
-                            even[i] = Self::expand_diagonal::<$even>(simd, n[i], even[i]);
-                        });
-                        unroll::<SUMS>(#[inline(always)] |i| {
-                            let chain = if split { &mut odd[i] } else { &mut even[i] };
-                            *chain = Self::expand_diagonal::<$odd>(simd, n[i], *chain);
-                        });
-                    )*};
-                }
-                expand_diagonals!(0 1 2 3 4 5 6 7);
+                diagonals!(&EXPAND_DIAGONALS, n; 0 1 2 3 4 5 6 7);
                 let correction = constant(simd, &EXPAND.correction);
                 let mask = simd.u64_splat(MASK);
                 unroll::<SUMS>(
