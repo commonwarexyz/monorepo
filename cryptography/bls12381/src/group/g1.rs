@@ -2,12 +2,13 @@
 
 use super::{
     Scalar, fmt_coordinates,
-    kernel::{Add, Double, Group, Kernel, MAX_COMPONENTS, MAX_LANES, Multiply, MultiplyEach, Sum},
+    kernel::{Add, Double, Group, Kernel, MAX_COMPONENTS, Multiply, MultiplyEach, Sum},
     msm,
 };
 use crate::core::{
     curve::g1::{Coordinates, GENERATOR, IDENTITY, Point},
     field::{
+        MAX_LANES,
         arithmetic::Field,
         fp::{self, BYTES},
     },
