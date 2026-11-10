@@ -6,9 +6,12 @@
 
 use super::{
     Scalar,
-    kernel::{Group, Kernel, MAX_LANES, identity, load_each, signed_digits, sum_lanes, windows},
+    kernel::{Group, Kernel, identity, load_each, signed_digits, sum_lanes, windows},
 };
-use crate::core::{curve::Points, field::arithmetic::Field};
+use crate::core::{
+    curve::Points,
+    field::{MAX_LANES, arithmetic::Field},
+};
 use alloc::{vec, vec::Vec};
 use commonware_simd::Simd;
 use core::ops::RangeInclusive;
