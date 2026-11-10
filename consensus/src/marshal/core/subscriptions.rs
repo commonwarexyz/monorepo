@@ -309,7 +309,7 @@ mod tests {
             }
         }
 
-        /// Registers a caller for `commitment`, which fetches it when `fetch` is set.
+        /// Registers a caller for `commitment`. The caller fetches it when `fetch` is set.
         fn subscribe(
             &mut self,
             commitment: Digest,
@@ -341,18 +341,38 @@ mod tests {
 
     #[test]
     fn insert_coalesces_duplicate_keys() {
-        let mut fixture = Fixture::new();
+        let test_buffer = TestBuffer::default();
+        let buffer = test_buffer.clone();
+        let mut waiters = TestWaiters::default();
+        let mut subscriptions = Subscriptions::<TestVariant>::new();
         let block = block(1, 10);
-        let first_receiver = fixture.subscribe(block.digest(), true);
-        let second_receiver = fixture.subscribe(block.digest(), true);
 
-        assert_eq!(fixture.buffer.commitment_subscription_count(), 1);
-        assert_eq!(fixture.subscriptions.entries.len(), 1);
+        let (first_sender, first_receiver) = oneshot::channel();
+        subscriptions.insert(
+            Span::none(),
+            block.digest(),
+            true,
+            first_sender,
+            &mut waiters,
+            &buffer,
+        );
+        let (second_sender, second_receiver) = oneshot::channel();
+        subscriptions.insert(
+            Span::none(),
+            block.digest(),
+            true,
+            second_sender,
+            &mut waiters,
+            &buffer,
+        );
 
-        assert!(fixture.subscriptions.notify(&block));
+        assert_eq!(test_buffer.commitment_subscription_count(), 1);
+        assert_eq!(subscriptions.entries.len(), 1);
+
+        assert!(subscriptions.notify(&block));
         assert_receives(first_receiver, &block);
         assert_receives(second_receiver, &block);
-        assert!(fixture.subscriptions.entries.is_empty());
+        assert!(subscriptions.entries.is_empty());
     }
 
     #[test]
@@ -399,23 +419,41 @@ mod tests {
 
     #[test]
     fn retain_open_drops_closed_subscribers_and_keeps_open_ones() {
-        let mut fixture = Fixture::new();
+        let buffer = TestBuffer::default();
+        let mut waiters = TestWaiters::default();
+        let mut subscriptions = Subscriptions::<TestVariant>::new();
         let block = block(3, 30);
-        let closed_receiver = fixture.subscribe(block.digest(), true);
-        let open_receiver = fixture.subscribe(block.digest(), true);
+
+        let (closed_sender, closed_receiver) = oneshot::channel();
+        subscriptions.insert(
+            Span::none(),
+            block.digest(),
+            true,
+            closed_sender,
+            &mut waiters,
+            &buffer,
+        );
+        let (open_sender, open_receiver) = oneshot::channel();
+        subscriptions.insert(
+            Span::none(),
+            block.digest(),
+            true,
+            open_sender,
+            &mut waiters,
+            &buffer,
+        );
         drop(closed_receiver);
 
-        assert!(fixture.subscriptions.retain_open().is_empty());
-        let subscription = fixture
-            .subscriptions
+        assert!(subscriptions.retain_open().is_empty());
+        let subscription = subscriptions
             .entries
             .get(&block.digest())
             .expect("open subscriber should remain");
         assert_eq!(subscription.fetching.len(), 1);
 
-        assert!(fixture.subscriptions.notify(&block));
+        assert!(subscriptions.notify(&block));
         assert_receives(open_receiver, &block);
-        assert!(fixture.subscriptions.entries.is_empty());
+        assert!(subscriptions.entries.is_empty());
     }
 
     #[test]

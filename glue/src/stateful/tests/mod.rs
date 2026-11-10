@@ -1299,7 +1299,7 @@ fn out_of_order_certifications_complete_on_qmdb() {
             certifications.push(deferred.certify(
                 block.context.round,
                 block.digest(),
-                History::anchored(Arc::from(&ancestor_commitments[..=index])),
+                History::anchored(&ancestor_commitments[..=index]),
             ));
         }
 
@@ -1473,7 +1473,7 @@ fn finalizations_and_certifications_complete_during_proposal_parent_lookup_on_qm
             certifications.push(deferred.certify(
                 block.context.round,
                 block.digest(),
-                History::anchored(Arc::from(&ancestor_commitments[..=index])),
+                History::anchored(&ancestor_commitments[..=index]),
             ));
         }
         for result in futures::future::join_all(certifications).await {
@@ -1816,7 +1816,7 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             let certification = deferred.certify(
                 block.context.round,
                 block.digest(),
-                History::anchored(Arc::from(&ancestor_commitments[..=index])),
+                History::anchored(&ancestor_commitments[..=index]),
             );
             assert!(
                 certification
@@ -1841,7 +1841,7 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
                 deferred.certify(
                     block.context.round,
                     block.digest(),
-                    History::anchored(Arc::from(&ancestor_commitments[..=index])),
+                    History::anchored(&ancestor_commitments[..=index]),
                 ),
             ));
         }
@@ -2062,7 +2062,7 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
             let certification = deferred.certify(
                 block.context.round,
                 block.digest(),
-                History::anchored(Arc::from(&ancestor_commitments[..=index])),
+                History::anchored(&ancestor_commitments[..=index]),
             );
             assert!(
                 certification
@@ -2114,7 +2114,7 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
                 deferred.certify(
                     block.context.round,
                     block.digest(),
-                    History::anchored(Arc::from(&ancestor_commitments[..=index])),
+                    History::anchored(&ancestor_commitments[..=index]),
                 ),
             ));
         }
@@ -2312,7 +2312,7 @@ fn pruning_joins_verification_on_real_qmdbs() {
             let certification = deferred.certify(
                 block.context.round,
                 block.digest(),
-                History::anchored(Arc::from(&ancestor_commitments[..=index])),
+                History::anchored(&ancestor_commitments[..=index]),
             );
             assert!(
                 certification
@@ -2354,7 +2354,7 @@ fn pruning_joins_verification_on_real_qmdbs() {
         let mut certification = deferred.certify(
             block.context.round,
             block.digest(),
-            History::anchored(Arc::from(&ancestor_commitments[..=4])),
+            History::anchored(&ancestor_commitments[..=4]),
         );
         first_started
             .await

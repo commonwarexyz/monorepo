@@ -7198,10 +7198,10 @@ mod tests {
                     local_index,
                     leader_timeout: Duration::from_secs(20),
                     handoff: Handoff::Vote(()),
-                    history_observer: Some(Box::new(move |round, ancestry| {
+                    history_observer: Some(Box::new(move |round, history| {
                         if round.view() == View::new(3) {
-                            assert_eq!(ancestry.commitments().as_ref(), expected.as_slice());
-                            assert!(!ancestry.is_anchored());
+                            assert_eq!(history.commitments().as_ref(), expected.as_slice());
+                            assert!(!history.is_anchored());
                             *observer.lock() = true;
                         }
                     })),
@@ -7280,6 +7280,109 @@ mod tests {
         application_history_holds_resident_suffix(1, false);
     }
 
+    /// A request whose path is certificate-backed down to genesis is dispatched with an
+    /// anchored history, and a certification request carries the commitments below its
+    /// candidate.
+    #[test_traced]
+    fn test_application_history_anchored_on_complete_path() {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let epoch = Epoch::new(333);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(
+                &mut context,
+                b"_COMMONWARE_CONSENSUS_TEST_APPLICATION_HISTORY",
+                4,
+            );
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+            let genesis = mocks::application::genesis::<Sha256>(epoch);
+            let first = Proposal::new(
+                Round::new(epoch, View::new(1)),
+                View::zero(),
+                Sha256::hash(&[b"first"]),
+            );
+            let parent = Proposal::new(
+                Round::new(epoch, View::new(2)),
+                first.view(),
+                Sha256::hash(&[b"parent"]),
+            );
+            let verified = Arc::new(Mutex::new(false));
+            let certified = Arc::new(Mutex::new(false));
+            let (verify_observer, certify_observer) = (verified.clone(), certified.clone());
+            let complete = [genesis, first.payload, parent.payload];
+            let elector = RoundRobin::<Sha256>::default().with_term(
+                TermLength::new(NZU32!(5)),
+                Duration::from_secs(30),
+                ViewDelta::new(2),
+            );
+            let (mut mailbox, mut batcher, _resolver, relay, _) = setup_voter(
+                &context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                VoterOptions {
+                    local_index: 1,
+                    leader_timeout: Duration::from_secs(20),
+                    history_observer: Some(Box::new(move |round, history| {
+                        if round.view() == View::new(3) {
+                            assert_eq!(history.commitments().as_ref(), complete.as_slice());
+                            assert!(history.is_anchored());
+                            *verify_observer.lock() = true;
+                        }
+                    })),
+                    certifier: Certifier::WithHistory(Box::new(move |round, _, history| {
+                        if round.view() == View::new(2) {
+                            assert_eq!(history.commitments().as_ref(), &complete[..2]);
+                            assert!(history.is_anchored());
+                            *certify_observer.lock() = true;
+                        }
+                        true
+                    })),
+                    ..VoterOptions::default()
+                },
+            )
+            .await;
+            let peer_schemes = peers(&schemes, 1);
+            for proposal in [&first, &parent] {
+                let (_, certificate) = build_notarization(&peer_schemes, proposal, quorum(4));
+                mailbox.recovered(Certificate::Notarization(certificate));
+            }
+            let contents = (Round::new(epoch, View::new(3)), parent.payload, 1u64).encode();
+            let candidate = Proposal::new(
+                Round::new(epoch, View::new(3)),
+                parent.view(),
+                Sha256::hash(&[&contents]),
+            );
+            relay.broadcast(
+                &participants[2],
+                Recipients::All,
+                (candidate.payload, contents),
+            );
+            mailbox.proposal(candidate);
+            let mut voted = false;
+            while !(voted && *certified.lock()) {
+                select! {
+                    message = batcher.recv() => {
+                        if let batcher::Message::Constructed(Vote::Notarize(vote)) =
+                            message.unwrap()
+                            && vote.view() == View::new(3)
+                        {
+                            assert!(*verified.lock());
+                            voted = true;
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(10)) =>
+                        panic!("the candidate must be verified and its parent certified"),
+                }
+            }
+        });
+    }
+
     /// A term-start candidate whose parent in an earlier term has no certificate here is
     /// certified on an empty history. The only request for that certificate is the targeted
     /// one verification of the candidate makes.
@@ -7324,17 +7427,15 @@ mod tests {
                 VoterOptions {
                     local_index: 1,
                     leader_timeout: Duration::from_secs(20),
-                    certifier: Certifier::WithAncestry(Box::new(
-                        move |round, payload, ancestry| {
-                            if round.view() == candidate_view {
-                                assert_eq!(payload, candidate_payload);
-                                assert!(ancestry.commitments().is_empty());
-                                assert!(!ancestry.is_anchored());
-                                *call_observer.lock() += 1;
-                            }
-                            true
-                        },
-                    )),
+                    certifier: Certifier::WithHistory(Box::new(move |round, payload, history| {
+                        if round.view() == candidate_view {
+                            assert_eq!(payload, candidate_payload);
+                            assert!(history.commitments().is_empty());
+                            assert!(!history.is_anchored());
+                            *call_observer.lock() += 1;
+                        }
+                        true
+                    })),
                     ..VoterOptions::default()
                 },
             )

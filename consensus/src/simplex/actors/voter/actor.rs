@@ -436,7 +436,7 @@ impl<
         // Check if we are ready to propose
         let request = self.state.try_propose()?;
         let context = request.context().clone();
-        let ancestry = self.state.parent_history(context.parent.0);
+        let history = self.state.parent_history(context.parent.0);
 
         // Request proposal from application
         let span = info_span!(
@@ -454,10 +454,10 @@ impl<
             match &request {
                 ProposalRequest::Prepare(_) => {
                     self.record_handoff_event(HandoffEventKind::Requested);
-                    ProposalState::Preparing(self.automaton.prepare(context, ancestry))
+                    ProposalState::Preparing(self.automaton.prepare(context, history))
                 }
                 ProposalRequest::Propose(_) => {
-                    ProposalState::Proposing(self.automaton.propose(context, ancestry))
+                    ProposalState::Proposing(self.automaton.propose(context, history))
                 }
             }
         });
@@ -480,7 +480,7 @@ impl<
             }
             Verify::Wait => return None,
         };
-        let ancestry = self.state.parent_history(context.parent.0);
+        let history = self.state.parent_history(context.parent.0);
 
         // Request verification
         let span = info_span!(
@@ -489,12 +489,12 @@ impl<
             epoch = context.round.epoch().traced(),
             view = context.view().traced()
         );
+        let round = context.round;
         let receiver = span.in_scope(|| {
             debug!(?proposal, "requested proposal verification");
-            self.automaton
-                .verify(context.clone(), proposal.payload, ancestry)
+            self.automaton.verify(context, proposal.payload, history)
         });
-        Some(Request(context.round, span, receiver))
+        Some(Request(round, span, receiver))
     }
 
     /// Drops obsolete pending application requests and dispatches eligible new ones.
@@ -1248,7 +1248,7 @@ impl<
                     resolver.resolve(proposal, view, Kind::Notarization, None);
                 }
                 for proposal in candidates {
-                    let ancestry = self.state.certification_history(proposal.view());
+                    let history = self.state.certification_history(proposal.view());
                     let round = proposal.round;
                     let view = round.view();
                     debug!(%view, "attempting certification");
@@ -1259,7 +1259,7 @@ impl<
                         view = view.traced()
                     );
                     let receiver = span
-                        .in_scope(|| self.automaton.certify(round, proposal.payload, ancestry));
+                        .in_scope(|| self.automaton.certify(round, proposal.payload, history));
                     let handle = certify_pool.push(async move { (round, span, receiver.await) });
                     self.state.set_certify_handle(view, handle);
                 }

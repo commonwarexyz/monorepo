@@ -176,11 +176,11 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// rather than rebuilding them from current local state. If consensus
         /// later abandons a dependency, it also abandons the proposal.
         ///
-        /// `ancestry` holds the commitments consensus has on the selected parent branch at
-        /// dispatch, in forward order, ending at the parent and excluding the new payload.
-        /// Consecutive re-proposals of one payload contribute one commitment. An anchored
-        /// history begins at a finalized or genesis anchor. A suffix, possibly empty, holds
-        /// only the newest commitments.
+        /// `history` holds the commitments consensus has on the selected parent branch at
+        /// dispatch, in forward order, ending at the parent. Consecutive re-proposals of one
+        /// payload contribute one commitment, so a payload that re-proposes its parent appears
+        /// as the parent's commitment. An anchored history begins at a finalized or genesis
+        /// anchor. A suffix, possibly empty, holds only the newest commitments.
         ///
         /// Closing the response declines this request, which consensus may
         /// treat as final for the context. Keep the response pending when
@@ -188,7 +188,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         fn propose(
             &mut self,
             context: Self::Context,
-            ancestry: History<Self::Digest>,
+            history: History<Self::Digest>,
         ) -> oneshot::Receiver<Self::Digest>;
 
         /// Verify the payload is valid.
@@ -212,13 +212,13 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ///
         /// The future-context requirement on [`Self::propose`] applies here
         /// too: the context's dependencies may not be resolvable locally yet.
-        /// `ancestry` has the same ordering and anchoring as
-        /// [`Self::propose`] and excludes `payload`.
+        /// `history` has the same ordering and anchoring as [`Self::propose`]
+        /// and ends at `payload`'s parent.
         fn verify(
             &mut self,
             context: Self::Context,
             payload: Self::Digest,
-            ancestry: History<Self::Digest>,
+            history: History<Self::Digest>,
         ) -> oneshot::Receiver<bool>;
     }
 
@@ -307,7 +307,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// certifying. The request then waits as if the application had returned
         /// [`Handoff::Wait`].
         ///
-        /// `ancestry` has the same ordering and anchoring as
+        /// `history` has the same ordering and anchoring as
         /// [`Automaton::propose`].
         ///
         /// # Request Contract
@@ -320,7 +320,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         fn prepare(
             &mut self,
             _context: Self::Context,
-            _ancestry: History<Self::Digest>,
+            _history: History<Self::Digest>,
         ) -> oneshot::Receiver<Handoff<Self::Digest>> {
             let (sender, receiver) = oneshot::channel();
             sender.send_lossy(Handoff::Wait);
@@ -335,9 +335,9 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// on `(round, payload)` rather than `payload` alone.
         ///
         /// Certification may be requested without prior local verification.
-        /// `ancestry` supplies the selected parent branch independently of
+        /// `history` supplies the selected parent branch independently of
         /// verification, with the same ordering and anchoring as
-        /// [`Automaton::propose`], and excludes `payload`.
+        /// [`Automaton::propose`], and ends at `payload`'s parent.
         ///
         /// Like [`Automaton::verify`], payloads produced by [`Automaton::propose`] are certifiable-by-construction.
         /// Also like [`Automaton::verify`], certification is single-shot for the given
@@ -372,7 +372,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             &mut self,
             _round: Round,
             _payload: Self::Digest,
-            _ancestry: History<Self::Digest>,
+            _history: History<Self::Digest>,
         ) -> oneshot::Receiver<bool> {
             let (sender, receiver) = oneshot::channel();
             sender.send_lossy(true);

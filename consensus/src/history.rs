@@ -26,17 +26,17 @@ impl<D: Digest> History<D> {
     ///
     /// The caller asserts that every block below the first commitment is canonical. With no
     /// commitments, it asserts that of every block the history is read against.
-    pub const fn anchored(commitments: Arc<[D]>) -> Self {
+    pub fn anchored(commitments: impl Into<Arc<[D]>>) -> Self {
         Self {
-            commitments,
+            commitments: commitments.into(),
             anchored: true,
         }
     }
 
     /// Creates a history that holds only the newest commitments of its branch.
-    pub const fn suffix(commitments: Arc<[D]>) -> Self {
+    pub fn suffix(commitments: impl Into<Arc<[D]>>) -> Self {
         Self {
-            commitments,
+            commitments: commitments.into(),
             anchored: false,
         }
     }

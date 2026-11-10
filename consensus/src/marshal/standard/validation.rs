@@ -187,7 +187,7 @@ pub(super) async fn run_app_verify<E, S, A, B, T>(
     application: &mut A,
     marshal: &Mailbox<S, Standard<B>>,
     tx: &mut oneshot::Sender<T>,
-    ancestry: History<B::Digest>,
+    history: History<B::Digest>,
 ) -> Option<bool>
 where
     E: Supervisor + Clock,
@@ -196,7 +196,7 @@ where
     B: Block + Codec,
 {
     let (parent_view, parent_commitment) = context.parent;
-    let blocks = marshal.blocks_with_parent(parent.height(), parent_commitment, ancestry);
+    let blocks = marshal.blocks_with_parent(parent.height(), parent_commitment, history);
     let validity_request = application
         .verify(
             (runtime_context.child("app_verify"), context.clone()),

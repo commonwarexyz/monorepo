@@ -88,7 +88,7 @@ const BROADCAST: u64 = 4;
 /// Selected blocks `B1..BD` below the candidate.
 const DEPTH: u64 = 8;
 
-/// Marshal's repair window, which also bounds a range's pending bodies.
+/// Marshal's repair window. It also bounds a range's pending bodies.
 const WINDOW: usize = 3;
 
 /// One-way latency of every simulated link.
@@ -418,9 +418,9 @@ impl Application<deterministic::Context> for InstrumentedApp {
 /// Sits between the real Simplex engine and [`Deferred`].
 ///
 /// Requests for the selected views `1..=D` are answered without reaching [`Deferred`], so no
-/// independent verification or certification job prepares application state before the
-/// input event. Requests for the candidate view are forwarded unchanged with the voter's
-/// history. Proposals are never produced.
+/// independent verification or certification job prepares application state before the input
+/// event. Requests for the candidate view are forwarded unchanged with the voter's history.
+/// Proposals are never produced.
 #[derive(Clone)]
 struct Gate<A> {
     context: Arc<deterministic::Context>,
@@ -440,7 +440,7 @@ where
     fn propose(
         &mut self,
         _context: Self::Context,
-        _ancestry: History<Self::Digest>,
+        _history: History<Self::Digest>,
     ) -> oneshot::Receiver<Self::Digest> {
         let (sender, receiver) = oneshot::channel();
         self.proposals.lock().push(sender);
@@ -451,11 +451,11 @@ where
         &mut self,
         context: Self::Context,
         payload: Self::Digest,
-        ancestry: History<Self::Digest>,
+        history: History<Self::Digest>,
     ) -> oneshot::Receiver<bool> {
         if context.round.view() == self.target {
             self.observations.lock().target_verifies += 1;
-            return self.inner.verify(context, payload, ancestry);
+            return self.inner.verify(context, payload, history);
         }
         let (sender, receiver) = oneshot::channel();
         let _ = sender.send(true);
@@ -471,7 +471,7 @@ where
         &mut self,
         round: Round,
         payload: Self::Digest,
-        ancestry: History<Self::Digest>,
+        history: History<Self::Digest>,
     ) -> oneshot::Receiver<bool> {
         let (sender, receiver) = oneshot::channel();
         if round.view() != self.target {
@@ -483,7 +483,7 @@ where
             return receiver;
         }
         self.observations.lock().target_certifies += 1;
-        let inner = self.inner.certify(round, payload, ancestry);
+        let inner = self.inner.certify(round, payload, history);
         let observations = self.observations.clone();
         self.context
             .child("target_certify")
@@ -675,6 +675,7 @@ fn run(scenario: Scenario) {
         let peers = (0..N).filter(|&index| index != me).collect::<Vec<_>>();
         let candidate_leader = (depth + 1) as usize % N;
         assert_ne!(candidate_leader, me);
+
         // The chain's contexts name the leaders the real voter elects for its rounds.
         let (genesis, chain) = build_chain_with_leaders(&context, depth + 1, |view| {
             leader(&participants, view).clone()
@@ -1146,14 +1147,14 @@ fn run(scenario: Scenario) {
             );
         }
         if scenario.kind == Kind::Tail {
-            let reason = guard.hold_release.expect("tail body never released");
+            let reason = guard.hold_release.expect("tail body must be released");
             assert_eq!(
                 reason, "prefix_applied",
                 "replay did not start before the last missing body arrived"
             );
         }
         if scenario.kind == Kind::OutOfOrder {
-            let reason = guard.hold_release.expect("held body never released");
+            let reason = guard.hold_release.expect("held body must be released");
             assert_eq!(reason, "higher_body_answered");
         }
     });

@@ -326,7 +326,7 @@ where
         commitment: Commitment<B, C, H>,
         prefetched_block: Option<Arc<CodedBlock<B, C, H>>>,
         stage: Stage,
-        ancestry: History<Commitment<B, C, H>>,
+        history: History<Commitment<B, C, H>>,
     ) -> oneshot::Receiver<GateOutcome> {
         let marshal = self.marshal.clone();
         let mut application = self.application.clone();
@@ -430,7 +430,7 @@ where
                     }
 
                     let blocks =
-                        marshal.blocks_with_parent(parent.height(), parent_commitment, ancestry);
+                        marshal.blocks_with_parent(parent.height(), parent_commitment, history);
                     let validity_request = application
                         .verify(
                             (
@@ -484,7 +484,7 @@ where
         round: Round,
         payload: Commitment<B, C, H>,
         block_rx: oneshot::Receiver<Arc<CodedBlock<B, C, H>>>,
-        ancestry: History<Commitment<B, C, H>>,
+        history: History<Commitment<B, C, H>>,
     ) -> oneshot::Receiver<bool> {
         // No in-progress task means we never verified this proposal locally.
         // We can use the block's embedded context to move to the next view. If a Byzantine
@@ -565,7 +565,7 @@ where
                     payload,
                     Some(block),
                     Stage::Certified,
-                    ancestry,
+                    history,
                 );
                 gates::forward(tx, verify_rx, |result| match result {
                     GateOutcome::Ready(result) => Some(result),
@@ -587,7 +587,7 @@ where
         payload: Commitment<B, C, H>,
         task: oneshot::Receiver<GateOutcome>,
         block_rx: oneshot::Receiver<Arc<CodedBlock<B, C, H>>>,
-        ancestry: History<Commitment<B, C, H>>,
+        history: History<Commitment<B, C, H>>,
     ) -> oneshot::Receiver<bool> {
         // A completed gate either carries an applicable local verdict or requests
         // recovery. After an unclean restart the in-memory task is gone, which also
@@ -601,7 +601,7 @@ where
             .with_attribute("round", round);
         context.spawn(move |_| {
             gates::drive(tx, task, round, payload, move || {
-                marshaled.certify_from_embedded_context(round, payload, block_rx, ancestry)
+                marshaled.certify_from_embedded_context(round, payload, block_rx, history)
             })
             .instrument(info_span!(
                 "marshal.coding.certify.existing",
@@ -626,7 +626,7 @@ where
     fn checks(
         &self,
         consensus_context: Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
-        ancestry: History<Commitment<B, C, H>>,
+        history: History<Commitment<B, C, H>>,
         fetch_parent: bool,
     ) -> impl Future<Output = CodingResolved<B, C, H>> + Send + 'static {
         let scheme_provider = self.scheme_provider.clone();
@@ -692,7 +692,7 @@ where
                 return Resolved::Reuse(parent.commitment(), parent);
             }
 
-            let blocks = marshal.blocks_with_parent(parent.height(), parent_commitment, ancestry);
+            let blocks = marshal.blocks_with_parent(parent.height(), parent_commitment, history);
             Resolved::Build(
                 parent.inner_digested(),
                 blocks,
@@ -740,14 +740,14 @@ where
     fn propose(
         &mut self,
         consensus_context: Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
-        ancestry: History<Self::Digest>,
+        history: History<Self::Digest>,
     ) -> oneshot::Receiver<Self::Digest> {
         let strategy = self.strategy.clone();
         let erasure_encode_duration = self.erasure_encode_duration.clone();
         let clock = self.context.clone();
         let (parent_view, parent_commitment) = consensus_context.parent;
         // A certified proposal parent can be fetched from peers.
-        let checks = self.checks(consensus_context.clone(), ancestry, true);
+        let checks = self.checks(consensus_context.clone(), history, true);
         let span = info_span!(
             "marshal.coding.propose.task",
             round = %consensus_context.round
@@ -792,7 +792,7 @@ where
         &mut self,
         consensus_context: Context<Self::Digest, <Z::Scheme as Verifier>::PublicKey>,
         payload: Self::Digest,
-        ancestry: History<Self::Digest>,
+        history: History<Self::Digest>,
     ) -> oneshot::Receiver<bool> {
         // If there's no scheme for the current epoch, we cannot vote on the proposal.
         // Send back a receiver with a dropped sender.
@@ -951,8 +951,7 @@ where
         // drops the verify receiver without cancelling certification for it, so
         // deferred verification must survive that drop for certify to consume.
         let round = consensus_context.round;
-        let task =
-            self.deferred_verify(consensus_context, payload, None, Stage::Verified, ancestry);
+        let task = self.deferred_verify(consensus_context, payload, None, Stage::Verified, history);
         self.gates.insert(round, payload, task);
 
         match scheme.me().and_then(|m| m.signer()) {
@@ -1020,14 +1019,14 @@ where
     fn prepare(
         &mut self,
         consensus_context: Context<Self::Digest, <Z::Scheme as Verifier>::PublicKey>,
-        ancestry: History<Self::Digest>,
+        history: History<Self::Digest>,
     ) -> oneshot::Receiver<Handoff<Self::Digest>> {
         let strategy = self.strategy.clone();
         let erasure_encode_duration = self.erasure_encode_duration.clone();
         let clock = self.context.clone();
         let (parent_view, parent_commitment) = consensus_context.parent;
         // An uncertified preparation parent must already be available locally.
-        let checks = self.checks(consensus_context.clone(), ancestry, false);
+        let checks = self.checks(consensus_context.clone(), history, false);
         let span = info_span!(
             "marshal.coding.prepare.task",
             round = %consensus_context.round
@@ -1062,7 +1061,7 @@ where
         &mut self,
         round: Round,
         payload: Self::Digest,
-        ancestry: History<Self::Digest>,
+        history: History<Self::Digest>,
     ) -> oneshot::Receiver<bool> {
         // Certify may be reached without an earlier `verify`, so the shard engine may not know
         // the leader yet. A notarized commitment is still enough to start reconstruction from
@@ -1079,10 +1078,10 @@ where
             self.marshal.verified_deferred(round, block, ack)
         });
         if let Some(task) = task {
-            return self.certify_from_existing_task(round, payload, task, block_rx, ancestry);
+            return self.certify_from_existing_task(round, payload, task, block_rx, history);
         }
 
-        self.certify_from_embedded_context(round, payload, block_rx, ancestry)
+        self.certify_from_embedded_context(round, payload, block_rx, history)
     }
 }
 

@@ -33,7 +33,7 @@ impl A for Application {
     fn propose(
         &mut self,
         context: Self::Context,
-        _ancestry: History<Self::Digest>,
+        _history: History<Self::Digest>,
     ) -> oneshot::Receiver<Self::Digest> {
         let (sender, receiver) = oneshot::channel();
 
@@ -60,7 +60,7 @@ impl A for Application {
         &mut self,
         context: Self::Context,
         payload: Self::Digest,
-        _ancestry: History<Self::Digest>,
+        _history: History<Self::Digest>,
     ) -> oneshot::Receiver<bool> {
         trace!(%context, ?payload, "verify");
         let (sender, receiver) = oneshot::channel();

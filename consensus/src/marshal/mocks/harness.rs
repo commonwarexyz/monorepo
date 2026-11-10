@@ -59,7 +59,6 @@ use std::{
     collections::BTreeMap,
     future::Future,
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
-    sync::Arc,
     time::{Duration, Instant},
 };
 use tracing::info;
@@ -5195,7 +5194,7 @@ pub fn blocks_forward_range<H: TestHarness>() {
         let blocks = handle.mailbox.blocks_with_parent(
             Height::new(7),
             parent_commitment,
-            crate::History::anchored(Arc::from(selected)),
+            crate::History::anchored(selected),
         );
         assert_eq!(blocks.tip(), Height::new(7));
         assert_eq!(blocks.digest(Height::new(7)), Some(parent));

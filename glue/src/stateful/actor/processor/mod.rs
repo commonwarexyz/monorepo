@@ -777,9 +777,9 @@ where
     /// `block`'s merkleized state is ready, and that state remains cached through the
     /// application's `finalized` hook.
     ///
-    /// An uncached `block` is processed as [`Finality::Finalized`] on the history that `history`
-    /// returns for the height of `block`'s parent, which must be canonical finalized history
-    /// ending there. `history` is called only for an uncached block.
+    /// An uncached `block` is processed as [`Finality::Finalized`] on the source that `blocks`
+    /// returns for the height of `block`'s parent. That source must be canonical finalized
+    /// history ending at the parent. `blocks` is called only for an uncached block.
     ///
     /// Panics if `block` does not have the next height and the branch anchor as its parent, if a
     /// request is still processing `block`, or if an uncached block fails to process or match its
@@ -787,7 +787,7 @@ where
     pub(super) async fn finalize(
         &mut self,
         context: &E,
-        history: impl FnOnce(Height) -> Blocks<A::Block>,
+        blocks: impl FnOnce(Height) -> Blocks<A::Block>,
         block: &Digested<A::Block>,
         start_barrier: bool,
     ) -> Applied<SyncTargets<A, E>> {
@@ -833,7 +833,7 @@ where
                 .process(
                     (context.child("finalize_reconstruct"), block_context),
                     block.clone(),
-                    history(anchor.height),
+                    blocks(anchor.height),
                     batches,
                     Finality::Finalized,
                 )
@@ -1096,14 +1096,14 @@ where
     /// Selects the nearest cached ancestor of `target` or the branch anchor using the resident
     /// commitments in `blocks`, without reading bodies.
     ///
-    /// The search descends from `resume`, a height with the digest discovered for it, or from
+    /// The search descends from `resume`, a height whose digest `blocks` discovered, or from
     /// `target`'s parent when `resume` is `None`. `target`'s parent identifies the cached ancestor
     /// one height below it even when its commitment is not resident.
     fn replay_start(
         &self,
         blocks: &Blocks<A::Block>,
         target: &Digested<A::Block>,
-        resume: Option<(Height, BlockDigest<A, E>)>,
+        resume: Option<Height>,
     ) -> Result<ReplayStart<BlockDigest<A, E>>, PrepareBatchesError> {
         let (target_height, target_digest) = (target.height(), target.digest());
         let state = self.state.lock();
@@ -1125,17 +1125,15 @@ where
             );
             return Err(PrepareBatchesError::Invalid);
         }
-        let (start, known) = resume.unwrap_or_else(|| {
-            let parent_height = target_height
+        let mut height = resume.unwrap_or_else(|| {
+            target_height
                 .previous()
-                .expect("target above the branch anchor must have a parent");
-            (parent_height, target.parent())
+                .expect("target above the branch anchor must have a parent")
         });
-        let mut height = start;
         while !state.pending.is_empty() && height > state.branch.height {
             let Some(digest) = blocks
                 .digest(height)
-                .or_else(|| (height == start).then_some(known))
+                .or_else(|| (height.next() == target_height).then(|| target.parent()))
             else {
                 return Ok(ReplayStart::Missing(height));
             };
@@ -1179,15 +1177,15 @@ where
 
         // The search continues from each height it discovers. Once `blocks` selects no digest at
         // a height, the search has nothing left to match, and recovery starts above the branch
-        // anchor. That anchor moves only during maintenance, which first drops this future, so
-        // it is the anchor every search here observed.
+        // anchor. Maintenance drops this future before it moves that anchor, so it is the anchor
+        // every search here observed.
         let mut resume = None;
         let anchor = loop {
             match self.replay_start(blocks, &target, resume)? {
                 ReplayStart::Known => return Ok(None),
                 ReplayStart::Above(anchor) => break anchor,
                 ReplayStart::Missing(height) => match blocks.resolve_digest(height).await {
-                    Ok(Some(digest)) => resume = Some((height, digest)),
+                    Ok(Some(_)) => resume = Some(height),
                     Ok(None) => break self.branch_anchor(),
                     Err(BlocksError::Unavailable) => return Err(PrepareBatchesError::Incomplete),
                     Err(_) => return Err(PrepareBatchesError::Invalid),
@@ -1229,11 +1227,11 @@ where
             return Ok(());
         };
         while !path.exhausted() {
-            let Some((block, history)) = path.take()? else {
+            let Some((block, selected)) = path.take()? else {
                 path.acquire().await?;
                 continue;
             };
-            if let Some(flight) = self.join_flight(app, context.child("replay"), block, history) {
+            if let Some(flight) = self.join_flight(app, context.child("replay"), block, selected) {
                 flight.await?;
             }
         }
@@ -1530,7 +1528,7 @@ mod tests {
     }
 
     /// Returns selected history ending at `block`'s parent that the application never reads.
-    fn unread_history(block: &Digested<Block>) -> Blocks<Block> {
+    fn unread_blocks(block: &Digested<Block>) -> Blocks<Block> {
         let parent = block.height().previous();
         fixtures::pending_blocks(parent.expect("processed block must have a parent"))
     }
@@ -1547,7 +1545,7 @@ mod tests {
             app,
             context.child("replay"),
             block.clone(),
-            unread_history(&block),
+            unread_blocks(&block),
         ) {
             Some(flight) => flight.await,
             None => Ok(()),
@@ -1567,7 +1565,7 @@ mod tests {
                 app,
                 context.child("replay"),
                 block.clone(),
-                unread_history(block),
+                unread_blocks(block),
             )
             .expect("block must not have state yet")
     }
@@ -1847,7 +1845,10 @@ mod tests {
         }
 
         /// Returns the finalized history ending at `block`'s parent, built on demand.
-        fn history(&self, block: &Digested<Block>) -> impl FnOnce(Height) -> Blocks<Block> + use<> {
+        fn finalized_blocks(
+            &self,
+            block: &Digested<Block>,
+        ) -> impl FnOnce(Height) -> Blocks<Block> + use<> {
             let provider = self.clone();
             let parent = block.parent();
             move |tip| provider.branch(tip, parent)
@@ -2002,7 +2003,7 @@ mod tests {
                 .processor
                 .finalize(
                     self.context_cell.as_present(),
-                    self.provider.history(&block),
+                    self.provider.finalized_blocks(&block),
                     &block,
                     true,
                 )
@@ -2025,7 +2026,7 @@ mod tests {
                 .processor
                 .finalize(
                     self.context_cell.as_present(),
-                    self.provider.history(&block),
+                    self.provider.finalized_blocks(&block),
                     &block,
                     true,
                 )
@@ -2347,7 +2348,7 @@ mod tests {
             let finalized_block = digested(winner.clone());
             let mut finalize = Box::pin(harness.processor.finalize(
                 harness.context_cell.as_present(),
-                harness.provider.history(&finalized_block),
+                harness.provider.finalized_blocks(&finalized_block),
                 &finalized_block,
                 true,
             ));
@@ -2391,7 +2392,7 @@ mod tests {
             let block = digested(winner.clone());
             let mut finalize = Box::pin(harness.processor.finalize(
                 harness.context_cell.as_present(),
-                harness.provider.history(&block),
+                harness.provider.finalized_blocks(&block),
                 &block,
                 true,
             ));
@@ -2548,7 +2549,7 @@ mod tests {
             let finalized_block = digested(winner.clone());
             let mut finalize = Box::pin(harness.processor.finalize(
                 harness.context_cell.as_present(),
-                harness.provider.history(&finalized_block),
+                harness.provider.finalized_blocks(&finalized_block),
                 &finalized_block,
                 true,
             ));
@@ -2623,7 +2624,7 @@ mod tests {
             let finalized_block = digested(parent.clone());
             let mut finalize = Box::pin(harness.processor.finalize(
                 harness.context_cell.as_present(),
-                harness.provider.history(&finalized_block),
+                harness.provider.finalized_blocks(&finalized_block),
                 &finalized_block,
                 true,
             ));
@@ -3547,7 +3548,7 @@ mod tests {
     }
 
     #[test]
-    fn execution_rebuild_pending_does_not_retry_closed_source_forever() {
+    fn execution_rebuild_pending_does_not_retry_closed_provider_forever() {
         deterministic::Runner::default().start(|context| async move {
             let mut harness = Harness::new(context.child("harness")).await;
             let genesis = Block::genesis();

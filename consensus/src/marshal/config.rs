@@ -126,8 +126,8 @@ where
     /// Sources from [`Mailbox::blocks_with_parent`](super::core::Mailbox::blocks_with_parent)
     /// and [`Mailbox::finalized_blocks`](super::core::Mailbox::finalized_blocks) give each range
     /// an additional window of this size for pending acquisitions and buffered bodies. A source
-    /// that discovers commitments below a history suffix retains at most this many of the
-    /// bodies it reads.
+    /// that discovers commitments below a history suffix retains at most this many of the bodies
+    /// it reads.
     pub max_repair: NonZeroUsize,
 
     /// Maximum number of dispatched blocks awaiting application acknowledgement,
