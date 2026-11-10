@@ -625,9 +625,12 @@ impl Pool {
             return;
         }
         let hint = pack_unserved(self.clock().1, episode);
+
+        // Release publishes the push with the hint, so the worker that
+        // acquires the hint in `Self::take_unserved` sees the push.
         let _ = self
             .unserved
-            .compare_exchange(0, hint, Ordering::Relaxed, Ordering::Relaxed);
+            .compare_exchange(0, hint, Ordering::Release, Ordering::Relaxed);
     }
 
     /// The unserved hint, or zero, read without the lock.
@@ -650,9 +653,13 @@ impl Pool {
     #[inline(never)]
     #[must_use]
     pub fn take_unserved(&self, hint: u64, ready: &mut Ready) -> Option<Runnable> {
+        // Acquire pairs with the release in `Self::mark_unserved`, so the
+        // length read below sees the hinted push, or a take since that emptied
+        // the queue and ended its episode. A relaxed clear could read the
+        // length from before the push and drop the hint unseen.
         if self
             .unserved
-            .compare_exchange(hint, 0, Ordering::Relaxed, Ordering::Relaxed)
+            .compare_exchange(hint, 0, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
             || !self.has_global()
         {
