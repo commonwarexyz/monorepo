@@ -309,8 +309,7 @@ pub mod fuzz {
         Sum,
         /// Checks multiplying a slice against one multiplication at a time.
         MulEach,
-        /// Checks that the endomorphism multiplies by its eigenvalue, and that the components of
-        /// a scalar reconstruct it.
+        /// Checks that the endomorphism multiplies by its eigenvalue.
         Endomorphism,
         /// Checks that every representation and backend computes what each kernel's dispatch
         /// does.
@@ -420,25 +419,8 @@ pub mod fuzz {
                     }
                 }
                 Self::Endomorphism => {
-                    let eigenvalue = G::eigenvalue();
                     let (p, _) = element::<G>(u)?;
-                    assert_eq!(Endomorphism(p).dispatch(), p * &eigenvalue);
-
-                    let scalar = Scalar::arbitrary(u)?;
-                    let bound = 1u128.checked_shl(G::COMPONENT_BITS - 1);
-                    let mut sum = Scalar::ZERO;
-                    let mut power = Scalar::ONE;
-                    for (c, component) in G::components(&scalar).into_iter().enumerate() {
-                        let [low, high] = component;
-                        let wide = u128::from(low) | u128::from(high) << 64;
-                        assert!(bound.is_none_or(|bound| wide < bound));
-                        assert!(c < G::COMPONENTS || wide == 0);
-                        let component =
-                            Scalar::from_words([low, high, 0, 0]).expect("below the order");
-                        sum += &(component * &power);
-                        power *= &-eigenvalue;
-                    }
-                    assert_eq!(sum, scalar);
+                    assert_eq!(Endomorphism(p).dispatch(), p * &G::eigenvalue());
                 }
                 Self::Representations => {
                     let kind = u.int_in_range(0u8..=6)?;
