@@ -2141,6 +2141,11 @@ impl Worker {
         let max_spin =
             Duration::from_micros(spinner_cfg.max_budget_us.try_into().unwrap_or(u64::MAX));
 
+        // The first polls precede the first service pass, so sleeps polled in
+        // between compare their deadlines with the time of this start, not
+        // with a time that an earlier worker left on this thread.
+        sleep::set_turn(Instant::now());
+
         loop {
             if self.panics.first.is_some() {
                 return None;
@@ -2359,6 +2364,11 @@ impl Worker {
                     searcher.finish_park();
                 }
             }
+
+            // The wait may have lasted long, and the next polls precede the
+            // next service pass, so sleeps polled in between compare their
+            // deadlines with the time of this return.
+            sleep::set_turn(Instant::now());
         }
     }
 }
