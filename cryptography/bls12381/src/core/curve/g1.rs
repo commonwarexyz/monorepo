@@ -28,6 +28,7 @@ use crate::core::{
         MAX_LANES,
         arithmetic::Field,
         fp::{BYTES, MINUS_ONE, ONE, encode},
+        gather, lanes_of, scatter,
     },
 };
 use commonware_formatting::hex;
@@ -97,13 +98,9 @@ impl<S: Simd, F: Field<S>> Points<S> for Point<F> {
     #[inline(always)]
     fn load(simd: S, points: &[Coordinates], fill: &Coordinates) -> Self {
         const { assert!(F::LANES <= MAX_LANES) };
-        let mut coordinates = [[[0; BYTES]; MAX_LANES]; 3];
         let lanes = points.len().min(F::LANES);
-        for (i, coordinate) in coordinates.iter_mut().enumerate() {
-            for (lane, point) in coordinate.iter_mut().zip(&points[..lanes]) {
-                *lane = point[i];
-            }
-        }
+        let mut coordinates = [[[0; BYTES]; MAX_LANES]; 3];
+        gather(&mut coordinates, &points[..lanes], |point| point.each_ref());
         Self {
             x: F::load(simd, &coordinates[0][..lanes], &fill[0]),
             y: F::load(simd, &coordinates[1][..lanes], &fill[1]),
@@ -119,13 +116,9 @@ impl<S: Simd, F: Field<S>> Points<S> for Point<F> {
         self.x.store(simd, &mut coordinates[0][..lanes]);
         self.y.store(simd, &mut coordinates[1][..lanes]);
         self.z.store(simd, &mut coordinates[2][..lanes]);
-        for (lane, point) in points[..lanes].iter_mut().enumerate() {
-            *point = [
-                coordinates[0][lane],
-                coordinates[1][lane],
-                coordinates[2][lane],
-            ];
-        }
+        scatter(&coordinates, &mut points[..lanes], |point, [x, y, z]| {
+            *point = [*x, *y, *z]
+        });
     }
 
     #[inline(always)]
@@ -139,25 +132,15 @@ impl<S: Simd, F: Field<S>> Points<S> for Point<F> {
             .store_raw::<BOUND>(simd, &mut coordinates[1][..lanes]);
         self.z
             .store_raw::<BOUND>(simd, &mut coordinates[2][..lanes]);
-        for (lane, point) in points[..lanes].iter_mut().enumerate() {
-            *point = [
-                coordinates[0][lane],
-                coordinates[1][lane],
-                coordinates[2][lane],
-            ];
-        }
+        scatter(&coordinates, &mut points[..lanes], |point, [x, y, z]| {
+            *point = [*x, *y, *z]
+        });
     }
 
     #[inline(always)]
     fn load_raw(simd: S, points: &[&[F::Raw; 3]]) -> Self {
         const { assert!(F::LANES <= MAX_LANES) };
-        let coordinate = |i: usize| {
-            let mut lanes = [&points[0][i]; MAX_LANES];
-            for (lane, point) in lanes.iter_mut().zip(points).take(F::LANES) {
-                *lane = &point[i];
-            }
-            F::load_raw::<BOUND>(simd, &lanes)
-        };
+        let coordinate = |i| F::load_raw::<BOUND>(simd, &lanes_of(points, i, F::LANES));
         Self {
             x: coordinate(0),
             y: coordinate(1),

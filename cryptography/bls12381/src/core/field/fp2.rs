@@ -68,6 +68,7 @@ use super::{
     MAX_LANES,
     arithmetic::{Field, Signed, TIGHT, unroll},
     fp::{self, BYTES as FP_BYTES, WORDS},
+    gather, lanes_of, scatter,
 };
 use commonware_simd::Simd;
 
@@ -115,13 +116,9 @@ impl<F> Fp2<F> {
         F: Field<S>,
     {
         const { assert!(F::LANES <= MAX_LANES) };
-        let mut components = [[[0; FP_BYTES]; MAX_LANES]; 2];
         let lanes = elements.len().min(F::LANES);
-        for (lane, element) in elements[..lanes].iter().enumerate() {
-            let [c0, c1] = split(element);
-            components[0][lane] = *c0;
-            components[1][lane] = *c1;
-        }
+        let mut components = [[[0; FP_BYTES]; MAX_LANES]; 2];
+        gather(&mut components, &elements[..lanes], split);
         let [fill0, fill1] = split(fill);
         Self {
             c0: F::load(simd, &components[0][..lanes], fill0),
@@ -142,11 +139,11 @@ impl<F> Fp2<F> {
         let lanes = elements.len().min(F::LANES);
         self.c0.store(simd, &mut components[0][..lanes]);
         self.c1.store(simd, &mut components[1][..lanes]);
-        for (lane, element) in elements[..lanes].iter_mut().enumerate() {
-            let (c1, c0) = element.split_at_mut(FP_BYTES);
-            c0.copy_from_slice(&components[0][lane]);
-            c1.copy_from_slice(&components[1][lane]);
-        }
+        scatter(&components, &mut elements[..lanes], |element, [c0, c1]| {
+            let (chunks, _) = element.as_chunks_mut::<FP_BYTES>();
+            chunks[0] = *c1;
+            chunks[1] = *c0;
+        });
     }
 
     /// Returns `self + rhs`, without reducing.
@@ -173,9 +170,9 @@ impl<F> Fp2<F> {
         let lanes = elements.len().min(F::LANES);
         self.c0.store_raw::<A>(simd, &mut components[0][..lanes]);
         self.c1.store_raw::<A>(simd, &mut components[1][..lanes]);
-        for (lane, element) in elements[..lanes].iter_mut().enumerate() {
-            *element = [components[0][lane], components[1][lane]];
-        }
+        scatter(&components, &mut elements[..lanes], |element, [c0, c1]| {
+            *element = [*c0, *c1]
+        });
     }
 
     /// Loads lane `i` from `elements[i]`, as [`Self::store_raw`] stored it, for at least
@@ -186,16 +183,9 @@ impl<F> Fp2<F> {
         F: Field<S>,
     {
         const { assert!(F::LANES <= MAX_LANES) };
-        let component = |i: usize| {
-            let mut lanes = [&elements[0][i]; MAX_LANES];
-            for (lane, element) in lanes.iter_mut().zip(elements).take(F::LANES) {
-                *lane = &element[i];
-            }
-            F::load_raw::<A>(simd, &lanes)
-        };
         Self {
-            c0: component(0),
-            c1: component(1),
+            c0: F::load_raw::<A>(simd, &lanes_of(elements, 0, F::LANES)),
+            c1: F::load_raw::<A>(simd, &lanes_of(elements, 1, F::LANES)),
         }
     }
 
