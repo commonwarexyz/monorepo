@@ -251,7 +251,9 @@ const BATCH_SIZE: usize = 64;
 /// pool worker therefore fires sleeps only as fast as its run queue takes
 /// them, in deadline order, and the sleeps that one task multiplexes complete
 /// at that rate. Request deadlines, and a peer's rescue of a stalled worker's
-/// sleeps, keep a full budget per pass.
+/// sleeps, keep a full budget per pass, and so do the refiles of later sleeps,
+/// which wake nothing, so a crowded wheel bucket cascades as fast beside a
+/// full run queue as beside an empty one.
 ///
 /// Between two passes the worker polls a batch of up to [`BATCH_SIZE`]
 /// tasks, so with long polls a full batch would hold each further budget back
@@ -1566,17 +1568,18 @@ pub struct Worker {
     /// can fire as a result.
     rescue_at: Instant,
     /// Whether the latest service pass left due sleeps or request deadlines
-    /// behind because its expiry ran out of budget. While set, the next
-    /// polling batch also ends once it has polled for [`BACKLOG_SLICE`] and
-    /// the run queue has room, so the remaining due timers get their next
+    /// behind because its expiry ran out of budget or of fires. While set, the
+    /// next polling batch also ends once it has polled for [`BACKLOG_SLICE`]
+    /// and the run queue has room, so the remaining due timers get their next
     /// budgeted pass without waiting for a full batch of long polls. A pool
-    /// worker's sleep budget is the room in its run queue, so a saturated
-    /// worker stays behind while it fires sleeps only as fast as that queue
-    /// takes them, in deadline order. Request deadlines keep a full budget.
-    /// Cleared by a pass that reaches every due deadline. A pass that runs
-    /// out of budget while draining a detached wheel bucket leaves its bound
-    /// at or below its time, even with only later deadlines left to refile
-    /// (see [`Wheel::bound`]), which sets this until the bucket is drained.
+    /// worker fires no more sleeps per pass than its run queue has room for,
+    /// so a saturated worker stays behind while it fires sleeps only as fast
+    /// as that queue takes them, in deadline order. Refiles and request
+    /// deadlines keep a full budget. Cleared by a pass that reaches every due
+    /// deadline. A pass that runs out of budget while draining a detached
+    /// wheel bucket leaves its bound at or below its time, even with only
+    /// later deadlines left to refile (see [`Wheel::bound`]), which sets this
+    /// until the bucket is drained.
     ///
     /// [`Wheel::bound`]: super::wheel::Wheel::bound
     backlog: bool,
@@ -2028,13 +2031,14 @@ impl Worker {
         // since the wakes of a larger burst would overflow the queue and move
         // its newest runnables, such as a task that has just requeued itself,
         // behind the burst in the global queue. It fires at least one, so a
-        // queue that stays full cannot hold expiry back for good.
+        // queue that stays full cannot hold expiry back for good. Refiles
+        // wake nothing, so they keep the full budget.
         if *timers_next <= nanos {
             let room = seat
                 .as_ref()
                 .map_or(BUDGET as usize, |seat| seat.ready.room());
-            let budget = room.clamp(1, BUDGET as usize) as u32;
-            *timers_next = timers.expire(nanos, budget, deferred);
+            let fires = room.clamp(1, BUDGET as usize) as u32;
+            *timers_next = timers.expire(nanos, fires, deferred);
         }
 
         // A pass that ran out of budget leaves its bound at or before this
