@@ -328,6 +328,8 @@ mod tests {
         Commitment::new(Location::new(size), D::from([marker; 32]))
     }
 
+    /// A commitment encodes as its size's varint and its root, and decoding refuses a size beyond
+    /// the family's leaves.
     #[test]
     fn commitment_round_trips_and_refuses_a_size_beyond_the_family() {
         let commitment = state(14, 14);
@@ -337,7 +339,10 @@ mod tests {
         assert_eq!(&encoded[1..], commitment.root.as_ref());
         assert_eq!(Commitment::<F, D>::decode(encoded).unwrap(), commitment);
 
-        let beyond = Commitment::new(F::MAX_LEAVES + 1, commitment.root);
+        let beyond = Commitment {
+            size: F::MAX_LEAVES + 1,
+            root: commitment.root,
+        };
         assert!(matches!(
             Commitment::<F, D>::decode(beyond.encode()),
             Err(CodecError::Invalid("Location", _))
