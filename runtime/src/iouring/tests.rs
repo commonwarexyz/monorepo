@@ -4584,6 +4584,7 @@ fn test_runner_restores_the_callers_block_hook() {
         /// Calls of `outer` on this thread.
         static CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
+    /// The caller's own block hook, which counts its calls.
     fn outer() {
         CALLS.with(|calls| calls.set(calls.get() + 1));
     }
@@ -4620,6 +4621,7 @@ fn test_rayon_call_hands_off_the_run_queue() {
     use crate::Strategizer as _;
     use commonware_parallel::{Strategy as _, mocks::Explorer};
 
+    /// Longer than the test, so only the hand-off can move the queued task.
     const AGE: Duration = MAX_STEAL_AGE;
     let cfg = config().with_worker_threads(2).with_steal_age(AGE);
     Runner::new(cfg).start(|context| async move {
@@ -5630,6 +5632,7 @@ fn spawn_thread_recorder(
 #[case::twenty_milliseconds(Duration::from_millis(20))]
 #[case::default(DEFAULT_STEAL_AGE)]
 fn test_young_lone_runnable_behind_a_long_poll_is_taken_once_it_ripens(#[case] age: Duration) {
+    /// How much later than the steal age the relook may run on a loaded host.
     const WAKE_SLACK: Duration = Duration::from_secs(1);
     let cfg = config().with_worker_threads(2).with_steal_age(age);
     Runner::new(cfg).start(|context| async move {
@@ -5864,7 +5867,9 @@ fn test_lone_runnable_woken_by_its_worker_service_stays_with_its_owner() {
 /// started.
 #[test]
 fn test_spawn_burst_children_are_stealable_at_once() {
+    /// Tasks the spawner spawns in one poll.
     const CHILDREN: usize = 8;
+    /// Longer than the test, so the first child can move only because a spawn queued it.
     const AGE: Duration = MAX_STEAL_AGE;
     let cfg = config().with_worker_threads(2).with_steal_age(AGE);
     Runner::new(cfg).start(|context| async move {
