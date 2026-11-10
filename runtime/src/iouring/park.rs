@@ -602,6 +602,33 @@ pub mod tests {
         word(unparker) / INCREMENT
     }
 
+    /// Number of live handles on the word, which stays allocated while any
+    /// remains.
+    pub fn handles(parker: &Parker) -> usize {
+        Arc::strong_count(&parker.word)
+    }
+
+    /// Wake up to `count` waiters on the word directly, returning how many woke.
+    #[cfg(not(feature = "loom"))]
+    pub fn wake(unparker: &Unparker, count: u32) -> libc::c_long {
+        // SAFETY: `unparker` retains the aligned atomic word for the call.
+        unsafe {
+            libc::syscall(
+                libc::SYS_futex,
+                unparker.word.as_ptr(),
+                libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG,
+                count,
+            )
+        }
+    }
+
+    /// Loom builds have no kernel futex to wake, and never run the tests that
+    /// call this.
+    #[cfg(feature = "loom")]
+    pub fn wake(_unparker: &Unparker, _count: u32) -> libc::c_long {
+        unreachable!("loom builds have no kernel futex")
+    }
+
     /// Forget an unarmed word's notifications, so a test can count new ones.
     pub fn reset(parker: &Parker) {
         assert_eq!(parker.word.load(Ordering::Relaxed) & WAITER, 0);
@@ -917,12 +944,6 @@ pub mod tests {
         /// How long the idle wait must stay asleep after the single wake.
         const STRANDED: Duration = Duration::from_millis(200);
 
-        /// Number of live handles on the word, which stays allocated while any
-        /// remains.
-        pub fn handles(parker: &Parker) -> usize {
-            Arc::strong_count(&parker.word)
-        }
-
         /// Build a ring with the driver's flags. With deferred task work, a ring
         /// wait's completion waits for the owner's next enter instead of
         /// interrupting the owner's thread futex wait, as in production.
@@ -946,19 +967,6 @@ pub mod tests {
 
             // A wait whose compare failed would have completed during the submit.
             assert!(ring.completion().is_empty());
-        }
-
-        /// Wake up to `count` waiters on the word directly, returning how many woke.
-        pub fn wake(unparker: &Unparker, count: u32) -> libc::c_long {
-            // SAFETY: `unparker` retains the aligned atomic word for the call.
-            unsafe {
-                libc::syscall(
-                    libc::SYS_futex,
-                    unparker.word.as_ptr(),
-                    libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG,
-                    count,
-                )
-            }
         }
 
         /// The procfs directory of the calling thread.

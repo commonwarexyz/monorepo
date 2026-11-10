@@ -777,7 +777,7 @@ pub mod tests {
         IoBuf, IoBufMut, IoBufs,
         iouring::{
             mailbox::Mailbox,
-            park::tests::wait_until_armed,
+            park::tests::{handles, wait_until_armed, wake},
             request::{
                 Cache, DIRECT_ALIGN, IOVEC_BATCH_SIZE, ReadAtRequest, RecvRequest, RequestOutput,
                 SyncRequest, WriteAtRequest, WriteAtState,
@@ -792,7 +792,7 @@ pub mod tests {
         fs::{self, OpenOptions},
         io::Write,
         os::{
-            fd::{AsRawFd, RawFd},
+            fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
             unix::{fs::OpenOptionsExt as _, net::UnixStream},
         },
         panic::{AssertUnwindSafe, catch_unwind},
@@ -898,6 +898,21 @@ pub mod tests {
     pub fn on_service_while_acquiring(hook: impl FnOnce() + 'static) {
         let previous = WHILE_ACQUIRING.replace(Some(Box::new(hook)));
         assert!(previous.is_none(), "service hook already installed");
+    }
+
+    /// Duplicate the driver's ring descriptor, so the kernel keeps the ring
+    /// until the duplicate closes, even after the driver drops.
+    fn hold_ring(driver: &Driver) -> OwnedFd {
+        // SAFETY: `dup` only reads the driver's open ring descriptor.
+        let fd = unsafe { libc::dup(driver.ring.as_raw_fd()) };
+        assert!(
+            fd >= 0,
+            "failed to duplicate the ring descriptor: {}",
+            io::Error::last_os_error()
+        );
+
+        // SAFETY: `fd` is a new open descriptor that nothing else owns.
+        unsafe { OwnedFd::from_raw_fd(fd) }
     }
 
     /// Destination of a result collected by the harness.
@@ -2425,6 +2440,94 @@ pub mod tests {
         harness.drain();
     }
 
+    /// Dropping a driver cancels its submitted ring wait, so no waiter remains
+    /// on a futex word whose address can be reused, and then releases its
+    /// handles on the word. A wait that a wake already took is not found by
+    /// the cancel, which also lets the word go.
+    #[test]
+    fn test_driver_drop_cancels_ring_wait() {
+        // Create the word shared by both cancellation cases.
+        let parker = Parker::new();
+        let unparker = parker.unparker();
+        let handles_without_driver = handles(&parker);
+        for cancel in [false, true] {
+            // A park with a short deadline leaves its ring wait queued.
+            let mut driver = Driver::new(
+                &RingConfig::default(),
+                Duration::from_secs(60),
+                unparker.clone(),
+                Instant::now(),
+            )
+            .unwrap();
+            assert!(
+                driver
+                    .park(&parker, 0, Some(Instant::now() + Duration::from_millis(2)))
+                    .unwrap()
+            );
+
+            if cancel {
+                // A duplicate descriptor keeps the ring alive across the drop,
+                // so its teardown, which also removes the wait, cannot run
+                // before the check.
+                let ring = hold_ring(&driver);
+
+                // Cancel the live wait by dropping its owner.
+                drop(driver);
+
+                // No wait remains while the duplicate keeps the ring alive, so
+                // only the drop's synchronous cancel removed it.
+                assert_eq!(wake(&unparker, 2), 0, "driver left its ring wait queued");
+                drop(ring);
+            } else {
+                // Release the wait directly to prove the park queued it. The
+                // driver has not reaped its completion, so the drop's cancel
+                // finds no wait.
+                let woken = wake(&unparker, 2);
+
+                // Exactly the driver's ring wait was present.
+                assert_eq!(woken, 1, "park did not queue its ring wait");
+                drop(driver);
+            }
+
+            // The drop kept no handle, so the word can be freed.
+            assert_eq!(handles(&parker), handles_without_driver);
+        }
+    }
+
+    /// A driver dropped off its owner thread cannot cancel its ring wait,
+    /// since the ring accepts the cancel only from the thread that created it.
+    /// The drop then keeps the word allocated under the wait it leaves queued.
+    #[test]
+    fn test_driver_drop_off_its_owner_leaks_the_word() {
+        // A park with a short deadline leaves its ring wait queued.
+        let parker = Parker::new();
+        let unparker = parker.unparker();
+        let handles_without_driver = handles(&parker);
+        let mut driver = Driver::new(
+            &RingConfig::default(),
+            Duration::from_secs(60),
+            unparker.clone(),
+            Instant::now(),
+        )
+        .unwrap();
+        assert!(
+            driver
+                .park(&parker, 0, Some(Instant::now() + Duration::from_millis(2)))
+                .unwrap()
+        );
+
+        // Drop the driver on another thread, while a duplicate descriptor
+        // keeps the ring, and so any wait its cancel missed, alive.
+        let ring = hold_ring(&driver);
+        std::thread::spawn(move || drop(driver)).join().unwrap();
+
+        // The cancel failed, so the drop kept one handle and the wait is
+        // still queued.
+        assert_eq!(handles(&parker), handles_without_driver + 1);
+        assert_eq!(wake(&unparker, 2), 1, "the ring wait was cancelled");
+        drop(ring);
+    }
+
     #[test]
     fn test_park_reserves_ring_wait_slot_with_full_sq() {
         for stalled in [false, true] {
@@ -3111,115 +3214,5 @@ pub mod tests {
         for result in results {
             assert_eq!(result.unwrap_err().raw_os_error(), Some(libc::EBADF));
         }
-    }
-}
-
-#[cfg(all(test, not(feature = "loom")))]
-mod ring_wait_tests {
-    use super::*;
-    use crate::iouring::park::tests::native::{handles, wake};
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-
-    /// Duplicate the driver's ring descriptor, so the kernel keeps the ring
-    /// until the duplicate closes, even after the driver drops.
-    fn hold_ring(driver: &Driver) -> OwnedFd {
-        // SAFETY: `dup` only reads the driver's open ring descriptor.
-        let fd = unsafe { libc::dup(driver.ring.as_raw_fd()) };
-        assert!(
-            fd >= 0,
-            "failed to duplicate the ring descriptor: {}",
-            io::Error::last_os_error()
-        );
-
-        // SAFETY: `fd` is a new open descriptor that nothing else owns.
-        unsafe { OwnedFd::from_raw_fd(fd) }
-    }
-
-    /// Dropping a driver cancels its submitted ring wait, so no waiter remains
-    /// on a futex word whose address can be reused, and then releases its
-    /// handles on the word. A wait that a wake already took is not found by
-    /// the cancel, which also lets the word go.
-    #[test]
-    fn test_driver_drop_cancels_ring_wait() {
-        // Create the word shared by both cancellation cases.
-        let parker = Parker::new();
-        let unparker = parker.unparker();
-        let handles_without_driver = handles(&parker);
-        for cancel in [false, true] {
-            // A park with a short deadline leaves its ring wait queued.
-            let mut driver = Driver::new(
-                &RingConfig::default(),
-                Duration::from_secs(60),
-                unparker.clone(),
-                Instant::now(),
-            )
-            .unwrap();
-            assert!(
-                driver
-                    .park(&parker, 0, Some(Instant::now() + Duration::from_millis(2)))
-                    .unwrap()
-            );
-
-            if cancel {
-                // A duplicate descriptor keeps the ring alive across the drop,
-                // so its teardown, which also removes the wait, cannot run
-                // before the check.
-                let ring = hold_ring(&driver);
-
-                // Cancel the live wait by dropping its owner.
-                drop(driver);
-
-                // No wait remains while the duplicate keeps the ring alive, so
-                // only the drop's synchronous cancel removed it.
-                assert_eq!(wake(&unparker, 2), 0, "driver left its ring wait queued");
-                drop(ring);
-            } else {
-                // Release the wait directly to prove the park queued it. The
-                // driver has not reaped its completion, so the drop's cancel
-                // finds no wait.
-                let woken = wake(&unparker, 2);
-
-                // Exactly the driver's ring wait was present.
-                assert_eq!(woken, 1, "park did not queue its ring wait");
-                drop(driver);
-            }
-
-            // The drop kept no handle, so the word can be freed.
-            assert_eq!(handles(&parker), handles_without_driver);
-        }
-    }
-
-    /// A driver dropped off its owner thread cannot cancel its ring wait,
-    /// since the ring accepts the cancel only from the thread that created it.
-    /// The drop then keeps the word allocated under the wait it leaves queued.
-    #[test]
-    fn test_driver_drop_off_its_owner_leaks_the_word() {
-        // A park with a short deadline leaves its ring wait queued.
-        let parker = Parker::new();
-        let unparker = parker.unparker();
-        let handles_without_driver = handles(&parker);
-        let mut driver = Driver::new(
-            &RingConfig::default(),
-            Duration::from_secs(60),
-            unparker.clone(),
-            Instant::now(),
-        )
-        .unwrap();
-        assert!(
-            driver
-                .park(&parker, 0, Some(Instant::now() + Duration::from_millis(2)))
-                .unwrap()
-        );
-
-        // Drop the driver on another thread, while a duplicate descriptor
-        // keeps the ring, and so any wait its cancel missed, alive.
-        let ring = hold_ring(&driver);
-        std::thread::spawn(move || drop(driver)).join().unwrap();
-
-        // The cancel failed, so the drop kept one handle and the wait is
-        // still queued.
-        assert_eq!(handles(&parker), handles_without_driver + 1);
-        assert_eq!(wake(&unparker, 2), 1, "the ring wait was cancelled");
-        drop(ring);
     }
 }
