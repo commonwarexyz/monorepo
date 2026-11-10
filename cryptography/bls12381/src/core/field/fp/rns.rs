@@ -547,26 +547,26 @@ fn fold<S: Simd>(simd: S, value: S::U64, complement: S::U64) -> S::U64 {
     simd.u64_madd52lo(low, simd.u64_shr::<BITS>(value), complement)
 }
 
-/// Returns `accumulator + coefficient * digit`; the sum must stay below `2^448`, so it never
-/// wraps.
+/// Adds `coefficient * digit` to the seven words of `accumulator` that start at word `offset`;
+/// their sum must stay below `2^448`, so it never wraps.
 const fn accumulate(
-    mut accumulator: [u64; WORDS + 1],
+    accumulator: &mut [u64; 2 * WORDS + 1],
+    offset: usize,
     coefficient: &[u64; WORDS],
     digit: u64,
-) -> [u64; WORDS + 1] {
+) {
     let mut carry = 0u128;
     let mut i = 0;
     while i < WORDS {
         // At most (2^64 - 1) + (2^64 - 1)^2 + (2^64 - 1) = 2^128 - 1.
-        let sum = (accumulator[i] as u128)
+        let sum = (accumulator[offset + i] as u128)
             .wrapping_add(coefficient[i] as u128 * digit as u128)
             .wrapping_add(carry);
-        accumulator[i] = sum as u64;
+        accumulator[offset + i] = sum as u64;
         carry = sum >> 64;
         i += 1;
     }
-    accumulator[WORDS] = accumulator[WORDS].wrapping_add(carry as u64);
-    accumulator
+    accumulator[offset + WORDS] = accumulator[offset + WORDS].wrapping_add(carry as u64);
 }
 
 /// Returns the canonical integer represented by second-basis residues at most `2q`, with an
@@ -576,31 +576,26 @@ const fn accumulate(
 /// modulo `p` through [`TO_CANONICAL`], whose weights also divide by `M` and carry a factor
 /// `2^384`. The generator checks that the seven-word sum stays below `2^55 * p`.
 const fn canonical(n: &[u64; MODULI]) -> [u64; WORDS] {
-    let mut accumulator = [0; WORDS + 1];
+    // The sum fills the low seven words, and each word step below moves on by one word.
+    let mut accumulator = [0; 2 * WORDS + 1];
     let mut i = 0;
     while i < MODULI {
-        accumulator = accumulate(accumulator, &TO_CANONICAL[i], n[i]);
+        accumulate(&mut accumulator, 0, &TO_CANONICAL[i], n[i]);
         i += 1;
     }
     let k = quotient(n, &EXPAND.fraction);
-    accumulator = accumulate(accumulator, &CANONICAL_CORRECTION, k);
+    accumulate(&mut accumulator, 0, &CANONICAL_CORRECTION, k);
 
-    // Each word step adds a multiple of p below 2^64 * p to clear the low word, so the six steps
-    // divide exactly by 2^384 and leave a value below (2^55 * p + 2^384 * p) / 2^384, which is
-    // below 2p.
+    // Each word step adds a multiple of p below 2^64 * p to clear the lowest remaining word, so
+    // the six steps divide exactly by 2^384 and leave a value below
+    // (2^55 * p + 2^384 * p) / 2^384, which is below 2p.
     let mut step = 0;
     while step < WORDS {
-        let digit = accumulator[0].wrapping_mul(MODULUS_N0);
-        accumulator = accumulate(accumulator, &MODULUS, digit);
-        let mut i = 0;
-        while i < WORDS {
-            accumulator[i] = accumulator[i + 1];
-            i += 1;
-        }
-        accumulator[WORDS] = 0;
+        let digit = accumulator[step].wrapping_mul(MODULUS_N0);
+        accumulate(&mut accumulator, step, &MODULUS, digit);
         step += 1;
     }
-    let [w0, w1, w2, w3, w4, w5, _] = accumulator;
+    let [.., w0, w1, w2, w3, w4, w5, _] = accumulator;
     subtract_modulus([w0, w1, w2, w3, w4, w5], 0, &MODULUS)
 }
 
