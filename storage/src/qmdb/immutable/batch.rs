@@ -120,10 +120,7 @@ where
     Operation<F, K, V>: EncodeShared,
 {
     /// Create a batch from the DB (no parent chain).
-    pub(super) fn new<E, C, T>(
-        immutable: &Db<F, E, K, V, C, H, T, S>,
-        base: Commitment<F, H::Digest>,
-    ) -> Self
+    pub(super) fn new<E, C, T>(immutable: &Db<F, E, K, V, C, H, T, S>) -> Self
     where
         E: Context,
         C: Mutable<Item = Operation<F, K, V>>,
@@ -136,7 +133,7 @@ where
             parent: None,
             metadata: None,
             inactivity_floor: immutable.inactivity_floor_loc,
-            base,
+            base: immutable.commitment(),
         }
     }
 

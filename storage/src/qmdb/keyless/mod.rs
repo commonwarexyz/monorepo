@@ -490,16 +490,7 @@ where
 
     /// Create a new speculative batch of operations with this database as its parent.
     pub fn new_batch(&self) -> batch::UnmerkleizedBatch<F, H, V, S> {
-        batch::UnmerkleizedBatch::new(self, self.commitment())
-    }
-
-    /// Create an initial [`batch::MerkleizedBatch`] from the DB's current state.
-    pub fn to_batch(&self) -> Arc<batch::MerkleizedBatch<F, H::Digest, V, S>> {
-        Arc::new(batch::MerkleizedBatch {
-            journal_batch: self.journal.to_merkleized_batch(),
-            parent: None,
-            bounds: chain::Bounds::from_db(self.commitment(), self.inactivity_floor_loc),
-        })
+        batch::UnmerkleizedBatch::new(self)
     }
 
     /// Check that `batch` can be applied to the database in its current state, without

@@ -347,7 +347,8 @@ where
     ///
     /// Proof generation also requires the necessary Merkle nodes to be retained.
     pub fn bounds(&self) -> Range<Location<F>> {
-        Location::new(self.journal.bounds().start)..Location::new(self.journal.bounds().end)
+        let bounds = self.journal.bounds();
+        Location::new(bounds.start)..Location::new(bounds.end)
     }
 
     /// Update state gauges from the current database state.
@@ -675,14 +676,14 @@ where
     /// The [`Commitment`](chain::Commitment) for the database's current state.
     pub(crate) fn commitment(&self) -> chain::Commitment<F, H::Digest> {
         chain::Commitment {
-            size: self.bounds().end,
+            size: self.journal.size(),
             root: self.root,
         }
     }
 
     /// Create a new speculative batch of operations with this database as its parent.
     pub fn new_batch(&self) -> batch::UnmerkleizedBatch<F, H, K, V, S> {
-        batch::UnmerkleizedBatch::new(self, self.commitment())
+        batch::UnmerkleizedBatch::new(self)
     }
 
     /// Check that `batch` can be applied to the database in its current state, without

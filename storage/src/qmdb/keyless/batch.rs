@@ -14,6 +14,7 @@ use crate::{
 use commonware_codec::EncodeShared;
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_parallel::Strategy;
+use commonware_utils::iter::zip_eq;
 use std::sync::{Arc, Weak};
 
 /// Strong ref to an ancestor [`MerkleizedBatch`] in the keyless-batch chain.
@@ -144,7 +145,7 @@ where
     Operation<F, V>: EncodeShared,
 {
     /// Create a batch from the DB (no parent chain).
-    pub(super) fn new<E, C>(keyless: &Db<F, E, V, C, H, S>, base: Commitment<F, H::Digest>) -> Self
+    pub(super) fn new<E, C>(keyless: &Db<F, E, V, C, H, S>) -> Self
     where
         E: Context,
         C: Mutable<Item = Operation<F, V>>,
@@ -155,7 +156,7 @@ where
             parent: None,
             metadata: None,
             inactivity_floor: keyless.inactivity_floor_loc,
-            base,
+            base: keyless.commitment(),
         }
     }
 
@@ -332,7 +333,7 @@ where
 
         if !db_locs.is_empty() {
             let db_results = db.get_many(&db_locs).await?;
-            for (slot, value) in db_indices.into_iter().zip(db_results) {
+            for (slot, value) in zip_eq(db_indices, db_results) {
                 results[slot] = value;
             }
         }
@@ -589,7 +590,7 @@ where
 
         if !db_locs.is_empty() {
             let db_results = db.get_many(&db_locs).await?;
-            for (slot, value) in db_indices.into_iter().zip(db_results) {
+            for (slot, value) in zip_eq(db_indices, db_results) {
                 results[slot] = value;
             }
         }
@@ -617,5 +618,25 @@ where
             inactivity_floor: self.bounds.inactivity_floor,
             base: self.commitment(),
         }
+    }
+}
+
+impl<F, E, V, C, H, S> Db<F, E, V, C, H, S>
+where
+    F: Family,
+    E: Context,
+    V: ValueEncoding,
+    C: Mutable<Item = Operation<F, V>>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, V>: EncodeShared,
+{
+    /// Create an initial [`MerkleizedBatch`] from the DB's current state.
+    pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, V, S>> {
+        Arc::new(MerkleizedBatch {
+            journal_batch: self.journal.to_merkleized_batch(),
+            parent: None,
+            bounds: Bounds::from_db(self.commitment(), self.inactivity_floor_loc),
+        })
     }
 }
