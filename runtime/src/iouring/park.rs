@@ -13,7 +13,8 @@
 //! notification. Each turn it:
 //! - loads the sequence with [`Parker::observe`] after its task polls and before
 //!   checking any source of work,
-//! - runs again if it found work or the sequence moved since that load,
+//! - runs again if it found work, left a mailbox batch untaken, or the sequence
+//!   moved since that load,
 //! - arms with [`Parker::arm`], setting the waiter bit, and blocks only while the
 //!   armed word still carries the observed sequence,
 //! - disarms when the wait returns.
@@ -1461,6 +1462,81 @@ mod loom_tests {
             assert!(!mailbox.has_mail());
             assert!(!waiting(&mailbox.unparker));
         });
+    }
+
+    /// Run a worker shaped like the drive loop while a producer sends one
+    /// message behind a batch of two. Each turn observes, takes only into an
+    /// empty scratch while the mailbox reports mail, applies one message, its
+    /// bounded share, and decides in that same turn whether to park. With
+    /// `check_mail` the decision reads the mail flag, as the drive loop does.
+    /// Without it, the turn that empties the scratch parks on the word alone.
+    fn batch_started_during_partial_drain(check_mail: bool) {
+        loom::model(move || {
+            // The inbox holds a batch of two before the producer starts.
+            let mailbox = Arc::new(Mailbox::new());
+            let parker = mailbox.parker();
+            assert!(mailbox.send(message(0)).is_ok());
+            assert!(mailbox.send(message(1)).is_ok());
+
+            // The producer's message starts a second batch if the worker took
+            // the first one before it. The producer is the last thread able
+            // to wake the word, so a wait still queued once it finishes fails
+            // the model.
+            let producer = thread::spawn({
+                let mailbox = mailbox.clone();
+                move || {
+                    assert!(mailbox.send(message(2)).is_ok());
+                    abandon(&mailbox.unparker);
+                }
+            });
+
+            // The worker runs turns until it has applied all three, and stops
+            // before the park decision of the turn that applies the last one.
+            let mut received = Vec::new();
+            let mut scratch = Vec::new();
+            loop {
+                let seen = parker.observe();
+                if scratch.is_empty() && mailbox.has_mail() {
+                    assert!(mailbox.take(&mut scratch));
+                }
+                if !scratch.is_empty() {
+                    received.push(index(scratch.remove(0)));
+                }
+                if received.len() == 3 {
+                    break;
+                }
+
+                // The park decision of the same turn. The take above was
+                // skipped if the turn began with a message left in the scratch.
+                if !scratch.is_empty() || (check_mail && mailbox.has_mail()) || parker.moved(seen) {
+                    continue;
+                }
+                idle_park(&parker, seen);
+            }
+            producer.join().unwrap();
+
+            // Every message arrived in order and the flag is clear.
+            assert_eq!(received, [0, 1, 2]);
+            assert!(!mailbox.has_mail());
+            assert!(!waiting(&mailbox.unparker));
+        });
+    }
+
+    /// A batch that starts while the worker still applies an earlier one
+    /// notifies before the observation of the turn that empties the scratch.
+    /// That turn skipped its take, so it reads the mail flag before it parks
+    /// and no batch stays in the mailbox of a parked worker.
+    #[test]
+    fn test_batch_started_during_partial_drain_is_taken_before_park() {
+        batch_started_during_partial_drain(true);
+    }
+
+    /// Negative control: a park decision on the word alone strands that batch,
+    /// since no later send to its mailbox notifies.
+    #[test]
+    #[should_panic(expected = "a futex wait was stranded with no waker left")]
+    fn test_parking_on_the_word_alone_strands_a_batch_started_during_partial_drain() {
+        batch_started_during_partial_drain(false);
     }
 
     /// Closure transfers shared ownership while one already taken batch still

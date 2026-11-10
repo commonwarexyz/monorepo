@@ -24,6 +24,12 @@
 //! worker's recheck before blocking, or the wake of its wait, sends it round
 //! again, and its next observation includes the notification.
 //!
+//! The worker takes only into an empty scratch and applies a bounded share of
+//! it each turn, so a turn can observe a batch's notification and still leave
+//! that batch in the inbox. No later send of the batch notifies, so the worker
+//! reads the flag again after it applies messages and blocks only while the
+//! flag is clear.
+//!
 //! The mailbox also holds the worker's [`Parker`] until the worker takes it at
 //! startup, so the word has one parker. The pool's idle state unparks a
 //! selected worker through its mailbox's [`Unparker`], without a message. See

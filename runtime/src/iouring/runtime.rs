@@ -1863,7 +1863,11 @@ impl Worker {
     /// A take is due only while the mailbox reports mail, which needs no lock,
     /// so pool claims and permit grants, which move the worker's word without a
     /// message, cost no take. The turn observed the word before this check, so
-    /// a batch it misses moves the word after that observation.
+    /// a batch whose flag it cannot see yet moves the word after that
+    /// observation. A batch is taken only into an empty scratch, so one that
+    /// starts while an earlier batch is still being applied stays in the
+    /// mailbox with its flag set, and the drive loop reads the flag again
+    /// before it parks.
     fn messages(&mut self, mailbox: &Arc<Mailbox>) {
         // Reversing allows bounded FIFO processing without shifting the
         // remainder.
@@ -2133,13 +2137,17 @@ impl Worker {
             };
 
             // Queued submissions need another service turn even when no task
-            // has a notification that would cause it to be polled. A
+            // has a notification that would cause it to be polled. A turn that
+            // began with messages left in its scratch took no batch, and a
+            // batch that started meanwhile may have notified before this
+            // turn's observation, so only the mail flag shows it. A
             // notification since this turn's observation may have arrived after
             // its source was checked. Going round again without parking ends a
             // search, and the catch-up's callbacks run user code.
             if ready
                 || pending_submissions
                 || !self.inbox.is_empty()
+                || mailbox.has_mail()
                 || self.parker.moved(self.seen_seq)
             {
                 if let Some(searcher) = &mut searcher {
