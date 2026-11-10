@@ -57,11 +57,11 @@ use std::time::{Duration, Instant};
 /// per [`REFILES_PER_UNIT`] slots refiled. It bounds the work of one pass, so
 /// a storm of simultaneous deadlines keeps its worker from polling tasks for
 /// about one budget of wakes or cancellations at a time, and a backlog drains
-/// at most one budget per pass. A pool worker gives the pass over its own
-/// sleeps no more units than its run queue has room for (see
-/// [`super::sleep`]). A worker's service runs one pass over its sleeps and
-/// one over its request deadlines, and a pool worker runs one more over each
-/// stalled peer's sleeps that it expires.
+/// at most one budget per pass. A pool worker's pass over its own sleeps
+/// fires no more of them than its run queue has room for, while its refiles
+/// keep the full budget (see [`Wheel::expire_capped`]). A worker's service
+/// runs one pass over its sleeps and one over its request deadlines, and a
+/// pool worker runs one more over each stalled peer's sleeps that it expires.
 pub const BUDGET: u32 = 256;
 
 /// Refiles that cost one unit of an expiry budget. A refile only moves a slot
@@ -72,10 +72,13 @@ pub const BUDGET: u32 = 256;
 pub const REFILES_PER_UNIT: u32 = 16;
 
 /// Most slots that a bucket above level zero holds while it still cascades
-/// lazily, at its first deadline. Their refiles cost a quarter of one budget,
-/// so that pass still fires what is due. A fuller bucket cascades from its
-/// start instead (see [`Wheel::bound`]), at the cost of one earlier pass, or
-/// timed wake of an idle owner, per more than this many slots.
+/// lazily, at its first deadline. Refiling them one level down costs at most
+/// a quarter of a full budget, which refiles keep even in a pass whose fires
+/// are capped, so a bucket up to level three, whose slots may descend three
+/// levels, still leaves that pass a quarter of its budget to fire what is
+/// due. A fuller bucket cascades from its start instead (see
+/// [`Wheel::bound`]), at the cost of one earlier pass, or timed wake of an
+/// idle owner, per more than this many slots.
 const LAZY_SLOTS: u32 = REFILES_PER_UNIT * BUDGET / 4;
 
 /// Number of wheel levels.
@@ -453,6 +456,21 @@ impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
     /// or at or below the base's time when `now` is older than it, while a
     /// slot is due or the detached bucket holds slots to refile.
     pub fn expire(&mut self, now: u64, budget: &mut u32, fire: &mut impl FnMut(u32)) {
+        self.expire_capped(now, budget, u32::MAX, fire);
+    }
+
+    /// As [`Self::expire`], but firing at most `fires` slots, while refiles
+    /// still spend from the whole `budget`. A pass ends at the first due slot
+    /// that it may not fire, so the slots fire in the order of an uncapped
+    /// pass, and [`Self::bound`] then stays at or below `now` as after a
+    /// budget that ran out.
+    pub fn expire_capped(
+        &mut self,
+        now: u64,
+        budget: &mut u32,
+        mut fires: u32,
+        fire: &mut impl FnMut(u32),
+    ) {
         // An older time is treated as the base, which never exceeds a time an
         // earlier caller passed.
         let target = (now / RESOLUTION).max(self.base);
@@ -463,9 +481,15 @@ impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
             if slot == NIL {
                 break;
             }
+            // A due slot that the pass may not fire ends it, so no later slot
+            // fires ahead of it.
+            if fires == 0 {
+                return;
+            }
             self.detach(slot);
             fire(slot);
             *budget -= 1;
+            fires -= 1;
         }
 
         // Drain the detached bucket, then detach the next bucket in time
@@ -483,9 +507,13 @@ impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
                 let slot = self.buckets[self.pending as usize].head;
                 let tick = self.links[slot as usize].tick;
                 if tick <= target {
+                    if fires == 0 {
+                        return;
+                    }
                     self.detach(slot);
                     fire(slot);
                     *budget -= 1;
+                    fires -= 1;
                 } else {
                     // The detached bucket's ticks are at least the base, which
                     // is its start, so a refile lands on a lower level.

@@ -102,7 +102,8 @@
 //! So does a pass that leaves a wheel bucket partly refiled. The wheel bounds
 //! a crowded bucket by its start (see [`Wheel::bound`]), so the owner, parked
 //! or not, starts to refile it then, in such consecutive passes, rather than
-//! at its first deadline.
+//! at its first deadline. Refiles wake nothing, so the room in the run queue
+//! caps only fires, and those passes refile with a full budget.
 //!
 //! A poll that does not return freezes its worker's service, timers included.
 //! A pool worker that is not closing therefore checks its peers' published
@@ -226,9 +227,9 @@ const RESOLUTION: u64 = 1024;
 /// How long a worker's published bound must be overdue, and its owner's latest
 /// expiry pass past, before a busy peer expires its due registrations. An
 /// owner whose turns stay short serves a small backlog well within it, and
-/// drains a large one itself one budget per pass, so peers act on a worker
-/// that has not run an expiry pass for about this long, such as one stalled
-/// in a long poll.
+/// drains a large one itself as fast as its run queue takes it, so peers act
+/// on a worker that has not run an expiry pass for about this long, such as
+/// one stalled in a long poll.
 const RESCUE_THRESHOLD: Duration = Duration::from_millis(1);
 
 /// Least time between two checks of the peers' bounds by one pool worker, a
@@ -294,10 +295,13 @@ struct Registrations {
 }
 
 impl Registrations {
-    /// Fire the registrations due at `now`, within `budget` units.
-    fn expire(&mut self, now: u64, mut budget: u32, ending: &mut Ending<'_>) {
+    /// Fire at most `fires` of the registrations due at `now`. Fires and
+    /// refiles spend from one [`BUDGET`] of units, so a small `fires` leaves
+    /// the rest of it to refiles.
+    fn expire(&mut self, now: u64, fires: u32, ending: &mut Ending<'_>) {
         let Self { entries, wheel, .. } = self;
-        wheel.expire(now, &mut budget, &mut |index| {
+        let mut budget = BUDGET;
+        wheel.expire_capped(now, &mut budget, fires, &mut |index| {
             // A slot is resident exactly while its registration waits, and
             // firing removes the registration.
             let id = entries.id_at(index as usize).unwrap();
@@ -543,16 +547,19 @@ impl Timers {
         (sleeper, at)
     }
 
-    /// The owner's expiry pass at `now`, in nanoseconds since the origin:
-    /// fire due registrations within `budget` units, at most one [`BUDGET`],
-    /// and publish the new bound, which the owner caches. A pool worker passes
-    /// the room in its run queue, so a saturated worker fires only what that
-    /// queue can take, in deadline order. A peer's rescue keeps a full budget.
-    /// The bound stays at or below `now` while due registrations remain.
-    pub fn expire(&self, now: u64, budget: u32, deferred: &mut Deferred) -> u64 {
+    /// The owner's expiry pass at `now`, in nanoseconds since the origin. It
+    /// fires at most `fires` due registrations, no more than one [`BUDGET`]
+    /// of them, refiles later ones within the rest of that budget, and
+    /// publishes the new bound, which the owner caches. A pool worker passes
+    /// the room in its run queue as `fires`, so a saturated worker fires only
+    /// what that queue can take, in deadline order, while a crowded wheel
+    /// bucket cascades as fast as beside an empty queue. A peer's rescue keeps
+    /// a full budget. The bound stays at or below `now` while due
+    /// registrations remain.
+    pub fn expire(&self, now: u64, fires: u32, deferred: &mut Deferred) -> u64 {
         let mut registrations = self.lock();
         self.end(&mut registrations, deferred, |registrations, ending| {
-            registrations.expire(now, budget, ending);
+            registrations.expire(now, fires, ending);
         });
 
         // Peers read the bound to find due registrations, and the pass time
