@@ -483,10 +483,10 @@
 //!
 //! - **V6.** Keep each posted matrix while receivers may still audit it, and serve openings
 //!   ([Matrix::open]). Serve each close and the requests it processes to validators that did not
-//!   check it. Keep the whole payout log, and serve payout proofs ([PayoutProof]) under the last
-//!   posted payouts root, before and after a halt. After a halt, also serve balance proofs under
-//!   the last posted balances root. Otherwise receivers cannot challenge, peers cannot apply the
-//!   close, and accounts cannot withdraw their payouts or claim.
+//!   check it. Keep the whole payout log, and serve payout proofs ([PayoutProof]) under the payouts
+//!   root of the last close applied, with its epoch (L6), before and after a halt. After a halt,
+//!   also serve balance proofs under the last posted balances root. Otherwise receivers cannot
+//!   challenge, peers cannot apply the close, and accounts cannot withdraw their payouts or claim.
 //!
 //! - **V7.** Decode closes with the deployment's [Limits]. Otherwise the validator rejects valid
 //!   closes or attests closes beyond the agreed limits.
@@ -513,8 +513,8 @@
 //!                           | halted or not                |
 //!                           +------------------------------+
 //!                           +------------------------------+
-//!   Summary payouts ------->| payouts root                 |
-//!   PayoutProof ----------->| claimed ranges [0,2) [3,5)   |-- withdraw --> account
+//!   Summary payouts ------->| payouts root of each epoch   |
+//!   PayoutProof, epoch ---->| claimed ranges [0,2) [3,5)   |-- withdraw --> account
 //!                           +------------------------------+
 //! ```
 //!
@@ -566,14 +566,17 @@
 //!
 //!   In one state change, a post drops the processed requests and sets each required count to what
 //!   remains queued. It adds the commit position (the payouts size less one) to the claimed ranges.
-//!   It records the summary's matrix root, balances root, payouts root, and digest. It transfers
-//!   nothing. A lower required count lets closes defer a forced withdrawal forever, and a transfer
-//!   that can fail inside a post blocks every later post.
+//!   It records the summary's balances root and digest, and keeps its matrix root and payouts root
+//!   with those of every earlier post. It transfers nothing. A lower required count lets closes
+//!   defer a forced withdrawal forever, and a transfer that can fail inside a post blocks every
+//!   later post.
 //!
 //! - **L6.** Pay a payout, before or after a halt, only if [PayoutProof::verify] accepts its proof
-//!   under the last posted payouts root and no claimed range covers its index. In one state change,
-//!   add the index to the claimed ranges and pay the payout to its account's destination (L10).
-//!   Otherwise a payout is paid twice or never.
+//!   under the payouts root of the posted close the caller names by its epoch, and no claimed range
+//!   covers its index. Keep every posted payouts root. In one state change, add the index to the
+//!   claimed ranges and pay the payout to its account's destination (L10). Otherwise a payout is
+//!   paid twice, or is never paid because an operator that keeps posting leaves every proof
+//!   validators serve under a root the ledger discarded.
 //!
 //! - **L7.** Before a halt, halt on a challenge that [Challenge::verify] accepts against a posted
 //!   epoch and its matrix root, and keep every posted matrix root. Otherwise receivers lose their
@@ -582,8 +585,8 @@
 //! - **L8.** Once halted, by a valid challenge or the deployment's own policy, post nothing and
 //!   take no deposit or forced withdrawal. Make each queued deposit claimable by its account, and
 //!   drop the queued forced withdrawals and the required counts. Unpaid payouts stay claimable
-//!   under the last posted payouts root. Otherwise a post after the halt changes the balances
-//!   accounts claim against.
+//!   under every posted payouts root that holds them (L6). Otherwise a post after the halt changes
+//!   the balances accounts claim against.
 //!
 //! - **L9.** After a halt, pay each account its balance at most once, only if
 //!   [BalanceProof::verify] accepts its proof under the last posted balances root. Pay its
@@ -602,9 +605,9 @@
 //! The balance and payout claims need proofs, and a validator supplies them.
 //!
 //! ```text
-//!   validator --balance proof--> account --claim(proof)--> ledger --> balance as of the last post
-//!                                account --claim---------> ledger --> deposits no close processed
-//!   validator --payout proof---> account --claim(proof)--> ledger --> one payout, once per index
+//!   validator --balance proof--> account --claim(proof)---------> ledger --> last posted balance
+//!                                account --claim----------------> ledger --> deposits still queued
+//!   validator --payout proof---> account --claim(proof, epoch)--> ledger --> payout once per index
 //! ```
 //!
 //! The ledger tracks paid payouts by their indices in the payout log. Its claimed ranges map each
@@ -632,8 +635,11 @@
 //! ```
 //!
 //! The proof shows that a payout exists, and the claimed ranges keep it from being paid twice. A
-//! replayed proof is refused even though it still verifies. A proof verifies only under the root it
-//! was built for, so after a later post the account fetches a fresh proof of the same index.
+//! replayed proof is refused even though it still verifies. A withdrawal names the posted close
+//! whose payouts root its proof is under, and the ledger keeps every posted payouts root, so the
+//! proof stays valid however many closes post after that one. The log only appends and a payout
+//! keeps its index, so every posted root that holds index i holds the same payout there, a commit
+//! never verifies as a payout, and the claimed ranges pay index i once whichever root proves it.
 //!
 //! ## Implementing a ledger
 //!

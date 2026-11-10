@@ -37,14 +37,14 @@ pub enum Refusal {
     /// The call would take more than the ledger holds or can hold.
     #[error("the call would take more than the ledger holds or can hold")]
     Custody,
-    /// No close of the challenged epoch has posted.
-    #[error("no close of the challenged epoch has posted")]
+    /// No close of the named epoch has posted.
+    #[error("no close of the named epoch has posted")]
     NotPosted,
     /// The payout at the proven index was already paid.
     #[error("the payout at the proven index was already paid")]
     Withdrawn,
-    /// The balance or payout proof does not verify under the last posted root.
-    #[error("the balance or payout proof does not verify under the last posted root")]
+    /// The balance or payout proof does not verify under its posted root.
+    #[error("the balance or payout proof does not verify under its posted root")]
     InvalidProof,
     /// A deposit or withdrawal of nothing.
     #[error("amount is zero")]
@@ -65,10 +65,10 @@ pub struct Persisted<P: PublicKey, D: Digest, A: Amount> {
     pub parent: D,
     /// Balances root of the last posted summary.
     pub balances: D,
-    /// Payouts root of the last posted summary.
-    pub payouts: D,
     /// Matrix root of each posted close, in epoch order.
     pub matrices: Vec<D>,
+    /// Payouts root of each posted close, in epoch order.
+    pub payouts: Vec<D>,
     /// Funds the ledger holds. A deposit adds to them and every transfer takes from them.
     pub held: A,
     /// Queued deposits, oldest first.
@@ -152,8 +152,8 @@ where
         let persisted = Persisted {
             parent: genesis.digest(),
             balances,
-            payouts: genesis.payouts.root,
             matrices: Vec::new(),
+            payouts: Vec::new(),
             held: A::ZERO,
             deposits: VecDeque::new(),
             required_deposits: 0,
@@ -192,6 +192,12 @@ where
     pub fn matrix(&self, epoch: Epoch) -> Option<&H::Digest> {
         let index = usize::try_from(epoch.checked_sub(1)?).ok()?;
         self.persisted.matrices.get(index)
+    }
+
+    /// Returns the payouts root of the posted close of `epoch`.
+    pub fn payouts(&self, epoch: Epoch) -> Option<&H::Digest> {
+        let index = usize::try_from(epoch.checked_sub(1)?).ok()?;
+        self.persisted.payouts.get(index)
     }
 
     /// Returns the ranges of payout log indices that hold a commit or a paid payout, in order, each
@@ -296,20 +302,22 @@ where
         persisted.forced_withdrawals.drain(..forced_withdrawals);
         persisted.required_deposits = persisted.deposits.len();
         persisted.required_forced_withdrawals = persisted.forced_withdrawals.len();
-        persisted.payouts = summary.payouts.root;
         persisted.matrices.push(summary.matrix);
+        persisted.payouts.push(summary.payouts.root);
         persisted.balances = summary.balances;
         persisted.parent = summary.digest();
         Ok(())
     }
 
-    /// Pays the payout `proof` proves under the last posted payouts root, once per index, before or
-    /// after a halt (L6). Returns the account paid and the amount.
+    /// Pays the payout `proof` proves under the payouts root of the posted close of `epoch`, once
+    /// per index, before or after a halt (L6). Returns the account paid and the amount.
     pub fn withdraw_payout(
         &mut self,
+        epoch: Epoch,
         proof: &PayoutProof<P, H::Digest, A>,
     ) -> Result<(P, A), Refusal> {
-        if !proof.verify::<H>(&self.persisted.payouts) {
+        let root = self.payouts(epoch).ok_or(Refusal::NotPosted)?;
+        if !proof.verify::<H>(root) {
             return Err(Refusal::InvalidProof);
         }
         if self.covers(proof.index) {

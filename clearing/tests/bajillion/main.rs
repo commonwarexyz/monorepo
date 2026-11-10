@@ -478,15 +478,16 @@ where
     }
 
     /// Withdraws the `payouts` the posted close of `epoch` owes, each with a proof from a
-    /// validator.
+    /// validator under the payouts root of the last close it applied.
     async fn withdraw_payouts(&mut self, epoch: Epoch, payouts: &Amounts<P, A>) {
+        let applied = self.validators[0].summary().epoch;
         for (account, amount) in payouts.iter() {
             let proof = self.validators[0]
                 .prove_payout(epoch, account)
                 .await
                 .unwrap()
                 .expect("the close must owe the account a payout");
-            let withdrawn = self.ledger.withdraw_payout(&proof).unwrap();
+            let withdrawn = self.ledger.withdraw_payout(applied, &proof).unwrap();
             assert_eq!(withdrawn, (account.clone(), amount));
         }
     }

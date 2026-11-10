@@ -541,67 +541,118 @@ fn test_payouts_are_withdrawn_once_before_or_after_a_halt() {
         let mut forged = alice.clone();
         forged.payout.amount += 1;
         assert!(matches!(
-            ledger.withdraw_payout(&forged),
+            ledger.withdraw_payout(2, &forged),
             Err(Refusal::InvalidProof)
         ));
-        assert_eq!(ledger.withdraw_payout(&alice).unwrap(), (account(0), 4));
+        assert_eq!(ledger.withdraw_payout(2, &alice).unwrap(), (account(0), 4));
         assert_eq!(ledger.custody(), 16);
         assert!(matches!(
-            ledger.withdraw_payout(&alice),
+            ledger.withdraw_payout(2, &alice),
             Err(Refusal::Withdrawn)
         ));
 
-        // After a halt, the payouts root freezes and the remaining payout is claimed against it.
+        // After a halt, the remaining payout is claimed under the same posted payouts root.
         ledger.halt();
-        assert_eq!(ledger.withdraw_payout(&bob).unwrap(), (account(1), 6));
+        assert_eq!(ledger.withdraw_payout(2, &bob).unwrap(), (account(1), 6));
         assert!(matches!(
-            ledger.withdraw_payout(&bob),
+            ledger.withdraw_payout(2, &bob),
             Err(Refusal::Withdrawn)
         ));
         assert_eq!(ledger.custody(), 10);
     });
 }
 
-/// A payout proof verifies only under the last posted payouts root. After a later post, the account
-/// fetches a fresh proof of the same index.
+/// A payout proof pays under the payouts root of the posted close a withdrawal names, even after
+/// later posts and a halt. Naming an epoch with no post, or a posted close whose root the proof is
+/// not under, is refused, and an index is paid once whichever posted root proves it.
 #[test]
-fn test_payout_proofs_follow_the_last_post() {
+fn test_payout_proofs_stay_valid_under_every_posted_root() {
     deterministic::Runner::default().start(|mut context| async move {
-        let mut deployment = TestDeployment::new(&context, "stale", 1).await;
+        let mut deployment = TestDeployment::new(&context, "roots", 1).await;
 
-        // Alice's forced withdrawal of 4 pays out in epoch 2, and the post of an idle close of
-        // epoch 3 moves the payouts root past the proof served before it.
+        // The forced withdrawals of 4 by alice and 6 by bob pay out in epoch 2, and each gets a
+        // proof under the payouts root of epoch 2.
         deployment.ledger.deposit(account(0), 10).unwrap();
+        deployment.ledger.deposit(account(1), 10).unwrap();
         deployment.close(&mut context).await;
         deployment.ledger.withdraw(account(0), 4).unwrap();
+        deployment.ledger.withdraw(account(1), 6).unwrap();
         let queue = deployment.ledger.queue();
-        let withdrawing = close_epoch(&mut deployment.operator, &queue, 0, 1);
+        let withdrawing = close_epoch(&mut deployment.operator, &queue, 0, 2);
         let proposals = deployment.verify(&withdrawing).await;
         deployment.post(&mut context, proposals).await;
-        let stale = deployment.validators[0]
-            .prove_payout(2, &account(0))
-            .await
-            .unwrap()
-            .unwrap();
+        let mut early = Vec::new();
+        for index in 0..2 {
+            let validator = &deployment.validators[0];
+            early.push(
+                validator
+                    .prove_payout(2, &account(index))
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+
+        // An idle close of epoch 3 posts and moves the payouts root, and each payout gets a
+        // second proof of the same index under the root of epoch 3.
         let idle = close(&mut deployment.operator);
         let proposals = deployment.verify(&idle).await;
         deployment.post(&mut context, proposals).await;
+        let mut late = Vec::new();
+        for index in 0..2 {
+            let validator = &deployment.validators[0];
+            late.push(
+                validator
+                    .prove_payout(2, &account(index))
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+        assert_eq!(late[0].index, early[0].index);
+        assert_eq!(late[1].index, early[1].index);
 
-        // The proof under the earlier root is refused, and a fresh proof of the same index pays.
+        // A proof is refused under an epoch with no post, and under a posted root it is not
+        // under.
+        let ledger = &mut deployment.ledger;
+        for epoch in [0, 4] {
+            assert!(matches!(
+                ledger.withdraw_payout(epoch, &early[0]),
+                Err(Refusal::NotPosted)
+            ));
+        }
         assert!(matches!(
-            deployment.ledger.withdraw_payout(&stale),
+            ledger.withdraw_payout(1, &early[0]),
             Err(Refusal::InvalidProof)
         ));
-        let fresh = deployment.validators[0]
-            .prove_payout(2, &account(0))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(fresh.index, stale.index);
+        assert!(matches!(
+            ledger.withdraw_payout(3, &early[0]),
+            Err(Refusal::InvalidProof)
+        ));
+
+        // Alice's proof under the root of epoch 2 pays after the post of epoch 3, and her proof
+        // under the root of epoch 3 is then refused.
         assert_eq!(
-            deployment.ledger.withdraw_payout(&fresh).unwrap(),
+            ledger.withdraw_payout(2, &early[0]).unwrap(),
             (account(0), 4)
         );
+        assert!(matches!(
+            ledger.withdraw_payout(3, &late[0]),
+            Err(Refusal::Withdrawn)
+        ));
+
+        // After a halt, every posted root stays. Bob's proof under the root of epoch 3 pays, and
+        // his proof under the root of epoch 2 is then refused.
+        ledger.halt();
+        assert_eq!(
+            ledger.withdraw_payout(3, &late[1]).unwrap(),
+            (account(1), 6)
+        );
+        assert!(matches!(
+            ledger.withdraw_payout(2, &early[1]),
+            Err(Refusal::Withdrawn)
+        ));
+        assert_eq!(ledger.custody(), 10);
     });
 }
 
@@ -647,7 +698,8 @@ fn test_withdrawn_ranges_stay_compact() {
                 let summary = deployment.post(&mut context, proposals).await;
                 owed.extend(accounts.map(|index| (summary.epoch, account(index))));
             }
-            let size = deployment.validators[0].summary().payouts.size;
+            let applied = deployment.validators[0].summary();
+            let (size, posted) = (applied.payouts.size, applied.epoch);
 
             // Prove every payout, then order the proofs for this run.
             let mut proofs = Vec::new();
@@ -676,7 +728,7 @@ fn test_withdrawn_ranges_stay_compact() {
             };
             check(deployment.ledger.ranges(), outstanding);
             for proof in &proofs {
-                deployment.ledger.withdraw_payout(proof).unwrap();
+                deployment.ledger.withdraw_payout(posted, proof).unwrap();
                 outstanding -= 1;
                 check(deployment.ledger.ranges(), outstanding);
             }
@@ -722,7 +774,7 @@ fn test_owed_payouts_count_toward_the_custody_bound() {
         assert_eq!(ledger.custody(), u64::MAX);
 
         // Withdrawing the payout frees its room.
-        assert_eq!(ledger.withdraw_payout(&proof).unwrap(), (account(0), 10));
+        assert_eq!(ledger.withdraw_payout(2, &proof).unwrap(), (account(0), 10));
         ledger.deposit(account(1), 10).unwrap();
         assert_eq!(ledger.custody(), u64::MAX);
     });

@@ -625,7 +625,10 @@ fn test_validator_realigns_its_payout_log_after_a_crash() {
             .unwrap()
             .unwrap();
         assert_eq!(
-            deployment.ledger.withdraw_payout(&proof).unwrap(),
+            deployment
+                .ledger
+                .withdraw_payout(second.epoch, &proof)
+                .unwrap(),
             (account(0), 1)
         );
     });

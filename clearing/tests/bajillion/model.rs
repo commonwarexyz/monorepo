@@ -394,6 +394,8 @@ struct Replayed {
     balances: BTreeMap<PublicKey, u64>,
     /// Balance proofs under the last posted balances root, for every positive balance.
     proofs: BTreeMap<PublicKey, BalanceProof<Digest, u64>>,
+    /// Epoch of the last post. The payout proofs are under its payouts root.
+    applied: Epoch,
     /// Every payout the posted closes owe, by epoch and account, with its proof under the last
     /// posted payouts root.
     payouts: BTreeMap<(Epoch, PublicKey), PayoutProof<PublicKey, Digest, u64>>,
@@ -456,6 +458,7 @@ fn replay(
         }
 
         // It then serves balances, proofs, and openings under the last post.
+        let applied = validator.summary().epoch;
         let mut balances = BTreeMap::new();
         let mut proofs = BTreeMap::new();
         let mut payouts = BTreeMap::new();
@@ -504,6 +507,7 @@ fn replay(
         Replayed {
             balances,
             proofs,
+            applied,
             payouts,
             openings,
             candidate: evaluated,
@@ -1481,7 +1485,7 @@ impl Model for Workload {
                 let account = &self.accounts[user];
                 let proof = &snapshot.payouts[&(epoch, account.clone())];
                 let paid = world.withdrawn.contains(&(epoch, user));
-                match world.ledger.withdraw_payout(proof) {
+                match world.ledger.withdraw_payout(snapshot.applied, proof) {
                     Ok((to, amount))
                         if !paid && to == *account && amount == proof.payout.amount =>
                     {
