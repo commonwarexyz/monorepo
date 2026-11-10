@@ -3177,6 +3177,7 @@ mod tests {
             control1.reset_peer_sets();
             assert!(manager1.peer_set(3).await.is_none());
             assert!(updates.recv().await.is_none());
+            assert!(all_recipients(&mut sender1).is_empty());
             assert!(!delivered(&context, &mut sender1, &mut receiver2, &pk2).await);
 
             // An id older than the forgotten sets is accepted

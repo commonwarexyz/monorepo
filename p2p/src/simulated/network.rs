@@ -1908,11 +1908,46 @@ mod tests {
         });
     }
 
+    /// A set tracked through a peer's own manager counts the peer once when the set lists it.
     #[test]
-    #[should_panic(expected = "peer set too large: 3 > 2")]
-    fn test_max_peers_per_set_counts_owner() {
+    fn test_max_peers_per_set_counts_listed_owner_once() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Limit each peer set to two identities and give peer 1 its own peer sets
+            let cfg = Config {
+                max_size: MAX_MESSAGE_SIZE,
+                max_peers_per_set: NZUsize!(2),
+                disconnect_on_block: true,
+                tracked_peer_sets: NZUsize!(1),
+            };
+            let (mut network, _oracle) = Network::new(context.child("network"), cfg);
+            let peer_1 = ed25519::PrivateKey::from_seed(1).public_key();
+            let peer_2 = ed25519::PrivateKey::from_seed(2).public_key();
+            network.own_trackers.insert(peer_1.clone(), Tracker::new());
+
+            // The owner and one other peer fill the limit, so the set is accepted
+            assert!(
+                network
+                    .register_tracked_peer_set(
+                        Some(&peer_1),
+                        0,
+                        TrackedPeers::new(
+                            Set::try_from([peer_1.clone(), peer_2]).unwrap(),
+                            Set::default(),
+                        ),
+                    )
+                    .await
+            );
+        });
+    }
+
+    /// A set tracked through a peer's own manager counts the peer even when the set omits it.
+    #[test]
+    #[should_panic(expected = "peer set too large: 3 > 2")]
+    fn test_max_peers_per_set_counts_omitted_owner() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Limit each peer set to two identities and give peer 1 its own peer sets
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
                 max_peers_per_set: NZUsize!(2),
@@ -1925,25 +1960,11 @@ mod tests {
             let peer_3 = ed25519::PrivateKey::from_seed(3).public_key();
             network.own_trackers.insert(peer_1.clone(), Tracker::new());
 
-            // A set that lists the owner counts it once
-            assert!(
-                network
-                    .register_tracked_peer_set(
-                        Some(&peer_1),
-                        0,
-                        TrackedPeers::new(
-                            Set::try_from([peer_1.clone(), peer_2.clone()]).unwrap(),
-                            Set::default(),
-                        ),
-                    )
-                    .await
-            );
-
-            // A set that omits the owner counts it as well
+            // Two other peers and the omitted owner exceed the limit
             network
                 .register_tracked_peer_set(
                     Some(&peer_1),
-                    1,
+                    0,
                     TrackedPeers::new(Set::try_from([peer_2, peer_3]).unwrap(), Set::default()),
                 )
                 .await;
