@@ -104,7 +104,7 @@ pub fn graftable_chunks<F: Graftable>(ops_leaves: u64, grafting_height: u32) -> 
     (ops_leaves - birth_chunk_0) / chunk_size + 1
 }
 
-/// Returns the grafted leaf for a bitmap `chunk` and the root of the ops subtree it covers.
+/// Returns the grafted leaf digest for a bitmap `chunk` and the root of the ops subtree it covers.
 fn grafted_leaf<H: Hasher>(
     hasher: &merkle::hasher::Standard<H>,
     chunk: &[u8],
@@ -117,7 +117,7 @@ fn grafted_leaf<H: Hasher>(
     }
 }
 
-/// Compute the [grafted_leaf] of each resolved `(chunk_idx, chunk_ops_digest, chunk)` triple.
+/// Compute the grafted leaf digest of each resolved `(chunk_idx, chunk_ops_digest, chunk)` triple.
 pub(super) fn graft_chunk_digests<H: Hasher, S: Strategy, const N: usize>(
     strategy: &S,
     inputs: Vec<(usize, H::Digest, [u8; N])>,
