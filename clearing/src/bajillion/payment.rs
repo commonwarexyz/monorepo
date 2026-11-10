@@ -199,9 +199,10 @@ where
 /// first.
 ///
 /// It carries the roots its two states claim, so each signature verifies from the request alone.
-/// The state of the request's epoch pays the batch on top of the sender's latest countersigned map
-/// of that epoch, and the state of the next epoch pays only the batch on top of that map. The
-/// sender's row in the close of the request's epoch decides which of the two can settle.
+/// The state of the request's epoch adds the batch to the sender's latest countersigned map of
+/// that epoch, on top of `previous`, and the state of the next epoch pays only the batch on top of
+/// that map. The sender's row in the close of the request's epoch decides which of the two can
+/// settle.
 ///
 /// ```text
 ///                     close(epoch - 1)     close(epoch)     close(epoch + 1)  signatures

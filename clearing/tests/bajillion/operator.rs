@@ -103,9 +103,9 @@ fn test_flows_apply_per_account_in_epoch_order() {
         delivered.entry(account).or_default().push(flow);
     }
     let apply = |flows: &[Flow<u64>], balance: u64| {
-        flows
-            .iter()
-            .fold(balance, |balance, flow| flow.settle(balance).unwrap().0)
+        flows.iter().fold(balance, |balance, flow| {
+            flow.settle(balance).unwrap().balance
+        })
     };
 
     // Applied in epoch order, each account's flows give the operator's balance. Applied as

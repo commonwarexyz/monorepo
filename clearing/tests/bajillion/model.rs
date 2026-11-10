@@ -54,10 +54,10 @@
 //! The invariants are the properties below. Custody backs the balances, the unprocessed deposits,
 //! and the unpaid payouts, so a halt leaves nothing in custody once every claim and payout is paid.
 //! Every step had the outcome the model predicted. The operator holds the committee's balances
-//! after the last close it released. The committee's balances and payouts are what the released
-//! closes settle. Every receipt of a posted epoch is honored unless its admission was forgotten. A
-//! request is admitted in at most one epoch unless its admission was forgotten. Claimed ranges
-//! never overlap or touch.
+//! after the last close it released. The committee's balances and posted payouts are what the
+//! released closes settle. Every receipt of a posted epoch is honored unless its admission was
+//! forgotten. A request is admitted in at most one epoch unless its admission was forgotten.
+//! Claimed ranges never overlap or touch.
 //!
 //! The witnesses each workload requires are listed with it. They cover admission and withdrawals
 //! while a close awaits its post, a request admitted in the epoch after its own and its copy
@@ -1580,7 +1580,7 @@ impl Model for Workload {
                 },
             ),
             Property::always(
-                "the committee's balances and payouts are what the released closes settle",
+                "the committee's balances and posted payouts are what the released closes settle",
                 |model: &Self, world: &World| {
                     let snapshot = model.snapshot(world);
                     let (balances, payouts) = model.settled(world, false);

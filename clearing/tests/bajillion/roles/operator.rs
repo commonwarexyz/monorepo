@@ -402,7 +402,7 @@ impl<P: PublicKey, K: Signer, H: Hasher, A: Amount> Operator<P, K, H, A> {
         let settled = flows
             .iter()
             .map(|(account, flow)| {
-                let (balance, _) = flow.settle(self.balance(account))?;
+                let balance = flow.settle(self.balance(account))?.balance;
                 Ok((account.clone(), balance))
             })
             .collect::<Result<Vec<_>, FlowError>>()?;

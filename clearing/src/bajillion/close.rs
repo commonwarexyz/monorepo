@@ -632,8 +632,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bajillion::tests::{
-        TestClose, account, namespace, operator_key, queue, user, users,
+    use crate::bajillion::{
+        Settled,
+        tests::{TestClose, account, namespace, operator_key, queue, user, users},
     };
     use commonware_codec::{Decode as _, DecodeExt as _, Encode as _};
     use commonware_cryptography::{
@@ -859,15 +860,17 @@ mod tests {
         assert_eq!(close.rows(), &rows);
         assert_eq!(close.withdrawals(), &withdrawals);
 
-        // The operator's signature covers the matrix root of the rows, and the flows sum every
-        // account's part of the close.
-        let message = TestClose::message(
-            1,
-            &close.matrix::<Sha256>().root(),
-            close.withdrawals(),
-            1,
-            0,
-        );
+        // The operator signs the epoch, the matrix root of the rows, the withdrawals, and both
+        // counts. The flows sum every account's part of the close.
+        let root = close.matrix::<Sha256>().root();
+        let message = TestClose::message(1, &root, close.withdrawals(), 1, 0);
+        let mut signed = Vec::new();
+        1u64.write(&mut signed);
+        root.write(&mut signed);
+        close.withdrawals().write(&mut signed);
+        1u64.write(&mut signed);
+        0u64.write(&mut signed);
+        assert_eq!(message, signed);
         assert!(
             operator
                 .public_key()
@@ -882,8 +885,20 @@ mod tests {
                 .unwrap()
                 .1
         };
-        assert_eq!(flow(&signers[0]).settle(10).unwrap(), (4, 5));
-        assert_eq!(flow(&signers[2]).settle(0).unwrap(), (6, 0));
+        assert_eq!(
+            flow(&signers[0]).settle(10).unwrap(),
+            Settled {
+                balance: 4,
+                payout: 5
+            }
+        );
+        assert_eq!(
+            flow(&signers[2]).settle(0).unwrap(),
+            Settled {
+                balance: 6,
+                payout: 0
+            }
+        );
     }
 
     #[test]

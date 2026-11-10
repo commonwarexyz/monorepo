@@ -18,7 +18,8 @@
 //! ```text
 //!   sender           operator          receiver         validators          ledger
 //!      |                 |                 |                 |                 |
-//!      | states, sign    |                 |                 |                 |
+//!      | states, sign,   |                 |                 |                 |
+//!      | persist         |                 |                 |                 |
 //!      |---- Request --->|                 |                 |                 |
 //!      |                 | verify, admit,  |                 |                 |
 //!      |                 | fits?, persist  |                 |                 |
@@ -30,9 +31,11 @@
 //!      |                 |                 | keep largest    |                 |
 //!      |                 |                 |                 |                 |
 //!      |                 |<----------------------------------|<-- queue(e) ----|
-//!      |                 | assemble        |                 |                 |
+//!      |                 | assemble,       |                 |                 |
+//!      |                 | persist         |                 |                 |
 //!      |                 |------------ Close(e) ------------>|                 |
 //!      |                 |                 |                 | check, settle,  |
+//!      |                 |                 |                 | persist,        |
 //!      |                 |                 |                 | certify         |
 //!      |                 |                 |                 |-- Summary(e) -->|
 //!      |                 |                 |                 |                 | verify, post,
@@ -93,16 +96,17 @@
 //! ```text
 //!   role        keeps                 calls
 //!   ---------------------------------------------------------------------------------------------
-//!   sender      any store             Request::states, States::sign,
+//!   sender      any store             Request::states, States::sign, States::request,
 //!                                     State::verify_acknowledgement, Receipt::issue,
 //!                                     Opening::verify_row, Withdrawal::sign
 //!   operator    any store             Request::verify, Verified::admit, State::acknowledge,
 //!                                     Withdrawal::verify, Close::assemble, Flow::settle
-//!   receiver    any store             Receipt::verify, Opening::verify, Challenge::verify
+//!   receiver    any store             Receipt::verify, Opening::verify
 //!   validators  Balances, Payouts,    Close::check, Checked::settle, Proposal::apply,
-//!               any store             Proposal::payouts, Matrix::open, Queue::prefix
-//!   ledger      any store             Summary::verify, Challenge::verify, PayoutProof::verify,
-//!                                     BalanceProof::verify
+//!               any store             Close::matrix, Matrix::open, Queue::prefix,
+//!                                     Summary::genesis, Matrix::empty
+//!   ledger      any store             Summary::genesis, Summary::verify, Challenge::verify,
+//!                                     PayoutProof::verify, BalanceProof::verify
 //! ```
 //!
 //! Each role's section below names its helpers and states its obligations. An obligation is a
@@ -206,9 +210,9 @@
 //!                                      |                                       v
 //!   Request --> verify --Verified--> admit --New--> fits? --> persist --> acknowledge --> Ack
 //!                  :                   ^              ^          |
-//!            reads nothing             | latest map,  | balance, | state, map,
-//!                                      | row in e-1   | deducted | signature
-//!                                      |              |          |
+//!            reads nothing             | latest state | balance, | state, map,
+//!                                      | and map,     | deducted | signature
+//!                                      | row in e-1   |          |
 //!                                      |              |          v
 //!                                +-----+--------------+----------+-----------+
 //!                                |        operator store, any layout         |
@@ -227,7 +231,7 @@
 //! ```text
 //!   admit      |============ e ===========|=========== e+1 ==========|=========== e+2 ==========>
 //!
-//!   close(e-1)  -- certify, post ---------x
+//!   close(e-1) |- assemble, certify, post x
 //!   close(e)                              |- assemble, certify, post x
 //!   close(e+1)                                                       |- assemble, ... ---------->
 //!
@@ -404,12 +408,12 @@
 //!                        v
 //!                   matrix root
 //!                  /           \
-//!     H(alice || a_root)     H(bob || b_root)      one leaf per sender
+//!     H(alice || a_root)     H(bob || b_root)      one row per sender
 //!             |
 //!             v
 //!           a_root
 //!          /      \
-//!   H(bob || 5)  H(carol || 2)                     alice's payment map, one leaf per receiver
+//!   H(bob || 5)  H(carol || 2)                     alice's payment map, one entry per receiver
 //! ```
 //!
 //! Once the close posts, [Proposal::apply] applies both batches and returns both databases with the
@@ -635,14 +639,12 @@
 //!
 //! An implementation must compute the same digests, roots, and verification results as the crate
 //! for every post, challenge, and claim. The rules below fix those computations, and a test vector
-//! in the crate pins their results for one deployment, so an implementation checks itself against
-//! the crate before it holds funds. Fixed-width integers are big-endian, and the rest are varints,
-//! the canonical unsigned LEB128 of [commonware_codec::varint].
+//! in the crate pins the digests and roots of one deployment. Fixed-width integers are big-endian,
+//! and the rest are varints, the canonical unsigned LEB128 of [commonware_codec::varint].
 //!
 //! 1. **Trees.** Payment maps and the matrix commit with the binary Merkle tree of
-//!    [commonware_storage::bmt] over the digests of their entries. Entries are strictly increasing
-//!    in the account type's order. For the schemes of this workspace, that is the byte order of the
-//!    key. An empty tree holds the single node `H()`, so its root is `H(0u32 || H())`.
+//!    [commonware_storage::bmt] over the digests of their entries. An empty tree holds the single
+//!    node `H()`, so its root is `H(0u32 || H())`.
 //!
 //!    ```text
 //!    payment map entry                 matrix row
@@ -664,22 +666,15 @@
 //!            l0          l1         l2               li = H(i || ei), ei the digest of entry i
 //!    ```
 //!
-//! 2. **Openings.** A member [Lookup] proves one leaf. A non-member lookup proves the neighbors at
-//!    `position - 1` and `position`, with the key strictly between them, and a missing neighbor
-//!    means the key precedes the first entry or follows the last. An [Opening] verifies the row
-//!    under the matrix root, then the entry under the row's root, and has an entry exactly when the
-//!    row exists.
+//! 2. **Openings.** A non-member [Lookup] proves the entries at `position - 1` and `position`, with
+//!    the key strictly between their keys in the account type's order. For the schemes of this
+//!    workspace, that is the byte order of the key. The lower entry is missing exactly when
+//!    `position` is 0, and the upper exactly when `position` is the leaf count. An [Opening] has an
+//!    entry exactly when its row is a member.
 //!
-//!    ```text
-//!    position    0     1     2     3        key               position   leaves proved
-//!    entries    e0    e1    e2    e3        e1, a member          1       1
-//!                         ^                 k, e1 < k < e2        2       1 and 2
-//!                         k                 k > e3                4       3
-//!    ```
-//!
-//! 3. **Signatures.** Each scheme's verification defines its framing, and the schemes of this
-//!    workspace sign the bytes below. Each [Namespace] field frames the deployment's namespace the
-//!    same way before its suffix.
+//! 3. **Signatures.** The schemes of this workspace sign the bytes below. A receipt's [State] is
+//!    signed by its sender in [Namespace::state] and by the operator in
+//!    [Namespace::acknowledgement].
 //!
 //!    ```text
 //!    signed bytes, for message m in namespace n
@@ -687,30 +682,14 @@
 //!    | len(n) (varint) | n | m |
 //!    +-----------------+---+---+
 //!
-//!    Namespace field, for the deployment's namespace d and suffix s
-//!    +-----------------+---+----------------------------------+
-//!    | len(d) (varint) | d | _COMMONWARE_CLEARING_BAJILLION_s |
-//!    +-----------------+---+----------------------------------+
-//!    s = STATE, ACKNOWLEDGEMENT, WITHDRAWAL, CLOSE, or SUMMARY
-//!    ```
-//!
-//! 4. **Receipts.** The sender signs a [State] in [Namespace::state] and the operator in
-//!    [Namespace::acknowledgement], and the receipt's entry proves under the state's payments root
-//!    at its position.
-//!
-//!    ```text
 //!    State
 //!    +-----------+-------------+--------------+--------------+
 //!    | epoch (8) | account (P) | payments (D) | previous (D) |
 //!    +-----------+-------------+--------------+--------------+
 //!    ```
 //!
-//! 5. **Summaries.** A [Summary]'s digest is the hash of its encoding, and the certificate covers
-//!    the encoding in [Namespace::summary]. A running hash extends the parent summary's over each
-//!    request the close processes from that queue, in queue order. The ledger takes the running
-//!    hashes as certified and does not recompute them. The genesis summary has epoch 0, a parent of
-//!    all zeros, the empty matrix root, the empty balances root, the empty log's size and root, and
-//!    counts of zero with hashes of all zeros.
+//! 4. **Summaries.** A [Summary]'s digest is the hash of its encoding, and the certificate covers
+//!    the encoding in [Namespace::summary].
 //!
 //!    ```text
 //!    Summary
@@ -719,50 +698,23 @@
 //!    |       |        |        |          | size | root | count | hash |  count   |  hash   |
 //!    |   8   |   D    |   D    |    D     | 1-9  |  D   | 1-10  |  D   |   1-10   |    D    |
 //!    +-------+--------+--------+----------+------+------+-------+------+----------+---------+
-//!
-//!    running hash after request i of a queue, from hash(0) in the parent summary
-//!    +---------------+-------------+------------+
-//!    | hash(i-1) (D) | account (P) | amount (A) |  -> hash(i)
-//!    +---------------+-------------+------------+
 //!    ```
 //!
-//! 6. **Counts.** A summary's count for each queue lies between that queue's required count and its
-//!    length.
+//! 5. **Balance proofs.** [BalanceProof::verify] is the key-value proof of QMDB's current database
+//!    over the Merkle Mountain Belt of [commonware_storage::merkle::mmb], with bitmap chunks of 32
+//!    bytes.
 //!
-//! 7. **The empty roots.** A deployment reads the empty balances root from an empty [Balances]
-//!    database. It depends on the hasher, account type, and amount type, because the database pads
-//!    its fixed-size operations to the key and value widths. An empty [Payouts] log holds one
-//!    commit with no metadata and an inactivity floor of zero, so its size is 1. [Summary::genesis]
-//!    records its size and root.
-//!
-//! 8. **Balance proofs.** [BalanceProof::verify] is the key-value proof of QMDB's current database,
-//!    an operation proof under the canonical root together with its bitmap chunk of 32 bytes. It is
-//!    the largest part of an implementation.
-//!
-//! 9. **Payout proofs.** [PayoutProof::verify] is the range proof of QMDB's keyless database for
-//!    one operation, over the Merkle Mountain Range of [commonware_storage::merkle::mmr]. A leaf's
-//!    node position in the range differs from the operation's index. The proof carries the log's
-//!    size and rebuilds the root from that leaf and that size. The floor stays zero, so the root
-//!    has no inactive peaks. An implementation reproduces the storage crate's node and root
-//!    hashing for that family.
+//! 6. **Payout proofs.** [PayoutProof::verify] is the range proof of QMDB's keyless database for
+//!    one operation, over the Merkle Mountain Range of [commonware_storage::merkle::mmr]. The floor
+//!    stays zero, so the root has no inactive peaks, and QMDB folds the peaks backward
+//!    ([commonware_storage::merkle::Bagging::BackwardFold]).
 //!
 //!    ```text
-//!    appended payout
-//!    +---------+-------------+------------+-----------+
-//!    | tag (1) | account (P) | amount (A) | zeros (9) |
-//!    |    1    |             |            |           |
-//!    +---------+-------------+------------+-----------+
-//!
-//!    commit
-//!    +---------+--------------+---------------+-----------+
-//!    | tag (1) | metadata (1) | zeros (P + A) | floor (8) |
-//!    |    0    |      0       |               |     0     |
-//!    +---------+--------------+---------------+-----------+
-//!
-//!    leaf
-//!    +-------------------+------------------------+
-//!    | node position (8) | operation (P + A + 10) |
-//!    +-------------------+------------------------+
+//!    leaf of the payout at index i, with node position n = 2i - popcount(i)
+//!    +-------+---------+-------------+------------+-----------+
+//!    | n (8) | tag (1) | account (P) | amount (A) | zeros (9) |
+//!    |       |    1    |             |            |           |
+//!    +-------+---------+-------------+------------+-----------+
 //!    ```
 
 mod amounts;
@@ -788,7 +740,7 @@ pub use payment::{
     Admission, Challenge, ChallengeError, Receipt, Request, RequestError, Signatures, State,
     States, Verified,
 };
-pub use settlement::{Flow, FlowError};
+pub use settlement::{Flow, FlowError, Settled};
 pub use summary::{Processed, Summary, SummaryError};
 pub use validator::{
     ApplyError, BalanceProof, Balances, CheckError, Checked, Checkpoint, Payout, PayoutBatch,

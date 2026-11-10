@@ -104,6 +104,15 @@ where
     }
 }
 
+/// What an account holds and is paid once its [Flow] settles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Settled<A: Amount> {
+    /// Balance left after the payout.
+    pub balance: A,
+    /// Amount paid out.
+    pub payout: A,
+}
+
 /// Funds moving into and out of one account in the close of an epoch.
 ///
 /// Each part is an exact sum, so it may exceed the largest amount even when the balance it settles
@@ -136,9 +145,9 @@ impl<A: Amount> Flow<A> {
         self.epoch
     }
 
-    /// Settles the flow on the account's `previous` balance and returns the balance left and the
-    /// payout. The payout is the lesser of the settled balance and the amount requested.
-    pub fn settle(&self, previous: A) -> Result<(A, A), FlowError> {
+    /// Settles the flow on the account's `previous` balance. The payout is the lesser of the
+    /// settled balance and the amount requested.
+    pub fn settle(&self, previous: A) -> Result<Settled<A>, FlowError> {
         let settled = Total::new(previous)
             .add(self.credit)
             .ok_or(FlowError::Overflow)?
@@ -150,10 +159,10 @@ impl<A: Amount> Flow<A> {
             .withdraw
             .get()
             .map_or(settled, |requested| requested.min(settled));
-        let remaining = settled
+        let balance = settled
             .checked_sub(payout)
             .expect("payout must be at most the balance");
-        Ok((remaining, payout))
+        Ok(Settled { balance, payout })
     }
 }
 
@@ -294,9 +303,9 @@ impl<P: PublicKey, A: Amount> Flows<P, A> {
         let mut changed = Vec::new();
         let mut payouts = Vec::new();
         for ((account, flow), previous) in zip_eq(&self.flows, balances) {
-            let (remaining, payout) = flow.settle(previous)?;
-            if remaining != previous {
-                changed.push((account.clone(), remaining));
+            let Settled { balance, payout } = flow.settle(previous)?;
+            if balance != previous {
+                changed.push((account.clone(), balance));
             }
             if payout != A::ZERO {
                 payouts.push((account.clone(), payout));
@@ -354,8 +363,20 @@ mod tests {
         };
         let (paying, paid) = (flow(&alice), flow(&bob));
         assert_eq!((paying.credit.carries, paying.debit.carries), (1, 1));
-        assert_eq!(paying.settle(5).unwrap(), (5, 0));
-        assert_eq!(paid.settle(0).unwrap(), (u64::MAX, 0));
+        assert_eq!(
+            paying.settle(5).unwrap(),
+            Settled {
+                balance: 5,
+                payout: 0
+            }
+        );
+        assert_eq!(
+            paid.settle(0).unwrap(),
+            Settled {
+                balance: u64::MAX,
+                payout: 0
+            }
+        );
 
         // Every flow round trips.
         for flow in [paying, paid] {
@@ -373,7 +394,13 @@ mod tests {
             amount,
         });
         let flows = Flows::new(2, std::iter::empty(), &[], &[], &forced).into_flows();
-        assert_eq!(flows[0].1.settle(10).unwrap(), (0, 10));
+        assert_eq!(
+            flows[0].1.settle(10).unwrap(),
+            Settled {
+                balance: 0,
+                payout: 10
+            }
+        );
     }
 
     #[cfg(feature = "arbitrary")]
