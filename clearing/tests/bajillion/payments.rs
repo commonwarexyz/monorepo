@@ -399,41 +399,6 @@ fn test_posted_close_resolves_pending_requests() {
     assert_eq!(alice.payments(6), Some(&amounts(&[(1, 10)])));
 }
 
-/// A close settling an earlier countersigned map does not settle the request that would have
-/// extended it. The request stays pending, because its state for the next epoch builds on the
-/// settled map, and the next close drops it if the operator did not admit it.
-#[test]
-fn test_posted_earlier_map_does_not_settle_request() {
-    let mut operator = operator();
-    fund(&mut operator, &[(0, 100)]);
-    let mut alice = sender(0);
-    let request = alice.send(2, amounts(&[(1, 5)])).unwrap();
-    alice
-        .acknowledged(&operator.accept(&request).unwrap())
-        .unwrap();
-
-    // The close settles the sender's earlier map, not the one its pending request pays.
-    let request = alice.send(2, amounts(&[(1, 5)])).unwrap();
-    let posted = close(&mut operator);
-    let (root, opening) = open_row(&posted, 0);
-    assert_eq!(
-        alice.posted(2, &root, &opening).unwrap(),
-        Some(Outcome::Pending)
-    );
-    assert_eq!(alice.pending(), Some(&request));
-    assert_eq!(alice.payments(2), Some(&amounts(&[(1, 5)])));
-
-    // The next close has no row of the sender, so it drops the request.
-    let posted = close(&mut operator);
-    let (root, opening) = open_row(&posted, 0);
-    assert_eq!(
-        alice.posted(3, &root, &opening).unwrap(),
-        Some(Outcome::Dropped)
-    );
-    assert!(alice.pending().is_none());
-    assert_eq!(alice.payments(3), None);
-}
-
 /// A post drops a pending request once neither of its states can settle. When the close of the
 /// request's epoch settles a row other than the map its state for the next epoch builds on, the
 /// sender pays again in the next epoch without waiting for that epoch's close.
@@ -582,6 +547,7 @@ fn test_state_settles_only_in_its_own_epoch() {
         Some(Outcome::Pending)
     );
     assert_eq!(alice.pending(), Some(&request));
+    assert_eq!(alice.payments(2), Some(&amounts(&[(1, 10)])));
 
     // The operator admits it in epoch 3, and the close of epoch 3 settles it.
     operator.accept(&request).unwrap();
