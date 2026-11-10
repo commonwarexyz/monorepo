@@ -354,6 +354,7 @@ pub fn store_cfg(ctx: &impl Strategizer) -> StoreConfig<EightCap, VarVecCfg, Ray
         init_cache: INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
         strategy: ctx.strategy(THREADS),
+        init_concurrency: (),
     }
 }
 
