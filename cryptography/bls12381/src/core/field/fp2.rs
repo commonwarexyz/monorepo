@@ -615,36 +615,10 @@ impl<F> Fp2<F> {
             );
             return reduced;
         }
-        // Components are requested in order, so each product forms with its real component and
-        // holds its imaginary component for the next request.
-        let mut imaginary = None;
-        let components = F::reduce_each_signed_tight::<C, K>(
+        pair(F::reduce_each_signed_tight::<C, K>(
             simd,
-            #[inline(always)]
-            |i| {
-                if i % 2 == 0 {
-                    let Fp2 { c0, c1 } = product(i / 2);
-                    imaginary = Some(c1);
-                    c0
-                } else {
-                    imaginary.take().expect("the real component comes first")
-                }
-            },
-        );
-        let mut reduced = [Self {
-            c0: components[0],
-            c1: components[1],
-        }; N];
-        unroll::<N>(
-            #[inline(always)]
-            |k| {
-                reduced[k] = Self {
-                    c0: components[2 * k],
-                    c1: components[2 * k + 1],
-                };
-            },
-        );
-        reduced
+            interleave(product),
+        ))
     }
 
     /// Returns the difference of each component's signed sums, as one sum of products per
@@ -694,36 +668,7 @@ impl<F> Fp2<F> {
             );
             return reduced;
         }
-        // Components are requested in order, so each sum forms with its real component and
-        // holds its imaginary component for the next request.
-        let mut imaginary = None;
-        let components = F::reduce_each::<C>(
-            simd,
-            #[inline(always)]
-            |i| {
-                if i % 2 == 0 {
-                    let Fp2 { c0, c1 } = sum(i / 2);
-                    imaginary = Some(c1);
-                    c0
-                } else {
-                    imaginary.take().expect("the real component comes first")
-                }
-            },
-        );
-        let mut reduced = [Self {
-            c0: components[0],
-            c1: components[1],
-        }; N];
-        unroll::<N>(
-            #[inline(always)]
-            |k| {
-                reduced[k] = Self {
-                    c0: components[2 * k],
-                    c1: components[2 * k + 1],
-                };
-            },
-        );
-        reduced
+        pair(F::reduce_each::<C>(simd, interleave(sum)))
     }
 
     /// Returns the inverse `(c0 - c1 i) / (c0^2 + c1^2)`, or zero for zero.
@@ -740,6 +685,45 @@ impl<F> Fp2<F> {
         let conjugate = self.conjugate::<{ TIGHT + 1 }, S>(simd).carry(simd);
         Self::reduce_tight::<1, S>(simd, conjugate.product_base(simd, inverse))
     }
+}
+
+/// Returns component `i` of the sequence `value(0).c0`, `value(0).c1`, `value(1).c0`, ...,
+/// for `i` requested in order.
+///
+/// Each real request forms its value once and holds the imaginary component for the next request.
+#[inline(always)]
+fn interleave<T>(mut value: impl FnMut(usize) -> Fp2<T>) -> impl FnMut(usize) -> T {
+    let mut imaginary = None;
+    #[inline(always)]
+    move |i| {
+        if i % 2 == 0 {
+            let Fp2 { c0, c1 } = value(i / 2);
+            imaginary = Some(c1);
+            c0
+        } else {
+            imaginary.take().expect("the real component comes first")
+        }
+    }
+}
+
+/// Returns elements from consecutive real and imaginary components, the order of [`interleave`].
+#[inline(always)]
+fn pair<T: Copy, const N: usize, const C: usize>(components: [T; C]) -> [Fp2<T>; N] {
+    const { assert!(N > 0 && C == 2 * N) };
+    let mut paired = [Fp2 {
+        c0: components[0],
+        c1: components[1],
+    }; N];
+    unroll::<N>(
+        #[inline(always)]
+        |k| {
+            paired[k] = Fp2 {
+                c0: components[2 * k],
+                c1: components[2 * k + 1],
+            };
+        },
+    );
+    paired
 }
 
 /// Splits an element's encoding into its `c0` and `c1` encodings.
