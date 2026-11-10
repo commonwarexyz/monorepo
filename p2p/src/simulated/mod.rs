@@ -40,7 +40,7 @@
 //! [Control::socket_manager] reaches that peer alone, so peers can advance through peer sets at
 //! different times. A peer ignores a set whose id is not newer than every set it tracks, so a peer
 //! that has moved ahead on its own skips the network-wide sets it has passed.
-//! [Control::reset_peer_sets] empties a peer's sets, as a restart does.
+//! [Control::reset_peer_sets] empties a peer's sets and ends its subscriptions, as a restart does.
 //!
 //! # Bandwidth Simulation
 //!

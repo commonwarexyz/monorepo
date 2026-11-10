@@ -133,6 +133,7 @@ struct Tracker<P: PublicKey> {
 }
 
 impl<P: PublicKey> Tracker<P> {
+    /// Returns a tracker with no peer sets and no subscribers.
     const fn new() -> Self {
         Self {
             sets: BTreeMap::new(),
