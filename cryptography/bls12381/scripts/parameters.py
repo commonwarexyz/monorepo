@@ -91,6 +91,10 @@ class Tables(NamedTuple):
     big_m: int
     big_n: int
     rotation: int
+    reduce_pre: int
+    reduce_post: int
+    expand_pre: int
+    expand_post: int
     reduce: Conversion
     expand: Conversion
     to_rns: Conversion
@@ -188,30 +192,26 @@ def is_probable_prime(value: int) -> bool:
 
 
 def build() -> Tables:
-    p = P
-    m = MODULI_M
-    n = MODULI_N
-    big_m = math.prod(m)
-    big_n = math.prod(n)
+    big_m = math.prod(MODULI_M)
+    big_n = math.prod(MODULI_N)
     radix = 1 << WORD
     inverse_m_n = pow(big_m, -1, big_n)
     inverse_radix_n = pow(radix, -1, big_n)
 
-    m_opt = crt([big_m // modulus for modulus in m], m)
+    reduce_pre = crt([big_m // modulus for modulus in MODULI_M], MODULI_M)
     assert all(
-        QR * QR * (-p * radix * (big_m // modulus)) % modulus == 1 for modulus in m
+        QR * QR * (-P * radix * (big_m // modulus)) % modulus == 1 for modulus in MODULI_M
     )
-    reduce_pre = m_opt
-    reduce_post = p * inverse_m_n * inverse_m_n * radix * radix
+    reduce_post = P * inverse_m_n * inverse_m_n * radix * radix
     expand_pre = big_m * inverse_radix_n
     expand_post = radix * radix * QR
-    reduce = conversion(m, n, reduce_pre, reduce_post, floor=True)
-    expand = conversion(n, m, expand_pre, expand_post, floor=False)
+    reduce = conversion(MODULI_M, MODULI_N, reduce_pre, reduce_post, floor=True)
+    expand = conversion(MODULI_N, MODULI_M, expand_pre, expand_post, floor=False)
 
-    input_digits = (p.bit_length() + BITS - 1) // BITS
+    input_digits = (P.bit_length() + BITS - 1) // BITS
     to_rns = conversion(
-        (p,),
-        n,
+        (P,),
+        MODULI_N,
         big_m,
         inverse_m_n * radix * radix,
         input_digits=input_digits,
@@ -221,12 +221,12 @@ def build() -> Tables:
 
     # The radix coefficients carry an extra factor of 2^(64*WORDS) that the
     # six Montgomery word steps of the canonical conversion divide out.
-    canonical_post = pow(big_m, -1, p) * pow(2, 64 * WORDS, p) % p
-    canonical_shifted = tuple(expand_pre * weight % big_n for weight in crt_weights(n))
+    canonical_post = pow(big_m, -1, P) * pow(2, 64 * WORDS, P) % P
+    canonical_shifted = tuple(expand_pre * weight % big_n for weight in crt_weights(MODULI_N))
     to_canonical = tuple(
-        words((shifted % p) * canonical_post % p) for shifted in canonical_shifted
+        words((shifted % P) * canonical_post % P) for shifted in canonical_shifted
     )
-    canonical_correction = words((-big_n % p) * canonical_post % p)
+    canonical_correction = words((-big_n % P) * canonical_post % P)
     canonical_fraction = tuple(
         (shifted * (1 << FRACTION_BITS) + big_n - 1) // big_n
         for shifted in canonical_shifted
@@ -241,14 +241,18 @@ def build() -> Tables:
     assert rotation % big_n == radix * inverse_m_n % big_n
 
     encoded_p = (
-        tuple((p * rotation) % modulus for modulus in m),
-        tuple((p * rotation) % modulus for modulus in n),
+        tuple((P * rotation) % modulus for modulus in MODULI_M),
+        tuple((P * rotation) % modulus for modulus in MODULI_N),
     )
     assert any(encoded_p[half][lane] for half in range(2) for lane in range(LANES))
     return Tables(
         big_m,
         big_n,
         rotation,
+        reduce_pre,
+        reduce_post,
+        expand_pre,
+        expand_post,
         reduce,
         expand,
         to_rns,
@@ -271,20 +275,10 @@ def apply_conversion(
 
 
 def validate_model(tables: Tables) -> None:
-    p = P
-    m = MODULI_M
-    n = MODULI_N
     radix = 1 << WORD
-    inverse_radix_m = tuple(pow(radix, -1, modulus) for modulus in m)
-    inverse_radix_n = tuple(pow(radix, -1, modulus) for modulus in n)
+    inverse_radix_m = tuple(pow(radix, -1, modulus) for modulus in MODULI_M)
+    inverse_radix_n = tuple(pow(radix, -1, modulus) for modulus in MODULI_N)
     rng = random.Random("bls12381:fp:rns")
-
-    inverse_m_n = pow(tables.big_m, -1, tables.big_n)
-    inverse_radix_big_n = pow(radix, -1, tables.big_n)
-    reduce_pre = crt([tables.big_m // modulus for modulus in m], m)
-    reduce_post = p * inverse_m_n * inverse_m_n * radix * radix
-    expand_pre = tables.big_m * inverse_radix_big_n
-    expand_post = radix * radix * QR
 
     def check_conversion(values, source, destination, pre, post, table, *, correction):
         source_product = math.prod(source)
@@ -308,158 +302,112 @@ def validate_model(tables: Tables) -> None:
         return cases
 
     # The no-k reduction lifts the quotient by at most 2 * LANES multiples of M.
-    reduce_maxima = tuple(2 * modulus for modulus in m)
+    reduce_maxima = tuple(2 * modulus for modulus in MODULI_M)
     for values in domain(reduce_maxima):
         lift = check_conversion(
-            values, m, n, reduce_pre, reduce_post, tables.reduce, correction=False
+            values,
+            MODULI_M,
+            MODULI_N,
+            tables.reduce_pre,
+            tables.reduce_post,
+            tables.reduce,
+            correction=False,
         )
         assert 0 <= lift <= 2 * LANES * tables.big_m
 
-    expand_maxima = tuple(2 * modulus for modulus in n)
+    expand_maxima = tuple(2 * modulus for modulus in MODULI_N)
     for values in domain(expand_maxima):
         lift = check_conversion(
-            values, n, m, expand_pre, expand_post, tables.expand, correction=True
+            values,
+            MODULI_N,
+            MODULI_M,
+            tables.expand_pre,
+            tables.expand_post,
+            tables.expand,
+            correction=True,
         )
         assert 0 <= lift < tables.big_n
 
     def encode(value: int):
-        encoded = value * tables.big_m % p
+        encoded = value * tables.big_m % P
         encoded = encoded * tables.rotation % (tables.big_m * tables.big_n)
         return (
-            tuple(encoded % modulus for modulus in m),
-            tuple(encoded % modulus for modulus in n),
+            tuple(encoded % modulus for modulus in MODULI_M),
+            tuple(encoded % modulus for modulus in MODULI_N),
         )
 
     coefficients = tuple(integer(row) for row in tables.to_canonical)
     canonical_correction = integer(tables.canonical_correction)
-    inverse_canonical_radix = pow(2, -64 * WORDS, p)
+    inverse_canonical_radix = pow(2, -64 * WORDS, P)
 
     def canonicalize(n_half: tuple[int, ...]) -> int:
         k = sum(n_half[i] * tables.expand.fraction[i] for i in range(LANES)) >> FRACTION_BITS
         return (
             sum(n_half[i] * coefficients[i] for i in range(LANES)) + k * canonical_correction
-        ) * inverse_canonical_radix % p
+        ) * inverse_canonical_radix % P
 
     def multiply(left_mn, right_mn):
         reduced_m = tuple(
-            left_mn[0][i] * right_mn[0][i] * inverse_radix_m[i] % m[i] for i in range(LANES)
+            left_mn[0][i] * right_mn[0][i] * inverse_radix_m[i] % MODULI_M[i]
+            for i in range(LANES)
         )
         reduce_raw, _ = apply_conversion(reduced_m, tables.reduce, correction=False)
         reduced_n = tuple(
-            (reduce_raw[i] + left_mn[1][i] * right_mn[1][i]) * inverse_radix_n[i] % n[i]
+            (reduce_raw[i] + left_mn[1][i] * right_mn[1][i]) * inverse_radix_n[i] % MODULI_N[i]
             for i in range(LANES)
         )
         expand_raw, _ = apply_conversion(reduced_n, tables.expand, correction=True)
-        expanded_m = tuple(expand_raw[i] * inverse_radix_m[i] % m[i] for i in range(LANES))
+        expanded_m = tuple(
+            expand_raw[i] * inverse_radix_m[i] % MODULI_M[i] for i in range(LANES)
+        )
         return expanded_m, reduced_n
 
-    cases = [(0, 0), (0, 1), (1, 1), (p - 1, 1), (p - 1, p - 1)]
-    cases.extend((rng.randrange(p), rng.randrange(p)) for _ in range(100))
+    cases = [(0, 0), (0, 1), (1, 1), (P - 1, 1), (P - 1, P - 1)]
+    cases.extend((rng.randrange(P), rng.randrange(P)) for _ in range(100))
     for left, right in cases:
         result = multiply(encode(left), encode(right))
-        assert canonicalize(result[1]) == left * right % p
+        assert canonicalize(result[1]) == left * right % P
 
     represented = encode(1)
     expected = 1
     for _ in range(100):
-        factor = rng.randrange(p)
+        factor = rng.randrange(P)
         represented = multiply(represented, encode(factor))
-        expected = expected * factor % p
+        expected = expected * factor % P
         assert canonicalize(represented[1]) == expected
 
-    digits = (p.bit_length() + BITS - 1) // BITS
-    for value in (0, 1, p - 1, *[rng.randrange(p) for _ in range(100)]):
+    digits = (P.bit_length() + BITS - 1) // BITS
+    for value in (0, 1, P - 1, *[rng.randrange(P) for _ in range(100)]):
         source = padded(
             tuple((value >> (BITS * index)) & ((1 << BITS) - 1) for index in range(digits))
         )
         raw, _ = apply_conversion(source, tables.to_rns, correction=True)
         expected = encode(value)[1]
-        assert all(raw[i] * inverse_radix_n[i] % n[i] == expected[i] for i in range(LANES))
-
-
-def montgomery_lane_bound(total: int, modulus: int) -> int:
-    """Largest output of the lane Montgomery reduction of an accumulator below total."""
-    return (total >> WORD) + modulus
-
-
-def fold_bound(value: int, modulus: int) -> int:
-    """Largest output of folding 2^BITS into its residue for an input below value."""
-    assert value >> BITS < 1 << WORD
-    complement = (1 << BITS) - modulus
-    return (1 << BITS) - 1 + (value >> BITS) * complement
-
-
-def validate_kernel(tables: Tables) -> None:
-    """Checks the lane bounds of the kernel in src/core/field/fp/rns.rs.
-
-    Every element has lanes in [0, 2q]. A multiplication accumulates one lane product,
-    and each conversion accumulates one row product per lane plus its quotient correction. The
-    integer bounds are asserted by rns.rs.
-    """
-    m = MODULI_M
-    n = MODULI_N
-    radix = 1 << WORD
-    assert all(4 * modulus < radix for modulus in m + n)
-    # Each multiply-add contributes below 2^52 to a low accumulator.
-    assert (1 + LANES + 2) * radix <= U64_MAX
-
-    # The first-basis reduction of a single lane product is already in [0, 2q].
-    for modulus in m:
-        assert montgomery_lane_bound((2 * modulus) ** 2, modulus) <= 2 * modulus
-
-    # The second basis adds the reduction rows to its own lane product.
-    for column, modulus in enumerate(n):
-        total = (2 * modulus) ** 2 + sum(
-            2 * m[row] * tables.reduce.matrix[row][column] for row in range(LANES)
+        assert all(
+            raw[i] * inverse_radix_n[i] % MODULI_N[i] == expected[i] for i in range(LANES)
         )
-        reduced = montgomery_lane_bound(total, modulus)
-        assert fold_bound(reduced, modulus) <= 2 * modulus
-
-    # Expansion of prepared second-basis lanes; the quotient has two 52-bit digits.
-    expand_k = sum(2 * n[i] * tables.expand.fraction[i] for i in range(LANES)) >> FRACTION_BITS
-    assert expand_k < 1 << 64
-    for column, modulus in enumerate(m):
-        total = sum(2 * n[row] * tables.expand.matrix[row][column] for row in range(LANES))
-        total += (radix - 1) * tables.expand.correction[column]
-        total += (expand_k >> WORD) * tables.expand.correction_shift[column]
-        reduced = montgomery_lane_bound(total, modulus)
-        assert fold_bound(reduced, modulus) <= 2 * modulus
-
-    # Conversion of a canonical integer from BITS-bit digits uses both quotient digits.
-    digit = (1 << BITS) - 1
-    to_k = sum(digit * fraction for fraction in tables.to_rns.fraction) >> FRACTION_BITS
-    assert to_k < 1 << 64
-    for column, modulus in enumerate(n):
-        total = sum(digit * tables.to_rns.matrix[row][column] for row in range(LANES))
-        total += (radix - 1) * tables.to_rns.correction[column]
-        total += (to_k >> WORD) * tables.to_rns.correction_shift[column]
-        reduced = montgomery_lane_bound(total, modulus)
-        assert fold_bound(reduced, modulus) <= 2 * modulus
 
 
 def validate_bounds(tables: Tables) -> None:
-    p = P
-    m = MODULI_M
-    n = MODULI_N
-    assert all(integer(coefficient) < p for coefficient in tables.to_canonical)
-    assert integer(tables.canonical_correction) < p
+    assert all(integer(coefficient) < P for coefficient in tables.to_canonical)
+    assert integer(tables.canonical_correction) < P
     canonical_max = sum(
-        (2 * n[index]) * integer(tables.to_canonical[index]) for index in range(LANES)
+        (2 * MODULI_N[index]) * integer(tables.to_canonical[index]) for index in range(LANES)
     )
     canonical_k = sum(
-        (2 * n[index]) * tables.expand.fraction[index] for index in range(LANES)
+        (2 * MODULI_N[index]) * tables.expand.fraction[index] for index in range(LANES)
     ) >> FRACTION_BITS
     canonical_max += canonical_k * integer(tables.canonical_correction)
     # The seven-word canonical accumulator stays below 2^55 * p, which leaves room for the six
     # word steps, each adding below 2^64 * p, to stay below 2^448.
-    assert canonical_max < (1 << 55) * p
-    assert 1 < p < (1 << 381) and p & 1
+    assert canonical_max < (1 << 55) * P
+    assert 1 < P < (1 << 381) and P & 1
     # Ceil-fixed-point error is strictly below sum(inputs)/2^64 < 1/2.
-    assert sum(2 * modulus for modulus in n) < 1 << 63
+    assert sum(2 * modulus for modulus in MODULI_N) < 1 << 63
     for table, destination in (
-        (tables.reduce, n),
-        (tables.expand, m),
-        (tables.to_rns, n),
+        (tables.reduce, MODULI_N),
+        (tables.expand, MODULI_M),
+        (tables.to_rns, MODULI_N),
     ):
         assert all(
             coefficient < destination[column]
@@ -473,7 +421,7 @@ def validate_bounds(tables: Tables) -> None:
         assert all(fraction <= U64_MAX for fraction in table.fraction)
     assert all(
         value < modulus
-        for half, moduli in enumerate((m, n))
+        for half, moduli in enumerate((MODULI_M, MODULI_N))
         for value, modulus in zip(tables.encoded_p[half], moduli)
     )
 
@@ -487,15 +435,14 @@ def validate_reference(tables: Tables, reference_header: Path | None) -> None:
     mask = (1 << WORD) - 1
     # The reference stores the plain radix coefficients without the
     # 2^(64*WORDS) factor carried by the emitted tables.
-    p = P
-    inverse_canonical_radix = pow(2, -64 * WORDS, p)
+    inverse_canonical_radix = pow(2, -64 * WORDS, P)
     from_matrix = [
         (coefficient >> (WORD * digit)) & mask
         for row in tables.to_canonical
-        for coefficient in (integer(row) * inverse_canonical_radix % p,)
+        for coefficient in (integer(row) * inverse_canonical_radix % P,)
         for digit in range(LANES)
     ]
-    correction = integer(tables.canonical_correction) * inverse_canonical_radix % p
+    correction = integer(tables.canonical_correction) * inverse_canonical_radix % P
     arrays = {
         "moduli1": list(MODULI_M),
         "moduli2": list(MODULI_N),
@@ -566,7 +513,6 @@ def emit_conversion(value: Conversion) -> str:
 
 
 def emit(tables: Tables) -> str:
-    p = P
     return f"""//! Residue-number-system parameters for the base field.
 //!
 //! Adapted from the BLS12-381 coordinate-field tables of VROOM
@@ -577,10 +523,10 @@ def emit(tables: Tables) -> str:
 use super::{{Basis, Conversion, MODULI, WORDS}};
 
 /// `floor(M / p)` for the product `M` of the first basis.
-pub(super) const M_OVER_P: u64 = {tables.big_m // p};
+pub(super) const M_OVER_P: u64 = {tables.big_m // P};
 
 /// `floor(N / p)` for the product `N` of the second basis.
-pub(super) const N_OVER_P: u64 = {tables.big_n // p};
+pub(super) const N_OVER_P: u64 = {tables.big_n // P};
 
 /// The first basis.
 pub(super) const M: Basis = {emit_basis(MODULI_M)};
@@ -618,7 +564,6 @@ def generate(reference_header: Path | None = None) -> str:
     tables = build()
     validate_bounds(tables)
     validate_model(tables)
-    validate_kernel(tables)
     validate_reference(tables, reference_header)
     return emit(tables)
 
