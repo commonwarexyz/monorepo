@@ -9,11 +9,11 @@
 //! under the lock.
 //!
 //! The sequence of the worker's futex word (see [`super::park`]) also moves
-//! for pool claims and permit grants, which carry no message. So the inbox
-//! keeps a mail flag, set by the send that starts a batch and cleared by the
-//! take or close that empties the inbox, both under the lock. The worker
-//! checks the flag without locking and takes only when it is set, so a
-//! notification without mail costs no lock.
+//! for pool claims and permit grants, which carry no message. So the mailbox
+//! keeps a mail flag beside the word, set by the send that starts a batch and
+//! cleared by the take or close that empties the inbox, both under the lock.
+//! The worker checks the flag through its [`Parker`] without locking and takes
+//! only when it is set, so a notification without mail costs no lock.
 //!
 //! A relaxed load of the flag suffices once the worker has observed the word.
 //! The send stores the flag before it unlocks and notifies with release
@@ -47,13 +47,9 @@ use std::mem;
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "loom")] {
-        use loom::sync::{
-            Mutex, MutexGuard,
-            atomic::{AtomicBool, Ordering},
-        };
+        use loom::sync::{Mutex, MutexGuard};
     } else {
         use commonware_utils::sync::{Mutex, MutexGuard};
-        use std::sync::atomic::{AtomicBool, Ordering};
     }
 }
 
@@ -98,15 +94,16 @@ struct Inbox {
 
 /// A worker's shared entry point: its inbox and the unparker of its word.
 pub struct Mailbox {
-    /// Unparks the worker after a send that starts a batch. Owned here so
-    /// producers can unpark after unlocking. The pool and the driver also
-    /// unpark the worker through it, without a message.
+    /// Unparks the worker after a send that starts a batch, and holds the mail
+    /// flag beside the word. Owned here so producers can unpark after
+    /// unlocking. The pool unparks the worker through it, and the driver
+    /// through a clone, both without a message.
     pub unparker: Unparker,
-    /// Whether the inbox holds a batch. Written only under the inbox lock and
-    /// read without it.
-    mail: AtomicBool,
     /// Pending messages. No user code runs under this mutex.
     inbox: Mutex<Inbox>,
+    /// Calls to [`Self::take`], each of which locks the inbox.
+    #[cfg(test)]
+    takes: std::sync::atomic::AtomicUsize,
 }
 
 impl Mailbox {
@@ -116,12 +113,13 @@ impl Mailbox {
         let parker = Parker::new();
         Self {
             unparker: parker.unparker(),
-            mail: AtomicBool::new(false),
             inbox: Mutex::new(Inbox {
                 open: true,
                 messages: Vec::new(),
                 parker: Some(parker),
             }),
+            #[cfg(test)]
+            takes: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -160,7 +158,7 @@ impl Mailbox {
             // The lock orders this store with the take that clears it, and the
             // notification below publishes it to the worker's observation.
             if first {
-                self.mail.store(true, Ordering::Relaxed);
+                self.unparker.set_mail(true);
             }
             first
         };
@@ -182,24 +180,18 @@ impl Mailbox {
             scratch.is_empty(),
             "mailbox scratch must be drained before transfer"
         );
+        #[cfg(test)]
+        self.takes
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let mut inbox = self.lock();
         if inbox.messages.is_empty() {
             return false;
         }
         mem::swap(&mut inbox.messages, scratch);
-        self.mail.store(false, Ordering::Relaxed);
+        self.unparker.set_mail(false);
 
         true
-    }
-
-    /// Whether a batch may be waiting, without locking the inbox.
-    ///
-    /// A batch whose notification the caller's last [`Parker::observe`] included
-    /// is reported, unless the caller took it since. See the module docs.
-    #[inline]
-    pub fn has_mail(&self) -> bool {
-        self.mail.load(Ordering::Relaxed)
     }
 
     /// Close the mailbox and return the pending messages for cleanup outside
@@ -207,7 +199,7 @@ impl Mailbox {
     pub fn close(&self) -> Vec<Message> {
         let mut inbox = self.lock();
         inbox.open = false;
-        self.mail.store(false, Ordering::Relaxed);
+        self.unparker.set_mail(false);
         mem::take(&mut inbox.messages)
     }
 
@@ -216,13 +208,19 @@ impl Mailbox {
     pub fn is_open(&self) -> bool {
         self.lock().open
     }
+
+    /// Calls to [`Self::take`] so far.
+    #[cfg(test)]
+    pub fn takes(&self) -> usize {
+        self.takes.load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::iouring::{
-        park::tests::{notifications, wait_until_armed},
+        park::tests::{has_mail, notifications, wait_until_armed},
         slab::Id,
     };
     use futures::task::{ArcWake, waker};
@@ -309,15 +307,15 @@ mod tests {
         assert!(mailbox.is_open());
         assert!(!mailbox.take(&mut scratch));
         assert_eq!(notifications(&mailbox.unparker), 0);
-        assert!(!mailbox.has_mail());
+        assert!(!has_mail(&mailbox.unparker));
 
         // Multiple messages share one notification and retain their send order.
         assert!(mailbox.send(Message::WakeRoot).is_ok());
         assert!(mailbox.send(cancel_message()).is_ok());
         assert_eq!(notifications(&mailbox.unparker), 1);
-        assert!(mailbox.has_mail());
+        assert!(has_mail(&mailbox.unparker));
         assert!(mailbox.take(&mut scratch));
-        assert!(!mailbox.has_mail());
+        assert!(!has_mail(&mailbox.unparker));
         assert!(matches!(
             scratch.as_slice(),
             [Message::WakeRoot, Message::Cancel(_)]
@@ -326,7 +324,7 @@ mod tests {
         // A new batch notifies again while the worker drains its scratch.
         assert!(mailbox.send(Message::WakeRoot).is_ok());
         assert_eq!(notifications(&mailbox.unparker), 2);
-        assert!(mailbox.has_mail());
+        assert!(has_mail(&mailbox.unparker));
 
         // The worker takes the new batch once it has drained its scratch.
         scratch.clear();
@@ -337,7 +335,7 @@ mod tests {
         scratch.clear();
         assert!(!mailbox.take(&mut scratch));
         assert_eq!(notifications(&mailbox.unparker), 2);
-        assert!(!mailbox.has_mail());
+        assert!(!has_mail(&mailbox.unparker));
     }
 
     /// Notifications without messages leave the mail flag clear.
@@ -348,14 +346,14 @@ mod tests {
         let parker = mailbox.parker();
         mailbox.unparker.unpark();
 
-        // The word moved, but the mailbox reports no mail, so the worker skips
-        // the take.
+        // The word moved, but the worker's parker reports no mail, so the
+        // worker skips the take.
         assert!(parker.moved(0));
-        assert!(!mailbox.has_mail());
+        assert!(!parker.has_mail());
 
         // A message sent after the notification still reports mail.
         assert!(mailbox.send(Message::WakeRoot).is_ok());
-        assert!(mailbox.has_mail());
+        assert!(parker.has_mail());
         assert_eq!(notifications(&mailbox.unparker), 2);
     }
 
@@ -411,10 +409,10 @@ mod tests {
         assert!(mailbox.send(message).is_ok());
 
         // Closing transfers queued messages to the caller for disposal.
-        assert!(mailbox.has_mail());
+        assert!(has_mail(&mailbox.unparker));
         let queued = mailbox.close();
         assert!(!mailbox.is_open());
-        assert!(!mailbox.has_mail());
+        assert!(!has_mail(&mailbox.unparker));
         assert!(matches!(queued.as_slice(), [Message::Forward(_)]));
         assert!(!reentrant.woken.load(Ordering::Relaxed));
 
@@ -427,7 +425,7 @@ mod tests {
         assert!(matches!(rejected, Err(Message::Forward(_))));
         assert!(!reentrant.woken.load(Ordering::Relaxed));
         assert_eq!(notifications(&mailbox.unparker), 1);
-        assert!(!mailbox.has_mail());
+        assert!(!has_mail(&mailbox.unparker));
 
         drop(rejected);
         assert!(reentrant.woken.load(Ordering::Relaxed));

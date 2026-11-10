@@ -30,10 +30,10 @@
 //! Queued requests expire even while all operation slots are occupied.
 //!
 //! The ring uses SINGLE_ISSUER, DEFER_TASKRUN, and IORING_OP_FUTEX_WAIT. The
-//! runtime targets Linux 7.0 or newer (see [`super`]).
-//! Unfinished requests need a GETEVENTS enter even when tasks keep the worker
-//! busy. An idle turn may defer that enter to [`Driver::park`]. Control SQEs carry
-//! no request resources and may remain until later I/O service or ring teardown.
+//! runtime targets Linux 7.0 or newer (see [`super`]). Unfinished requests
+//! need a GETEVENTS enter even when tasks keep the worker busy. An idle turn
+//! may defer that enter to [`Driver::park`]. Control SQEs carry no request
+//! resources and may remain until later I/O service or ring teardown.
 //!
 //! Parking arms the worker's [`Parker`] and blocks only while its word
 //! still carries the sequence the worker observed before checking its sources.
@@ -337,6 +337,8 @@ impl Driver {
 
         #[cfg(test)]
         tests::after_service(&self.ring, deferred)?;
+        #[cfg(test)]
+        tests::while_acquiring(&self.state);
 
         Ok(!service_kernel && !self.is_empty())
     }
@@ -356,9 +358,9 @@ impl Driver {
         seen: u32,
         deadline: Option<Instant>,
     ) -> io::Result<bool> {
-        debug_assert!(
+        assert!(
             self.state.unparker.unparks(parker),
-            "driver parked on another worker's word"
+            "a driver must park on the word it was created with"
         );
         if self.has_pending_submissions() {
             return Ok(false);
@@ -500,8 +502,7 @@ impl Drop for Driver {
         // EEXIST, which would leak the word, so the driver must drop on its
         // owner thread, as worker cleanup does.
         //
-        // No wait is live once its completion was reaped. Without SQPOLL, an
-        // unsubmitted wait SQE stays inert through ring destruction.
+        // No wait is live once its completion was reaped.
         if self.state.ring_wait_needed {
             return;
         }
@@ -511,6 +512,9 @@ impl Drop for Driver {
             match self.ring.submitter().register_sync_cancel(None, cancel) {
                 Ok(()) => return,
                 Err(error) => match error.raw_os_error() {
+                    // The wait already completed, or its SQE was never
+                    // submitted. Without SQPOLL, an unsubmitted SQE stays
+                    // inert through ring destruction.
                     Some(libc::ENOENT) => return,
                     Some(libc::EINTR) => continue,
                     _ => {
@@ -838,6 +842,10 @@ pub mod tests {
     thread_local! {
         /// One failure scoped to the calling thread and the selected ring.
         static FAULT: Cell<Option<(RawFd, Fault)>> = const { Cell::new(None) };
+
+        /// Callback run once at the end of this thread's next service turn
+        /// that leaves a durability request waiting for its permit.
+        static WHILE_ACQUIRING: Cell<Option<Box<dyn FnOnce()>>> = const { Cell::new(None) };
     }
 
     /// Clear an unused injection when its test scope exits or unwinds.
@@ -891,6 +899,26 @@ pub mod tests {
         }
 
         Ok(())
+    }
+
+    /// Run `hook` on the calling thread at the end of its next service turn
+    /// that leaves a durability request waiting for its permit, after that
+    /// turn polled the request's acquisition. The hook runs while the worker's
+    /// local state is borrowed, so it must not reach that state.
+    pub fn on_service_while_acquiring(hook: impl FnOnce() + 'static) {
+        let previous = WHILE_ACQUIRING.replace(Some(Box::new(hook)));
+        assert!(previous.is_none(), "service hook already installed");
+    }
+
+    /// Run the hook installed for a service turn that leaves a durability
+    /// request waiting for its permit, if this is one.
+    pub(super) fn while_acquiring(state: &State) {
+        if state.acquiring.is_empty() {
+            return;
+        }
+        if let Some(hook) = WHILE_ACQUIRING.take() {
+            hook();
+        }
     }
 
     /// Duplicate the driver's ring descriptor, so the kernel keeps the ring
@@ -1176,7 +1204,7 @@ pub mod tests {
     }
 
     /// Create an isolated open for tests that control durability completion.
-    fn make_file(name: &str) -> (PathBuf, Arc<Shared>) {
+    pub fn make_file(name: &str) -> (PathBuf, Arc<Shared>) {
         let directory =
             std::env::temp_dir().join(format!("commonware_driver_{name}_{}", std::process::id()));
         let hold = Hold::acquire(&directory).unwrap();

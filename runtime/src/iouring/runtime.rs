@@ -31,8 +31,9 @@
 //!   |     |     +-- io_uring ring (SQ/CQ)
 //!   |     |     +-- Waiters (requests and unconsumed results)
 //!   |     |     `-- ready queue, deadlines, cancellations (IDs)
-//!   |     +-- Mailbox (messages and wake source)
+//!   |     +-- Mailbox (messages and the unparker of the worker's word)
 //!   |     `-- Deferred (callbacks and retired owners)
+//!   +-- parker (the worker's word and mail flag, taken from Mailbox at startup)
 //!   +-- inbox (batch taken from Mailbox)
 //!   +-- deferred (batch detached from Local)
 //!   `-- panics (first failure retained through cleanup)
@@ -1860,18 +1861,18 @@ impl Worker {
 
     /// Apply a bounded batch of messages, taking another mailbox batch when needed.
     ///
-    /// A take is due only while the mailbox reports mail, which needs no lock,
-    /// so pool claims and permit grants, which move the worker's word without a
-    /// message, cost no take. The turn observed the word before this check, so
-    /// a batch whose flag it cannot see yet moves the word after that
-    /// observation. A batch is taken only into an empty scratch, so one that
-    /// starts while an earlier batch is still being applied stays in the
+    /// A take is due only while the mail flag beside the worker's word is set,
+    /// which needs no lock, so pool claims and permit grants, which move the
+    /// word without a message, cost no take. The turn observed the word before
+    /// this check, so a batch whose flag it cannot see yet moves the word after
+    /// that observation. A batch is taken only into an empty scratch, so one
+    /// that starts while an earlier batch is still being applied stays in the
     /// mailbox with its flag set, and the drive loop reads the flag again
     /// before it parks.
     fn messages(&mut self, mailbox: &Arc<Mailbox>) {
         // Reversing allows bounded FIFO processing without shifting the
         // remainder.
-        if self.inbox.is_empty() && mailbox.has_mail() && mailbox.take(&mut self.inbox) {
+        if self.inbox.is_empty() && self.parker.has_mail() && mailbox.take(&mut self.inbox) {
             self.inbox.reverse();
         }
 
@@ -2025,7 +2026,8 @@ impl Worker {
         // and returns a held search count before the caller destroys the root.
         let mut searcher = index.map(|index| Searcher::new(&shared.pool, index));
 
-        // A spin ends once any notification moves the worker's word.
+        // Calibrate with the spin's own condition: a spin ends once any
+        // notification moves the worker's word.
         let mut spinner = Spinner::new(&spinner_cfg, || self.parker.moved(self.seen_seq));
         let max_spin =
             Duration::from_micros(spinner_cfg.max_budget_us.try_into().unwrap_or(u64::MAX));
@@ -2106,8 +2108,10 @@ impl Worker {
             // still finds the work a claim or grant announces, and every path
             // that runs again instead of parking catches up a deferred enter.
             let defer =
-                !self.local.borrow().is_ready() && self.inbox.is_empty() && !mailbox.has_mail();
+                !self.local.borrow().is_ready() && self.inbox.is_empty() && !self.parker.has_mail();
             let kernel_deferred = self.service(defer);
+            #[cfg(test)]
+            tests::record_kernel_service(defer, kernel_deferred);
 
             // Apply foreign messages and completion callbacks before considering
             // a wait. Any tasks they make ready will be polled on the next turn.
@@ -2147,7 +2151,7 @@ impl Worker {
             if ready
                 || pending_submissions
                 || !self.inbox.is_empty()
-                || mailbox.has_mail()
+                || self.parker.has_mail()
                 || self.parker.moved(self.seen_seq)
             {
                 if let Some(searcher) = &mut searcher {
@@ -2320,18 +2324,19 @@ impl crate::Runner for Runner {
         self.cfg.validate();
 
         // On Linux 6.16 and later without upstream fix 3eff68bce255, a private
-        // futex wait that io_uring queues while the process has one thread
-        // lands in the global futex hash. The first thread created afterwards
-        // installs a private hash, where every later wake looks instead, so
-        // that ring wait never completes. Worker zero runs on this thread, and
-        // with one worker no other thread may exist. Creating a thread before
-        // any worker can queue a ring wait installs the private hash first,
-        // and it stays after the thread exits. This runs on every start, since
-        // one thread costs little and needs no reasoning about which threads
-        // exist already. Upstream commit 3eff68bce255 ("io_uring/futex:
-        // allocate private hash before waiting", in 7.4, 6.18.60 and 7.2.14)
-        // fixes the kernel. Remove this once every supported kernel carries
-        // that fix.
+        // futex wait that io_uring queues before the process has created its
+        // first thread lands in the global futex hash. The first thread
+        // created afterwards installs the process's private hash, where every
+        // later wake looks instead, so that ring wait never completes. Worker
+        // zero runs on this thread, and with one worker no other thread may
+        // exist. Creating a thread before any worker can queue a ring wait
+        // installs the private hash first, and the hash outlives the thread.
+        // This runs on every start, since one thread costs little and needs no
+        // reasoning about which threads exist already. Upstream commit
+        // 3eff68bce255 ("io_uring/futex: allocate private hash before
+        // waiting", merged for 7.4 and backported to 6.18.60, 7.2.14 and
+        // 7.3.2) fixes the kernel. Remove this once the documented kernel
+        // target excludes every release without that fix.
         let hash = thread::Builder::new().spawn(|| {}).unwrap_or_else(|error| {
             panic!("failed to create the io_uring futex hash thread: {error}")
         });
