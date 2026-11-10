@@ -2251,7 +2251,7 @@ pub mod tests {
     async fn test_merkleize_reads_no_graft_inputs<M, C>(context: Context, db: C, cache: CacheRef)
     where
         M: merkle::Graftable,
-        C: DbAny<M, Key = Digest, Value = Digest>,
+        C: DbAny<Family = M, Key = Digest, Value = Digest>,
     {
         let digest = |i: u64| Sha256::hash(&[&i.to_be_bytes()]);
 
@@ -2319,8 +2319,8 @@ pub mod tests {
         (@open $context:ident, $db:ty, $cfg:ident) => {{
             let cache = CacheRef::new(PAGE_SIZE, NZUsize!(512));
             let mut cfg = $cfg::<OneCap>("prefetch");
-            cfg.merkle_config.page_cache = cache.clone();
-            cfg.journal_config.page_cache = cache.clone();
+            cfg.merkle.page_cache = cache.clone();
+            cfg.log.page_cache = cache.clone();
             let db = <$db>::init($context.child("storage"), cfg, None)
                 .await
                 .unwrap();

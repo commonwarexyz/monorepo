@@ -2587,7 +2587,7 @@ pub(crate) mod test {
         cache: CacheRef,
         make_value: impl Fn(u64) -> Digest,
     ) where
-        D: DbAny<F, Key = Digest, Value = Digest>,
+        D: DbAny<Family = F, Key = Digest, Value = Digest>,
     {
         // Seed keys, then write fillers so the seeded operations span sealed blobs and the tail.
         // Holding the floor keeps the operations in place.
@@ -2668,7 +2668,7 @@ pub(crate) mod test {
         db: D,
         cache: CacheRef,
     ) where
-        D: DbAny<F, Key = Digest, Value = Digest>,
+        D: DbAny<Family = F, Key = Digest, Value = Digest>,
     {
         // Seed keys with the floor held below them, so the walk reads the oldest seeded
         // operations, none of which the batch updates.
@@ -2716,7 +2716,7 @@ pub(crate) mod test {
         cache: CacheRef,
         prefetch_neighbors: impl Fn(&D, &[&Digest], &[&Digest]) -> W,
     ) where
-        D: DbAny<F, Key = Digest, Value = Digest>,
+        D: DbAny<Family = F, Key = Digest, Value = Digest>,
         W: Future<Output = ()>,
     {
         // Seed keys, then pick creates whose first two bytes no seeded key shares, so the index
@@ -2792,8 +2792,8 @@ pub(crate) mod test {
         (@open $context:ident, $db:ty, $cfg:ident, $translator:ty) => {{
             let cache = CacheRef::new(PAGE_SIZE, NZUsize!(256));
             let mut cfg = $cfg::<$translator>("prefetch");
-            cfg.merkle_config.page_cache = cache.clone();
-            cfg.journal_config.page_cache = cache.clone();
+            cfg.merkle.page_cache = cache.clone();
+            cfg.log.page_cache = cache.clone();
             let db = <$db>::init($context.child("storage"), cfg, None)
                 .await
                 .unwrap();
