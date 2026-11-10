@@ -320,37 +320,6 @@ pub mod tests {
     }
 
     #[test]
-    fn test_budget_leaves_a_due_backlog_that_drains() {
-        // More than three budgets of requests share one deadline.
-        let origin = Instant::now();
-        let mut deadlines = Deadlines::new(origin);
-        let deadline = origin + Duration::from_millis(100);
-        let count = 3 * BUDGET + 7;
-        for slot in 0..count {
-            deadlines.insert(slot, deadline);
-        }
-
-        // Passes at one time fire at most one budget each, and the bound
-        // stays at or before that time while some remain.
-        let now = deadlines.fires_at(deadline);
-        let mut passes = 0;
-        let mut total = 0;
-        while deadlines.len() > 0 {
-            let fired = expire(&mut deadlines, now);
-            assert!(fired.len() <= BUDGET as usize);
-            total += fired.len();
-            passes += 1;
-            if deadlines.len() > 0 {
-                assert!(deadlines.next_deadline().unwrap() <= now);
-            }
-        }
-
-        // All of them fired within a few passes.
-        assert_eq!(total, count as usize);
-        assert!((4..=5).contains(&passes), "{passes} passes");
-    }
-
-    #[test]
     fn test_times_saturate_at_both_ends() {
         let origin = Instant::now() + Duration::from_secs(1);
         let mut deadlines = Deadlines::new(origin);

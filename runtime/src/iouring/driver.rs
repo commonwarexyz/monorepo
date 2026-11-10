@@ -1472,6 +1472,13 @@ pub mod tests {
             .register_deadlines(harness.start, &mut harness.deferred);
         assert!(harness.driver.state.deadlines.contains(current.0.index));
 
+        // Every path that unlinks resolves the full identity first, so the
+        // stale one reaches neither the waiter nor the deadline.
+        harness.orphan(old);
+        harness.driver.state.cancel(old, &mut harness.deferred);
+        assert!(harness.driver.state.deadlines.contains(current.0.index));
+        assert!(harness.driver.state.waiters.is_pending(current));
+
         // The early deadline expires, but must not cancel the replacement in
         // the orphan's slot or remove the replacement's later deadline.
         let (early, late) = (harness.fires_at(early), harness.fires_at(late));
@@ -3164,61 +3171,6 @@ pub mod tests {
                 .iter()
                 .any(|completed| timed_out(completed, 1))
         );
-        harness.drain();
-    }
-
-    #[test]
-    fn test_stale_and_reused_ids_cannot_unlink_another_request() {
-        // An orphaned request leaves its slot and its deadline at once.
-        let mut harness = Harness::new(1);
-        let early = harness.start + Duration::from_millis(5);
-        let late = harness.start + Duration::from_millis(15);
-        let (old, _old_peer) = UnixStream::pair().unwrap();
-        let old = harness.admit(recv(old, 1, Some(early)), 0);
-        harness
-            .driver
-            .state
-            .register_deadlines(harness.start, &mut harness.deferred);
-        harness.orphan(old);
-        harness.completed.clear();
-        assert_eq!(harness.driver.state.deadlines.len(), 0);
-
-        // The replacement reuses the slot index under a new generation.
-        let (current, _current_peer) = UnixStream::pair().unwrap();
-        let current = harness.admit(recv(current, 1, Some(late)), 2);
-        assert_eq!(old.0.index, current.0.index);
-        assert_ne!(old, current);
-        harness
-            .driver
-            .state
-            .register_deadlines(harness.start, &mut harness.deferred);
-        assert!(harness.driver.state.deadlines.contains(current.0.index));
-
-        // Every path that unlinks resolves the full identity first, so the
-        // stale one reaches neither the waiter nor the deadline.
-        harness.orphan(old);
-        harness.driver.state.cancel(old, &mut harness.deferred);
-        assert!(harness.driver.state.deadlines.contains(current.0.index));
-        assert!(harness.driver.state.waiters.is_pending(current));
-
-        // The old deadline expires nothing, the replacement expires at its own.
-        let early = harness.fires_at(early);
-        harness
-            .driver
-            .state
-            .advance_timeouts(early, &mut harness.deferred);
-        harness.collect();
-        assert!(harness.completed.is_empty());
-        assert!(harness.driver.state.waiters.is_pending(current));
-        let late = harness.fires_at(late);
-        harness
-            .driver
-            .state
-            .advance_timeouts(late, &mut harness.deferred);
-        harness.collect();
-        assert_eq!(harness.completed.len(), 1);
-        assert!(timed_out(&harness.completed[0], 2));
-        assert!(harness.driver.is_empty());
         harness.drain();
     }
 
