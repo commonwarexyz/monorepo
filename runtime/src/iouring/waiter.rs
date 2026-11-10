@@ -207,6 +207,11 @@ impl Waiters {
         waiter.request.prepare_durability()
     }
 
+    /// Identity of the request or retained result in slot `index`, if any.
+    pub fn id_at(&self, index: u32) -> Option<WaiterId> {
+        self.entries.id_at(index as usize).map(WaiterId)
+    }
+
     /// Original absolute deadline of an unfinished request, if it has one.
     ///
     /// Stale IDs and retained results return `None`. Cancellation does not
@@ -469,11 +474,7 @@ impl Waiters {
 
         // The outstanding SQE keeps this slot occupied, even if the packed
         // generation has wrapped. Recover the full ID before returning it.
-        let id = self
-            .entries
-            .id_at(index as usize)
-            .map(WaiterId)
-            .expect("operation CQE for missing waiter");
+        let id = self.id_at(index).expect("operation CQE for missing waiter");
         assert_eq!(
             id.0.generation as u32, generation,
             "operation CQE for mismatched waiter generation"
@@ -534,6 +535,22 @@ pub mod tests {
         },
         task::Wake,
     };
+
+    impl Waiters {
+        /// Number of slots, including vacant ones.
+        pub(crate) const fn slots(&self) -> usize {
+            self.entries.slots()
+        }
+
+        /// Identity of the unfinished request in slot `index` that has not
+        /// been cancelled, if any.
+        pub(crate) fn active_at(&self, index: usize) -> Option<WaiterId> {
+            let id = WaiterId(self.entries.id_at(index)?);
+            self.get(id)
+                .is_some_and(|waiter| matches!(waiter.state, WaiterState::Active))
+                .then_some(id)
+        }
+    }
 
     /// Counts deferred wake invocations without touching worker state.
     #[derive(Default)]
