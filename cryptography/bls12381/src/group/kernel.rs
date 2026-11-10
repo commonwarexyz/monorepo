@@ -141,12 +141,12 @@ pub trait Group: Copy + Send + Sync {
     /// so that the top digit absorbs the carry.
     const COMPONENT_BITS: u32;
 
-    /// Splits a scalar `k` into components below `2^(COMPONENT_BITS - 1)` such that, for the
-    /// eigenvalue `e` of [`Points::endomorphism`], `k` is the sum over components `c` of
-    /// `components[c] (-e)^c`: the eigenvalue is the negation of the base in both groups, so
-    /// the odd components count negatively. Components beyond [`Self::COMPONENTS`] are zero.
-    /// Runs in time independent of the scalar.
-    fn components(scalar: &Scalar) -> [u128; MAX_COMPONENTS];
+    /// Splits a scalar `k` into components below `2^(COMPONENT_BITS - 1)`, as little-endian
+    /// words, such that, for the eigenvalue `e` of [`Points::endomorphism`], `k` is the sum
+    /// over components `c` of `components[c] (-e)^c`: the eigenvalue is the negation of the
+    /// base in both groups, so the odd components count negatively. Components beyond
+    /// [`Self::COMPONENTS`] are zero. Runs in time independent of the scalar.
+    fn components(scalar: &Scalar) -> [[u64; 2]; MAX_COMPONENTS];
 
     /// Returns the element's coordinates.
     fn coordinates(&self) -> &Self::Coordinates;
@@ -229,11 +229,6 @@ fn signed_digits(value: &[u64], width: u32, negate: bool, digits: &mut [i16]) {
     }));
 }
 
-/// Returns the little-endian words of a component.
-const fn words(component: u128) -> [u64; 2] {
-    [component as u64, (component >> 64) as u64]
-}
-
 /// Returns the number of windows of `width` bits in a component of `G`.
 const fn windows<G: Group>(width: u32) -> usize {
     G::COMPONENT_BITS.div_ceil(width) as usize
@@ -250,7 +245,7 @@ fn digits<G: Group>(scalar: &Scalar) -> Digits {
     for (c, (digits, component)) in digits.iter_mut().zip(components).enumerate() {
         if c < G::COMPONENTS {
             signed_digits(
-                &words(component),
+                &component,
                 WINDOW_BITS as u32,
                 c % 2 == 1,
                 &mut digits[..windows],
@@ -602,7 +597,7 @@ fn component_digits<G: Group>(
         if split {
             let components = G::components(scalar);
             for (c, digits) in digits.chunks_exact_mut(stride).enumerate() {
-                signed_digits(&words(components[c]), width, c % 2 == 1, digits);
+                signed_digits(&components[c], width, c % 2 == 1, digits);
             }
         } else {
             signed_digits(&scalar.to_words(), width, false, digits);
