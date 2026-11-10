@@ -149,7 +149,7 @@ use tracing::warn;
 pub mod batch;
 mod db;
 pub use db::Db;
-pub(crate) use db::{dedup_positions, match_read_ops};
+pub(crate) use db::read_many_map;
 pub mod operation;
 pub use operation::{COMMIT_CONTEXT, DELETE_CONTEXT, UPDATE_CONTEXT};
 pub mod ordered;

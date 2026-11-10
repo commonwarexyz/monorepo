@@ -36,7 +36,7 @@ const fn same_position(a: &(usize, u64), b: &(usize, u64)) -> bool {
 }
 
 /// Collapse position-sorted `(key index, position)` candidates into deduplicated positions.
-pub(crate) fn dedup_positions(candidates: &[(usize, u64)]) -> Vec<u64> {
+fn dedup_positions(candidates: &[(usize, u64)]) -> Vec<u64> {
     let mut positions = Vec::with_capacity(candidates.len());
     positions.extend(candidates.chunk_by(same_position).map(|group| group[0].1));
     positions
@@ -47,7 +47,7 @@ pub(crate) fn dedup_positions(candidates: &[(usize, u64)]) -> Vec<u64> {
 /// slot whose operation carries its exact key. `ops` yields one slot per deduplicated
 /// position, in order: the operation read there, or `None` when the page cache could not
 /// serve it, which is reported to `on_miss` with each candidate's key index and position.
-pub(crate) fn match_read_ops<F: Family, U: Update, T>(
+fn match_read_ops<F: Family, U: Update, T>(
     keys: &[impl Borrow<U::Key>],
     candidates: &[(usize, u64)],
     ops: impl Iterator<Item = Option<Operation<F, U>>>,
@@ -84,6 +84,128 @@ pub(crate) fn match_read_ops<F: Family, U: Update, T>(
             results[last] = Some(map(data, loc));
         }
     }
+}
+
+/// Batch read `keys`, which must not be empty, through `snapshot` and `reader`, mapping each
+/// matched update through `map` along with the location it was read from. A key repeated in
+/// `keys` receives a clone of its update in every slot but the last.
+///
+/// Positions the page cache holds are served without awaiting, split across `strategy` when the
+/// batch is large enough. One batched read then serves the rest.
+pub(crate) async fn read_many_map<F, R, I, U, S, T>(
+    snapshot: &I,
+    reader: &R,
+    strategy: &S,
+    keys: &[impl Borrow<U::Key> + Sync],
+    map: impl Fn(U, Location<F>) -> T + Send + Sync,
+) -> Result<Vec<Option<T>>, crate::journal::Error>
+where
+    F: Family,
+    R: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
+    U: Update,
+    S: Strategy,
+    T: Send,
+{
+    // One fused pass resolves everything the page cache can serve: probe the index, sort
+    // candidate locations, read cached operations, and match them back to keys, collecting
+    // misses. The strategy policy decides per batch size whether the pass runs on the
+    // calling thread or sharded across the pool.
+    let (mut results, mut misses) =
+        strategy.run_batches(keys.len(), NonZeroUsize::MIN, 1, |batches| {
+            let mut shards = batches
+                .map_collect_vec(
+                    |ranges| ranges,
+                    |range| {
+                        resolve_cached(snapshot, reader, &keys[range.clone()], &map, range.start)
+                    },
+                )
+                .into_iter();
+
+            // The first shard's vectors are kept and the rest appended, so a whole-input
+            // run moves nothing and a split run reserves the results buffer once.
+            let (mut results, mut misses) = shards
+                .next()
+                .expect("run_batches must supply a batch for nonempty keys");
+            results.reserve(keys.len() - results.len());
+            for (shard_results, shard_misses) in shards {
+                results.extend(shard_results);
+                misses.extend(shard_misses);
+            }
+            (results, misses)
+        });
+    if misses.is_empty() {
+        return Ok(results);
+    }
+
+    // Fallback: read each distinct missed position once with one batched read, which also
+    // validates the missed positions: every candidate position is decoded by exactly one of
+    // the two passes, so corruption detection does not depend on cache state.
+    misses.sort_unstable_by_key(|&(_, pos)| pos);
+    let positions = dedup_positions(&misses);
+    let ops = reader.read_many(&positions).await?;
+    assert_eq!(
+        ops.len(),
+        positions.len(),
+        "read_many returns one operation per position"
+    );
+    match_read_ops(
+        keys,
+        &misses,
+        ops.into_iter().map(Some),
+        &map,
+        &mut results,
+        |_, pos| unreachable!("read_many returns one operation per position, pos={pos}"),
+    );
+    Ok(results)
+}
+
+/// Probe the index for `keys`, serve page-cache hits synchronously, and match them back to
+/// keys. Returns per-key results plus `(base + key index, position)` pairs for positions
+/// the cache could not serve. A miss is recorded even when its key already resolved so the
+/// fallback read still validates the position.
+fn resolve_cached<F, R, I, U, T>(
+    snapshot: &I,
+    reader: &R,
+    keys: &[impl Borrow<U::Key>],
+    map: &(impl Fn(U, Location<F>) -> T + Send + Sync),
+    base: usize,
+) -> ShardReads<T>
+where
+    F: Family,
+    R: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
+    U: Update,
+    T: Send,
+{
+    // Probe the in-memory index. Each key may map to multiple locations due to hash
+    // collisions.
+    let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
+    snapshot.get_many(keys.iter().map(Borrow::borrow), |key_idx, &loc| {
+        candidates.push((key_idx, *loc))
+    });
+
+    // Sort by position and deduplicate for the batched cache read.
+    candidates.sort_unstable_by_key(|&(_, pos)| pos);
+    let positions = dedup_positions(&candidates);
+
+    let served = reader.try_read_many_sync(&positions);
+    assert_eq!(
+        served.len(),
+        positions.len(),
+        "try_read_many_sync returns one slot per position"
+    );
+    let mut results: Vec<Option<T>> = (0..keys.len()).map(|_| None).collect();
+    let mut misses: Vec<(usize, u64)> = Vec::new();
+    match_read_ops(
+        keys,
+        &candidates,
+        served.into_iter(),
+        map,
+        &mut results,
+        |key_idx, pos| misses.push((base + key_idx, pos)),
+    );
+    (results, misses)
 }
 
 /// Type alias for the authenticated journal used by [Db].
@@ -292,97 +414,7 @@ where
         self.metrics.get_many_calls.inc();
         self.metrics.lookups_requested.inc_by(keys.len() as u64);
 
-        // One fused pass resolves everything the page cache can serve: probe the index, sort
-        // candidate locations, read cached operations, and match them back to keys, collecting
-        // misses. The strategy policy decides per batch size whether the pass runs on the
-        // calling thread or sharded across the pool.
-        let strategy = self.strategy();
-        let (mut results, mut misses) =
-            strategy.run_batches(keys.len(), NonZeroUsize::MIN, 1, |batches| {
-                let mut shards = batches
-                    .map_collect_vec(
-                        |ranges| ranges,
-                        |range| self.resolve_cached(&keys[range.clone()], &map, range.start),
-                    )
-                    .into_iter();
-
-                // The first shard's vectors are kept and the rest appended, so a whole-input
-                // run moves nothing and a split run reserves the results buffer once.
-                let (mut results, mut misses) = shards
-                    .next()
-                    .expect("run_batches must supply a batch for nonempty keys");
-                results.reserve(keys.len() - results.len());
-                for (shard_results, shard_misses) in shards {
-                    results.extend(shard_results);
-                    misses.extend(shard_misses);
-                }
-                (results, misses)
-            });
-        if misses.is_empty() {
-            return Ok(results);
-        }
-
-        // Fallback: read each distinct missed position once with one batched read, which also
-        // validates the missed positions: every candidate position is decoded by exactly one of
-        // the two passes, so corruption detection does not depend on cache state.
-        misses.sort_unstable_by_key(|&(_, pos)| pos);
-        let positions = dedup_positions(&misses);
-        let ops = self.log.read_many(&positions).await?;
-        assert_eq!(
-            ops.len(),
-            positions.len(),
-            "read_many returns one operation per position"
-        );
-        match_read_ops(
-            keys,
-            &misses,
-            ops.into_iter().map(Some),
-            &map,
-            &mut results,
-            |_, pos| unreachable!("read_many returns one operation per position, pos={pos}"),
-        );
-        Ok(results)
-    }
-
-    /// Probe the index for `keys`, serve page-cache hits synchronously, and match them back to
-    /// keys. Returns per-key results plus `(base + key index, position)` pairs for positions
-    /// the cache could not serve. A miss is recorded even when its key already resolved so the
-    /// fallback read still validates the position.
-    fn resolve_cached<T: Send>(
-        &self,
-        keys: &[impl Borrow<U::Key>],
-        map: &(impl Fn(U, Location<F>) -> T + Send + Sync),
-        base: usize,
-    ) -> ShardReads<T> {
-        // Probe the in-memory index. Each key may map to multiple locations due to hash
-        // collisions.
-        let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
-        self.snapshot
-            .get_many(keys.iter().map(Borrow::borrow), |key_idx, &loc| {
-                candidates.push((key_idx, *loc))
-            });
-
-        // Sort by position and deduplicate for the batched cache read.
-        candidates.sort_unstable_by_key(|&(_, pos)| pos);
-        let positions = dedup_positions(&candidates);
-
-        let served = self.log.try_read_many_sync(&positions);
-        assert_eq!(
-            served.len(),
-            positions.len(),
-            "try_read_many_sync returns one slot per position"
-        );
-        let mut results: Vec<Option<T>> = (0..keys.len()).map(|_| None).collect();
-        let mut misses: Vec<(usize, u64)> = Vec::new();
-        match_read_ops(
-            keys,
-            &candidates,
-            served.into_iter(),
-            map,
-            &mut results,
-            |key_idx, pos| misses.push((base + key_idx, pos)),
-        );
-        (results, misses)
+        Ok(read_many_map(&self.snapshot, &self.log, self.strategy(), keys, map).await?)
     }
 
     /// Return the retained operation range `[start, end)`.

@@ -11,7 +11,7 @@ use crate::{
     merkle::mmr::Location,
     qmdb::{
         any::{
-            BITMAP_CHUNK_BYTES, dedup_positions, match_read_ops,
+            BITMAP_CHUNK_BYTES, read_many_map,
             unordered::{Update, variable::Operation},
         },
         bitmap::fill_from,
@@ -26,6 +26,7 @@ use crate::{
 };
 use commonware_codec::{CodecShared, Read};
 use commonware_macros::boxed;
+use commonware_parallel::Strategy;
 use commonware_runtime::Handle;
 use commonware_utils::{Widen, bitmap};
 use core::{borrow::Borrow, num::NonZeroUsize};
@@ -36,7 +37,7 @@ type Error = crate::qmdb::Error<crate::mmr::Family>;
 
 /// Configuration for initializing a [Db].
 #[derive(Clone)]
-pub struct Config<T: Translator, C> {
+pub struct Config<T: Translator, C, S: Strategy> {
     /// Configuration for the variable-size operations log journal.
     pub log: JournalConfig<C>,
 
@@ -49,6 +50,9 @@ pub struct Config<T: Translator, C> {
 
     /// Size (in bytes) of the read buffer used to replay the log during init.
     pub init_buffer: NonZeroUsize,
+
+    /// The strategy used to parallelize batched reads.
+    pub strategy: S,
 }
 
 /// A finalized batch of writes and deletes ready to be applied to the store.
@@ -73,26 +77,28 @@ impl<K: Key, V: CodecShared + Clone, const N: usize> From<[(K, Option<V>); N]> f
 }
 
 /// A mutable batch of writes and deletes staged against the current store state.
-pub struct Batch<'a, E, K, V, T>
+pub struct Batch<'a, E, K, V, T, S>
 where
     E: Context,
     K: Key,
     V: VariableValue,
     T: Translator,
+    S: Strategy,
 {
-    db: &'a Db<E, K, V, T>,
+    db: &'a Db<E, K, V, T, S>,
     diff: BTreeMap<K, Option<V>>,
     metadata: Option<V>,
 }
 
-impl<'a, E, K, V, T> Batch<'a, E, K, V, T>
+impl<'a, E, K, V, T, S> Batch<'a, E, K, V, T, S>
 where
     E: Context,
     K: Key,
     V: VariableValue,
     T: Translator,
+    S: Strategy,
 {
-    const fn new(db: &'a Db<E, K, V, T>) -> Self {
+    const fn new(db: &'a Db<E, K, V, T, S>) -> Self {
         Self {
             db,
             diff: BTreeMap::new(),
@@ -160,12 +166,13 @@ where
 }
 
 /// An unauthenticated key-value database based off of an append-only [Journal] of operations.
-pub struct Db<E, K, V, T>
+pub struct Db<E, K, V, T, S>
 where
     E: Context,
     K: Key,
     V: VariableValue,
     T: Translator,
+    S: Strategy,
 {
     /// A log of all [Operation]s that have been applied to the store.
     ///
@@ -201,14 +208,18 @@ where
 
     /// Metrics for this database.
     metrics: Metrics<E>,
+
+    /// The strategy used to parallelize batched reads.
+    strategy: S,
 }
 
-impl<E, K, V, T> std::fmt::Debug for Db<E, K, V, T>
+impl<E, K, V, T, S> std::fmt::Debug for Db<E, K, V, T, S>
 where
     E: Context,
     K: Key,
     V: VariableValue,
     T: Translator,
+    S: Strategy,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Db")
@@ -218,12 +229,13 @@ where
     }
 }
 
-impl<E, K, V, T> Db<E, K, V, T>
+impl<E, K, V, T, S> Db<E, K, V, T, S>
 where
     E: Context,
     K: Key,
     V: VariableValue,
     T: Translator,
+    S: Strategy,
 {
     /// Get the value of `key` in the db, or None if it has no value.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
@@ -257,49 +269,12 @@ where
         self.metrics.get_many_calls.inc();
         self.metrics.lookups_requested.inc_by(keys.len() as u64);
 
-        // Probe the index. Translated keys can collide, so a key may have several candidates.
-        let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
-        self.snapshot
-            .get_many(keys.iter().map(Borrow::borrow), |key_idx, &loc| {
-                candidates.push((key_idx, *loc))
-            });
-        candidates.sort_unstable_by_key(|&(_, pos)| pos);
-        let positions = dedup_positions(&candidates);
-
-        // Serve every position the page cache holds without awaiting, collecting the rest. A
-        // miss is recorded even when its key already resolved, so the read below still
-        // validates the position.
         let value = |update: Update<K, VariableEncoding<V>>, _| update.1;
-        let mut values = vec![None; keys.len()];
-        let mut misses = Vec::new();
-        match_read_ops(
-            keys,
-            &candidates,
-            self.log.try_read_many_sync(&positions).into_iter(),
-            &value,
-            &mut values,
-            |key_idx, pos| misses.push((key_idx, pos)),
-        );
-        if misses.is_empty() {
-            return Ok(values);
-        }
-
-        // Read the missed positions, which are still in position order, in one batch.
-        let positions = dedup_positions(&misses);
-        let ops = self.log.read_many(&positions).await?;
-        match_read_ops(
-            keys,
-            &misses,
-            ops.into_iter().map(Some),
-            &value,
-            &mut values,
-            |_, pos| unreachable!("read_many returns one operation per position, pos={pos}"),
-        );
-        Ok(values)
+        Ok(read_many_map(&self.snapshot, &self.log, &self.strategy, keys, value).await?)
     }
 
     /// Returns a new empty batch of changes.
-    pub const fn new_batch(&self) -> Batch<'_, E, K, V, T> {
+    pub const fn new_batch(&self) -> Batch<'_, E, K, V, T, S> {
         Batch::new(self)
     }
 
@@ -393,7 +368,7 @@ where
     #[boxed]
     pub async fn init(
         context: E,
-        cfg: Config<T, <Operation<crate::mmr::Family, K, V> as Read>::Cfg>,
+        cfg: Config<T, <Operation<crate::mmr::Family, K, V> as Read>::Cfg, S>,
         max_size: Option<Location>,
     ) -> Result<Self, Error> {
         // Variable-journal recovery rebuilds item offsets before selecting a commit. Keep the
@@ -487,6 +462,7 @@ where
             bitmap,
             inactivity_floor_loc,
             metrics: Metrics::new(context),
+            strategy: cfg.strategy,
         };
         db.update_metrics();
         Ok(db)
@@ -825,6 +801,7 @@ mod test {
     };
     use commonware_macros::{test_collect_traces, test_traced};
     use commonware_math::algebra::Random;
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         Metrics as _, Runner, Spawner as _, Supervisor as _,
         buffer::paged::CacheRef,
@@ -852,9 +829,10 @@ mod test {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
     /// The type of the store used in tests.
-    type TestStore = Db<deterministic::Context, Digest, Vec<u8>, TwoCap>;
+    type TestStore = Db<deterministic::Context, Digest, Vec<u8>, TwoCap, Sequential>;
 
-    fn test_config() -> Config<TwoCap, <Operation<crate::mmr::Family, Digest, Vec<u8>> as Read>::Cfg>
+    fn test_config()
+    -> Config<TwoCap, <Operation<crate::mmr::Family, Digest, Vec<u8>> as Read>::Cfg, Sequential>
     {
         Config {
             log: JournalConfig {
@@ -869,6 +847,7 @@ mod test {
             translator: TwoCap,
             init_cache: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
+            strategy: Sequential,
         }
     }
 
@@ -1089,7 +1068,8 @@ mod test {
     }
 
     /// A store over a delayed-sync storage backend.
-    type DelayedStore = Db<DelayedSyncContext<deterministic::Context>, Digest, Vec<u8>, TwoCap>;
+    type DelayedStore =
+        Db<DelayedSyncContext<deterministic::Context>, Digest, Vec<u8>, TwoCap, Sequential>;
 
     /// Open a [DelayedStore] whose blob syncs park on `pending`.
     ///
@@ -1115,6 +1095,7 @@ mod test {
             translator: TwoCap,
             init_cache: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
+            strategy: Sequential,
         };
         DelayedStore::init(
             DelayedSyncContext {
@@ -2272,7 +2253,7 @@ mod test {
     }
 
     /// A [Db] keyed by variable-length byte keys.
-    type VecKeyStore = Db<deterministic::Context, Vec<u8>, Vec<u8>, TwoCap>;
+    type VecKeyStore = Db<deterministic::Context, Vec<u8>, Vec<u8>, TwoCap, Sequential>;
 
     #[test_traced("DEBUG")]
     fn test_store_variable_length_keys() {
@@ -2292,6 +2273,7 @@ mod test {
                 translator: TwoCap,
                 init_cache: Some(NZUsize!(1024)),
                 init_buffer: NZUsize!(1 << 21),
+                strategy: Sequential,
             };
 
             // Commit two keys of different lengths that share a translated prefix.
@@ -2327,7 +2309,7 @@ mod test {
     }
 
     /// A store keyed by SHA-256 digests whose translator buckets keys by their first byte.
-    type PolicyStore<V> = Db<deterministic::Context, sha256::Digest, V, OneCap>;
+    type PolicyStore<V> = Db<deterministic::Context, sha256::Digest, V, OneCap, Sequential>;
 
     async fn open<V: VariableValue + Read<Cfg = ()>>(
         context: deterministic::Context,
@@ -2346,6 +2328,7 @@ mod test {
             translator: OneCap,
             init_cache: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
+            strategy: Sequential,
         };
         PolicyStore::init(context, cfg, None).await.unwrap()
     }
@@ -2486,7 +2469,8 @@ mod test {
         }
 
         deterministic::Runner::default().start(|context| async move {
-            type CountedStore = Db<deterministic::Context, Digest, Vec<u8>, CountingTranslator>;
+            type CountedStore =
+                Db<deterministic::Context, Digest, Vec<u8>, CountingTranslator, Sequential>;
             let lookups = Arc::new(AtomicUsize::new(0));
             let cfg = test_config();
             let db = CountedStore::init(
@@ -2496,6 +2480,7 @@ mod test {
                     translator: CountingTranslator(lookups.clone()),
                     init_cache: cfg.init_cache,
                     init_buffer: cfg.init_buffer,
+                    strategy: cfg.strategy,
                 },
                 None,
             )
@@ -3029,12 +3014,13 @@ mod test {
     /// unpruned bit is set if and only if its location holds a live update or the last commit,
     /// and every live update lies at or above the inactivity floor. The snapshot maps each live
     /// key to its update and holds no other entry.
-    async fn assert_bitmap_consistent<E, K, V, T>(db: &Db<E, K, V, T>)
+    async fn assert_bitmap_consistent<E, K, V, T, S>(db: &Db<E, K, V, T, S>)
     where
         E: Context,
         K: Key,
         V: VariableValue,
         T: Translator,
+        S: Strategy,
     {
         let bounds = db.log.bounds();
         assert_eq!(db.bitmap.len(), bounds.end);
@@ -3243,7 +3229,7 @@ mod test {
 
     #[allow(dead_code)]
     fn assert_write_futures_are_send(
-        db: Db<deterministic::Context, Digest, Vec<u8>, TwoCap>,
+        db: Db<deterministic::Context, Digest, Vec<u8>, TwoCap, Sequential>,
         key: Digest,
         value: Vec<u8>,
     ) {
@@ -3254,7 +3240,7 @@ mod test {
     }
 
     #[allow(dead_code)]
-    fn assert_commit_is_send(db: Db<deterministic::Context, Digest, Vec<u8>, TwoCap>) {
+    fn assert_commit_is_send(db: Db<deterministic::Context, Digest, Vec<u8>, TwoCap, Sequential>) {
         is_send(db.commit());
     }
 }

@@ -2,6 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::blake3::Digest;
+use commonware_parallel::Sequential;
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
@@ -21,7 +22,7 @@ const MAX_GET_MANY_KEYS: usize = 8;
 
 type Key = Digest;
 type Value = Vec<u8>;
-type StoreDb = Db<deterministic::Context, Key, Value, TwoCap>;
+type StoreDb = Db<deterministic::Context, Key, Value, TwoCap, Sequential>;
 
 #[derive(Debug)]
 enum Operation {
@@ -120,7 +121,9 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 const PAGE_SIZE: NonZeroU16 = NZU16!(125);
 const PAGE_CACHE_SIZE: usize = 8;
 
-fn test_config(test_name: &str) -> Config<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
+fn test_config(
+    test_name: &str,
+) -> Config<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ())), Sequential> {
     Config {
         log: VConfig {
             partition: format!("{test_name}-log"),
@@ -134,6 +137,7 @@ fn test_config(test_name: &str) -> Config<TwoCap, ((), (commonware_codec::RangeC
         translator: TwoCap,
         init_cache: Some(NZUsize!(3)),
         init_buffer: NZUsize!(1 << 21),
+        strategy: Sequential,
     }
 }
 
