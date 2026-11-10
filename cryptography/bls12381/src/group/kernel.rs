@@ -75,7 +75,7 @@ pub trait Kernel: Sized {
 
     /// Returns whether the operation holds independent items in every lane of a 64-bit
     /// representation, which then finishes them sooner than residues.
-    fn batch(&self) -> bool {
+    fn prefers_wide_lanes(&self) -> bool {
         false
     }
 
@@ -100,7 +100,7 @@ pub trait Kernel: Sized {
             where
                 S: X86V4C,
             {
-                if self.0.batch() {
+                if self.0.prefers_wide_lanes() {
                     self.0.run::<S, Unsat49<S>>(simd)
                 } else {
                     self.0.run::<S, Rns<S>>(simd)
@@ -123,11 +123,11 @@ pub trait Group: Copy + Send + Sync {
     /// The identity.
     const IDENTITY: Self::Coordinates;
 
-    /// Fewest elements for which [`Sum`] favors the 64-bit lanes over residues, or `None` when
-    /// residues finish every count sooner.
+    /// Most elements for which [`Sum`] still favors residues over the 64-bit lanes, or `None`
+    /// when residues finish every count sooner.
     const SUM_BATCH: Option<usize>;
 
-    /// Fewest elements for which [`MultiplyEach`] favors the 64-bit lanes over residues, or
+    /// Most elements for which [`MultiplyEach`] still favors residues over the 64-bit lanes, or
     /// `None` when residues finish every count sooner.
     const MULTIPLY_BATCH: Option<usize>;
 
@@ -415,7 +415,7 @@ pub struct Sum<'a, G>(pub &'a [G]);
 impl<G: Group> Kernel for Sum<'_, G> {
     type Output = G;
 
-    fn batch(&self) -> bool {
+    fn prefers_wide_lanes(&self) -> bool {
         G::SUM_BATCH.is_some_and(|batch| self.0.len() > batch)
     }
 
@@ -441,7 +441,7 @@ pub struct MultiplyEach<'a, G> {
 impl<G: Group> Kernel for MultiplyEach<'_, G> {
     type Output = ();
 
-    fn batch(&self) -> bool {
+    fn prefers_wide_lanes(&self) -> bool {
         G::MULTIPLY_BATCH.is_some_and(|batch| self.elements.len().min(self.scalars.len()) > batch)
     }
 
