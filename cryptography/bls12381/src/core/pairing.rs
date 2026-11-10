@@ -264,8 +264,10 @@ fn add_step<S: Simd, F: Field<S>>(simd: S, t: &mut Point<F>, pair: &Pair<F>) -> 
     )
 }
 
-/// Returns `f^((p^12 - 1) / r)` in each lane, up to the fixed power that the addition chain computes,
-/// or zero for zero.
+/// Returns `f^(3 (p^12 - 1) / r)` in each lane, or zero for zero.
+///
+/// The addition chain of the hard part computes the cube of `f^((p^12 - 1) / r)`, which keeps the
+/// pairing bilinear and nondegenerate, since `3` does not divide `r`.
 ///
 /// This is the second half of a pairing: the final exponentiation of [`miller_loop`] of one pair is
 /// its pairing.
