@@ -122,13 +122,12 @@ impl DebugCounter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(debug_assertions)]
     use std::panic::catch_unwind;
 
     #[test]
+    #[cfg(debug_assertions)]
     fn bounds_follow_a_formula() {
-        if !DebugCounter::live() {
-            return;
-        }
         let a = DebugCounter::new(3);
         let b = DebugCounter::new(5);
         let mut result = a;
@@ -150,10 +149,8 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     fn rejects_insufficient_subtraction_bias() {
-        if !DebugCounter::live() {
-            return;
-        }
         assert!(
             catch_unwind(|| {
                 DebugCounter::new(0).sub_with_bias(DebugCounter::new(9), 8);
@@ -163,10 +160,8 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     fn rejects_counter_addition_overflow() {
-        if !DebugCounter::live() {
-            return;
-        }
         assert!(
             catch_unwind(|| {
                 DebugCounter::new(u64::MAX).add(DebugCounter::new(1));
@@ -176,10 +171,8 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     fn rejects_counter_multiplication_overflow() {
-        if !DebugCounter::live() {
-            return;
-        }
         assert!(
             catch_unwind(|| {
                 DebugCounter::new(u64::MAX).mul(DebugCounter::new(2));
@@ -189,18 +182,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     fn rejects_zero_divisor() {
-        if !DebugCounter::live() {
-            return;
-        }
         assert!(catch_unwind(|| DebugCounter::new(1).div_ceil(0)).is_err());
     }
 
     #[test]
+    #[cfg(not(debug_assertions))]
     fn disabled_counter_has_no_storage_or_checks() {
-        if DebugCounter::live() {
-            return;
-        }
         assert_eq!(core::mem::size_of::<DebugCounter>(), 0);
         let a = DebugCounter::new(u64::MAX);
         let mut result = a;
