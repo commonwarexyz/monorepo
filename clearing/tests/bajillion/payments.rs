@@ -516,7 +516,7 @@ fn test_replayed_request_settles_at_most_once() {
     let (mut operator, mut alice, refused, posted) = dropped_request();
 
     // Alice resolves the post of epoch 2 before a new request of epoch 3 pays the dropped batch
-    // again. The close settled the map she recorded.
+    // again (S6). The close settled the map she recorded.
     let (root, opening) = open_row(&posted, 0);
     assert_eq!(alice.posted(2, &root, &opening).unwrap(), Outcome::Match);
 

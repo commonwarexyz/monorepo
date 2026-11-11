@@ -72,7 +72,8 @@
 //! every request's roots and map (S1). The sender verifies acknowledgements and refuses one for an
 //! epoch whose post it already resolved (S2). The model decides from the copies it sent when a
 //! sender drops a refused request (S4). Senders resolve posts in order, and the model predicts what
-//! each post settled for the sender (S5).
+//! each post settled for the sender (S5). The model treats every send as a new payment, so it does
+//! not apply S6, the rule for paying an earlier request's batch again.
 //!
 //! The operator admits on both sides of a cut (O2, O4, O6), checks spendable balances (O3), and
 //! applies one close per epoch at its cut (O8). Receivers take receipts in acknowledgement order

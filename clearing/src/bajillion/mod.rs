@@ -201,6 +201,12 @@
 //!   its payments (V6). Otherwise the sender drops a request a close settled, builds on the wrong
 //!   root, or never learns that a close settled a map it did not record.
 //!
+//! - **S6.** When a new request pays again the batch of a refused request of epoch `e`, sign it
+//!   only for epoch `e` or a later one. For `e + 1`, first resolve the post of `e`. For an epoch
+//!   after `e + 1`, first resolve the posts of `e` and `e + 1` (S5). The same holds for the batch
+//!   of a request of epoch `e` whose recorded map a post did not settle. Sending the earlier
+//!   request again needs no post. Otherwise both requests can settle, and the batch is paid twice.
+//!
 //! # Operator
 //!
 //! The operator admits payments and soft withdrawals, closes each epoch, and tracks what each

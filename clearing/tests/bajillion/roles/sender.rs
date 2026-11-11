@@ -354,7 +354,8 @@ impl<S: Signer, O: PublicKey, H: Hasher, A: Amount> Sender<S, O, H, A> {
         .ok_or(Refusal::InvalidReceipt)
     }
 
-    /// Drops the pending request after a refusal of its only delivery (S4).
+    /// Drops the pending request after a refusal of its only delivery (S4). Its states can still
+    /// settle, so S6 limits when a new request may pay its batch again.
     pub fn refused(&mut self) -> Result<(), Refusal> {
         self.persisted
             .pending
