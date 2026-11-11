@@ -1,52 +1,37 @@
-//! Unsaturated radix-`2^28` Montgomery arithmetic on several base field elements at once, using
-//! 32-bit lane values.
+//! Base field arithmetic on `S::U32_LANES` elements at once, in unsaturated radix-`2^28`
+//! Montgomery form: [`Unsat28`], which implements [`Field`] on every backend.
+//!
+//! Products reduce eagerly. Callers follow the
+//! [operation rules](super::super::arithmetic#operation-rules) of [`Field`] with this
+//! representation's limits: integer bound at most [`LIMIT`], limb bound at most [`LIMB_LIMIT`],
+//! and multiplicand limb bound at most [`SLACK`]. The limb limit is low, so long chains of
+//! additions must carry along the way.
+//!
+//! # How it works
 //!
 //! An [`Unsat28`] is a matrix with [`LIMBS`] rows and `S::U32_LANES` columns: row `i` holds limb
-//! `i` of every element. Elements use radix `2^28` in Montgomery form with `R = 2^392`. Limbs
-//! occupy 32-bit lanes and products accumulate in 64-bit lanes: `u32_widen_mul_first` and
+//! `i` of every element, in Montgomery form with `R = 2^392`. Each value carries two debug-only
+//! bound counters: an integer bound in units of `p`, and a limb bound in units of `2^28`.
+//!
+//! Loads, products, tight reductions, and [`Field::carry`] return carried values, whose limbs are
+//! below `2^28`; additions, subtractions, negations, and doublings return uncarried ones.
+//! Carrying preserves the represented integer; only multiplication and tight reduction reduce
+//! modulo `p`.
+//!
+//! Limbs occupy 32-bit lanes and products accumulate in 64-bit lanes: `u32_widen_mul_first` and
 //! `u32_widen_mul_second` split each row of products between two 64-bit vectors (UMULL and UMULL2
-//! on NEON, VPMULUDQ on even and odd lanes on AVX-512), and `u64_narrow_pair` packs limbs back.
+//! on NEON, VPMULUDQ on even and odd lanes on AVX-512), and `u64_narrow_pair` packs limbs back. A
+//! multiplication accepts limbs below `2^30`, so it takes sums of up to [`SLACK`] carried values
+//! without carrying them. A subtraction or negation adds a multiple of `p` whose limbs cover any
+//! subtrahend whose limbs are at most twice those of a carried value.
 //!
-//! # Usage
-//!
-//! Elements cross the boundary as [`BYTES`]-byte big-endian integers below `2^384`, which loads
-//! interpret modulo `p` and stores return canonically.
-//!
-//! Loads, splats, products, and [`Unsat28::carry`] return carried values, whose limbs are below
-//! `2^28`; additions, subtractions, negations, and doublings return uncarried ones. A
-//! multiplication accepts limbs below `2^30`, so it multiplies sums of up to [`SLACK`] carried
-//! values without carrying them. [`Unsat28::ready`] prepares a multiplicand from a static bound on
-//! its limbs, carrying only when that bound exceeds [`SLACK`]. A subtraction or negation removes
-//! values whose limbs are at most twice those of a carried value. Limbs must also fit their 32-bit
-//! lanes, so a value holds at most [`LIMB_LIMIT`] carried values' worth of limbs: longer chains of
-//! additions carry along the way.
-//!
-//! Carrying preserves the represented integer; multiplication is what reduces modulo `p`, and
-//! [`Unsat28::store`] returns canonical elements from any value. A subtraction or negation bias
-//! `K` must exceed the bound of the value it removes.
-//!
-//! # Bounds
-//!
-//! Each value carries two debug-only bound counters: an integer bound in units of `p`, and a
-//! limb bound in units of `2^28`. For integer bounds `A` and `B` and limb bounds `L` and `M`:
-//!
-//! | Operation | Requires | Integer bound | Limb bound |
-//! |---|---|---|---|
-//! | load, splat | | `2` | `1` |
-//! | `a + b` | | `A + B` | `L + M` |
-//! | `a - b` with bias `K` | `M <= 2`, `B < K` | `A + K` | `L + 3` |
-//! | `-a` with bias `K` | `L <= 2`, `A < K` | `K` | `3` |
-//! | carry | | `A` | `1` |
-//! | `a * b` | `L, M <= SLACK` | `ceil(A * B / LIMIT) + 1` | `1` |
-//! | tight reduction | | `2` | `1` |
-//!
-//! Every integer bound is at most [`LIMIT`], so values fit carried limbs because `p < 2^381`.
-//! Every limb bound is at most [`LIMB_LIMIT`], so limbs stay below `15 * 2^28` and still fit their
-//! lanes after receiving a carry, which is at most `15`. Multiplication returns below
-//! `a * b / 2^392 + p`, and `p / 2^392 < 1 / LIMIT`. A tight reduction subtracts an estimate of
-//! the multiple of `p` that the top limb covers and carries, which returns below `1.03 p`. Debug
-//! builds check these rules; release builds do not, and results are unspecified when a formula
-//! violates them.
+//! The limits keep the arithmetic exact. Every integer bound is at most [`LIMIT`], so values fit
+//! carried limbs because `p < 2^381`. Every limb bound is at most [`LIMB_LIMIT`], so limbs stay
+//! below `15 * 2^28` and still fit their lanes after receiving a carry, which is at most `15`.
+//! Multiplication returns below `a * b / 2^392 + p`, and `p / 2^392 < 1 / LIMIT`, which gives the
+//! product bound `ceil(A * B / LIMIT) + 1`. A tight reduction subtracts an estimate of the
+//! multiple of `p` that the top limb covers and carries, which returns below `1.03 p` and so
+//! integer bound `2`.
 
 use super::{
     super::{MAX_LANES, arithmetic::Field},
@@ -175,8 +160,6 @@ const fn bias(k: u64) -> [u32; LIMBS] {
 }
 
 /// `S::U32_LANES` base field elements in radix `2^28` Montgomery form, one per lane.
-///
-/// See the [module documentation](self) for the layout and the bounds every value satisfies.
 pub struct Unsat28<S: Simd> {
     limbs: [S::U32; LIMBS],
     bound: DebugCounter,
@@ -492,7 +475,6 @@ impl<S: Simd> Field<S> for Unsat28<S> {
     type Product = Self;
     const PRODUCTS: usize = 8;
 
-    /// Loads up to `S::U32_LANES` elements, one per lane, filling the remaining lanes with `fill`.
     #[inline(always)]
     fn load(simd: S, elements: &[[u8; BYTES]], fill: &[u8; BYTES]) -> Self {
         let fill = limbs_from_words(words_from_bytes(fill));
@@ -506,7 +488,6 @@ impl<S: Simd> Field<S> for Unsat28<S> {
         Self::raw(simd, &lanes, 10).to_lanes(simd)
     }
 
-    /// Stores the canonical value of each lane into `elements`, dropping lanes beyond its length.
     #[inline(always)]
     fn store(self, simd: S, elements: &mut [[u8; BYTES]]) {
         let canonical = self

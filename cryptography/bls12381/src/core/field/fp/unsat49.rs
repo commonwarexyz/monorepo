@@ -1,46 +1,32 @@
-//! Unsaturated radix-`2^49` Montgomery arithmetic on several base field elements at once, using
-//! 64-bit lane values.
+//! Base field arithmetic on `S::U64_LANES` elements at once, in unsaturated radix-`2^49`
+//! Montgomery form: [`Unsat49`], which implements [`Field`] on every backend.
+//!
+//! Products reduce eagerly. Callers follow the
+//! [operation rules](super::super::arithmetic#operation-rules) of [`Field`] with this
+//! representation's limits: integer bound at most [`LIMIT`], limb bound below `2^15`, and
+//! multiplicand limb bound at most [`SLACK`].
+//!
+//! # How it works
 //!
 //! An [`Unsat49`] is a matrix with [`LIMBS`] rows and `S::U64_LANES` columns: row `i` holds limb
-//! `i` of every element. Elements use radix `2^49` in Montgomery form with `R = 2^392`. Products
-//! accumulate with `u64_madd52lo` and `u64_madd52hi`, which AVX-512 IFMA provides natively and
-//! other backends emulate. They split each product at bit 52, so each column of high halves is
-//! shifted left by three bits before joining its column.
+//! `i` of every element, in Montgomery form with `R = 2^392`. Each value carries two debug-only
+//! bound counters: an integer bound in units of `p`, and a limb bound in units of `2^49`.
 //!
-//! # Usage
+//! Loads, products, and [`Field::carry`] return carried values, whose limbs are below `2^49`;
+//! additions, subtractions, negations, and doublings return uncarried ones. Carrying preserves the
+//! represented integer; only multiplication reduces modulo `p`.
 //!
-//! Elements cross the boundary as [`BYTES`]-byte big-endian integers below `2^384`, which loads
-//! interpret modulo `p` and stores return canonically.
+//! Products accumulate with `u64_madd52lo` and `u64_madd52hi`, which AVX-512 IFMA provides
+//! natively and other backends emulate. These split each product at bit 52, so each column of
+//! high halves is shifted left by three bits before joining its column. The multipliers accept
+//! limbs below `2^52`, so a multiplication takes sums of up to [`SLACK`] carried values without
+//! carrying them. A subtraction or negation adds a multiple of `p` whose limbs cover any
+//! subtrahend whose limbs are at most twice those of a carried value.
 //!
-//! Loads, splats, products, and [`Unsat49::carry`] return carried values, whose limbs are below
-//! `2^49`; additions, subtractions, negations, and doublings return uncarried ones. A
-//! multiplication accepts limbs below `2^52`, so it multiplies sums of up to [`SLACK`] carried
-//! values without carrying them. [`Unsat49::ready`] prepares a multiplicand from a static bound on
-//! its limbs, carrying only when that bound exceeds [`SLACK`]. A subtraction or negation removes
-//! values whose limbs are at most twice those of a carried value.
-//!
-//! Carrying preserves the represented integer; multiplication is what reduces modulo `p`, and
-//! [`Unsat49::store`] returns canonical elements from any value. A subtraction or negation bias
-//! `K` must exceed the bound of the value it removes.
-//!
-//! # Bounds
-//!
-//! Each value carries two debug-only bound counters: an integer bound in units of `p`, and a
-//! limb bound in units of `2^49`. For integer bounds `A` and `B` and limb bounds `L` and `M`:
-//!
-//! | Operation | Requires | Integer bound | Limb bound |
-//! |---|---|---|---|
-//! | load, splat | | `2` | `1` |
-//! | `a + b` | | `A + B` | `L + M` |
-//! | `a - b` with bias `K` | `M <= 2`, `B < K` | `A + K` | `L + 3` |
-//! | `-a` with bias `K` | `L <= 2`, `A < K` | `K` | `3` |
-//! | carry | | `A` | `1` |
-//! | `a * b` | `L, M <= SLACK` | `ceil(A * B / LIMIT) + 1` | `1` |
-//!
-//! Every integer bound is at most [`LIMIT`], so values fit carried limbs because `p < 2^381`.
-//! Every limb bound is below `2^15`, so carries fit the 64-bit lanes. Multiplication returns below
-//! `a * b / 2^392 + p`, and `p / 2^392 < 1 / LIMIT`. Debug builds check these rules; release
-//! builds do not, and results are unspecified when a formula violates them.
+//! The limits keep the arithmetic exact. Every integer bound is at most [`LIMIT`], so values fit
+//! carried limbs because `p < 2^381`. Every limb bound is below `2^15`, so carries fit the 64-bit
+//! lanes. Multiplication returns below `a * b / 2^392 + p`, and `p / 2^392 < 1 / LIMIT`, which
+//! gives the product bound `ceil(A * B / LIMIT) + 1`.
 
 use super::{
     super::arithmetic::Field, BYTES, MAX_LANES, MODULUS, WORDS, bytes_from_words, power_of_two,
@@ -111,8 +97,6 @@ const fn bias(k: u64) -> [u64; LIMBS] {
 }
 
 /// `S::U64_LANES` base field elements in radix `2^49` Montgomery form, one per lane.
-///
-/// See the [module documentation](self) for the layout and the bounds every value satisfies.
 pub struct Unsat49<S: Simd> {
     limbs: [S::U64; LIMBS],
     bound: DebugCounter,
@@ -287,7 +271,6 @@ impl<S: Simd> Field<S> for Unsat49<S> {
     type Product = Self;
     const PRODUCTS: usize = 8;
 
-    /// Loads up to `S::U64_LANES` elements, one per lane, filling the remaining lanes with `fill`.
     #[inline(always)]
     fn load(simd: S, elements: &[[u8; BYTES]], fill: &[u8; BYTES]) -> Self {
         let mut lanes = [limbs_from_words(words_from_bytes(fill)); MAX_LANES];
@@ -298,7 +281,6 @@ impl<S: Simd> Field<S> for Unsat49<S> {
         Self::raw(simd, &lanes, 10).to_lanes(simd)
     }
 
-    /// Stores the canonical value of each lane into `elements`, dropping lanes beyond its length.
     #[inline(always)]
     fn store(self, simd: S, elements: &mut [[u8; BYTES]]) {
         let canonical = self
