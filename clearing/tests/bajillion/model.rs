@@ -64,13 +64,15 @@
 //! a state built on a map whose close awaits its post, a request admitted in the epoch after its
 //! own and its copy refused after its own epoch settled it, a retry acknowledged, a post settling
 //! an unacknowledged request, a post dropping a request whose next state builds on another row, a
-//! post omitting a map its sender recorded, a payout capped by the balance, a repeated payout or
-//! claim refused, an omitted row challenged, and claims draining the custody.
+//! post omitting a map its sender recorded, an acknowledgement refused after the sender resolved
+//! its epoch, a payout capped by the balance, a repeated payout or claim refused, an omitted row
+//! challenged, and claims draining the custody.
 //!
 //! The workloads reach these parts of the users' and the operator's obligations. The model checks
-//! every request's roots and map (S1). The sender verifies acknowledgements (S2). The model decides
-//! from the copies it sent when a sender drops a refused request (S4). Senders resolve posts in
-//! order, and the model predicts what each post settled for the sender (S5).
+//! every request's roots and map (S1). The sender verifies acknowledgements and refuses one for an
+//! epoch whose post it already resolved (S2). The model decides from the copies it sent when a
+//! sender drops a refused request (S4). Senders resolve posts in order, and the model predicts what
+//! each post settled for the sender (S5).
 //!
 //! The operator admits on both sides of a cut (O2, O4, O6), checks spendable balances (O3), and
 //! applies one close per epoch at its cut (O8). Receivers take receipts in acknowledgement order
@@ -1240,12 +1242,15 @@ impl Model for Workload {
                 let user = sent.user;
                 let current = world.pending[user] == Some(reply.request);
                 match reply.acknowledgement {
-                    // An acknowledgement of the pending request countersigns one of its states
-                    // and yields a receipt for each receiver of the batch (S2, S3).
+                    // An acknowledgement of the pending request countersigns one of its states and
+                    // yields a receipt for each receiver of the batch (S2, S3). A post is final for
+                    // its epoch, so the sender refuses a state of an epoch whose post it resolved
+                    // and keeps the request pending (S2).
                     Some((epoch, acknowledgement)) => {
+                        let closed = epoch <= world.resolved[user];
                         let outcome = world.senders[user].acknowledged(&acknowledgement);
                         match outcome {
-                            Ok(receipts) if current => {
+                            Ok(receipts) if current && !closed => {
                                 let map = self.map_of(&world, &world.countersigned, epoch, user);
                                 let expected =
                                     Amounts::combine(&map, &sent.request.0.batch).unwrap();
@@ -1267,6 +1272,9 @@ impl Model for Workload {
                                 for receipt in receipts {
                                     self.receive(&mut world, receipt);
                                 }
+                            }
+                            Err(Sending::Closed) if current && closed => {
+                                self.witness("an acknowledgement of a resolved epoch is refused");
                             }
                             Err(Sending::NotPending | Sending::InvalidAcknowledgement)
                                 if !current => {}
@@ -1852,6 +1860,7 @@ fn test_model_rebuilds_on_the_posted_row() {
             "a state builds on a map whose close awaits its post",
             "a post drops a request whose next state builds on another row",
             "a post omits a map its sender recorded",
+            "an acknowledgement of a resolved epoch is refused",
         ],
     );
 }

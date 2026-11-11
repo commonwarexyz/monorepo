@@ -480,6 +480,33 @@ fn test_post_before_request_epoch_keeps_it_pending() {
     assert_eq!(alice.pending(), Some(&request));
 }
 
+/// A post is final for its epoch, so an acknowledgement that arrives after it records nothing (S2).
+/// The operator countersigns alice's request and forgets the admission before its cut. The post
+/// leaves the request pending for the next epoch, and the late acknowledgement is refused.
+#[test]
+fn test_acknowledgement_after_the_post_records_nothing() {
+    let mut operator = operator();
+    fund(&mut operator, &[(0, 100)]);
+    let mut alice = sender(0);
+
+    // The operator countersigns the request, then forgets the admission before its cut.
+    let request = alice.send(2, amounts(&[(1, 5)])).unwrap();
+    let late = operator.accept(&request).unwrap();
+    operator.forget(&account(0));
+    let posted = close(&mut operator);
+    assert!(posted.rows().is_empty());
+
+    // The close has no row of hers and she recorded no map of epoch 2. Her state of epoch 3 builds
+    // on the empty map, so the request stays pending.
+    let (root, opening) = open_row(&posted, 0);
+    assert_eq!(alice.posted(2, &root, &opening).unwrap(), Outcome::Match);
+
+    // The acknowledgement of her state of epoch 2 arrives after the post and records nothing.
+    assert!(matches!(alice.acknowledged(&late), Err(Sending::Closed)));
+    assert_eq!(alice.pending(), Some(&request));
+    assert_eq!(alice.payments(2), None);
+}
+
 /// A refusal of a request in its own epoch does not retire its state for the next epoch (S4). Once
 /// the close settles the map that state builds on, a replayed copy is admitted if the sender can
 /// afford it. A request for another batch then fails, and a request for the same batch repeats the

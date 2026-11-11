@@ -176,8 +176,9 @@
 //!   map settled.
 //!
 //! - **S2.** Record a map as countersigned only once [State::verify_acknowledgement] accepts the
-//!   operator's acknowledgement of its state. Otherwise the sender's record diverges as in S1, and
-//!   its receivers reject the receipts.
+//!   operator's acknowledgement of its state, and only before resolving the post of that state's
+//!   epoch (S5). Otherwise the sender's record diverges as in S1 or holds a map the post did not
+//!   settle, and its receivers reject the receipts.
 //!
 //! - **S3.** Persist each request with its [States] before sending it. On an acknowledgement,
 //!   persist the state, both signatures, and the map in one write that clears the request, before

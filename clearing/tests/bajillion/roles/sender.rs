@@ -25,6 +25,9 @@ pub enum Refusal {
     /// The acknowledgement countersigns none of the pending request's states.
     #[error("the acknowledgement countersigns none of the pending request's states")]
     InvalidAcknowledgement,
+    /// The sender already resolved the post of the acknowledged state's epoch.
+    #[error("the sender already resolved the post of the acknowledged state's epoch")]
+    Closed,
     /// The sender holds no acknowledged state of the epoch.
     #[error("the sender holds no acknowledged state of the epoch")]
     NotAcknowledged,
@@ -278,8 +281,9 @@ impl<S: Signer, O: PublicKey, H: Hasher, A: Amount> Sender<S, O, H, A> {
     }
 
     /// Records the pending state the operator countersigned, with both signatures and its map, in
-    /// one write that also clears the request (S2, S3). Only then returns a receipt for each
-    /// receiver of its batch.
+    /// one write that also clears the request (S2, S3). Only then does it return a receipt for each
+    /// receiver of its batch. A state of an epoch whose post the sender resolved is refused, and
+    /// the request stays pending.
     #[allow(clippy::type_complexity)]
     pub fn acknowledged(
         &mut self,
@@ -309,8 +313,15 @@ impl<S: Signer, O: PublicKey, H: Hasher, A: Amount> Sender<S, O, H, A> {
             })
             .ok_or(Refusal::InvalidAcknowledgement)?;
 
-        // One write records the state and clears the request before any receipt is issued (S3).
+        // A post is final for its epoch, so a state of an epoch whose post the sender resolved is
+        // not recorded, and the request stays pending (S2).
         let epoch = countersigned.state.epoch;
+        let resolved = self.persisted.posted.keys().next_back();
+        if resolved.is_some_and(|resolved| epoch <= *resolved) {
+            return Err(Refusal::Closed);
+        }
+
+        // One write records the state and clears the request before any receipt is issued (S3).
         self.persisted.countersigned.insert(epoch, countersigned);
         self.persisted.pending = None;
         self.receipts(epoch, receivers)
@@ -407,7 +418,9 @@ impl<S: Signer, O: PublicKey, H: Hasher, A: Amount> Sender<S, O, H, A> {
 
     /// Forgets the countersigned states and posted roots of epochs before `epoch`. The next request
     /// builds on what the sender recorded for the epoch before its own, so `epoch` must be at most
-    /// that epoch. The pending request keeps the maps it extends in its states.
+    /// that epoch. The pending request keeps the maps it extends in its states. The last post
+    /// resolved tells [Self::acknowledged] which states are closed, so `epoch` must also be at most
+    /// that post's epoch.
     pub fn prune(&mut self, epoch: Epoch) {
         self.persisted.countersigned = self.persisted.countersigned.split_off(&epoch);
         self.persisted.posted = self.persisted.posted.split_off(&epoch);
