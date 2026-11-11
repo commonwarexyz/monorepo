@@ -1,4 +1,7 @@
 //! Elliptic curve arithmetic on several points at once, one per vector lane.
+//!
+//! The group kernels use [`Points`], which [`g1::Point`] and [`g2::Point`] implement. Each of
+//! those modules states the coordinate bounds its formulas accept and return.
 
 use commonware_simd::Simd;
 
@@ -27,10 +30,10 @@ pub trait Points<S: Simd>: Copy {
     /// per lane, without any conversion.
     fn load_raw(simd: S, points: &[&Self::Raw]) -> Self;
 
-    /// Returns `self + rhs`.
+    /// Returns `self + rhs` for any points, including the identity and equal points.
     fn add(self, simd: S, rhs: Self) -> Self;
 
-    /// Returns `2 * self`.
+    /// Returns `2 * self` for any point, including the identity.
     fn double(self, simd: S) -> Self;
 
     /// Returns `rhs` in every lane whose bit is set in `lanes`, and `self` in the others.
