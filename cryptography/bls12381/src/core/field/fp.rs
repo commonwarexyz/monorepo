@@ -167,7 +167,7 @@ const fn bias<const N: usize, const BITS: u32>(k: u64) -> [u64; N] {
 
 /// Reference arithmetic on canonical integers, for testing representations.
 ///
-/// Its field operations are the [`montgomery`] functions of the scalar field, which
+/// Its field operations are the [`montgomery`] functions it shares with the scalar field, which
 /// [`Plan::Arithmetic`](crate::montgomery::fuzz::Plan::Arithmetic) checks independently.
 #[cfg(any(test, feature = "fuzz"))]
 pub(crate) mod reference {
@@ -232,13 +232,23 @@ pub(crate) mod reference {
     }
 
     /// Returns the residue of a big-endian integer.
-    pub(crate) fn reduce(bytes: &[u8; BYTES]) -> Element {
+    pub(crate) fn decode(bytes: &[u8; BYTES]) -> Element {
         mul(words_from_bytes(bytes), ONE)
     }
 
     /// Returns the big-endian encoding of a canonical integer.
-    pub(crate) fn to_bytes(a: Element) -> [u8; BYTES] {
-        bytes_from_words(&a)
+    pub(crate) const fn encode(a: Element) -> [u8; BYTES] {
+        super::encode(a)
+    }
+
+    /// Returns the residue of a big-endian integer, as [`decode`].
+    pub(crate) fn reduce(bytes: &[u8; BYTES]) -> Element {
+        decode(bytes)
+    }
+
+    /// Returns the big-endian encoding of a canonical integer, as [`encode`].
+    pub(crate) const fn to_bytes(a: Element) -> [u8; BYTES] {
+        encode(a)
     }
 
     /// Draws a canonical integer: one below `2^381`, mapping integers at or above `p` to zero.
@@ -262,8 +272,8 @@ pub(crate) mod reference {
         assert_eq!(mul(two, invert(two)), ONE);
         assert_eq!(sub(ZERO, ONE), neg(ONE));
         assert_eq!(add(neg(ONE), ONE), ZERO);
-        assert_eq!(reduce(&bytes_from_words(&MODULUS)), ZERO);
-        assert_eq!(words_from_bytes(&to_bytes(MODULUS)), MODULUS);
+        assert_eq!(decode(&bytes_from_words(&MODULUS)), ZERO);
+        assert_eq!(words_from_bytes(&encode(MODULUS)), MODULUS);
     }
 }
 
@@ -314,7 +324,7 @@ pub(crate) mod testing {
 
     /// Draws a canonical element, the residue of [`bytes`].
     pub(crate) fn element(u: &mut Unstructured<'_>) -> arbitrary::Result<Element> {
-        Ok(reference::reduce(&bytes(u)?))
+        Ok(reference::decode(&bytes(u)?))
     }
 
     /// An emulated backend. Together they cover every lane count and algorithm path that dispatch
@@ -842,7 +852,7 @@ pub(crate) mod testing {
         result.store(simd, &mut stored);
         for (lane, stored) in stored.iter().enumerate() {
             let expected = case.expected::<S, F>(a[lane], b[lane]);
-            assert_eq!(*stored, reference::to_bytes(expected), "{}", label(lane));
+            assert_eq!(*stored, reference::encode(expected), "{}", label(lane));
         }
         Ok(())
     }

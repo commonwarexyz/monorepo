@@ -732,14 +732,14 @@ pub mod fuzz {
     ) -> arbitrary::Result<(F, Vec<Element>)> {
         if u.int_in_range(0..=3)? == 1 {
             let fill = testing::bytes(u)?;
-            let residues = vec![reference::reduce(&fill); F::LANES];
+            let residues = vec![reference::decode(&fill); F::LANES];
             return Ok((F::load(simd, &[], &fill), residues));
         }
         let mut lanes = Vec::with_capacity(F::LANES);
         for _ in 0..F::LANES {
             lanes.push(testing::bytes(u)?);
         }
-        let residues = lanes.iter().map(reference::reduce).collect();
+        let residues = lanes.iter().map(reference::decode).collect();
         Ok((F::load(simd, &lanes, &[0; BYTES]), residues))
     }
 
@@ -755,7 +755,7 @@ pub mod fuzz {
         for (lane, output) in output.iter().enumerate() {
             assert_eq!(
                 *output,
-                reference::to_bytes(expected(lane)),
+                reference::encode(expected(lane)),
                 "{label} on {}, lane {lane}",
                 type_name::<F>()
             );
@@ -783,8 +783,8 @@ pub mod fuzz {
         for (lane, stored) in stored.iter().enumerate() {
             let expected = match lane {
                 lane if lane >= lanes => sentinel,
-                lane if lane < count => reference::to_bytes(reference::reduce(&elements[lane])),
-                _ => reference::to_bytes(reference::reduce(&fill)),
+                lane if lane < count => reference::encode(reference::decode(&elements[lane])),
+                _ => reference::encode(reference::decode(&fill)),
             };
             assert_eq!(
                 *stored,
