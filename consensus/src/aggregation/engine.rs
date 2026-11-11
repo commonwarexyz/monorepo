@@ -950,8 +950,8 @@ impl<
             replay_buffer: self.journal_replay_buffer,
         };
 
-        // Replay rebuilds the engine's in-memory state, so journal pages need
-        // not remain in the OS page cache.
+        // Replay rebuilds the engine's in-memory state, so journal pages don't need to stay in
+        // the OS page cache.
         Journal::init(self.context.child("journal"), cfg, ReadOptions::DONT_CACHE)
             .await
             .expect("init failed")

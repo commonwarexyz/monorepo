@@ -27,8 +27,8 @@
 //! Each physical page ends in a two-slot CRC record. The slots let a partial page be rewritten
 //! without clobbering its last durable contents, so an interrupted write loses at most unsynced
 //! bytes. [Writer::new] backs up over any trailing bytes not covered by a valid checksum,
-//! treating them as an incomplete write. It also zeroes any checksum slot such a write left
-//! behind, so a later interrupted write cannot bring those bytes back.
+//! treating them as an incomplete write. On a partial last page, it also zeroes a checksum slot
+//! that such a write left behind, so a later interrupted write cannot bring those bytes back.
 //!
 //! # Recovery
 //!

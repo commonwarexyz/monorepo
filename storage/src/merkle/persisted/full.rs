@@ -872,9 +872,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         // A failed node journal sync must surface before the metadata is removed.
         let merkle = self.wait_for_sync().await?;
 
-        // Remove the metadata first. A journal that outlives the interruption reopens whole while
-        // its start is still zero and is discarded by prepare once pruned, since its pins went with
-        // the metadata; either way a retried destroy empties the store.
+        // Remove the metadata first. A node journal that outlives an interruption reopens whole
+        // while its start is still zero. Once pruned, prepare discards it because its pins went
+        // with the metadata. Either way, a retried destroy empties the store.
         merkle.metadata.destroy().await?;
         merkle.journal.destroy().await?;
         Ok(())

@@ -636,11 +636,10 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             }
         }
 
-        // Initialize oversized journal. A checkpoint is only published after the
-        // oversized journal is durably synced (see Self::sync), so recovery restores
-        // exactly the checkpointed state: committed data it covers cannot be silently
-        // repaired away, and anything beyond it is discarded. A reset restores the empty
-        // checkpoint over the wiped partitions.
+        // Initialize the oversized journal. Self::sync returns a checkpoint only after the
+        // oversized journal is durable, so recovery restores exactly the checkpointed state. It
+        // never repairs away committed data the checkpoint covers, and it discards anything beyond
+        // it. A reset restores the empty checkpoint over the wiped partitions.
         let oversized_cfg = OversizedConfig {
             index_partition: config.key_partition.clone(),
             value_partition: config.value_partition.clone(),

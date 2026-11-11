@@ -107,7 +107,8 @@ pub trait Database: Sized + Send {
     /// The engine calls this when the sync journal it opens holds no operation of the target's
     /// range, before it appends any fetched operation. State derived from operations the journal
     /// held earlier would otherwise be read as describing the operations fetched in their place.
-    /// Implementations that persist no state beside the journal must explicitly return `Ok(())`.
+    /// Implementations with no persisted state that would be read that way must explicitly
+    /// return `Ok(())`.
     fn discard_local_state(
         context: Self::Context,
         config: &Self::Config,

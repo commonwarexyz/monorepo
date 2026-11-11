@@ -434,9 +434,9 @@ impl<E: Context, I: Record, V: CodecShared> Pending<E, I, V> {
         Ok(self)
     }
 
-    /// Truncate each section's values to the end of its last index entry. Bytes past it are left
-    /// when replay repairs index pages or validation truncates a section at its first invalid
-    /// value.
+    /// Truncate each section's values to the end of its last index entry, then remove value
+    /// sections that have no index section. Values extend past the last entry when replay repairs
+    /// index pages or validation truncates a section at its first invalid value.
     async fn align_values_to_index(mut self) -> Result<Self, Error> {
         let sections = self.index.sections().collect::<Vec<_>>();
         let mut value_truncations = BTreeMap::new();
@@ -458,7 +458,7 @@ impl<E: Context, I: Record, V: CodecShared> Pending<E, I, V> {
 
     /// Reconcile durable markers with the retained state after tracked startup recovery.
     ///
-    /// Markers rise to each section's replayed length without syncing the data journals: the
+    /// Markers rise to each section's replayed length without syncing the data journals. The
     /// retained entries were readable when the run began, which the [commonware_runtime::Storage]
     /// durability contract makes crash-durable, and recovery truncations are durable before this
     /// runs. Returns the published tracked journal.
@@ -503,20 +503,17 @@ impl<E: Context, I: Record, V: CodecShared> Pending<E, I, V> {
 }
 
 impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
-    /// Initialize with crash recovery restoring a durable checkpoint, as
-    /// `(section, index size)`.
+    /// Initialize with crash recovery restoring a durable `(section, index size)` checkpoint.
     ///
-    /// Recovery keeps exactly the checkpointed state: each section below `section` is
-    /// adopted at its validated terminal boundary, `section` is truncated to `index
-    /// size`, and everything after it is removed. Value sections older than the oldest
-    /// retained index section, which a prune interrupted between its index and value
-    /// removals leaves behind, are removed as well. A missing or damaged boundary the
-    /// checkpoint covers fails init with [Error::Corruption], while interior damage
-    /// below a boundary surfaces lazily as read errors.
+    /// Recovery keeps exactly the checkpointed state. Each section below `section` is adopted at
+    /// its validated terminal boundary, `section` is truncated to `index size`, and everything
+    /// after it is removed. A prune interrupted between its index and value removals can leave
+    /// value sections older than the oldest retained index section, and recovery removes them too.
+    /// A missing or damaged boundary the checkpoint covers fails init with [Error::Corruption], and
+    /// interior damage below a boundary surfaces lazily as read errors.
     ///
-    /// Callers must only provide a checkpoint that was durably synced before it was
-    /// published (see [crate::freezer::Freezer]). The empty checkpoint `(0, 0)` opens
-    /// empty storage without creating or writing any blob.
+    /// Callers must only provide a checkpoint that was durably synced before it was published. The
+    /// empty checkpoint `(0, 0)` opens empty storage without creating or writing any blob.
     pub async fn init_with_checkpoint(
         context: E,
         cfg: Config<V::Cfg>,
@@ -639,9 +636,9 @@ impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
 
     /// Start a joint data sync and publish only previously completed tracked boundaries.
     ///
-    /// The returned handle covers only the requested data syncs. Marker generations trail
-    /// data durability by design, and a marker failure surfaces as [Error::Metadata] when a
-    /// later request observes it.
+    /// The returned handle covers only the requested data syncs. Marker generations trail data
+    /// durability, and a marker failure surfaces as [Error::Metadata] when a later request
+    /// observes it.
     pub(crate) async fn start_sync_tracked(
         mut self,
         sections: &BTreeSet<u64>,
@@ -873,14 +870,12 @@ pub struct Recovery<E: Context, I: Record, V: Codec> {
 }
 
 impl<E: Context, I: Record, V: CodecShared> Recovery<E, I, V> {
-    /// Returns the next `(section, position, entry)`, or `None` once every section is
-    /// exhausted.
+    /// Returns the next `(section, position, entry)`, or `None` once every section is exhausted.
     ///
-    /// An index error ends the section that produced it, and iteration continues with
-    /// the next section. A value-verification error is returned without ending its
-    /// section and dooms the recovery: finishing it fails with
-    /// [Error::ReplayFailed]. Errors while mutating storage to repair a section end the
-    /// replay. Dropping a pending call also ends it. The next call returns
+    /// An index error ends the section that produced it, and iteration continues with the next
+    /// section. A value-verification error is returned without ending its section, and finishing
+    /// the recovery then fails with [Error::ReplayFailed]. Errors while mutating storage to repair
+    /// a section end the replay. Dropping a pending call also ends it. The next call returns
     /// [Error::ReplayInterrupted] and [Recovery::finish] fails.
     pub async fn next(&mut self) -> Option<Result<(u64, u64, I), Error>> {
         if self.interrupted {
@@ -5401,7 +5396,7 @@ mod tests {
                         let (offset, size) = entry.value_location();
                         assert_eq!(
                             journal.get_value(section, offset, size).await.unwrap(),
-                            [u8::try_from(entry.id).expect("id fits in a byte"); 16],
+                            [u8::try_from(entry.id).expect("id must fit in a byte"); 16],
                             "a retained entry must read back its value"
                         );
                     }

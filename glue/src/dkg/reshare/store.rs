@@ -178,8 +178,8 @@ where
         replay_buffer: NonZeroUsize,
         mut secret_store: SS,
     ) -> Self {
-        // Replay rebuilds the epoch caches in memory, so journal pages need
-        // not remain in the OS page cache.
+        // Replay rebuilds the epoch caches in memory, so journal pages don't need to stay in the
+        // OS page cache.
         let mut replay = Journal::init(
             context.child("events"),
             JournalConfig {

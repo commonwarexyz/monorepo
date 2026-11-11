@@ -293,7 +293,7 @@ async fn recover_expected(
         // completed joint sync, every frame below it must be in bounds and valid (frame validity
         // implies the value boundary).
         let floor = usize::try_from(floors.get(&section).copied().unwrap_or(0))
-            .expect("oracle floor overflow");
+            .expect("marker floor must fit in usize");
         assert!(
             floor <= records.len(),
             "marker exceeds the durable index boundary in section {section}"
@@ -360,7 +360,7 @@ async fn assert_view(
             let (offset, size) = entry.value_location();
             let value = oversized.get_value(section, offset, size).await;
             assert_eq!(
-                value.expect("retained value missing"),
+                value.expect("retained value must be readable"),
                 [id as u8; 16],
                 "retained value changed"
             );

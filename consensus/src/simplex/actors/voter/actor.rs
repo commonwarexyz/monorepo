@@ -1066,8 +1066,8 @@ impl<
         let mut vote_sender = WrappedSender::new(vote_sender);
         let mut certificate_sender = WrappedSender::new(certificate_sender);
 
-        // Open the journal. Replayed artifacts become in-memory state, so journal
-        // pages need not remain in the OS page cache.
+        // Open the journal. Replayed artifacts become in-memory state, so journal pages don't
+        // need to stay in the OS page cache.
         let mut replay = Journal::<_, Artifact<S, D>>::init(
             self.context.child("journal"),
             JConfig {

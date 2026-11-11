@@ -126,7 +126,8 @@ pub struct Config<C> {
     /// The size of the write buffer to use for each blob.
     pub write_buffer: NonZeroUsize,
 
-    /// The size of the buffer used to replay each blob during [Journal::init].
+    /// The size of the buffer used to replay each blob through the [Recovery] that
+    /// [Journal::init] returns.
     pub replay_buffer: NonZeroUsize,
 }
 
@@ -401,10 +402,10 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
 /// [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
 /// and
 /// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
-/// the first invalid data read will be considered the new end of the journal (and the
-/// underlying [Blob] will be truncated to the last valid item). Because any blob could have
-/// trailing bytes, [Journal::init] returns a [Recovery] that replays and repairs every section
-/// from its start, and the journal is available only once that replay completes.
+/// the first invalid data read will be considered the new end of the journal (and the underlying
+/// [Blob] will be truncated to the last valid item). Because any blob could have trailing bytes,
+/// [Journal::init] returns a [Recovery] that replays and repairs every section from its start, and
+/// the journal is available only once that replay completes.
 ///
 /// Mutating functions consume the journal and return it only on success: an error (or a dropped
 /// future) destroys the handle. Mutations on pruned sections fail with
@@ -846,7 +847,8 @@ impl<E: Storage + Metrics, V: CodecShared> Recovery<E, V> {
     /// Returns the journal.
     ///
     /// Fails with [Error::ReplayFailed] when the recovery was not fully drained, yielded an
-    /// error, or was interrupted: the journal is destroyed and the owner must initialize again.
+    /// error, or was interrupted. The journal is then destroyed and the owner must initialize
+    /// again.
     pub fn finish(self) -> Result<Journal<E, V>, Error> {
         if self.in_progress || self.errored || !self.finished {
             return Err(Error::ReplayFailed);
@@ -2485,13 +2487,13 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Write incomplete varint: 0xFF has continuation bit set, needs more bytes
-            // This creates 2 trailing bytes that cannot form a valid item
+            // Leave two raw bytes past the last physical page. Opening the blob trims a partial
+            // physical page, so they are gone before replay decodes any item.
             blob.write_at(physical_size_before, vec![0xFF, 0xFF], WriteOptions::SYNC)
                 .await
                 .unwrap();
 
-            // Reopen journal and replay every item before the trailing corrupt bytes
+            // Reopen journal and replay every item before the trailing bytes
             {
                 drop(blob);
                 let mut replay = Journal::<_, i32>::init(
@@ -2502,7 +2504,7 @@ mod tests {
                 .await
                 .unwrap();
 
-                // Consume the reader - should detect trailing bytes and truncate
+                // Replay yields every item appended before the trailing bytes
                 let mut items = Vec::new();
                 while let Some(result) = replay.next().await {
                     items.push(result.unwrap().3);

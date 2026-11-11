@@ -620,7 +620,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     }
 
     /// Validate the terminal boundary of every checkpoint-covered section without mutating
-    /// damage. Interior pages are not read.
+    /// storage. Interior pages are not read.
     pub async fn preflight_restore(
         context: E,
         cfg: Config,

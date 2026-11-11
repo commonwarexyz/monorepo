@@ -80,8 +80,8 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
     fn try_destroy(
         db: Self::Db,
     ) -> impl Future<Output = Result<(), qmdb::Error<Self::Family>>> + Send;
-    /// Returns the configuration of the Merkle structure that the database `config` names
-    /// persists.
+    /// Returns the configuration of the Merkle structure persisted by the database that `config`
+    /// names.
     fn merkle_config(config: &ConfigOf<Self>) -> merkle::full::Config<Sequential>;
     /// Makes every applied operation of `db` durable.
     fn db_sync(db: Self::Db) -> impl Future<Output = Self::Db> + Send;
@@ -1009,7 +1009,7 @@ pub(crate) fn test_sync_source_fails<H: SyncTestHarness>() {
 /// Operations in each batch that the interrupted-destroy tests apply.
 pub(crate) const INTERRUPTED_DESTROY_OPS: usize = 300;
 
-/// Least sync boundary of a database that [`prune_to_sync_boundary`] returns.
+/// Minimum sync boundary of a database that [`prune_to_sync_boundary`] returns.
 const PRUNED_SYNC_BOUNDARY: u64 = 64;
 
 /// Raises the sync boundary of `db` to at least [`PRUNED_SYNC_BOUNDARY`], applying the operations
