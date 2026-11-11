@@ -23,6 +23,9 @@ use core::{
 
 /// An element of G2, the subgroup of prime order `r` of the curve `y^2 = x^3 + 4 (1 + i)` over
 /// the quadratic extension.
+///
+/// Equal elements can hold different projective coordinates, so compare elements with `==`
+/// rather than through their `Debug` output.
 #[derive(Clone, Copy)]
 pub struct G2(Coordinates);
 
@@ -154,8 +157,9 @@ impl Space<Scalar> for G2 {
     /// Returns the sum of the points times their scalars, in variable time.
     ///
     /// The scalars must be public, as Lagrange coefficients and batch-verification weights are:
-    /// the running time and memory accesses depend on them. A sequential strategy runs one kernel
-    /// over all points, and a parallel one splits them into batches of a few hundred points.
+    /// the running time and memory accesses depend on them. A parallel strategy may split the
+    /// points into batches of at least 256, so fewer than 512 points always run on the calling
+    /// thread.
     fn msm(points: &[Self], scalars: &[Scalar], strategy: &impl Strategy) -> Self {
         msm::batched(points, scalars, strategy)
     }
@@ -177,16 +181,16 @@ impl G2 {
 
     /// Returns the sum of the elements, as when aggregating keys or signatures.
     ///
-    /// Adds one element per lane, so it costs far less than adding them one at a time.
+    /// Costs less per element than adding the elements one at a time with `+`.
     pub fn sum(elements: &[Self]) -> Self {
         Sum(elements).dispatch()
     }
 
-    /// Multiplies each element by the scalar at the same index, in place, without branching on
-    /// the scalars.
+    /// Multiplies each element by the scalar at the same index, in place, in time independent of
+    /// the scalars' values.
     ///
-    /// Multiplies one element per lane. Elements beyond the scalars are unchanged, and scalars
-    /// beyond the elements are ignored.
+    /// Elements beyond the scalars are unchanged, and scalars beyond the elements are ignored.
+    /// Costs less per element than multiplying the elements one at a time with `*`.
     pub fn mul_each(elements: &mut [Self], scalars: &[Scalar]) {
         MultiplyEach { elements, scalars }.dispatch();
     }
