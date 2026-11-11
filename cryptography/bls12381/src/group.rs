@@ -11,42 +11,11 @@ mod scalar;
 mod vectors;
 
 use commonware_formatting::Hex;
-use commonware_math::algebra::Additive;
-use commonware_parallel::Strategy;
-use core::{fmt, num::NonZeroUsize};
+use core::fmt;
 pub use g1::G1;
 pub use g2::G2;
-use kernel::{Group, Kernel};
-use msm::Msm;
 pub use pairing::{GT, multi_pairing, pairing, pairings};
 pub use scalar::Scalar;
-
-/// Fewest elements of [`msm()`] that a parallel strategy gives one kernel. Every kernel pays for
-/// its own bucket sums and doublings, which cost about as much as adding a few hundred elements.
-const MSM_BATCH: NonZeroUsize = NonZeroUsize::new(256).unwrap();
-
-/// Returns the sum of the points times their scalars, in variable time, through one kernel per
-/// batch of at least [`MSM_BATCH`] points that the strategy runs.
-fn msm<G: Group + Additive>(points: &[G], scalars: &[Scalar], strategy: &impl Strategy) -> G {
-    let count = points.len().min(scalars.len());
-    let (points, scalars) = (&points[..count], &scalars[..count]);
-    strategy.run_batches(count, MSM_BATCH, 1, |batches| {
-        batches
-            .map_collect_vec(
-                |ranges| ranges,
-                |range| {
-                    Msm {
-                        elements: &points[range.clone()],
-                        scalars: &scalars[range],
-                        method: None,
-                    }
-                    .dispatch()
-                },
-            )
-            .iter()
-            .fold(G::zero(), |sum, batch| sum + batch)
-    })
-}
 
 /// Formats the projective coordinates of an element of the group `name`.
 fn fmt_coordinates<const N: usize>(
@@ -65,9 +34,9 @@ fn fmt_coordinates<const N: usize>(
 #[cfg(any(test, feature = "fuzz"))]
 pub mod fuzz {
     use super::{
-        MSM_BATCH, Scalar,
+        Scalar,
         kernel::{Add, Double, Group, Kernel, Multiply, MultiplyEach, Sum},
-        msm::{self, Msm},
+        msm::{self, MSM_BATCH, Msm},
     };
     pub use super::{pairing::fuzz as pairing, scalar::fuzz as scalar};
     use crate::core::{
