@@ -277,6 +277,17 @@ where
         .await?;
         let journal_size = journal.size();
 
+        // A journal that resumes nothing holds none of the operations that persisted local
+        // state was derived from. That state is discarded before any fetched operation is
+        // appended, so it cannot be read as describing the operations fetched in their place.
+        if journal_size == config.target.range.start() {
+            DB::discard_local_state(
+                config.context.child("discard_local_state"),
+                &config.db_config,
+            )
+            .await?;
+        }
+
         // The sync journal is the source of truth for resume. If it already
         // reaches the target, try to recover the target's pinned nodes from local
         // Merkle state before asking peers for them. Partial journals resume without
@@ -769,13 +780,17 @@ pub(crate) mod tests {
     use crate::{
         merkle::{Proof, mmr::Family as MmrFamily},
         qmdb::sync::{
-            harness::{DbOf, OpOf, SyncTestHarness},
+            harness::{
+                DbOf, INTERRUPTED_DESTROY_OPS, InterruptedDestroy, OpOf, SyncTestHarness,
+                interrupt_destroy, prune_to_sync_boundary,
+            },
             source::{self, tests::FailSource},
         },
     };
     use commonware_cryptography::{Sha256, sha256};
     use commonware_runtime::{Runner as _, deterministic};
     use commonware_utils::{NZU64, NZUsize, non_empty_range};
+    use rand::Rng as _;
     use std::{
         convert::Infallible,
         sync::{
@@ -787,6 +802,7 @@ pub(crate) mod tests {
     #[derive(Clone)]
     struct TestConfig {
         journal_size: u64,
+        local_state_discards: Arc<AtomicUsize>,
         pinned_node_probes: Arc<AtomicUsize>,
     }
 
@@ -861,6 +877,14 @@ pub(crate) mod tests {
             Ok(self)
         }
 
+        async fn discard_local_state(
+            _context: Self::Context,
+            config: &Self::Config,
+        ) -> Result<(), qmdb::Error<Self::Family>> {
+            config.local_state_discards.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
         async fn local_pinned_nodes(
             _context: Self::Context,
             config: &Self::Config,
@@ -917,6 +941,7 @@ pub(crate) mod tests {
             apply_batch_size: NZU64!(1),
             db_config: TestConfig {
                 journal_size,
+                local_state_discards: Arc::new(AtomicUsize::new(0)),
                 pinned_node_probes,
             },
             update_rx: None,
@@ -1226,6 +1251,148 @@ pub(crate) mod tests {
         });
     }
 
+    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+    ///
+    /// A sync into storage whose destroy stopped after emptying the log is stopped once fetched
+    /// operations are durable in its journal, and the sync that restarts over that journal
+    /// completes with the target's roots. The cases vary whether the target's range starts at
+    /// zero and whether the first sync stops with the range partly or wholly fetched.
+    pub(crate) fn pr_5651_regression_sync_restart_after_destroy<H: SyncTestHarness>(
+        pruned: bool,
+        fetched: bool,
+    ) where
+        Arc<DbOf<H>>: SourceFor<DbOf<H>>,
+    {
+        deterministic::Runner::default().start(|mut context| async move {
+            let InterruptedDestroy {
+                target_db,
+                target,
+                canonical_root,
+                db_config,
+            } = InterruptedDestroy::<H>::new(&mut context, pruned, false).await;
+            let config = |context: deterministic::Context| Config {
+                db_config: db_config.clone(),
+                fetch_batch_size: NZU64!(10),
+                target: target.clone(),
+                context,
+                source: target_db.clone(),
+                apply_batch_size: NZU64!(1024),
+                max_outstanding_requests: NZUsize!(1),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+            };
+
+            // Stop the first sync before it builds the database, with its journal durable.
+            let stop = if fetched {
+                target.range.end()
+            } else {
+                target.range.start() + 1
+            };
+            let mut engine: Engine<DbOf<H>, _> =
+                Engine::new(config(context.child("first"))).await.unwrap();
+            while engine.journal.size() < stop {
+                engine = match engine.step().await.unwrap() {
+                    NextStep::Continue(engine) => engine,
+                    NextStep::Complete(_) => panic!("sync completed before it was stopped"),
+                };
+            }
+            engine.journal = engine.journal.sync().await.unwrap();
+            drop(engine);
+
+            // The restarted sync resumes the journal and reaches the target.
+            let synced_db: DbOf<H> = crate::qmdb::sync::sync(config(context.child("second")))
+                .await
+                .unwrap();
+            assert_eq!(H::ops_root(&synced_db), target.root);
+            assert_eq!(H::canonical_root(&synced_db), canonical_root);
+            assert_eq!(H::bounds(&synced_db).end, target.range.end());
+
+            H::destroy(synced_db).await;
+            H::destroy(
+                Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc")),
+            )
+            .await;
+        });
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+    ///
+    /// A sync into storage whose destroy stopped after emptying the log is stopped once a commit
+    /// of the target is durable in its journal, and opening the database then recovers the
+    /// target's state at that commit. The destroyed database was pruned, so what it derived from
+    /// its operations includes Merkle pins and, where the database grafts a bitmap, pruned chunks.
+    pub(crate) fn pr_5651_regression_open_after_stopped_sync<H: SyncTestHarness>()
+    where
+        Arc<DbOf<H>>: SourceFor<DbOf<H>>,
+    {
+        deterministic::Runner::default().start(|mut context| async move {
+            // The target rewrites the same keys before its first commit. A database that derives
+            // its inactivity floor then commits one past every chunk the client pruned, so the
+            // commit is recoverable whether or not those chunks are still recorded.
+            let mut target_db = H::init_db(context.child("target")).await;
+            for _ in 0..3 {
+                let ops = H::create_ops(INTERRUPTED_DESTROY_OPS);
+                target_db = H::apply_ops(target_db, ops, None).await;
+            }
+            let first_commit_end = H::bounds(&target_db).end;
+            let first_commit_root = H::ops_root(&target_db);
+            let first_commit_canonical_root = H::canonical_root(&target_db);
+            let ops = H::create_ops_seeded(INTERRUPTED_DESTROY_OPS, 2);
+            let target_db = H::apply_ops(target_db, ops, None).await;
+            let target = Target {
+                root: H::ops_root(&target_db),
+                range: non_empty_range!(Location::new(0), H::bounds(&target_db).end),
+            };
+            let target_db = Arc::new(target_db);
+
+            // The client pruned a different history before its destroy was interrupted.
+            let db_config = H::config(&context.next_u64().to_string());
+            let local_db = H::init_db_with_config(context.child("local"), db_config.clone()).await;
+            let ops = H::create_ops_seeded(INTERRUPTED_DESTROY_OPS, 1);
+            let local_db = H::apply_ops(local_db, ops, None).await;
+            let local_db = prune_to_sync_boundary::<H>(local_db, 1).await;
+            let local_db = H::db_sync(local_db).await;
+            interrupt_destroy::<H>(&context, local_db, &db_config).await;
+
+            // Stop the sync between the target's commits, with its journal durable.
+            let config = Config {
+                db_config: db_config.clone(),
+                fetch_batch_size: NZU64!(10),
+                target: target.clone(),
+                context: context.child("client"),
+                source: target_db.clone(),
+                apply_batch_size: NZU64!(1024),
+                max_outstanding_requests: NZUsize!(1),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+            };
+            let mut engine: Engine<DbOf<H>, _> = Engine::new(config).await.unwrap();
+            while engine.journal.size() < first_commit_end {
+                engine = match engine.step().await.unwrap() {
+                    NextStep::Continue(engine) => engine,
+                    NextStep::Complete(_) => panic!("sync completed before it was stopped"),
+                };
+            }
+            assert!(engine.journal.size() < target.range.end());
+            engine.journal = engine.journal.sync().await.unwrap();
+            drop(engine);
+
+            // The reopened database holds the first commit under the target's roots.
+            let reopened_db = H::init_db_with_config(context.child("reopened"), db_config).await;
+            assert_eq!(H::bounds(&reopened_db).end, first_commit_end);
+            assert_eq!(H::ops_root(&reopened_db), first_commit_root);
+            assert_eq!(H::canonical_root(&reopened_db), first_commit_canonical_root);
+
+            H::destroy(reopened_db).await;
+            H::destroy(
+                Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc")),
+            )
+            .await;
+        });
+    }
+
     /// Target updates keep fetched operations and keep pinned nodes only while the lower bound is
     /// unchanged. Once the lower bound moves, applying drops batches below it and trims a batch
     /// that straddles it.
@@ -1296,6 +1463,37 @@ pub(crate) mod tests {
                 .unwrap();
 
             assert_eq!(pinned_node_probes.load(Ordering::SeqCst), 0);
+        });
+    }
+
+    #[test]
+    fn new_discards_local_state_when_journal_resumes_nothing() {
+        deterministic::Runner::default().start(|context| async move {
+            let pinned_node_probes = Arc::new(AtomicUsize::new(0));
+            let config = test_engine_config(context, 5, pinned_node_probes.clone());
+            let local_state_discards = config.db_config.local_state_discards.clone();
+            Engine::new(config).await.unwrap();
+
+            assert_eq!(local_state_discards.load(Ordering::SeqCst), 1);
+            assert_eq!(pinned_node_probes.load(Ordering::SeqCst), 0);
+        });
+    }
+
+    #[test]
+    fn new_keeps_local_state_when_journal_resumes() {
+        deterministic::Runner::default().start(|context| async move {
+            // A journal that holds part of the range or all of it resumes operations.
+            for (label, journal_size) in [("partial", 6), ("complete", 10)] {
+                let config = test_engine_config(
+                    context.child(label),
+                    journal_size,
+                    Arc::new(AtomicUsize::new(0)),
+                );
+                let local_state_discards = config.db_config.local_state_discards.clone();
+                Engine::new(config).await.unwrap();
+
+                assert_eq!(local_state_discards.load(Ordering::SeqCst), 0);
+            }
         });
     }
 
