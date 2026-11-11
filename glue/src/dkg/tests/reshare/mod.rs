@@ -263,8 +263,12 @@ fn reshare_e2e_multiple_epochs(#[case] network: Network) {
 #[case::lookup(Network::Lookup)]
 #[test_group("slow")]
 #[test_traced("INFO")]
-fn reshare_e2e_multiple_epochs_rotating_subset(#[case] network: Network) {
+fn reshare_e2e_multiple_epochs_rotating_subset(
+    #[case] network: Network,
+    #[values(0, 5, 7)] seed: u64,
+) {
     successful_reshare_plan_with_schemes(ReshareEngine::with_committee(network, 7, 4), 4)
+        .seed(seed)
         .timeout(Duration::from_secs(90))
         .run()
         .unwrap();
