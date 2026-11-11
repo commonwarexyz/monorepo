@@ -81,10 +81,6 @@ enum PreflightMode {
     Floors {
         /// Logical byte prefix of each section protected by a durable validation marker.
         floors: BTreeMap<u64, u64>,
-
-        /// Highest section the recovery owner may open. Later sections stay unopened until paired
-        /// truncation removes them.
-        ceiling: u64,
     },
 
     /// Restore one checkpoint section and discard every later section.
@@ -155,12 +151,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         context: E,
         cfg: Config,
         minimum_items: &BTreeMap<u64, u64>,
-        ceiling: u64,
     ) -> Result<RecoveryPreflight<E, A>, Error> {
-        assert!(
-            minimum_items.keys().all(|section| *section <= ceiling),
-            "validation floors must not exceed the recovery ceiling"
-        );
         let stored = Self::stored(&context, &cfg).await?;
         let page_size = cfg.page_cache.page_size();
         let mut floors = BTreeMap::new();
@@ -196,7 +187,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
             context,
             cfg,
             boundaries,
-            mode: PreflightMode::Floors { floors, ceiling },
+            mode: PreflightMode::Floors { floors },
         })
     }
 
@@ -306,7 +297,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         // Restore never opens a section above its checkpoint. The truncation below removes those
         // sections unread.
         let (floors, restore, ceiling) = match mode {
-            PreflightMode::Floors { floors, ceiling } => (floors, None, ceiling),
+            PreflightMode::Floors { floors } => (floors, None, u64::MAX),
             PreflightMode::Restore { section, floors } => {
                 let size = floors.get(&section).copied().unwrap_or(0);
                 (floors, Some((section, size)), section)
@@ -675,22 +666,17 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
         let mode = PreflightMode::Floors {
             floors: BTreeMap::new(),
-            ceiling: u64::MAX,
         };
         Ok(Self(Box::new(Inner::init(context, cfg, mode).await?)))
     }
 
     /// Prove validation floors without opening a writer or mutating their blobs.
-    ///
-    /// [RecoveryPreflight::finish] opens only sections through `ceiling`. Panics if a floor lies
-    /// above `ceiling`.
     pub(crate) async fn preflight_floors(
         context: E,
         cfg: Config,
         minimum_items: &BTreeMap<u64, u64>,
-        ceiling: u64,
     ) -> Result<RecoveryPreflight<E, A>, Error> {
-        Inner::preflight_floors(context, cfg, minimum_items, ceiling).await
+        Inner::preflight_floors(context, cfg, minimum_items).await
     }
 
     /// Return the longest item-aligned prefix of `section` within `end` that lies within validated
@@ -709,18 +695,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             .recoverable_prefix_len_at_most(0, end, buffer, ReadOptions::default())
             .await?;
         Ok(recoverable - recoverable % Self::CHUNK_SIZE as u64)
-    }
-
-    /// Truncate the unpublished section and remove later sections during paired initialization.
-    pub(crate) async fn truncate_pending_tail(
-        mut self,
-        section: u64,
-        end: u64,
-    ) -> Result<Self, Error> {
-        self.0.manager = self.0.manager.truncate_pending(section, end).await?;
-        self.0.unrecovered.retain(|candidate| *candidate <= section);
-        self.0.floors.retain(|candidate, _| *candidate <= section);
-        Ok(self)
     }
 
     /// Prove every checkpoint-covered index byte without mutating damage.
@@ -1871,14 +1845,10 @@ mod tests {
             // terminal entry and leaves the ordinary replay pass to inspect the suffix.
             recordings.clear();
             let floors = BTreeMap::from([(1, 16)]);
-            let preflight = Journal::<_, u64>::preflight_floors(
-                context.child("preflight"),
-                cfg,
-                &floors,
-                u64::MAX,
-            )
-            .await
-            .expect("failed to preflight");
+            let preflight =
+                Journal::<_, u64>::preflight_floors(context.child("preflight"), cfg, &floors)
+                    .await
+                    .expect("failed to preflight");
             assert_eq!(recordings.snapshot().reads.len(), 1);
             preflight
                 .finish()
@@ -2025,17 +1995,13 @@ mod tests {
 
             recordings.clear();
             let floors = BTreeMap::from([(1, 2)]);
-            let journal = Journal::<_, Digest>::preflight_floors(
-                context.child("reopen"),
-                cfg,
-                &floors,
-                u64::MAX,
-            )
-            .await
-            .expect("failed to preflight")
-            .finish()
-            .await
-            .expect("failed to reopen");
+            let journal =
+                Journal::<_, Digest>::preflight_floors(context.child("reopen"), cfg, &floors)
+                    .await
+                    .expect("failed to preflight")
+                    .finish()
+                    .await
+                    .expect("failed to reopen");
 
             // Two 32-byte items occupy four 16-byte pages. The terminal entry spans two pages, and
             // Writer reads the tail once when opening. No earlier entry page is scanned.

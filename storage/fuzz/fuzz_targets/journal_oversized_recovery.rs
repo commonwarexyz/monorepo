@@ -114,12 +114,11 @@ struct FuzzInput {
     subset: bool,
     /// Per-entry target section selector.
     routes: [u8; 24],
-    /// Per-entry action applied after its append: pipeline a sync of its section, release one held
-    /// completion, settle everything held, sync one section, sync everything, flush nothing to
-    /// publish marker debt, prune, or bound one section through initialization. These ops complete
-    /// before the fault window opens, so the marker-before-data ordering inside bounded
-    /// initialization is not falsifiable here. Prune's ordering is made falsifiable by the
-    /// interrupted-prune final op and by the remove faults armed around every prune.
+    /// Per-entry action applied after its append. Its low three bits select pipelining a sync of
+    /// its section, releasing one held completion, settling everything held, syncing one section,
+    /// syncing everything, flushing nothing to publish marker debt, or pruning below the section
+    /// its top four bits select. Prune's ordering is made falsifiable by the interrupted-prune
+    /// final op and by the remove faults armed around every prune.
     ops: [u8; 24],
     /// Shape of the faulted crash. It flushes everything then abandons the requests, interrupts a
     /// blocking sync of every section, interrupts a blocking sync of one section, or abandons a
@@ -218,11 +217,11 @@ async fn frame_valid(
 /// Recovery adopts each section's marker floor without value checks and validates forward from
 /// it, truncating at the first invalid value.
 ///
-/// Markers trail durability: under crash cuts (no bit rot) a floor was published only after a
-/// completed joint sync covered it, and prune or bounded initialization durably move markers
-/// before data can shrink, so a floor can never exceed the section's durable record count
-/// and every frame below it must still be in bounds and checksum-valid. Both halves are asserted
-/// here against the image-derived boundaries.
+/// Markers trail durability. Under crash cuts (no bit rot) a floor was published only after a
+/// completed joint sync covered it, and prune durably removes markers before data can shrink, so
+/// a floor can never exceed the section's durable record count and every frame below it must
+/// still be in bounds and checksum-valid. Both halves are asserted here against the image-derived
+/// boundaries.
 ///
 /// Maps each section to the id at each retained position, asserting identity against the
 /// intended append stream since an in-model crash cut cannot forge a CRC-valid record. Every
@@ -417,7 +416,7 @@ fn fuzz(input: FuzzInput) {
 
             // Every sync completion below stays parked until an op resolves it, so requests pipeline
             // and completions resolve in op-chosen order. The model mirrors each section's logical
-            // ids through appends, prunes, and bounded initialization.
+            // ids through appends and prunes.
             let mut counts: BTreeMap<u64, u64> = BTreeMap::new();
             let mut durable: BTreeMap<u64, u64> = BTreeMap::new();
             let mut model: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
@@ -494,88 +493,45 @@ fn fuzz(input: FuzzInput) {
                                 .expect("empty flush failed");
                     }
                     7 => {
-                        // Finish held syncs before pruning or reopening storage. Pruning needs
-                        // their durable coverage to update the model; reopening requires exclusive
-                        // ownership.
+                        // Finish held syncs before pruning, since pruning needs their durable
+                        // coverage to update the model.
                         release_pending_syncs(&pending);
                         for (covered_section, covered, handle) in held.drain(..) {
                             handle.await.expect("pipelined sync failed");
                             let durable = durable.entry(covered_section).or_default();
                             *durable = (*durable).max(covered);
                         }
-                        if op & 0x08 == 0 {
-                            // Prune: tracked floors are durably removed before section data
-                            // disappears. Input-driven remove faults can fail the prune partway,
-                            // leaving an index section deleted while its value section survives,
-                            // an orphan image the recovery assertions must observe being cleaned.
-                            let min = u64::from(op >> 4) % SECTIONS;
-                            *fault_config.write() = deterministic::FaultConfig {
-                                remove_rate: Some(remove_rate),
-                                ..Default::default()
-                            };
-                            let result = drive_pending_syncs(&pending, oversized.prune(min)).await;
-                            *fault_config.write() = deterministic::FaultConfig::default();
-                            match result {
-                                Ok((journal, did_prune)) => {
-                                    oversized = journal;
-                                    if did_prune {
-                                        prune_floor = prune_floor.max(min);
-                                        counts.retain(|&section, _| section >= min);
-                                        durable.retain(|&section, _| section >= min);
-                                        model.retain(|&section, _| section >= min);
-                                    }
-                                }
-                                Err(_) => {
-                                    // The failed prune consumed the journal after durably removing
-                                    // the markers below the floor, so sections below it may be
-                                    // partially removed. Durability claims below the floor are
-                                    // dropped while the intended stream is kept, since surviving
-                                    // records must stay authentic. The run crashes here with
-                                    // nothing flushed by a final op.
+
+                        // Tracked floors are durably removed before section data disappears.
+                        // Input-driven remove faults can fail the prune partway, leaving an index
+                        // section deleted while its value section survives, an orphan image the
+                        // recovery assertions must observe being cleaned.
+                        let min = u64::from(op >> 4) % SECTIONS;
+                        *fault_config.write() = deterministic::FaultConfig {
+                            remove_rate: Some(remove_rate),
+                            ..Default::default()
+                        };
+                        let result = drive_pending_syncs(&pending, oversized.prune(min)).await;
+                        *fault_config.write() = deterministic::FaultConfig::default();
+                        match result {
+                            Ok((journal, did_prune)) => {
+                                oversized = journal;
+                                if did_prune {
+                                    prune_floor = prune_floor.max(min);
+                                    counts.retain(|&section, _| section >= min);
                                     durable.retain(|&section, _| section >= min);
-                                    return (durable, model, false);
+                                    model.retain(|&section, _| section >= min);
                                 }
                             }
-                        } else {
-                            // Close every owner before bounded initialization of the selected
-                            // section.
-                            let live: Vec<u64> = counts.keys().copied().collect();
-                            if let Some(&section) =
-                                live.get(usize::from(op >> 4) % live.len().max(1))
-                            {
-                                let keep = counts[&section] * u64::from(op >> 6) / 4;
-                                _ = drive_pending_syncs(&pending, oversized.sync_all())
-                                    .await
-                                    .expect("sync before reopen failed");
-                                for (_, _, handle) in held.drain(..) {
-                                    handle.await.expect("prior sync failed");
-                                }
-                                oversized = drive_pending_syncs(&pending, async {
-                                    let bounded_context = context.child("capped");
-                                    let mut replay = Oversized::init_with_metadata_at_most(
-                                        bounded_context.child("oversized"),
-                                        config(),
-                                        METADATA_PARTITION.into(),
-                                        ReadOptions::default(),
-                                        section,
-                                        keep * TestEntry::SIZE as u64,
-                                    )
-                                    .await?;
-                                    while let Some(item) = replay.next().await {
-                                        item?;
-                                    }
-                                    replay.finish_tracked().await
-                                })
-                                .await
-                                .expect("bounded initialization failed");
-                                counts.retain(|candidate, _| *candidate <= section);
-                                model.retain(|candidate, _| *candidate <= section);
-                                counts.insert(section, keep);
-                                model
-                                    .get_mut(&section)
-                                    .expect("selected section is modeled")
-                                    .truncate(keep as usize);
-                                durable = counts.clone();
+                            Err(_) => {
+                                // The failed prune consumed the journal after durably removing the
+                                // markers below the floor, so sections below it may be partially
+                                // removed. Durability claims below the floor are dropped while the
+                                // intended stream is kept, since surviving records must stay
+                                // authentic. The run crashes here with nothing flushed by a final
+                                // op.
+                                durable.retain(|&section, _| section >= min);
+                                return (durable, model, false);
                             }
                         }
                     }
