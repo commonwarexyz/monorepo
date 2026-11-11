@@ -1897,6 +1897,7 @@ pub mod tests {
 #[cfg(all(test, feature = "loom"))]
 mod loom_tests {
     use super::*;
+    use crate::iouring::tasks::Tasks;
     use loom::thread;
 
     /// A look that saw a stale count alone, sampled the clock and then
@@ -1932,6 +1933,62 @@ mod loom_tests {
             );
             assert_eq!(fresh.join().unwrap(), 0);
             assert_eq!(stale.join().unwrap(), 0);
+        });
+    }
+
+    /// A push into the global queue that wakes no worker leaves an unserved
+    /// hint, and the worker that clears the hint sees that push, so its take
+    /// finds the runnable. The clear's acquire is the half that matters: it
+    /// pairs with the fence in `Pool::push_batch`, which orders the push
+    /// before the hint as the hint's own release does. With a relaxed clear,
+    /// the worker can read the length from before the push and drop the hint
+    /// unseen, which fails this model.
+    ///
+    /// The pusher and the worker each run on a spawned thread, and the worker
+    /// waits for the hint with yields, since two properties of loom would let
+    /// other shapes pass without checking anything. Loom keeps only the last
+    /// access to each atomic for its partial order reduction, so it never
+    /// runs the pusher's load and exchange of the hint ahead of a worker's
+    /// load that came first, and a worker that reads the hint once can miss
+    /// it in every schedule. And loom never returns a value that a thread saw
+    /// before it yielded, so a worker on the thread that built the pool,
+    /// which saw the initial length, cannot read it stale after waiting.
+    #[test]
+    fn test_cleared_hint_shows_its_push() {
+        loom::model(|| {
+            // Neither worker is published idle, so the push wakes no one.
+            let pool = std::sync::Arc::new(Pool::new(2, Duration::ZERO).0);
+            let set = Tasks::new(1);
+            let (task, runnable) = super::tests::task(&set);
+
+            // The pusher leaves the hint, and the worker waits for it.
+            let pusher = thread::spawn({
+                let pool = pool.clone();
+                move || assert!(pool.push(runnable).is_ok())
+            });
+            let worker = thread::spawn({
+                let pool = pool.clone();
+                move || {
+                    let mut ready = pool.queue(0).owner();
+                    let mut hint = pool.unserved();
+                    while hint == 0 {
+                        thread::yield_now();
+                        hint = pool.unserved();
+                    }
+
+                    // Clearing the hint shows the push, so the take finds it.
+                    let runnable = pool.take_unserved(hint, &mut ready);
+                    assert!(runnable.is_some(), "a cleared hint must show its push");
+                    runnable.unwrap().discard();
+                }
+            });
+            pusher.join().unwrap();
+            worker.join().unwrap();
+
+            // The worker cleared the only hint and took the only runnable.
+            assert_eq!(pool.unserved(), 0);
+            assert!(!pool.has_global());
+            task.clear();
         });
     }
 }
