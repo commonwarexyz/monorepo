@@ -68,7 +68,7 @@ runs:
       if: runner.os == 'Linux' && runner.arch == 'ARM64'
       shell: bash
       run: |
-        sudo apt-get install -y lld
+        "$GITHUB_ACTION_PATH/../../scripts/apt_install.sh" lld
         echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=clang" >> "$GITHUB_ENV"
         echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-C link-arg=-fuse-ld=lld" >> "$GITHUB_ENV"
 

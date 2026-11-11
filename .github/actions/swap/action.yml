@@ -10,12 +10,26 @@ runs:
       run: |
         echo 1 | sudo tee /sys/module/zswap/parameters/enabled
         cat /sys/module/zswap/parameters/enabled
-        sudo apt-get update
-        sudo apt-get install --yes --no-install-recommends swapspace
-        sudo install -d -m 700 /mnt/swapspace
-        echo 'swappath="/mnt/swapspace"' | sudo tee /etc/swapspace.conf
-        sudo systemctl restart swapspace
-        sudo systemctl is-active swapspace
+        # This is the first network step of most jobs, so a package mirror that cannot be reached
+        # must not fail the job. Retry the install, then continue without dynamic swap. Some
+        # callers check out only this action, so the loop does not use a shared script.
+        installed=false
+        for attempt in 1 2 3; do
+          if sudo apt-get update && sudo apt-get install --yes --no-install-recommends swapspace; then
+            installed=true
+            break
+          fi
+          echo "apt-get failed (attempt $attempt of 3)" >&2
+          sleep $((attempt * 15))
+        done
+        if [ "$installed" = true ]; then
+          sudo install -d -m 700 /mnt/swapspace
+          echo 'swappath="/mnt/swapspace"' | sudo tee /etc/swapspace.conf
+          sudo systemctl restart swapspace
+          sudo systemctl is-active swapspace
+        else
+          echo "::warning::Could not install swapspace. Continuing without dynamic swap."
+        fi
         sudo sysctl -w vm.swappiness=60
         sudo swapon --show
         free -h

@@ -54,7 +54,8 @@ jobs:
     - name: Brutalized tests
       run: FORGE_SNAPSHOT_CHECK=false forge test --brutalize
     - name: Install Z3
-      run: sudo apt-get update && sudo apt-get install -y z3
+      run: |
+        "$GITHUB_WORKSPACE/.github/scripts/apt_install.sh" z3
     - name: Symbolic tests
       run: forge test --symbolic --match-test '^(check|prove)_'
     - name: Build fuzz input generator

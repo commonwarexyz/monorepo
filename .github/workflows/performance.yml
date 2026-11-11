@@ -68,8 +68,7 @@ jobs:
 
       - name: Install Gungraun dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install --assume-yes --no-install-recommends \
+          "$GITHUB_WORKSPACE/.github/scripts/apt_install.sh" --no-install-recommends \
             clang \
             libclang-dev \
             valgrind

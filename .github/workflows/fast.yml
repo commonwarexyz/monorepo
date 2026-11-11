@@ -408,8 +408,7 @@ jobs:
     - name: Install QEMU
       if: ${{ matrix.qemu && steps.native.outputs.supported != 'true' }}
       run: |
-        sudo apt-get update
-        sudo apt-get install -y qemu-user
+        "$GITHUB_WORKSPACE/.github/scripts/apt_install.sh" qemu-user
         emulator="qemu-$(uname -m) -cpu ${{ matrix.qemu }}"
         runner="CARGO_TARGET_$(uname -m | tr '[:lower:]' '[:upper:]')_UNKNOWN_LINUX_GNU_RUNNER"
         echo "EMULATOR=$emulator" >> "$GITHUB_ENV"
