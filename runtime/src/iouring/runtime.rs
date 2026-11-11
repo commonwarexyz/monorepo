@@ -253,11 +253,12 @@ const BATCH_SIZE: usize = 64;
 /// queue. A larger burst leaves due timers for later passes, one per turn. A
 /// saturated pool worker therefore fires sleeps only as fast as its run queue
 /// takes them, in the wheel's order (see [`super::sleep`]), and the sleeps
-/// that one task multiplexes complete at that rate. Request deadlines, and a
-/// peer's rescue of a stalled worker's sleeps, keep a full budget per pass,
-/// and so do the refiles of later sleeps, which wake nothing, so a crowded
-/// wheel bucket cascades as fast beside a full run queue as beside an empty
-/// one.
+/// that one task multiplexes fire at that rate, although those that it
+/// repolls once a pass has reached their deadlines complete without their
+/// fires. Request deadlines, and a peer's rescue of a stalled worker's
+/// sleeps, keep a full budget per pass, and so do the refiles of later
+/// sleeps, which wake nothing, so a crowded wheel bucket cascades as fast
+/// beside a full run queue as beside an empty one.
 ///
 /// Between two passes the worker polls a batch of up to [`BATCH_SIZE`]
 /// tasks, so with long polls a full batch would hold each further budget back
@@ -1128,13 +1129,13 @@ pub struct Local {
     /// [`Wheel::bound`]: super::wheel::Wheel::bound
     pub timers_next: u64,
     /// Pending removals from `timers`: the registrations whose sleeps were
-    /// dropped on this worker while it was not closing. Queuing their
-    /// identities lets those drops skip the timers' lock. Only this worker
-    /// pushes and drains it: each registration here removes the latest one
-    /// and takes its slot, the next service pass, or cleanup before closing
-    /// `timers`, removes the rest, and each service pass caps its capacity at
-    /// [`DROPPED_CAPACITY`] (see [`super::sleep`]). While any remain, the
-    /// worker serves again rather than park.
+    /// dropped, or completed early by a poll, on this worker while it was not
+    /// closing. Queuing their identities lets those drops skip the timers'
+    /// lock. Only this worker pushes and drains it: each registration here
+    /// removes the latest one and takes its slot, the next service pass, or
+    /// cleanup before closing `timers`, removes the rest, and each service
+    /// pass caps its capacity at [`DROPPED_CAPACITY`] (see [`super::sleep`]).
+    /// While any remain, the worker serves again rather than park.
     pub timers_dropped: Vec<Id>,
     /// Reject new registration and send wakes to the global queue, while
     /// allowing idempotent cancellation.
@@ -1999,9 +2000,9 @@ impl Worker {
     /// Service the io_uring ring and timers using one time sample, collecting
     /// callbacks, and return whether kernel service was deferred to an idle
     /// wait. Timer service first removes the registrations of sleeps dropped
-    /// on this worker since the last pass, then expires due ones. A pool
-    /// worker that is not closing also expires its peers' overdue timers, at
-    /// most once per [`RESCUE_INTERVAL`].
+    /// or completed early on this worker since the last pass, then expires due
+    /// ones. A pool worker that is not closing also expires its peers' overdue
+    /// timers, at most once per [`RESCUE_INTERVAL`].
     fn service(&mut self, defer_kernel_service: bool) -> bool {
         let mut local = self.local.borrow_mut();
 
