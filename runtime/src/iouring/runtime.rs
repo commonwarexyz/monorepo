@@ -116,7 +116,9 @@
 //! has room for and no more than would fill it to half. A pool worker that
 //! finds both queues empty after a service pass tries to steal before parking,
 //! or relies on workers already holding search counts when the search cap
-//! refuses it.
+//! refuses it. The cap does not refuse a worker whose re-look of a young lone
+//! runnable has come due, since no other worker waits for that runnable to
+//! ripen.
 //!
 //! Before a synchronous [`commonware_parallel`] Rayon call blocks a pool
 //! worker's thread, the block hook the worker installs moves its queued
@@ -386,9 +388,11 @@ impl Config {
     /// this long since a worker looking for work first saw it, as behind a
     /// long poll. That worker looks again when the task is old enough, unless
     /// other work keeps it busy first, so the age is when a lone task may move,
-    /// not a bound on how long it waits. A newly spawned task queued alone on
-    /// its spawner's worker can be stolen at once whatever this age. Zero
-    /// steals every lone task at once.
+    /// not a bound on how long it waits. A worker with no I/O in flight waits
+    /// for that on its futex, which the thread's timer slack (50 microseconds
+    /// by default) can end late, so a shorter age is not met there. A newly
+    /// spawned task queued alone on its spawner's worker can be stolen at once
+    /// whatever this age. Zero steals every lone task at once.
     pub const fn with_steal_age(mut self, age: Duration) -> Self {
         self.steal_age = age;
         self
@@ -2392,7 +2396,10 @@ impl Worker {
             }
 
             // A young lone runnable that a look refused may be stolen once it
-            // ripens, so wait no longer than that before looking again.
+            // ripens, so wait no longer than that before looking again. A
+            // re-look that has already passed ends the wait at once. The next
+            // search then finds it due, which the search cap does not refuse,
+            // and clears it, so it cannot cut short wait after wait.
             let relook = searcher.as_ref().and_then(Searcher::relook);
             let deadline = deadline.into_iter().chain(relook).min();
 

@@ -122,12 +122,17 @@
 //! fences after the push sees it in its last look. A push into the global queue
 //! is therefore never left queued with every worker asleep, and a backlog of
 //! [`KICK`] or more that persists is taken or offered to a parked worker. A
-//! lone runnable that no look sees ripe waits for its owner. A worker whose
-//! look saw it young looks again once it ripens, unless other work wakes that
-//! worker first, in which case its next look before parking finds the runnable
-//! ripe from the same stamp. A worker that waits because a count is held,
-//! without reading the run queues, relies on that count's last return, which
-//! looks or kicks as above, or keeps a re-look an earlier look recorded.
+//! lone runnable that no look sees ripe can wait for its owner. A worker whose
+//! look saw it young, and that has nothing else to run, waits no longer than
+//! until it ripens and then searches again, past the cap if need be. That
+//! search clears the re-look before it reads any run queue, though, and can
+//! steal other work before its scan reaches the runnable, and racing looks can
+//! keep the runnable young for longer (see [`super::pool`]). The steal age is
+//! therefore when a lone runnable may move, not a bound on its wait: the
+//! runnable can wait until its owner or a later look reaches it. A worker that
+//! waits because a count is held, without reading the run queues, relies on
+//! that count's last return, which looks or kicks as above, or keeps a re-look
+//! an earlier look recorded.
 //!
 //! A take queues its share without a kick. A look that reads the length the
 //! take left, or a later one, sees the share. A worker that parked on a zero
@@ -171,9 +176,17 @@
 //! soft. Workers that check at once can all pass it, and wakes reserve counts
 //! without this cap, so the search count can exceed half the worker count. A
 //! worker whose re-look of a young lone runnable has come due searches even at
-//! the cap, since no count holder waits for that runnable to ripen. A re-look
-//! that the cap refuses before it is due stays recorded, so the worker still
-//! waits no longer than that.
+//! the cap, for two reasons. No count holder waits for that runnable to ripen,
+//! and a due re-look that the cap refused would stay recorded, so every wait
+//! it bounds would return at once until the counts drop.
+//!
+//! A re-look that the cap refuses before it is due stays recorded, so the
+//! worker still waits no longer than that. Its deadline can pass after the
+//! search sampled the clock but before the cap refused it, which costs one
+//! wait that returns at once, since the next search sees the re-look due. A
+//! re-look whose runnable has gone since, run by its owner or stolen, also
+//! passes the cap once when it comes due. That only adds contention: the count
+//! it takes is an ordinary one, and its search clears the re-look.
 
 use super::{mailbox::Mailbox, pool::Pool, task::Ready};
 use std::{mem, sync::Arc, thread, time::Instant};
@@ -393,8 +406,9 @@ impl Drop for Idle {
 /// more, from [`Searcher::prepare_park`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Park {
-    /// No work was observed or an existing count covers it, including a thief
-    /// holding the slots this worker needs. Wait for a wake.
+    /// No work was observed, a young lone runnable counting as none, or an
+    /// existing count covers it, including a thief holding the slots this
+    /// worker needs. Wait for a wake, and no longer than [`Searcher::relook`].
     Wait,
     /// The global queue's mirror was nonzero, or a push into it claimed this
     /// worker after it took a count to search, so run again and try to take
@@ -466,7 +480,8 @@ impl<'a> Searcher<'a> {
     /// runnable it refuses brings it forward. A re-look that has come due is
     /// the worker's own duty, so it then takes a count even at the cap. One
     /// the cap refuses before it is due stays, so the worker still waits no
-    /// longer than that.
+    /// longer than that. Passing the cap also keeps a due re-look from
+    /// staying recorded, where it would end every wait at once.
     #[must_use]
     pub fn search(&mut self, ready: &mut Ready) -> bool {
         let pool = self.pool;
@@ -506,9 +521,10 @@ impl<'a> Searcher<'a> {
         // The cap only limits contention, so a soft check is harmless. Workers
         // that load the count at once can all pass it, and claimed workers
         // inherit counts without it. A worker whose re-look came due passes it
-        // as well, since no other worker waits for that lone runnable to
-        // ripen. Nothing is published with the count. A kick that sees it
-        // relies on the fence after its return.
+        // as well, since no other worker waits for that lone runnable to ripen
+        // and a due re-look left recorded would end every wait at once.
+        // Nothing is published with the count. A kick that sees it relies on
+        // the fence after its return.
         let searching = self.pool.idle().searching.load(Ordering::Relaxed);
         if !due && 2 * searching >= self.pool.workers() {
             return false;
@@ -568,8 +584,10 @@ impl<'a> Searcher<'a> {
     ///
     /// [`Park::Wait`] leaves a live publication. The caller ends it through
     /// [`Self::finish_park`] after its wait, even if that wait does not block.
-    /// The other results withdraw it. [`Park::Search`] holds exactly one count
-    /// for the caller's search, while [`Park::Run`] may inherit a claim's count
+    /// The wait lasts until a wake, and no longer than [`Self::relook`], which
+    /// a young lone runnable the look refuses brings forward. The other results
+    /// withdraw the publication. [`Park::Search`] holds exactly one count for
+    /// the caller's search, while [`Park::Run`] may inherit a claim's count
     /// and otherwise hands on a last count returned here.
     #[must_use]
     pub fn prepare_park(&mut self, ready: &Ready) -> Park {
@@ -629,8 +647,9 @@ impl<'a> Searcher<'a> {
 
         // Otherwise this worker takes the count and searches, if another run
         // queue holds a backlog. A count taken here is this worker's own and
-        // carries nothing to another thread, so the exchange is relaxed. A
-        // failed exchange means a count appeared since the load, and that count
+        // carries nothing to another thread, so the exchange is relaxed. Its
+        // last return still hands the duty on, as any count's does. A failed
+        // exchange means a count appeared since the load, and that count
         // delegates the same way. A young lone runnable is no backlog yet: the
         // look records when it ripens instead, and the worker waits until then
         // at most, so no count is held for it.
@@ -672,7 +691,8 @@ impl<'a> Searcher<'a> {
     ///
     /// `true` leaves the worker unpublished with work observed or stolen, and
     /// possibly a held count. `false` leaves it published for the caller to
-    /// wait and then call [`Self::finish_park`], even if the wait does not block.
+    /// wait, no longer than [`Self::relook`], and then call
+    /// [`Self::finish_park`], even if the wait does not block.
     #[must_use]
     pub fn publish_and_look(&mut self, ready: &mut Ready) -> bool {
         // A search that finds nothing keeps its count, and the next publication

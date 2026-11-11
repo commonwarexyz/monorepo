@@ -38,18 +38,25 @@
 //! worker that acts on it, so its cache line stays quiet however many pushes
 //! go by. A busy worker reads it before each pop from its own run queue. Once
 //! the hint is [`GLOBAL_AGE`] old, the worker that clears it takes from the
-//! global queue first if the hinted episode still lasts. That worker then pops
-//! its own run queue before it acts on another hint, so a stream of unanswered
-//! pushes cannot starve the run queue. A worker reads the clock only when it
-//! sees a hint for the first time, which is how it notices one left during its
-//! own long poll, and otherwise compares with the time sample of its current
-//! turn. So a foreign wake that finds every worker inside a long poll, and is
-//! the global age old once that poll returns, runs next, or after one pop of
-//! the run queue that a just served hint owes, rather than after the polls
-//! queued behind it. A hint first seen younger waits for a later turn's sample
-//! or for the global queue interval. A hint whose episode has ended takes
-//! nothing when acted on, and until then it keeps later unanswered pushes from
-//! leaving hints of their own, which then wait for the interval.
+//! global queue once, ahead of its own run queue, if the hinted episode still
+//! lasts. That worker then pops its own run queue before it acts on another
+//! hint, so hints cannot starve the run queue. Between two pops of a run
+//! queue that stays nonempty, its worker polls at most two runnables straight
+//! from the global queue when the global queue interval is three or more, one
+//! for a hint and one for the interval, and at most three when it is two. An
+//! interval of one takes from the global queue before every pop, hint or not,
+//! so there the run queue waits while the global queue holds runnables.
+//!
+//! A worker reads the clock only when it sees a hint for the first time, which
+//! is how it notices one left during its own long poll, and otherwise compares
+//! with the time sample of its current turn. So a foreign wake that finds
+//! every worker inside a long poll, and is the global age old once that poll
+//! returns, runs next, or after one pop of the run queue that a just served
+//! hint owes, rather than after the polls queued behind it. A hint first seen
+//! younger waits for a later turn's sample or for the global queue interval. A
+//! hint whose episode has ended takes nothing when acted on, and until then it
+//! keeps later unanswered pushes from leaving hints of their own, which then
+//! wait for the interval.
 //!
 //! [global queue interval]: super::Config::with_global_queue_interval
 //!
@@ -118,10 +125,12 @@
 //! The owner pays nothing for this: its pops already move the position, and
 //! the first look's time is kept in a stamp per run queue that only lookers
 //! write. A look that refuses a young lone runnable records when it ripens,
-//! and the worker waits no longer than that before it looks again, even past
-//! the search cap, so the runnable is taken about the steal age after it was
-//! first seen, unless its owner gets to it first or other work wakes that
-//! worker before then. A steal age of zero takes a lone runnable at once.
+//! and a worker that stays idle waits no longer than that before it looks
+//! again, even past the search cap, so the runnable is taken about the steal
+//! age after it was first seen, unless its owner gets to it first or that
+//! worker finds other work first. The runnable then waits for its owner or a
+//! later look. A timed wait on a worker's futex can also end late (see
+//! [`MIN_STEAL_AGE`]). A steal age of zero takes a lone runnable at once.
 //!
 //! A position is the run queue head's full 55-bit count, in the stamp as in
 //! the head, so a stamp names a later runnable only once that count repeats,
@@ -245,11 +254,17 @@ pub const MAX_WORKERS: usize = 64;
 /// owner usually polls it next, sooner than a woken peer could.
 pub const KICK: usize = 2;
 
-/// Smallest nonzero steal age the runner accepts. A refused look waits until
-/// the lone runnable it saw ripens, and a wait that ends at once follows a
-/// lone runnable that stayed queued almost that long, so a worker looks again
-/// about once per steal age at most for each run queue. This keeps that rate
-/// far below a look's cost.
+/// Smallest nonzero steal age the runner accepts. A worker whose look refused
+/// a young lone runnable looks again once it ripens, and a wait that ends at
+/// once follows a lone runnable that stayed queued almost that long, so an
+/// idle worker looks again at most about once per steal age for each run
+/// queue it watches, and more often when it watches several whose lone
+/// runnables ripen at different times. Each look scans every other run queue,
+/// and the minimum bounds how often one watched run queue makes a worker
+/// look. A timed wait on a worker's futex, which a worker with no request in
+/// flight uses, can end up to the thread's timer slack late, 50 microseconds
+/// by default, so there a steal age below the slack is not met: the worker
+/// looks again up to the slack after the runnable ripens.
 pub const MIN_STEAL_AGE: Duration = Duration::from_micros(10);
 
 /// Largest steal age the runner accepts.
@@ -569,17 +584,20 @@ impl Pool {
         }
     }
 
-    /// Queue `runnable` for any worker and wake a parked one. Once the queue
-    /// has closed, returns the runnable for the caller to discard. The task
-    /// set closed first, so teardown clears its task or already has.
+    /// Queue `runnable` for any worker and wake a parked one, as
+    /// [`Self::push_batch`] does. Once the queue has closed, returns the
+    /// runnable for the caller to discard. The task set closed first, so
+    /// teardown clears its task or already has.
     pub fn push(&self, runnable: Runnable) -> Result<(), Runnable> {
         self.push_batch(iter::once(runnable))
             .map_err(|mut refused| refused.next().unwrap())
     }
 
     /// Queue `runnables` for any worker under one lock and wake a parked
-    /// worker. Once the queue has closed, returns them for the caller to
-    /// discard, as [`Self::push`] does.
+    /// worker. A batch that brings runnables but wakes no worker leaves an
+    /// unserved hint, unless one is already left. An empty batch wakes no
+    /// worker and leaves no hint. Once the queue has closed, returns them for
+    /// the caller to discard, as [`Self::push`] does.
     pub fn push_batch<I: Iterator<Item = Runnable>>(&self, runnables: I) -> Result<(), I> {
         let episode = {
             let mut queue = self.global();
@@ -627,7 +645,10 @@ impl Pool {
         let hint = pack_unserved(self.clock().1, episode);
 
         // Release publishes the push with the hint, so the worker that
-        // acquires the hint in `Self::take_unserved` sees the push.
+        // acquires the hint in `Self::take_unserved` sees the push. The fence
+        // in `Self::push_batch` orders the push before this exchange as well,
+        // so the acquire there is the half that matters. The release keeps
+        // this pairing correct on its own should that fence move.
         let _ = self
             .unserved
             .compare_exchange(0, hint, Ordering::Release, Ordering::Relaxed);
@@ -648,8 +669,11 @@ impl Pool {
     /// already did or it was replaced, and then take a share of the global
     /// queue as [`Self::take`] does if the queue is still in the hinted
     /// episode, that is, if it has held runnables ever since the hinted push.
-    /// Only the worker that clears a hint takes for it. Returns `None` when
-    /// another worker cleared the hint or the episode has ended.
+    /// The episode shows only that, not that the runnable taken waited the
+    /// global age, since a queue that stays nonempty can still turn over.
+    /// Only the worker that clears a hint takes for it, and only once.
+    /// Returns `None` when another worker cleared the hint or the episode has
+    /// ended.
     #[inline(never)]
     #[must_use]
     pub fn take_unserved(&self, hint: u64, ready: &mut Ready) -> Option<Runnable> {
@@ -1792,10 +1816,11 @@ pub mod tests {
     }
 
     /// A stamp keys its observation by the full 55-bit head count, so an old
-    /// stamp makes no lone runnable at a later count ripe, even one sharing
-    /// its low 24 bits or its `u32` position, and that look starts a fresh
-    /// observation. Only a full period of the head's count brings the stamped
-    /// count back, the run queue's own stall assumption.
+    /// stamp makes no lone runnable at a later count ripe, even one that a
+    /// narrower key would confuse with it, such as one sharing its low 24 bits
+    /// or its `u32` position, and that look starts a fresh observation. Only
+    /// a full period of the head's count brings the stamped count back, the
+    /// run queue's own stall assumption.
     #[test]
     fn test_stale_stamp_matches_only_after_a_full_period() {
         let pool = aged_pool_with_history(Duration::from_millis(100));
@@ -1903,11 +1928,20 @@ mod loom_tests {
     /// A look that saw a stale count alone, sampled the clock and then
     /// stalled, races a look that starts the observation of a fresh count
     /// later, while a third look reads the fresh count later still. The two
-    /// counts share their low 24 bits, which a narrower key would confuse.
-    /// Whatever the order, the stalled look's older time never reaches the
-    /// fresh count's observation, since a time is only raised and is raised
-    /// before its key is published. So the fresh count is never older than
-    /// its first sighting, and no lone runnable ripens early.
+    /// counts differ only above their low 24 bits, so a key narrower than the
+    /// head's count, such as one of 24 bits, would confuse them. Whatever the
+    /// order, the stalled look's older time never reaches the fresh count's
+    /// observation, since a time is only raised and is raised before its key
+    /// is published. So the fresh count is never older than its first
+    /// sighting, and no lone runnable ripens early.
+    ///
+    /// The fresh look's zero age is what checks the orderings, not the main
+    /// look's bound. Every look loads the key before it exchanges it, so loom
+    /// never lets the main look's first load return a spawned look's key, and
+    /// that bound holds whatever the orderings. The fresh look, on a spawned
+    /// thread, can run after the main look's exchange and read its key, so a
+    /// relaxed key, or a key published before its time, would let it read the
+    /// time from before that exchange and see a nonzero age.
     #[test]
     fn test_racing_looks_never_age_a_count_past_its_first_sighting() {
         /// The count the stalled look saw alone.
