@@ -134,8 +134,9 @@ pub struct Config<C> {
 struct SectionReplay<B: Blob> {
     section: u64,
     reader: BlobReplay<B>,
+
+    /// End of the last decoded item, which is where the next item starts.
     offset: u64,
-    valid_offset: u64,
 }
 
 /// The journal's state, boxed so the public [Journal] handle stays pointer-sized.
@@ -454,7 +455,6 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                 section,
                 reader,
                 offset: 0,
-                valid_offset: 0,
             });
         }
         let finished = sections.is_empty();
@@ -622,14 +622,14 @@ impl<E: Storage + Metrics, V: CodecShared> Recovery<E, V> {
         let current = self.sections.front().expect("replayed section is present");
         let section = current.section;
         let size = current.reader.blob_size();
-        let valid_offset = current.valid_offset;
+        let offset = current.offset;
 
         // Forward-validate from the replayed prefix to find where well-formed pages end.
         let recoverable = self
             .journal
             .0
             .writer(section)?
-            .recoverable_prefix_len(valid_offset, self.buffer, self.read_options)
+            .recoverable_prefix_len(offset, self.buffer, self.read_options)
             .await?;
 
         // A whole-blob recoverable prefix means the checksum failure did not come from a torn
@@ -640,8 +640,8 @@ impl<E: Storage + Metrics, V: CodecShared> Recovery<E, V> {
 
         // The cut must not drop below the validated replay prefix: that would lose data the
         // replay already handed out.
-        if recoverable < valid_offset {
-            return Err(Error::ItemOutOfRange(valid_offset));
+        if recoverable < offset {
+            return Err(Error::ItemOutOfRange(offset));
         }
 
         Ok(recoverable)
@@ -659,7 +659,7 @@ impl<E: Storage + Metrics, V: CodecShared> Recovery<E, V> {
         };
 
         let current = self.sections.front().expect("replayed section is present");
-        let (section, valid_offset) = (current.section, current.valid_offset);
+        let (section, offset) = (current.section, current.offset);
         warn!(
             section,
             invalid_size = current.reader.blob_size(),
@@ -678,12 +678,11 @@ impl<E: Storage + Metrics, V: CodecShared> Recovery<E, V> {
         let writer = writer.truncate(recoverable).await?;
         let (writer, mut reader) = writer.replay(self.buffer, self.read_options).await?;
         self.journal.0.manager.put(section, writer);
-        reader.seek_to(valid_offset)?;
+        reader.seek_to(offset)?;
         self.sections.push_front(SectionReplay {
             section,
             reader,
-            offset: valid_offset,
-            valid_offset,
+            offset,
         });
         self.repairing = false;
         Ok(())
@@ -692,21 +691,15 @@ impl<E: Storage + Metrics, V: CodecShared> Recovery<E, V> {
     /// Truncate the front section to its validated prefix and make the repair durable.
     async fn repair_tail(&mut self, message: &'static str) -> Result<(), Error> {
         let current = self.sections.front().expect("replayed section is present");
-        let (section, offset, valid_offset) =
-            (current.section, current.offset, current.valid_offset);
-        warn!(
-            blob = section,
-            bad_offset = offset,
-            new_size = valid_offset,
-            "{message}"
-        );
+        let (section, offset) = (current.section, current.offset);
+        warn!(blob = section, new_size = offset, "{message}");
 
         // Tail repair is exceptional. Make it durable immediately so callers do not need to
         // track replay-time repaired sections separately. Mark the repair incomplete until
         // it is durable.
         self.repairing = true;
         let writer = self.journal.0.manager.take(section).await?;
-        let writer = writer.truncate(valid_offset).await?;
+        let writer = writer.truncate(offset).await?;
         self.journal.0.manager.put(section, writer);
         self.repairing = false;
         Ok(())
@@ -771,8 +764,7 @@ impl<E: Storage + Metrics, V: CodecShared> Recovery<E, V> {
                     // Could be incomplete varint - check if reader exhausted
                     if current.reader.is_exhausted() || before_remaining < MAX_U32_VARINT_SIZE {
                         // Treat as trailing bytes
-                        if current.valid_offset < blob_size
-                            && current.offset < blob_size
+                        if current.offset < blob_size
                             && let Err(err) = self
                                 .repair_tail("trailing bytes detected: truncating")
                                 .await
@@ -827,7 +819,6 @@ impl<E: Storage + Metrics, V: CodecShared> Recovery<E, V> {
                 self.journal.0.compression.is_some(),
             ) {
                 Ok(decoded) => {
-                    current.valid_offset = next_offset;
                     current.offset = next_offset;
                     return Some(Ok((
                         current.section,
