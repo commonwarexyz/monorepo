@@ -118,6 +118,8 @@ impl<const BITS: usize, const LIMBS: usize> FixedSize for Uint<BITS, LIMBS> {
 
 impl<const BITS: usize, const LIMBS: usize> Write for Uint<BITS, LIMBS> {
     fn write(&self, buf: &mut impl BufMut) {
+        // The most significant limb contributes only its bytes within the width. Every other limb
+        // contributes all eight, most significant first.
         let Some((most, rest)) = self.as_limbs().split_last() else {
             return;
         };
@@ -132,6 +134,8 @@ impl<const BITS: usize, const LIMBS: usize> Read for Uint<BITS, LIMBS> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        // Read the limbs in the order they are written, the most significant limb from only its
+        // bytes within the width.
         at_least(buf, Self::SIZE)?;
         let mut limbs = [0u64; LIMBS];
         if let Some((most, rest)) = limbs.split_last_mut() {
@@ -142,6 +146,8 @@ impl<const BITS: usize, const LIMBS: usize> Read for Uint<BITS, LIMBS> {
                 *limb = buf.get_u64();
             }
         }
+
+        // A width that ends inside a byte leaves bits in the first byte that no value sets.
         ruint::Uint::checked_from_limbs_slice(&limbs)
             .map(Self)
             .ok_or(Error::Invalid("Uint", "a bit is set beyond the width"))
@@ -199,6 +205,8 @@ mod tests {
     /// A width that ends inside a limb encodes only the bytes of that limb within the width.
     #[test]
     fn test_partial_limbs_encode_their_bytes_only() {
+        // A width inside one limb encodes only that limb's bytes within it, and any other length
+        // is refused.
         type U40 = Uint<40, 1>;
         assert_eq!(U40::SIZE, 5);
         assert_eq!(U40::MAX.encode().as_ref(), [0xff; 5]);

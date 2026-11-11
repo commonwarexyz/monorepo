@@ -441,10 +441,10 @@ fn write<T: UPrim>(value: T, buf: &mut impl BufMut) {
         return;
     }
 
+    // Fast path for small values (common case for lengths). `as_u8()` does not truncate such a
+    // value or leave a continuation bit.
     let continuation_threshold = T::from_u8(CONTINUATION_BIT_MASK);
     if value < continuation_threshold {
-        // Fast path for small values (common case for lengths).
-        // `as_u8()` does not truncate the value or leave a continuation bit.
         buf.put_u8(value.as_u8());
         return;
     }
@@ -582,6 +582,7 @@ mod tests {
     /// its widest values stage past the primitive buffer.
     #[test]
     fn test_uint_round_trips_at_any_width() {
+        // A value that fits a `u64` encodes as the primitive does and decodes back.
         for value in [0u64, 1, 127, 128, 300, 0x3FFF, 0x4000, u64::MAX] {
             let wide = UInt(U256::from(value)).encode();
             assert_eq!(wide, UInt(value).encode());
@@ -622,9 +623,8 @@ mod tests {
     /// Widths that are not a multiple of eight bits bound their encodings by their exact width.
     #[test]
     fn test_uint_partial_widths() {
+        // Eight bits spill their top bit into a second byte. That byte holds nothing more.
         type U8 = Uint<8, 1>;
-        type U36 = Uint<36, 1>;
-
         assert_eq!(UInt(U8::MAX).encode().as_ref(), [0xFF, 0x01]);
         assert_eq!(
             UInt::<U8>::decode(Copying(&[0xFF, 0x01])).unwrap().0,
@@ -635,6 +635,8 @@ mod tests {
             Err(Error::InvalidVarint(1))
         ));
 
+        // Thirty-six bits leave one bit for a sixth byte.
+        type U36 = Uint<36, 1>;
         assert_eq!(<UInt<U36> as MaxEncodeSize>::MAX_ENCODE_SIZE, 6);
         let encoded = UInt(U36::MAX).encode();
         assert_eq!(encoded.len(), 6);
@@ -663,11 +665,8 @@ mod tests {
     /// A width of at most seven bits takes one byte, bounded by its exact width like any other.
     #[test]
     fn test_uint_narrow_widths() {
-        type U0 = Uint<0, 0>;
-        type U4 = Uint<4, 1>;
-        type U7 = Uint<7, 1>;
-
         // A bit beyond the width and a continuation are refused.
+        type U4 = Uint<4, 1>;
         assert_eq!(<UInt<U4> as MaxEncodeSize>::MAX_ENCODE_SIZE, 1);
         assert_eq!(UInt(U4::MAX).encode().as_ref(), [0x0F]);
         assert_eq!(UInt::<U4>::decode(Copying(&[0x0F])).unwrap().0, U4::MAX);
@@ -679,6 +678,7 @@ mod tests {
         }
 
         // Seven bits fill the byte, so only a continuation is left to refuse.
+        type U7 = Uint<7, 1>;
         assert_eq!(<UInt<U7> as MaxEncodeSize>::MAX_ENCODE_SIZE, 1);
         assert_eq!(UInt(U7::MAX).encode().as_ref(), [0x7F]);
         assert_eq!(UInt::<U7>::decode(Copying(&[0x7F])).unwrap().0, U7::MAX);
@@ -688,6 +688,7 @@ mod tests {
         ));
 
         // A width of zero bits holds only zero. Zero still takes a byte.
+        type U0 = Uint<0, 0>;
         assert_eq!(<UInt<U0> as MaxEncodeSize>::MAX_ENCODE_SIZE, 1);
         assert_eq!(UInt(U0::ZERO).encode_size(), 1);
         assert_eq!(UInt(U0::ZERO).encode().as_ref(), [0x00]);
