@@ -1015,11 +1015,6 @@ pub mod fuzz {
         Ok(lanes - u.int_in_range(0..=lanes - 1)?)
     }
 
-    /// Draws an extension element with canonical components, requiring the bytes it reads.
-    fn extension(u: &mut Unstructured<'_>) -> arbitrary::Result<fp2::Element> {
-        fp2::canonical(&mut Unstructured::new(u.bytes(2 * FP_BYTES)?))
-    }
-
     /// Draws an element with canonical components: mostly any element, otherwise zero, one, or an
     /// element of `Fp2` or `Fp6`.
     pub(crate) fn element(u: &mut Unstructured<'_>) -> arbitrary::Result<Element> {
@@ -1027,15 +1022,15 @@ pub mod fuzz {
         match u.int_in_range(0..=7u8)? {
             0..=3 => {
                 for coefficient in &mut a {
-                    *coefficient = extension(u)?;
+                    *coefficient = fp2::canonical(u)?;
                 }
             }
             4 => {}
             5 => a = reference::ONE,
-            6 => a[0] = extension(u)?,
+            6 => a[0] = fp2::canonical(u)?,
             _ => {
                 for coefficient in a.iter_mut().step_by(2) {
-                    *coefficient = extension(u)?;
+                    *coefficient = fp2::canonical(u)?;
                 }
             }
         }
@@ -1096,7 +1091,7 @@ pub mod fuzz {
             Ok(Self {
                 a,
                 b: element(u)?,
-                line: [extension(u)?, extension(u)?, extension(u)?],
+                line: [fp2::canonical(u)?, fp2::canonical(u)?, fp2::canonical(u)?],
             })
         }
 
