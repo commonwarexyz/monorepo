@@ -4454,7 +4454,7 @@ mod tests {
         match context.scan(partition).await {
             Ok(_) => true,
             Err(RuntimeError::PartitionMissing(_)) => false,
-            Err(err) => panic!("scan of {partition} failed: {err}"),
+            Err(err) => panic!("scan of {partition} must succeed: {err}"),
         }
     }
 
@@ -4462,7 +4462,7 @@ mod tests {
     /// failures, then reopen it and report where destroy stopped.
     ///
     /// `journal_partitions` names every partition of the operation journal configured by
-    /// `journal_cfg`, which destroy removes before the Merkle structure.
+    /// `journal_cfg`. Destroy removes them before the Merkle structure.
     fn interrupted_destroy_reopens<F, C>(
         seed: u64,
         journal_cfg: C::Config,
@@ -4589,6 +4589,7 @@ mod tests {
         F: Family + PartialEq,
         C: Backing<Context, Item = TestOp<F>>,
     {
+        // Each seed fails a different sample of syncs and removals.
         let outcomes: Vec<_> = (0..64u64)
             .map(|seed| {
                 interrupted_destroy_reopens::<F, C>(seed, journal_cfg.clone(), journal_partitions)
@@ -4602,7 +4603,7 @@ mod tests {
             Interrupted::InMerkle,
             Interrupted::Completed,
         ] {
-            assert!(outcomes.contains(&outcome), "no seed reached {outcome:?}");
+            assert!(outcomes.contains(&outcome), "a seed must reach {outcome:?}");
         }
     }
 

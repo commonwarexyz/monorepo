@@ -2144,6 +2144,13 @@ mod tests {
         commonware_parallel::Sequential,
     >;
 
+    type FixedDbConfig = Config<OneCap, FConfig, Sequential>;
+    type VariableDbConfig = Config<OneCap, VConfig<((), ())>, Sequential>;
+
+    /// Partitions of the operations log, then of the Merkle structure. Destroy removes them in
+    /// that order before the grafted metadata.
+    type Stages = [Vec<String>; 2];
+
     /// Where an interrupted destroy stopped, in the order destroy reaches each outcome.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Interrupted {
@@ -2167,18 +2174,15 @@ mod tests {
         match ctx.scan(partition).await {
             Ok(_) => true,
             Err(RuntimeError::PartitionMissing(_)) => false,
-            Err(err) => panic!("scan of {partition} failed: {err}"),
+            Err(err) => panic!("scan of {partition} must succeed: {err}"),
         }
     }
 
     /// Interrupt the destroy of a pruned database holding several commits with injected sync
     /// and removal failures, then reopen it and report where destroy stopped.
-    ///
-    /// `stages` names the partitions of the operations log and then those of the Merkle
-    /// structure, which destroy removes in that order before the grafted metadata.
     fn interrupted_destroy_reopens<F, DB, Fut>(
         seed: u64,
-        stages: &[Vec<String>; 2],
+        stages: &Stages,
         open: impl Fn(deterministic::Context) -> Fut,
     ) -> Interrupted
     where
@@ -2237,7 +2241,9 @@ mod tests {
             let reopened = (db.bounds(), db.root());
             let outcome = match (reopened == committed, finished) {
                 (true, 0) => Interrupted::Unchanged,
-                (true, _) => panic!("seed {seed} reopened at its last commit without its log"),
+                (true, _) => {
+                    panic!("seed {seed} must not reopen at its last commit without its log")
+                }
                 (false, 0) => Interrupted::InLog,
                 (false, 1) => Interrupted::InMerkle,
                 (false, _) => Interrupted::InGraftedMetadata,
@@ -2246,6 +2252,18 @@ mod tests {
                 outcome == Interrupted::Unchanged || reopened == fresh,
                 "seed {seed} must reopen at its last commit or new, not with bounds {:?}",
                 reopened.0
+            );
+
+            // A reopen makes its repairs durable before it returns, so opening again without a
+            // sync in between finds the same database.
+            drop(db);
+            let db = open(ctx.child("third"))
+                .await
+                .unwrap_or_else(|err| panic!("seed {seed} must reopen twice: {err}"));
+            assert_eq!(
+                (db.bounds(), db.root()),
+                reopened,
+                "seed {seed} must reopen unchanged"
             );
 
             // A retried destroy completes and leaves no blob behind.
@@ -2257,7 +2275,7 @@ mod tests {
 
     /// Sweep seeds and require that destroy stopped at each of its outcomes.
     fn interrupted_destroy_reopens_all_seeds<F, DB, Fut>(
-        stages: &[Vec<String>; 2],
+        stages: &Stages,
         open: impl Fn(deterministic::Context) -> Fut,
     ) where
         F: merkle::Graftable,
@@ -2265,6 +2283,7 @@ mod tests {
             + BitmapPrunedBits,
         Fut: Future<Output = Result<DB, Error<F>>>,
     {
+        // Each seed fails a different sample of syncs and removals.
         let outcomes: Vec<_> = (0..256u64)
             .map(|seed| interrupted_destroy_reopens(seed, stages, &open))
             .collect();
@@ -2277,7 +2296,7 @@ mod tests {
             Interrupted::InGraftedMetadata,
             Interrupted::Completed,
         ] {
-            assert!(outcomes.contains(&outcome), "no seed reached {outcome:?}");
+            assert!(outcomes.contains(&outcome), "a seed must reach {outcome:?}");
         }
     }
 
@@ -2294,7 +2313,7 @@ mod tests {
     /// A configuration of a database over a fixed log, and the partitions of its log and Merkle
     /// structure. Its journals keep few blobs once pruned, so an interrupted destroy's failures
     /// reach past the log's removal.
-    fn fixed_destroy_config() -> (Config<OneCap, FConfig, Sequential>, [Vec<String>; 2]) {
+    fn fixed_destroy_config() -> (FixedDbConfig, Stages) {
         let mut cfg = fixed_config::<OneCap>("interrupted-destroy");
         cfg.merkle.items_per_blob = NZU64!(512);
         cfg.log.items_per_blob = NZU64!(512);
@@ -2309,10 +2328,7 @@ mod tests {
     /// A configuration of a database over a variable log, and the partitions of its log and
     /// Merkle structure. Its journals keep few blobs once pruned, so an interrupted destroy's
     /// failures reach past the log's removal.
-    fn variable_destroy_config() -> (
-        Config<OneCap, VConfig<((), ())>, Sequential>,
-        [Vec<String>; 2],
-    ) {
+    fn variable_destroy_config() -> (VariableDbConfig, Stages) {
         let mut cfg = variable_config::<OneCap>("interrupted-destroy");
         cfg.merkle.items_per_blob = NZU64!(512);
         cfg.log.items_per_section = NZU64!(512);
