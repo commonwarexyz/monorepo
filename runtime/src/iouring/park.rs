@@ -177,9 +177,13 @@ impl ArmGuard<'_> {
 
 impl Drop for ArmGuard<'_> {
     fn drop(&mut self) {
-        // The next observation acquires any notification, so disarming needs
-        // no ordering of its own.
-        self.parker.word.fetch_and(!WAITER, Ordering::Relaxed);
+        // Only the worker sets the waiter bit, so a load that finds it clear,
+        // as after the notification that woke this park, is final and leaves
+        // nothing to disarm. The next observation acquires any notification,
+        // so disarming needs no ordering of its own.
+        if self.parker.word.load(Ordering::Relaxed) & WAITER != 0 {
+            self.parker.word.fetch_and(!WAITER, Ordering::Relaxed);
+        }
     }
 }
 
@@ -358,8 +362,9 @@ impl Parker {
     /// which feeds adaptive spinning. Returns `None` without blocking when a
     /// notification arrived since `seen` or the deadline has elapsed, and after
     /// an interruption or a timeout, so timer expiry does not count as a quick
-    /// notification wake. The futex timeout is computed immediately before
-    /// sleeping. Every return disarms the word, including skipped sleeps.
+    /// notification wake. The futex timeout is computed from the clock reading
+    /// that also times the sleep, taken immediately before it. Every return
+    /// disarms the word, including skipped sleeps.
     pub fn park(&self, seen: u32, deadline: Option<Instant>) -> Option<Duration> {
         let arm = self.arm(seen);
         if !arm.still_idle() {
@@ -367,7 +372,7 @@ impl Parker {
         }
 
         let before = Instant::now();
-        self.futex_wait(arm.snapshot(), deadline)
+        self.futex_wait(arm.snapshot(), deadline, before)
             .then(|| before.elapsed())
     }
 
@@ -379,9 +384,10 @@ impl Parker {
     /// equals it, which closes the race between arming and a concurrent
     /// notification. A stale snapshot, an elapsed deadline, `EINTR`, `EAGAIN`,
     /// `ETIMEDOUT`, and an unexpected error all return `false`, and the caller
-    /// rechecks its sources with the deadline unchanged.
+    /// rechecks its sources with the deadline unchanged. `now` is a clock
+    /// reading the caller took just before, from which the timeout is computed.
     #[cfg(not(feature = "loom"))]
-    fn futex_wait(&self, snapshot: u32, deadline: Option<Instant>) -> bool {
+    fn futex_wait(&self, snapshot: u32, deadline: Option<Instant>, now: Instant) -> bool {
         // This is only a same-word equality check before entering the
         // syscall. It relies only on modification order of this atomic, so
         // `Relaxed` is sufficient.
@@ -391,7 +397,7 @@ impl Parker {
 
         let timeout = match deadline {
             Some(deadline) => {
-                let remaining = deadline.saturating_duration_since(Instant::now());
+                let remaining = deadline.saturating_duration_since(now);
                 if remaining.is_zero() {
                     return false;
                 }
@@ -441,12 +447,12 @@ impl Parker {
     /// until a wake releases it, so loom can explore the same lost-wake
     /// boundary that the kernel's atomic futex wait protects in production.
     #[cfg(feature = "loom")]
-    fn futex_wait(&self, snapshot: u32, deadline: Option<Instant>) -> bool {
+    fn futex_wait(&self, snapshot: u32, deadline: Option<Instant>, now: Instant) -> bool {
         // Loom models notification races, not the kernel's timer queue. An
         // already due deadline exercises the no-sleep transition, and a deadline
         // still ahead is ignored, so the wait compares and queues as an untimed
         // wait does.
-        if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
+        if deadline.is_some_and(|deadline| deadline <= now) {
             return false;
         }
 
@@ -907,7 +913,7 @@ pub mod tests {
 
         // A wait on the stale snapshot returns at once instead of blocking,
         // through the userspace equality check or the futex EAGAIN path.
-        assert!(!parker.futex_wait(arm.snapshot(), None));
+        assert!(!parker.futex_wait(arm.snapshot(), None, Instant::now()));
         drop(arm);
 
         // The notification was counted and the guard disarmed.
@@ -1187,7 +1193,7 @@ mod loom_tests {
     /// wake of that wait posts its completion. A fresh ring wait therefore
     /// behaves as a blocking wait.
     fn ring_wait(parker: &Parker, guard: &ArmGuard<'_>) {
-        let _ = parker.futex_wait(guard.snapshot(), None);
+        let _ = parker.futex_wait(guard.snapshot(), None, Instant::now());
     }
 
     /// Arm against `seen` and block in a new ring wait if that is still idle.
@@ -1788,7 +1794,7 @@ mod loom_tests {
             assert_eq!(notifications(&unparker), 2);
             assert!(!waiting(&unparker));
             assert_eq!(parker.word.futex.lock().unwrap().wakes, 1);
-            assert!(!parker.futex_wait(guard.snapshot(), None));
+            assert!(!parker.futex_wait(guard.snapshot(), None, Instant::now()));
             drop(guard);
             assert!(!waiting(&unparker));
         });
