@@ -70,7 +70,10 @@ test-benches crate test_flags='':
     for bench in $binaries; do
         cargo test --bench "$bench" -p {{ crate }} {{ test_flags }} -- --verbose | tee -a "$output"
     done
-    python3 .github/scripts/lint_benchmark_names.py "$output"
+    # A partition can hold only binaries that print no benchmark names, such as size reports.
+    if grep -q '^Testing ' "$output"; then
+        python3 .github/scripts/lint_benchmark_names.py "$output"
+    fi
 
 # Run benchmarks with their large inputs (e.g. just bench-full -p commonware-storage --bench index)
 bench-full *args='':
