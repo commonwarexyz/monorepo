@@ -1205,79 +1205,7 @@ pub mod fuzz {
     /// The operations of [`Plan::CyclotomicChain`].
     const STEPS_CYCLOTOMIC: [Step; 2] = [Step::CyclotomicSquare, Step::Conjugate];
 
-    /// An operation on the current value of a chain.
-    type Apply<S, F> = fn(S, Fp12<F>, &Loaded<F>, &[Fp2<F>; 5]) -> Fp12<F>;
-
-    fn mul<S: Simd, F: Field<S>>(
-        simd: S,
-        mut y: Fp12<F>,
-        x: &Loaded<F>,
-        _: &[Fp2<F>; 5],
-    ) -> Fp12<F> {
-        y.mul(simd, &x.b);
-        y
-    }
-
-    fn square<S: Simd, F: Field<S>>(
-        simd: S,
-        mut y: Fp12<F>,
-        _: &Loaded<F>,
-        _: &[Fp2<F>; 5],
-    ) -> Fp12<F> {
-        y.square(simd);
-        y
-    }
-
-    fn mul_by_line<S: Simd, F: Field<S>>(
-        simd: S,
-        mut y: Fp12<F>,
-        x: &Loaded<F>,
-        _: &[Fp2<F>; 5],
-    ) -> Fp12<F> {
-        y.mul_by_line(simd, &x.line);
-        y
-    }
-
-    fn conjugate<S: Simd, F: Field<S>>(
-        simd: S,
-        y: Fp12<F>,
-        _: &Loaded<F>,
-        _: &[Fp2<F>; 5],
-    ) -> Fp12<F> {
-        y.conjugate(simd)
-    }
-
-    fn frobenius<S: Simd, F: Field<S>>(
-        simd: S,
-        y: Fp12<F>,
-        _: &Loaded<F>,
-        coefficients: &[Fp2<F>; 5],
-    ) -> Fp12<F> {
-        y.frobenius(simd, coefficients)
-    }
-
-    fn invert<S: Simd, F: Field<S>>(
-        simd: S,
-        y: Fp12<F>,
-        _: &Loaded<F>,
-        _: &[Fp2<F>; 5],
-    ) -> Fp12<F> {
-        y.invert(simd)
-    }
-
-    fn cyclotomic_square<S: Simd, F: Field<S>>(
-        simd: S,
-        mut y: Fp12<F>,
-        _: &Loaded<F>,
-        _: &[Fp2<F>; 5],
-    ) -> Fp12<F> {
-        y.cyclotomic_square(simd);
-        y
-    }
-
     /// Applies operations to `a`, storing the value after each.
-    ///
-    /// Each operation runs in its own function, so debug builds keep every frame small.
     struct Chain<'a> {
         inputs: &'a [Inputs],
         steps: &'a [Step],
@@ -1293,16 +1221,16 @@ pub mod fuzz {
             self.steps
                 .iter()
                 .map(|step| {
-                    let apply: Apply<S, F> = match step {
-                        Step::Mul => mul,
-                        Step::Square => square,
-                        Step::MulByLine => mul_by_line,
-                        Step::Conjugate => conjugate,
-                        Step::Frobenius => frobenius,
-                        Step::Invert => invert,
-                        Step::CyclotomicSquare => cyclotomic_square,
-                    };
-                    y = check_bound(simd, apply(simd, y, &loaded, &coefficients));
+                    match step {
+                        Step::Mul => y.mul(simd, &loaded.b),
+                        Step::Square => y.square(simd),
+                        Step::MulByLine => y.mul_by_line(simd, &loaded.line),
+                        Step::Conjugate => y = y.conjugate(simd),
+                        Step::Frobenius => y = y.frobenius(simd, &coefficients),
+                        Step::Invert => y = y.invert(simd),
+                        Step::CyclotomicSquare => y.cyclotomic_square(simd),
+                    }
+                    y = check_bound(simd, y);
                     store(simd, y, self.inputs.len())
                 })
                 .collect()
