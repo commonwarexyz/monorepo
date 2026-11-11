@@ -442,9 +442,10 @@ impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
 
     /// As [`Self::expire`], but firing at most `fires` slots, while refiles
     /// still spend from the whole `budget`. A pass ends at the first due slot
-    /// that it may not fire, so the slots fire in the order of an uncapped
-    /// pass, and [`Self::bound`] then stays at or below `now` as after a
-    /// budget that ran out.
+    /// that it may not fire, so it fires a prefix of what an uncapped pass
+    /// with the same budget would fire from the same state, and
+    /// [`Self::bound`] then stays at or below `now` as after a budget that
+    /// ran out.
     pub fn expire_capped(
         &mut self,
         now: u64,
@@ -531,7 +532,7 @@ impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
 
             // No resident is earlier than start, so the base can move there
             // and every other resident stays correctly filed. Clearing the
-            // bucket's bit detaches it in O(1): it keeps its list, so removals
+            // bucket's bit detaches it in O(1). It keeps its list, so removals
             // still find its slots, and the next iteration drains it.
             self.base = start;
             self.clear_occupied(bucket);

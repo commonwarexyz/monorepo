@@ -60,11 +60,14 @@ impl Deadlines {
 
         // The bound is the firing time rather than the deadline, so a worker
         // parked on it wakes when the deadline fires, not up to a tick early.
-        // The firing time is less than a tick after the deadline, so only a
-        // deadline at the end of `Instant`'s range lacks one, and that
-        // deadline bounds itself.
+        // Request deadlines are at most MAX_TIMEOUT ahead, and the firing
+        // time less than a tick later, so it is an instant.
         let fires = Wheel::<RESOLUTION>::rounded(nanos);
-        let fires = self.origin.after_nanos(fires).unwrap_or(deadline);
+        let fires = self
+            .origin
+            .after_nanos(fires)
+            .expect("a request deadline's firing time is an instant");
+
         self.next = Some(self.next.map_or(fires, |next| next.min(fires)));
     }
 
@@ -107,8 +110,15 @@ impl Deadlines {
             .expire(now, &mut budget, &mut |slot| fired.push(slot));
 
         // Take the wheel's bound, which can be later than one that removals
-        // left early. An empty wheel's bound has no instant.
-        self.next = self.origin.after_nanos(self.wheel.bound());
+        // left early. An empty wheel's bound has no instant, and any other
+        // bound is at most an installed firing time, which is one.
+        let bound = self.wheel.bound();
+
+        self.next = (bound != u64::MAX).then(|| {
+            self.origin
+                .after_nanos(bound)
+                .expect("a request deadline's firing time is an instant")
+        });
     }
 
     /// A conservative bound on the earliest firing time, or `None` when empty.

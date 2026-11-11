@@ -161,10 +161,12 @@
 //!                                        return result or resume panic
 //! ```
 //!
-//! No pool worker closes its mailbox or io_uring ring until every pool worker
-//! has drained the set and finished its last poll, since a task polled on one
-//! worker can hold registrations on another, whose mailbox forwards their
-//! results. A dedicated worker closes its mailbox once its root is gone.
+//! No pool worker closes its mailbox, its timers or its io_uring ring until
+//! every pool worker has drained the set and finished its last poll, since a
+//! task polled on one worker can hold registrations on another. That worker's
+//! mailbox forwards the results of its requests, and a sleep polled in its
+//! closed timers before its deadline panics. A dedicated worker closes its
+//! mailbox once its root is gone.
 //!
 //! Work spawned by root destruction participates in shutdown. Each worker keeps
 //! TLS installed while destroying tasks, draining retained writes and syncs,
@@ -1861,11 +1863,12 @@ impl Worker {
             }
 
             // A task polled on one worker can hold registrations on another,
-            // whose mailbox forwards their results. No pool worker closes its
-            // mailbox or drops the forwards it took from it until every pool
-            // worker has drained the set and finished its last poll, so no poll
-            // finds a registration's worker closed. An empty set is no such
-            // barrier, since another worker may still be dropping a future.
+            // whose mailbox forwards their results and whose timers its sleeps
+            // poll. No pool worker closes its mailbox or its timers, or drops
+            // the forwards it took from its mailbox, until every pool worker
+            // has drained the set and finished its last poll, so no poll finds
+            // a registration's worker closed. An empty set is no such barrier,
+            // since another worker may still be dropping a future.
             shared.pool.finish();
 
             // No pool task can run from here on, so the mailbox can close.

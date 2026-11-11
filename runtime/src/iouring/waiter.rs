@@ -384,9 +384,11 @@ impl Waiters {
         // The kernel must be done with the request before we move or release
         // the resources referenced by its SQE.
         let entry = self.entries.get_mut(id.0).expect("finished waiter missing");
+
         let Entry::Pending(waiter) = entry else {
             panic!("finished waiter not pending");
         };
+
         assert!(!waiter.in_flight, "cannot finish kernel-visible request");
 
         // Keep the identity occupied while separating the output from the

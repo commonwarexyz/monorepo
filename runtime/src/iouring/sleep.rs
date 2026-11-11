@@ -66,9 +66,10 @@
 //!
 //! Waker clones, wakes, and waker destruction never run under the timers' lock
 //! or a worker borrow, since they may reenter the runtime. A pending poll
-//! clones a changed waker outside the lock, while wakes and released wakers go
-//! through the current worker's [`Deferred`] batch, or are dropped at once on
-//! a thread without a worker.
+//! clones a changed waker outside the lock. Only workers end registrations, so
+//! wakes always go through the current worker's [`Deferred`] batch. Released
+//! wakers go through it as well, or are dropped at once on a thread without a
+//! worker.
 //!
 //! # Lock-Free Polls
 //!
@@ -142,12 +143,13 @@
 //! fires only what its run queue can take, and the sleeps that one task
 //! multiplexes fire at that rate, although their wakes reach a single task.
 //! Those that the task repolls once a pass has reached their deadlines
-//! complete without their fires (see above). It fires them in the wheel's
-//! order, bucket by bucket in time order.
-//! Within a bucket that a pass reaches after some of its deadlines passed, as
-//! a worker that is behind reaches buckets of 65 us on level one and of 4.2 ms
-//! on level two, the due ones fire in registration order rather than deadline
-//! order.
+//! complete without their fires (see above).
+//!
+//! A pass fires due registrations in the wheel's order, bucket by bucket in
+//! time order. Within a bucket that a pass reaches after some of its deadlines
+//! passed, as a worker that is behind reaches buckets of 65 us on level one
+//! and of 4.2 ms on level two, the due ones fire in registration order rather
+//! than deadline order.
 //!
 //! A pass that leaves due registrations behind keeps the published bound at
 //! or below its time, so the worker serves again before it parks, and a pool
@@ -353,7 +355,8 @@ impl Registrations {
 }
 
 /// Ends waiting registrations on behalf of a party other than their sleeps,
-/// within one critical section opened by [`Timers::end`].
+/// within the critical section of the caller of [`Timers::end`], which holds
+/// the lock throughout.
 struct Ending<'a> {
     /// Wakes of the ended registrations, run after the lock is released.
     wakes: &'a mut Vec<Waker>,
@@ -1298,6 +1301,7 @@ pub mod tests {
         // clock can represent.
         let before = Instant::now();
         let mut sleep = Sleep::new(Duration::MAX);
+
         let State::Unregistered { deadline, .. } = sleep.state else {
             panic!("a sleep registered at its creation");
         };

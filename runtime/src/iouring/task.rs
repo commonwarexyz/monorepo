@@ -704,7 +704,7 @@ impl Task {
     ///
     /// Sleeps use this to match a task waker's identity by its address,
     /// without the lock that guards their stored waker (see
-    /// [`super::sleep`]). A header outlives every reference to its task: the
+    /// [`super::sleep`]). A header outlives every reference to its task. The
     /// cell is freed only after its last reference is released, by a thread
     /// that has acquired every earlier release, and the allocator orders a
     /// free before any later allocation at the same address. So a new task's
