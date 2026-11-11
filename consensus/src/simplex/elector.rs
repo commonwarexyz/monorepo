@@ -569,7 +569,7 @@ where
     /// # Panics
     ///
     /// Panics if `certificate` is `None` for a view other than 1, or if it was
-    /// not verified and its signature fails to decode.
+    /// not verified and its seed signature is malformed.
     fn elect(
         &self,
         round: Round,
@@ -579,9 +579,8 @@ where
             round,
             self.n,
             certificate.map(|c| {
-                c.get()
-                    .expect("verified certificate must decode")
-                    .seed_signature
+                V::Signature::try_from(c.signature.seed_signature.clone())
+                    .expect("verified certificate must be well formed")
             }),
         )
     }

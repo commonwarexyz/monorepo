@@ -112,7 +112,7 @@ impl<E: Spawner + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader
             |namespace, message| cfg.handshake.sign(namespace, message),
         );
         let info_verifier = Info::verifier(
-            local,
+            local.clone(),
             cfg.peer_gossip_max_count,
             cfg.synchrony_bound,
             ip_namespace,
@@ -120,6 +120,7 @@ impl<E: Spawner + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader
         let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(
             context.child("tracker"),
             tracker::Config {
+                public_key: local,
                 myself,
                 bootstrappers: cfg.bootstrappers.clone(),
                 allow_private_ips: cfg.allow_private_ips,
@@ -323,7 +324,10 @@ mod tests {
     use super::*;
     use crate::{Ingress, Manager, authenticated::discovery::actors::peer};
     use commonware_codec::Encode;
-    use commonware_cryptography::{ChaCha20Poly1305, Signer, ed25519::PrivateKey};
+    use commonware_cryptography::{
+        ChaCha20Poly1305, Signer,
+        ed25519::{PrivateKey, PublicKeyBytes, SignatureBytes},
+    };
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
     use commonware_stream::{cups, cups::Cups, sake, sake::Sake};
     use commonware_utils::NZUsize;
@@ -366,14 +370,15 @@ mod tests {
             let peer_info = Info {
                 ingress: address.into(),
                 timestamp,
-                public_key: peer.clone(),
-                signature: peer_signer.sign(namespace, &message),
+                public_key: peer.clone().into(),
+                signature: peer_signer.sign(namespace, &message).into(),
             };
-            assert!(
+            assert_eq!(
                 network
                     .info_verifier
                     .validate(&context, &[peer_info])
-                    .is_ok()
+                    .unwrap(),
+                vec![peer.clone()]
             );
 
             // Check that the greeting uses the upgrader's identity and the gossip namespace.
@@ -386,10 +391,13 @@ mod tests {
                 .connect(peer, mailbox, false)
                 .await
                 .unwrap();
-            assert_eq!(greeting.public_key, local);
+            assert_eq!(greeting.public_key, PublicKeyBytes::from(local));
             assert_eq!(greeting.ingress, address.into());
             assert_eq!(greeting.timestamp, timestamp);
-            assert_eq!(greeting.signature, signer.sign(namespace, &message));
+            assert_eq!(
+                greeting.signature,
+                SignatureBytes::from(signer.sign(namespace, &message))
+            );
         });
     }
 

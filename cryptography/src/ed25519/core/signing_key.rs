@@ -142,9 +142,8 @@ impl SigningKey {
     pub fn sign(&self, msg: &[u8]) -> Signature {
         let r = Scalar::from_hash(Sha512::default().chain(&self.prefix[..]).chain(msg));
 
-        let R_bytes = (&r * constants::ED25519_BASEPOINT_TABLE)
-            .compress()
-            .to_bytes();
+        let R = &r * constants::ED25519_BASEPOINT_TABLE;
+        let R_bytes = R.compress().to_bytes();
 
         let k = Scalar::from_hash(
             Sha512::default()
@@ -153,8 +152,8 @@ impl SigningKey {
                 .chain(msg),
         );
 
-        let s_bytes = (r + k * self.s).to_bytes();
+        let s = r + k * self.s;
 
-        Signature { R_bytes, s_bytes }
+        Signature::new(R, R_bytes, s)
     }
 }

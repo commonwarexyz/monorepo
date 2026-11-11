@@ -15,7 +15,7 @@
 pub mod mocks;
 
 use crate::{
-    PublicKey,
+    PublicKey, Validated,
     bls12381::primitives::{
         group::Private,
         ops::{self, aggregate, batch},
@@ -26,9 +26,7 @@ use crate::{
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
 use bytes::BufMut;
-use commonware_codec::{
-    Buf, EncodeSize, Error, FixedSize, Read, ReadExt, Write, types::lazy::Lazy,
-};
+use commonware_codec::{Buf, EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_parallel::Strategy;
 use commonware_utils::{
     Participant, Widen,
@@ -135,7 +133,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
 
         Some(Attestation {
             signer: *index,
-            signature: signature.into(),
+            signature,
         })
     }
 
@@ -151,15 +149,12 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         let Some(public_key) = self.participants.value(attestation.signer.into()) else {
             return false;
         };
-        let Some(sig) = attestation.signature.get() else {
-            return false;
-        };
 
         ops::verify_message::<V>(
             public_key,
             subject.namespace(&self.namespace),
             &subject.message(),
-            sig,
+            &attestation.signature,
         )
         .is_ok()
     }
@@ -181,16 +176,10 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         let (filtered, failures) =
             strategy.map_partition_collect_vec(attestations.into_iter(), |attestation| {
                 let signer = attestation.signer;
-                let value = self
-                    .participants
-                    .value(signer.into())
-                    .and_then(|public_key| {
-                        attestation
-                            .signature
-                            .get()
-                            .cloned()
-                            .map(|signature| (attestation, (*public_key, signature)))
-                    });
+                let value = self.participants.value(signer.into()).map(|public_key| {
+                    let signature = attestation.signature;
+                    (attestation, (*public_key, signature))
+                });
                 (signer, value)
             });
         let mut invalid: BTreeSet<_> = failures.into_iter().collect();
@@ -239,10 +228,6 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             self.participants
                 .value(signer.into())
                 .ok_or(AssemblyError::UnknownSigner(signer))?;
-            let signature = signature
-                .get()
-                .cloned()
-                .ok_or(AssemblyError::MalformedSignature(signer))?;
             entries.push((signer, signature));
         }
 
@@ -255,7 +240,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
 
         Ok(Certificate {
             signers,
-            signature: Lazy::from(signature),
+            signature: (*signature.inner()).into(),
         })
     }
 
@@ -281,9 +266,10 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         }
 
         // Malformed signatures can skip per-signer group operations.
-        let Some(signature) = certificate.signature.get() else {
+        let Ok(signature) = V::Signature::try_from(certificate.signature.clone()) else {
             return false;
         };
+        let signature = aggregate::Signature::<V>::new(signature);
 
         // Aggregate the public keys.
         let mut agg_public = aggregate::PublicKey::<V>::zero();
@@ -300,7 +286,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
             &agg_public,
             subject.namespace(&self.namespace),
             &subject.message(),
-            signature,
+            &signature,
         )
         .is_ok()
     }
@@ -335,7 +321,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
 
     /// Returns the maximum encoded certificate size for at most `participants` participants.
     pub fn max_certificate_size(participants: u32) -> usize {
-        Signers::max_encode_size(participants) + V::Signature::SIZE
+        Signers::max_encode_size(participants) + <V::Signature as Validated>::Bytes::SIZE
     }
 
     pub const fn certificate_codec_config(&self) -> <Certificate<V> as Read>::Cfg {
@@ -353,8 +339,9 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
 pub struct Certificate<V: Variant> {
     /// Bitmap of participant indices that contributed signatures.
     pub signers: Signers,
-    /// Aggregated BLS signature covering all signatures in this certificate.
-    pub signature: Lazy<aggregate::Signature<V>>,
+    /// Encoding of the aggregated BLS signature covering all signatures in this certificate.
+    /// It is checked when the certificate is verified.
+    pub signature: <V::Signature as Validated>::Bytes,
 }
 
 impl<V: Variant> Write for Certificate<V> {
@@ -382,7 +369,7 @@ impl<V: Variant> Read for Certificate<V> {
             ));
         }
 
-        let signature = Lazy::<aggregate::Signature<V>>::read(reader)?;
+        let signature = <V::Signature as Validated>::Bytes::read(reader)?;
 
         Ok(Self { signers, signature })
     }
@@ -395,11 +382,8 @@ where
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let signers = Signers::arbitrary(u)?;
-        let signature = aggregate::Signature::arbitrary(u)?;
-        Ok(Self {
-            signers,
-            signature: Lazy::from(signature),
-        })
+        let signature = V::Signature::arbitrary(u)?.into();
+        Ok(Self { signers, signature })
     }
 }
 
@@ -724,13 +708,13 @@ mod tests {
             ops::compute_public,
             variant::{MinPk, MinSig, Variant},
         },
-        certificate::{Attestation, Membership, Scheme as _, Verifier as _},
+        certificate::{Attestation, AttestationBytes, Membership, Scheme as _, Verifier as _},
         ed25519::{self, PrivateKey as Ed25519PrivateKey},
         sha256::Digest as Sha256Digest,
     };
     use bytes::Bytes;
-    use commonware_codec::{Decode, Encode};
-    use commonware_math::algebra::{CryptoGroup, Random};
+    use commonware_codec::{Decode, DecodeExt, Encode};
+    use commonware_math::algebra::{Additive, CryptoGroup, Random};
     use commonware_parallel::Sequential;
     use commonware_utils::{Faults, N3f1, Participant, TryCollect, ordered::BiMap, test_rng};
 
@@ -946,7 +930,7 @@ mod tests {
 
         // Corrupt one attestation's signature.
         let mut attestations_corrupted = attestations;
-        attestations_corrupted[0].signature = attestations_corrupted[1].signature.clone();
+        attestations_corrupted[0].signature = attestations_corrupted[1].signature;
         let result = schemes[0].verify_attestations::<_, Sha256Digest, _>(
             &mut rng,
             TestSubject {
@@ -1105,7 +1089,7 @@ mod tests {
 
         // Corrupted certificate fails
         let mut corrupted = certificate;
-        corrupted.signature = Lazy::from(aggregate::Signature::zero());
+        corrupted.signature = V::Signature::zero().into();
         assert!(!verifier.verify_certificate::<_, Sha256Digest>(
             &mut rng,
             TestSubject {
@@ -1223,11 +1207,11 @@ mod tests {
 
     fn test_certificate_rejects_malformed_signature<V: Variant>() {
         let mut rng = test_rng();
-        let (schemes, _) = setup_signers::<V>(&mut rng, 4);
+        let (schemes, verifier) = setup_signers::<V>(&mut rng, 4);
         let quorum =
             usize::try_from(N3f1::quorum(schemes.len())).expect("quorum exceeds usize::MAX");
 
-        let mut attestations: Vec<_> = schemes
+        let attestations: Vec<_> = schemes
             .iter()
             .take(quorum)
             .map(|s| {
@@ -1238,14 +1222,30 @@ mod tests {
             })
             .collect();
 
-        let signer = attestations[0].signer;
-        let mut malformed = Bytes::from_static(&[0u8]);
-        attestations[0].signature = Lazy::deferred(&mut malformed, ());
+        // An all-zero encoding lacks the compression flag, so it is not a point.
+        let malformed =
+            <V::Signature as Validated>::Bytes::decode(vec![0u8; V::Signature::SIZE]).unwrap();
 
-        assert_eq!(
-            schemes[0].assemble(non_empty![@attestations], &Sequential),
-            Err(AssemblyError::MalformedSignature(signer))
-        );
+        // An attestation carrying the malformed encoding does not convert.
+        let mut bytes = AttestationBytes::from(attestations[0].clone());
+        bytes.signature = malformed.clone();
+        assert!(Attestation::<Scheme<ed25519::PublicKey, V>>::try_from(bytes).is_err());
+
+        // A certificate carrying the malformed encoding decodes but does not verify.
+        let mut certificate = schemes[0]
+            .assemble(non_empty![@attestations], &Sequential)
+            .unwrap();
+        certificate.signature = malformed;
+        let decoded = Certificate::<V>::decode_cfg(certificate.encode(), &schemes.len())
+            .expect("certificate must decode");
+        assert!(!verifier.verify_certificate::<_, Sha256Digest>(
+            &mut rng,
+            TestSubject {
+                message: Bytes::from_static(MESSAGE),
+            },
+            &decoded,
+            &Sequential,
+        ));
     }
 
     #[test]
@@ -1417,7 +1417,7 @@ mod tests {
         }
 
         // Corrupt second certificate
-        certificates[1].signature = Lazy::from(aggregate::Signature::zero());
+        certificates[1].signature = V::Signature::zero().into();
 
         let certs_iter = messages.iter().zip(&certificates).map(|(msg, cert)| {
             (
@@ -1632,17 +1632,15 @@ mod tests {
         let delta = V::Signature::generator() * &random_scalar;
         let forged_attestation1: Attestation<Scheme<ed25519::PublicKey, V>> = Attestation {
             signer: attestation1.signer,
-            signature: (*attestation1.signature.get().unwrap() - &delta).into(),
+            signature: attestation1.signature - &delta,
         };
         let forged_attestation2: Attestation<Scheme<ed25519::PublicKey, V>> = Attestation {
             signer: attestation2.signer,
-            signature: (*attestation2.signature.get().unwrap() + &delta).into(),
+            signature: attestation2.signature + &delta,
         };
 
-        let forged_sum = *forged_attestation1.signature.get().unwrap()
-            + forged_attestation2.signature.get().unwrap();
-        let valid_sum =
-            *attestation1.signature.get().unwrap() + attestation2.signature.get().unwrap();
+        let forged_sum = forged_attestation1.signature + &forged_attestation2.signature;
+        let valid_sum = attestation1.signature + &attestation2.signature;
         assert_eq!(forged_sum, valid_sum, "signature sums should be equal");
 
         let verification = schemes[0].verify_attestations::<_, Sha256Digest, _>(

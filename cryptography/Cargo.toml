@@ -89,6 +89,7 @@ bench = false
 default = [ "std" ]
 bls12381 = [ "dep:blst" ]
 mocks = [ "std" ]
+test-utils = []
 arbitrary = [
 	"commonware-codec/arbitrary",
 	"commonware-math/arbitrary",

@@ -92,10 +92,12 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
 
 impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Create a new set of records using the given bootstrappers and local node information.
+    ///
+    /// `myself` pairs the local public key with the info it signed.
     pub fn init(
         context: E,
         bootstrappers: Vec<(C, Ingress)>,
-        myself: Info<C>,
+        myself: (C, Info<C>),
         cfg: Config,
         releaser: Releaser<C>,
     ) -> Self {
@@ -107,7 +109,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
         // Add myself to the list of peers.
         // Overwrites the entry if myself is also a bootstrapper.
-        peers.insert(myself.public_key.clone(), Record::myself(myself));
+        let (public_key, info) = myself;
+        peers.insert(public_key, Record::myself(info));
 
         // Other initialization.
         let metrics = Metrics::init(&context);
@@ -177,15 +180,15 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
     }
 
-    /// Using a list of (already-validated) peer information, update the records.
-    pub fn update_peers(&mut self, infos: Vec<types::Info<C>>) {
-        for info in infos {
+    /// Using a list of (already-validated) peer information, each paired with the public key it
+    /// was verified against, update the records.
+    pub fn update_peers(&mut self, infos: Vec<(C, types::Info<C>)>) {
+        for (peer, info) in infos {
             // Update peer address
             //
             // It is not safe to rate limit how many times this can happen
             // over some interval because a malicious peer may just replay
             // old IPs to prevent us from propagating a new one.
-            let peer = info.public_key.clone();
             let Some(record) = self.peers.get_mut(&peer) else {
                 continue;
             };
@@ -591,7 +594,10 @@ mod tests {
     use super::*;
     use crate::authenticated::discovery::types;
     use commonware_actor::mailbox;
-    use commonware_cryptography::{Signer, secp256r1::standard::PrivateKey};
+    use commonware_cryptography::{
+        Signer,
+        secp256r1::standard::{PrivateKey, PublicKeyBytes},
+    };
     use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
     use commonware_utils::{
         NZUsize, SystemTimeExt, TryCollect, bitmap::BitMap, hostname, ordered::Set as OrderedSet,
@@ -604,17 +610,22 @@ mod tests {
         SocketAddr::from(([8, 8, 8, 8], 8080))
     }
 
-    fn create_info<S>(signer: &S, socket: SocketAddr, timestamp: u64) -> types::Info<S::PublicKey>
+    fn create_info<S>(
+        signer: &S,
+        socket: SocketAddr,
+        timestamp: u64,
+    ) -> (S::PublicKey, types::Info<S::PublicKey>)
     where
         S: commonware_cryptography::Signer,
     {
-        types::Info::sign(
+        let info = types::Info::sign(
             signer.public_key(),
             NAMESPACE,
             socket,
             timestamp,
             |namespace, message| signer.sign(namespace, message),
-        )
+        );
+        (signer.public_key(), info)
     }
 
     fn metric_value(metrics: &str, name: &str, peer: &str) -> Option<i64> {
@@ -1887,7 +1898,8 @@ mod tests {
                 "Should only have info for unblocked connected peer"
             );
             assert_eq!(
-                infos[0].public_key, peer_pk_2,
+                infos[0].public_key,
+                PublicKeyBytes::from(peer_pk_2),
                 "Returned info should be for peer 2"
             );
         });
@@ -2276,7 +2288,7 @@ mod tests {
                 1,
                 |namespace, message| peer_signer.sign(namespace, message),
             );
-            directory.update_peers(vec![dns]);
+            directory.update_peers(vec![(peer_pk.clone(), dns)]);
             assert!(directory.dialable().peers.is_empty());
 
             // A dial request from the stale snapshot must not hand out the disallowed ingress.

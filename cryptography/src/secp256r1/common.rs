@@ -1,9 +1,8 @@
-use crate::Secret;
+use crate::{Malformed, Secret};
 use bytes::BufMut;
-use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
-use commonware_utils::{Array, Span};
 use core::{
     cmp::Ordering,
     fmt::{Debug, Display},
@@ -106,7 +105,10 @@ impl arbitrary::Arbitrary<'_> for PrivateKeyInner {
 }
 
 /// Internal Secp256r1 Public Key storage.
-#[derive(Clone, Eq, FixedArray)]
+///
+/// A key is built from its compressed SEC1 encoding and is always a point on the curve. P-256 has
+/// cofactor one, so every such point has prime order.
+#[derive(Clone, Eq)]
 pub struct PublicKeyInner {
     raw: [u8; PUBLIC_KEY_LENGTH],
     pub key: VerifyingKey,
@@ -143,6 +145,11 @@ impl PublicKeyInner {
         Self::new(private_key.verifying_key())
     }
 
+    /// Returns the compressed SEC1 encoding of the key.
+    pub const fn raw(&self) -> &[u8; PUBLIC_KEY_LENGTH] {
+        &self.raw
+    }
+
     /// aws-lc-rs can decompress keys, but since we already have the key parsed
     /// in memory, extracting the uncompressed form directly is faster.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -158,13 +165,11 @@ impl Write for PublicKeyInner {
     }
 }
 
-impl Read for PublicKeyInner {
-    type Cfg = ();
+impl TryFrom<[u8; PUBLIC_KEY_LENGTH]> for PublicKeyInner {
+    type Error = Malformed;
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let raw = <[u8; PUBLIC_KEY_LENGTH]>::read(buf)?;
-        let key = VerifyingKey::from_sec1_bytes(&raw)
-            .map_err(|_| CodecError::Invalid(CURVE_NAME, "Invalid PublicKey"))?;
+    fn try_from(raw: [u8; PUBLIC_KEY_LENGTH]) -> Result<Self, Malformed> {
+        let key = VerifyingKey::from_sec1_bytes(&raw).map_err(|_| Malformed)?;
         Ok(Self { raw, key })
     }
 }
@@ -172,10 +177,6 @@ impl Read for PublicKeyInner {
 impl FixedSize for PublicKeyInner {
     const SIZE: usize = PUBLIC_KEY_LENGTH;
 }
-
-impl Span for PublicKeyInner {}
-
-impl Array for PublicKeyInner {}
 
 impl Hash for PublicKeyInner {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -246,7 +247,10 @@ macro_rules! impl_private_key_wrapper {
         impl commonware_codec::Read for $name {
             type Cfg = ();
 
-            fn read_cfg(buf: &mut impl Buf, cfg: &()) -> Result<Self, commonware_codec::Error> {
+            fn read_cfg(
+                buf: &mut impl commonware_codec::Buf,
+                cfg: &(),
+            ) -> Result<Self, commonware_codec::Error> {
                 PrivateKeyInner::read_cfg(buf, cfg).map(Self)
             }
         }
@@ -278,7 +282,28 @@ macro_rules! impl_private_key_wrapper {
 /// Macro to implement newtype wrapper traits for PublicKey.
 macro_rules! impl_public_key_wrapper {
     ($name:ident) => {
+        /// The encoding of a Secp256r1 public key, in compressed SEC1 form.
+        pub type PublicKeyBytes = crate::Encoding<$name, PUBLIC_KEY_LENGTH>;
+
         impl crate::PublicKey for $name {}
+
+        impl crate::Validated for $name {
+            type Bytes = PublicKeyBytes;
+        }
+
+        impl TryFrom<PublicKeyBytes> for $name {
+            type Error = crate::Malformed;
+
+            fn try_from(bytes: PublicKeyBytes) -> Result<Self, crate::Malformed> {
+                PublicKeyInner::try_from(*bytes.as_array()).map(Self)
+            }
+        }
+
+        impl From<$name> for PublicKeyBytes {
+            fn from(key: $name) -> Self {
+                Self::new(*key.0.raw())
+            }
+        }
 
         impl commonware_codec::Write for $name {
             fn write(&self, buf: &mut impl bytes::BufMut) {
@@ -286,21 +311,9 @@ macro_rules! impl_public_key_wrapper {
             }
         }
 
-        impl commonware_codec::Read for $name {
-            type Cfg = ();
-
-            fn read_cfg(buf: &mut impl Buf, cfg: &()) -> Result<Self, commonware_codec::Error> {
-                PublicKeyInner::read_cfg(buf, cfg).map(Self)
-            }
-        }
-
         impl commonware_codec::FixedSize for $name {
             const SIZE: usize = PUBLIC_KEY_LENGTH;
         }
-
-        impl commonware_utils::Span for $name {}
-
-        impl commonware_utils::Array for $name {}
 
         impl core::hash::Hash for $name {
             fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
@@ -351,6 +364,24 @@ pub(crate) mod tests {
     use super::*;
     use commonware_codec::DecodeExt;
 
+    /// The curve order `n`, big-endian.
+    pub const ORDER: [u8; 32] = [
+        0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xbc, 0xe6, 0xfa, 0xad, 0xa7, 0x17, 0x9e, 0x84, 0xf3, 0xb9, 0xca, 0xc2, 0xfc, 0x63,
+        0x25, 0x51,
+    ];
+
+    /// Replaces the big-endian scalar `s` with `n - s`. With the same `r`, both scalars
+    /// satisfy the ECDSA verification equation.
+    pub fn negate_scalar(s: &mut [u8]) {
+        let mut borrow = 0i16;
+        for (byte, n) in s.iter_mut().zip(ORDER).rev() {
+            let difference = i16::from(n) - i16::from(*byte) - borrow;
+            *byte = u8::try_from(difference.rem_euclid(256)).expect("residue must fit a byte");
+            borrow = i16::from(difference < 0);
+        }
+    }
+
     pub fn create_private_key() -> PrivateKeyInner {
         const HEX: &str = "519b423d715f8b581f4fa8ee59f4771a5b44c8130b4e3eacca54a56dda72b464";
         PrivateKeyInner::decode(commonware_formatting::from_hex(HEX).unwrap()).unwrap()
@@ -369,7 +400,8 @@ pub(crate) mod tests {
     }
 
     pub fn parse_public_key_as_compressed(qx: &str, qy: &str) -> PublicKeyInner {
-        PublicKeyInner::decode(parse_public_key_as_compressed_vector(qx, qy)).unwrap()
+        let compressed = parse_public_key_as_compressed_vector(qx, qy);
+        PublicKeyInner::try_from(<[u8; PUBLIC_KEY_LENGTH]>::try_from(compressed).unwrap()).unwrap()
     }
 
     pub fn parse_public_key_as_compressed_vector(qx: &str, qy: &str) -> Vec<u8> {
@@ -828,7 +860,6 @@ pub(crate) mod tests {
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<PublicKeyInner> => 1024,
             CodecConformance<PrivateKeyInner> => 1024,
         }
     }

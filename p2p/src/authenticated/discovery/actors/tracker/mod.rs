@@ -22,6 +22,8 @@ pub use reservation::Reservation;
 
 #[derive(Clone, Debug)]
 pub struct Config<C: PublicKey> {
+    pub public_key: C,
+    /// The local node's info, signed by `public_key`.
     pub myself: Info<C>,
     pub bootstrappers: Vec<Bootstrapper<C>>,
     pub allow_private_ips: bool,

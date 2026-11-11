@@ -90,8 +90,8 @@ pub enum Message<C: PublicKey> {
 
     /// Notify the tracker that a [types::Payload::Peers] message has been received from a peer.
     Peers {
-        /// The list of peers received.
-        peers: Vec<types::Info<C>>,
+        /// The list of peers received, each with the public key its info was verified against.
+        peers: Vec<(C, types::Info<C>)>,
     },
 
     /// Request a list of dialable peers.
@@ -193,7 +193,7 @@ impl<C: PublicKey> Mailbox<C> {
     }
 
     /// Send a `Peers` message to the tracker.
-    pub(crate) fn peers(&self, peers: Vec<types::Info<C>>) -> Feedback {
+    pub(crate) fn peers(&self, peers: Vec<(C, types::Info<C>)>) -> Feedback {
         self.0.enqueue(Message::Peers { peers })
     }
 

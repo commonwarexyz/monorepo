@@ -4,7 +4,7 @@ use arbitrary::{Arbitrary, Unstructured};
 use commonware_codec::{Copying, DecodeExt, Encode};
 use commonware_cryptography::{
     Signer, Verifier,
-    ed25519::{PrivateKey, PublicKey, Signature},
+    ed25519::{PrivateKey, PublicKey, Signature, SignatureBytes},
 };
 use commonware_utils::union_unique;
 use ed25519_consensus::{
@@ -12,6 +12,9 @@ use ed25519_consensus::{
     VerificationKey as ConsensusPublicKey,
 };
 use libfuzzer_sys::fuzz_target;
+
+mod common;
+use common::convert;
 
 #[derive(Debug)]
 pub enum FuzzInput<'a> {
@@ -124,7 +127,7 @@ fn split_namespace_message(bytes: &[u8]) -> (&[u8], &[u8]) {
 
 fn test_pubkey(pubkey: &[u8]) {
     let consensus_result = ConsensusPublicKey::try_from(pubkey);
-    let our_result = PublicKey::decode(Copying(pubkey));
+    let our_result = convert::<PublicKey>(pubkey);
 
     // Consensus implements the same ZIP-215 validation rules.
     assert_eq!(consensus_result.is_err(), our_result.is_err());
@@ -138,13 +141,16 @@ fn test_pubkey(pubkey: &[u8]) {
 
 fn test_signature(signature: &[u8]) {
     let consensus_result = ConsensusSignature::try_from(signature);
-    let our_result = Signature::decode(Copying(signature));
+    let our_result = SignatureBytes::decode(Copying(signature));
 
-    // Consensus implements the same ZIP-215 validation rules.
+    // Consensus parses any encoding of the right length and checks its form only when
+    // verifying, so only the length decides here.
     assert_eq!(consensus_result.is_err(), our_result.is_err());
 
-    // If all succeeded, check round-trip encoding
-    if let (Ok(consensus_signature), Ok(our_signature)) = (consensus_result, our_result) {
+    // If all succeeded, check round-trip encoding of the checked signature
+    if let (Ok(consensus_signature), Ok(our_bytes)) = (consensus_result, our_result)
+        && let Ok(our_signature) = Signature::try_from(our_bytes)
+    {
         let our_bytes = our_signature.encode();
         assert_eq!(&consensus_signature.to_bytes()[..], our_bytes.as_ref());
     }
@@ -160,11 +166,17 @@ fn test_verification(pubkey: &[u8], signature: &[u8], namespace: &[u8], message:
         (Ok(public_key), Ok(signature)) => Some(public_key.verify(&signature, &payload).is_ok()),
         _ => None,
     };
+
+    // Consensus rejects a malformed signature when verifying, and this implementation rejects
+    // it when checking its form, so both count as a failed verification.
     let our_result = match (
-        PublicKey::decode(Copying(pubkey)),
-        Signature::decode(Copying(signature)),
+        convert::<PublicKey>(pubkey),
+        SignatureBytes::decode(Copying(signature)),
     ) {
-        (Ok(public_key), Ok(signature)) => Some(public_key.verify(namespace, message, &signature)),
+        (Ok(public_key), Ok(signature)) => Some(
+            Signature::try_from(signature)
+                .is_ok_and(|signature| public_key.verify(namespace, message, &signature)),
+        ),
         _ => None,
     };
 

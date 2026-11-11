@@ -16,8 +16,10 @@ use commonware_cryptography::{
             variant::Variant,
         },
     },
+    validate_set,
 };
 use commonware_p2p::TrackedPeers;
+use commonware_parallel::Sequential;
 use commonware_utils::{Widen, ordered::Set, sequence::Unit};
 use std::num::NonZeroU32;
 use thiserror::Error;
@@ -130,6 +132,8 @@ impl Read for EpochOutcome {
 }
 
 /// Participants for a DKG/reshare epoch.
+///
+/// Decoding checks every public key and rejects a malformed one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Participants<P: PublicKey> {
     /// Peers that distribute dealings in this epoch.
@@ -249,10 +253,14 @@ impl<P: PublicKey> Read for Participants<P> {
 
     fn read_cfg(reader: &mut impl Buf, max: &Self::Cfg) -> Result<Self, CodecError> {
         let cfg = (RangeCfg::new(0..=max.get() as usize), ());
+        let dealers: Set<P::Bytes> = Set::read_cfg(reader, &cfg)?;
+        let players: Set<P::Bytes> = Set::read_cfg(reader, &cfg)?;
+        let next_players: Set<P::Bytes> = Set::read_cfg(reader, &cfg)?;
+        let malformed = |_| CodecError::Invalid("Participants", "malformed public key");
         Ok(Self {
-            dealers: Set::read_cfg(reader, &cfg)?,
-            players: Set::read_cfg(reader, &cfg)?,
-            next_players: Set::read_cfg(reader, &cfg)?,
+            dealers: validate_set::<P>(&dealers, &Sequential).map_err(malformed)?,
+            players: validate_set::<P>(&players, &Sequential).map_err(malformed)?,
+            next_players: validate_set::<P>(&next_players, &Sequential).map_err(malformed)?,
         })
     }
 }
@@ -261,6 +269,7 @@ impl<P: PublicKey> Read for Participants<P> {
 mod tests {
     use super::*;
     use crate::dkg::network::Addresses;
+    use bytes::Bytes;
     use commonware_codec::{Decode as _, Encode as _};
     use commonware_cryptography::{
         Signer as _,
@@ -271,7 +280,7 @@ mod tests {
         ed25519,
     };
     use commonware_p2p::Address;
-    use commonware_utils::{N3f1, NZU32, TestRng};
+    use commonware_utils::{N3f1, NZU32, TestRng, ordered::Map};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     fn keys(count: u64) -> Set<ed25519::PublicKey> {
@@ -288,6 +297,36 @@ mod tests {
                 (key.clone(), Address::Symmetric(socket))
             })
             .collect()
+    }
+
+    /// Returns a key encoding with `y = 2`. No curve point has that `y`.
+    fn malformed_key() -> ed25519::PublicKeyBytes {
+        let mut non_point = [0u8; 32];
+        non_point[0] = 2;
+        ed25519::PublicKeyBytes::new(non_point)
+    }
+
+    #[test]
+    fn participants_decode_rejects_malformed_key() {
+        let keys = keys(2);
+        let mut encoded = Vec::new();
+        keys.write(&mut encoded);
+        Set::from_iter_dedup([malformed_key()]).write(&mut encoded);
+        keys.write(&mut encoded);
+        assert!(matches!(
+            Participants::<ed25519::PublicKey>::decode_cfg(Bytes::from(encoded), &NZU32!(2)),
+            Err(CodecError::Invalid("Participants", "malformed public key"))
+        ));
+    }
+
+    #[test]
+    fn addresses_decode_rejects_malformed_key() {
+        let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1);
+        let addresses = Map::from_iter_dedup([(malformed_key(), Address::Symmetric(socket))]);
+        assert!(matches!(
+            Addresses::<ed25519::PublicKey>::decode_cfg(addresses.encode(), &RangeCfg::exact(1)),
+            Err(CodecError::Invalid("Addresses", "malformed public key"))
+        ));
     }
 
     fn addressed_info(
@@ -462,6 +501,8 @@ where
 /// [`EpochInfo`] for epoch 0, and the final block of each epoch carries the [`EpochInfo`]
 /// for the next. See [Peer Activation](crate::dkg#peer-activation) for how the directory is
 /// used.
+///
+/// Decoding checks every public key and rejects a malformed one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EpochInfo<V: Variant, P: PublicKey, D: Directory<P> = Unit> {
     /// Outcome of the ceremony that produced this artifact (on
@@ -541,14 +582,17 @@ impl<V: Variant, P: PublicKey, D: Directory<P>> Read for EpochInfo<V, P, D> {
         let outcome = EpochOutcome::read(buf)?;
         let epoch = Epoch::read(buf)?;
         let output = Output::<V, P>::read_cfg(buf, &(*max_participants, *max_supported_mode))?;
-        let players = Set::read_cfg(
+        let players: Set<P::Bytes> = Set::read_cfg(
             buf,
             &(RangeCfg::new(0..=max_participants.get() as usize), ()),
         )?;
-        let next_players = Set::read_cfg(
+        let next_players: Set<P::Bytes> = Set::read_cfg(
             buf,
             &(RangeCfg::new(0..=max_participants.get() as usize), ()),
         )?;
+        let malformed = |_| CodecError::Invalid("EpochInfo", "malformed public key");
+        let players = validate_set::<P>(&players, &Sequential).map_err(malformed)?;
+        let next_players = validate_set::<P>(&next_players, &Sequential).map_err(malformed)?;
         let peers = Set::from_iter_dedup(
             output
                 .players()

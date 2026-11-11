@@ -4,18 +4,19 @@
 //!
 //! Signature validation follows [ZIP215], the criteria that make Ed25519 safe for consensus:
 //!
-//! - The point encodings of the verifying key `A` and the signature component `R` are accepted
+//! - The point encodings of the public key `A` and the signature component `R` are accepted
 //!   even when non-canonical (a `y` coordinate at or above `p`, or a negative-zero `x`), as long
 //!   as they decode to a curve point.
 //! - The scalar component `s` must be canonical (`s < L`), ruling out signature malleability.
 //! - The verification equation is cofactored: `[8](s*B - R - H(R || A || M)*A) == identity`.
 //!
-//! [`VerifyingKey::verify`] and [`VerifyingKey::verify_batch`] apply the same criteria.
-//! A non-empty batch of at most `u32::MAX` signatures is always accepted when every signature
-//! verifies individually. Because batch verification checks a randomized linear combination, an
-//! invalid batch may be accepted with probability about `2^-128`, provided each verification
-//! call draws a fresh seed from an RNG unpredictable to whoever assembled the batch. See
-//! [this post] for why these criteria matter.
+//! A [`PublicKey`] or [`Signature`] runs the point and scalar checks when it is built from its
+//! encoding and keeps the decoded point, so verification checks only the equation. Single and
+//! batch verification apply the same criteria. A non-empty batch of at most `u32::MAX`
+//! signatures is always accepted when every signature verifies individually. Because batch
+//! verification checks a randomized linear combination, an invalid batch may be accepted with
+//! probability about `2^-128`, provided each verification call draws a fresh seed from an RNG
+//! unpredictable to whoever assembled the batch. See [this post] for why these criteria matter.
 //!
 //! [this post]: https://hdevalence.ca/blog/2020-10-04-its-25519am
 //! [ZIP215]: https://zips.z.cash/zip-0215
@@ -23,8 +24,9 @@
 mod core;
 
 use self::core::Scalar;
-use crate::curve::G;
+use crate::curve::{G, GAffine};
 use ::core::{
+    cmp::Ordering,
     fmt::{self, Debug, Display},
     hash::{Hash, Hasher},
     ops::Deref,
@@ -33,17 +35,25 @@ use ::core::{
 use alloc::vec::Vec;
 use bytes::BufMut;
 use commonware_codec::{Buf, FixedSize, Read, Write};
-use commonware_cryptography::{BatchEntry, BatchVerifier, Signer, Verifier};
+use commonware_cryptography::{
+    BatchEntry, BatchVerifier, Encoding, Malformed, Signer, Validated, Verifier,
+};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
-use commonware_utils::{Array, Span, union_unique};
+use commonware_utils::union_unique;
 use rand_core::CryptoRng;
 use sha2::{
     Digest,
     digest::{FixedOutput, Update},
 };
 use zeroize::{ZeroizeOnDrop, Zeroizing};
+
+/// Splits a signature encoding into the encodings of `R` and `s`.
+const fn halves(bytes: &[u8; 64]) -> (&[u8; 32], &[u8; 32]) {
+    let halves = bytes.as_chunks::<32>().0;
+    (&halves[0], &halves[1])
+}
 
 /// An Ed25519 signing key.
 ///
@@ -58,9 +68,9 @@ pub struct SigningKey {
     prefix: [u8; 32],
     /// The pruned secret scalar, reduced modulo the basepoint order.
     scalar: Scalar,
-    /// The verifying key derived from the secret scalar.
+    /// The public key derived from the secret scalar.
     #[zeroize(skip)]
-    verifying_key: VerifyingKey,
+    public_key: PublicKey,
 }
 
 impl SigningKey {
@@ -92,18 +102,18 @@ impl SigningKey {
         wide_scalar[..32].copy_from_slice(&scalar_le_bytes[..]);
         let scalar = Zeroizing::new(Scalar::from_bytes_mod_order_wide(&wide_scalar));
 
-        // Normalize before caching (see `VerifyingKey::point`).
+        // The key keeps its point in affine form (see `PublicKey::point`).
         let point = G::mul_base_secret(&scalar_le_bytes).to_affine();
-        let verifying_key = VerifyingKey {
-            bytes: core::VerifyingKeyBytes::new(point.compress()),
-            point: Some(point.to_extended()),
+        let public_key = PublicKey {
+            bytes: point.compress(),
+            point,
         };
 
         Self {
             seed: *seed,
             prefix: *prefix,
             scalar: *scalar,
-            verifying_key,
+            public_key,
         }
     }
 
@@ -115,29 +125,33 @@ impl SigningKey {
         );
         let nonce = Zeroizing::new(Scalar::from_bytes_mod_order_wide(&nonce_digest));
         let nonce_bytes = Zeroizing::new(nonce.to_bytes());
-        let r_bytes = G::mul_base_secret(&nonce_bytes).compress();
+
+        // The signature keeps `R` in affine form, as a key does its point, since its projective
+        // coordinates depend on the nonce.
+        let r = G::mul_base_secret(&nonce_bytes).to_affine();
+        let r_bytes = r.compress();
 
         let challenge_digest: [u8; 64] = sha2::Sha512::new()
             .chain(r_bytes)
-            .chain(self.verifying_key.bytes.as_bytes())
+            .chain(self.public_key.bytes)
             .chain(msg)
             .finalize_fixed()
             .into();
         let challenge = Scalar::from_bytes_mod_order_wide(&challenge_digest);
         let challenge_scalar = Zeroizing::new(challenge.mul_mod_l(&self.scalar));
-        let s_bytes = nonce.add_mod_l(&challenge_scalar).to_bytes();
+        let s = nonce.add_mod_l(&challenge_scalar);
 
         let mut bytes = [0u8; 64];
         bytes[..32].copy_from_slice(&r_bytes);
-        bytes[32..].copy_from_slice(&s_bytes);
-        Signature { bytes }
+        bytes[32..].copy_from_slice(&s.to_bytes());
+        Signature { bytes, r, s }
     }
 
-    /// The verifying key associated with this signing key.
+    /// The public key associated with this signing key.
     ///
-    /// Signatures produced by this signing key can be verified using this public key.
-    pub fn verifying_key(&self) -> VerifyingKey {
-        self.verifying_key.clone()
+    /// Signatures produced by this signing key can be verified using this key.
+    pub fn public_key(&self) -> PublicKey {
+        self.public_key.clone()
     }
 
     /// Signs a namespaced message using deterministic Ed25519.
@@ -168,10 +182,10 @@ impl commonware_cryptography::PrivateKey for SigningKey {}
 
 impl Signer for SigningKey {
     type Signature = Signature;
-    type PublicKey = VerifyingKey;
+    type PublicKey = PublicKey;
 
-    fn public_key(&self) -> VerifyingKey {
-        self.verifying_key()
+    fn public_key(&self) -> PublicKey {
+        Self::public_key(self)
     }
 
     fn sign(&self, namespace: &[u8], msg: &[u8]) -> Signature {
@@ -216,124 +230,31 @@ impl arbitrary::Arbitrary<'_> for SigningKey {
     }
 }
 
-/// A public key used to check signatures.
+/// The encoding of an Ed25519 public key.
+pub type PublicKeyBytes = Encoding<PublicKey, 32>;
+
+/// An Ed25519 public key.
 ///
-/// Decoding accepts any 32 bytes and defers point validation until signature verification.
-/// Encodings that do not represent a curve point can never verify a signature.
-/// Equality, ordering, and hashing use the original encoding: distinct encodings of the same
-/// point are distinct keys, and verification hashes the received bytes as required by ZIP215.
+/// A key is built from its [`PublicKeyBytes`], which must encode a curve point. As ZIP215
+/// requires, non-canonical encodings and points of small order are accepted. The key keeps the
+/// decoded point, so verification never decompresses a key, and [`Validated::try_from_batch`]
+/// decompresses many keys together, lane-wise.
+///
+/// Equality, ordering, and hashing use the original encoding. Distinct encodings of the same
+/// point are distinct keys, and verification hashes the received bytes as ZIP215 requires.
 #[derive(Clone)]
-pub struct VerifyingKey {
-    /// The encoded point.
+pub struct PublicKey {
+    /// The key's encoding, hashed into every challenge.
+    bytes: [u8; 32],
+    /// The point `bytes` encodes, in affine coordinates.
     ///
-    /// When deserializing, we just have the bytes, deferring parsing of them until
-    /// signature verification, so that we can more efficiently parse them in batch.
-    bytes: core::VerifyingKeyBytes,
-    /// If available, the point associated with these bytes, normalized to `Z = 1`.
-    ///
-    /// The projective coordinates of a secret scalar multiplication depend on the scalar beyond
-    /// the point itself, and this type is copied freely and never zeroized, so a cached point must
-    /// carry only the point.
-    point: Option<G>,
+    /// The projective coordinates of a secret scalar multiplication depend on the scalar as well
+    /// as the point. This type is cloned freely and never zeroized, so it keeps the point in
+    /// affine form.
+    point: GAffine,
 }
 
-impl PartialEq for VerifyingKey {
-    fn eq(&self, other: &Self) -> bool {
-        self.bytes == other.bytes
-    }
-}
-
-impl Eq for VerifyingKey {}
-
-impl PartialOrd for VerifyingKey {
-    fn partial_cmp(&self, other: &Self) -> Option<::core::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for VerifyingKey {
-    fn cmp(&self, other: &Self) -> ::core::cmp::Ordering {
-        self.bytes.cmp(&other.bytes)
-    }
-}
-
-impl Hash for VerifyingKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.bytes.hash(state);
-    }
-}
-
-impl Debug for VerifyingKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", Hex(self.bytes.as_bytes()))
-    }
-}
-
-impl Display for VerifyingKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", Hex(self.bytes.as_bytes()))
-    }
-}
-
-impl AsRef<[u8]> for VerifyingKey {
-    fn as_ref(&self) -> &[u8] {
-        self.bytes.as_bytes()
-    }
-}
-
-impl Deref for VerifyingKey {
-    type Target = [u8];
-
-    fn deref(&self) -> &[u8] {
-        self.bytes.as_bytes()
-    }
-}
-
-impl Write for VerifyingKey {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.bytes.as_bytes().write(buf);
-    }
-}
-
-impl FixedSize for VerifyingKey {
-    const SIZE: usize = 32;
-}
-
-impl Read for VerifyingKey {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        Ok(Self {
-            bytes: core::VerifyingKeyBytes::new(<[u8; Self::SIZE]>::read_cfg(buf, cfg)?),
-            point: None,
-        })
-    }
-}
-
-impl Span for VerifyingKey {}
-
-impl Array for VerifyingKey {}
-
-#[cfg(feature = "arbitrary")]
-impl arbitrary::Arbitrary<'_> for VerifyingKey {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self {
-            bytes: core::VerifyingKeyBytes::new(u.arbitrary()?),
-            point: None,
-        })
-    }
-}
-
-impl VerifyingKey {
-    fn verify_message(&self, msg: &[u8], sig: &Signature) -> bool {
-        core::verify(
-            &self.bytes,
-            self.point.as_ref(),
-            &core::Signature::from_bytes(sig.bytes),
-            msg,
-        )
-    }
-
+impl PublicKey {
     /// Verifies `sig` over the namespaced message, per the [module's validation
     /// criteria](self).
     ///
@@ -343,13 +264,13 @@ impl VerifyingKey {
     #[must_use]
     pub fn verify(&self, namespace: &[u8], msg: &[u8], sig: &Signature) -> bool {
         let msg = union_unique(namespace, msg);
-        self.verify_message(&msg, sig)
+        core::verify(self, sig, &msg)
     }
 
     /// Verifies an unframed message for raw Ed25519 test-vector checks.
     #[cfg(test)]
     pub(crate) fn verify_raw(&self, msg: &[u8], sig: &Signature) -> bool {
-        self.verify_message(msg, sig)
+        core::verify(self, sig, msg)
     }
 
     /// Batch-verifies unframed messages for raw Ed25519 test-vector checks.
@@ -361,15 +282,54 @@ impl VerifyingKey {
     ) -> bool {
         let items: Vec<_> = items
             .iter()
-            .map(|&(key, signature, message)| signature.batch_item(&key.bytes, None, message))
+            .map(|&(key, signature, message)| core::Item {
+                key,
+                signature,
+                namespace: None,
+                message,
+            })
             .collect();
-        core::verify_batch_bytes(rng, &items, strategy)
+        core::verify_batch(rng, &items, strategy)
     }
 }
 
-impl commonware_cryptography::PublicKey for VerifyingKey {}
+impl TryFrom<PublicKeyBytes> for PublicKey {
+    type Error = Malformed;
 
-impl Verifier for VerifyingKey {
+    fn try_from(bytes: PublicKeyBytes) -> Result<Self, Malformed> {
+        let bytes = *bytes.as_array();
+        let point = GAffine::decompress(&bytes).ok_or(Malformed)?;
+        Ok(Self { bytes, point })
+    }
+}
+
+impl From<PublicKey> for PublicKeyBytes {
+    fn from(key: PublicKey) -> Self {
+        Self::new(key.bytes)
+    }
+}
+
+impl Validated for PublicKey {
+    type Bytes = PublicKeyBytes;
+
+    /// Decompresses the keys together, lane-wise, across `strategy`.
+    fn try_from_batch(bytes: &[PublicKeyBytes], strategy: &impl Strategy) -> Vec<Option<Self>> {
+        core::decompress_many(bytes.len(), |i| *bytes[i].as_array(), strategy)
+            .into_iter()
+            .zip(bytes)
+            .map(|(point, bytes)| {
+                point.map(|point| Self {
+                    bytes: *bytes.as_array(),
+                    point,
+                })
+            })
+            .collect()
+    }
+}
+
+impl commonware_cryptography::PublicKey for PublicKey {}
+
+impl Verifier for PublicKey {
     type Signature = Signature;
 
     fn verify(&self, namespace: &[u8], msg: &[u8], sig: &Signature) -> bool {
@@ -377,10 +337,11 @@ impl Verifier for VerifyingKey {
     }
 }
 
-impl BatchVerifier for VerifyingKey {
+impl BatchVerifier for PublicKey {
     /// Checks all the signatures projected from `items`, per the [module's validation
     /// criteria](self). The projection receives each item's index in `items` and must return the
-    /// same entry for a given index and item.
+    /// same entry for a given index and item. A signer reused across the batch contributes one
+    /// term to the batch equation for all of its signatures.
     ///
     /// Empty batches and batches containing more than `u32::MAX` signatures are rejected. Within
     /// that limit, a non-empty batch is always accepted when every signature verifies individually.
@@ -397,32 +358,6 @@ impl BatchVerifier for VerifyingKey {
     /// # Panics
     ///
     /// Panics if a namespace is longer than `u32::MAX` bytes.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use commonware_cryptography::{BatchEntry, BatchVerifier as _};
-    /// use commonware_cryptography_curve25519::signing::{SigningKey, VerifyingKey};
-    /// use commonware_math::algebra::Random;
-    /// use commonware_parallel::Sequential;
-    /// use commonware_utils::test_rng;
-    ///
-    /// let key = SigningKey::random(test_rng());
-    /// let verifying_key = key.verifying_key();
-    /// let namespace = b"example";
-    /// let records = [(b"message".as_slice(), key.sign(namespace, b"message"))];
-    /// assert!(VerifyingKey::verify_batch(
-    ///     &mut test_rng(),
-    ///     &records,
-    ///     |_, (message, signature)| BatchEntry {
-    ///         namespace,
-    ///         message,
-    ///         public_key: &verifying_key,
-    ///         signature,
-    ///     },
-    ///     &Sequential,
-    /// ));
-    /// ```
     fn verify_batch<'a, R, T, F>(
         rng: &mut R,
         items: &'a [T],
@@ -445,47 +380,180 @@ impl BatchVerifier for VerifyingKey {
             .enumerate()
             .map(|(i, item)| {
                 let entry = project(i, item);
-                entry.signature.batch_item(
-                    &entry.public_key.bytes,
-                    Some(entry.namespace),
-                    entry.message,
-                )
+                core::Item {
+                    key: entry.public_key,
+                    signature: entry.signature,
+                    namespace: Some(entry.namespace),
+                    message: entry.message,
+                }
             })
             .collect();
-        core::verify_batch_bytes(rng, &items, strategy)
+        core::verify_batch(rng, &items, strategy)
     }
 }
 
+impl PartialEq for PublicKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.bytes == other.bytes
+    }
+}
+
+impl Eq for PublicKey {}
+
+impl PartialOrd for PublicKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PublicKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.bytes.cmp(&other.bytes)
+    }
+}
+
+impl Hash for PublicKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.bytes.hash(state);
+    }
+}
+
+impl Debug for PublicKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", Hex(&self.bytes))
+    }
+}
+
+impl Display for PublicKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", Hex(&self.bytes))
+    }
+}
+
+impl AsRef<[u8]> for PublicKey {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl Deref for PublicKey {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl Write for PublicKey {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.bytes.write(buf);
+    }
+}
+
+impl FixedSize for PublicKey {
+    const SIZE: usize = 32;
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for PublicKey {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(SigningKey::arbitrary(u)?.public_key())
+    }
+}
+
+/// The encoding of an Ed25519 signature.
+pub type SignatureBytes = Encoding<Signature, 64>;
+
 /// An Ed25519 signature.
 ///
-/// For an honestly generated [`VerifyingKey`], successful verification demonstrates approval by
-/// the holder of the corresponding [`SigningKey`]. A maliciously generated verifying key can
-/// admit a signature that verifies for any message.
+/// A signature is built from its [`SignatureBytes`], which must encode a curve point `R`,
+/// accepted from any encoding as ZIP215 requires, and a scalar `s` below the group order. The
+/// signature keeps both decoded, so verification checks only the equation, and
+/// [`Validated::try_from_batch`] decompresses the `R` points of many signatures together,
+/// lane-wise.
 ///
-/// Decoding accepts any 64 bytes. Point decoding and scalar canonicality are checked during
-/// verification. Equality, ordering, and hashing compare the original encoding.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// For an honestly generated [`PublicKey`], successful verification demonstrates approval by the
+/// holder of the corresponding [`SigningKey`]. A maliciously generated public key can admit a
+/// signature that verifies for any message.
+///
+/// Equality, ordering, and hashing compare the original encoding.
+#[derive(Clone)]
 pub struct Signature {
+    /// The encoding `R || s`, whose `R` half is hashed into the challenge.
     bytes: [u8; 64],
+    /// The point the first half of `bytes` encodes.
+    r: GAffine,
+    /// The scalar the second half of `bytes` encodes.
+    s: Scalar,
 }
 
 impl Signature {
-    /// Borrows this signature's `R` and `s` encodings with the signer's key and message as a
-    /// batch item.
-    const fn batch_item<'a>(
-        &'a self,
-        key: &'a core::VerifyingKeyBytes,
-        namespace: Option<&'a [u8]>,
-        message: &'a [u8],
-    ) -> core::Item<'a> {
-        let halves = self.bytes.as_chunks::<32>().0;
-        core::Item {
-            key,
-            r: &halves[0],
-            s: &halves[1],
-            namespace,
-            message,
-        }
+    /// The encoding of `R`.
+    const fn r_bytes(&self) -> &[u8; 32] {
+        halves(&self.bytes).0
+    }
+}
+
+impl TryFrom<SignatureBytes> for Signature {
+    type Error = Malformed;
+
+    fn try_from(bytes: SignatureBytes) -> Result<Self, Malformed> {
+        let bytes = *bytes.as_array();
+        let (r, s) = halves(&bytes);
+        let r = GAffine::decompress(r).ok_or(Malformed)?;
+        let s = Scalar::from_canonical_bytes(s).ok_or(Malformed)?;
+        Ok(Self { bytes, r, s })
+    }
+}
+
+impl From<Signature> for SignatureBytes {
+    fn from(signature: Signature) -> Self {
+        Self::new(signature.bytes)
+    }
+}
+
+impl Validated for Signature {
+    type Bytes = SignatureBytes;
+
+    /// Decompresses the signatures' `R` points together, lane-wise, across `strategy`.
+    fn try_from_batch(bytes: &[SignatureBytes], strategy: &impl Strategy) -> Vec<Option<Self>> {
+        core::decompress_many(bytes.len(), |i| *halves(bytes[i].as_array()).0, strategy)
+            .into_iter()
+            .zip(bytes)
+            .map(|(r, bytes)| {
+                let bytes = *bytes.as_array();
+                let s = Scalar::from_canonical_bytes(halves(&bytes).1)?;
+                Some(Self { bytes, r: r?, s })
+            })
+            .collect()
+    }
+}
+
+impl commonware_cryptography::Signature for Signature {}
+
+impl PartialEq for Signature {
+    fn eq(&self, other: &Self) -> bool {
+        self.bytes == other.bytes
+    }
+}
+
+impl Eq for Signature {}
+
+impl PartialOrd for Signature {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Signature {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.bytes.cmp(&other.bytes)
+    }
+}
+
+impl Hash for Signature {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.bytes.hash(state);
     }
 }
 
@@ -525,47 +593,41 @@ impl FixedSize for Signature {
     const SIZE: usize = 64;
 }
 
-impl Read for Signature {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        Ok(Self {
-            bytes: <[u8; Self::SIZE]>::read_cfg(buf, cfg)?,
-        })
-    }
-}
-
-impl Span for Signature {}
-
-impl Array for Signature {}
-
-impl commonware_cryptography::Signature for Signature {}
-
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for Signature {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self {
-            bytes: u.arbitrary()?,
-        })
+        let signing_key = SigningKey::arbitrary(u)?;
+        let message: Vec<u8> = u.arbitrary()?;
+        Ok(signing_key.sign(&[], &message))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{SigningKey, VerifyingKey};
-    use commonware_codec::{Copying, DecodeExt, Encode};
-    use commonware_cryptography::{BatchEntry, BatchVerifier as _, PrivateKey, Verifier};
-    use commonware_parallel::Sequential;
+    use super::{PublicKey, PublicKeyBytes, Signature, SignatureBytes, SigningKey};
+    use crate::curve::{GAffine, LANES};
+    use commonware_cryptography::{
+        BatchEntry, BatchVerifier as _, PrivateKey, Validated as _, Verifier,
+    };
+    use commonware_parallel::{Sequential, mocks::explore};
     use commonware_utils::test_rng;
     use core::cmp::Ordering;
     use std::collections::HashSet;
+
+    /// Returns `signature` with the lowest bit of `s` flipped. Only `s = L - 1` would become
+    /// non-canonical.
+    fn flip_s(signature: &Signature) -> Signature {
+        let mut bytes = signature.bytes;
+        bytes[32] ^= 1;
+        Signature::try_from(SignatureBytes::new(bytes)).unwrap()
+    }
 
     #[test]
     fn batch_entries_use_union_unique_framing() {
         // Signing frames each message with `union_unique`. The pairs include an empty namespace
         // and message, and a 200-byte namespace whose length prefix takes two bytes.
         let signer = SigningKey::from_seed(&[3; 32]);
-        let key = signer.verifying_key();
+        let key = signer.public_key();
         let pairs = [
             (&b""[..], &b""[..]),
             (b"ns", b"message"),
@@ -575,8 +637,8 @@ mod tests {
             .iter()
             .map(|&(namespace, message)| (namespace, message, signer.sign(namespace, message)))
             .collect();
-        let verify = |entries: &[(&[u8], &[u8], super::Signature)]| {
-            VerifyingKey::verify_batch(
+        let verify = |entries: &[(&[u8], &[u8], Signature)]| {
+            PublicKey::verify_batch(
                 &mut test_rng(),
                 entries,
                 |_, (namespace, message, signature)| BatchEntry {
@@ -595,17 +657,16 @@ mod tests {
         assert!(!verify(&[(&b"nsm"[..], &b"essage"[..], signature)]));
     }
 
-    /// Equality, ordering, and hashing follow the encoding: a decoded copy equals the original
-    /// whatever its cached point, and two encodings of the same point stay distinct keys.
+    /// Equality, ordering, and hashing follow the encoding, so a key built from its encoding
+    /// equals the key it was derived from, and two encodings of the same point stay distinct keys.
     #[test]
-    fn verifying_key_identity_follows_encoding() {
-        let key =
-            <SigningKey as commonware_math::algebra::Random>::random(test_rng()).verifying_key();
-        let decoded = VerifyingKey::decode(key.encode()).unwrap();
-        assert!(key.point.is_some() && decoded.point.is_none());
-        assert_eq!(key, decoded);
-        assert_eq!(key.cmp(&decoded), Ordering::Equal);
-        assert!(!HashSet::from([key]).insert(decoded));
+    fn public_key_identity_follows_encoding() {
+        let key = <SigningKey as commonware_math::algebra::Random>::random(test_rng()).public_key();
+        let converted = PublicKey::try_from(PublicKeyBytes::from(key.clone())).unwrap();
+        assert_eq!(key.point.compress(), converted.point.compress());
+        assert_eq!(key, converted);
+        assert_eq!(key.cmp(&converted), Ordering::Equal);
+        assert!(!HashSet::from([key]).insert(converted));
 
         // `y = 1` and the non-canonical `y = p + 1` both encode the identity.
         let mut canonical = [0u8; 32];
@@ -613,17 +674,9 @@ mod tests {
         let mut noncanonical = [0xffu8; 32];
         noncanonical[0] = 0xee;
         noncanonical[31] = 0x7f;
-        let point = |bytes| {
-            crate::curve::GAffine::decompress(bytes)
-                .unwrap()
-                .to_extended()
-        };
-        assert_eq!(
-            point(&canonical).compress(),
-            point(&noncanonical).compress()
-        );
-        let canonical = VerifyingKey::decode(Copying(&canonical[..])).unwrap();
-        let noncanonical = VerifyingKey::decode(Copying(&noncanonical[..])).unwrap();
+        let canonical = PublicKey::try_from(PublicKeyBytes::new(canonical)).unwrap();
+        let noncanonical = PublicKey::try_from(PublicKeyBytes::new(noncanonical)).unwrap();
+        assert_eq!(canonical.point.compress(), noncanonical.point.compress());
         assert_ne!(canonical, noncanonical);
         assert_ne!(canonical.cmp(&noncanonical), Ordering::Equal);
         assert!(HashSet::from([canonical]).insert(noncanonical));
@@ -632,7 +685,7 @@ mod tests {
     #[test]
     fn empty_batch_is_invalid() {
         let empty: [(); 0] = [];
-        assert!(!VerifyingKey::verify_batch(
+        assert!(!PublicKey::verify_batch(
             &mut test_rng(),
             &empty,
             |_, _| unreachable!(),
@@ -645,10 +698,10 @@ mod tests {
     #[test]
     fn oversized_batch_is_invalid() {
         let signer = SigningKey::from_seed(&[9; 32]);
-        let key = signer.verifying_key();
+        let key = signer.public_key();
         let signature = signer.sign(b"namespace", b"message");
         let items = vec![(); usize::MAX];
-        assert!(!VerifyingKey::verify_batch(
+        assert!(!PublicKey::verify_batch(
             &mut test_rng(),
             &items,
             |_, _| BatchEntry {
@@ -667,16 +720,16 @@ mod tests {
         const WRONG_NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_CURVE25519_SIGNING_TEST_WRONG";
 
         let signing_key = SigningKey::from_seed(&[42; 32]);
-        let verifying_key = signing_key.verifying_key();
+        let public_key = signing_key.public_key();
         let message = b"message";
         let signature = signing_key.sign(NAMESPACE, message);
 
-        assert!(verifying_key.verify(NAMESPACE, message, &signature));
-        assert!(!verifying_key.verify(WRONG_NAMESPACE, message, &signature));
+        assert!(public_key.verify(NAMESPACE, message, &signature));
+        assert!(!public_key.verify(WRONG_NAMESPACE, message, &signature));
     }
 
     /// Signing and verifying through the `commonware-cryptography` traits match the inherent
-    /// methods.
+    /// methods, and a signature keeps the decoded `R` and `s` it was built from.
     #[test]
     fn sign_and_verify() {
         fn sign<S: PrivateKey>(
@@ -688,21 +741,192 @@ mod tests {
         }
 
         let signing_key = SigningKey::from_seed(&[5; 32]);
-        let (verifying_key, signature) = sign(&signing_key, b"namespace", b"message");
-        assert_eq!(verifying_key, signing_key.verifying_key());
+        let (public_key, signature) = sign(&signing_key, b"namespace", b"message");
+        assert_eq!(public_key, signing_key.public_key());
         assert_eq!(signature, signing_key.sign(b"namespace", b"message"));
+        let converted = Signature::try_from(SignatureBytes::from(signature.clone())).unwrap();
+        assert_eq!(converted.r.compress(), signature.r.compress());
+        assert_eq!(converted.s.to_bytes(), signature.s.to_bytes());
         assert!(Verifier::verify(
-            &verifying_key,
+            &public_key,
             b"namespace",
             b"message",
             &signature
         ));
         assert!(!Verifier::verify(
-            &verifying_key,
+            &public_key,
             b"other",
             b"message",
             &signature
         ));
+        assert!(!public_key.verify(b"namespace", b"message", &flip_s(&signature)));
+
+        // The batch path rejects a signature over another namespace, an altered scalar, an
+        // empty batch, and an oversized batch.
+        let batch = |records: &[(&[u8], &[u8], Signature)]| {
+            PublicKey::verify_batch(
+                &mut test_rng(),
+                records,
+                |_, (namespace, message, signature)| BatchEntry {
+                    namespace,
+                    message,
+                    public_key: &public_key,
+                    signature,
+                },
+                &Sequential,
+            )
+        };
+        assert!(batch(&[(b"namespace", b"message", signature.clone())]));
+        assert!(!batch(&[
+            (b"namespace", b"message", signature.clone()),
+            (b"other", b"message", signature.clone()),
+        ]));
+        assert!(!batch(&[
+            (b"namespace", b"message", signature.clone()),
+            (b"namespace", b"message", flip_s(&signature)),
+        ]));
+        assert!(!batch(&[]));
+        let oversized = vec![(); usize::MAX];
+        assert!(!PublicKey::verify_batch(
+            &mut test_rng(),
+            &oversized,
+            |_, _| BatchEntry {
+                namespace: b"namespace",
+                message: b"message",
+                public_key: &public_key,
+                signature: &signature,
+            },
+            &Sequential,
+        ));
+    }
+
+    /// [`PublicKey`] and [`Signature`] meet the validation contract of the cryptography traits,
+    /// and a key accepts every encoding of a curve point, including the non-canonical and
+    /// small-order encodings ZIP215 admits, keeping its bytes and the point they encode.
+    #[test]
+    fn validation_contract() {
+        // `y = 2` is not the `y` coordinate of any curve point, with either sign bit.
+        let mut non_point = [0u8; 32];
+        non_point[0] = 2;
+        let mut non_point_negative = non_point;
+        non_point_negative[31] |= 0x80;
+        commonware_cryptography::assert_validation_contract::<SigningKey>(
+            &[&non_point, &non_point_negative],
+            |honest| {
+                // The honest signature with a non-point `R` or with `s + L` in place of `s`.
+                // Adding `L` encodes the same scalar non-canonically.
+                let mut s_plus_l = honest.to_vec();
+                let mut carry = 0u16;
+                for (byte, l) in s_plus_l[32..].iter_mut().zip(crate::test::SCALAR_ORDER) {
+                    let [low, high] = (u16::from(*byte) + u16::from(l) + carry).to_le_bytes();
+                    *byte = low;
+                    carry = u16::from(high);
+                }
+                let mut r_non_point = honest.to_vec();
+                r_non_point[..32].copy_from_slice(&non_point);
+                vec![s_plus_l, r_non_point]
+            },
+        );
+
+        for encoding in crate::test::ZIP215_POINTS {
+            let key = PublicKey::try_from(PublicKeyBytes::new(encoding)).unwrap();
+            assert_eq!(key.as_ref(), encoding);
+            assert_eq!(
+                key.point.compress(),
+                GAffine::decompress(&encoding).unwrap().compress()
+            );
+            assert_eq!(PublicKeyBytes::from(key).as_array(), &encoding);
+        }
+    }
+
+    /// Converting many encodings together agrees with converting each alone under every strategy,
+    /// at counts on both sides of a lane boundary, with malformed encodings anywhere in the
+    /// batch.
+    #[test]
+    fn batch_conversion_agrees_with_single() {
+        // Keys of three signers, every ZIP215 point, and a non-point encoding, in a repeating
+        // pattern so that each kind lands in every lane of a unit.
+        let signers: Vec<SigningKey> = (0..3).map(|i| SigningKey::from_seed(&[i; 32])).collect();
+        let mut non_point = [0u8; 32];
+        non_point[0] = 2;
+        let mut key_bytes: Vec<PublicKeyBytes> = Vec::new();
+        for i in 0..3 * LANES + 1 {
+            let bytes = match i % 5 {
+                0..=2 => *PublicKeyBytes::from(signers[i % 3].public_key()).as_array(),
+                3 => crate::test::ZIP215_POINTS[i % crate::test::ZIP215_POINTS.len()],
+                _ => non_point,
+            };
+            key_bytes.push(PublicKeyBytes::new(bytes));
+        }
+
+        // Honest signatures, signatures with `R` a ZIP215 point and `s = 0`, and malformed
+        // signatures with a non-point `R` or a non-canonical `s`.
+        let mut signature_bytes: Vec<SignatureBytes> = Vec::new();
+        for i in 0..3 * LANES + 1 {
+            let mut bytes =
+                *SignatureBytes::from(signers[i % 3].sign(b"namespace", &i.to_le_bytes()))
+                    .as_array();
+            match i % 5 {
+                0..=1 => {}
+                2 => {
+                    bytes[..32].copy_from_slice(
+                        &crate::test::ZIP215_POINTS[i % crate::test::ZIP215_POINTS.len()],
+                    );
+                    bytes[32..].fill(0);
+                }
+                3 => bytes[..32].copy_from_slice(&non_point),
+                _ => bytes[32..].copy_from_slice(&crate::test::SCALAR_ORDER),
+            }
+            signature_bytes.push(SignatureBytes::new(bytes));
+        }
+
+        for count in [0, 1, LANES - 1, LANES, LANES + 1, 2 * LANES, 3 * LANES + 1] {
+            let keys = explore(|strategy| {
+                PublicKey::try_from_batch(&key_bytes[..count], strategy)
+                    .into_iter()
+                    .map(|key| key.map(|key| (key.bytes, key.point.compress())))
+                    .collect::<Vec<_>>()
+            });
+            let expected: Vec<_> = key_bytes[..count]
+                .iter()
+                .map(|bytes| {
+                    PublicKey::try_from(bytes.clone())
+                        .ok()
+                        .map(|key| (key.bytes, key.point.compress()))
+                })
+                .collect();
+            assert_eq!(keys, expected, "count {count}");
+            assert!(count < 5 || keys.iter().any(Option::is_none));
+
+            let signatures = explore(|strategy| {
+                Signature::try_from_batch(&signature_bytes[..count], strategy)
+                    .into_iter()
+                    .map(|signature| {
+                        signature.map(|signature| {
+                            (
+                                signature.bytes,
+                                signature.r.compress(),
+                                signature.s.to_bytes(),
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            });
+            let expected: Vec<_> = signature_bytes[..count]
+                .iter()
+                .map(|bytes| {
+                    Signature::try_from(bytes.clone()).ok().map(|signature| {
+                        (
+                            signature.bytes,
+                            signature.r.compress(),
+                            signature.s.to_bytes(),
+                        )
+                    })
+                })
+                .collect();
+            assert_eq!(signatures, expected, "count {count}");
+            assert!(count < 4 || signatures.iter().any(Option::is_none));
+        }
     }
 
     #[test]
@@ -715,13 +939,13 @@ mod tests {
 
     #[cfg(feature = "arbitrary")]
     mod conformance {
-        use super::super::{Signature, SigningKey, VerifyingKey};
+        use super::super::{PublicKeyBytes, SignatureBytes, SigningKey};
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {
             CodecConformance<SigningKey> => 1024,
-            CodecConformance<VerifyingKey>,
-            CodecConformance<Signature>,
+            CodecConformance<PublicKeyBytes>,
+            CodecConformance<SignatureBytes>,
         }
     }
 }
