@@ -91,7 +91,8 @@ const CANCEL_USER_DATA: UserData = u32::MAX as UserData;
 pub struct Driver {
     /// The worker's ring. Closing it only queues its teardown in the kernel, so
     /// cleanup retires every operation that can access request memory before
-    /// the driver drops.
+    /// the driver drops, and the drop cancels a live ring wait before any
+    /// field drops. The field order carries no teardown guarantee.
     ring: IoUring,
     /// Kept separately to allow batching SQ access while updating request state.
     state: State,
@@ -115,8 +116,10 @@ struct State {
     pending_cancels: VecDeque<WaiterId>,
     /// Deadlines for queued and in-flight requests, independent of sleepers.
     timeout_wheel: TimeoutWheel,
-    /// Unparker of the worker's word, the word every ring wait waits on,
-    /// retained through ring destruction.
+    /// Unparker of the worker's word, the word every ring wait waits on. It
+    /// keeps the word allocated while a ring wait can still be queued at its
+    /// address, and the driver's drop leaks it if that wait cannot be
+    /// cancelled.
     unparker: Unparker,
     /// Whether no ring futex wait is live, so the next blocking park queues one.
     ring_wait_needed: bool,
@@ -378,6 +381,15 @@ impl Driver {
             return Ok(false);
         }
 
+        // A ring wait that an earlier park left queued serves this park. Its
+        // compare belonged to that park, so this arm alone guards the sequence
+        // since `seen`, and a later notification finds the waiter bit and
+        // wakes that wait.
+        //
+        // A transient enter can leave a new wait's SQE unsubmitted. Its
+        // snapshot carries the waiter bit, so a later enter queues it only
+        // inside a park armed with the same word and otherwise fails it with
+        // EAGAIN.
         if self.state.ring_wait_needed {
             arm.install(&mut self.ring.submission());
             self.state.ring_wait_needed = false;
@@ -1098,6 +1110,7 @@ pub mod tests {
         /// Fill the one-slot SQ with a control SQE that uses no operation slot.
         fn fill_with_control(&mut self) {
             let nop = Nop::new().build().user_data(CANCEL_USER_DATA);
+
             // SAFETY: Nop references no memory that the kernel could access.
             unsafe {
                 self.driver.ring.submission().push(&nop).unwrap();
@@ -2339,6 +2352,8 @@ pub mod tests {
         harness.drain();
     }
 
+    /// A ring wait left queued by a park does not by itself make a CPU-only
+    /// service turn stage work or enter the kernel.
     #[test]
     fn test_ring_wait_alone_does_not_require_kernel_service() {
         let mut harness = Harness::new(1);
@@ -2479,7 +2494,7 @@ pub mod tests {
         // Drop the driver on another thread, while a duplicate descriptor
         // keeps the ring, and so any wait its cancel missed, alive.
         let ring = hold_ring(&driver);
-        std::thread::spawn(move || drop(driver)).join().unwrap();
+        thread::spawn(move || drop(driver)).join().unwrap();
 
         // The cancel failed, so the drop kept one handle and the wait is
         // still queued.
@@ -2530,6 +2545,10 @@ pub mod tests {
         drop(ring);
     }
 
+    /// A park reserves an SQ slot for its ring wait before arming. A full SQ is
+    /// flushed, or sent back to service when the flush makes no room, and the
+    /// request that filled it stays in flight while a notification after the
+    /// arm ends the wait.
     #[test]
     fn test_park_reserves_ring_wait_slot_with_full_sq() {
         for stalled in [false, true] {
@@ -2907,6 +2926,9 @@ pub mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    /// A permit released on another thread after a closed worker observed its
+    /// word ends the worker's ring wait, since the driver's acquisition waker
+    /// notifies the word after the mailbox closes.
     #[test]
     fn test_foreign_durability_release_wakes_closed_worker_park() {
         let (directory, file) = make_file("closed_permit_wake");
@@ -3121,6 +3143,7 @@ pub mod tests {
         let fault = inject(&harness.driver, Fault::DropCompletion);
         let error = harness.park(0, Some(Instant::now())).unwrap_err();
         assert_eq!(error.raw_os_error(), Some(libc::EBADR));
+
         // The flush failed before installing the ring wait, not a later enter
         // in this park.
         assert!(harness.driver.state.ring_wait_needed);

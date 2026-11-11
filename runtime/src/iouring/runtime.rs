@@ -99,7 +99,8 @@
 //!
 //! Each turn polls a bounded batch of tasks and checks the root's wake flag,
 //! services I/O and timers, and applies a bounded batch of mailbox messages.
-//! Deferred callbacks run between these phases.
+//! Deferred callbacks run between these phases. A turn observes its worker's
+//! word after the polls and before it checks any source of work.
 //!
 //! A pool worker takes a share of the global queue every
 //! [`Config::with_global_queue_interval`] takes and whenever its own run queue
@@ -1139,7 +1140,7 @@ impl Local {
             }),
             Role::Dedicated => None,
         };
-        let local = Self {
+        Ok(Self {
             seat,
             driver: Some(driver),
             timers: Timers::default(),
@@ -1150,8 +1151,7 @@ impl Local {
             deferred: Deferred::default(),
             shared,
             reported_pending: 0,
-        };
-        Ok(local)
+        })
     }
 
     /// Return the worker installed on this thread, including during cleanup.
@@ -1514,8 +1514,9 @@ pub struct Worker {
     inbox: Vec<Message>,
     /// The parker of this worker's word, the only handle that can wait on it.
     parker: Parker,
-    /// Sequence of the word observed after this turn's polls and before any of
-    /// its source checks. A wait blocks only while the word still carries it.
+    /// Sequence of the word last observed, loaded each turn before the worker
+    /// checks its sources of work, and on each pass of the cleanup loop. A wait
+    /// blocks only while the word still carries it.
     seen_seq: u32,
     /// Calls to [`Self::next_runnable`] left until the one that looks at the
     /// pool's global queue.
@@ -1530,7 +1531,9 @@ pub struct Worker {
 impl Worker {
     /// Install TLS only after constructing a cleanup owner. A pool worker
     /// counts itself in the pool's shutdown barrier, and its cleanup leaves it.
-    /// Panics if this thread already has a worker installed.
+    /// The worker keeps `parker`, the parker of the word its `local` driver
+    /// and mailbox notify. Panics if this thread already has a worker
+    /// installed.
     fn new(local: Local, parker: Parker) -> Self {
         if local.role().is_pool() {
             local.shared.pool.enter();
@@ -1554,6 +1557,10 @@ impl Worker {
     }
 
     /// Create a worker and drive a stack-pinned root, retaining the worker for cleanup.
+    ///
+    /// The worker waits through `parker`, the only handle that can wait on its
+    /// word. A pool worker must receive the parker [`Pool::new`] created for
+    /// its index, and a dedicated worker can take a fresh one.
     ///
     /// The optional service task runs alongside the root. Only worker zero,
     /// which owns the runner, closes runner-wide reservations when its root
@@ -1884,9 +1891,9 @@ impl Worker {
     /// mailbox with its flag set, and the drive loop reads the flag again
     /// before it parks.
     fn messages(&mut self, mailbox: &Arc<Mailbox>) {
-        // Reversing allows bounded FIFO processing without shifting the
-        // remainder.
         if self.inbox.is_empty() && mailbox.has_mail() && mailbox.take(&mut self.inbox) {
+            // Reversing allows bounded FIFO processing without shifting the
+            // remainder.
             self.inbox.reverse();
         }
 
@@ -2253,6 +2260,9 @@ impl Worker {
                 let near_deadline = deadline
                     .is_some_and(|deadline| deadline.saturating_duration_since(now) <= max_spin);
 
+                // Spin unless it could outlast the deadline, then park against
+                // the same observation. A spin that saw the word move skips the
+                // park, which would refuse to block anyway.
                 let seen = self.seen_seq;
                 if (near_deadline || !spinner.spin(|| self.parker.moved(seen)))
                     && let Some(duration) = self.parker.park(seen, deadline)
@@ -2345,11 +2355,11 @@ impl crate::Runner for Runner {
         // first thread lands in the global futex hash. The first thread
         // created afterwards installs the process's private hash, where every
         // later wake looks instead, so that ring wait never completes. Worker
-        // zero runs on this thread, and with one worker no other thread may
-        // exist. Creating a thread before any worker can queue a ring wait
-        // installs the private hash first, and the hash outlives the thread.
-        // This runs on every start, since one thread costs little and needs no
-        // reasoning about which threads exist already. Upstream commit
+        // zero runs on this thread, and with one worker the process can have
+        // no other thread. Creating a thread before any worker can queue a
+        // ring wait installs the private hash first, and the hash outlives the
+        // thread. This runs on every start, since one thread costs little and
+        // needs no reasoning about which threads exist already. Upstream commit
         // 3eff68bce255 ("io_uring/futex: allocate private hash before
         // waiting", merged for 7.4 and backported to 6.18.60, 7.2.14 and
         // 7.3.2) fixes the kernel. Remove this once the documented kernel

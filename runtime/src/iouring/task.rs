@@ -2031,7 +2031,7 @@ mod loom_tests {
     }
 
     /// A pool of `workers` workers with no runner, and the parker of each
-    /// worker's mailbox. Task headers hold a standard `Weak` to the pool, and
+    /// worker's word. Task headers hold a standard `Weak` to the pool, and
     /// every wake takes the global queue path.
     fn pool(workers: usize) -> (std::sync::Arc<Pool>, Vec<Parker>) {
         let (pool, parkers) = Pool::new(workers);

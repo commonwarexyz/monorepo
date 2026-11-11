@@ -1,35 +1,78 @@
 //! Futex parking for io_uring workers.
 //!
+//! Each worker owns a 32-bit futex word that works as an eventcount: producers
+//! advance a sequence on it, and the worker blocks only while the sequence
+//! still has the value it observed before checking its sources of work.
 //! [`Parker::new`] creates the word with its only [`Parker`], which the worker
 //! keeps to wait, and [`Parker::unparker`] hands out [`Unparker`]s, with which
 //! other threads notify it. An unpark is what this module calls a
 //! notification. [`Idle`](super::idle::Idle) selects which pool worker to
 //! unpark. See [`super::idle`] for the parking sequence.
 //!
-//! The word holds a waiter bit and a sequence. A producer first makes its
-//! condition visible (a mailbox message, a pool claim, or a driver permit
-//! grant), then calls [`Unparker::unpark`], which advances the sequence. A
-//! notification that finds the waiter bit set also clears it, and the one
-//! whose clear takes the bit wakes the word, so concurrent notifications share
-//! one wake. The worker never acknowledges a notification. Each turn it:
+//! Bit 0 of the word is the waiter bit, which the worker sets while it may
+//! block. Bits 1 to 31 hold the sequence, which each notification advances by
+//! two, so it wraps modulo 2^31 and never touches the waiter bit. The word
+//! takes these atomic operations:
+//! - A notification does a release `fetch_add` of the increment and, if it
+//!   found the waiter bit set, a relaxed `fetch_and` that clears the bit. The
+//!   one whose clear takes the bit wakes the word, so concurrent notifications
+//!   share one wake.
+//! - The worker observes with an acquire load that masks the waiter bit, arms
+//!   with a relaxed `fetch_or` of the bit, and disarms with a relaxed
+//!   `fetch_and` that clears it, unless a relaxed load finds a notification
+//!   already cleared it.
+//!
+//! The release increment and the acquire observation make a notification's
+//! condition visible to the checks that follow the observation. The other
+//! operations need no ordering of their own: they act on one atomic, whose
+//! modification order is total, and each read-modify-write continues the
+//! release sequence of the increments before it.
+//!
+//! A producer first makes its condition visible (a mailbox message, a pool
+//! claim, or a driver permit grant), then calls [`Unparker::unpark`]. The
+//! worker never acknowledges a notification, so it detects one only by
+//! finding the sequence changed. Each turn it:
 //! - loads the sequence with [`Parker::observe`] after its task polls and before
 //!   checking any source of work,
 //! - runs again if it found work, left a mailbox batch untaken, or the sequence
 //!   moved since that load,
-//! - arms with [`Parker::arm`], setting the waiter bit, and blocks only while the
+//! - arms with [`Parker::arm`], setting the waiter bit, and waits only while the
 //!   armed word still carries the observed sequence,
-//! - disarms when the wait returns.
+//! - disarms when the park returns.
 //!
-//! A notification leaves no permit behind. One that precedes the observation
-//! makes its condition visible to the checks that follow it. One that follows
-//! changes the sequence before the arm, which then refuses to block, or comes
-//! after the arm. It then finds the waiter bit, which it or another
-//! notification clears before waking the word, or finds the bit already taken
-//! by an earlier notification whose wake is still to come. A wait queued after
-//! the arm first compares the word with the armed snapshot under the kernel's
-//! futex lock, so a notification between the arm and that compare fails the
-//! wait instead of being missed. A delayed wake syscall can also end a later
-//! park, so every return leads back to the source checks.
+//! The worker waits on the word in two places: in the ring through a one-shot
+//! `IORING_OP_FUTEX_WAIT` ([`ArmGuard::install`]) while it has unfinished
+//! requests, and with a thread futex wait ([`Parker::park`]) when fully idle.
+//! Before either queues, the kernel compares the word with the armed snapshot
+//! under its futex lock and fails the wait at once if they differ.
+//!
+//! A notification leaves no permit behind, so each place it can fall relative
+//! to a turn is covered separately:
+//! - Before the observation, the observation includes it, so the checks that
+//!   follow see its condition.
+//! - Between the observation and the arm, the sequence has moved, so the arm
+//!   refuses to block.
+//! - After the arm, it finds the waiter bit set, or finds it already taken by
+//!   an earlier notification of the same arm, whose wake has run or is still
+//!   to come. Either way a wake follows the clear and releases the waits
+//!   queued before it, and a wait the kernel queues after the clear fails its
+//!   compare, because the word changed.
+//!
+//! A delayed wake syscall can also end a later park, so every return leads
+//! back to the source checks.
+//!
+//! A ring wait remains live until its completion is reaped and can remain
+//! queued after the park that installed it ends. A wake that releases it only
+//! posts a completion, which deferred task work delivers at the worker's next
+//! enter, so it cannot end a thread wait. A ring wait queued ahead of the
+//! thread's idle wait could therefore absorb a wake meant for it. The word has
+//! at most one ring wait and one thread wait queued, so a wake releases two
+//! waiters.
+//!
+//! A later ring park reuses a wait that is still queued. That wait's compare
+//! belonged to the park that installed it, so the reusing park relies on its
+//! arm alone: a notification before the arm makes it refuse to block, and the
+//! wake that follows a notification after it releases the queued wait.
 //!
 //! These checks compare sequences, so they could miss a notification only if
 //! the 31-bit sequence wrapped all the way around between the observation and
@@ -45,25 +88,32 @@
 //! notification can also lag behind its condition, but only while its producer
 //! thread is inside the call, one per thread.
 //!
-//! The worker waits on the word in two places: in the ring through a one-shot
-//! `IORING_OP_FUTEX_WAIT` ([`ArmGuard::install`]) while it has unfinished
-//! requests, and with a thread futex wait ([`Parker::park`]) when fully idle.
-//! A ring wait remains live until its completion is reaped and can remain
-//! queued after the park that installed it ends. Such a wait can absorb a wake
-//! meant for the thread's idle wait, so a wake releases up to two waiters.
-//!
-//! A later ring park reuses a wait that is still queued. That wait's compare
-//! belonged to the park that installed it, so the reusing park relies on its
-//! arm alone: a notification before the arm fails the sequence check, and one
-//! after it finds the waiter bit, or finds it already taken by an earlier
-//! notification whose wake is still to come, so the queued wait is woken.
-//!
 //! The types bound who waits. A word has one [`Parker`], which is neither
 //! [`Clone`] nor [`Sync`], so one thread at a time can arm it or wait on it, and a
 //! ring wait can be installed only under a live [`ArmGuard`]. [`Unparker`]s can
 //! only notify. The remaining half of the bound, at most one live ring wait,
 //! rests on each worker owning one driver, which installs again only after
 //! reaping its wait's completion.
+//!
+//! The kernel keeps only the word's address for a queued ring wait, so the
+//! driver holds an [`Unparker`] of the word until it has reaped or cancelled
+//! the wait, and keeps the word allocated for good if the cancel fails. No
+//! wait then outlives the word to absorb a wake meant for a later futex at the
+//! same address.
+//!
+//! Since concurrent notifications share one wake, a notifier descheduled
+//! between its clear and its wake syscall delays the wake of every later
+//! notification of that park until it runs again, or until a completion or
+//! deadline ends the park.
+//!
+//! The Loom tests explore this protocol with one worker and one or two
+//! producers, the larger models within a preemption bound. They model the
+//! kernel's futex queue as a list of waits under a mutex that stands in for its
+//! bucket lock, so a wait compares and queues atomically with respect to wakes,
+//! which release the oldest waits first. A modeled ring wait is a queued entry
+//! whose release posts a completion for the worker to reap. They do not model
+//! completion delivery, `io_uring_enter`, kernel timeouts, signals, or syscall
+//! errors, which the tests with a real ring and real futex calls cover.
 
 use super::waiter::UserData;
 use crossbeam_utils::CachePadded;
@@ -138,6 +188,12 @@ impl ArmGuard<'_> {
     /// completes or is cancelled, so no wait stays queued at a freed word's
     /// address. A notification that changes the word before the kernel queues
     /// the wait completes it at once with `EAGAIN`.
+    ///
+    /// On kernels without upstream fix 3eff68bce255, a private wait queued
+    /// before the process creates its first thread lands in the global futex
+    /// hash, while every wake after that thread looks in the process's private
+    /// hash. So [`Runner`](super::Runner) creates and joins a guard thread on
+    /// every start, before any worker can install a wait.
     #[cfg(not(feature = "loom"))]
     pub fn install(&self, submission_queue: &mut SubmissionQueue<'_>) {
         assert!(
@@ -189,23 +245,18 @@ impl Drop for ArmGuard<'_> {
 
 /// The futex word shared by the worker and its producers: a waiter bit and a
 /// notification sequence.
-///
-/// The handles share it padded to its own cache lines. Every notification
-/// writes the word, and the worker loads it on every turn and spin iteration,
-/// so a neighboring allocation, such as another worker's word or this
-/// allocation's reference counts, would turn those writes into misses for
-/// unrelated threads.
 #[cfg(not(feature = "loom"))]
 type Word = AtomicU32;
 
 /// The loom build's futex word, beside a model of the kernel's futex queue.
 ///
-/// Loom cannot observe real futexes or io_uring CQEs, so this build replaces
-/// the futex with a modeled wait queue under a mutex standing in for the
-/// kernel's bucket lock, and a condvar on which modeled waits block. It models
-/// the producer and worker atomic protocol, and releases waits oldest first,
-/// not CQE delivery, `io_uring_enter`, or syscall errors. It dereferences
-/// to its atomic, so the handles use it as the production word.
+/// Loom cannot observe real futexes or io_uring CQEs, so this build pairs the
+/// atomic word with a modeled wait queue under a mutex standing in for the
+/// kernel's bucket lock, and a condvar on which modeled waits block. Wakes
+/// release waits oldest first. The model covers the atomic protocol between
+/// the worker and its producers, not CQE delivery, `io_uring_enter`, or
+/// syscall errors. It dereferences to its atomic, so the handles use it as the
+/// production word.
 #[cfg(feature = "loom")]
 struct Word {
     /// Waiter bit and notification sequence.
@@ -221,7 +272,7 @@ struct Word {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Waiter {
     /// A ring wait, whose wake posts a completion that the driver reaps later.
-    /// Only the persistent ring wait models queue one.
+    /// Only the models of a ring wait reused across parks queue one.
     #[cfg_attr(not(test), allow(dead_code))]
     Ring,
     /// A wait that blocks its caller until a wake releases it, identified by
@@ -285,7 +336,11 @@ impl Deref for Word {
 /// There is one per word, created by [`Parker::new`]. It is neither [`Clone`]
 /// nor [`Sync`], so one thread at a time can wait on the word.
 pub struct Parker {
-    /// The word, shared with its unparkers.
+    /// The word, shared with its unparkers and padded to its own cache lines.
+    /// Every notification writes it and the worker loads it on every turn and
+    /// spin iteration, so a neighboring allocation, such as another worker's
+    /// word or this allocation's reference counts, would turn those writes
+    /// into misses for unrelated threads.
     word: Arc<CachePadded<Word>>,
     /// Keeps the handle [`Send`] but not [`Sync`].
     _not_sync: PhantomData<Cell<()>>,
@@ -294,7 +349,8 @@ pub struct Parker {
 /// A handle that notifies the worker owning a word's [`Parker`].
 #[derive(Clone)]
 pub struct Unparker {
-    /// The word, shared with its parker.
+    /// The word, shared with its parker and padded as described on
+    /// [`Parker`].
     word: Arc<CachePadded<Word>>,
 }
 
@@ -358,13 +414,15 @@ impl Parker {
     /// Park while idle until a notification or the optional absolute deadline,
     /// comparing against the sequence observed as `seen`.
     ///
-    /// Returns how long the thread blocked when a notification ended the wait,
-    /// which feeds adaptive spinning. Returns `None` without blocking when a
-    /// notification arrived since `seen` or the deadline has elapsed, and after
-    /// an interruption or a timeout, so timer expiry does not count as a quick
-    /// notification wake. The futex timeout is computed from the clock reading
-    /// that also times the sleep, taken immediately before it. Every return
-    /// disarms the word, including skipped sleeps.
+    /// Returns how long the thread blocked when a wake ended the wait, which
+    /// feeds adaptive spinning. The wake is usually this park's notification,
+    /// but a delayed wake syscall of an earlier park's notification also
+    /// counts. Returns `None` without blocking when a notification arrived
+    /// since `seen` or the deadline has elapsed, and after an interruption or
+    /// a timeout, so timer expiry does not count as a quick notification wake.
+    /// The futex timeout is computed from the clock reading that also times the
+    /// sleep, taken immediately before it. Every return disarms the word,
+    /// including skipped sleeps.
     pub fn park(&self, seen: u32, deadline: Option<Instant>) -> Option<Duration> {
         let arm = self.arm(seen);
         if !arm.still_idle() {
@@ -520,7 +578,7 @@ impl Unparker {
     #[cfg(not(feature = "loom"))]
     fn futex_wake(&self) {
         loop {
-            // SAFETY: `state` is a valid aligned futex word for the duration of
+            // SAFETY: `word` is a valid aligned futex word for the duration of
             // the syscall.
             let ret = unsafe {
                 libc::syscall(
@@ -689,6 +747,7 @@ pub mod tests {
         let (mut action, mut previous): (libc::sigaction, libc::sigaction) =
             unsafe { std::mem::zeroed() };
         action.sa_sigaction = interrupt_wait as *const () as usize;
+
         // SAFETY: Both action structures are initialized stack storage retained
         // through the synchronous call. The handler performs no operations and
         // has the signal ABI, and sigemptyset receives its writable mask.
@@ -884,6 +943,8 @@ pub mod tests {
         assert!(!waiting(&unparker));
     }
 
+    /// Tests that call the kernel's futex and a real ring, which a loom build
+    /// cannot run.
     #[cfg(not(feature = "loom"))]
     pub mod native {
         use super::*;
@@ -1163,7 +1224,8 @@ mod loom_tests {
         let _ = parker.park(seen, None);
     }
 
-    /// The driver's record of its ring wait in the persistent ring models.
+    /// The driver's record of its ring wait in the models of a ring wait reused
+    /// across parks.
     #[derive(Default)]
     struct Ring {
         /// Whether a ring wait was installed and its completion is not yet
@@ -1232,7 +1294,7 @@ mod loom_tests {
     /// source with a relaxed load, and park through `park` against the
     /// observation when the source is still below the target.
     ///
-    /// The load is relaxed, as is the store in [`publish`], so only the
+    /// The load is relaxed, as is the increment in [`publish`], so only the
     /// eventcount's release and acquire edges can make a condition visible.
     fn simulate_until(
         parker: &Parker,
@@ -1250,8 +1312,8 @@ mod loom_tests {
         }
     }
 
-    /// Make one condition visible with a relaxed store, then notify, so only
-    /// the notification's release can publish the condition.
+    /// Make one condition visible with a relaxed increment, then notify, so
+    /// only the notification's release can publish the condition.
     fn publish(unparker: &Unparker, source: &AtomicU32) {
         source.fetch_add(1, Ordering::Relaxed);
         unparker.unpark();
@@ -1389,7 +1451,7 @@ mod loom_tests {
 
     /// Run a worker shaped like the drive loop while a producer sends one
     /// message behind a batch of two. Each turn observes, takes only into an
-    /// empty scratch while its parker reports mail, applies one message, its
+    /// empty scratch while its mailbox reports mail, applies one message, its
     /// bounded share, and decides in that same turn whether to park. With
     /// `check_mail` the decision reads the mail flag, as the drive loop does.
     /// Without it, the turn that empties the scratch parks on the word alone.
@@ -1449,7 +1511,7 @@ mod loom_tests {
     /// moves the word without mail. A producer can be delayed between
     /// unlocking and notifying while the worker takes, applies its scratch one
     /// message per turn, and parks once the scratch is empty. The worker
-    /// observes, then takes only while its parker reports mail, as the run
+    /// observes, then takes only while its mailbox reports mail, as the run
     /// loop does, so the claim costs no take and no batch is missed. This
     /// models userspace ownership and waking, not kernel CQE delivery.
     #[test]
