@@ -1230,7 +1230,7 @@ mod tests {
         deterministic::Context,
     };
     use commonware_utils::{
-        NZU16, NZUsize,
+        NZU16, NZUsize, Widen,
         sequence::{FixedBytes, U64},
     };
 
@@ -1272,6 +1272,82 @@ mod tests {
     #[allow(dead_code)]
     fn assert_freezer_destroy_is_send(freezer: TestFreezer) {
         is_send(freezer.destroy());
+    }
+
+    /// Recovery durably zeroes a table slot that a torn write left invalid, so the bucket's next
+    /// put finds an empty slot beside the committed head.
+    #[test_traced]
+    fn recovery_zeroes_torn_table_slot() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = super::super::Config {
+                key_partition: "test-key-index".into(),
+                key_write_buffer: NZUsize!(1024),
+                key_page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
+                value_partition: "test-value-journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(1024),
+                value_target_size: 10 * 1024 * 1024,
+                table_partition: "test-table".into(),
+                table_initial_size: 4,
+                table_resize_frequency: 4,
+                table_resize_chunk_size: 4,
+                table_replay_buffer: NZUsize!(64 * 1024),
+                codec_config: (),
+            };
+
+            // Commit one key, leaving its bucket with a valid slot beside an empty one.
+            let key = test_key_at_index(4, 0);
+            let freezer =
+                Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone(), None)
+                    .await
+                    .unwrap();
+            let (freezer, _) = freezer.put(key.clone(), &42).await.unwrap();
+            let checkpoint = freezer.close().await.unwrap();
+            let (blob, _) = context.open(&cfg.table_partition, b"table").await.unwrap();
+            let bucket = blob
+                .read_at(0, Entry::FULL_SIZE, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
+            let (slot0, slot1) =
+                Inner::<Context, FixedBytes<64>, i32>::parse_entries(Copying(bucket.as_ref()))
+                    .unwrap();
+            assert!(slot0.is_valid() && slot1.is_empty());
+
+            // Tear a write of the next epoch's entry into the empty slot so that everything lands
+            // except its CRC.
+            let torn = Entry::new(checkpoint.epoch + 1, 0, 1, 2).encode();
+            let offset: u64 = Widen::widen(Entry::SIZE);
+            blob.write_at(
+                offset,
+                torn.as_ref()[..Entry::SIZE - crc32::Digest::SIZE].to_vec(),
+                WriteOptions::SYNC,
+            )
+            .await
+            .unwrap();
+            drop(blob);
+
+            // Recovery keeps the committed head.
+            let freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                context.child("second"),
+                cfg.clone(),
+                Some(checkpoint),
+            )
+            .await
+            .unwrap();
+            assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(42));
+            drop(freezer);
+
+            // The torn slot is zeroed, and the zeroing is durable.
+            let (blob, _) = context.open(&cfg.table_partition, b"table").await.unwrap();
+            let slot = blob
+                .read_at(offset, Entry::SIZE, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(slot.as_ref(), &[0u8; Entry::SIZE]);
+        });
     }
 
     #[test_traced]
