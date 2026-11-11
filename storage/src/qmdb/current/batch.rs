@@ -21,7 +21,7 @@ use crate::{
         },
         bitmap::{Candidates, Shared, fill_from},
         chain::Bounds,
-        current::{db::compute_ops_root_witness, grafting},
+        current::{db::compute_ops_root_witness, grafting, proof::OpsRootWitness},
         floor::{Policy, Proportional},
         operation::Key,
         value::ValueEncoding,
@@ -267,8 +267,14 @@ pub struct MerkleizedBatch<F: Graftable, D: Digest, U: update::Update, const N: 
     /// COW bitmap state (for use as a parent in speculative batches).
     pub(crate) bitmap: BitmapBatch<N>,
 
-    /// The canonical root (ops root + grafted root + partial chunk).
+    /// The canonical root, including the ops, grafted, pending, and partial contributions.
     pub(crate) canonical_root: D,
+
+    /// Witness binding the ops root to `canonical_root`.
+    pub(crate) ops_root_witness: OpsRootWitness<F, D>,
+
+    /// Physical bitmap pruning boundary when the batch was merkleized.
+    pruned_chunks: u64,
 }
 
 impl<F, H, U, const N: usize, S: Strategy> UnmerkleizedBatch<F, H, U, N, S>
@@ -767,9 +773,9 @@ where
 /// ancestor diffs. Avoids iterating raw operations.
 ///
 /// Pushes: one bit per operation in the batch. All false except active diff entries (whose `loc`
-/// falls in the batch) and the CommitFloor (last op).
+/// falls in the batch) and the Commit (last op).
 ///
-/// Clears: previous CommitFloor, plus the most recent superseded location for each mutated key. We
+/// Clears: previous Commit, plus the most recent superseded location for each mutated key. We
 /// search back through ancestors to find the most recent active location, and if none exists, we
 /// clear the key's database location (`base_old_loc`).
 #[allow(clippy::type_complexity)]
@@ -787,11 +793,11 @@ where
     let appended_chunks = (batch_len as u64).div_ceil(ChunkOverlay::<N>::CHUNK_BITS) as usize;
     let mut overlay = ChunkOverlay::new(base, total_bits, diff.len() + appended_chunks + 1);
 
-    // 1. CommitFloor (last op) is always active.
+    // 1. Commit (last op) is always active.
     let commit_loc = batch_base + batch_len as u64 - 1;
     overlay.set_bit(base, commit_loc);
 
-    // 2. Inactivate previous CommitFloor.
+    // 2. Inactivate previous Commit.
     overlay.clear_bit(base, batch_base - 1);
 
     // 3. Set active bits + clear superseded locations from the diff. The diff is key-sorted,
@@ -931,7 +937,7 @@ where
     let graftable_overlay = grafting::graftable_chunks::<F>(*overlay_ops_leaves, grafting_height)
         .min(new_complete_chunks as u64) as usize;
     let graftable_parent = *grafted_parent.leaves() as usize;
-    let pruned_chunks = bitmap_parent.pruned_chunks();
+    let pruned_chunks = overlay.parent.pruned_chunks;
     assert!(
         pruned_chunks <= graftable_parent
             && graftable_parent <= graftable_overlay
@@ -1003,20 +1009,22 @@ where
     let grafted_storage =
         grafting::Storage::<F, H, _, _>::new(&grafted_tree, grafting_height, &ops_tree);
 
-    let canonical_root = compute_ops_root_witness::<F, H, _, _, N>(
+    let ops_root_witness = compute_ops_root_witness::<F, H, _, _, N>(
         &bitmap_batch,
         &grafted_storage,
         overlay_ops_leaves,
         inner.bounds.inactivity_floor,
     )
-    .await?
-    .root::<H>(&ops_root);
+    .await?;
+    let canonical_root = ops_root_witness.root::<H>(&ops_root);
 
     Ok(Arc::new(MerkleizedBatch {
         inner,
         grafted: grafted_batch,
         bitmap: bitmap_batch,
         canonical_root,
+        ops_root_witness,
+        pruned_chunks: Widen::widen(pruned_chunks),
     }))
 }
 
@@ -1158,6 +1166,56 @@ impl<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
         self.inner.root()
     }
 
+    /// Return the witness binding [`Self::ops_root`] to [`Self::root`].
+    pub const fn ops_root_witness(&self) -> &OpsRootWitness<F, D> {
+        &self.ops_root_witness
+    }
+
+    /// Return the number of bitmap chunks pruned when this batch was merkleized.
+    pub const fn pruned_chunks(&self) -> u64 {
+        self.pruned_chunks
+    }
+
+    /// Return the bitmap chunks this batch wrote, ascending by index.
+    ///
+    /// No chunk is below [`Self::pruned_chunks`]. Replaying a chain's chunks in order reproduces
+    /// each batch's unpruned chunks.
+    pub fn chunks(&self) -> Vec<(u64, [u8; N])> {
+        // A `Base` bitmap has no overlay, so its batch wrote no chunks. The sort gives equal
+        // results an equal order.
+        let mut chunks: Vec<(u64, [u8; N])> = match &self.bitmap {
+            BitmapBatch::Base(_) => Vec::new(),
+            BitmapBatch::Layer(layer) => layer
+                .overlay
+                .chunks
+                .iter()
+                .map(|(&index, &chunk)| (Widen::widen(index), chunk))
+                .collect(),
+        };
+        chunks.sort_unstable_by_key(|(index, _)| *index);
+        chunks
+    }
+
+    /// Return the grafted nodes this batch appended or overwrote, ascending by operations-tree
+    /// position.
+    ///
+    /// Replaying a chain's nodes in order reproduces each batch's grafted tree.
+    pub fn grafted_nodes(&self) -> Vec<(Position<F>, D)> {
+        // The sort gives equal results an equal order.
+        let mut nodes: Vec<(Position<F>, D)> = self
+            .grafted
+            .local_nodes()
+            .map(|(pos, digest)| {
+                (
+                    grafting::grafted_to_ops_pos::<F>(pos, grafting::height::<N>()),
+                    digest,
+                )
+            })
+            .collect();
+        nodes.sort_unstable_by_key(|(pos, _)| *pos);
+        nodes
+    }
+
     /// Return the ops-level [`Bounds`] of the batch.
     ///
     /// All commitments (`base`, `db`, `tip`, and `ancestors`) contain ops roots. In particular,
@@ -1168,17 +1226,15 @@ impl<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
 
     /// Return the operations this batch appends to the ops log and the location of the first.
     ///
-    /// Delegates to the wrapped ops-level batch. The bitmap state contributes to the
-    /// canonical root but appends no log operations. There are no matching proof or
-    /// pinned-node methods: an ops-level proof verifies only against [`Self::ops_root`],
-    /// never the grafted [`Self::root`] that blocks commit to.
+    /// The bitmap contributes to the canonical root but appends no operations.
+    /// [`Self::ops_pinned_nodes`] is the frontier they extend.
     pub fn operations(&self) -> (Location<F>, Arc<Vec<Operation<F, U>>>) {
         self.inner.operations()
     }
 
     /// Return the batch's safe sync boundary.
     ///
-    /// This equals the boundary [`super::db::Db::sync_boundary`] reports once this batch is applied.
+    /// This equals the boundary [`super::Db::sync_boundary`] reports once this batch is applied.
     pub fn sync_boundary(&self) -> Location<F> {
         // Derive from the commit's chunk-aligned inactivity floor, the same quantity the DB uses
         // after apply. Deliberately not the physical bitmap pruning boundary, which can lag the
@@ -1212,6 +1268,22 @@ where
             Arc::clone(&self.grafted),
             self.bitmap.trim_committed(),
         )
+    }
+
+    /// Return the operations-tree frontier at this batch's first operation, with the order, errors,
+    /// and retention of [`any::batch::MerkleizedBatch::pinned_nodes`]. Replaying
+    /// [`Self::operations`] onto it at the batch's inactivity floor recomputes [`Self::ops_root`].
+    pub fn ops_pinned_nodes<E, C, I, H>(
+        &self,
+        db: &super::db::Db<F, E, C, I, H, U, N, S>,
+    ) -> Result<Vec<D>, Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>>,
+        H: Hasher<Digest = D>,
+    {
+        self.inner.pinned_nodes(&db.any)
     }
 
     /// Read through: local diff -> ancestor diffs -> database.
@@ -1330,6 +1402,8 @@ where
             grafted,
             bitmap: BitmapBatch::Base(Arc::clone(&self.any.bitmap)),
             canonical_root: self.root,
+            ops_root_witness: self.ops_root_witness.clone(),
+            pruned_chunks: Widen::widen(self.any.bitmap.pruned_chunks()),
         })
     }
 }
@@ -1337,12 +1411,23 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{mmb, mmr, utils::detached::block_strategy};
-    use commonware_cryptography::Sha256;
+    use crate::{
+        mmb, mmr,
+        qmdb::{
+            ProofExt,
+            current::{tests::fixed_config, unordered::fixed},
+            floor::Hold,
+        },
+        translator::OneCap,
+        utils::detached::block_strategy,
+    };
+    use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
-    use commonware_parallel::{Rayon, mocks::Explorer, rayon::ThreadPoolBuilder};
+    use commonware_parallel::{Rayon, Sequential, mocks::Explorer, rayon::ThreadPoolBuilder};
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_utils::{NZUsize, bitmap::Prunable as BitMap};
     use std::{
+        collections::BTreeMap,
         future::Future as _,
         task::Context as TaskContext,
         time::{Duration, Instant},
@@ -1490,12 +1575,12 @@ mod tests {
         let overlay = build_chunk_overlay::<mmr::Family, U, _, N>(&base, 4, 4, &diff, &[]);
 
         // Chunk 0 should have: bits 0-3 from base (all set), bit 4 set (key1), bits 5-6 false
-        // (inactive), bit 7 set (CommitFloor at loc 7). Also bit 3 cleared (previous commit).
+        // (inactive), bit 7 set (Commit at loc 7). Also bit 3 cleared (previous commit).
         let c0 = overlay.get(0).expect("chunk 0 should be dirty");
         assert_ne!(c0[0] & (1 << 4), 0); // key1 active
         assert_eq!(c0[0] & (1 << 5), 0); // inactive
         assert_eq!(c0[0] & (1 << 6), 0); // inactive
-        assert_ne!(c0[0] & (1 << 7), 0); // CommitFloor
+        assert_ne!(c0[0] & (1 << 7), 0); // Commit
         assert_eq!(c0[0] & (1 << 3), 0); // previous commit cleared
     }
 
@@ -1570,7 +1655,7 @@ mod tests {
 
         // Segment of 20 ops starting at loc 20. This pushes total to 40 bits, completing chunk 0
         // (32 bits) and starting chunk 1. Diff: only one active key at loc 35 (in chunk 1), plus
-        // CommitFloor at loc 39. No active bits land in chunk 0's new region (bits 20-31).
+        // Commit at loc 39. No active bits land in chunk 0's new region (bits 20-31).
         let key1 = FixedBytes::from([1, 0, 0, 0]);
         let mut diff = vec![(
             key1,
@@ -2003,5 +2088,349 @@ mod tests {
 
         // Every reconstructed layer must still cache the original shared terminal.
         assert!(Arc::ptr_eq(result.shared(), &shared));
+    }
+
+    type TestDb<F, const N: usize> =
+        fixed::Db<F, deterministic::Context, Digest, Digest, Sha256, OneCap, N, Sequential>;
+
+    type TestUpdate = update::Unordered<Digest, crate::qmdb::value::FixedEncoding<Digest>>;
+
+    /// What a batch wrote: its pruned boundary, chunks, and grafted nodes.
+    #[derive(Debug, PartialEq)]
+    struct Writes<F: Graftable, const N: usize> {
+        pruned_chunks: u64,
+        chunks: Vec<(u64, [u8; N])>,
+        nodes: Vec<(Position<F>, Digest)>,
+    }
+
+    impl<F: Graftable, const N: usize> Writes<F, N> {
+        fn of(batch: &MerkleizedBatch<F, Digest, TestUpdate, N, Sequential>) -> Self {
+            let writes = Self {
+                pruned_chunks: batch.pruned_chunks(),
+                chunks: batch.chunks(),
+                nodes: batch.grafted_nodes(),
+            };
+
+            // Both lists ascend without repeats, and no chunk is below the pruned boundary.
+            assert!(writes.chunks.windows(2).all(|pair| pair[0].0 < pair[1].0));
+            assert!(writes.nodes.windows(2).all(|pair| pair[0].0 < pair[1].0));
+            assert!(
+                writes
+                    .chunks
+                    .iter()
+                    .all(|(idx, _)| *idx >= writes.pruned_chunks)
+            );
+            writes
+        }
+    }
+
+    /// A mirror that holds bitmap chunks by chunk index and grafted nodes by operations-tree
+    /// position. It is seeded from the database and advanced only by applying writes.
+    struct Mirror<F: Graftable, const N: usize> {
+        chunks: BTreeMap<u64, [u8; N]>,
+        nodes: BTreeMap<Position<F>, Digest>,
+    }
+
+    impl<F: Graftable, const N: usize> Mirror<F, N> {
+        /// Seed a mirror with the database's unpruned bitmap chunks and grafted nodes.
+        fn from_db(db: &TestDb<F, N>) -> Self {
+            // Copy every unpruned chunk, including a trailing partial chunk.
+            let bitmap = db.bitmap();
+            let chunks = (bitmap.pruned_chunks() as u64..bitmap.len().div_ceil((N * 8) as u64))
+                .map(|idx| (idx, bitmap.get_chunk(idx as usize)))
+                .collect();
+
+            // Copy every grafted node the database retains, keyed by operations-tree position.
+            let nodes = (0..*db.grafted_tree.size())
+                .filter_map(|pos| {
+                    db.grafted_tree.get_node(Position::new(pos)).map(|digest| {
+                        (
+                            grafting::grafted_to_ops_pos::<F>(
+                                Position::new(pos),
+                                grafting::height::<N>(),
+                            ),
+                            digest,
+                        )
+                    })
+                })
+                .collect();
+            Self { chunks, nodes }
+        }
+
+        /// Insert every chunk and node in `writes` into the mirror, replacing any existing entry.
+        fn apply(&mut self, writes: &Writes<F, N>) {
+            self.chunks.extend(writes.chunks.iter().copied());
+            self.nodes.extend(writes.nodes.iter().copied());
+        }
+
+        /// Check that the mirror holds every unpruned chunk and grafted node `db` retains.
+        fn check(&self, db: &TestDb<F, N>) {
+            let expected = Self::from_db(db);
+            for (idx, chunk) in &expected.chunks {
+                assert_eq!(self.chunks.get(idx), Some(chunk));
+            }
+            for (pos, digest) in &expected.nodes {
+                assert_eq!(self.nodes.get(pos), Some(digest));
+            }
+        }
+    }
+
+    /// Check that a batch's witness binds its operations root to its canonical root, and that an
+    /// ops-level proof of its operations and pinned nodes verifies under that operations root.
+    fn check_frontier<F: Graftable, const N: usize>(
+        batch: &MerkleizedBatch<F, Digest, TestUpdate, N, Sequential>,
+        db: &TestDb<F, N>,
+    ) {
+        assert!(
+            batch
+                .ops_root_witness()
+                .verify::<Sha256>(&batch.ops_root(), &batch.root())
+        );
+        let (start, operations) = batch.operations();
+        let pins = batch.ops_pinned_nodes(db).unwrap();
+        let proof = batch.inner.proof(&db.any).unwrap();
+        assert!(proof.verify_with_pinned_nodes::<Sha256, _>(
+            start,
+            operations.iter(),
+            &pins,
+            &batch.ops_root(),
+        ));
+    }
+
+    /// Write the hash of `round` to the key hashed from each index in `keys`.
+    fn write_keys<F: Graftable, const N: usize>(
+        mut batch: UnmerkleizedBatch<F, Sha256, TestUpdate, N, Sequential>,
+        keys: Range<u64>,
+        round: u64,
+    ) -> UnmerkleizedBatch<F, Sha256, TestUpdate, N, Sequential> {
+        let value = Sha256::hash(&[&round.to_be_bytes()]);
+        for key in keys {
+            batch = batch.write(Sha256::hash(&[&key.to_be_bytes()]), Some(value));
+        }
+        batch
+    }
+
+    /// Replay a parent and its child, both merkleized before either is applied, into a mirror.
+    async fn replay_chained<F: Graftable, const N: usize>(ctx: deterministic::Context) {
+        // The parent writes more than two chunks of operations, so it appends grafted nodes. The
+        // child rewrites every key, so its writes both overwrite nodes the parent appended and
+        // append nodes of their own.
+        let mut db = TestDb::<F, N>::init(
+            ctx.child("storage"),
+            fixed_config::<OneCap>("chained"),
+            None,
+        )
+        .await
+        .unwrap();
+        let mut mirror = Mirror::from_db(&db);
+        let count = (N * 16 + 5) as u64;
+        let parent = write_keys(db.new_batch(), 0..count, 0)
+            .merkleize_with(&db, &mut Hold)
+            .await
+            .unwrap();
+        let child = write_keys(parent.new_batch::<Sha256>(), 0..count, 1)
+            .merkleize_with(&db, &mut Hold)
+            .await
+            .unwrap();
+        let parent_writes = Writes::of(&parent);
+        let child_writes = Writes::of(&child);
+        let parent_wrote = |pos: &Position<F>| {
+            parent_writes
+                .nodes
+                .binary_search_by_key(pos, |&(p, _)| p)
+                .is_ok()
+        };
+        assert!(child_writes.nodes.iter().any(|(pos, _)| parent_wrote(pos)));
+        assert!(child_writes.nodes.iter().any(|(pos, _)| !parent_wrote(pos)));
+
+        // Writes cover only their own batch: an empty child of the written parent writes the one
+        // chunk its commit lands in.
+        let empty = parent
+            .new_batch::<Sha256>()
+            .merkleize_with(&db, &mut Hold)
+            .await
+            .unwrap();
+        assert_eq!(Writes::of(&empty).chunks.len(), 1);
+
+        // Each batch's frontier is checked before either is applied.
+        check_frontier(&parent, &db);
+        check_frontier(&child, &db);
+
+        // Applying the parent's writes and then the child's keeps the mirror in step with the
+        // database.
+        db = db.apply_batch(parent).await.unwrap();
+        mirror.apply(&parent_writes);
+        mirror.check(&db);
+        db = db.apply_batch(child).await.unwrap();
+        mirror.apply(&child_writes);
+        mirror.check(&db);
+
+        // Rewriting every key leaves an earlier complete chunk all zero, so its grafted leaf is the
+        // operations-tree subtree root it covers. Reading that root from the operations tree checks
+        // the mirror independently of the writes, and the mirror holds it in place of the leaf the
+        // parent grafted while the chunk was nonzero.
+        let zero = mirror
+            .chunks
+            .iter()
+            .find(|(idx, chunk)| **idx < db.bitmap().complete_chunks() as u64 && **chunk == [0; N])
+            .map(|(&idx, _)| idx)
+            .expect("a complete chunk must be all zero after every key is rewritten");
+        let pos = F::subtree_root_position(
+            merkle::Location::new(zero * (N * 8) as u64),
+            grafting::height::<N>(),
+        );
+        let raw = db.any.log.merkle.get_node(pos).await.unwrap().unwrap();
+        assert_eq!(mirror.nodes.get(&pos), Some(&raw));
+        db.destroy().await.unwrap();
+    }
+
+    /// A child's writes overwrite and extend its unapplied parent's grafted nodes, and replaying
+    /// both in order reproduces MMR and MMB databases and a database with 64-byte chunks.
+    #[test_traced]
+    fn test_writes_replay_chained_batches() {
+        deterministic::Runner::default().start(|ctx| async move {
+            replay_chained::<mmr::Family, 32>(ctx.child("mmr")).await;
+            replay_chained::<mmb::Family, 32>(ctx.child("mmb")).await;
+            replay_chained::<mmr::Family, 64>(ctx.child("mmr64")).await;
+        });
+    }
+
+    /// Writes carry the grafted leaf of a chunk that becomes graftable through operations-tree
+    /// growth alone.
+    #[test_traced]
+    fn test_writes_pending_chunk_becomes_graftable_without_bitmap_write() {
+        deterministic::Runner::default().start(|ctx| async move {
+            // In MMB, chunk 0 becomes graftable only once the operations tree reaches
+            // `graftable_at` operations.
+            let mut db = TestDb::<mmb::Family, 32>::init(
+                ctx.child("pending"),
+                fixed_config::<OneCap>("pending"),
+                None,
+            )
+            .await
+            .unwrap();
+            let mut mirror = Mirror::from_db(&db);
+            let height = grafting::height::<32>();
+            let chunk_root = mmb::Family::subtree_root_position(mmb::Location::new(0), height);
+            let graftable_at = mmb::Family::peak_birth_size(chunk_root, height);
+
+            // With the genesis commit and its own commit, the parent ends one operation short of
+            // `graftable_at`, leaving chunk 0 complete but pending. Its writes keep the mirror in
+            // step.
+            let parent = write_keys(db.new_batch(), 0..graftable_at - 3, 0)
+                .merkleize_with(&db, &mut Hold)
+                .await
+                .unwrap();
+            assert_eq!(*parent.bounds().tip.size, graftable_at - 1);
+            assert!(parent.ops_root_witness().pending_chunk_digest.is_some());
+            let writes = Writes::of(&parent);
+            db = db.apply_batch(Arc::clone(&parent)).await.unwrap();
+            mirror.apply(&writes);
+            mirror.check(&db);
+
+            // An empty batch adds one commit, so it reaches `graftable_at` and grafts chunk 0.
+            let transition = parent
+                .new_batch::<Sha256>()
+                .merkleize_with(&db, &mut Hold)
+                .await
+                .unwrap();
+            assert_eq!(*transition.bounds().tip.size, graftable_at);
+            assert!(transition.ops_root_witness().pending_chunk_digest.is_none());
+
+            // The empty batch writes none of chunk 0's bits, yet chunk 0's grafted leaf is the only
+            // node in its writes. The mirror holds no grafted nodes before applying those writes
+            // and matches the database after.
+            let writes = Writes::of(&transition);
+            assert!(!writes.chunks.iter().any(|(idx, _)| *idx == 0));
+            assert_eq!(writes.nodes.len(), 1);
+            assert!(mirror.nodes.is_empty());
+            db = db.apply_batch(transition).await.unwrap();
+            mirror.apply(&writes);
+            mirror.check(&db);
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Saved writes are unchanged after apply, prune, staleness, and dropped ancestors, and a
+    /// batch held unmerkleized across a prune records the new pruning boundary.
+    #[test_traced]
+    fn test_writes_survive_apply_prune_and_stale_ancestors() {
+        deterministic::Runner::default().start(|ctx| async move {
+            // Four rounds of rewriting the same 256 keys under a proportional floor policy
+            // leave enough inactive operations below the floor for a later prune to remove
+            // whole chunks.
+            let mut db = TestDb::<mmr::Family, 32>::init(
+                ctx.child("lifecycle"),
+                fixed_config::<OneCap>("lifecycle"),
+                None,
+            )
+            .await
+            .unwrap();
+            for round in 0..4u64 {
+                let batch = write_keys(db.new_batch(), 0..256, round)
+                    .merkleize(&db)
+                    .await
+                    .unwrap();
+                db = db.apply_batch(batch).await.unwrap();
+            }
+
+            // Save the writes of an unapplied parent and a child that rewrites the first 16 keys,
+            // and seed a mirror, before anything is pruned.
+            let parent = db.new_batch().merkleize(&db).await.unwrap();
+            let child = write_keys(parent.new_batch::<Sha256>(), 0..16, 4)
+                .merkleize_with(&db, &mut Hold)
+                .await
+                .unwrap();
+            let saved = Writes::of(&child);
+            let saved_parent = Writes::of(&parent);
+            let mut mirror = Mirror::from_db(&db);
+            assert_eq!(saved.pruned_chunks, 0);
+
+            // The parent's saved writes keep the mirror in step.
+            db = db.apply_batch(Arc::clone(&parent)).await.unwrap();
+            mirror.apply(&saved_parent);
+            mirror.check(&db);
+
+            // Pruning to the sync boundary removes at least one chunk. A batch at the database's
+            // own state writes nothing and keeps its writes across the prune, and a fresh batch at
+            // the pruned state records the new boundary. A copy of the child is written before the
+            // prune and held unmerkleized across it.
+            let base = db.to_batch();
+            let saved_base = Writes::of(&base);
+            assert!(saved_base.chunks.is_empty() && saved_base.nodes.is_empty());
+            let held = write_keys(parent.new_batch::<Sha256>(), 0..16, 4);
+            let boundary = db.sync_boundary();
+            db = db.prune(boundary).await.unwrap();
+            assert!(db.bitmap().pruned_chunks() > 0);
+            assert_eq!(Writes::of(&base), saved_base);
+            assert_eq!(
+                db.to_batch().pruned_chunks(),
+                db.bitmap().pruned_chunks() as u64
+            );
+
+            // A batch captures the pruning boundary when it is merkleized, so the held copy records
+            // the new boundary.
+            let post_prune = held.merkleize_with(&db, &mut Hold).await.unwrap();
+            let post_grafts = Writes::of(&post_prune);
+            assert_eq!(
+                post_grafts.pruned_chunks,
+                db.bitmap().pruned_chunks() as u64
+            );
+
+            // The post-prune child's writes keep the mirror in step.
+            db = db.apply_batch(post_prune).await.unwrap();
+            mirror.apply(&post_grafts);
+            mirror.check(&db);
+
+            // Once the database moves past the saved child's chain, reading the child's frontier
+            // fails as stale. The child's writes stay unchanged after the parent is dropped and
+            // the database is destroyed.
+            let successor = db.new_batch().merkleize_with(&db, &mut Hold).await.unwrap();
+            db = db.apply_batch(successor).await.unwrap();
+            assert!(matches!(child.ops_pinned_nodes(&db), Err(Error::StaleRead)));
+            drop(parent);
+            db.destroy().await.unwrap();
+            assert_eq!(Writes::of(&child), saved);
+        });
     }
 }

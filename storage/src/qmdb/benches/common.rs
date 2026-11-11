@@ -34,7 +34,7 @@ use commonware_storage::{
         },
         immutable::fixed::{Config as ImmutableFixedConfig, Db as IFixed},
         keyless::variable::{Config as KeylessConfig, Db as Keyless},
-        store::db::{Config as StoreConfig, Db as Store},
+        store::{Config as StoreConfig, Db as Store},
     },
     translator::EightCap,
 };
@@ -644,7 +644,7 @@ pub async fn gen_random_kv<F, M>(
 ) -> M
 where
     F: Family,
-    M: DbAny<F, Key = Digest>,
+    M: DbAny<Family = F, Key = Digest>,
 {
     let mut rng = TestRng::new(42);
 
@@ -774,7 +774,7 @@ pub fn make_fixed_value(rng: &mut TestRng) -> Digest {
 }
 
 /// Pre-populate the database with `num_keys` unique keys, then commit.
-pub async fn seed_db<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest>>(
+pub async fn seed_db<F: merkle::Family, C: DbAny<Family = F, Key = Digest, Value = Digest>>(
     db: C,
     num_keys: u64,
 ) -> C {
@@ -797,7 +797,7 @@ pub fn write_random_updates<B, Db>(
     rng: &mut TestRng,
 ) -> B
 where
-    B: UnmerkleizedBatch<Db, K = Digest, V = Digest>,
+    B: UnmerkleizedBatch<Db, Key = Digest, Value = Digest>,
     Db: ?Sized,
 {
     for _ in 0..num_updates {

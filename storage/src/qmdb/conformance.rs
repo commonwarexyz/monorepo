@@ -273,7 +273,7 @@ fn colliding_digest(prefix: u8, suffix: u64) -> Digest {
 }
 
 /// Apply a batch of keyed writes (creates, updates, or deletes) to the database.
-async fn apply_writes<F: Family, D: DbAny<F, Key = Digest, Value = Digest>>(
+async fn apply_writes<F: Family, D: DbAny<Family = F, Key = Digest, Value = Digest>>(
     db: D,
     writes: Vec<(Digest, Option<Digest>)>,
 ) -> D {
@@ -351,11 +351,11 @@ mod tests {
         }
     }
 
-    type Store = store::db::Db<Ctx, Digest, Digest, OneCap>;
+    type Store = store::Db<Ctx, Digest, Digest, OneCap>;
 
-    fn store_config(suffix: &str) -> store::db::Config<OneCap, ((), ())> {
+    fn store_config(suffix: &str) -> store::Config<OneCap, ((), ())> {
         let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
-        store::db::Config {
+        store::Config {
             log: variable_log_config(suffix, pc, ((), ())),
             translator: OneCap,
             init_cache: Some(NZUsize!(1024)),
@@ -460,7 +460,7 @@ mod tests {
     }
 
     /// Apply [`keyed_batches`] for `seed` to `db` and return its root.
-    async fn keyed_root<F: Family, D: DbAny<F, Key = Digest, Value = Digest>>(
+    async fn keyed_root<F: Family, D: DbAny<Family = F, Key = Digest, Value = Digest>>(
         mut db: D,
         seed: u64,
     ) -> (D, Vec<u8>) {
@@ -782,7 +782,7 @@ mod tests {
     ) -> (D, Vec<u8>)
     where
         F: Family,
-        D: DbAny<F, Key = Digest, Value = Digest>,
+        D: DbAny<Family = F, Key = Digest, Value = Digest>,
         P: Policy<F, Digest, Digest> + Send,
     {
         for (writes, rule) in floor_batches(seed) {
@@ -1579,7 +1579,7 @@ mod tests {
 // Each test creates two databases (`fwd` and `rev`) and applies the same set of
 // operations in forward and reverse order, then asserts the roots are equal.
 
-async fn apply_both_orders<F: Family, D: DbAny<F, Key = Digest, Value = Digest>>(
+async fn apply_both_orders<F: Family, D: DbAny<Family = F, Key = Digest, Value = Digest>>(
     fwd: D,
     rev: D,
     ops: Vec<(Digest, Option<Digest>)>,
@@ -1594,7 +1594,10 @@ async fn apply_both_orders<F: Family, D: DbAny<F, Key = Digest, Value = Digest>>
 }
 
 #[boxed]
-async fn assert_keyed_order_independent<F: Family, D: DbAny<F, Key = Digest, Value = Digest>>(
+async fn assert_keyed_order_independent<
+    F: Family,
+    D: DbAny<Family = F, Key = Digest, Value = Digest>,
+>(
     fwd: D,
     rev: D,
 ) -> (D, D) {

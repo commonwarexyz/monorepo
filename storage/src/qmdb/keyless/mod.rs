@@ -482,7 +482,10 @@ where
 
     /// The [`Commitment`](chain::Commitment) for the database's current state.
     pub(crate) fn commitment(&self) -> chain::Commitment<F, H::Digest> {
-        chain::Commitment::new(self.journal.size(), self.root)
+        chain::Commitment {
+            size: self.journal.size(),
+            root: self.root,
+        }
     }
 
     /// Create a new speculative batch of operations with this database as its parent.

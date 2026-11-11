@@ -135,7 +135,7 @@ pub(crate) mod test {
     };
 
     /// A generic type alias for an Any database parameterized by merkle family.
-    type AnyTestGeneric<F> = crate::qmdb::any::db::Db<
+    type AnyTestGeneric<F> = crate::qmdb::any::Db<
         F,
         deterministic::Context,
         Journal<
@@ -639,8 +639,8 @@ pub(crate) mod test {
                 Operation::Delete(key) => {
                     batch = batch.write(key, None);
                 }
-                Operation::CommitFloor(_, _) => {
-                    panic!("CommitFloor not supported in apply_ops");
+                Operation::Commit(_, _) => {
+                    panic!("Commit not supported in apply_ops");
                 }
             }
         }
@@ -697,7 +697,7 @@ pub(crate) mod test {
                     Operation::Delete(key) => {
                         expected.insert(*key, None);
                     }
-                    Operation::CommitFloor(_, _) => unreachable!(),
+                    Operation::Commit(_, _) => unreachable!(),
                 }
             }
             let db = apply_ops(db, ops).await;
@@ -952,7 +952,7 @@ pub(crate) mod test {
         });
     }
 
-    /// A fresh db's log holds only the auto-appended CommitFloor. A multi-worker reopen must
+    /// A fresh db's log holds only the auto-appended Commit. A multi-worker reopen must
     /// handle the keyless single-op replay (every routed batch empty).
     #[test_traced("WARN")]
     fn test_unordered_partitioned_fresh_db_parallel_init() {
@@ -1536,7 +1536,7 @@ pub(crate) mod test {
             let before = db.bounds().end;
             let writes = (first_key..first_key + 5).map(|i| (key(i), Some(val(i))));
             db = commit_writes_generic(db, writes, None).await;
-            // Five writes, a CommitFloor, and any floor-walk operations.
+            // Five writes, a Commit, and any floor-walk operations.
             assert!(db.bounds().end.saturating_sub(*before) >= 6);
         }
 

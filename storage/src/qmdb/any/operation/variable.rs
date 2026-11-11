@@ -34,7 +34,7 @@ where
                 UPDATE_CONTEXT.write(buf);
                 p.write(buf);
             }
-            Operation::CommitFloor(metadata, floor_loc) => {
+            Operation::Commit(metadata, floor_loc) => {
                 COMMIT_CONTEXT.write(buf);
                 write_commit_variable(metadata, *floor_loc, buf);
             }
@@ -56,7 +56,7 @@ where
             }
             COMMIT_CONTEXT => {
                 let (metadata, floor_loc) = read_commit_variable(buf, &cfg.1)?;
-                Ok(Operation::CommitFloor(metadata, floor_loc))
+                Ok(Operation::Commit(metadata, floor_loc))
             }
             e => Err(CodecError::InvalidEnum(e)),
         }
@@ -75,7 +75,7 @@ where
         1 + match self {
             Self::Delete(k) => k.encode_size(),
             Self::Update(p) => p.encode_size(),
-            Self::CommitFloor(v, floor) => commit_variable_payload_size(v, *floor),
+            Self::Commit(v, floor) => commit_variable_payload_size(v, *floor),
         }
     }
 }
@@ -92,7 +92,7 @@ where
         1 + match self {
             Self::Delete(k) => k.encode_size(),
             Self::Update(p) => p.encode_size(),
-            Self::CommitFloor(v, floor) => commit_variable_payload_size(v, *floor),
+            Self::Commit(v, floor) => commit_variable_payload_size(v, *floor),
         }
     }
 }

@@ -154,8 +154,8 @@ where
     pub async fn get_metadata(&self) -> Result<Option<U::Value>, crate::qmdb::Error<F>> {
         // The log always ends with a commit operation.
         match self.log.read(*self.log.size() - 1).await? {
-            Operation::CommitFloor(metadata, _) => Ok(metadata),
-            _ => unreachable!("last commit is not a CommitFloor operation"),
+            Operation::Commit(metadata, _) => Ok(metadata),
+            _ => unreachable!("last commit is not a Commit operation"),
         }
     }
 
@@ -166,7 +166,10 @@ where
 
     /// The [`Commitment`] for the database's current state.
     pub(crate) fn commitment(&self) -> Commitment<F, H::Digest> {
-        Commitment::new(self.log.size(), self.root)
+        Commitment {
+            size: self.log.size(),
+            root: self.root,
+        }
     }
 
     /// Return the inactive_peaks count for the given leaf count and inactivity floor.
@@ -549,7 +552,7 @@ where
     ///
     /// # Panics
     ///
-    /// Panics if the last operation is not a commit floor operation. Empty logs are handled
+    /// Panics if the last operation is not a commit operation. Empty logs are handled
     /// upstream by [`crate::qmdb::any::init_with_bitmap`].
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn init_from_log(

@@ -19,8 +19,9 @@ use commonware_storage::{
         self, ProofExt as _,
         any::unordered::{Update, fixed::Operation},
         current::{
+            Db,
             batch::{MerkleizedBatch, Slot},
-            unordered::{db::Db, proof::constant::KeyValueProof},
+            unordered::proof::constant::KeyValueProof,
         },
         keyless,
         value::FixedEncoding,
@@ -102,10 +103,9 @@ pub type Balances<E, P, H, I, S, A> = Db<
     mmb::Family,
     E,
     Journal<E, Operation<mmb::Family, P, A>>,
-    P,
-    FixedEncoding<A>,
     I,
     H,
+    Update<P, FixedEncoding<A>>,
     CHUNK,
     S,
 >;

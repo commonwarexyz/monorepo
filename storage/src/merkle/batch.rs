@@ -692,6 +692,24 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
         None
     }
 
+    /// Iterate the nodes this batch appended or overwrote relative to its parent batch.
+    #[cfg(feature = "std")]
+    pub(crate) fn local_nodes(&self) -> impl Iterator<Item = (Position<F>, D)> + '_ {
+        self.data
+            .overwrites
+            .iter()
+            .map(|(&pos, &digest)| (pos, digest))
+            .chain(
+                self.data
+                    .appended
+                    .iter()
+                    .enumerate()
+                    .map(|(index, &digest)| {
+                        (Position::new(*self.data.parent_size + index as u64), digest)
+                    }),
+            )
+    }
+
     /// Compute the root digest after this batch's mutations using `inactive_peaks` and the bagging
     /// carried by `hasher`.
     pub fn root(

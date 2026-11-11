@@ -16,7 +16,7 @@ pub use update::Update;
 pub const DELETE_CONTEXT: u8 = 0xD1;
 /// Wire tag for [Operation::Update].
 pub const UPDATE_CONTEXT: u8 = 0xD2;
-/// Wire tag for [Operation::CommitFloor].
+/// Wire tag for [Operation::Commit].
 pub const COMMIT_CONTEXT: u8 = 0xD3;
 
 pub type Ordered<F, K, V> = Operation<F, update::Ordered<K, V>>;
@@ -40,11 +40,11 @@ pub trait OperationCodec<F: Family, S: Update<ValueEncoding = Self>>:
     ) -> Result<Operation<F, S>, CodecError>;
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, Eq, PartialEq, Debug)]
 pub enum Operation<F: Family, S: Update> {
     Delete(S::Key),
     Update(S),
-    CommitFloor(Option<S::Value>, Location<F>),
+    Commit(Option<S::Value>, Location<F>),
 }
 
 #[cfg(feature = "arbitrary")]
@@ -59,7 +59,7 @@ where
         match choice {
             0 => Ok(Self::Delete(u.arbitrary()?)),
             1 => Ok(Self::Update(u.arbitrary()?)),
-            2 => Ok(Self::CommitFloor(u.arbitrary()?, u.arbitrary()?)),
+            2 => Ok(Self::Commit(u.arbitrary()?, u.arbitrary()?)),
             _ => unreachable!(),
         }
     }
@@ -72,7 +72,7 @@ impl<F: Family, S: Update> crate::qmdb::operation::Operation<F> for Operation<F,
         match self {
             Self::Delete(k) => Some(k),
             Self::Update(p) => Some(p.key()),
-            Self::CommitFloor(_, _) => None,
+            Self::Commit(_, _) => None,
         }
     }
 
@@ -80,7 +80,7 @@ impl<F: Family, S: Update> crate::qmdb::operation::Operation<F> for Operation<F,
         match self {
             Self::Delete(k) => Some(k),
             Self::Update(p) => Some(p.into_key()),
-            Self::CommitFloor(_, _) => None,
+            Self::Commit(_, _) => None,
         }
     }
 
@@ -96,7 +96,7 @@ impl<F: Family, S: Update> crate::qmdb::operation::Operation<F> for Operation<F,
 impl<F: Family, S: Update> crate::qmdb::operation::Floored<F> for Operation<F, S> {
     fn inactivity_floor(&self) -> Option<Location<F>> {
         match self {
-            Self::CommitFloor(_, loc) => Some(*loc),
+            Self::Commit(_, loc) => Some(*loc),
             _ => None,
         }
     }
@@ -104,7 +104,7 @@ impl<F: Family, S: Update> crate::qmdb::operation::Floored<F> for Operation<F, S
 
 impl<F: Family, S: Update> Committable for Operation<F, S> {
     fn is_commit(&self) -> bool {
-        matches!(self, Self::CommitFloor(_, _))
+        matches!(self, Self::Commit(_, _))
     }
 }
 
@@ -135,15 +135,11 @@ impl<F: Family, S: Update> fmt::Display for Operation<F, S> {
         match self {
             Self::Delete(key) => write!(f, "[key:{} <deleted>]", hex(key)),
             Self::Update(payload) => payload.fmt(f),
-            Self::CommitFloor(value, loc) => {
+            Self::Commit(value, floor) => {
                 if let Some(value) = value {
-                    write!(
-                        f,
-                        "[commit {} with inactivity floor: {loc}]",
-                        hex(&value.encode())
-                    )
+                    write!(f, "[commit {} floor:{}]", hex(&value.encode()), **floor)
                 } else {
-                    write!(f, "[commit with inactivity floor: {loc}]")
+                    write!(f, "[commit floor:{}]", **floor)
                 }
             }
         }
@@ -182,8 +178,8 @@ mod tests {
             value: 0xdead_beef_u64,
             next_key: FixedBytes::from([9, 9, 9, 9]),
         });
-        let commit_some = Op::CommitFloor(Some(123u64), crate::mmr::Location::new(5));
-        let commit_none = Op::CommitFloor(None, crate::mmr::Location::new(7));
+        let commit_some = Op::Commit(Some(123u64), crate::mmr::Location::new(5));
+        let commit_none = Op::Commit(None, crate::mmr::Location::new(7));
 
         roundtrip(&delete, &());
         roundtrip(&update, &());
@@ -199,11 +195,24 @@ mod tests {
 
         let delete = Op::Delete(FixedBytes::from([0, 0, 0, 1]));
         let update = Op::Update(update::Unordered(FixedBytes::from([9, 8, 7, 6]), 77u64));
-        let commit = Op::CommitFloor(Some(555u64), crate::mmr::Location::new(3));
+        let commit = Op::Commit(Some(555u64), crate::mmr::Location::new(3));
 
         roundtrip(&delete, &());
         roundtrip(&update, &());
         roundtrip(&commit, &());
+    }
+
+    #[test]
+    fn commit_display() {
+        type Op = Unordered<F, FixedBytes<4>, FixedEncoding<u64>>;
+
+        let commit = Op::Commit(Some(555u64), crate::mmr::Location::new(3));
+        assert_eq!(
+            format!("{commit}"),
+            format!("[commit {} floor:3]", hex(&555u64.encode()))
+        );
+        let commit = Op::Commit(None, crate::mmr::Location::new(7));
+        assert_eq!(format!("{commit}"), "[commit floor:7]");
     }
 
     #[test]
@@ -214,7 +223,7 @@ mod tests {
 
         // With 8-byte keys the update variant is the largest, so commit records carry trailing
         // padding beyond the commit payload.
-        let op = Op::CommitFloor(None, crate::mmr::Location::new(7));
+        let op = Op::Commit(None, crate::mmr::Location::new(7));
         let mut buf: Vec<u8> = op.encode().to_vec();
         assert!(buf.len() > 1 + 1 + u64::SIZE + u64::SIZE);
         *buf.last_mut().unwrap() = 0x01;
@@ -234,8 +243,8 @@ mod tests {
             value: vec![1, 2, 3, 4, 5],
             next_key: FixedBytes::from([3, 3, 3, 3]),
         });
-        let commit_some = Op::CommitFloor(Some(vec![9, 9, 9]), crate::mmr::Location::new(9));
-        let commit_none = Op::CommitFloor(None, crate::mmr::Location::new(10));
+        let commit_some = Op::Commit(Some(vec![9, 9, 9]), crate::mmr::Location::new(9));
+        let commit_none = Op::Commit(None, crate::mmr::Location::new(10));
 
         roundtrip(&delete, &cfg);
         roundtrip(&update, &cfg);
@@ -255,7 +264,7 @@ mod tests {
             FixedBytes::from([5, 5, 5, 5]),
             vec![7, 7, 7, 7],
         ));
-        let commit = Op::CommitFloor(Some(vec![8, 8]), crate::mmr::Location::new(12));
+        let commit = Op::Commit(Some(vec![8, 8]), crate::mmr::Location::new(12));
 
         roundtrip(&delete, &cfg);
         roundtrip(&update, &cfg);

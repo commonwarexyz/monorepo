@@ -1,7 +1,7 @@
 //! Shared synchronization logic for [crate::qmdb::current] databases.
 //!
 //! Contains the implementation of [crate::qmdb::sync::Database] for
-//! [Db](crate::qmdb::current::db::Db), covering every variant (ordered/unordered,
+//! [Db](crate::qmdb::current::Db), covering every variant (ordered/unordered,
 //! fixed/variable, any snapshot index).
 //!
 //! The canonical root of a `current` database combines the ops root, grafted root, and optional
@@ -36,7 +36,7 @@ use crate::{
     qmdb::{
         self,
         any::{
-            db::Db as AnyDb,
+            Db as AnyDb,
             operation::{Operation, update::Update},
         },
         bitmap::Shared,
@@ -65,7 +65,7 @@ impl<T: Translator, J: Clone, S: Strategy, B> Config for super::Config<T, J, S, 
     }
 }
 
-/// Shared helper to build a `current::db::Db` from sync components.
+/// Shared helper to build a `current::Db` from sync components.
 ///
 /// This follows the same pattern as `any/sync/mod.rs::build_db` but additionally:
 /// * Builds the activity bitmap by replaying the operations log.
@@ -167,15 +167,14 @@ where
         pinned_nodes
     };
 
-    // Rebuild the grafted tree, graft roots, and canonical root from the synced `any` state.
-    // The canonical root is deterministic because the engine authenticates the ops and the
+    // Rebuild the grafted tree, graft roots, and ops root witness from the synced `any` state. The
+    // resulting canonical root is deterministic because the engine authenticates the ops and the
     // bitmap is derived from them.
-    let (grafted_tree, graft_roots, root) = db::rebuild_grafted_tree::<F, H, S, N>(
+    let (grafted_tree, graft_roots, ops_root_witness) = db::rebuild_grafted_tree::<F, H, S, N>(
         any.bitmap.as_ref(),
         &grafted_pinned_nodes,
         &any.log.merkle,
         any.inactivity_floor_loc,
-        any.root(),
         &strategy,
     )
     .await?;
@@ -185,6 +184,7 @@ where
         db::init_metadata::<F, E, DigestOf<H>>(context.child("metadata"), &metadata_partition)
             .await?;
 
+    let root = ops_root_witness.root::<H>(&any.root());
     let metrics = db::Metrics::new(context);
     let current_db = db::Db {
         any,
@@ -193,6 +193,7 @@ where
         metadata,
         strategy,
         root,
+        ops_root_witness,
         metrics,
         #[cfg(test)]
         halt_before_prune_log: false,

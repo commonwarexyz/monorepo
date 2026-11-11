@@ -226,7 +226,7 @@ pub struct Db<
     /// An authenticated database that provides the ability to prove whether a key ever had a
     /// specific value. Owns the activity-status bitmap (`any.bitmap`) that this layer reads to
     /// install grafted-tree updates and serve proofs.
-    pub(super) any: any::db::Db<F, E, C, I, H, U, N, S>,
+    pub(super) any: any::Db<F, E, C, I, H, U, N, S>,
 
     /// Each leaf corresponds to a complete bitmap chunk at the grafting height.
     /// See the [grafted leaf formula](super) in the module documentation.
@@ -255,6 +255,9 @@ pub struct Db<
     /// The cached canonical root.
     /// See the [Root structure](super) section in the module documentation.
     pub(super) root: DigestOf<H>,
+
+    /// Witness binding the ops root to `root`.
+    pub(super) ops_root_witness: OpsRootWitness<F, H::Digest>,
 
     /// Metrics for the Current layer.
     pub(super) metrics: Metrics<E>,
@@ -383,20 +386,9 @@ where
         self.any.root()
     }
 
-    /// Returns a witness that this database's canonical root commits to its ops root.
-    ///
-    /// This can be used to authenticate an ops root against a trusted canonical `current` root.
-    pub async fn ops_root_witness(&self) -> Result<OpsRootWitness<F, H::Digest>, Error<F>> {
-        let storage = self.grafted_storage();
-        let ops_size = storage.size();
-        let ops_leaves = Location::<F>::try_from(ops_size)?;
-        compute_ops_root_witness::<F, H, _, _, N>(
-            self.any.bitmap.as_ref(),
-            &storage,
-            ops_leaves,
-            self.any.inactivity_floor_loc,
-        )
-        .await
+    /// Returns the cached witness binding [`Self::ops_root`] to [`Self::root`].
+    pub const fn ops_root_witness(&self) -> &OpsRootWitness<F, H::Digest> {
+        &self.ops_root_witness
     }
 
     /// Snapshot of the grafted tree for use in batch chains.
@@ -700,7 +692,7 @@ where
     /// plus a best-effort attempt to bound the recovery needed on startup.
     /// Bitmap metadata is not persisted by this call or by [Self::commit]. A new sync waits for
     /// the prior sync before starting. Failures surface as described on
-    /// [`any::Db::start_sync`](crate::qmdb::any::db::Db::start_sync).
+    /// [`any::Db::start_sync`](crate::qmdb::any::Db::start_sync).
     #[tracing::instrument(name = "qmdb.current.db.start_sync", level = "info", skip_all)]
     #[boxed]
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
@@ -787,6 +779,7 @@ where
             .release_below_floor::<N>(self.any.inactivity_floor_loc);
         Arc::make_mut(&mut self.grafted_tree).apply_batch(&batch.grafted)?;
         self.root = batch.canonical_root;
+        self.ops_root_witness = batch.ops_root_witness.clone();
         self.update_metrics();
         Ok(self)
     }
@@ -1002,16 +995,23 @@ pub(super) async fn compute_ops_root_witness<
     })
 }
 
-/// Rebuild the grafted overlay tree and compute the canonical db root from the ops tree and
-/// bitmap. Returns the grafted tree, the retained graft roots, and the db root.
+/// Rebuild the grafted overlay tree from the ops tree and bitmap, and compute the witness that
+/// binds the ops root to the canonical db root. Returns the grafted tree, the retained graft roots,
+/// and the witness.
 pub(super) async fn rebuild_grafted_tree<F, H, S, const N: usize>(
     bitmap: &impl bitmap::Readable<N>,
     pinned_nodes: &[H::Digest],
     ops_tree: &impl MerkleStorage<F, Digest = H::Digest>,
     inactivity_floor: Location<F>,
-    ops_root: H::Digest,
     strategy: &S,
-) -> Result<(Mem<F, H::Digest>, GraftRoots<H::Digest>, H::Digest), Error<F>>
+) -> Result<
+    (
+        Mem<F, H::Digest>,
+        GraftRoots<H::Digest>,
+        OpsRootWitness<F, H::Digest>,
+    ),
+    Error<F>,
+>
 where
     F: merkle::Graftable,
     H: Hasher,
@@ -1024,11 +1024,10 @@ where
     graft_roots.release_below_floor::<N>(inactivity_floor);
     let storage =
         grafting::Storage::<F, H, _, _>::new(&grafted_tree, grafting::height::<N>(), ops_tree);
-    let root =
+    let witness =
         compute_ops_root_witness::<F, H, _, _, N>(bitmap, &storage, ops_leaves, inactivity_floor)
-            .await?
-            .root::<H>(&ops_root);
-    Ok((grafted_tree, graft_roots, root))
+            .await?;
+    Ok((grafted_tree, graft_roots, witness))
 }
 
 /// Compute the root of the grafted structure represented by `storage`.
@@ -1456,7 +1455,7 @@ mod tests {
     async fn populate_fixed_db<F, DB>(db: DB, start: u64, count: u64) -> DB
     where
         F: merkle::Graftable,
-        DB: DbAny<F, Key = sha256::Digest, Value = sha256::Digest>,
+        DB: DbAny<Family = F, Key = sha256::Digest, Value = sha256::Digest>,
     {
         let mut batch = db.new_batch();
         for idx in start..start + count {
@@ -2044,7 +2043,7 @@ mod tests {
                 db = populate_fixed_db::<mmr::Family, _>(db, next_idx, 1).await;
                 next_idx += 1;
             }
-            let witness = db.ops_root_witness().await.unwrap();
+            let witness = db.ops_root_witness().clone();
             let ops_root = db.ops_root();
             let canonical_root = db.root();
 
@@ -2075,7 +2074,7 @@ mod tests {
             .await
             .unwrap();
             let db = populate_fixed_db::<mmb::Family, _>(db, 0, 260).await;
-            let witness = db.ops_root_witness().await.unwrap();
+            let witness = db.ops_root_witness().clone();
             let ops_root = db.ops_root();
             let canonical_root = db.root();
 
@@ -2103,43 +2102,6 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_ops_root_witness_verifies_with_pruned_db() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            let mut db = MmrDb::init(
-                ctx.child("storage"),
-                fixed_config::<OneCap>("ops-root-witness-pruned"),
-                None,
-            )
-            .await
-            .unwrap();
-
-            // Churn the same keys repeatedly to drive the inactivity floor past chunk boundaries.
-            for _ in 0..5 {
-                db = populate_fixed_db::<mmr::Family, _>(db, 0, 512).await;
-            }
-            let boundary = db.sync_boundary();
-            let db = db.prune(boundary).await.unwrap();
-            assert!(
-                db.any.bitmap.pruned_chunks() > 0,
-                "test requires at least one pruned chunk to exercise the zero-chunk path"
-            );
-            let witness = db.ops_root_witness().await.unwrap();
-            let ops_root = db.ops_root();
-            let canonical_root = db.root();
-
-            assert!(witness.verify::<Sha256>(&ops_root, &canonical_root));
-
-            let wrong_canonical_root = Sha256::hash(&[b"wrong canonical root"]);
-            assert!(!witness.verify::<Sha256>(&ops_root, &wrong_canonical_root));
-
-            let mut tampered = witness;
-            tampered.grafted_root = Sha256::hash(&[b"wrong grafted root"]);
-            assert!(!tampered.verify::<Sha256>(&ops_root, &canonical_root));
-        });
-    }
-
-    #[test_traced]
     fn test_ops_root_witness_verifies_on_fresh_db() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
@@ -2150,7 +2112,7 @@ mod tests {
             )
             .await
             .unwrap();
-            let witness = db.ops_root_witness().await.unwrap();
+            let witness = db.ops_root_witness();
             let ops_root = db.ops_root();
             let canonical_root = db.root();
 

@@ -34,14 +34,14 @@
 //!
 //! # Data structures
 //!
-//! A Current database ([db::Db]) wraps an Any database and adds:
+//! A Current database ([Db]) wraps an Any database and adds:
 //!
 //! - **Status bitmap** ([BitMap]): One bit per operation in the log. Bit _i_ is 1 if operation _i_
 //!   is active, 0 otherwise. The bitmap is divided into fixed-size chunks of `N` bytes (i.e. `N *
 //!   8` bits each). `N` must be a power of two.
 //!
 //!   One exception by convention: the *current* last commit carries bit = 1 even though a
-//!   CommitFloor is not an active update. Earlier (intermediate) CommitFloors carry bit = 0.
+//!   Commit is not an active update. Earlier (intermediate) Commits carry bit = 0.
 //!   Maintaining this makes the chunk containing the latest commit deterministic across init and
 //!   `apply_batch`.
 //!
@@ -265,7 +265,7 @@
 //! individual height-`gh` peaks for each chunk in the pair, and those map to grafted _leaves_
 //! (height 0 in the grafted tree), which are not pinned peaks.
 //!
-//! To avoid this, [`Db::prune`](db::Db::prune) defers bitmap pruning for chunks whose chunk-pair
+//! To avoid this, [`Db::prune`] defers bitmap pruning for chunks whose chunk-pair
 //! parent has not yet been born in the ops tree (see `Db::sync_boundary`). Once the parent is born,
 //! every ops peak within the pruned region is at height `gh+1` or above, and maps to a pinned peak
 //! or an ancestor of pinned peaks that can be reconstructed by hashing children (see
@@ -315,8 +315,8 @@
 //! Pending and partial slots are independent. When both are present, pending hashes in before
 //! partial.
 //!
-//! The canonical root is returned by [`db::Db::root`]. State sync uses [`db::Db::ops_root`],
-//! also exposed by [`sync::Database::ops_root`](crate::qmdb::sync::Database::ops_root).
+//! The canonical root is returned by [`Db::root`]. State sync uses [`Db::ops_root`], also
+//! exposed by [`sync::Database::ops_root`](crate::qmdb::sync::Database::ops_root).
 //!
 //! For state sync, the sync engine targets the ops root and verifies each batch against it. Callers
 //! verifying ops proofs directly should use [`crate::qmdb::ProofExt::verify`]. After sync, the
@@ -354,7 +354,8 @@ use core::num::NonZeroUsize;
 use std::sync::Arc;
 
 pub mod batch;
-pub mod db;
+mod db;
+pub use db::Db;
 pub mod grafting;
 
 pub mod ordered;
@@ -524,18 +525,18 @@ where
     )
     .await?;
 
-    // Rebuild the grafted tree, graft roots, and canonical root from the persisted pins and
+    // Rebuild the grafted tree, graft roots, and ops root witness from the persisted pins and
     // selected operation tree.
-    let (grafted_tree, graft_roots, root) = db::rebuild_grafted_tree::<F, H, S, N>(
+    let (grafted_tree, graft_roots, ops_root_witness) = db::rebuild_grafted_tree::<F, H, S, N>(
         any.bitmap.as_ref(),
         &pinned_nodes,
         &any.log.merkle,
         any.inactivity_floor_loc,
-        any.root(),
         &strategy,
     )
     .await?;
 
+    let root = ops_root_witness.root::<H>(&any.root());
     let metrics = Metrics::new(context);
     let db = db::Db {
         any,
@@ -544,6 +545,7 @@ where
         metadata,
         strategy,
         root,
+        ops_root_witness,
         metrics,
         #[cfg(test)]
         halt_before_prune_log: false,
@@ -593,7 +595,7 @@ pub mod tests {
                     test_any_policy_own_writes, test_any_proportional_bound,
                     test_any_proportional_one_batch,
                 },
-                traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
+                traits::{BatchableDb, DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             },
             chain::Bounds,
             floor::{Bounded, Hold},
@@ -624,7 +626,7 @@ pub mod tests {
 
     type Error<F> = crate::qmdb::Error<F>;
     type Location<F> = merkle::Location<F>;
-    type WriteVec<F, C> = Vec<(<C as DbAny<F>>::Key, Option<<C as DbAny<F>>::Value>)>;
+    type WriteVec<C> = Vec<(<C as BatchableDb>::Key, Option<<C as BatchableDb>::Value>)>;
 
     // Janky page & cache sizes to exercise boundary conditions.
     const PAGE_SIZE: NonZeroU16 = NZU16!(88);
@@ -948,9 +950,9 @@ pub mod tests {
     /// Returns a boxed future so the merkleize/apply/commit chain does not inflate the futures
     /// (and poll frames) of every test composing commits, which overflow the stack on platforms
     /// with small defaults.
-    fn commit_writes<'a, F: merkle::Graftable, C: DbAny<F> + 'a>(
+    fn commit_writes<'a, F: merkle::Graftable, C: DbAny<Family = F> + 'a>(
         db: C,
-        writes: impl IntoIterator<Item = (C::Key, Option<<C as DbAny<F>>::Value>)> + 'a,
+        writes: impl IntoIterator<Item = (C::Key, Option<C::Value>)> + 'a,
     ) -> std::pin::Pin<Box<dyn Future<Output = Result<C, Error<F>>> + 'a>> {
         Box::pin(async move {
             let mut batch = db.new_batch();
@@ -974,9 +976,9 @@ pub mod tests {
     ) -> Result<C, Error<F>>
     where
         F: merkle::Graftable,
-        C: DbAny<F>,
+        C: DbAny<Family = F>,
         C::Key: TestKey,
-        <C as DbAny<F>>::Value: TestValue,
+        C::Value: TestValue,
     {
         // Log the seed with high visibility to make failures reproducible.
         warn!("rng_seed={}", rng_seed);
@@ -996,7 +998,7 @@ pub mod tests {
 
         // Randomly update / delete them. We use a delete frequency that is 1/7th of the update
         // frequency. Accumulate writes and commit periodically.
-        let mut pending: WriteVec<F, C> = Vec::new();
+        let mut pending: WriteVec<C> = Vec::new();
         for _ in 0u64..num_elements * 10 {
             let rand_key = TestKey::from_seed(rng.next_u64() % num_elements);
             if rng.next_u32().is_multiple_of(7) {
@@ -1023,9 +1025,9 @@ pub mod tests {
     ) -> String
     where
         M: merkle::Graftable + 'static,
-        C: DbAny<M> + 'static,
+        C: DbAny<Family = M> + 'static,
         C::Key: TestKey,
-        <C as DbAny<M>>::Value: TestValue,
+        C::Value: TestValue,
         F: FnMut(Context, String) -> Fut,
         Fut: Future<Output = C>,
     {
@@ -1060,9 +1062,9 @@ pub mod tests {
     pub async fn test_build_random_close_reopen<M, C, F, Fut>(context: Context, open_db: F)
     where
         M: merkle::Graftable,
-        C: DbAny<M> + 'static,
+        C: DbAny<Family = M> + 'static,
         C::Key: TestKey,
-        <C as DbAny<M>>::Value: TestValue,
+        C::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
@@ -1082,19 +1084,19 @@ pub mod tests {
     pub async fn test_commit_after_sync_recovery<M, C, F, Fut>(context: Context, mut open_db: F)
     where
         M: merkle::Graftable,
-        C: DbAny<M> + 'static,
+        C: DbAny<Family = M> + 'static,
         C::Key: TestKey,
-        <C as DbAny<M>>::Value: TestValue,
+        C::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
         let mut open_db_clone = open_db.clone();
         let partition = "commit-after-sync".to_string();
         let db: C = Box::pin(open_db_clone(context.child("first"), partition.clone())).await;
-        let key0 = <<C as DbAny<M>>::Key as TestKey>::from_seed(0);
-        let key1 = <<C as DbAny<M>>::Key as TestKey>::from_seed(1);
-        let value0 = <C as DbAny<M>>::Value::from_seed(100);
-        let value1 = <C as DbAny<M>>::Value::from_seed(200);
+        let key0 = <C::Key as TestKey>::from_seed(0);
+        let key1 = <C::Key as TestKey>::from_seed(1);
+        let value0 = C::Value::from_seed(100);
+        let value1 = C::Value::from_seed(200);
 
         // Establish a synced baseline so metadata and journal recovery start from it.
         let db = commit_writes::<M, C>(db, [(key0, Some(value0.clone()))])
@@ -1126,9 +1128,9 @@ pub mod tests {
     pub async fn test_simulate_write_failures<M, C, F, Fut>(mut context: Context, mut open_db: F)
     where
         M: merkle::Graftable,
-        C: DbAny<M> + 'static,
+        C: DbAny<Family = M> + 'static,
         C::Key: TestKey,
-        <C as DbAny<M>>::Value: TestValue,
+        C::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
@@ -1211,9 +1213,9 @@ pub mod tests {
         mut open_db: F,
     ) where
         M: merkle::Graftable,
-        C: DbAny<M>,
+        C: DbAny<Family = M>,
         C::Key: TestKey,
-        <C as DbAny<M>>::Value: TestValue,
+        C::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
@@ -1231,11 +1233,11 @@ pub mod tests {
 
         // Apply identical operations to both databases, but only prune one.
         // Accumulate writes between commits.
-        let mut pending_no_pruning: WriteVec<M, C> = Vec::new();
-        let mut pending_pruning: WriteVec<M, C> = Vec::new();
+        let mut pending_no_pruning: WriteVec<C> = Vec::new();
+        let mut pending_pruning: WriteVec<C> = Vec::new();
         for i in 0..NUM_OPERATIONS {
             let key: C::Key = TestKey::from_seed(i);
-            let value: <C as DbAny<M>>::Value = TestValue::from_seed(i * 1000);
+            let value: C::Value = TestValue::from_seed(i * 1000);
 
             pending_no_pruning.push((key, Some(value.clone())));
             pending_pruning.push((key, Some(value)));
@@ -1286,9 +1288,9 @@ pub mod tests {
         mut open_db: F,
     ) where
         M: merkle::Graftable,
-        C: DbAny<M> + BitmapPrunedBits + 'static,
+        C: DbAny<Family = M> + BitmapPrunedBits + 'static,
         C::Key: TestKey,
-        <C as DbAny<M>>::Value: TestValue,
+        C::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
@@ -1358,9 +1360,9 @@ pub mod tests {
     pub async fn test_current_db_build_big<M, C, F, Fut>(context: Context, mut open_db: F)
     where
         M: merkle::Graftable,
-        C: DbAny<M>,
+        C: DbAny<Family = M>,
         C::Key: TestKey,
-        <C as DbAny<M>>::Value: TestValue,
+        C::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
@@ -1369,7 +1371,7 @@ pub mod tests {
         let mut open_db_clone = open_db.clone();
         let db: C = Box::pin(open_db_clone(context.child("first"), "build-big".into())).await;
 
-        let mut map = std::collections::HashMap::<C::Key, <C as DbAny<M>>::Value>::default();
+        let mut map = std::collections::HashMap::<C::Key, C::Value>::default();
 
         // All creates, updates, and deletes in one batch.
         let mut batch = db.new_batch();
@@ -1377,7 +1379,7 @@ pub mod tests {
         // Initial creates
         for i in 0u64..ELEMENTS {
             let k: C::Key = TestKey::from_seed(i);
-            let v: <C as DbAny<M>>::Value = TestValue::from_seed(i * 1000);
+            let v: C::Value = TestValue::from_seed(i * 1000);
             batch = batch.write(k, Some(v.clone()));
             map.insert(k, v);
         }
@@ -1388,7 +1390,7 @@ pub mod tests {
                 continue;
             }
             let k: C::Key = TestKey::from_seed(i);
-            let v: <C as DbAny<M>>::Value = TestValue::from_seed((i + 1) * 10000);
+            let v: C::Value = TestValue::from_seed((i + 1) * 10000);
             batch = batch.write(k, Some(v.clone()));
             map.insert(k, v);
         }
@@ -1439,9 +1441,9 @@ pub mod tests {
     pub async fn test_stale_batch_side_effect_free<M, C, F, Fut>(context: Context, mut open_db: F)
     where
         M: merkle::Graftable,
-        C: DbAny<M>,
+        C: DbAny<Family = M>,
         C::Key: TestKey,
-        <C as DbAny<M>>::Value: TestValue,
+        C::Value: TestValue,
         F: FnMut(Context, String) -> Fut,
         Fut: Future<Output = C>,
     {
@@ -1453,8 +1455,8 @@ pub mod tests {
 
         let key1 = <C::Key as TestKey>::from_seed(1);
         let key2 = <C::Key as TestKey>::from_seed(2);
-        let value1 = <<C as DbAny<M>>::Value as TestValue>::from_seed(10);
-        let value2 = <<C as DbAny<M>>::Value as TestValue>::from_seed(20);
+        let value1 = <C::Value as TestValue>::from_seed(10);
+        let value2 = <C::Value as TestValue>::from_seed(20);
 
         let mut batch = db.new_batch();
         batch = batch.write(key1, Some(value1.clone()));
@@ -1512,7 +1514,7 @@ pub mod tests {
         /// Observe `db`.
         fn capture<C>(db: &C) -> Self
         where
-            C: DbAny<M, Digest = Digest> + BitmapPrunedBits,
+            C: DbAny<Family = M, Digest = Digest> + BitmapPrunedBits,
         {
             let bounds = db.bounds();
             let pruned = db.pruned_bits();
@@ -1560,7 +1562,7 @@ pub mod tests {
         S: Strategy,
         Operation<M, U>: Codec,
         C: DbAny<
-                M,
+                Family = M,
                 Key = Digest,
                 Value = Digest,
                 Digest = Digest,
@@ -1581,25 +1583,25 @@ pub mod tests {
         // The seed places `c1` in chunk 1. A's floor raise moves it into A's tail, in a complete
         // chunk that F leaves untouched. F's root then reads C's overwrite of that grafted leaf
         // from the DB's grafted tree.
-        let seed: WriteVec<M, C> = (0..SEED).map(|i| (indexed(i), Some(val(i)))).collect();
+        let seed: WriteVec<C> = (0..SEED).map(|i| (indexed(i), Some(val(i)))).collect();
 
         // A overwrites keys `0..CHUNK_BITS`, deletes k1, and creates kx.
-        let mut a: WriteVec<M, C> = (0..CHUNK_BITS)
+        let mut a: WriteVec<C> = (0..CHUNK_BITS)
             .map(|i| (indexed(i), Some(val(SEED + i))))
             .collect();
         a.extend([(k1, None), (kx, Some(val(5000)))]);
 
         // B updates k0, recreates k1, deletes kx, and creates enough keys to complete a chunk.
-        let mut b: WriteVec<M, C> = vec![(k0, Some(val(5001))), (k1, Some(val(5002))), (kx, None)];
+        let mut b: WriteVec<C> = vec![(k0, Some(val(5001))), (k1, Some(val(5002))), (kx, None)];
         b.extend((fresh..fresh + CHUNK_BITS).map(|i| (indexed(i), Some(val(i)))));
 
         // E is empty. C updates k0, deletes k1, and updates c1. D updates k0 and recreates kx.
-        let e: WriteVec<M, C> = Vec::new();
-        let c: WriteVec<M, C> = vec![(k0, Some(val(5003))), (k1, None), (c1, Some(val(5004)))];
-        let d: WriteVec<M, C> = vec![(k0, Some(val(5005))), (kx, Some(val(5006)))];
+        let e: WriteVec<C> = Vec::new();
+        let c: WriteVec<C> = vec![(k0, Some(val(5003))), (k1, None), (c1, Some(val(5004)))];
+        let d: WriteVec<C> = vec![(k0, Some(val(5005))), (kx, Some(val(5006)))];
 
         // F follows D: it updates k0 and c1 and creates one key.
-        let f: WriteVec<M, C> = vec![
+        let f: WriteVec<C> = vec![
             (k0, Some(val(5007))),
             (c1, Some(val(5008))),
             (indexed(fresh + CHUNK_BITS), Some(val(5009))),
@@ -2003,7 +2005,7 @@ pub mod tests {
             assert!(partial.iter().any(|byte| *byte != 0));
 
             // Tie the extracted bytes to the digests authenticated by the existing root witness.
-            let witness = db.ops_root_witness().await.unwrap();
+            let witness = db.ops_root_witness();
             assert_eq!(
                 witness.pending_chunk_digest,
                 Some(Sha256::hash(&[pending.as_slice()]))
@@ -2277,9 +2279,9 @@ pub mod tests {
     async fn test_ordered_build_big<M, C, F, Fut>(context: Context, open_db: F)
     where
         M: merkle::Graftable,
-        C: DbAny<M>,
+        C: DbAny<Family = M>,
         C::Key: TestKey,
-        <C as DbAny<M>>::Value: TestValue,
+        C::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
@@ -2289,9 +2291,9 @@ pub mod tests {
     async fn test_unordered_build_big<M, C, F, Fut>(context: Context, open_db: F)
     where
         M: merkle::Graftable,
-        C: DbAny<M>,
+        C: DbAny<Family = M>,
         C::Key: TestKey,
-        <C as DbAny<M>>::Value: TestValue,
+        C::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
@@ -3979,9 +3981,9 @@ pub mod tests {
         mut open_db: F,
     ) where
         M: merkle::Graftable,
-        C: DbAny<M> + 'static,
+        C: DbAny<Family = M> + 'static,
         C::Key: TestKey,
-        <C as DbAny<M>>::Value: TestValue,
+        C::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
@@ -3989,7 +3991,7 @@ pub mod tests {
         let partition = "speculative-root".to_string();
 
         // Write enough operations to cross a chunk boundary. With N=32 (CHUNK_SIZE_BITS=256),
-        // 260 writes + 1 CommitFloor = 261 operations, completing one chunk with 5 ops in the
+        // 260 writes + 1 Commit = 261 operations, completing one chunk with 5 ops in the
         // next partial chunk. This ensures the grafted root computation must handle the
         // newly completed chunk.
         let db: C = Box::pin(open_db_clone(context.child("init"), partition.clone())).await;
@@ -5019,7 +5021,7 @@ pub mod tests {
         const N: usize = 32;
         const CHUNK_SIZE_BITS: u64 = commonware_utils::bitmap::Prunable::<N>::CHUNK_SIZE_BITS;
         // Seed enough keys to cross at least one chunk boundary. Each batch also produces a
-        // CommitFloor op, so the bitmap grows past the user-visible key count.
+        // Commit op, so the bitmap grows past the user-visible key count.
         const SEED_KEYS: u64 = CHUNK_SIZE_BITS + 50;
 
         let executor = deterministic::Runner::default();
@@ -6169,7 +6171,7 @@ pub mod tests {
         S: Strategy,
         Operation<F, U>: Codec,
         Self: DbAny<
-                F,
+                Family = F,
                 Key = Digest,
                 Value = Digest,
                 Digest = Digest,
@@ -6247,7 +6249,7 @@ pub mod tests {
         Operation<F, update::Ordered<Digest, V>>: Codec,
         Self: Links<F>
             + DbAny<
-                F,
+                Family = F,
                 Merkleized = Arc<
                     batch::MerkleizedBatch<F, Digest, update::Ordered<Digest, V>, N, S>,
                 >,

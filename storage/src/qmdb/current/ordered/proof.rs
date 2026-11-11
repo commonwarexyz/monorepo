@@ -1,6 +1,5 @@
 //! Ordered current proofs with fixed-size or runtime-sized bitmap chunks.
 
-use super::{COMMIT_CONTEXT, KEY_VALUE_CONTEXT};
 use crate::{
     merkle::Graftable,
     qmdb::{
@@ -14,6 +13,12 @@ use bytes::BufMut;
 use commonware_codec::{Buf, Encode, EncodeSize, Read, ReadExt as _, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::range::contains_cyclic;
+
+/// Wire tag for [ExclusionProof::KeyValue].
+pub const KEY_VALUE_CONTEXT: u8 = 0;
+
+/// Wire tag for [ExclusionProof::Commit].
+pub const COMMIT_CONTEXT: u8 = 1;
 
 /// Proofs with fixed-size bitmap chunks.
 pub mod constant {
@@ -151,10 +156,7 @@ where
             }
             Self::Commit(op_proof, metadata) => {
                 // An empty database's commit floor equals the commit operation's location
-                (
-                    op_proof,
-                    Operation::CommitFloor(metadata.clone(), op_proof.loc),
-                )
+                (op_proof, Operation::Commit(metadata.clone(), op_proof.loc))
             }
         };
 

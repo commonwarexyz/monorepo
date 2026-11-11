@@ -147,8 +147,10 @@ use std::sync::Arc;
 use tracing::warn;
 
 pub mod batch;
-pub mod db;
+mod db;
+pub use db::Db;
 pub mod operation;
+pub use operation::{COMMIT_CONTEXT, DELETE_CONTEXT, UPDATE_CONTEXT};
 pub mod ordered;
 pub(crate) mod sync;
 #[cfg(any(test, feature = "test-traits"))]
@@ -160,7 +162,7 @@ pub mod unordered;
 /// Compute the authenticated root of a newly initialized database without opening storage.
 ///
 /// The initial commit never carries metadata, so this root always represents
-/// `CommitFloor(None, 0)`.
+/// `Commit(None, 0)`.
 pub fn initial_root<F, U, H>() -> H::Digest
 where
     F: Family,
@@ -168,7 +170,7 @@ where
     U: Update,
     Operation<F, U>: Codec,
 {
-    single_operation_root::<F, H>(&Operation::<F, U>::CommitFloor(None, Location::new(0)))
+    single_operation_root::<F, H>(&Operation::<F, U>::Commit(None, Location::new(0)))
 }
 
 pub(crate) const BITMAP_CHUNK_BYTES: usize = 64;
@@ -255,7 +257,7 @@ where
     }
 }
 
-/// Like [`db::Db::init`] but accepts a pre-allocated bitmap (used by `current::Db`, which sizes
+/// Like [`Db::init`] but accepts a pre-allocated bitmap (used by `current::Db`, which sizes
 /// pruned chunks from grafted metadata). `bitmap = None` allocates internally.
 #[boxed]
 pub(crate) async fn init_with_bitmap<F, E, U, H, I, J, S, const N: usize>(
@@ -309,8 +311,8 @@ where
 
     if log.size() == 0 {
         warn!("Authenticated log is empty, initializing new db");
-        let commit_floor = Operation::CommitFloor(None, Location::new(0));
-        (log, _) = log.append(&commit_floor).await?;
+        let commit = Operation::Commit(None, Location::new(0));
+        (log, _) = log.append(&commit).await?;
         log = log.sync().await?;
     }
 
@@ -493,7 +495,7 @@ pub(crate) mod test {
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: DbAny<F, Key = Digest, Value = V, Digest = Digest>,
+        D: DbAny<Family = F, Key = Digest, Value = V, Digest = Digest>,
     {
         const ELEMENTS: u64 = 1000;
 
@@ -594,7 +596,7 @@ pub(crate) mod test {
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: DbAny<F, Key = Digest, Value = V, Digest = Digest>,
+        D: DbAny<Family = F, Key = Digest, Value = V, Digest = Digest>,
     {
         let root = db.root();
 
@@ -674,7 +676,7 @@ pub(crate) mod test {
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: DbAny<F, Key = Digest, Value = V, Digest = Digest>,
+        D: DbAny<Family = F, Key = Digest, Value = V, Digest = Digest>,
         V: Clone + CodecShared + Eq + std::fmt::Debug,
     {
         let key0 = Sha256::hash(&[&0u64.to_be_bytes()]);
@@ -722,7 +724,7 @@ pub(crate) mod test {
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: DbAny<F, Key = Digest, Value = V, Digest = Digest>,
+        D: DbAny<Family = F, Key = Digest, Value = V, Digest = Digest>,
         V: Clone + CodecShared + Eq + std::fmt::Debug,
     {
         let key0 = Sha256::hash(&[&0u64.to_be_bytes()]);
@@ -768,7 +770,7 @@ pub(crate) mod test {
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: DbAny<F, Key = Digest, Value = V, Digest = Digest>,
+        D: DbAny<Family = F, Key = Digest, Value = V, Digest = Digest>,
     {
         const ELEMENTS: u64 = 1000;
 
@@ -820,7 +822,7 @@ pub(crate) mod test {
         bounded_db: impl Fn(Context, Location) -> Pin<Box<dyn Future<Output = Result<D, Error>> + Send>>,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: DbAny<mmr::Family, Key = Digest, Value = V, Digest = Digest>,
+        D: DbAny<Family = mmr::Family, Key = Digest, Value = V, Digest = Digest>,
         V: Clone + CodecShared + Eq + std::fmt::Debug,
     {
         let key0 = Sha256::hash(&[&0u64.to_be_bytes()]);
@@ -977,9 +979,9 @@ pub(crate) mod test {
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: DbAny<mmr::Family, Key = Digest, Value = V, Digest = Digest> + Provable<mmr::Family>,
+        D: Provable<Family = mmr::Family, Key = Digest, Value = V, Digest = Digest>,
         V: CodecShared + Clone + Eq + std::hash::Hash + std::fmt::Debug,
-        <D as Provable<mmr::Family>>::Operation: Codec,
+        D::Operation: Codec,
     {
         const ELEMENTS: u64 = 1000;
 
@@ -1062,7 +1064,7 @@ pub(crate) mod test {
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: DbAny<F, Key = Digest, Value = V, Digest = Digest>,
+        D: DbAny<Family = F, Key = Digest, Value = V, Digest = Digest>,
     {
         // Update the same key many times within a single batch.
         const UPDATES: u64 = 100;
@@ -1096,8 +1098,8 @@ pub(crate) mod test {
         mut db: D,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: DbAny<mmr::Family, Key = Digest, Value = V, Digest = Digest> + Provable<mmr::Family>,
-        <D as Provable<mmr::Family>>::Operation: Codec + PartialEq + std::fmt::Debug,
+        D: Provable<Family = mmr::Family, Key = Digest, Value = V, Digest = Digest>,
+        D::Operation: Codec + PartialEq + std::fmt::Debug,
     {
         use commonware_utils::NZU64;
 
@@ -1161,8 +1163,8 @@ pub(crate) mod test {
         mut db: D,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: DbAny<mmr::Family, Key = Digest, Value = V, Digest = Digest> + Provable<mmr::Family>,
-        <D as Provable<mmr::Family>>::Operation: Codec + PartialEq + std::fmt::Debug + Clone,
+        D: Provable<Family = mmr::Family, Key = Digest, Value = V, Digest = Digest>,
+        D::Operation: Codec + PartialEq + std::fmt::Debug + Clone,
     {
         use commonware_utils::NZU64;
 
@@ -1257,8 +1259,8 @@ pub(crate) mod test {
         mut db: D,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: DbAny<mmr::Family, Key = Digest, Value = V, Digest = Digest> + Provable<mmr::Family>,
-        <D as Provable<mmr::Family>>::Operation: Codec + PartialEq + std::fmt::Debug,
+        D: Provable<Family = mmr::Family, Key = Digest, Value = V, Digest = Digest>,
+        D::Operation: Codec + PartialEq + std::fmt::Debug,
     {
         use commonware_utils::NZU64;
 
@@ -1282,7 +1284,7 @@ pub(crate) mod test {
             boundaries.push(db.bounds().end);
         }
 
-        // Singleton historical state: only the initial CommitFloor is visible.
+        // Singleton historical state: only the initial Commit is visible.
         let singleton_size = boundaries[0];
         let (single_proof, single_ops) = db
             .historical_proof(singleton_size, Location::new(0), NZU64!(1))
@@ -1326,7 +1328,7 @@ pub(crate) mod test {
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: DbAny<F, Key = Digest, Value = V, Digest = Digest>,
+        D: DbAny<Family = F, Key = Digest, Value = V, Digest = Digest>,
         V: Clone + CodecShared + Eq + std::fmt::Debug,
     {
         let mut map = HashMap::<Digest, V>::default();
@@ -1513,7 +1515,7 @@ pub(crate) mod test {
                 Operation::Delete(key) => {
                     live.remove(key);
                 }
-                Operation::CommitFloor(..) => {}
+                Operation::Commit(..) => {}
             }
         }
     }
@@ -1637,7 +1639,7 @@ pub(crate) mod test {
         writes: &[(Digest, Option<Digest>)],
     ) -> D::Merkleized
     where
-        D: DbAny<F, Key = Digest, Value = Digest>,
+        D: DbAny<Family = F, Key = Digest, Value = Digest>,
     {
         writes
             .iter()
@@ -1654,7 +1656,7 @@ pub(crate) mod test {
         writes: &[(Digest, Option<Digest>)],
     ) -> D
     where
-        D: DbAny<F, Key = Digest, Value = Digest>,
+        D: DbAny<Family = F, Key = Digest, Value = Digest>,
     {
         let batch = build(&db, db.new_batch(), writes).await;
         let db = db.apply_batch(batch).await.unwrap();
@@ -1669,7 +1671,7 @@ pub(crate) mod test {
         make_value: &impl Fn(u64) -> Digest,
     ) -> D
     where
-        D: DbAny<F, Key = Digest, Value = Digest>,
+        D: DbAny<Family = F, Key = Digest, Value = Digest>,
     {
         let writes: Vec<_> = (0..SIBLINGS)
             .map(|i| (sibling(i), Some(make_value(i))))
@@ -1691,7 +1693,7 @@ pub(crate) mod test {
         S: Strategy,
         Operation<F, U>: Codec,
         D: DbAny<
-                F,
+                Family = F,
                 Key = Digest,
                 Value = Digest,
                 Merkleized = Arc<batch::MerkleizedBatch<F, Digest, U, S>>,
@@ -1744,7 +1746,7 @@ pub(crate) mod test {
         S: Strategy,
         Operation<F, U>: Codec,
         D: DbAny<
-                F,
+                Family = F,
                 Key = Digest,
                 Value = Digest,
                 Merkleized = Arc<batch::MerkleizedBatch<F, Digest, U, S>>,
@@ -1795,7 +1797,7 @@ pub(crate) mod test {
         S: Strategy,
         Operation<F, U>: Codec,
         D: DbAny<
-                F,
+                Family = F,
                 Key = Digest,
                 Value = Digest,
                 Merkleized = Arc<batch::MerkleizedBatch<F, Digest, U, S>>,
@@ -1900,7 +1902,7 @@ pub(crate) mod test {
         S: Strategy,
         Operation<F, U>: Codec,
         Db<F, Context, C, I, Sha256, U, N, S>: DbAny<
-                F,
+                Family = F,
                 Key = Digest,
                 Value = Digest,
                 Digest = Digest,
@@ -2520,7 +2522,7 @@ pub(crate) mod test {
         writes: &[(Digest, Option<Digest>)],
     ) -> D::Merkleized
     where
-        D: DbAny<F, Key = Digest, Value = Digest>,
+        D: DbAny<Family = F, Key = Digest, Value = Digest>,
     {
         writes
             .iter()
@@ -2533,7 +2535,7 @@ pub(crate) mod test {
     /// Apply `writes` as one batch with [`Hold`].
     pub(crate) async fn hold<F: Family, D>(db: D, writes: &[(Digest, Option<Digest>)]) -> D
     where
-        D: DbAny<F, Key = Digest, Value = Digest>,
+        D: DbAny<Family = F, Key = Digest, Value = Digest>,
     {
         let merkleized = hold_batch(&db, db.new_batch(), writes).await;
         db.apply_batch(merkleized).await.unwrap()
@@ -2547,7 +2549,7 @@ pub(crate) mod test {
         policy: &mut (impl Policy<F, Digest, Digest> + Send),
     ) -> Result<D::Merkleized, crate::qmdb::Error<F>>
     where
-        D: DbAny<F, Key = Digest, Value = Digest>,
+        D: DbAny<Family = F, Key = Digest, Value = Digest>,
     {
         batch.merkleize_with(db, policy).await
     }
@@ -2560,7 +2562,7 @@ pub(crate) mod test {
         choose: impl FnMut(&Digest) -> Choice + Send,
     ) -> (D::Merkleized, Vec<GenericLocation<F>>)
     where
-        D: DbAny<F, Key = Digest, Value = Digest>,
+        D: DbAny<Family = F, Key = Digest, Value = Digest>,
     {
         let mut policy = Script::new(usize::MAX, u64::MAX, choose);
         let merkleized = batch.merkleize_with(db, &mut policy).await.unwrap();
@@ -2640,7 +2642,7 @@ pub(crate) mod test {
             .map(|op| match op {
                 Operation::Update(update) => usize::from(before.contains_key(update.key())),
                 Operation::Delete(_) => 2,
-                Operation::CommitFloor(..) => panic!("the writes append a commit"),
+                Operation::Commit(..) => panic!("the writes append a commit"),
             })
             .sum();
         Written {
@@ -2673,7 +2675,7 @@ pub(crate) mod test {
             .map(|op| match op {
                 Operation::Update(update) => (*update.key(), Some(*update.value())),
                 Operation::Delete(key) => (*key, None),
-                Operation::CommitFloor(..) => panic!("a commit precedes the last operation"),
+                Operation::Commit(..) => panic!("a commit precedes the last operation"),
             })
             .collect()
     }
@@ -2737,7 +2739,7 @@ pub(crate) mod test {
         db: D,
         make_value: impl Fn(u64) -> Digest,
     ) where
-        D: DbAny<F, Key = Digest, Value = Digest, Digest = Digest>,
+        D: DbAny<Family = F, Key = Digest, Value = Digest, Digest = Digest>,
     {
         let writes: Vec<_> = (0..4)
             .map(|i| (to_digest(i), Some(make_value(i))))
@@ -2851,7 +2853,7 @@ pub(crate) mod test {
             .map(|op| match op {
                 Operation::Update(update) => (*update.key(), Some(*update.value())),
                 Operation::Delete(key) => (*key, None),
-                Operation::CommitFloor(..) => unreachable!(),
+                Operation::Commit(..) => unreachable!(),
             })
             .collect();
         assert_eq!(
@@ -3794,7 +3796,7 @@ pub(crate) mod test {
         S: Strategy,
         Operation<F, U>: Codec,
         Db<F, Context, C, I, Sha256, U, N, S>: DbAny<
-                F,
+                Family = F,
                 Key = Digest,
                 Value = Digest,
                 Digest = Digest,
@@ -3867,7 +3869,7 @@ pub(crate) mod test {
         S: Strategy,
         Operation<F, U>: Codec,
         Db<F, Context, C, I, Sha256, U, N, S>: DbAny<
-                F,
+                Family = F,
                 Key = Digest,
                 Value = Digest,
                 Digest = Digest,
@@ -3949,7 +3951,7 @@ pub(crate) mod test {
         S: Strategy,
         Operation<F, U>: Codec,
         Db<F, Context, C, I, Sha256, U, N, S>: DbAny<
-                F,
+                Family = F,
                 Key = Digest,
                 Value = Digest,
                 Digest = Digest,
@@ -4022,7 +4024,7 @@ pub(crate) mod test {
 
     /// Database access the policy tests need beyond [`DbAny`].
     pub(crate) trait Inspect<F: Family>:
-        DbAny<F, Key = Digest, Value = Digest, Digest = Digest>
+        DbAny<Family = F, Key = Digest, Value = Digest, Digest = Digest>
     {
         /// The update kind.
         type Update: Update<Key = Digest, Value = Digest>;
@@ -4058,7 +4060,7 @@ pub(crate) mod test {
         S: Strategy,
         Operation<F, U>: Codec,
         Self: DbAny<
-                F,
+                Family = F,
                 Key = Digest,
                 Value = Digest,
                 Digest = Digest,
@@ -4152,7 +4154,7 @@ pub(crate) mod test {
     async fn assert_values<F, D>(db: &D, model: &Model)
     where
         F: Family,
-        D: DbAny<F, Key = Digest, Value = Digest>,
+        D: DbAny<Family = F, Key = Digest, Value = Digest>,
     {
         for key in &model.keys {
             assert_eq!(
@@ -5057,7 +5059,8 @@ pub(crate) mod test {
         U: Update<Key = Digest, Value = Digest>,
         S: Strategy,
         Operation<F, U>: Codec,
-        Self: Inspect<F> + DbAny<F, Merkleized = Arc<batch::MerkleizedBatch<F, Digest, U, S>>>,
+        Self: Inspect<F>
+            + DbAny<Family = F, Merkleized = Arc<batch::MerkleizedBatch<F, Digest, U, S>>>,
     {
         fn changes(batch: &Self::Merkleized, key: &Digest) -> Vec<Change<F>> {
             changes(&batch.diff, key)
@@ -5069,7 +5072,7 @@ pub(crate) mod test {
     }
 
     impl<F, C, I, U, const N: usize, S> Changes<F>
-        for crate::qmdb::current::db::Db<F, Context, C, I, Sha256, U, N, S>
+        for crate::qmdb::current::Db<F, Context, C, I, Sha256, U, N, S>
     where
         F: crate::merkle::Graftable,
         C: Mutable<Item = Operation<F, U>>,
@@ -5079,7 +5082,7 @@ pub(crate) mod test {
         Operation<F, U>: Codec,
         Self: Inspect<F>
             + DbAny<
-                F,
+                Family = F,
                 Merkleized = Arc<crate::qmdb::current::batch::MerkleizedBatch<F, Digest, U, N, S>>,
             >,
     {
@@ -5114,7 +5117,7 @@ pub(crate) mod test {
         Operation<F, operation::update::Ordered<Digest, V>>: Codec,
         Self: Links<F>
             + DbAny<
-                F,
+                Family = F,
                 Merkleized = Arc<
                     batch::MerkleizedBatch<F, Digest, operation::update::Ordered<Digest, V>, S>,
                 >,
@@ -5771,7 +5774,7 @@ pub(crate) mod test {
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
         make_value: impl Fn(u64) -> Digest,
     ) where
-        D: DbAny<F, Key = Digest, Value = Digest, Digest = Digest>,
+        D: DbAny<Family = F, Key = Digest, Value = Digest, Digest = Digest>,
     {
         let names = [
             "log_journal_read_calls_total",
@@ -5864,7 +5867,7 @@ pub(crate) mod test {
         db: D,
         make_value: impl Fn(u64) -> Digest,
     ) where
-        D: DbAny<F, Key = Digest, Value = Digest, Digest = Digest>,
+        D: DbAny<Family = F, Key = Digest, Value = Digest, Digest = Digest>,
     {
         // Seed sixteen updates with a held floor.
         let seed: Vec<_> = (0..16)
@@ -6101,7 +6104,7 @@ pub(crate) mod test {
             let merkleized = batch.merkleize(&db).await.unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
 
-            // A CommitFloor op was appended, so root must change.
+            // A Commit op was appended, so root must change.
             assert_ne!(db.root(), root_before);
 
             // DB should still be functional.
@@ -6379,7 +6382,7 @@ pub(crate) mod test {
                 let before = db.bounds().end;
                 let writes = (first_key..first_key + 5).map(|i| (key(i), Some(val(i))));
                 db = commit_writes(db, writes, None).await;
-                // Five writes, a CommitFloor, and any floor-walk operations.
+                // Five writes, a Commit, and any floor-walk operations.
                 assert!(db.bounds().end.saturating_sub(*before) >= 6);
             }
 
@@ -7403,17 +7406,17 @@ mod bitmap_tests {
         AnyTest::init(context, cfg, None).await.unwrap()
     }
 
-    /// CommitFloor convention: only the *current* last commit carries bit=1; every earlier
+    /// Commit convention: only the *current* last commit carries bit=1. Every earlier
     /// (now intermediate) commit boundary carries bit=0.
     ///
-    /// Maintained by `apply_batch`'s explicit demote-then-promote pair on CommitFloor bits. If
+    /// Maintained by `apply_batch`'s explicit demote-then-promote pair on Commit bits. If
     /// the demote step were missed, intermediate commits would persist at bit=1.
     #[test_traced]
-    fn current_commit_floor_bit_is_one_others_zero() {
+    fn current_commit_bit_is_one_others_zero() {
         deterministic::Runner::default().start(|context| async move {
             let mut db = open_db(context.child("db")).await;
 
-            // Apply three single-write batches; each produces one CommitFloor op.
+            // Apply three single-write batches. Each produces one Commit op.
             let keys: Vec<_> = (0..3u64)
                 .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
                 .collect();
@@ -7442,11 +7445,7 @@ mod bitmap_tests {
             // Most recent commit is current -> bit=1.
             assert!(db.bitmap.get_bit(*commit_locs[2]));
 
-            let reopen = open_db(
-                context
-                    .child("reopen")
-                    .with_attribute("case", "commit_floor"),
-            );
+            let reopen = open_db(context.child("reopen").with_attribute("case", "commit"));
             let db = assert_rebuild_matches(db, reopen, &keys).await;
             db.destroy().await.unwrap();
         });

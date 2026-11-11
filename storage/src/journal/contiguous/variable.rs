@@ -34,10 +34,10 @@ use crate::{
     },
 };
 use bytes::{Bytes, BytesMut};
-use commonware_codec::{Codec, CodecShared, Copying, varint::MAX_U32_VARINT_SIZE};
+use commonware_codec::{Buf, Codec, CodecShared, Copying, Viewing, varint::MAX_U32_VARINT_SIZE};
 use commonware_macros::boxed;
 use commonware_runtime::{
-    Blob as RBlob, Buf, Handle, IoBuf, ReadOptions,
+    Blob as RBlob, Buf as _, Handle, IoBuf, ReadOptions,
     buffer::paged::{CacheRef, Recovery as PagedRecovery, Replay},
 };
 use commonware_utils::{MAX_ALLOCATION_BYTES, futures::try_join_all};
@@ -100,13 +100,13 @@ fn read_buffer_len(lengths: impl IntoIterator<Item = usize>) -> Option<usize> {
 /// [Error::OffsetDataMismatch] if the prefix disagrees with `span`'s length. `blob` and `offset`
 /// locate the frame in that error.
 fn decode_frame_span<V: CodecShared>(
-    mut span: Bytes,
+    mut span: impl Buf,
     blob: u64,
     offset: u64,
     codec_config: &V::Cfg,
     compressed: bool,
 ) -> Result<V, Error> {
-    let expected_len = span.len();
+    let expected_len = span.remaining();
     let (size, varint_len) = decode_length_prefix(&mut span)?;
     let actual_len = size.checked_add(varint_len).ok_or(Error::OffsetOverflow)?;
     if actual_len != expected_len {
@@ -526,8 +526,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         if !blob.try_read_sync_into(&mut header[..header_len], offset) {
             return None;
         }
-        let mut cursor = Copying(&header[..header_len]);
-        let (_, item_info) = find_frame(&mut cursor, offset).ok()?;
+        let (_, item_info) = find_frame(&header[..header_len], offset).ok()?;
 
         let (varint_len, data_len) = match item_info {
             FrameInfo::Complete {
@@ -561,12 +560,9 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
             return None;
         }
         with_bytes(buf, |bytes| {
-            decode_item::<V>(
-                bytes.slice(varint_len..),
-                &self.codec_config,
-                self.compressed,
-            )
-            .ok()
+            let mut item = Viewing::new(bytes);
+            item.advance(varint_len);
+            decode_item::<V>(item, &self.codec_config, self.compressed).ok()
         })
     }
 
@@ -763,10 +759,9 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
             let missed = blob.try_read_ranges_sync_into(&mut buf, &ranges);
             with_bytes(&mut buf, |bytes| {
                 let mut missed = missed.into_iter().peekable();
-                let mut local = 0usize;
+                let mut frames = Viewing::new(bytes);
                 for (range_idx, &(idx, offset, len)) in group.iter().enumerate() {
-                    let start = local;
-                    local += len;
+                    let span = frames.split_to(len);
                     if missed.peek() == Some(&range_idx) {
                         missed.next();
                         continue;
@@ -774,9 +769,8 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
 
                     // A frame that fails to decode stays unserved, so an async read re-reads it
                     // and returns the error.
-                    let slot = bytes.slice(start..local);
                     if let Ok(item) = decode_frame_span(
-                        slot,
+                        span,
                         blob_num,
                         offset,
                         &self.codec_config,
@@ -994,10 +988,11 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
         }
         let mut buf = vec![0u8; total];
         blob.read_ranges_into(&mut buf, &spans).await?;
-        let mut bytes = Bytes::from(buf);
+        let bytes = Bytes::from(buf);
+        let mut frames = Viewing::new(&bytes);
         let mut items = Vec::with_capacity(ranges.len());
         for &(offset, len) in &ranges {
-            let span = bytes.split_to(len);
+            let span = frames.split_to(len);
             items.push(decode_frame_span(
                 span,
                 blob_num,
@@ -4898,9 +4893,14 @@ mod tests {
         encode_frame_into(None, &fields, &mut frame).unwrap();
         let source = Bytes::from(frame);
         let range = source.as_ptr_range();
-        let decoded =
-            decode_frame_span::<Vec<Bytes>>(source, 0, 0, &((..).into(), (..).into()), false)
-                .unwrap();
+        let decoded = decode_frame_span::<Vec<Bytes>>(
+            Viewing::new(&source),
+            0,
+            0,
+            &((..).into(), (..).into()),
+            false,
+        )
+        .unwrap();
         assert_eq!(decoded, fields);
         assert!(decoded.iter().all(|field| range.contains(&field.as_ptr())));
     }
