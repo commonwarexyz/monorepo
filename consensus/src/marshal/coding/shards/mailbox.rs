@@ -36,6 +36,13 @@ where
         /// The coded segment.
         segment: StreamedSegment<C>,
     },
+    /// The commitment of the block this node sealed from the segments it streamed in a round.
+    StreamRoots {
+        /// The round in which the block was built.
+        round: Round,
+        /// The commitment of the sealed block.
+        commitment: Commitment<B, C, H>,
+    },
     /// A notification from consensus that a [`Commitment`] has been discovered.
     Discovered {
         /// The [`Commitment`] of the proposed block.
@@ -121,6 +128,7 @@ where
             | Self::SubscribeByDigest { response, .. } => response.is_closed(),
             Self::Proposed { .. }
             | Self::StreamSegment { .. }
+            | Self::StreamRoots { .. }
             | Self::Discovered { .. }
             | Self::Notarized { .. } => false,
         }
@@ -248,6 +256,16 @@ where
         let _ = self
             .sender
             .enqueue(Message::StreamSegment { round, segment });
+    }
+
+    /// Send the roots that bind the segments streamed in `round` to `commitment`.
+    ///
+    /// `commitment` must be that of the block sealed from those segments, and the call must follow
+    /// the block's last [`Self::stream_segment`].
+    pub(crate) fn stream_roots(&self, round: Round, commitment: Commitment<B, C, H>) {
+        let _ = self
+            .sender
+            .enqueue(Message::StreamRoots { round, commitment });
     }
 
     /// Inform the engine of an externally proposed [`Commitment`].

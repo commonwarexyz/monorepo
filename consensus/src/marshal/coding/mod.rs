@@ -5412,7 +5412,8 @@ mod tests {
             )
             .await;
 
-            // A shards mailbox whose receiver records the segments a build streams.
+            // A shards mailbox whose receiver records the segments a build streams. A build that
+            // streams ends with the commitment of its sealed block.
             let (sender, mut receiver) = mailbox::new::<
                 shards::mailbox::Message<CodingB, TestCoding, Sha256, K>,
             >(context.child("recorded"), NZUsize!(64));
@@ -5420,11 +5421,11 @@ mod tests {
             let mut streamed = move || {
                 let mut segments = 0;
                 while let Ok(message) = receiver.try_recv() {
-                    assert!(
-                        matches!(message, shards::mailbox::Message::StreamSegment { .. }),
-                        "a build must send the engine only stream segments"
-                    );
-                    segments += 1;
+                    match message {
+                        shards::mailbox::Message::StreamSegment { .. } => segments += 1,
+                        shards::mailbox::Message::StreamRoots { .. } => {}
+                        _ => panic!("a build must send only segments and the block's commitment"),
+                    }
                 }
                 segments
             };

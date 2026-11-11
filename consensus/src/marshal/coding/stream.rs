@@ -24,7 +24,7 @@ use crate::{
     types::Round,
 };
 use commonware_coding::{Config as CodingConfig, EncodedSegment, Scheme, Segmentable};
-use commonware_cryptography::{Digested, Hasher, PublicKey};
+use commonware_cryptography::{Committable, Digested, Hasher, PublicKey};
 use commonware_macros::select;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, Spawner};
@@ -91,9 +91,10 @@ impl<C: Segmentable> BodyStream<C> {
     ///
     /// When the pushed bytes are as long as the block's body, the rest of the coded layout is coded
     /// through the same encoder, the remaining segments go to `shards`, and the shards are
-    /// assembled from the streamed segments. Otherwise (nothing pushed, pushes whose length differs
-    /// from the body's, or an encoder failure), the block is coded whole, and the shards engine
-    /// sends its chunks when the block is proposed.
+    /// assembled from the streamed segments. The sealed block's commitment follows the segments to
+    /// `shards` so the shards engine can send the roots that bind them to it. Otherwise (nothing
+    /// pushed, pushes whose length differs from the body's, or an encoder failure), the block is
+    /// coded whole and the shards engine sends it when the block is proposed.
     pub(crate) async fn seal<B, H, P>(
         self,
         block: Digested<B>,
@@ -156,8 +157,14 @@ impl<C: Segmentable> BodyStream<C> {
             shards.stream_segment(round, segment.clone());
             segments.push(segment);
         }
-        let shards = C::assemble_shards(roots, segments);
-        CodedBlock::from_shards(block, config, root, shards)
+        let coded =
+            CodedBlock::from_shards(block, config, root, C::assemble_shards(roots, segments));
+
+        // A participant that receives the block's chunks needs the roots to verify its assigned
+        // shard and vote, so the commitment follows the last segment to the shards engine before
+        // consensus learns it.
+        shards.stream_roots(round, coded.commitment());
+        coded
     }
 }
 
@@ -279,11 +286,11 @@ mod tests {
                 harness::{CodingB, CodingCtx, D, K, default_leader, genesis_commitment},
             },
         },
-        types::{Epoch, Height, View},
+        types::{Epoch, Height, View, coding::Commitment},
     };
     use bytes::Bytes;
     use commonware_actor::mailbox;
-    use commonware_cryptography::{Committable as _, Digestible as _, Sha256};
+    use commonware_cryptography::{Digestible as _, Sha256};
     use commonware_parallel::Sequential;
     use commonware_runtime::{Clock as _, Runner as _, Supervisor as _, deterministic};
     use commonware_utils::NZUsize;
@@ -315,13 +322,18 @@ mod tests {
     }
 
     /// Runs one build that pushes `pushes` to the sink and seals `block`, and returns the sealed
-    /// block, the segments handed to the shards engine, and how many of them it held before the
-    /// block was sealed.
+    /// block, the segments handed to the shards engine, how many of them it held before the block
+    /// was sealed, and the commitment the seal handed it for the roots, if any.
     #[allow(clippy::type_complexity)]
     fn build(
         block: CodingB,
         pushes: Vec<Bytes>,
-    ) -> (CodedBlock<CodingB, SC, H>, Vec<StreamedSegment<SC>>, usize) {
+    ) -> (
+        CodedBlock<CodingB, SC, H>,
+        Vec<StreamedSegment<SC>>,
+        usize,
+        Option<Commitment<CodingB, SC, H>>,
+    ) {
         deterministic::Runner::default().start(|context| async move {
             // A shards mailbox whose receiver records what the build sends the engine.
             let (sender, mut receiver) = mailbox::new::<Message<CodingB, SC, H, K>>(
@@ -340,9 +352,11 @@ mod tests {
                 context.sleep(Duration::from_millis(1)).await;
             }
 
-            // Every message the build sends is a segment of this round.
+            // Every message the build sends is a segment of this round or the commitment that ends
+            // the stream.
             let mut segments = Vec::new();
-            let mut drain = |segments: &mut Vec<_>| {
+            let mut announced = None;
+            let mut drain = |segments: &mut Vec<_>, announced: &mut Option<_>| {
                 while let Ok(message) = receiver.try_recv() {
                     match message {
                         Message::StreamSegment {
@@ -350,25 +364,45 @@ mod tests {
                             segment,
                         } => {
                             assert_eq!(streamed, round);
+                            assert!(
+                                announced.is_none(),
+                                "a segment must not follow the block's commitment"
+                            );
                             segments.push(segment);
                         }
-                        _ => panic!("only segments must be sent while building"),
+                        Message::StreamRoots {
+                            round: streamed,
+                            commitment,
+                        } => {
+                            assert_eq!(streamed, round);
+                            assert!(
+                                announced.replace(commitment).is_none(),
+                                "the commitment must not be sent more than once"
+                            );
+                        }
+                        _ => panic!("a build must send only segments and the block's commitment"),
                     }
                 }
             };
 
-            // Segments sent before sealing are counted apart from those the seal sends.
-            drain(&mut segments);
+            // Segments sent before sealing are counted apart from those the seal sends, and no
+            // commitment is sent before the block is sealed.
+            drain(&mut segments, &mut announced);
             let early = segments.len();
+            assert!(
+                announced.is_none(),
+                "the commitment must not be sent before sealing"
+            );
             let sealed = stream.seal(ready(block), &Sequential, &shards, round).await;
-            drain(&mut segments);
-            (sealed, segments, early)
+            drain(&mut segments, &mut announced);
+            (sealed, segments, early, announced)
         })
     }
 
-    /// Streaming the body and sealing produces the commitment and shards of a whole-block
-    /// encode, and every segment reaches the shards engine in order with the chunk of each
-    /// shard. The segments the pushed body completes reach it before the block is sealed.
+    /// Streaming the body and sealing produces the commitment and shards of a whole-block encode,
+    /// and every segment reaches the shards engine in order with the chunk of each shard. The
+    /// segments the pushed body completes reach it before the block is sealed, and the seal follows
+    /// the last segment with the block's commitment.
     #[test]
     fn test_streamed_block_matches_whole_encode() {
         // Three uneven pushes seal the block that a whole-block encode produces.
@@ -376,13 +410,18 @@ mod tests {
         let block = block(round);
         let expected =
             encode_block::<CodingB, SC, H>(block.clone(), coding_config_for_participants(4));
-        let (sealed, segments, early) = build(block.clone(), pieces(&block));
+        let (sealed, segments, early, announced) = build(block.clone(), pieces(&block));
         assert_eq!(sealed.commitment(), expected.commitment());
         assert_eq!(sealed.digest(), expected.digest());
         assert!(sealed.shards(&Sequential) == expected.shards(&Sequential));
         assert!(
             early >= 2,
             "the segments the pushes complete must be sent before sealing"
+        );
+        assert_eq!(
+            announced,
+            Some(expected.commitment()),
+            "the seal must send the block's commitment for the roots"
         );
 
         // Each segment reached the engine in order, with its root and every shard's chunk.
@@ -399,21 +438,23 @@ mod tests {
         }
     }
 
-    /// A build that pushes nothing codes the block whole and streams no segment.
+    /// A build that pushes nothing codes the block whole and sends the shards engine nothing.
     #[test]
     fn test_unpushed_build_codes_whole_block() {
-        // A build that pushes nothing seals the whole-block encode and sends no segment.
+        // A build that pushes nothing seals the whole-block encode and sends the engine nothing.
         let round = Round::new(Epoch::zero(), View::new(1));
         let block = block(round);
         let expected =
             encode_block::<CodingB, SC, H>(block.clone(), coding_config_for_participants(4));
-        let (sealed, segments, _) = build(block, Vec::new());
+        let (sealed, segments, _, announced) = build(block, Vec::new());
         assert_eq!(sealed.commitment(), expected.commitment());
         assert!(segments.is_empty());
+        assert!(announced.is_none());
     }
 
-    /// Pushed bytes whose length differs from the block's body fall back to coding the block
-    /// whole, so the sealed commitment is still the block's.
+    /// Pushed bytes whose length differs from the block's body fall back to coding the block whole,
+    /// so the sealed commitment is still the block's. The seal hands the shards engine no
+    /// commitment for the segments it abandons.
     #[test]
     fn test_mismatched_push_falls_back_to_whole_encode() {
         // A build that withholds its last piece still seals the whole-block encode.
@@ -423,8 +464,9 @@ mod tests {
             encode_block::<CodingB, SC, H>(block.clone(), coding_config_for_participants(4));
         let mut pushes = pieces(&block);
         pushes.pop();
-        let (sealed, _, _) = build(block, pushes);
+        let (sealed, _, _, announced) = build(block, pushes);
         assert_eq!(sealed.commitment(), expected.commitment());
         assert!(sealed.shards(&Sequential) == expected.shards(&Sequential));
+        assert!(announced.is_none());
     }
 }

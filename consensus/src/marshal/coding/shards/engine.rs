@@ -530,6 +530,14 @@ where
 /// root and configuration.
 type CommitmentRecords<B, C, H, P> = BTreeMap<Commitment<B, C, H>, CommitmentRecord<B, C, H, P>>;
 
+/// The roots of the segments this node streamed in a round for the build in progress, in segment
+/// order, with the commitment of the block it last sealed in the round and sent roots for. A new
+/// build in the round replaces the roots and leaves the commitment.
+type Streamed<B, C, H> = (
+    Vec<<C as CodingScheme>::Commitment>,
+    Option<Commitment<B, C, H>>,
+);
+
 /// The current lifecycle status of a commitment.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CommitmentStatus {
@@ -765,9 +773,8 @@ where
     /// Metrics for the shard engine.
     metrics: ShardMetrics<P>,
 
-    /// The roots of the segments this node streamed for the block it is building, keyed by
-    /// round, in segment order.
-    streamed: BTreeMap<Round, Vec<C::Commitment>>,
+    /// What this node streamed for the block it is building in each round.
+    streamed: BTreeMap<Round, Streamed<B, C, H>>,
 
     /// The elector configuration from [`Config::elector`].
     elector: Option<L>,
@@ -924,6 +931,9 @@ where
                     }
                     Message::StreamSegment { round, segment } => {
                         self.stream_segment(&mut sender, round, segment);
+                    }
+                    Message::StreamRoots { round, commitment } => {
+                        self.stream_roots(&mut sender, round, commitment);
                     }
                     Message::Discovered {
                         commitment,
@@ -1648,6 +1658,16 @@ where
             self.ingest_buffered_chunks(sender, commitment);
             return;
         }
+
+        // The proposal brings a block this node sealed in the round, so the notarization creates no
+        // reconstruction record for it.
+        if self
+            .streamed
+            .get(&round)
+            .is_some_and(|(_, sealed)| *sealed == Some(commitment))
+        {
+            return;
+        }
         let Some(scheme) = self.scheme_provider.scheme(round.epoch()) else {
             warn!(%commitment, "no scheme for epoch, ignoring notarized commitment");
             return;
@@ -1823,9 +1843,10 @@ where
 
     /// Broadcasts the shards of a [`CodedBlock`] and caches the block.
     ///
-    /// Every recipient receives the block's chunks as stream messages, then the segment roots
-    /// that bind them to the commitment. A block sealed from the segments this node streamed in
-    /// the round needs only its roots, since every recipient already has its chunks.
+    /// The block's chunks go out as stream messages, followed by the segment roots that bind them
+    /// to the commitment. The chunks are skipped when the roots recorded for the round's stream are
+    /// the block's, and the roots are skipped when the commitment recorded for the round's seal is
+    /// the block's.
     fn broadcast_shards<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, ShardMessage<B, C, H>>,
@@ -1877,7 +1898,8 @@ where
         // Segments go out one at a time, each to every recipient before the next, so every
         // participant can verify and relay its first chunk while the rest are in flight.
         let (roots, _) = C::split(&shards[my_index]);
-        if self.streamed.remove(&round).as_ref() != Some(&roots) {
+        let (streamed, sealed) = self.streamed.remove(&round).unzip();
+        if streamed.as_ref() != Some(&roots) {
             let mut columns: Vec<_> = shards
                 .iter()
                 .map(|shard| C::split(shard).1.into_iter())
@@ -1899,13 +1921,15 @@ where
                 self.send_segment(sender, round, participants, my_index, segment);
             }
         }
-        let message = StreamRoots {
-            commitment,
-            round,
-            roots,
-        };
-        self.sent += 1;
-        let _ = sender.send(Recipients::All, message.into(), true);
+        if sealed.flatten() != Some(commitment) {
+            let message = StreamRoots {
+                commitment,
+                round,
+                roots,
+            };
+            self.sent += 1;
+            let _ = sender.send(Recipients::All, message.into(), true);
+        }
         self.finish_broadcast(round, block);
     }
 
@@ -1957,7 +1981,7 @@ where
 
         // Segments arrive in order. A first segment starts another build in the round, replacing
         // the roots of any earlier one.
-        let roots = self.streamed.entry(round).or_default();
+        let (roots, _) = self.streamed.entry(round).or_default();
         if segment.segment == 0 {
             roots.clear();
         }
@@ -1968,6 +1992,35 @@ where
         }
         roots.push(segment.root);
         self.send_segment(sender, round, participants, my_index, segment);
+    }
+
+    /// Sends the roots recorded for the round's stream when they hash to the coding root of
+    /// `commitment`, and records the commitment so [`Self::broadcast_shards`] does not send them
+    /// again.
+    ///
+    /// Nothing is sent when the round has no recorded roots or they hash to another root, as they
+    /// can once another build of the round streams its own segments.
+    fn stream_roots<Sr: Sender<PublicKey = P>>(
+        &mut self,
+        sender: &mut WrappedSender<Sr, ShardMessage<B, C, H>>,
+        round: Round,
+        commitment: Commitment<B, C, H>,
+    ) {
+        let Some((roots, sealed)) = self.streamed.get_mut(&round) else {
+            return;
+        };
+        if C::commit(roots) != commitment.root() {
+            debug!(%round, %commitment, "streamed roots do not bind the sealed block");
+            return;
+        }
+        *sealed = Some(commitment);
+        let message = StreamRoots {
+            commitment,
+            round,
+            roots: roots.clone(),
+        };
+        self.sent += 1;
+        let _ = sender.send(Recipients::All, message.into(), true);
     }
 
     /// Sends every other participant its chunk of `segment`, and sends the chunk at this node's
@@ -2815,6 +2868,27 @@ mod tests {
         }
     }
 
+    /// Returns the segments of `block` as the node that builds it in `round` streams them, in
+    /// segment order.
+    fn segments_of<S: Segmentable>(
+        block: &CodedBlock<B, S, H>,
+        round: Round,
+    ) -> Vec<StreamedSegment<S>> {
+        let shards: Vec<_> = (0..block.shards(&STRATEGY).len())
+            .map(|index| stream_of(block, round, index as u16))
+            .collect();
+        (0..shards[0].len())
+            .map(|segment| StreamedSegment::<S> {
+                segment: segment as u16,
+                root: shards[0][segment].root,
+                chunks: shards
+                    .iter()
+                    .map(|shard| shard[segment].chunk.clone())
+                    .collect(),
+            })
+            .collect()
+    }
+
     /// Returns the messages the leader of `round` sends the holder of shard `index` of `block`:
     /// the shard's chunks in segment order, then the roots.
     fn assigned<S: Segmentable>(
@@ -2963,6 +3037,18 @@ mod tests {
             },
             _ = context.sleep(DEFAULT_LINK.latency * 4) => None,
         }
+    }
+
+    /// Returns every message sent to `observer` until none arrives within a few link latencies.
+    async fn drain<S: Segmentable>(
+        context: &deterministic::Context,
+        observer: &mut simulated::Receiver<P>,
+    ) -> Vec<ShardMessage<B, S, H>> {
+        let mut messages = Vec::new();
+        while let Some(message) = next_message::<S>(context, observer).await {
+            messages.push(message);
+        }
+        messages
     }
 
     /// Sequential execution that records the `len` of each spawned job.
@@ -11307,10 +11393,11 @@ mod tests {
         });
     }
 
-    /// A leader sends each participant the chunk at its index as each segment is coded, and once
-    /// the block sealed from those segments is proposed, sends only its roots.
+    /// A leader sends each other participant the chunk at its index as each segment is coded and
+    /// the roots once it seals the block from those segments. Proposing that block sends nothing
+    /// more.
     #[test_traced]
-    fn test_streamed_proposal_sends_roots_only() {
+    fn test_streamed_proposal_sends_roots_when_sealed() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
@@ -11326,40 +11413,32 @@ mod tests {
                 round,
                 ..
             } = chunk_setup(&context, &oracle).await;
-            let shards: Vec<_> = (0..4)
-                .map(|index| stream_of(&block, round, index))
-                .collect();
 
             // Each segment reaches peer 2 as it is coded, and each counts as one message sent.
-            for (segment, chunk) in shards[2].iter().enumerate() {
-                engine.stream_segment(
-                    &mut sender,
-                    round,
-                    StreamedSegment::<SC> {
-                        segment: chunk.segment,
-                        root: chunk.root,
-                        chunks: shards
-                            .iter()
-                            .map(|shard| shard[segment].chunk.clone())
-                            .collect(),
-                    },
-                );
+            let chunks = stream_of(&block, round, 2);
+            for (segment, chunk) in segments_of(&block, round).into_iter().zip(&chunks) {
+                engine.stream_segment(&mut sender, round, segment);
                 let sent = next_message::<SC>(&context, &mut observer)
                     .await
                     .expect("each segment's chunk must be sent as it is coded");
                 assert!(sent == ShardMessage::Stream(chunk.clone()));
             }
-            assert_eq!(engine.sent, shards[2].len() as u64);
+            assert_eq!(engine.sent, chunks.len() as u64);
 
-            // Proposing the block sealed from those segments sends only its roots and caches the
-            // block.
-            engine.broadcast_shards(&mut sender, round, Arc::new(block.clone()));
+            // Sealing the block from those segments sends its roots, and they count as one message.
+            // The seal is not a consensus signal.
+            engine.stream_roots(&mut sender, round, block.commitment());
             let sent = next_message::<SC>(&context, &mut observer)
                 .await
-                .expect("the roots must be sent");
+                .expect("the roots must be sent when the block is sealed");
             assert!(sent == ShardMessage::Roots(roots_of(&block, round)));
+            assert_eq!(engine.sent, chunks.len() as u64 + 1);
+            assert!(engine.signaled.is_none());
+
+            // Proposing the sealed block sends nothing more and caches the block.
+            engine.broadcast_shards(&mut sender, round, Arc::new(block.clone()));
             assert!(next_message::<SC>(&context, &mut observer).await.is_none());
-            assert_eq!(engine.sent, shards[2].len() as u64 + 1);
+            assert_eq!(engine.sent, chunks.len() as u64 + 1);
             assert!(
                 engine
                     .records
@@ -11368,6 +11447,198 @@ mod tests {
                     .is_some()
             );
         });
+    }
+
+    /// A proposal sends the block's chunks unless the roots streamed in the round are the block's,
+    /// and its roots unless the round's seal sent them. Each round streams and seals differently
+    /// before the first block is proposed in it.
+    #[test_traced]
+    fn test_proposal_sends_what_the_stream_and_seal_did_not() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
+                context.child("network"),
+                network_config(4),
+            );
+            network.start();
+            let ChunkSetup {
+                mut engine,
+                mut sender,
+                mut observer,
+                block,
+                other,
+                ..
+            } = chunk_setup(&context, &oracle).await;
+            let chunks = |block: &CodedBlock<B, SC, H>, round| -> Vec<ShardMessage<B, SC, H>> {
+                stream_of(block, round, 2)
+                    .into_iter()
+                    .map(ShardMessage::from)
+                    .collect()
+            };
+
+            // A seal sends nothing before a segment is streamed, and nothing when it names a block
+            // the streamed roots do not hash to. The proposal of the streamed block then sends its
+            // roots alone.
+            let round = Round::new(Epoch::zero(), View::new(1));
+            engine.stream_roots(&mut sender, round, block.commitment());
+            for segment in segments_of(&block, round) {
+                engine.stream_segment(&mut sender, round, segment);
+            }
+            engine.stream_roots(&mut sender, round, other.commitment());
+            assert!(drain::<SC>(&context, &mut observer).await == chunks(&block, round));
+            engine.broadcast_shards(&mut sender, round, Arc::new(block.clone()));
+            assert!(drain::<SC>(&context, &mut observer).await == [roots_of(&block, round).into()]);
+
+            // The seal of the other block sends that block's roots, so the proposal of the first
+            // block sends every chunk and its own roots.
+            let round = Round::new(Epoch::zero(), View::new(2));
+            for segment in segments_of(&other, round) {
+                engine.stream_segment(&mut sender, round, segment);
+            }
+            engine.stream_roots(&mut sender, round, other.commitment());
+            assert!(drain::<SC>(&context, &mut observer).await == assigned(&other, round, 2));
+            engine.broadcast_shards(&mut sender, round, Arc::new(block.clone()));
+            assert!(drain::<SC>(&context, &mut observer).await == assigned(&block, round, 2));
+
+            // The first block is streamed and sealed. Another build then streams one segment in its
+            // place, and a seal that names that build sends nothing because its stream is
+            // incomplete. The proposal of the first block sends every chunk again and does not
+            // repeat the roots.
+            let round = Round::new(Epoch::zero(), View::new(3));
+            for segment in segments_of(&block, round) {
+                engine.stream_segment(&mut sender, round, segment);
+            }
+            engine.stream_roots(&mut sender, round, block.commitment());
+            assert!(drain::<SC>(&context, &mut observer).await == assigned(&block, round, 2));
+            engine.stream_segment(&mut sender, round, segments_of(&other, round).remove(0));
+            engine.stream_roots(&mut sender, round, other.commitment());
+            assert!(drain::<SC>(&context, &mut observer).await == chunks(&other, round)[..1]);
+            engine.broadcast_shards(&mut sender, round, Arc::new(block.clone()));
+            assert!(drain::<SC>(&context, &mut observer).await == chunks(&block, round));
+        });
+    }
+
+    /// A proposer does not reconstruct a block it sealed when consensus reports the block notarized
+    /// before the engine is asked to broadcast it. The engine sends nothing for the notarization,
+    /// keeps no record of the commitment, and caches the block once it is proposed.
+    #[test_traced]
+    fn test_sealed_block_notarized_before_it_is_proposed_is_not_reconstructed() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
+                context.child("network"),
+                network_config(4),
+            );
+            network.start();
+            let ChunkSetup {
+                mut engine,
+                mut sender,
+                peer_keys,
+                mut observer,
+                block,
+                other,
+                round,
+                ..
+            } = chunk_setup(&context, &oracle).await;
+            let commitment = block.commitment();
+
+            // This node streams and seals the block, and peer 2 receives its chunks and roots.
+            for segment in segments_of(&block, round) {
+                engine.stream_segment(&mut sender, round, segment);
+            }
+            engine.stream_roots(&mut sender, round, commitment);
+            assert!(drain::<SC>(&context, &mut observer).await == assigned(&block, round, 2));
+            let sent = engine.sent;
+
+            // Every peer relays its chunks and the roots, enough to reconstruct the block, and
+            // consensus reports the notarization before the block is proposed. The notarization
+            // counts as a consensus signal and creates no record.
+            for index in 1..4 {
+                let peer = &peer_keys[usize::from(index)];
+                receive(
+                    &mut engine,
+                    &mut sender,
+                    peer,
+                    relayed(&block, round, index),
+                );
+                receive(
+                    &mut engine,
+                    &mut sender,
+                    peer,
+                    [roots_of(&block, round).into()],
+                );
+            }
+            engine.handle_notarized_commitment(&mut sender, commitment, round);
+            assert!(drain::<SC>(&context, &mut observer).await.is_empty());
+            assert!(!engine.records.contains_key(&commitment));
+            assert_eq!(engine.signaled, Some(round));
+
+            // A notarization of another block in the round creates that block's record.
+            engine.handle_notarized_commitment(&mut sender, other.commitment(), round);
+            assert!(engine.records.contains_key(&other.commitment()));
+
+            // The proposal sends nothing more and caches the block.
+            engine.broadcast_shards(&mut sender, round, Arc::new(block.clone()));
+            assert!(drain::<SC>(&context, &mut observer).await.is_empty());
+            assert_eq!(engine.sent, sent);
+            assert!(
+                engine
+                    .records
+                    .get(&commitment)
+                    .and_then(CommitmentRecord::block)
+                    .is_some()
+            );
+            assert!(oracle.blocked().await.unwrap().is_empty());
+        });
+    }
+
+    /// Participants verify their assigned shards and reconstruct a block from its leader's stream
+    /// alone. The leader streams every segment and seals the block, and it is never asked to
+    /// broadcast the block.
+    #[test_traced]
+    fn test_e2e_streamed_block_is_verified_before_it_is_proposed() {
+        let fixture: Fixture<SC> = Fixture {
+            num_primary_peers: 10,
+            ..Default::default()
+        };
+
+        fixture.start(
+            |config, context, oracle, mut peers, _, coding_config| async move {
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
+                let coded_block = encode_block::<B, SC, H>(inner, coding_config);
+                let commitment = coded_block.commitment();
+
+                // The leader streams every segment and seals the block.
+                let leader = peers[0].public_key.clone();
+                let round = Round::new(Epoch::zero(), View::new(1));
+                for segment in segments_of(&coded_block, round) {
+                    peers[0].mailbox.stream_segment(round, segment);
+                }
+                peers[0].mailbox.stream_roots(round, commitment);
+
+                // Every other participant learns the commitment and its leader from consensus.
+                for peer in peers[1..].iter_mut() {
+                    peer.mailbox.discovered(commitment, leader.clone(), round);
+                }
+                context.sleep(config.link.latency * 3).await;
+
+                // Each of them verifies its assigned shard and reconstructs the block, and no peer
+                // is blocked.
+                for peer in peers[1..].iter_mut() {
+                    peer.mailbox
+                        .subscribe_assigned_shard_verified(commitment)
+                        .await
+                        .expect("the participant's shard subscription must complete");
+                    let reconstructed = peer
+                        .mailbox
+                        .get(commitment)
+                        .await
+                        .expect("the participant must reconstruct the block");
+                    assert_eq!(reconstructed.commitment(), commitment);
+                }
+                assert!(oracle.blocked().await.unwrap().is_empty());
+            },
+        );
     }
 
     /// A notarization lets a node the leader never reached reconstruct from the chunks other
