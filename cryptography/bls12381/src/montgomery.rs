@@ -449,7 +449,7 @@ pub mod fuzz {
                 sparse[k / 64] = 1 << (k % 64);
                 sparse
             }
-            _ => reference::canonical(&mut Unstructured::new(u.bytes(8 * WORDS)?))?,
+            _ => reference::canonical(u)?,
         };
         let inverse = invert::<WORDS, LIMBS>(&a, &MODULUS, INVERSE);
         if a == reference::ZERO {
