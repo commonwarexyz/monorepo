@@ -52,8 +52,9 @@ impl<C: Clone + Send + Sync + 'static, S: Strategy> Config for crate::qmdb::comp
 /// A database that [`sync`](super::sync) can build from operations fetched from a [`Source`].
 ///
 /// Every authenticated QMDB variant implements this trait, and callers drive it through
-/// [`sync`](super::sync): the engine calls [`Self::local_pinned_nodes`] when a sync journal left
-/// on disk already reaches the target, fetches and verifies the remaining operations, builds the
+/// [`sync`](super::sync): the engine calls [`Self::discard_local_state`] when the sync journal
+/// left on disk holds no operation of the target's range and [`Self::local_pinned_nodes`] when
+/// it already reaches the target, fetches and verifies the remaining operations, builds the
 /// database with [`Self::from_sync_result`], checks [`Self::ops_root`] against the target, and only
 /// then calls [`Self::persist_sync_result`].
 ///
@@ -101,6 +102,17 @@ pub trait Database: Sized + Send {
         self,
     ) -> impl Future<Output = Result<Self, crate::qmdb::Error<Self::Family>>> + Send;
 
+    /// Durably discard persisted state derived from the operations of the sync journal.
+    ///
+    /// The engine calls this when the sync journal it opens holds no operation of the target's
+    /// range, before it appends any fetched operation. State derived from operations the journal
+    /// held earlier would otherwise be read as describing the operations fetched in their place.
+    /// Implementations that persist no state beside the journal must explicitly return `Ok(())`.
+    fn discard_local_state(
+        context: Self::Context,
+        config: &Self::Config,
+    ) -> impl Future<Output = Result<(), crate::qmdb::Error<Self::Family>>> + Send;
+
     /// Return locally available pinned nodes for the target, if persisted local state can
     /// authenticate them.
     ///
@@ -127,6 +139,27 @@ pub(crate) fn journal_covers_range<F: Family>(
     range: &NonEmptyRange<Location<F>>,
 ) -> bool {
     Location::new(bounds.start) <= range.start() && Location::new(bounds.end) == range.end()
+}
+
+/// Shared body for [`Database::discard_local_state`] implementations backed by a persisted
+/// [`full::Merkle`]. Durably empties the structure that `config` names, including its pruning
+/// boundary and pins.
+pub(crate) async fn discard_local_state<F, E, H, S>(
+    context: E,
+    config: full::Config<S>,
+) -> Result<(), crate::qmdb::Error<F>>
+where
+    F: Family,
+    E: Context,
+    H: Hasher,
+    S: Strategy,
+{
+    let hasher = crate::qmdb::hasher::<H>();
+    full::Merkle::<F, _, H::Digest, S>::prepare(context, &hasher, config, full::Retain::Nothing)
+        .await?
+        .finish()
+        .await?;
+    Ok(())
 }
 
 /// Shared body for [`Database::local_pinned_nodes`] implementations backed by a persisted

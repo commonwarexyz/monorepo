@@ -758,6 +758,15 @@ pub(crate) mod harnesses {
             db.destroy().await.unwrap();
         }
 
+        #[boxed]
+        async fn try_destroy(db: Self::Db) -> Result<(), qmdb::Error<Self::Family>> {
+            db.destroy().await
+        }
+
+        fn merkle_config(config: &ConfigOf<Self>) -> MerkleConfig<Sequential> {
+            config.merkle.clone()
+        }
+
         async fn db_sync(db: Self::Db) -> Self::Db {
             db.sync().await.unwrap()
         }

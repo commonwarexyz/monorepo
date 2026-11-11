@@ -189,8 +189,8 @@ pub(crate) enum Retain<F: Family> {
     All,
     /// At most this many leaves. The persisted pruning boundary must not exceed it.
     AtMost(Location<F>),
-    /// No leaf: the caller's leaf source is empty at position zero, so the persisted pruning
-    /// boundary and pins are cleared first.
+    /// No leaf: the caller's leaf source holds no item the persisted structure describes, so
+    /// the persisted pruning boundary and pins are cleared first.
     Nothing,
 }
 
@@ -332,7 +332,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
 
         // One metadata commit drops the boundary together with its pins.
         if discard && metadata.keys().next().is_some() {
-            warn!("crash repair: discarding Merkle metadata without a leaf source");
+            warn!("discarding Merkle metadata without a leaf source");
             metadata.clear();
             metadata = metadata.sync().await?;
         }
@@ -378,7 +378,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
                 .start
                 > 0;
         let journal = if orphaned {
-            warn!("crash repair: discarding pruned node journal without a persisted boundary");
+            warn!("discarding pruned node journal without a persisted boundary");
             Journal::<E, D>::clear(context.child("journal"), journal_cfg, 0).await?
         } else {
             Journal::<E, D>::recover(context.child("journal"), journal_cfg, node_cap).await?

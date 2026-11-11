@@ -8,13 +8,18 @@ use crate::{
     merkle::{self, Location},
     qmdb::{
         self,
-        sync::{self, Config, Engine, Target, engine::NextStep, source::tests::FailSource},
+        sync::{
+            self, Config, Engine, Journal as _, Target, engine::NextStep, source::tests::FailSource,
+        },
     },
 };
 use commonware_cryptography::sha256;
 use commonware_macros::boxed;
+use commonware_parallel::Sequential;
 use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
-use commonware_utils::{NZU16, NZU64, NZUsize, channel::ring, non_empty_range, sync::AsyncRwLock};
+use commonware_utils::{
+    NZU16, NZU64, NZUsize, channel::ring, non_empty_range, probability, sync::AsyncRwLock,
+};
 use rand::Rng as _;
 use std::{
     fmt::Debug,
@@ -71,6 +76,13 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
     ) -> impl Future<Output = Self::Db> + Send;
     /// Removes all persisted state of `db`.
     fn destroy(db: Self::Db) -> impl Future<Output = ()> + Send;
+    /// Removes the persisted state of `db`, stopping at the first failure and returning it.
+    fn try_destroy(
+        db: Self::Db,
+    ) -> impl Future<Output = Result<(), qmdb::Error<Self::Family>>> + Send;
+    /// Returns the configuration of the Merkle structure that the database `config` names
+    /// persists.
+    fn merkle_config(config: &ConfigOf<Self>) -> merkle::full::Config<Sequential>;
     /// Makes every applied operation of `db` durable.
     fn db_sync(db: Self::Db) -> impl Future<Output = Self::Db> + Send;
 
@@ -994,6 +1006,191 @@ pub(crate) fn test_sync_source_fails<H: SyncTestHarness>() {
     });
 }
 
+/// Operations in each batch that the interrupted-destroy tests apply.
+pub(crate) const INTERRUPTED_DESTROY_OPS: usize = 300;
+
+/// Least sync boundary of a database that [`prune_to_sync_boundary`] returns.
+const PRUNED_SYNC_BOUNDARY: u64 = 64;
+
+/// Raises the sync boundary of `db` to at least [`PRUNED_SYNC_BOUNDARY`], applying the operations
+/// of `seed` again until it does, and prunes `db` to that boundary.
+pub(crate) async fn prune_to_sync_boundary<H: SyncTestHarness>(
+    mut db: DbOf<H>,
+    seed: u64,
+) -> DbOf<H> {
+    loop {
+        db = H::prune(db, Location::new(PRUNED_SYNC_BOUNDARY)).await;
+        let boundary = H::sync_boundary(&db);
+        if *boundary >= PRUNED_SYNC_BOUNDARY {
+            return H::prune(db, boundary).await;
+        }
+
+        // A database that derives its inactivity floor raises it once the same keys are
+        // rewritten.
+        let ops = H::create_ops_seeded(INTERRUPTED_DESTROY_OPS, seed);
+        db = H::apply_ops(db, ops, None).await;
+    }
+}
+
+/// Destroys the durable database `db` that `config` names with every removal failing, so the
+/// destroy stops once the clear of its log is durable.
+pub(crate) async fn interrupt_destroy<H: SyncTestHarness>(
+    context: &deterministic::Context,
+    db: DbOf<H>,
+    config: &ConfigOf<H>,
+) {
+    let end = H::bounds(&db).end;
+
+    // The first removal of a destroy follows the durable clear of its log.
+    context.storage_fault_config().write().remove_rate = Some(probability!(1.0));
+    let result = H::try_destroy(db).await;
+    context.storage_fault_config().write().remove_rate = None;
+    assert!(result.is_err(), "destroy must stop at its first removal");
+
+    // The log reopens empty at zero beside the whole Merkle structure of the destroyed database.
+    let log = <JournalOf<H> as sync::Journal<H::Family>>::new(
+        context.child("emptied_log"),
+        sync::DatabaseConfig::journal_config(config),
+        non_empty_range!(Location::new(0), end),
+    )
+    .await
+    .unwrap();
+    assert_eq!(log.size(), Location::new(0));
+    drop(log);
+    let hasher = qmdb::hasher::<<DbOf<H> as sync::Database>::Hasher>();
+    let merkle = merkle::full::Merkle::<H::Family, _, sha256::Digest, Sequential>::init(
+        context.child("stale_merkle"),
+        &hasher,
+        H::merkle_config(config),
+    )
+    .await
+    .unwrap();
+    assert_eq!(merkle.leaves(), end);
+}
+
+/// Client storage that an interrupted destroy left behind, beside a target whose operations that
+/// storage never held.
+pub(crate) struct InterruptedDestroy<H: SyncTestHarness> {
+    /// Source of the target's operations.
+    pub(crate) target_db: Arc<DbOf<H>>,
+    /// Target to sync the client storage to.
+    pub(crate) target: Target<H::Family, sha256::Digest>,
+    /// Canonical root of the target.
+    pub(crate) canonical_root: sha256::Digest,
+    /// Configuration naming the client storage.
+    pub(crate) db_config: ConfigOf<H>,
+}
+
+impl<H: SyncTestHarness> InterruptedDestroy<H> {
+    /// Builds a target and a client database that holds other operations, then interrupts the
+    /// destroy of the client database.
+    ///
+    /// The target's range starts at its sync boundary when `pruned` and at zero otherwise. The
+    /// client's Merkle structure extends past the start of that range, and past its end when
+    /// `ahead`.
+    pub(crate) async fn new(
+        context: &mut deterministic::Context,
+        pruned: bool,
+        ahead: bool,
+    ) -> Self {
+        let ops = H::create_ops(INTERRUPTED_DESTROY_OPS);
+        let mut target_db = H::init_db(context.child("target")).await;
+        target_db = H::apply_ops(target_db, ops, Some(H::sample_metadata())).await;
+        let mut start = Location::new(0);
+        if pruned {
+            target_db = prune_to_sync_boundary::<H>(target_db, 0).await;
+            start = H::sync_boundary(&target_db);
+        }
+        let end = H::bounds(&target_db).end;
+        let target = Target {
+            root: H::ops_root(&target_db),
+            range: non_empty_range!(start, end),
+        };
+        let canonical_root = H::canonical_root(&target_db);
+
+        // The client holds a different history whose Merkle structure extends past the target's
+        // lower bound.
+        let local_ops = if ahead {
+            2 * *end
+        } else {
+            (*start + 3 * *end) / 4
+        };
+        let local_ops = usize::try_from(local_ops).expect("operation count fits in usize");
+        let db_config = H::config(&context.next_u64().to_string());
+        let local_db = H::init_db_with_config(context.child("local"), db_config.clone()).await;
+        let local_db = H::apply_ops(local_db, H::create_ops_seeded(local_ops, 1), None).await;
+        let local_db = H::db_sync(local_db).await;
+        let local_end = H::bounds(&local_db).end;
+        assert!(
+            local_end > start,
+            "test setup requires nodes past the bound"
+        );
+        assert_eq!(
+            local_end > end,
+            ahead,
+            "test setup misplaced the client's end"
+        );
+        interrupt_destroy::<H>(context, local_db, &db_config).await;
+
+        Self {
+            target_db: Arc::new(target_db),
+            target,
+            canonical_root,
+            db_config,
+        }
+    }
+}
+
+/// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+///
+/// A sync into storage whose destroy stopped after emptying the log completes with the target's
+/// roots, and the synced state survives a reopen. The cases vary whether the target's range
+/// starts at zero and whether the Merkle structure left behind ends before or after the target.
+pub(crate) fn pr_5651_regression_sync_after_interrupted_destroy<H: SyncTestHarness>(
+    pruned: bool,
+    ahead: bool,
+) where
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
+{
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        let InterruptedDestroy {
+            target_db,
+            target,
+            canonical_root,
+            db_config,
+        } = InterruptedDestroy::<H>::new(&mut context, pruned, ahead).await;
+
+        let config = Config {
+            db_config: db_config.clone(),
+            fetch_batch_size: NZU64!(10),
+            target: target.clone(),
+            context: context.child("client"),
+            source: target_db.clone(),
+            apply_batch_size: NZU64!(1024),
+            max_outstanding_requests: NZUsize!(1),
+            update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
+        };
+        let synced_db: DbOf<H> = sync::sync(config).await.unwrap();
+        assert_eq!(H::ops_root(&synced_db), target.root);
+        assert_eq!(H::canonical_root(&synced_db), canonical_root);
+        assert_eq!(H::bounds(&synced_db).end, target.range.end());
+        drop(synced_db);
+
+        // A reopen recovers the target's state from storage alone.
+        let reopened_db = H::init_db_with_config(context.child("reopened"), db_config).await;
+        assert_eq!(H::ops_root(&reopened_db), target.root);
+        assert_eq!(H::canonical_root(&reopened_db), canonical_root);
+        assert_eq!(H::bounds(&reopened_db).end, target.range.end());
+
+        H::destroy(reopened_db).await;
+        H::destroy(Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc")))
+            .await;
+    });
+}
+
 /// Engine configuration for a compact sync over the one-operation range ending at the target.
 pub(crate) fn compact_engine_config<DB, S>(
     context: DB::Context,
@@ -1157,6 +1354,44 @@ macro_rules! sync_tests {
             #[test_traced("WARN")]
             fn test_sync_source_fails() {
                 crate::qmdb::sync::harness::test_sync_source_fails::<$harness>();
+            }
+
+            /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+            #[rstest]
+            #[case::genesis_merkle_behind(false, false)]
+            #[case::genesis_merkle_ahead(false, true)]
+            #[case::pruned_merkle_behind(true, false)]
+            #[case::pruned_merkle_ahead(true, true)]
+            fn pr_5651_regression_sync_after_interrupted_destroy(
+                #[case] pruned: bool,
+                #[case] ahead: bool,
+            ) {
+                crate::qmdb::sync::harness::pr_5651_regression_sync_after_interrupted_destroy::<
+                    $harness,
+                >(pruned, ahead);
+            }
+
+            /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+            #[rstest]
+            #[case::genesis_partial(false, false)]
+            #[case::genesis_fetched(false, true)]
+            #[case::pruned_partial(true, false)]
+            #[case::pruned_fetched(true, true)]
+            fn pr_5651_regression_sync_restart_after_destroy(
+                #[case] pruned: bool,
+                #[case] fetched: bool,
+            ) {
+                crate::qmdb::sync::engine::tests::pr_5651_regression_sync_restart_after_destroy::<
+                    $harness,
+                >(pruned, fetched);
+            }
+
+            /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+            #[test_traced("WARN")]
+            fn pr_5651_regression_open_after_stopped_sync() {
+                crate::qmdb::sync::engine::tests::pr_5651_regression_open_after_stopped_sync::<
+                    $harness,
+                >();
             }
 
             $( $extra!($harness); )?

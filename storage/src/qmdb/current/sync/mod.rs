@@ -262,6 +262,30 @@ where
         Ok(self)
     }
 
+    async fn discard_local_state(
+        context: Self::Context,
+        config: &Self::Config,
+    ) -> Result<(), qmdb::Error<F>> {
+        qmdb::sync::discard_local_state::<F, _, H, S>(
+            context.child("merkle"),
+            config.merkle.clone(),
+        )
+        .await?;
+
+        // Grafted metadata records chunks pruned from operations the log held, so it is
+        // discarded with the Merkle structure of those operations.
+        let (mut metadata, pruned_chunks, _) = db::init_metadata::<F, E, DigestOf<H>>(
+            context.child("metadata"),
+            &config.grafted_metadata_partition,
+        )
+        .await?;
+        if pruned_chunks > 0 {
+            metadata.clear();
+            metadata.sync().await?;
+        }
+        Ok(())
+    }
+
     async fn local_pinned_nodes(
         context: Self::Context,
         config: &Self::Config,
