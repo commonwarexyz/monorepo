@@ -177,8 +177,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// later abandons a dependency, it also abandons the proposal.
         ///
         /// `history` is the [`History`] consensus holds on the selected parent branch at
-        /// dispatch. It ends at the parent, and a payload that re-proposes its parent appears as
-        /// the parent's commitment.
+        /// dispatch. It can be empty. A nonempty history ends at the parent, and a payload that
+        /// re-proposes its parent appears as the parent's commitment.
         ///
         /// Closing the response declines this request, which consensus may
         /// treat as final for the context. Keep the response pending when
@@ -516,9 +516,8 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// Build a new block on top of the provided parent ancestry. If the build job fails,
         /// or the proposer's slot should be skipped, the implementor should return [None].
         ///
-        /// `ancestry` holds the parent and supplies forward ranges of the selected parent
-        /// branch, including finalized history. Select only the history needed to build the
-        /// block.
+        /// `ancestry` holds the parent and supplies forward ranges of the selected parent branch,
+        /// including finalized history. Select only the history needed to build the block.
         ///
         /// `input` is the per-proposal input for this build.
         ///

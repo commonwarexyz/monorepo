@@ -119,8 +119,8 @@ where
     ///
     /// Also bounds the finalized heights requested in one forward gap-repair pass and the
     /// number of resolver messages handled in one batch. Direct acquisitions are not limited by
-    /// the shared capacity. Each stays active until its block is delivered or its receiver is
-    /// dropped.
+    /// the shared capacity. Each stays active until its block is delivered, or until marshal
+    /// handles an event after its receiver is dropped.
     ///
     /// Sources from [`Mailbox::blocks_with_parent`](super::core::Mailbox::blocks_with_parent)
     /// and [`Mailbox::finalized_blocks`](super::core::Mailbox::finalized_blocks) give each range

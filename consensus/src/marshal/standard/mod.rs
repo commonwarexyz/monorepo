@@ -6425,9 +6425,9 @@ mod tests {
         }
     }
 
-    /// Returns once marshal has dropped the callers and leases canceled before this call. Marshal
-    /// drops them at the start of a loop turn, and the second round trip shows that a turn started
-    /// after the first.
+    /// Returns once marshal has removed the callers and leases canceled before this call. Marshal
+    /// removes them at the start of a loop turn, so the helper makes two mailbox round trips, and
+    /// the second shows that a turn started after the first.
     async fn prune_canceled(mailbox: &Mailbox<S, Standard<B>>) {
         let _ = mailbox.get_processed().await;
         let _ = mailbox.get_processed().await;
@@ -14401,7 +14401,7 @@ mod tests {
     }
 
     /// Gap repair that archives a block from a buffer without notifications answers the callers
-    /// already waiting for its commitment and cancels the request they owned.
+    /// already waiting for its commitment and cancels the request the acquiring caller owned.
     #[test_traced("WARN")]
     fn test_standard_local_gap_repair_answers_exact_callers() {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
@@ -14517,7 +14517,7 @@ mod tests {
     }
 
     /// Callers for one commitment share a single request that lasts until the last caller drops
-    /// its receiver. Marshal releases a dropped caller when it handles its next event.
+    /// its receiver. Marshal releases a dropped caller once it has handled its next event.
     #[test_traced("WARN")]
     fn test_standard_acquire_coalesces_and_cancels_last_caller() {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {

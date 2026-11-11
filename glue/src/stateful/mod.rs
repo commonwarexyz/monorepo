@@ -93,7 +93,7 @@
 //! # Lazy Recovery
 //!
 //! When a parent has no pending or applied state, [`Stateful`] uses the commitments of the
-//! selected branch to find the nearest known state, acquires the missing blocks in forward order,
+//! selected branch to find the nearest known state, reads the missing blocks in forward order,
 //! and processes them with [`Application::process`] as [`Finality::Candidate`] blocks. Each
 //! recovered state is retained once its processing completes, even if the request is later
 //! cancelled, and it answers the block's own verification.

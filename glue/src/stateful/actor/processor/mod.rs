@@ -14,11 +14,12 @@
 //!   [`Finality::Candidate`]. The block is valid if the application accepts it and the result
 //!   matches its commitments. A cached state answers later verifications of its block.
 //! - Recovery: when a parent's state is not cached (for example after a restart), its missing
-//!   ancestors are acquired forward from the selected branch, starting above the nearest cached
-//!   ancestor or the branch anchor, and processed in height order as candidates. The parent comes
-//!   last. The request holds it, so the acquired range ends below it. A recovered state is cached
-//!   only if it matches its block's commitments. Concurrent requests that need the same block's
-//!   state, including a verification of that block, share one processing call.
+//!   ancestors are read forward from the selected branch, starting above the nearest cached
+//!   ancestor or the branch anchor, and processed in height order as candidates. The parent is
+//!   processed last. The request holds it, so the range read from the branch ends below it. A
+//!   recovered state is cached only if it matches its block's commitments. Concurrent requests
+//!   that need the same block's state, including a verification of that block, share one
+//!   processing call.
 //! - Finalization: processing of the finalized block and of competing branches finishes before
 //!   the block's state is applied, while processing of its descendants may continue. The caller
 //!   coordinates durability, so one database barrier can cover several finalizations.

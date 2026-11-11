@@ -478,8 +478,11 @@ where
                     "stream must be synced before the actor handles its next event"
                 );
 
-                // Remove any dropped subscribers. If all subscribers dropped, abort the waiter.
-                // Requests that only dropped callers or leases owned are canceled.
+                // Remove callers, prefetch leases, and finalized waiters whose receivers closed,
+                // and cancel the requests that only closed callers or leases owned. Removing the
+                // last caller for a commitment also aborts its buffer waiter. Cleanup runs before
+                // marshal waits for its next event, so a receiver dropped during that wait is
+                // still registered while the event is handled.
                 let mut released = self.block_subscriptions.retain_open();
                 released.extend(self.prefetch.retain_open());
                 Self::cancel_subscription_requests(&mut resolver, released);

@@ -180,9 +180,10 @@
 //! ## Application History
 //!
 //! Simplex supplies the commitments it holds on the selected parent branch separately from its
-//! encoded context. Applications receive the parent block in a [`blocks::Ancestry`], and the
-//! candidate when verifying, and use the ancestry's [`blocks::Blocks`] to select the history they
-//! need. Selected ranges load bodies in increasing height order.
+//! encoded context. Calls that build or verify a block receive a [`blocks::Ancestry`] holding the
+//! parent block and a [`blocks::Blocks`] over the selected branch ending at it. Verification also
+//! receives the candidate. Applications select the history they need from the [`blocks::Blocks`],
+//! and selected ranges yield bodies in increasing height order.
 //!
 //! Below the supplied commitments, ranges read canonical finalized history when the commitments
 //! are anchored. Otherwise they discover older commitments by following parent links through

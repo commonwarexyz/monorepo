@@ -127,7 +127,8 @@ pub enum Error {
 /// lowest bodies it read, and a range takes a retained body without acquiring it again.
 ///
 /// Later finalization or pruning does not redirect an acquisition that is already pending. It
-/// stays pending until the body arrives, every waiter drops, or marshal shuts down.
+/// stays pending until the body arrives, every waiter drops, or marshal shuts down. A read of a
+/// canonical height also ends with [`Error::Unavailable`] when a floor update skips that height.
 pub struct Blocks<B: Block> {
     tip: Height,
     source: Arc<dyn Source<B>>,
@@ -189,21 +190,23 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// - Suffix: their commitments are discovered by walking down from the lowest known
     ///   commitment, one parent link per step.
     ///
-    /// A step first asks marshal for the finalized block it stores at the lowest known height. A
-    /// matching digest makes every lower height canonical, and those heights then come from
-    /// finalized storage. A different digest means the branch conflicts with finalized history,
-    /// and lower heights are [`Error::Unavailable`].
+    /// A step first asks marshal which block it records as finalized at the lowest known height,
+    /// and a stored finalization or a stored block answers. A matching digest makes every lower
+    /// height canonical, and those heights then come from finalized storage. A different digest
+    /// means the branch conflicts with finalized history, and lower heights are
+    /// [`Error::Unavailable`]. Finalized storage is sampled once per step and never awaited for a
+    /// height that is not known to be finalized.
     ///
-    /// With no finalized block stored there, the step acquires the body by its commitment and
+    /// With no finalized block recorded there, the step acquires the body by its commitment and
     /// takes the parent it names as the next commitment. The first step reads the body of the
-    /// history's first commitment. That is the bound parent's body when `history` holds nothing
-    /// below it. Finalized storage is sampled once per step and never awaited for a height that
-    /// is not known to be finalized.
+    /// history's first commitment. When `history` is empty or holds only the parent, that is the
+    /// bound parent's body.
     ///
-    /// An anchored history gives each commitment a height by its position below `parent_height`.
-    /// If a block on the branch declares a height that is not one above its parent's, the anchor's
-    /// inferred height is wrong, and a read below it can wait on a height that is not finalized.
-    /// Such a block fails its own certification, so nothing built on it can finalize.
+    /// An anchored history gives each commitment a height by its position, with the last at
+    /// `parent_height`. If a block on the branch declares a height that is not one above its
+    /// parent's, the anchor's inferred height is wrong, and a read below it can wait on a height
+    /// that is not finalized. Such a block fails its own certification, so nothing built on it can
+    /// finalize.
     ///
     /// A polled range keeps the part of its remaining heights that `history` covers prefetched
     /// in forward order, within the capacity shared by all ranges
@@ -346,9 +349,9 @@ impl<V: Variant> Walk<V> {
     /// Takes one step from the lowest known commitment. The outcome is recorded before the
     /// step completes, so progress never depends on which caller observes it.
     async fn step<S: Scheme>(walk: Arc<Mutex<Self>>, marshal: Mailbox<S, V>) {
-        // A finalized block stored at the lowest known height ends the walk, as a junction when
-        // it matches and a conflict otherwise. Without one, the step acquires the body to learn
-        // its parent.
+        // A block recorded as finalized at the lowest known height ends the walk, as a junction
+        // when it matches and a conflict otherwise. Without one, the step acquires the body to
+        // learn its parent.
         let (height, commitment) = walk.lock().lowest();
         let outcome = match marshal.get_info(height).await {
             Some((_, digest)) if digest == V::commitment_to_inner(commitment) => Err(End::Junction),
@@ -598,7 +601,7 @@ impl<B: Block> Blocks<B> {
         self.source.clone().resolve(height).await
     }
 
-    /// Acquires an inclusive range in increasing height order.
+    /// Returns a stream that yields the blocks of an inclusive range in increasing height order.
     ///
     /// Acquisition starts when the stream is polled. Consuming a block releases the stream's
     /// ownership of it and permits the next request. An empty range performs no work. A range

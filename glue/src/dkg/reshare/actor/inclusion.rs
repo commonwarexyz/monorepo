@@ -2882,8 +2882,8 @@ mod tests {
                     .is_none()
             );
 
-            // A source with no resident digest reads the parent's body, and that
-            // body must be the finalized tip.
+            // With no resident digest, the scan reads the parent's body and accepts the branch
+            // only when that body is the finalized tip.
             for (block, accepted) in fetched {
                 let (release, gate) = oneshot::channel();
                 let (source, started) = gated_blocks([block], gate);

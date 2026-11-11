@@ -57,8 +57,7 @@ impl<V: Variant> Subscriptions<V> {
             .is_some_and(|subscription| !subscription.fetching.is_empty())
     }
 
-    /// Removes canceled subscribers and returns commitments whose last fetching caller left.
-    ///
+    /// Removes canceled callers and returns the commitments whose last fetching caller left.
     /// Canceled callers that only wait are removed without being reported.
     pub(super) fn retain_open(&mut self) -> Vec<V::Commitment> {
         let mut ended = Vec::new();
