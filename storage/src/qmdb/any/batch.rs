@@ -993,7 +993,7 @@ where
         let ops = self.read_ops(locations, reader).await?;
         let live = zip_eq(ops, locations.iter().copied()).filter_map(|(op, loc)| {
             let Operation::Update(update) = op else {
-                unreachable!("index locations hold updates");
+                unreachable!("location does not reference update operation. loc={loc}");
             };
             locate(&self.ancestors, loc, update.key())
                 .is_some()

@@ -187,31 +187,40 @@ where
     }
 
     /// Get the value of `key` in the db, or None if it has no value.
+    pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, crate::qmdb::Error<F>> {
+        let _timer = self.metrics.get_timer();
+        self.metrics.get_calls.inc();
+        self.metrics.lookups_requested.inc();
+
+        let update = self.get_with_loc(key).await?;
+        Ok(update.map(|(update, _)| update.into_value()))
+    }
+
+    /// Returns the update for `key` and its location, or None if the key is not active.
     // Explicit Send avoids the borrowed-iterator inference limitation (rust-lang/rust#100013).
-    #[allow(clippy::manual_async_fn)]
-    pub fn get(
+    #[allow(clippy::manual_async_fn, clippy::type_complexity)]
+    pub(crate) fn get_with_loc(
         &self,
         key: &U::Key,
-    ) -> impl Future<Output = Result<Option<U::Value>, crate::qmdb::Error<F>>> + Send {
+    ) -> impl Future<Output = Result<Option<(U, Location<F>)>, crate::qmdb::Error<F>>> + Send {
         async move {
-            let _timer = self.metrics.get_timer();
-            self.metrics.get_calls.inc();
-            self.metrics.lookups_requested.inc();
-
             // Translated keys can collide, so read candidates until the full key matches.
-            let mut result = None;
             for loc in self.index.get(key).copied() {
-                let op = self.log.read(*loc).await?;
-                let Operation::Update(data) = op else {
-                    panic!("location does not reference update operation. loc={loc}");
-                };
-                if data.key() == key {
-                    result = Some(data.into_value());
-                    break;
+                let update = self.read_update(loc).await?;
+                if update.key() == key {
+                    return Ok(Some((update, loc)));
                 }
             }
 
-            Ok(result)
+            Ok(None)
+        }
+    }
+
+    /// Reads the update at `loc`, which must hold one, as every index location does.
+    pub(crate) async fn read_update(&self, loc: Location<F>) -> Result<U, crate::qmdb::Error<F>> {
+        match self.log.read(*loc).await? {
+            Operation::Update(update) => Ok(update),
+            _ => unreachable!("location does not reference update operation. loc={loc}"),
         }
     }
 
@@ -363,7 +372,7 @@ where
                 continue;
             };
             let Operation::Update(data) = op else {
-                panic!("location does not reference update operation. loc={pos}");
+                unreachable!("location does not reference update operation. loc={pos}");
             };
 
             // The candidates sharing this position match the update only for repeated input

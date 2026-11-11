@@ -397,8 +397,8 @@ pub enum Error<F: Family> {
     #[error("key exists")]
     KeyExists,
 
-    /// An index location does not hold a set, or a compact sync result is not exactly one
-    /// commit at the expected location. The payload is that location.
+    /// A compact sync result is not exactly one commit at the expected location. The payload is
+    /// that location.
     #[error("unexpected data at location: {0}")]
     UnexpectedData(Location<F>),
 

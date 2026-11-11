@@ -91,12 +91,11 @@ mod tests {
                 partition: "compact-immutable-variable-witness".into(),
                 items_per_section: NZU64!(64),
                 compression: None,
-                codec_config: (),
+                codec_config: ((), ()),
                 page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
-            commit_codec_config: ((), ()),
         };
         CompactDb::init(context, cfg, None).await.unwrap()
     }
@@ -263,7 +262,6 @@ mod tests {
         test_variable_delayed_merkleize_after_ancestor_apply => run_delayed_merkleize_after_ancestor_apply, open;
         test_variable_get_many => run_get_many, open;
         test_variable_get_many_duplicate_keys => run_get_many_duplicate_keys, open;
-        test_variable_get_many_unexpected_data => run_get_many_unexpected_data, open;
         test_variable_apply_after_ancestor_dropped => run_apply_after_ancestor_dropped, open;
         test_variable_dropped_ancestor_reads => run_dropped_ancestor_reads, open;
         test_variable_multi_key_batch_reads => run_multi_key_batch_reads, open;
