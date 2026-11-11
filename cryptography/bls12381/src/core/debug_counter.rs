@@ -29,8 +29,8 @@ impl DebugCounter {
 
     /// Bounds `a + bias - b` by `a + bias`, checking that `b` is at most `bias`.
     ///
-    /// This establishes nonnegativity for the represented integer. Separate limb or residue
-    /// constraints remain the arithmetic context's responsibility.
+    /// The check shows that the represented integer stays nonnegative. Limb and residue
+    /// constraints remain for the caller to check.
     ///
     /// # Panics
     ///
