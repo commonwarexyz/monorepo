@@ -30,7 +30,7 @@ use std::{collections::VecDeque, sync::Arc};
 /// `init_buffer` sizes the replay read buffer (in bytes). `cache_size` bounds a
 /// `(location -> key)` cache that lets collision resolution resolve candidates from memory
 /// instead of re-reading the log; `None` disables it.
-pub(crate) async fn build_snapshot_from_log<F, C, I, Fn>(
+async fn build_snapshot_from_log<F, C, I, Fn>(
     inactivity_floor_loc: crate::merkle::Location<F>,
     reader: &C,
     snapshot: &mut I,
