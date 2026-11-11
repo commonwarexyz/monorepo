@@ -1,19 +1,30 @@
 //! Kernels for the group operations, each written once over every base field representation.
 //!
-//! Each public operation runs as one kernel through [`Kernel::dispatch`], which selects the
-//! backend at the boundary. The backend's profile then selects the base field representation: on
-//! x86v4c, residues, except for the sums and multiples of many elements of G1, whose base field
-//! products the 64-bit lanes finish sooner; 32-bit lanes elsewhere. Elements cross the boundary
-//! as canonical coordinates, so every kernel loads its inputs and stores its outputs, and loaded
-//! coordinates satisfy the bounds of the curve formulas.
+//! A kernel implements [`Kernel::run`] once, generically over the representation, and the
+//! public operations run it through [`Kernel::dispatch`]. G1 and G2 implement [`Group`], which
+//! gives the kernels their coordinates, their points in each representation, and the split of
+//! their scalars.
+//!
+//! # Dispatch
+//!
+//! [`Kernel::dispatch`] selects the backend at the boundary. The backend's profile then selects
+//! the base field representation: on x86v4c, residues, except for the sums and multiples of many
+//! elements of G1, whose base field products the 64-bit lanes finish sooner; 32-bit lanes
+//! elsewhere. Elements cross the boundary as canonical coordinates, so every kernel loads its
+//! inputs and stores its outputs, and loaded coordinates satisfy the bounds of the curve formulas.
 //!
 //! Operations over slices of elements ([`Sum`], [`MultiplyEach`], and
 //! [`Msm`](super::msm::Msm)) hold one element per lane, so they amortize the boundary and fill
-//! every lane; the single-element operations use one lane and measure latency.
+//! every lane; the single-element operations use one lane, so their cost is the latency of one
+//! lane's formulas.
+//!
+//! # Multiplication
 //!
 //! Multiplications split each scalar by the group's endomorphism ([`Group::components`]) into
 //! two components of 128 bits in G1 and four of 64 bits in G2, so that the doublings they share
 //! cover a component rather than the whole scalar, at the cost of one image per component.
+//! [`multiply`] runs a fixed schedule and [`gather`] reads every table entry, so neither the
+//! operations nor the memory accesses depend on the scalar.
 
 use super::Scalar;
 use crate::core::{
