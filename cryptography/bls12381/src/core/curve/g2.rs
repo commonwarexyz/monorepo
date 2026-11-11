@@ -4,10 +4,11 @@
 //!
 //! # Coordinate bounds
 //!
-//! Every coordinate component a formula accepts or returns has positional limb bound `1` and integer
-//! bound at most [`BOUND`], as defined by the [base field arithmetic](crate::core::field::arithmetic).
-//! Loaded coordinates and every formula's outputs satisfy this, so points chain through any number
-//! of operations without carrying or canonicalizing between them.
+//! Every coordinate component a formula accepts or returns has positional limb bound `1` and
+//! integer bound at most [`BOUND`], as defined by the
+//! [base field arithmetic](crate::core::field::arithmetic). Loaded coordinates and every formula's
+//! outputs satisfy this, so points chain through any number of operations without carrying or
+//! canonicalizing between them.
 //!
 //! Raw coordinates hold each lane of a point in the representation's own form, through
 //! [`Field::store_raw`] with bound [`BOUND`], so storing and loading them costs no conversion and
@@ -16,10 +17,11 @@
 //! # How the formulas keep their bounds
 //!
 //! Multiplications by `3b = 12 (1 + i)` scale a factor by `12` before a product and multiply the
-//! product by `1 + i`, which only rearranges its [signed sums](crate::core::field::arithmetic::Signed).
-//! Scaling before the product keeps positional bounds small, since a positional product divides
-//! its factors' bounds by `2048`. Products whose factors are sums or scaled values use
-//! [`Fp2::product_schoolbook`], whose positional bounds stay below Karatsuba's for such factors.
+//! product by `1 + i`, which only rearranges its
+//! [signed sums](crate::core::field::arithmetic::Signed). Scaling before the product keeps
+//! positional bounds small, since a positional product divides its factors' bounds by `2048`.
+//! Products whose factors are sums or scaled values use [`Fp2::product_schoolbook`], whose
+//! positional bounds stay below Karatsuba's for such factors.
 //!
 //! Each reduction uses the smallest positional bias covering its negative sums for coordinates
 //! within [`BOUND`], and each value subtraction the smallest bias covering its subtrahend in every
@@ -506,7 +508,8 @@ where
     }
 }
 
-/// Reference arithmetic and coordinate bound hooks for the [curve formula checks](crate::core::curve::fuzz).
+/// Reference arithmetic and coordinate bound hooks for the
+/// [curve formula checks](crate::core::curve::fuzz).
 #[cfg(any(test, feature = "fuzz"))]
 pub(crate) mod fuzz {
     use super::*;

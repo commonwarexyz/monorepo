@@ -17,20 +17,21 @@
 //!
 //! # How it works
 //!
-//! The Miller loop runs on the twist `y^2 = x^3 + 4 (1 + i)` of G2 in the projective coordinates of
-//! [`Point`], with affine inputs, and evaluates each line as the sparse element
-//! `l0 + l2 w^2 + l3 w^3` of `Fp12`. Lines are scaled by factors in `Fp2` that the final exponentiation
-//! removes. The final exponentiation splits into the easy part `(p^6 - 1) (p^2 + 1)`, which lands in
-//! the cyclotomic subgroup, and the hard part, an addition chain over the curve parameter
-//! `z = -0xd201000000010000` (see "Faster Squaring in the Cyclotomic Subgroup of Sixth Degree
-//! Extensions", Granger and Scott, 2010, and the chain of the zkcrypto `pairing` crate).
+//! The Miller loop runs on the twist `y^2 = x^3 + 4 (1 + i)` of G2 in the projective coordinates
+//! of [`Point`], with affine inputs, and evaluates each line as the sparse element
+//! `l0 + l2 w^2 + l3 w^3` of `Fp12`. Lines are scaled by factors in `Fp2` that the final
+//! exponentiation removes. The final exponentiation splits into the easy part
+//! `(p^6 - 1) (p^2 + 1)`, which lands in the cyclotomic subgroup, and the hard part, an addition
+//! chain over the curve parameter `z = -0xd201000000010000` (see "Faster Squaring in the
+//! Cyclotomic Subgroup of Sixth Degree Extensions", Granger and Scott, 2010, and the chain of the
+//! zkcrypto `pairing` crate).
 //!
 //! # Bounds
 //!
-//! The points of the Miller loop satisfy the [coordinate bounds of G2](crate::core::curve::g2), and its
-//! lines the bounds of [`Fp12::mul_by_line`]: every line component has limb bound `1` and integer
-//! bound at most [`LINE_COMPONENT_BOUND`], below [`LINE_BOUND`]. Every element of `Fp12` satisfies
-//! the [element bounds](crate::core::field::fp12).
+//! The points of the Miller loop satisfy the [coordinate bounds of G2](crate::core::curve::g2), and
+//! its lines the bounds of [`Fp12::mul_by_line`]: every line component has limb bound `1` and
+//! integer bound at most [`LINE_COMPONENT_BOUND`], below [`LINE_BOUND`]. Every element of `Fp12`
+//! satisfies the [element bounds](crate::core::field::fp12).
 //!
 //! # Kernels
 //!
