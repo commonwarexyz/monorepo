@@ -256,8 +256,7 @@ const BATCH_SIZE: usize = 64;
 /// repolls once a pass has reached their deadlines complete without their
 /// fires. Request deadlines, and a peer's rescue of a stalled worker's
 /// sleeps, keep a full budget per pass, and so do the refiles of later
-/// sleeps, which wake nothing, so a crowded wheel bucket cascades as fast
-/// beside a full run queue as beside an empty one.
+/// sleeps, which wake nothing.
 ///
 /// Between two passes the worker polls a batch of up to [`BATCH_SIZE`]
 /// tasks, so with long polls a full batch would hold each further budget back
@@ -1120,12 +1119,8 @@ pub struct Local {
     /// from it, so neither locks the timers just to learn that nothing is due.
     /// Only this worker registers, and it lowers the cache with every
     /// registration, so the cache is never later than the earliest firing
-    /// time. It is earlier while a crowded wheel bucket waits to be refiled
-    /// from its start (see [`Wheel::bound`]). Removals and peer expiry can
-    /// also leave it early, which costs spurious expiry passes, never a late
-    /// timer.
-    ///
-    /// [`Wheel::bound`]: super::wheel::Wheel::bound
+    /// time. Removals and peer expiry can leave it early, which costs
+    /// spurious expiry passes, never a late timer.
     pub timers_next: u64,
     /// Reject new registration and send wakes to the global queue, while
     /// allowing idempotent cancellation.
@@ -1582,9 +1577,9 @@ pub struct Worker {
     /// as that queue takes them, in the wheel's order. Refiles and request
     /// deadlines keep a full budget. Cleared by a pass that reaches every due
     /// deadline. A pass that runs out of budget while draining a detached
-    /// wheel bucket leaves its bound at or below its time, even with only
-    /// later deadlines left to refile (see [`Wheel::bound`]), which sets this
-    /// until the bucket is drained.
+    /// wheel bucket can leave its bound at or below its time with only later
+    /// deadlines left to refile (see [`Wheel::bound`]), which sets this for a
+    /// few more passes.
     ///
     /// [`Wheel::bound`]: super::wheel::Wheel::bound
     backlog: bool,

@@ -23,23 +23,16 @@
 //! bucket of N later slots holds back due slots in other level buckets for
 //! about N / ([`REFILES_PER_UNIT`] * budget) passes.
 //!
-//! [`Wheel::bound`] is the time by which the owner must run its next pass,
-//! and it never walks a bucket. Each bucket keeps a count of its slots and a
-//! lower bound of their ticks, exact until a slot holding the minimum is
-//! removed. A bucket above level zero that holds at most [`LAZY_SLOTS`] slots
-//! is bounded by that minimum, so it cascades once its first deadline is due
-//! and costs its owner no pass before then. A removed minimum can leave that
-//! bound early, which costs one early pass. A fuller bucket is bounded by its
-//! start, and a detached one by the base, so the owner drains it in
-//! consecutive passes as soon as time reaches it. Its refiles are then over
-//! before its first deadline, unless that deadline follows the bucket's start
-//! more closely than they take.
+//! [`Wheel::bound`] never walks a bucket. Each bucket keeps a lower bound of
+//! its ticks, exact until a slot holding the minimum is removed. A bucket
+//! above level zero is bounded by that minimum, so it cascades once its first
+//! deadline is due and costs its owner no pass before then. A removed minimum
+//! can leave the bound early, which costs early passes until expiry reaches
+//! the bucket and has fired or refiled every slot in it.
 //!
 //! The base moves only in passes. A slot inserted long after the latest pass
 //! files by its distance from that base, on a higher level than its distance
-//! from the current time needs, which costs it a few more refiles. A crowd of
-//! such slots shares a bucket that has already started, so its owner's next
-//! passes refile it and bring the base up to date.
+//! from the current time needs, which costs it a few more refiles.
 //!
 //! The wheel holds no payload. Its owner keys slots by a stable index of its
 //! own, such as a slab index, and keeps the state behind them. Each worker's
@@ -70,16 +63,6 @@ pub const BUDGET: u32 = 256;
 /// registered long before them cascade in large buckets, whose refiles would
 /// otherwise hold back the due slots behind them for many passes.
 pub const REFILES_PER_UNIT: u32 = 16;
-
-/// Most slots that a bucket above level zero holds while it still cascades
-/// lazily, at its first deadline. Refiling them one level down costs at most
-/// a quarter of a full budget, which refiles keep even in a pass whose fires
-/// are capped, so a bucket up to level three, whose slots may descend three
-/// levels, still leaves that pass a quarter of its budget to fire what is
-/// due. A fuller bucket cascades from its start instead (see
-/// [`Wheel::bound`]), at the cost of one earlier pass, or timed wake of an
-/// idle owner, per more than this many slots.
-const LAZY_SLOTS: u32 = REFILES_PER_UNIT * BUDGET / 4;
 
 /// Number of wheel levels.
 const LEVELS: usize = 9;
@@ -126,7 +109,7 @@ const ABSENT: Link = Link {
     bucket: NONE,
 };
 
-/// One bucket's list, its length, and a lower bound of its ticks.
+/// One bucket's list and a lower bound of its ticks.
 #[derive(Clone, Copy)]
 struct Bucket {
     /// Lower bound of the bucket's ticks, exact until a slot holding the
@@ -136,8 +119,6 @@ struct Bucket {
     head: u32,
     /// Last slot.
     tail: u32,
-    /// Number of slots.
-    count: u32,
 }
 
 /// An empty bucket.
@@ -145,7 +126,6 @@ const EMPTY: Bucket = Bucket {
     min: u64::MAX,
     head: NIL,
     tail: NIL,
-    count: 0,
 };
 
 /// Conversions between instants and a wheel's nanoseconds since its owner's
@@ -328,7 +308,6 @@ impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
         }
 
         entry.tail = slot;
-        entry.count += 1;
 
         let link = &mut self.links[slot as usize];
         link.prev = tail;
@@ -370,8 +349,6 @@ impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
         if next == NIL {
             entry.tail = prev;
         }
-
-        entry.count -= 1;
 
         // An emptied bucket leaves the bitmaps, and an emptied detached
         // bucket is drained.
@@ -416,12 +393,9 @@ impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
     }
 
     /// Insert `slot`, which must not be resident and must be below
-    /// `u32::MAX`, at `deadline`. Returns the time by which a pass must
-    /// reach the slot, never later than its firing time and never earlier
-    /// than [`Self::bound`]: its firing time, or the start of its bucket if
-    /// that one now cascades from its start. An owner that caches the bound
-    /// lowers its cache to this time.
-    pub fn insert(&mut self, slot: u32, deadline: u64) -> u64 {
+    /// `u32::MAX`, at `deadline`. It fires at [`Self::rounded`] of that
+    /// deadline, to which an owner that caches the bound lowers its cache.
+    pub fn insert(&mut self, slot: u32, deadline: u64) {
         // The owner picks the slot indices, so the links grow to the highest
         // one inserted and keep that storage until [`Self::clear`]. The last
         // index is the null link, which only growth could admit.
@@ -446,19 +420,6 @@ impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
 
         self.link(slot, bucket);
         self.len += 1;
-
-        // A bucket above level zero that has grown past its lazy size is
-        // reached at its first tick, the slot's tick without the bits of the
-        // levels below. The due list is beyond the last level.
-        let level = bucket / LEVEL_BUCKETS;
-
-        let reach = if (1..LEVELS).contains(&level) && self.buckets[bucket].count > LAZY_SLOTS {
-            tick & !((1 << (level * LEVEL_BITS)) - 1)
-        } else {
-            tick
-        };
-
-        reach * RESOLUTION
     }
 
     /// Remove the resident `slot`, asserting its residency.
@@ -472,8 +433,9 @@ impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
     /// slots refiled. Due slots go first, then the detached bucket, then
     /// buckets in time order. A pass that runs out of budget leaves the rest
     /// for the next one, and [`Self::bound`] then stays at or below `now`,
-    /// or at or below the base's time when `now` is older than it, while a
-    /// slot is due or the detached bucket holds slots to refile.
+    /// or at or below the base's time when `now` is older than it, while any
+    /// reached slot is due, and possibly while only reached slots to refile
+    /// remain (see [`Self::bound`]).
     pub fn expire(&mut self, now: u64, budget: &mut u32, fire: &mut impl FnMut(u32)) {
         self.expire_capped(now, budget, u32::MAX, fire);
     }
@@ -583,15 +545,15 @@ impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
         }
     }
 
-    /// The time by which the owner must run its next pass, never later than
-    /// the earliest resident's firing time, `u64::MAX` when empty. It never
-    /// walks a bucket. It is the earliest firing time, exact unless the slots
-    /// holding a bucket's minimum were removed, while the earliest level
-    /// bucket is on level zero or holds at most [`LAZY_SLOTS`] slots. It is
-    /// the start of a fuller bucket, which cascades from there, and the
-    /// base's time while a detached bucket holds slots, which the next pass
-    /// fires or refiles. A bound at or below the time of the latest pass
-    /// therefore does not strictly mean that a slot is due.
+    /// A time never later than the earliest resident's firing time, `u64::MAX`
+    /// when empty. It is exact unless the slots holding a bucket's minimum
+    /// were removed, and it never walks a bucket. A detached bucket keeps the
+    /// minimum it had when expiry reached it while slots leave it, fired,
+    /// removed or refiled, so after a pass that runs out of budget in that
+    /// bucket, the bound can stay at or below the pass's time while only
+    /// later slots to refile remain, until it is drained. A bound at or below
+    /// the time of the latest pass therefore does not strictly mean that a
+    /// slot is due.
     pub fn bound(&self) -> u64 {
         // The due list, the detached bucket, and the earliest level bucket
         // together hold the earliest resident, whichever it is.
@@ -602,17 +564,15 @@ impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
         }
 
         if self.pending != NONE {
-            // The base is the detached bucket's start until it is drained.
-            tick = tick.min(self.base);
+            tick = tick.min(self.buckets[self.pending as usize].min);
         }
 
         if let Some((bucket, start)) = self.next_event() {
             // Every slot of a level zero bucket holds its start tick.
-            let entry = &self.buckets[bucket];
-            tick = tick.min(if bucket < LEVEL_BUCKETS || entry.count > LAZY_SLOTS {
+            tick = tick.min(if bucket < LEVEL_BUCKETS {
                 start
             } else {
-                entry.min
+                self.buckets[bucket].min
             });
         }
 
@@ -653,21 +613,6 @@ pub mod tests {
         /// Number of slots whose links the wheel has storage for.
         pub(crate) const fn capacity(&self) -> usize {
             self.links.capacity()
-        }
-
-        /// Whether every bucket's count is the length of its list.
-        fn counts_match(&self) -> bool {
-            self.buckets.iter().all(|bucket| {
-                let mut count = 0;
-                let mut slot = bucket.head;
-
-                while slot != NIL {
-                    count += 1;
-                    slot = self.links[slot as usize].next;
-                }
-
-                count == bucket.count
-            })
         }
     }
 
@@ -726,12 +671,9 @@ pub mod tests {
     /// that a pass fires no more slots than its budget has units, that an
     /// unbudgeted pass leaves nothing due, that firing times are less than
     /// one tick after their deadlines, that the bound never exceeds the
-    /// earliest firing time or, while a bucket is detached, the base's time,
-    /// and that an insertion returns a time between the bound and its firing
-    /// time without lowering the bound below what it returns. Each insertion
-    /// step inserts `crowd` slots within 2^16 ns of one deadline, so that a
-    /// large crowd fills buckets past their lazy size.
-    fn model<const RESOLUTION: u64>(seed: u64, steps: usize, max_bits: u32, crowd: u32) {
+    /// earliest firing time, and that an insertion lowers the bound no
+    /// further than its firing time.
+    fn model<const RESOLUTION: u64>(seed: u64, steps: usize, max_bits: u32) {
         // A wheel and its model: live slots with their firing times, the
         // same ordered by firing time, and free slots for reuse.
         let mut rng = TestRng::new(seed);
@@ -756,35 +698,27 @@ pub mod tests {
                         _ => latest.saturating_add(scaled(&mut rng, max_bits)),
                     };
 
-                    for member in 0..crowd {
-                        let deadline = if member == 0 {
-                            deadline
-                        } else {
-                            deadline.saturating_add(scaled(&mut rng, 16))
-                        };
+                    let slot = free.pop().unwrap_or_else(|| {
+                        slots += 1;
+                        slots - 1
+                    });
 
-                        let slot = free.pop().unwrap_or_else(|| {
-                            slots += 1;
-                            slots - 1
-                        });
+                    let before = wheel.bound();
+                    wheel.insert(slot, deadline);
+                    let firing = Wheel::<RESOLUTION>::rounded(deadline);
 
-                        let before = wheel.bound();
-                        let reach = wheel.insert(slot, deadline);
-                        let firing = Wheel::<RESOLUTION>::rounded(deadline);
+                    assert!(firing >= deadline.min(Wheel::<RESOLUTION>::MAX));
+                    assert!(firing - deadline.min(Wheel::<RESOLUTION>::MAX) < RESOLUTION);
+                    assert!(live.insert(slot, firing).is_none());
 
-                        assert!(firing >= deadline.min(Wheel::<RESOLUTION>::MAX));
-                        assert!(firing - deadline.min(Wheel::<RESOLUTION>::MAX) < RESOLUTION);
-                        assert!(live.insert(slot, firing).is_none());
+                    order.insert((firing, slot));
 
-                        order.insert((firing, slot));
-
-                        // A cache lowered to the returned time stays at or
-                        // below the bound, and never passes the firing time.
-                        let bound = wheel.bound();
-
-                        assert!(bound <= reach && reach <= firing, "reach at {step}");
-                        assert!(bound >= before.min(reach), "lowered bound at {step}");
-                    }
+                    // A cache lowered to the firing time stays at or below
+                    // the bound.
+                    assert!(
+                        wheel.bound() >= before.min(firing),
+                        "lowered bound at {step}"
+                    );
                 }
                 // Remove a random live slot.
                 5..=7 => {
@@ -864,20 +798,7 @@ pub mod tests {
                 None => assert_eq!(bound, u64::MAX, "bound of an empty wheel at {step}"),
                 Some((firing, _)) => assert!(bound <= *firing, "late bound at {step}"),
             }
-
-            // A detached bucket keeps the bound at the base's time, which no
-            // pass has run ahead of, so its owner drains it without a wait.
-            if wheel.pending != NONE {
-                assert!(wheel.base * RESOLUTION <= latest, "base ahead at {step}");
-                assert!(bound <= wheel.base * RESOLUTION, "idle drain at {step}");
-            }
-
-            if step % 64 == 0 {
-                assert!(wheel.counts_match(), "bucket count at {step}");
-            }
         }
-
-        assert!(wheel.counts_match());
 
         // Expiring at the bound always fires or raises it.
         let mut passes = 0;
@@ -906,7 +827,7 @@ pub mod tests {
     fn test_model_fine() {
         for seed in 0..6 {
             for max_bits in [14, 30, 45, 63] {
-                model::<FINE>(seed, 20_000, max_bits, 1);
+                model::<FINE>(seed, 20_000, max_bits);
             }
         }
     }
@@ -915,18 +836,8 @@ pub mod tests {
     fn test_model_coarse() {
         for seed in 0..6 {
             for max_bits in [24, 40, 63] {
-                model::<COARSE>(seed, 20_000, max_bits, 1);
+                model::<COARSE>(seed, 20_000, max_bits);
             }
-        }
-    }
-
-    #[test]
-    fn test_model_crowded() {
-        // Crowds beyond the lazy size, so that buckets cascade from their
-        // starts and stay detached across passes of a few units.
-        for seed in 0..3 {
-            model::<FINE>(seed, 400, 30, LAZY_SLOTS + 500);
-            model::<COARSE>(seed, 400, 40, LAZY_SLOTS + 500);
         }
     }
 
@@ -1083,110 +994,57 @@ pub mod tests {
     }
 
     #[test]
-    fn test_crowded_bucket_cascades_from_its_start() {
-        /// Slots in the storm.
-        const COUNT: u32 = 50_000;
+    fn test_capped_pass_refiles_with_the_whole_budget() {
+        // The same bucket, with later slots listed ahead of the one due first.
+        let mut wheel = Wheel::<FINE>::new(0);
+        let deadline = 50_000_000;
+        let later = REFILES_PER_UNIT * (BUDGET - 1);
 
-        // Deadlines 400 ns apart from 300 ms on share the level three bucket
-        // that starts at 2^18 ticks. The earliest registers last, so a walk
-        // of the bucket reaches it after every other slot.
-        let start = (1 << 18) * FINE;
+        for slot in 0..later {
+            wheel.insert(slot, deadline + FINE + u64::from(slot) * 64);
+        }
+
+        wheel.insert(later, deadline);
+
+        // A pass that may fire one slot still refiles every later slot from
+        // the whole budget, so it reaches the due one and fires it.
+        let now = Wheel::<FINE>::rounded(deadline);
+        let mut fired = Vec::new();
+        let mut budget = BUDGET;
+        wheel.expire_capped(now, &mut budget, 1, &mut |slot| fired.push(slot));
+
+        assert_eq!(fired, [later]);
+        assert_eq!(budget, 0);
+    }
+
+    #[test]
+    fn test_bucket_cascades_at_its_first_deadline() {
+        /// Slots in the bucket, few enough that one budget refiles them down
+        /// three levels.
+        const COUNT: u32 = 1024;
+
+        // Deadlines 400 ns apart from 300 ms on share one level three bucket.
+        // The earliest registers last, so a walk of the bucket reaches it
+        // after every other slot. The bucket is bounded by its earliest
+        // firing time, so its owner runs no pass before then.
         let deadline = |slot: u32| 300_000_000 + u64::from(COUNT - 1 - slot) * 400;
         let mut wheel = Wheel::<FINE>::new(0);
 
         for slot in 0..COUNT {
-            // Up to its lazy size the bucket is reached at its earliest
-            // firing time, and beyond it at its start.
-            let reach = wheel.insert(slot, deadline(slot));
+            wheel.insert(slot, deadline(slot));
 
-            if slot < LAZY_SLOTS {
-                assert_eq!(reach, Wheel::<FINE>::rounded(deadline(slot)));
-            } else {
-                assert_eq!(reach, start);
-            }
-
-            assert_eq!(wheel.bound(), reach);
+            assert_eq!(wheel.bound(), Wheel::<FINE>::rounded(deadline(slot)));
         }
 
-        // An owner that runs a budgeted pass whenever the bound has passed
-        // refiles the bucket from its start, and then the bucket of the next
-        // level that holds the earliest deadlines from its own start, in
-        // consecutive passes that fire nothing.
+        // One pass at that time refiles every slot down the levels and still
+        // fires the earliest.
         let first = Wheel::<FINE>::rounded(deadline(COUNT - 1));
-        let mut now = 0;
-        let mut passes = 0;
-
-        while wheel.bound() < first {
-            now = now.max(wheel.bound());
-            let mut budget = BUDGET;
-            wheel.expire(now, &mut budget, &mut |slot| {
-                panic!("slot {slot} fired early")
-            });
-
-            passes += 1;
-        }
-
-        assert!(now < first, "refiled only at the first deadline");
-        assert_eq!(passes, 15);
-
-        // The first pass at the earliest firing time fires the earliest slot.
-        assert_eq!(wheel.bound(), first);
-
         let mut fired = Vec::new();
         let mut budget = BUDGET;
         wheel.expire(first, &mut budget, &mut |slot| fired.push(slot));
 
         assert_eq!(fired, [COUNT - 1]);
-    }
-
-    #[test]
-    fn test_small_bucket_cascades_at_its_first_deadline() {
-        // The same bucket at its lazy size is bounded by its earliest firing
-        // time, so its owner runs no pass before then.
-        let deadline = |slot: u32| 300_000_000 + u64::from(LAZY_SLOTS - 1 - slot) * 400;
-        let mut wheel = Wheel::<FINE>::new(0);
-
-        for slot in 0..LAZY_SLOTS {
-            let reach = wheel.insert(slot, deadline(slot));
-
-            assert_eq!(reach, Wheel::<FINE>::rounded(deadline(slot)));
-            assert_eq!(wheel.bound(), reach);
-        }
-
-        // One pass at that time refiles every slot down the levels and still
-        // fires the earliest.
-        let first = Wheel::<FINE>::rounded(deadline(LAZY_SLOTS - 1));
-        let mut fired = Vec::new();
-        let mut budget = BUDGET;
-        wheel.expire(first, &mut budget, &mut |slot| fired.push(slot));
-
-        assert_eq!(fired, [LAZY_SLOTS - 1]);
         assert!(budget > 0);
-    }
-
-    #[test]
-    fn test_crowded_bucket_behind_the_base_cascades_at_once() {
-        // The wheel last passed at zero. One second later a crowd registers
-        // a millisecond ahead, in a bucket that started before then.
-        let registered = 1_000_000_000;
-        let deadline = |slot: u32| registered + 1_000_000 + u64::from(slot) * 400;
-        let mut wheel = Wheel::<FINE>::new(0);
-
-        for slot in 0..=LAZY_SLOTS {
-            let reach = wheel.insert(slot, deadline(slot));
-            assert_eq!(reach <= registered, slot == LAZY_SLOTS);
-        }
-
-        // The owner's next pass refiles the bucket and brings the base up to
-        // date, so later slots file by their distance from that time.
-        let mut budget = BUDGET;
-        wheel.expire(registered, &mut budget, &mut |slot| {
-            panic!("slot {slot} fired early")
-        });
-
-        assert!(budget > 0);
-        assert_eq!(wheel.bound(), Wheel::<FINE>::rounded(deadline(0)));
-        assert_eq!(wheel.base, registered / FINE);
     }
 
     #[test]
