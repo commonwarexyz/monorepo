@@ -639,7 +639,8 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         // Initialize oversized journal. A checkpoint is only published after the
         // oversized journal is durably synced (see Self::sync), so recovery restores
         // exactly the checkpointed state: committed data it covers cannot be silently
-        // repaired away, and anything beyond it is discarded.
+        // repaired away, and anything beyond it is discarded. A reset restores the empty
+        // checkpoint over the wiped partitions.
         let oversized_cfg = OversizedConfig {
             index_partition: config.key_partition.clone(),
             value_partition: config.value_partition.clone(),
@@ -651,16 +652,13 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             codec_config: config.codec_config,
         };
         let oversized_context = context.child("oversized");
-        let oversized: Oversized<E, Record<K>, V> = match checkpoint
+        let restored = checkpoint
             .filter(|checkpoint| !checkpoint.is_empty())
-            .map(|checkpoint| (checkpoint.section, checkpoint.oversized_size))
-        {
-            Some(checkpoint) => {
-                Oversized::init_with_checkpoint(oversized_context, oversized_cfg, checkpoint)
-                    .await?
-            }
-            None => Oversized::init(oversized_context, oversized_cfg).await?,
-        };
+            .map_or((0, 0), |checkpoint| {
+                (checkpoint.section, checkpoint.oversized_size)
+            });
+        let oversized: Oversized<E, Record<K>, V> =
+            Oversized::init_with_checkpoint(oversized_context, oversized_cfg, restored).await?;
 
         // Open table blob
         let (table, table_len) = context

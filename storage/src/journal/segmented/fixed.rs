@@ -74,8 +74,8 @@ struct Inner<E: Storage + Metrics, A: CodecFixed> {
     _array: PhantomData<A>,
 }
 
-/// Recovery work authorized at open. [Journal::init_bounded] uses `Floors` with no floors. Every
-/// other value follows a completed non-mutating preflight.
+/// Recovery work authorized at open. [Journal::init] uses `Floors` with no floors. Every other
+/// value follows a completed non-mutating preflight.
 enum PreflightMode {
     /// Preserve each durable validation floor while replay repairs its suffix.
     Floors {
@@ -673,15 +673,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Backing blobs are opened without scanning their full page prefixes. Use `replay` to validate
     /// and iterate over all items before appending to a retained section.
     pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
-        Self::init_bounded(context, cfg, u64::MAX).await
-    }
-
-    /// Open only sections through `ceiling`. [Journal::truncate_pending_tail] or [Journal::clear]
-    /// must remove any later section before the journal is published.
-    pub(crate) async fn init_bounded(context: E, cfg: Config, ceiling: u64) -> Result<Self, Error> {
         let mode = PreflightMode::Floors {
             floors: BTreeMap::new(),
-            ceiling,
+            ceiling: u64::MAX,
         };
         Ok(Self(Box::new(Inner::init(context, cfg, mode).await?)))
     }
@@ -1257,10 +1251,6 @@ mod tests {
                 item?;
             }
             replay.finish()
-        }
-
-        pub(in super::super) fn test_configuration(&self) -> (E, String, AppendFactory) {
-            self.0.manager.test_configuration()
         }
     }
 

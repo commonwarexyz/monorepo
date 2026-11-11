@@ -332,9 +332,12 @@ impl<const COMPRESSED: bool> StorageWorkload for SegmentedOversizedWorkload<COMP
             compression: COMPRESSED.then_some(3),
             codec_config: (RangeCfg::new(0..256), ()),
         };
-        let mut journal =
-            oversized::Oversized::<_, TestEntry, Vec<u8>>::init(context.child("journal"), config)
-                .await?;
+        let mut journal = oversized::Oversized::<_, TestEntry, Vec<u8>>::init_with_checkpoint(
+            context.child("journal"),
+            config,
+            (0, 0),
+        )
+        .await?;
 
         let items_count = context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4);
         let mut data_to_write = vec![Vec::new(); items_count];

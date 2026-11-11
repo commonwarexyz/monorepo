@@ -21,39 +21,35 @@
 //!
 //! # Crash Recovery
 //!
-//! On unclean shutdown, the index journal and glob may have different lengths:
-//! - Index entry pointing to non-existent glob data (dangerous)
-//! - Glob value without index entry (orphan, acceptable but cleaned up)
-//! - Glob sections without corresponding index sections (orphan sections, removed)
+//! Values are appended to the glob before their index entries, so an unclean shutdown can leave
+//! an index entry without durable value bytes, value bytes without an index entry, or a value
+//! section without an index section. The index is the authority. Recovery durably shortens it
+//! before releasing the value bytes it no longer references, so later appends cannot expose a
+//! dropped entry or its stale bytes. Each index section ends up paired with a value section that
+//! stops at its last retained entry, and value sections without an index section are removed.
 //!
-//! During initialization, crash recovery is performed:
-//! 1. Each section's last valid entry is found by scanning backwards: an entry is valid
-//!    only if its glob reference is in bounds (`value_offset + value_size <= glob_size`)
-//!    and its value's checksum verifies
-//! 2. Entries beyond the last valid one are skipped and the index journal is truncated
-//! 3. Orphan value sections (sections in glob but not in index) are removed
+//! The owner selects one of two recovery contracts at initialization.
 //!
-//! This allows async writes (glob first, then index) while ensuring consistency after recovery. A
-//! trailing run of entries that became durable ahead of their value bytes is truncated at the next
-//! init, whether the glob is short (range check) or covers the ranges with garbage (checksum
-//! check). Entries below the last valid one are kept without reading their values (monotonically
-//! increasing offsets make them range-valid), so their checksums are verified lazily at
-//! `get_value()`, which can fail for a kept entry if the underlying storage is corrupted.
-//! Truncations (including the repairs recovery itself performs) make both journals' truncations
-//! durable before returning, so neither a dropped index entry nor the stale bytes it referenced can
-//! survive a crash once later appends may reuse the freed offsets.
+//! ## Checkpoint restore
 //!
-//! When a checkpoint is provided ([Oversized::init_with_checkpoint]), recovery restores the
-//! state instead of inferring one: each section below the checkpoint is adopted at its
-//! validated terminal boundary (without reading values), the checkpointed section is
-//! durably truncated to the committed size, and everything after it is removed unread. A
-//! missing or damaged durable boundary fails init rather than being repaired. Other
-//! committed damage the checkpoint covers surfaces lazily as read errors.
+//! [Oversized::init_with_checkpoint] restores a `(section, index size)` checkpoint that the owner
+//! published only after a completed [Oversized::sync] covered it. Each section below the
+//! checkpoint is adopted at its validated terminal boundary without reading values, the
+//! checkpoint section is durably truncated to the committed size, and everything after it is
+//! removed unread. A missing or damaged boundary the checkpoint covers fails init, and other
+//! committed damage surfaces lazily as read errors.
 //!
-//! Tracked recovery persists a per-section committed item count. Entries below the marker are
-//! adopted once their index/value boundary is proven, entries above it are value-verified in
-//! order, and the first invalid value truncates the section's remainder. Markers trail proven
-//! syncs, publishing once a section is durable and idle (or on an empty flush).
+//! Restoring the empty checkpoint `(0, 0)` on empty storage opens a fresh journal. A restored
+//! journal keeps no markers, so its owner is responsible for publishing each later checkpoint.
+//!
+//! ## Marker-tracked recovery
+//!
+//! [Oversized::init_with_metadata] persists a per-section committed item count. Entries below the
+//! marker are adopted once their index/value boundary is proven, entries above it are
+//! value-verified in order, and the first invalid value truncates the section's remainder. Markers
+//! trail proven syncs, publishing once a section is durable and idle (or on an empty flush).
+//! [Oversized::init_with_metadata_at_most] applies the same contract below an upper bound on the
+//! retained history.
 
 use super::{
     fixed::{
@@ -74,7 +70,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     num::NonZeroUsize,
 };
-use tracing::{debug, warn};
+use tracing::warn;
 
 /// Trait for index entries that reference oversized values in glob storage.
 ///
@@ -123,9 +119,9 @@ pub struct Config<C> {
 
 /// Recovery contract applied while opening the index and value journals.
 ///
-/// Exactly one mode establishes their shared boundary: `Restore` uses an explicit checkpoint,
-/// `Floors` preserves per-section validated prefixes while repairing any suffix, and `Infer`
-/// derives the boundary entirely from journal contents.
+/// Exactly one mode establishes their shared boundary. `Restore` uses an explicit checkpoint, and
+/// `Floors` preserves each per-section validated prefix, if any, while repairing the suffix above
+/// it.
 enum RecoveryMode<'a> {
     /// Restore one checkpoint section and remove every later section unread.
     Restore { section: u64, index_size: u64 },
@@ -136,10 +132,6 @@ enum RecoveryMode<'a> {
         floors: &'a BTreeMap<u64, u64>,
         ceiling: u64,
     },
-
-    /// Infer the durable state of every section through `ceiling`, leaving later index and value
-    /// sections unopened for removal before publication.
-    Infer { ceiling: u64 },
 }
 
 /// Durable recovery state for a journal that validates every uncommitted value during replay.
@@ -358,11 +350,6 @@ impl<E: Context, I: Record, V: CodecShared> Pending<E, I, V> {
         let value_context = context.child("values");
 
         let (index, values) = match recovery {
-            RecoveryMode::Infer { ceiling } => {
-                let index = FixedJournal::init_bounded(index_context, index_cfg, ceiling).await?;
-                let values = GlobRecovery::init(value_context, value_cfg, ceiling).await?;
-                (index, values)
-            }
             RecoveryMode::Floors { floors, ceiling } => {
                 let preflight =
                     FixedJournal::preflight_floors(index_context, index_cfg, floors, ceiling)
@@ -395,26 +382,6 @@ impl<E: Context, I: Record, V: CodecShared> Pending<E, I, V> {
         })
     }
 
-    /// Drain the fixed journal's ordered recovery pass, then reconcile the value tail of each
-    /// section. The replay buffer controls every forward index read.
-    async fn recover_inferred(self, buffer: NonZeroUsize) -> Result<Oversized<E, I, V>, Error> {
-        let mut replay = self
-            .index
-            .replay(0, 0, buffer, ReadOptions::default())
-            .await?;
-        while let Some(result) = replay.next().await {
-            result?;
-        }
-        Ok(Self {
-            index: replay.finish()?,
-            values: self.values,
-            tracking: self.tracking,
-        }
-        .repair()
-        .await?
-        .into())
-    }
-
     /// Return the value boundary owned by an optional terminal index entry.
     fn boundary_value_end(section: u64, entry: &Option<I>) -> Result<u64, Error> {
         let Some(entry) = entry else {
@@ -426,66 +393,6 @@ impl<E: Context, I: Record, V: CodecShared> Pending<E, I, V> {
                 "section {section} has an overflowing terminal value range"
             ))
         })
-    }
-
-    /// Perform crash recovery by validating index entries against glob contents.
-    ///
-    /// Only checks entries from the end of each section until one is valid. Since entries
-    /// are appended sequentially and value offsets are monotonically increasing within a
-    /// section, all earlier entries must be range-valid (their value checksums are
-    /// verified lazily at read).
-    async fn repair(mut self) -> Result<Self, Error> {
-        let chunk_size = FixedJournal::<E, I>::CHUNK_SIZE as u64;
-        let sections: Vec<u64> = self.index.sections().collect();
-
-        // Shorten each index prefix before collecting the value suffixes it releases. Once all
-        // index repairs are durable, no stale entry can claim a subsequently reused value range.
-        let mut value_truncations = BTreeMap::new();
-        for section in sections {
-            let index_size = self.index.size(section)?;
-            let glob_size = self.values.size(section)?;
-            let entry_count = index_size / chunk_size;
-
-            // Values are reachable only through index entries.
-            if entry_count == 0 {
-                if glob_size > 0 {
-                    debug!(section, glob_size, "truncating orphaned value bytes");
-                    value_truncations.insert(section, 0);
-                }
-                continue;
-            }
-
-            // Find last valid entry and target glob size
-            let (valid_count, glob_target) = self
-                .find_last_valid_entry(section, entry_count, glob_size, 0)
-                .await?;
-
-            // Truncate index if any entries are invalid
-            if valid_count < entry_count {
-                let valid_size = valid_count * chunk_size;
-                debug!(section, entry_count, valid_count, "truncating index");
-                self.index = self
-                    .index
-                    .truncate_pending_section(section, valid_size)
-                    .await?;
-            }
-
-            // Truncate glob trailing garbage (can occur when value was written but
-            // index entry wasn't, or when index was truncated but glob wasn't)
-            if glob_size > glob_target {
-                debug!(
-                    section,
-                    glob_size, glob_target, "truncating glob trailing garbage"
-                );
-                value_truncations.insert(section, glob_target);
-            }
-        }
-
-        // Durable index prefixes now authorize releasing and reusing the unreferenced values.
-        self.values = self.values.truncate_sections(&value_truncations).await?;
-
-        // Clean up orphan value sections that don't exist in index
-        self.cleanup_orphan_value_sections().await
     }
 
     /// Verify every floor's terminal value extent before repair can mutate either journal.
@@ -710,7 +617,7 @@ impl<E: Context, I: Record, V: CodecShared> Pending<E, I, V> {
     /// Other sections are unaffected.
     /// The value size is derived from the last entry after truncating the index.
     ///
-    /// Both truncations are made durable before returning (see [Oversized::init_at_most]).
+    /// Both truncations are made durable before returning.
     async fn truncate_pending_section(
         mut self,
         section: u64,
@@ -753,51 +660,6 @@ impl<E: Context, I: Record, V: CodecShared> Pending<E, I, V> {
 }
 
 impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
-    /// Open through `section` and index-byte `end`, rounding down a partial entry.
-    ///
-    /// Later index sections and whole index pages above `end` are removed before opening, and the
-    /// removal stays durable even if initialization then fails. Later value sections are removed
-    /// without being opened. Recovery validates the paired retained prefix.
-    pub async fn init_at_most(
-        context: E,
-        cfg: Config<V::Cfg>,
-        section: u64,
-        end: u64,
-    ) -> Result<Self, Error> {
-        // The index must release references before paired recovery can release value bytes.
-        let end = end - end % FixedJournal::<E, I>::CHUNK_SIZE as u64;
-        super::manager::truncate_paged_tail(
-            &context,
-            &cfg.index_partition,
-            cfg.index_page_cache.page_size(),
-            section,
-            end,
-        )
-        .await?;
-        let buffer = cfg.replay_buffer;
-        let pending = Pending::init(context, cfg, RecoveryMode::Infer { ceiling: section }).await?;
-        let (mut pending, index_end, value_end) =
-            pending.select_cap(section, end, 0, buffer).await?;
-        pending.index = pending
-            .index
-            .truncate_pending_tail(section, index_end)
-            .await?;
-        pending.values = pending.values.truncate(section, value_end).await?;
-        pending.recover_inferred(buffer).await
-    }
-
-    /// Initialize with inferred crash recovery.
-    ///
-    /// Recovery infers the durable state: it finds each section's last valid entry (in bounds of
-    /// the glob, checksum-verified) and truncates the index journal to exclude the entries beyond
-    /// it.
-    pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
-        let replay_buffer = cfg.replay_buffer;
-        let journal =
-            Pending::init(context, cfg, RecoveryMode::Infer { ceiling: u64::MAX }).await?;
-        journal.recover_inferred(replay_buffer).await
-    }
-
     /// Initialize with crash recovery restoring a durable checkpoint, as
     /// `(section, index size)`.
     ///
@@ -807,9 +669,11 @@ impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
     /// retained index section, which a prune interrupted between its index and value
     /// removals leaves behind, are removed as well. A missing or damaged boundary the
     /// checkpoint covers fails init with [Error::Corruption], while interior damage
-    /// below a boundary surfaces lazily as read errors. Callers must only provide a
-    /// checkpoint that was durably synced before it was published (see
-    /// [crate::freezer::Freezer]).
+    /// below a boundary surfaces lazily as read errors.
+    ///
+    /// Callers must only provide a checkpoint that was durably synced before it was
+    /// published (see [crate::freezer::Freezer]). The empty checkpoint `(0, 0)` opens
+    /// empty storage without creating or writing any blob.
     pub async fn init_with_checkpoint(
         context: E,
         cfg: Config<V::Cfg>,
@@ -908,15 +772,10 @@ impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
         }
 
         // Every advertised prefix is proven before ordinary suffix repair may mutate either
-        // journal. An empty sidecar retains the legacy inferred-recovery behavior.
-        let ceiling = cap.map_or(u64::MAX, |(section, _)| section);
-        let recovery = if floors.is_empty() {
-            RecoveryMode::Infer { ceiling }
-        } else {
-            RecoveryMode::Floors {
-                floors: &floors,
-                ceiling,
-            }
+        // journal. An empty sidecar commits no prefix, so replay validates every value.
+        let recovery = RecoveryMode::Floors {
+            floors: &floors,
+            ceiling: cap.map_or(u64::MAX, |(section, _)| section),
         };
         let mut journal = Pending::init(context, cfg, recovery).await?;
 
@@ -1438,25 +1297,6 @@ mod tests {
     use commonware_utils::{NZU16, NZUsize, probability};
     use std::time::Duration;
 
-    impl<E: crate::Context, I: Record, V: CodecShared> Oversized<E, I, V> {
-        async fn test_reopen_at_most(self, section: u64, end: u64) -> Result<Self, Error> {
-            let (context, index_partition, index_factory) = self.index.test_configuration();
-            let (_, value_cfg) = self.values.test_configuration();
-            let cfg = Config {
-                index_partition,
-                value_partition: value_cfg.partition,
-                index_page_cache: index_factory.page_cache_ref,
-                index_write_buffer: index_factory.write_buffer,
-                value_write_buffer: value_cfg.write_buffer,
-                compression: value_cfg.compression,
-                codec_config: value_cfg.codec_config,
-                replay_buffer: commonware_utils::NZUsize!(65536),
-            };
-            _ = self.sync_all().await?;
-            Self::init_at_most(context, cfg, section, end).await
-        }
-    }
-
     /// Convert offset + size to byte end position (for truncation tests).
     fn byte_end(offset: u64, size: u32) -> u64 {
         offset + u64::from(size)
@@ -1533,11 +1373,16 @@ mod tests {
         }
     }
 
-    fn value_tail_repairs_overlap(align: bool) {
-        deterministic::Runner::default().start(move |context| async move {
+    /// Aligning value tails to the index truncates independent sections concurrently, so each
+    /// section's durable value truncation reaches its sync before any of them completes.
+    #[test]
+    fn test_oversized_orphan_value_alignment_sync_concurrency() {
+        deterministic::Runner::default().start(|context| async move {
             let cfg = entry_cfg();
+
+            // Seed one durable entry per section.
             let mut journal: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("seed"), cfg.clone())
+                Oversized::init_with_checkpoint(context.child("seed"), cfg.clone(), (0, 0))
                     .await
                     .unwrap();
             for section in 1..=2 {
@@ -1563,6 +1408,8 @@ mod tests {
             journal.values = journal.values.sync_all().await.unwrap();
             drop(journal);
 
+            // Reopen and replay the index, leaving each section's value tail longer than its
+            // last retained entry.
             let outer = PendingSyncs::default();
             let inner = PendingSyncs::default();
             let delayed = DelayedSyncContext {
@@ -1579,7 +1426,10 @@ mod tests {
             } = Pending::<_, TestEntry, TestValue>::init(
                 delayed,
                 cfg.clone(),
-                RecoveryMode::Infer { ceiling: u64::MAX },
+                RecoveryMode::Floors {
+                    floors: &BTreeMap::new(),
+                    ceiling: u64::MAX,
+                },
             )
             .await
             .unwrap();
@@ -1617,15 +1467,9 @@ mod tests {
                 blocked: second_blocked,
                 release: second_release,
             } = next_pending_sync(&inner);
-            let mut repairing = Box::pin(async move {
-                if align {
-                    recovery.align_values_to_index().await
-                } else {
-                    recovery.repair().await
-                }
-            });
+            let mut aligning = Box::pin(recovery.align_values_to_index());
             commonware_macros::select! {
-                _ = repairing.as_mut() => {
+                _ = aligning.as_mut() => {
                     panic!("recovery completed before both value syncs were released");
                 },
                 _ = async {
@@ -1640,9 +1484,10 @@ mod tests {
             assert_eq!(inner.calls(), 1);
             second_release.send(Ok(())).unwrap();
             first_release.send(Ok(())).unwrap();
-            let journal: Oversized<_, TestEntry, TestValue> = repairing.await.unwrap().into();
+            let journal: Oversized<_, TestEntry, TestValue> = aligning.await.unwrap().into();
             assert_eq!(inner.calls(), 2);
 
+            // Each section keeps its entry, and its value tail ends at that entry.
             for section in 1..=2 {
                 assert_eq!(journal.size(section).unwrap(), TestEntry::SIZE as u64);
                 let entry = journal.get(section, 0).await.unwrap();
@@ -1659,16 +1504,6 @@ mod tests {
             }
             journal.destroy().await.unwrap();
         });
-    }
-
-    #[test]
-    fn test_oversized_orphan_value_repair_sync_concurrency() {
-        value_tail_repairs_overlap(false);
-    }
-
-    #[test]
-    fn test_oversized_orphan_value_alignment_sync_concurrency() {
-        value_tail_repairs_overlap(true);
     }
 
     fn test_cfg() -> Config<()> {
@@ -1693,6 +1528,39 @@ mod tests {
 
     /// Simple test value type with unit config.
     type TestValue = [u8; 16];
+
+    /// Marker partition of the journals [open_tracked] opens.
+    const MARKERS: &str = "test-markers";
+
+    /// Open a marker-tracked journal, bounded by `cap` as `(section, index end)` when given, and
+    /// drain its validation replay.
+    async fn open_tracked<E: crate::Context>(
+        context: E,
+        cfg: Config<()>,
+        cap: Option<(u64, u64)>,
+    ) -> Result<Oversized<E, TestEntry, TestValue>, Error> {
+        let mut replay = match cap {
+            Some((section, end)) => {
+                Oversized::init_with_metadata_at_most(
+                    context,
+                    cfg,
+                    MARKERS.into(),
+                    ReadOptions::default(),
+                    section,
+                    end,
+                )
+                .await?
+            }
+            None => {
+                Oversized::init_with_metadata(context, cfg, MARKERS.into(), ReadOptions::default())
+                    .await?
+            }
+        };
+        while let Some(item) = replay.next().await {
+            item?;
+        }
+        replay.finish_tracked().await
+    }
 
     #[test]
     fn test_overshooting_cap_keeps_lazy_committed_validation() {
@@ -1936,13 +1804,16 @@ mod tests {
         });
     }
 
+    /// An appended entry and its value read back from a fresh journal.
     #[test_traced]
     fn test_oversized_append_and_get() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context, cfg).await.expect("Failed to init");
+                Oversized::init_with_checkpoint(context, cfg, (0, 0))
+                    .await
+                    .expect("Failed to init");
 
             // Append entry with value
             let value: TestValue = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
@@ -1970,15 +1841,17 @@ mod tests {
         });
     }
 
+    /// Tracked recovery truncates the index at the first entry whose value bytes were lost and
+    /// keeps the entries before it.
     #[test_traced]
-    fn test_oversized_crash_recovery() {
+    fn test_oversized_tracked_recovery_truncates_lost_value_tail() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
 
             // Create and populate oversized journal
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                open_tracked(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -2011,7 +1884,7 @@ mod tests {
 
             // Recovery truncates the invalid index suffix.
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone())
+                open_tracked(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("reinitialization must succeed");
 
@@ -2036,6 +1909,7 @@ mod tests {
         });
     }
 
+    /// A synced entry and its value survive a restore at the synced boundary.
     #[test_traced]
     fn test_oversized_persistence() {
         let executor = deterministic::Runner::default();
@@ -2044,7 +1918,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                Oversized::init_with_checkpoint(context.child("first"), cfg.clone(), (0, 0))
                     .await
                     .expect("Failed to init");
 
@@ -2058,11 +1932,14 @@ mod tests {
             oversized = oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
-            // Reopen and verify
-            let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg)
-                    .await
-                    .expect("reinitialization must succeed");
+            // Restore at the synced boundary and verify.
+            let oversized: Oversized<_, TestEntry, TestValue> = Oversized::init_with_checkpoint(
+                context.child("second"),
+                cfg,
+                (1, TestEntry::SIZE as u64),
+            )
+            .await
+            .expect("reinitialization must succeed");
 
             let retrieved_entry = oversized.get(1, position).await.expect("Failed to get");
             assert_eq!(retrieved_entry.id, 123);
@@ -2077,6 +1954,8 @@ mod tests {
         });
     }
 
+    /// Syncing selected sections makes both journals of exactly those sections durable and skips a
+    /// section that does not exist.
     #[test_traced]
     fn test_oversized_sync() {
         let executor = deterministic::Runner::default();
@@ -2084,7 +1963,7 @@ mod tests {
             let cfg = test_cfg();
 
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                Oversized::init_with_checkpoint(context.child("first"), cfg.clone(), (0, 0))
                     .await
                     .expect("Failed to init");
 
@@ -2110,10 +1989,13 @@ mod tests {
             drop(oversized);
 
             // Only the synced sections survive the unclean drop, with both index and value durable.
-            let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg)
-                    .await
-                    .expect("reinitialization must succeed");
+            let oversized: Oversized<_, TestEntry, TestValue> = Oversized::init_with_checkpoint(
+                context.child("second"),
+                cfg,
+                (3, TestEntry::SIZE as u64),
+            )
+            .await
+            .expect("reinitialization must succeed");
             for &(section, position, offset, size, value) in &located {
                 let result = oversized.get(section, position).await;
                 if section == 2 {
@@ -2153,13 +2035,15 @@ mod tests {
         }
     }
 
+    /// A tracked bounded open makes its index truncation durable before later appends can reuse
+    /// the value offsets it freed.
     #[test_traced]
-    fn test_oversized_truncate_truncation_durable_before_offset_reuse() {
+    fn test_oversized_tracked_bounded_open_truncation_durable_before_offset_reuse() {
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             // One fully durable entry/value pair.
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), test_cfg())
+                open_tracked(context.child("first"), test_cfg(), None)
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -2167,14 +2051,14 @@ mod tests {
                 .await
                 .expect("Failed to append");
             oversized = oversized.sync(1).await.expect("Failed to sync");
+            drop(oversized);
 
             // Truncate entry 1 away and append entry 2 at entry 1's glob offset, then crash between
             // the value sync and the index sync. Entry 2's bytes (same size, valid checksum) become
-            // durable at the exact range entry 1 referenced. Only the durable initialization repair
-            // prevents recovery from resurrecting entry 1 pointing at entry 2's value. The range
-            // and checksum checks cannot reject it.
-            oversized = oversized
-                .test_reopen_at_most(1, 0)
+            // durable at the exact range entry 1 referenced. Only the durable truncation prevents
+            // recovery from resurrecting entry 1 pointing at entry 2's value. The range and
+            // checksum checks cannot reject it.
+            let mut oversized = open_tracked(context.child("bounded"), test_cfg(), Some((1, 0)))
                 .await
                 .expect("Failed to truncate");
             (oversized, _, _, _) = oversized
@@ -2189,8 +2073,9 @@ mod tests {
         });
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
+            // Recovery keeps the truncation.
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), test_cfg())
+                open_tracked(context.child("second"), test_cfg(), None)
                     .await
                     .expect("reinitialization must succeed");
             assert_eq!(
@@ -2202,11 +2087,11 @@ mod tests {
         });
     }
 
-    /// Reopen at a page-aligned index bound, append over the freed index pages and value bytes,
-    /// then crash with the appends retained and any unsynced resize lost. Recovery must not
+    /// Reopen tracked at a page-aligned index bound, append over the freed index pages and value
+    /// bytes, then crash with the appends retained and any unsynced resize lost. Recovery must not
     /// revive discarded entries over the new values.
     #[test_traced]
-    fn test_oversized_init_at_most_truncation_survives_crash() {
+    fn test_oversized_tracked_bounded_open_truncation_survives_crash() {
         const BOUND: u64 = 3;
 
         // One entry per index page makes the bound page aligned. A value buffer smaller than one
@@ -2226,7 +2111,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(move |context| async move {
             let mut journal: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg())
+                open_tracked(context.child("first"), cfg(), None)
                     .await
                     .unwrap();
             for id in 0..8u64 {
@@ -2252,7 +2137,7 @@ mod tests {
                 ..Default::default()
             };
             let mut journal: Oversized<_, TestEntry, TestValue> =
-                Oversized::init_at_most(context.child("cap"), cfg(), 1, BOUND * chunk)
+                open_tracked(context.child("cap"), cfg(), Some((1, BOUND * chunk)))
                     .await
                     .unwrap();
             assert_eq!(journal.size(1).unwrap(), BOUND * chunk);
@@ -2270,7 +2155,7 @@ mod tests {
         deterministic::Runner::from(checkpoint).start(move |context| async move {
             *context.storage_fault_config().write() = deterministic::FaultConfig::default();
             let journal: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("recover"), cfg())
+                open_tracked(context.child("recover"), cfg(), None)
                     .await
                     .unwrap();
             let entries = journal.size(1).unwrap() / chunk;
@@ -2301,83 +2186,56 @@ mod tests {
         });
     }
 
+    /// A tracked bounded open whose cap lies past the journal end drops an index entry whose value
+    /// was lost, and a restart keeps the shorter section.
     #[test]
     fn test_bounded_initialization_recovers_lost_value_tail() {
-        for tracked in [false, true] {
-            let (_, checkpoint) =
-                deterministic::Runner::default().start_and_recover(|context| async move {
-                    let mut journal: Oversized<_, TestEntry, TestValue> = if tracked {
-                        let mut replay = Oversized::init_with_metadata(
-                            context.child("oversized"),
-                            test_cfg(),
-                            "cap-lost-values".into(),
-                            ReadOptions::default(),
-                        )
-                        .await
-                        .unwrap();
-                        while let Some(item) = replay.next().await {
-                            item.unwrap();
-                        }
-                        replay.finish_tracked().await.unwrap()
-                    } else {
-                        Oversized::init(context.child("journal"), test_cfg())
-                            .await
-                            .unwrap()
-                    };
-                    (journal, _, _, _) = journal
-                        .append(1, TestEntry::new(1, 0, 0), &[1; 16])
-                        .await
-                        .unwrap();
-                    journal = journal.sync_all().await.unwrap();
-                    (journal, _, _, _) = journal
-                        .append(1, TestEntry::new(2, 0, 0), &[2; 16])
-                        .await
-                        .unwrap();
-
-                    // Retain the second index entry across the crash, but lose its buffered value.
-                    journal.index = journal.index.sync(1).await.unwrap();
-                });
-            deterministic::Runner::from(checkpoint).start(|context| async move {
-                let journal: Oversized<_, TestEntry, TestValue> = if tracked {
-                    let mut replay = Oversized::init_with_metadata_at_most(
-                        context.child("oversized"),
-                        test_cfg(),
-                        "cap-lost-values".into(),
-                        ReadOptions::default(),
-                        1,
-                        u64::MAX,
-                    )
+        let (_, checkpoint) =
+            deterministic::Runner::default().start_and_recover(|context| async move {
+                // Make one entry durable.
+                let mut journal = open_tracked(context.child("seed"), test_cfg(), None)
                     .await
                     .unwrap();
-                    while let Some(item) = replay.next().await {
-                        item.unwrap();
-                    }
-                    replay.finish_tracked().await.unwrap()
-                } else {
-                    Oversized::init_at_most(context.child("capped"), test_cfg(), 1, u64::MAX)
-                        .await
-                        .unwrap()
-                };
-                assert_eq!(journal.size(1).unwrap(), TestEntry::SIZE as u64);
-                assert_eq!(journal.get(1, 0).await.unwrap().id, 1);
-                drop(journal);
-                let journal: Oversized<_, TestEntry, TestValue> =
-                    Oversized::init(context.child("restart"), test_cfg())
-                        .await
-                        .unwrap();
-                assert_eq!(journal.size(1).unwrap(), TestEntry::SIZE as u64);
-                assert_eq!(journal.get(1, 0).await.unwrap().id, 1);
-                journal.destroy().await.unwrap();
+                (journal, _, _, _) = journal
+                    .append(1, TestEntry::new(1, 0, 0), &[1; 16])
+                    .await
+                    .unwrap();
+                journal = journal.sync_all().await.unwrap();
+                (journal, _, _, _) = journal
+                    .append(1, TestEntry::new(2, 0, 0), &[2; 16])
+                    .await
+                    .unwrap();
+
+                // Retain the second index entry across the crash, but lose its buffered value.
+                journal.index = journal.index.sync(1).await.unwrap();
             });
-        }
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            // The bounded open keeps only the entry whose value is durable.
+            let journal = open_tracked(context.child("capped"), test_cfg(), Some((1, u64::MAX)))
+                .await
+                .unwrap();
+            assert_eq!(journal.size(1).unwrap(), TestEntry::SIZE as u64);
+            assert_eq!(journal.get(1, 0).await.unwrap().id, 1);
+            drop(journal);
+
+            // A restart keeps the same single entry.
+            let journal = open_tracked(context.child("restart"), test_cfg(), None)
+                .await
+                .unwrap();
+            assert_eq!(journal.size(1).unwrap(), TestEntry::SIZE as u64);
+            assert_eq!(journal.get(1, 0).await.unwrap().id, 1);
+            journal.destroy().await.unwrap();
+        });
     }
 
+    /// A tracked bounded open whose cap lies past the end adopts a marker-covered entry without
+    /// reading its damaged value, and leaves the index bytes untouched.
     #[test]
     fn test_bounded_initialization_preserves_corrupt_committed_boundary() {
         deterministic::Runner::default().start(|context| async move {
             let cfg = test_cfg();
             let mut journal: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("seed"), cfg.clone())
+                Oversized::init_with_checkpoint(context.child("seed"), cfg.clone(), (0, 0))
                     .await
                     .unwrap();
             (journal, _, _, _) = journal
@@ -2460,6 +2318,8 @@ mod tests {
         });
     }
 
+    /// Tracked recovery durably drops an entry whose value was lost, so a later append that reuses
+    /// its offset cannot revive it.
     #[test_traced]
     fn test_oversized_recovery_never_adopts_entries_for_lost_values() {
         // Crash 1: entry 1 becomes durable but its value does not (an index write surviving
@@ -2467,7 +2327,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), test_cfg())
+                open_tracked(context.child("first"), test_cfg(), None)
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -2483,7 +2343,7 @@ mod tests {
         let (_, checkpoint) =
             deterministic::Runner::from(checkpoint).start_and_recover(|context| async move {
                 let mut oversized: Oversized<_, TestEntry, TestValue> =
-                    Oversized::init(context.child("second"), test_cfg())
+                    open_tracked(context.child("second"), test_cfg(), None)
                         .await
                         .expect("reinitialization must succeed");
                 assert_eq!(
@@ -2506,7 +2366,7 @@ mod tests {
         // entry 1, now range-valid over entry 2's bytes.
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("third"), test_cfg())
+                open_tracked(context.child("third"), test_cfg(), None)
                     .await
                     .expect("reinitialization must succeed");
             assert_adopted_entries_consistent(&oversized).await;
@@ -2514,13 +2374,15 @@ mod tests {
         });
     }
 
+    /// A tracked bounded open fails when its value truncation cannot be made durable, after its
+    /// index truncation already is.
     #[test_traced]
-    fn test_oversized_truncate_fails_when_truncation_cannot_be_made_durable() {
+    fn test_oversized_tracked_bounded_open_fails_when_truncation_cannot_be_made_durable() {
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             // One fully durable entry/value pair.
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), test_cfg())
+                open_tracked(context.child("first"), test_cfg(), None)
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -2538,7 +2400,7 @@ mod tests {
                 fail_partition: "test-values".into(),
             };
             assert!(
-                Oversized::<_, TestEntry, TestValue>::init_at_most(faulty_values, test_cfg(), 1, 0)
+                open_tracked(faulty_values, test_cfg(), Some((1, 0)))
                     .await
                     .is_err(),
                 "bounded initialization must fail if truncation is not durable"
@@ -2549,7 +2411,7 @@ mod tests {
         // must not be adopted at recovery.
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("third"), test_cfg())
+                open_tracked(context.child("third"), test_cfg(), None)
                     .await
                     .expect("reinitialization must succeed");
             assert_eq!(oversized.size(1).expect("size"), 0);
@@ -2557,14 +2419,16 @@ mod tests {
         });
     }
 
+    /// Tracked recovery makes its value truncation durable before a later append can reuse the
+    /// freed offset.
     #[test_traced]
     fn test_oversized_recovery_glob_truncation_durable_before_offset_reuse() {
         // Crash 1: the index truncation is durable but the glob still holds entry 2's frame (the
-        // state a crash during initialization repair leaves behind).
+        // state a crash between recovery's index and value truncations leaves behind).
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), test_cfg())
+                open_tracked(context.child("first"), test_cfg(), None)
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -2592,7 +2456,7 @@ mod tests {
         let (_, checkpoint) =
             deterministic::Runner::from(checkpoint).start_and_recover(|context| async move {
                 let mut oversized: Oversized<_, TestEntry, TestValue> =
-                    Oversized::init(context.child("second"), test_cfg())
+                    open_tracked(context.child("second"), test_cfg(), None)
                         .await
                         .expect("reinitialization must succeed");
                 (oversized, _, _, _) = oversized
@@ -2606,7 +2470,7 @@ mod tests {
         // adopted referencing entry 2's still-durable frame.
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("third"), test_cfg())
+                open_tracked(context.child("third"), test_cfg(), None)
                     .await
                     .expect("reinitialization must succeed");
             assert_adopted_entries_consistent(&oversized).await;
@@ -2614,13 +2478,14 @@ mod tests {
         });
     }
 
+    /// Tracked recovery of an index shortened without its values releases the orphaned value bytes.
     #[test_traced]
     fn test_oversized_truncate_crash_between_truncations_recovers_post_truncate() {
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             // Two fully durable entry/value pairs.
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), test_cfg())
+                open_tracked(context.child("first"), test_cfg(), None)
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -2633,7 +2498,7 @@ mod tests {
                 .expect("Failed to append");
             oversized = oversized.sync(1).await.expect("Failed to sync");
 
-            // Stop initialization repair after shortening the index but before the values. The
+            // Stop a recovery truncation after shortening the index but before the values. The
             // index truncation is durable but the freed value bytes are not yet truncated.
             let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
             oversized.index = oversized
@@ -2648,7 +2513,7 @@ mod tests {
         // state.
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), test_cfg())
+                open_tracked(context.child("second"), test_cfg(), None)
                     .await
                     .expect("reinitialization must succeed");
             let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
@@ -2665,12 +2530,13 @@ mod tests {
         });
     }
 
+    /// A completed start_sync handle makes both journals of its section durable.
     #[test_traced]
     fn test_oversized_start_sync_completion_means_recoverable() {
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), test_cfg())
+                Oversized::init_with_checkpoint(context.child("first"), test_cfg(), (0, 0))
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -2682,11 +2548,15 @@ mod tests {
             // Crash: everything covered by the completed handle must survive.
         });
 
+        // Restore at the boundary the completed sync covered.
         deterministic::Runner::from(checkpoint).start(|context| async move {
-            let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), test_cfg())
-                    .await
-                    .expect("reinitialization must succeed");
+            let oversized: Oversized<_, TestEntry, TestValue> = Oversized::init_with_checkpoint(
+                context.child("second"),
+                test_cfg(),
+                (1, TestEntry::SIZE as u64),
+            )
+            .await
+            .expect("reinitialization must succeed");
             let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
             assert_eq!(oversized.size(1).expect("size"), chunk);
             assert_adopted_entries_consistent(&oversized).await;
@@ -2694,16 +2564,19 @@ mod tests {
         });
     }
 
+    /// A failed value sync surfaces as an error, and tracked recovery of that storage drops the
+    /// entry whose value never became durable.
     #[test_traced]
     fn test_oversized_sync_values_failure_recovers_clean() {
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
+            // Open a fresh journal whose value syncs fail.
             let faulty_values = SyncFaultContext {
                 inner: context.child("first"),
                 fail_partition: "test-values".into(),
             };
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(faulty_values, test_cfg())
+                Oversized::init_with_checkpoint(faulty_values, test_cfg(), (0, 0))
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -2717,9 +2590,11 @@ mod tests {
             assert!(oversized.sync(1).await.is_err(), "value sync must fail");
         });
 
+        // No acknowledged sync covers the entry. A tracked open of storage written without
+        // markers validates every value.
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), test_cfg())
+                open_tracked(context.child("second"), test_cfg(), None)
                     .await
                     .expect("reinitialization must succeed");
             assert_eq!(
@@ -2731,16 +2606,19 @@ mod tests {
         });
     }
 
+    /// A failed value sync surfaces through the start_sync handle, and tracked recovery of that
+    /// storage drops the entry whose value never became durable.
     #[test_traced]
     fn test_oversized_start_sync_values_failure_recovers_clean() {
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
+            // Open a fresh journal whose value syncs fail.
             let faulty_values = SyncFaultContext {
                 inner: context.child("first"),
                 fail_partition: "test-values".into(),
             };
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(faulty_values, test_cfg())
+                Oversized::init_with_checkpoint(faulty_values, test_cfg(), (0, 0))
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -2754,9 +2632,11 @@ mod tests {
             assert!(handle.await.is_err(), "value sync must fail");
         });
 
+        // No acknowledged sync covers the entry. A tracked open of storage written without
+        // markers validates every value.
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), test_cfg())
+                open_tracked(context.child("second"), test_cfg(), None)
                     .await
                     .expect("reinitialization must succeed");
             assert_eq!(
@@ -2768,12 +2648,13 @@ mod tests {
         });
     }
 
+    /// Dropping a start_sync handle does not cancel its sync, and the next sync completes the work.
     #[test_traced]
     fn test_oversized_start_sync_dropped_handle_driven_by_next_sync() {
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), test_cfg())
+                Oversized::init_with_checkpoint(context.child("first"), test_cfg(), (0, 0))
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -2788,11 +2669,15 @@ mod tests {
             oversized.sync(1).await.expect("Failed to sync");
         });
 
+        // Restore at the boundary the completed sync covered.
         deterministic::Runner::from(checkpoint).start(|context| async move {
-            let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), test_cfg())
-                    .await
-                    .expect("reinitialization must succeed");
+            let oversized: Oversized<_, TestEntry, TestValue> = Oversized::init_with_checkpoint(
+                context.child("second"),
+                test_cfg(),
+                (1, TestEntry::SIZE as u64),
+            )
+            .await
+            .expect("reinitialization must succeed");
             let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
             assert_eq!(oversized.size(1).expect("size"), chunk);
             assert_adopted_entries_consistent(&oversized).await;
@@ -2800,13 +2685,14 @@ mod tests {
         });
     }
 
+    /// Tracked recovery rejects an entry whose value range is in bounds but fails its checksum.
     #[test_traced]
     fn test_oversized_recovery_rejects_entry_with_torn_value_bytes() {
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             // One fully durable entry/value pair.
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), test_cfg())
+                open_tracked(context.child("first"), test_cfg(), None)
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -2839,7 +2725,7 @@ mod tests {
         // Entry 2's range fits within the glob, so only the checksum check can reject it.
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), test_cfg())
+                open_tracked(context.child("second"), test_cfg(), None)
                     .await
                     .expect("reinitialization must succeed");
             let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
@@ -2853,8 +2739,10 @@ mod tests {
         });
     }
 
+    /// Tracked recovery truncates a section at a torn interior index page, even though a valid
+    /// final page hides it from tail discovery and every value after it is intact.
     #[test_traced]
-    fn test_recovery_scans_past_torn_interior_index_page() {
+    fn test_recovery_truncates_at_torn_interior_index_page() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Use page size = entry size so each entry is on its own page.
@@ -2862,7 +2750,7 @@ mod tests {
 
             // Create five durable entry/value pairs.
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                open_tracked(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
             for i in 1..=5u8 {
@@ -2874,8 +2762,8 @@ mod tests {
             oversized = oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
-            // Corrupt the CRC record of the THIRD entry's index page: the backward open
-            // scan stops at the (valid) last page, so the torn page survives in bounds.
+            // Corrupt the CRC record of the third entry's index page. Tail discovery stops at the
+            // valid last page, so the torn page survives in bounds.
             let physical_page = TestEntry::SIZE as u64 + 12;
             let (index_blob, size) = context
                 .open(&cfg.index_partition, &1u64.to_be_bytes())
@@ -2892,35 +2780,27 @@ mod tests {
                 .expect("Failed to corrupt index page");
             drop(index_blob);
 
-            // Corrupt the fourth and fifth values so the backward scan must walk past
-            // their entries and read the torn page.
-            let (values_blob, _) = context
-                .open(&cfg.value_partition, &1u64.to_be_bytes())
-                .await
-                .expect("Failed to open values blob");
-            values_blob
-                .write_at(60, vec![0xFF; 20], WriteOptions::SYNC)
-                .await
-                .expect("Failed to corrupt value");
-            values_blob
-                .write_at(80, vec![0xFF; 20], WriteOptions::SYNC)
-                .await
-                .expect("Failed to corrupt value");
-            drop(values_blob);
-
-            // Recovery scans past the invalid tail values and the torn page (surfaced
-            // as a checksum failure, not a generic read error) to the last valid pair.
+            // Recovery keeps only the entries before the torn page and releases the values of the
+            // entries it drops.
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg)
+                open_tracked(context.child("second"), cfg, None)
                     .await
                     .expect("reinitialization must succeed");
             let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
             assert_eq!(oversized.size(1).expect("size"), 2 * chunk);
             assert_adopted_entries_consistent(&oversized).await;
+            let last = oversized.get(1, 1).await.expect("Failed to get");
+            assert_eq!(
+                oversized.values.size(1).expect("glob size"),
+                byte_end(last.value_offset, last.value_size),
+                "values of dropped entries must be released"
+            );
             oversized.destroy().await.expect("Failed to destroy");
         });
     }
 
+    /// Restore truncates to the checkpoint and removes later sections without validating the state
+    /// it discards.
     #[test_traced]
     fn test_oversized_restore_discards_beyond_checkpoint() {
         let executor = deterministic::Runner::default();
@@ -2928,7 +2808,7 @@ mod tests {
             // One committed entry, then torn state beyond the checkpoint: entries in
             // section 1 and 2 whose index becomes durable ahead of their values.
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), test_cfg())
+                Oversized::init_with_checkpoint(context.child("first"), test_cfg(), (0, 0))
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -2965,13 +2845,14 @@ mod tests {
         });
     }
 
+    /// Restore removes the sections past its checkpoint without opening or repairing them.
     #[test_traced]
     fn test_oversized_restore_does_not_repair_discarded_sections() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = entry_cfg();
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("seed"), cfg.clone())
+                Oversized::init_with_checkpoint(context.child("seed"), cfg.clone(), (0, 0))
                     .await
                     .expect("failed to init");
 
@@ -3046,85 +2927,16 @@ mod tests {
         });
     }
 
+    /// A tracked bounded open trims a torn index tail inside its cap and durably releases the value
+    /// the trimmed entry referenced.
     #[test_traced]
-    fn test_oversized_bounded_open_discards_both_sections_without_opening() {
+    fn test_oversized_tracked_bounded_open_repairs_retained_tail() {
         deterministic::Runner::default().start(|context| async move {
+            // Seed two durable one-page entries and publish a marker covering only the first.
             let cfg = entry_cfg();
-            let mut journal: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("seed"), cfg.clone())
-                    .await
-                    .unwrap();
-            for section in 1..=2 {
-                (journal, _, _, _) = journal
-                    .append(section, TestEntry::new(section, 0, 0), &[section as u8; 16])
-                    .await
-                    .unwrap();
-            }
-            journal = journal.sync_all().await.unwrap();
-            drop(journal);
-
-            // Sections 1 and 2 each hold one entry, and the cap below keeps only section 1. The
-            // torn section 2 index tail would cost a repair sync if paged recovery opened it.
-            tear_index_tail(&context, &cfg, 2).await;
-
-            // An exclusive live value handle proves bounded recovery never opens that section.
-            let (discarded_value, _) = context
-                .open(&cfg.value_partition, &2u64.to_be_bytes())
+            let mut journal = open_tracked(context.child("seed"), cfg.clone(), None)
                 .await
                 .unwrap();
-            let pending = PendingSyncs::default();
-            pending.arm();
-            let delayed = DelayedSyncContext {
-                inner: context,
-                pending: pending.clone(),
-            };
-            let chunk = TestEntry::SIZE as u64;
-            let journal: Oversized<_, TestEntry, TestValue> = drive_pending_syncs(
-                &pending,
-                Oversized::init_at_most(delayed.child("cap"), cfg.clone(), 1, chunk),
-            )
-            .await
-            .unwrap();
-
-            // PendingSyncs counts syncs, not removals. Pretrimming deletes index section 2 unread,
-            // and section 1 already ends at the cap in both journals, so nothing needs a sync.
-            assert_eq!(pending.calls(), 0);
-
-            // Section 1 keeps its entry and value, and section 2 is gone from both partitions.
-            assert_eq!(journal.newest_section(), Some(1));
-            let entry = journal.last(1).await.unwrap().unwrap();
-            assert_eq!(entry.id, 1);
-            assert_eq!(
-                journal
-                    .get_value(1, entry.value_offset, entry.value_size)
-                    .await
-                    .unwrap(),
-                [1; 16]
-            );
-            let retained = vec![1u64.to_be_bytes().to_vec()];
-            assert_eq!(delayed.scan(&cfg.index_partition).await.unwrap(), retained);
-            assert_eq!(delayed.scan(&cfg.value_partition).await.unwrap(), retained);
-            drop(discarded_value);
-            drop(journal);
-
-            // Unbounded recovery reopens the published state with section 1 still newest.
-            let recovered: Oversized<_, TestEntry, TestValue> =
-                drive_pending_syncs(&pending, Oversized::init(delayed.child("restart"), cfg))
-                    .await
-                    .unwrap();
-            assert_eq!(recovered.newest_section(), Some(1));
-            recovered.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_oversized_bounded_open_repairs_retained_tail() {
-        deterministic::Runner::default().start(|context| async move {
-            let cfg = entry_cfg();
-            let mut journal: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("seed"), cfg.clone())
-                    .await
-                    .unwrap();
             for id in 0..2 {
                 (journal, _, _, _) = journal
                     .append(1, TestEntry::new(id, 0, 0), &[id as u8; 16])
@@ -3132,12 +2944,17 @@ mod tests {
                     .unwrap();
             }
             journal = journal.sync_all().await.unwrap();
+            let mut tracking = journal.tracking.take().unwrap();
+            assert!(tracking.stage_marker(1, 1));
+            tracking.metadata = tracking.metadata.sync().await.unwrap();
+            drop(tracking);
             drop(journal);
 
-            // Tearing the tail truncates entry 1's physical page. The two-entry cap covers that
-            // page, so pretrimming keeps it and paged recovery trims it when opening section 1.
+            // Tearing the tail truncates entry 1's physical page above the marker. The two-entry
+            // cap covers that page, so paged recovery trims it when opening section 1.
             tear_index_tail(&context, &cfg, 1).await;
 
+            // Open through the cap while counting the syncs the open performs.
             let pending = PendingSyncs::default();
             pending.arm();
             let delayed = DelayedSyncContext {
@@ -3145,15 +2962,16 @@ mod tests {
                 pending: pending.clone(),
             };
             let chunk = TestEntry::SIZE as u64;
-            let journal: Oversized<_, TestEntry, TestValue> = drive_pending_syncs(
+            let journal = drive_pending_syncs(
                 &pending,
-                Oversized::init_at_most(delayed.child("cap"), cfg, 1, 2 * chunk),
+                open_tracked(delayed.child("cap"), cfg, Some((1, 2 * chunk))),
             )
             .await
             .unwrap();
 
             // One sync makes the index trim durable. The other makes truncating entry 1's value
-            // durable, since no retained index entry references that value.
+            // durable, since no retained index entry references that value. The marker already
+            // matches the retained entry, so no marker generation is written.
             assert_eq!(pending.calls(), 2);
             assert_eq!(journal.size(1).unwrap(), chunk);
             assert_eq!(journal.last(1).await.unwrap().unwrap().id, 0);
@@ -3161,57 +2979,15 @@ mod tests {
         });
     }
 
-    #[test_traced]
-    fn test_oversized_bounded_open_leaves_discarded_pages_unread() {
-        deterministic::Runner::default().start(|context| async move {
-            let cfg = entry_cfg();
-            let mut journal: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("seed"), cfg.clone())
-                    .await
-                    .unwrap();
-            for id in 0..3 {
-                (journal, _, _, _) = journal
-                    .append(1, TestEntry::new(id, 0, 0), &[id as u8; 16])
-                    .await
-                    .unwrap();
-            }
-            journal = journal.sync_all().await.unwrap();
-            drop(journal);
-
-            // Section 1 holds three one-page entries, and the tear truncates the third page. The
-            // one-entry cap retains only the first page. Pretrimming removes the second and torn
-            // third pages before paged recovery opens the blob, so no tail repair reads them.
-            // Index pretrimming and value truncation each require one sync.
-            tear_index_tail(&context, &cfg, 1).await;
-            let pending = PendingSyncs::default();
-            pending.arm();
-            let delayed = DelayedSyncContext {
-                inner: context,
-                pending: pending.clone(),
-            };
-            let chunk = TestEntry::SIZE as u64;
-            let journal: Oversized<_, TestEntry, TestValue> = drive_pending_syncs(
-                &pending,
-                Oversized::init_at_most(delayed.child("cap"), cfg, 1, chunk),
-            )
-            .await
-            .unwrap();
-            assert_eq!(pending.calls(), 2);
-            assert_eq!(journal.size(1).unwrap(), chunk);
-            assert_eq!(journal.last(1).await.unwrap().unwrap().id, 0);
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    /// The bounded-open pretrim removes index sections above the target newest-first and never
-    /// touches value sections, so a crash inside it leaves an index prefix beside every value
-    /// section. The cases crash after removing only the newest index section and after removing
-    /// every index section above target section 1.
+    /// A tracked bounded open removes the index sections above its cap newest-first before it
+    /// removes any value section, so a crash inside that removal leaves an index prefix beside
+    /// every value section. The cases crash after removing only the newest index section and after
+    /// removing every index section above target section 1.
     #[rstest::rstest]
     #[case::newest(3)]
     #[case::all(1)]
     #[test_traced]
-    fn test_oversized_pretrim_crash_recovers_unbounded(#[case] kept: u64) {
+    fn test_oversized_tracked_open_recovers_interrupted_section_removal(#[case] kept: u64) {
         const SECTIONS: u64 = 4;
         const ENTRIES: u64 = 3;
         deterministic::Runner::default().start(|context| async move {
@@ -3219,7 +2995,7 @@ mod tests {
             // value, and make both journals durable.
             let cfg = entry_cfg();
             let mut journal: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("seed"), cfg.clone())
+                open_tracked(context.child("seed"), cfg.clone(), None)
                     .await
                     .unwrap();
             for section in 1..=SECTIONS {
@@ -3234,9 +3010,8 @@ mod tests {
             journal = journal.sync_all().await.unwrap();
             drop(journal);
 
-            // The pretrim of a bounded open of section 1 removes the index sections above it
-            // newest-first before opening either journal. It never touches value sections. Crash
-            // once every index section above `kept` is gone.
+            // Crash once every index section above `kept` is gone and no value section has been
+            // removed.
             for section in (kept + 1..=SECTIONS).rev() {
                 context
                     .remove(&cfg.index_partition, Some(&section.to_be_bytes()))
@@ -3244,9 +3019,9 @@ mod tests {
                     .unwrap();
             }
 
-            // Unbounded recovery retains every surviving index entry with its value.
+            // An unbounded tracked open retains every surviving index entry with its value.
             let mut journal: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("restart"), cfg.clone())
+                open_tracked(context.child("restart"), cfg.clone(), None)
                     .await
                     .unwrap();
             assert_eq!(journal.newest_section(), Some(kept));
@@ -3306,7 +3081,9 @@ mod tests {
 
             // A clean reopen keeps the recovered prefix and both appended entries.
             let journal: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("reopen"), cfg).await.unwrap();
+                open_tracked(context.child("reopen"), cfg, None)
+                    .await
+                    .unwrap();
             assert_eq!(journal.newest_section(), Some(kept + 1));
             for section in 1..kept {
                 assert_eq!(
@@ -3335,12 +3112,12 @@ mod tests {
 
     /// Bounded tracked opens never open sections above the cap and remove them only after the
     /// marker update is durable. A marker retained at or below the cap selects floor recovery.
-    /// Markers only above the cap leave no floor, so inferred recovery must bound both journals.
+    /// Markers only above the cap leave no floor, and the open must still bound both journals.
     fn tracked_bounded_open_removes_marker_before_closed_sections_inner(markers: &'static [u64]) {
         deterministic::Runner::default().start(|context| async move {
             let cfg = entry_cfg();
             let mut journal: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("seed"), cfg.clone())
+                Oversized::init_with_checkpoint(context.child("seed"), cfg.clone(), (0, 0))
                     .await
                     .unwrap();
             for section in 1..=2 {
@@ -3460,22 +3237,28 @@ mod tests {
         });
     }
 
+    /// A marker retained at the cap selects floor recovery, and the sections above the cap stay
+    /// unopened until the lowered markers are durable.
     #[test_traced]
     fn test_oversized_tracked_bounded_open_removes_marker_before_closed_sections() {
         tracked_bounded_open_removes_marker_before_closed_sections_inner(&[1, 2]);
     }
 
+    /// With markers only above the cap, the bounded open still leaves the later sections unopened
+    /// until the lowered markers are durable.
     #[test_traced]
     fn test_oversized_tracked_bounded_open_without_retained_marker_leaves_sections_unopened() {
         tracked_bounded_open_removes_marker_before_closed_sections_inner(&[2]);
     }
 
+    /// A failed marker update during a tracked bounded open returns before either journal removes a
+    /// section above the cap.
     #[test_traced]
     fn test_oversized_tracked_bounded_open_marker_failure_keeps_suffix() {
         deterministic::Runner::default().start(|context| async move {
             let cfg = entry_cfg();
             let mut journal: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("seed"), cfg.clone())
+                Oversized::init_with_checkpoint(context.child("seed"), cfg.clone(), (0, 0))
                     .await
                     .unwrap();
             for section in 1..=2 {
@@ -3535,13 +3318,15 @@ mod tests {
         });
     }
 
+    /// Restore fails without repairing anything when a section the checkpoint covers lost value
+    /// bytes.
     #[test_traced]
     fn test_oversized_restore_incomplete_section_errors() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Two committed sections
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), test_cfg())
+                Oversized::init_with_checkpoint(context.child("first"), test_cfg(), (0, 0))
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -3581,6 +3366,8 @@ mod tests {
         });
     }
 
+    /// Restore adopts interior index damage below a checkpoint boundary. The damage surfaces as a
+    /// read error and stays byte-for-byte in place.
     #[test_traced]
     fn test_oversized_restore_adopts_interior_index_corruption() {
         let executor = deterministic::Runner::default();
@@ -3606,7 +3393,7 @@ mod tests {
                 // Persist three entries in section 1 and a later checkpoint candidate. One entry
                 // per integrity page makes the damaged page strictly interior.
                 let mut oversized: Oversized<_, TestEntry, TestValue> =
-                    Oversized::init(context.child(seed_child), cfg.clone())
+                    Oversized::init_with_checkpoint(context.child(seed_child), cfg.clone(), (0, 0))
                         .await
                         .expect("failed to init");
                 for id in 0..3 {
@@ -3686,13 +3473,15 @@ mod tests {
         });
     }
 
+    /// Restore adopts a section without reading its values, so a rotted committed value fails only
+    /// its own read.
     #[test_traced]
     fn test_oversized_restore_adopts_rotted_committed_value() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Two committed sections
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), test_cfg())
+                Oversized::init_with_checkpoint(context.child("first"), test_cfg(), (0, 0))
                     .await
                     .expect("Failed to init");
             let (offset, size);
@@ -3739,13 +3528,16 @@ mod tests {
         });
     }
 
+    /// A replay of an empty journal is exhausted from the start.
     #[test_traced]
     fn test_oversized_replay_empty_finishes_immediately() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context, cfg).await.expect("Failed to init");
+                Oversized::init_with_checkpoint(context, cfg, (0, 0))
+                    .await
+                    .expect("Failed to init");
 
             // An empty journal's reader is exhausted from the start
             let replay = oversized
@@ -3757,14 +3549,16 @@ mod tests {
         });
     }
 
+    /// A completed live replay returns the journal for further appends under either recovery
+    /// contract.
     #[test_traced]
     fn test_live_replay_preserves_append_and_recovery() {
         deterministic::Runner::default().start(|context| async move {
             for tracked in [false, true] {
-                let context = context.child(if tracked { "tracked" } else { "untracked" });
+                let context = context.child(if tracked { "tracked" } else { "checkpoint" });
                 let cfg = test_cfg();
 
-                // Open each publication mode and establish an empty validated journal.
+                // Open each recovery contract and establish an empty journal.
                 let mut journal: Oversized<_, TestEntry, TestValue> = if tracked {
                     let mut replay = Oversized::init_with_metadata(
                         context.child("oversized"),
@@ -3779,7 +3573,7 @@ mod tests {
                     }
                     replay.finish_tracked().await.unwrap()
                 } else {
-                    Oversized::init(context.child("init"), cfg.clone())
+                    Oversized::init_with_checkpoint(context.child("init"), cfg.clone(), (0, 0))
                         .await
                         .unwrap()
                 };
@@ -3812,7 +3606,7 @@ mod tests {
                     .unwrap();
                 _ = journal.sync_all().await.unwrap();
 
-                // Reinitialization must publish all four paired entries in either mode.
+                // Reopening must publish all four paired entries under either contract.
                 let journal: Oversized<_, TestEntry, TestValue> = if tracked {
                     let mut replay = Oversized::init_with_metadata(
                         context.child("oversized"),
@@ -3827,7 +3621,13 @@ mod tests {
                     }
                     replay.finish_tracked().await.unwrap()
                 } else {
-                    Oversized::init(context.child("reopen"), cfg).await.unwrap()
+                    Oversized::init_with_checkpoint(
+                        context.child("reopen"),
+                        cfg,
+                        (1, 4 * TestEntry::SIZE as u64),
+                    )
+                    .await
+                    .unwrap()
                 };
                 for id in 0..4 {
                     let entry = journal.get(1, id).await.unwrap();
@@ -3843,12 +3643,14 @@ mod tests {
         });
     }
 
+    /// A tracked startup replay finishes only through finish_tracked, and a live replay only
+    /// through finish.
     #[test_traced]
     fn test_replay_completion_requires_matching_phase() {
         deterministic::Runner::default().start(|context| async move {
             let cfg = test_cfg();
             let mut journal: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("seed"), cfg.clone())
+                Oversized::init_with_checkpoint(context.child("seed"), cfg.clone(), (0, 0))
                     .await
                     .unwrap();
             (journal, _, _, _) = journal
@@ -3907,15 +3709,21 @@ mod tests {
                 Err(Error::ReplayFailed)
             ));
 
-            Oversized::<_, TestEntry, TestValue>::init(context, cfg)
-                .await
-                .unwrap()
-                .destroy()
-                .await
-                .unwrap();
+            // The synced entry reopens through its checkpoint, so the store can be destroyed.
+            Oversized::<_, TestEntry, TestValue>::init_with_checkpoint(
+                context,
+                cfg,
+                (1, TestEntry::SIZE as u64),
+            )
+            .await
+            .unwrap()
+            .destroy()
+            .await
+            .unwrap();
         });
     }
 
+    /// Replay passes the caller's read options to every backing index read.
     #[test_traced]
     fn test_oversized_replay_propagates_read_options() {
         let executor = deterministic::Runner::default();
@@ -3924,7 +3732,9 @@ mod tests {
             let cfg = entry_cfg();
             let page_cache = cfg.index_page_cache.clone();
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context, cfg).await.expect("Failed to init");
+                Oversized::init_with_checkpoint(context, cfg, (0, 0))
+                    .await
+                    .expect("Failed to init");
             (oversized, _, _, _) = oversized
                 .append(1, TestEntry::new(1, 0, 0), &[1; 16])
                 .await
@@ -3965,13 +3775,16 @@ mod tests {
         });
     }
 
+    /// Finishing a replay before it is drained fails.
     #[test_traced]
     fn test_oversized_replay_finish_before_drain_fails() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context, cfg).await.expect("Failed to init");
+                Oversized::init_with_checkpoint(context, cfg, (0, 0))
+                    .await
+                    .expect("Failed to init");
             (oversized, _, _, _) = oversized
                 .append(1, TestEntry::new(1, 0, 0), &[1; 16])
                 .await
@@ -3986,13 +3799,16 @@ mod tests {
         });
     }
 
+    /// Pruning removes every section below the floor and keeps the rest.
     #[test_traced]
     fn test_oversized_prune() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context, cfg).await.expect("Failed to init");
+                Oversized::init_with_checkpoint(context, cfg, (0, 0))
+                    .await
+                    .expect("Failed to init");
 
             // Append to multiple sections
             for section in 1u64..=5 {
@@ -4026,19 +3842,20 @@ mod tests {
         });
     }
 
+    /// A restore whose checkpoint names the only written section retains its entry.
     #[test_traced]
-    fn test_recovery_empty_section() {
+    fn test_checkpoint_restore_of_sole_section() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
 
             // Create oversized journal
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                Oversized::init_with_checkpoint(context.child("first"), cfg.clone(), (0, 0))
                     .await
                     .expect("Failed to init");
 
-            // Append to section 2 only (section 1 remains empty after being opened)
+            // Write and sync section 2 only.
             let value: TestValue = [42; 16];
             let entry = TestEntry::new(1, 0, 0);
             (oversized, _, _, _) = oversized
@@ -4048,11 +3865,14 @@ mod tests {
             oversized = oversized.sync(2).await.expect("Failed to sync");
             drop(oversized);
 
-            // Recovery on reinitialization should handle the empty/non-existent section 1
-            let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg)
-                    .await
-                    .expect("reinitialization must succeed");
+            // A restore at section 2's synced boundary needs no earlier section.
+            let oversized: Oversized<_, TestEntry, TestValue> = Oversized::init_with_checkpoint(
+                context.child("second"),
+                cfg,
+                (2, TestEntry::SIZE as u64),
+            )
+            .await
+            .expect("reinitialization must succeed");
 
             // Section 2 entry should be valid
             let entry = oversized.get(2, 0).await.expect("Failed to get");
@@ -4062,6 +3882,8 @@ mod tests {
         });
     }
 
+    /// Tracked recovery empties a section whose values were all lost, and appends restart at
+    /// position zero.
     #[test_traced]
     fn test_recovery_all_entries_invalid() {
         let executor = deterministic::Runner::default();
@@ -4070,7 +3892,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                open_tracked(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -4097,7 +3919,7 @@ mod tests {
 
             // Recovery truncates the invalid index to zero entries.
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg)
+                open_tracked(context.child("second"), cfg, None)
                     .await
                     .expect("reinitialization must succeed");
 
@@ -4127,6 +3949,7 @@ mod tests {
         });
     }
 
+    /// Tracked recovery truncates each section independently at its first lost value.
     #[test_traced]
     fn test_recovery_multiple_sections_mixed_validity() {
         let executor = deterministic::Runner::default();
@@ -4135,7 +3958,7 @@ mod tests {
 
             // Create and populate multiple sections
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                open_tracked(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -4151,7 +3974,6 @@ mod tests {
                     .expect("Failed to append");
                 section1_locations.push((position, offset, size));
             }
-            oversized = oversized.sync(1).await.expect("Failed to sync");
 
             // Section 2: 5 entries
             let mut section2_locations = Vec::new();
@@ -4165,7 +3987,6 @@ mod tests {
                     .expect("Failed to append");
                 section2_locations.push((position, offset, size));
             }
-            oversized = oversized.sync(2).await.expect("Failed to sync");
 
             // Section 3: 2 entries
             for i in 0..2u8 {
@@ -4176,7 +3997,10 @@ mod tests {
                     .await
                     .expect("Failed to append");
             }
-            oversized = oversized.sync(3).await.expect("Failed to sync");
+
+            // One sync of every section publishes no marker, so the damage below lies above every
+            // floor.
+            oversized = oversized.sync_all().await.expect("Failed to sync");
             drop(oversized);
 
             // Truncate section 1 glob to keep only first entry
@@ -4203,7 +4027,7 @@ mod tests {
 
             // Reinitialize
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg)
+                open_tracked(context.child("second"), cfg, None)
                     .await
                     .expect("reinitialization must succeed");
 
@@ -4227,6 +4051,8 @@ mod tests {
         });
     }
 
+    /// Tracked recovery drops an entry whose index page fails its checksum, and appends follow the
+    /// remaining entries.
     #[test_traced]
     fn test_recovery_corrupted_last_index_entry() {
         let executor = deterministic::Runner::default();
@@ -4238,7 +4064,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                open_tracked(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -4272,7 +4098,7 @@ mod tests {
 
             // Reinitializing should detect page corruption and truncate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg)
+                open_tracked(context.child("second"), cfg, None)
                     .await
                     .expect("reinitialization must succeed");
 
@@ -4307,15 +4133,16 @@ mod tests {
         });
     }
 
+    /// A restore at the newest synced boundary keeps every entry of every section.
     #[test_traced]
-    fn test_recovery_all_entries_valid() {
+    fn test_checkpoint_restore_keeps_every_synced_entry() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                Oversized::init_with_checkpoint(context.child("first"), cfg.clone(), (0, 0))
                     .await
                     .expect("Failed to init");
 
@@ -4333,11 +4160,14 @@ mod tests {
             }
             drop(oversized);
 
-            // Reinitialize with no corruption, so recovery keeps every entry
-            let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg)
-                    .await
-                    .expect("reinitialization must succeed");
+            // Restore at the newest synced boundary.
+            let oversized: Oversized<_, TestEntry, TestValue> = Oversized::init_with_checkpoint(
+                context.child("second"),
+                cfg,
+                (3, 10 * TestEntry::SIZE as u64),
+            )
+            .await
+            .expect("reinitialization must succeed");
 
             // All entries should be valid
             for section in 1u64..=3 {
@@ -4354,6 +4184,7 @@ mod tests {
         });
     }
 
+    /// Tracked recovery drops the only entry of a section whose value was lost.
     #[test_traced]
     fn test_recovery_single_entry_invalid() {
         let executor = deterministic::Runner::default();
@@ -4362,7 +4193,7 @@ mod tests {
 
             // Create and populate with single entry
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                open_tracked(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -4386,7 +4217,7 @@ mod tests {
 
             // Reinitialize
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg)
+                open_tracked(context.child("second"), cfg, None)
                     .await
                     .expect("reinitialization must succeed");
 
@@ -4397,6 +4228,7 @@ mod tests {
         });
     }
 
+    /// Tracked recovery drops an entry whose value is one byte short.
     #[test_traced]
     fn test_recovery_last_entry_off_by_one() {
         let executor = deterministic::Runner::default();
@@ -4405,7 +4237,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                open_tracked(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -4439,7 +4271,7 @@ mod tests {
 
             // Reinitialize
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg)
+                open_tracked(context.child("second"), cfg, None)
                     .await
                     .expect("reinitialization must succeed");
 
@@ -4472,6 +4304,7 @@ mod tests {
         });
     }
 
+    /// Tracked recovery drops every entry of a section whose value blob is missing.
     #[test_traced]
     fn test_recovery_glob_missing_entirely() {
         let executor = deterministic::Runner::default();
@@ -4480,7 +4313,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                open_tracked(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -4503,7 +4336,7 @@ mod tests {
 
             // Reinitialize with an empty glob, so every entry is invalid
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg)
+                open_tracked(context.child("second"), cfg, None)
                     .await
                     .expect("reinitialization must succeed");
 
@@ -4516,6 +4349,7 @@ mod tests {
         });
     }
 
+    /// Appends after tracked recovery continue at the truncated position.
     #[test_traced]
     fn test_recovery_can_append_after_recovery() {
         let executor = deterministic::Runner::default();
@@ -4524,7 +4358,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                open_tracked(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -4554,7 +4388,7 @@ mod tests {
 
             // Reinitialize
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone())
+                open_tracked(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("reinitialization must succeed");
 
@@ -4587,6 +4421,8 @@ mod tests {
         });
     }
 
+    /// Tracked recovery drops the entries of a section whose value section is gone while its index
+    /// remains.
     #[test_traced]
     fn test_recovery_glob_pruned_but_index_not() {
         let executor = deterministic::Runner::default();
@@ -4595,7 +4431,7 @@ mod tests {
 
             // Create and populate multiple sections
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                open_tracked(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -4606,12 +4442,14 @@ mod tests {
                     .append(section, entry, &value)
                     .await
                     .expect("Failed to append");
-                oversized = oversized.sync(section).await.expect("Failed to sync");
             }
+
+            // One sync of every section publishes no marker, so the damage below lies above every
+            // floor.
+            oversized = oversized.sync_all().await.expect("Failed to sync");
             drop(oversized);
 
-            // Simulate crash during prune: prune ONLY the glob, not the index
-            // This creates the "glob pruned but index not" scenario
+            // Remove section 1's values while its index remains.
             use crate::journal::segmented::glob::{Config as GlobConfig, Glob};
             let glob_cfg = GlobConfig {
                 partition: cfg.value_partition.clone(),
@@ -4626,13 +4464,13 @@ mod tests {
             glob = glob.sync_all().await.expect("Failed to sync glob");
             drop(glob);
 
-            // Recovery warns and truncates index section 1 to zero entries.
+            // Recovery truncates index section 1 to zero entries.
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone())
+                open_tracked(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("reinitialization must succeed");
 
-            // Pruning the glob removes the corresponding index entries.
+            // Losing the values removes the corresponding index entries.
             assert!(oversized.get(1, 0).await.is_err());
 
             // Sections 2 and 3 should still be valid
@@ -4643,6 +4481,8 @@ mod tests {
         });
     }
 
+    /// Tracked recovery removes the value section of a lost index section and keeps the other
+    /// sections.
     #[test_traced]
     fn test_recovery_index_partition_deleted() {
         let executor = deterministic::Runner::default();
@@ -4651,7 +4491,7 @@ mod tests {
 
             // Create and populate multiple sections
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                open_tracked(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -4662,8 +4502,11 @@ mod tests {
                     .append(section, entry, &value)
                     .await
                     .expect("Failed to append");
-                oversized = oversized.sync(section).await.expect("Failed to sync");
             }
+
+            // One sync of every section publishes no marker, so the damage below lies above every
+            // floor.
+            oversized = oversized.sync_all().await.expect("Failed to sync");
             drop(oversized);
 
             // Delete index blob for section 2 (simulate corruption/loss)
@@ -4675,7 +4518,7 @@ mod tests {
             // Reinitializing should handle the missing index section gracefully
             // Section 2 is gone from index, orphan data in glob is acceptable
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone())
+                open_tracked(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("reinitialization must succeed");
 
@@ -4690,6 +4533,7 @@ mod tests {
         });
     }
 
+    /// Tracked recovery truncates index entries that outlived their unsynced values.
     #[test_traced]
     fn test_recovery_index_synced_but_glob_not() {
         let executor = deterministic::Runner::default();
@@ -4698,7 +4542,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                open_tracked(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -4741,7 +4585,7 @@ mod tests {
 
             // Recovery truncates the index to the glob boundary.
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg)
+                open_tracked(context.child("second"), cfg, None)
                     .await
                     .expect("reinitialization must succeed");
 
@@ -4758,6 +4602,8 @@ mod tests {
         });
     }
 
+    /// Tracked recovery releases value bytes that outlived their index entries, and appends reuse
+    /// the freed range.
     #[test_traced]
     fn test_recovery_glob_synced_but_index_not() {
         let executor = deterministic::Runner::default();
@@ -4769,7 +4615,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                open_tracked(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -4806,7 +4652,7 @@ mod tests {
 
             // Reinitialize while glob holds orphan data from entry 3
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone())
+                open_tracked(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("reinitialization must succeed");
 
@@ -4858,7 +4704,7 @@ mod tests {
 
             // Reinitialize after adding data on top of orphan glob data
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("third"), cfg)
+                open_tracked(context.child("third"), cfg, None)
                     .await
                     .expect("Failed to reinit after append");
 
@@ -4899,6 +4745,7 @@ mod tests {
         });
     }
 
+    /// Tracked recovery drops a partial index entry, and appends follow the complete entries.
     #[test_traced]
     fn test_recovery_partial_index_entry() {
         let executor = deterministic::Runner::default();
@@ -4907,7 +4754,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                open_tracked(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -4937,7 +4784,7 @@ mod tests {
 
             // Reinitializing should handle the partial entry gracefully
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone())
+                open_tracked(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("reinitialization must succeed");
 
@@ -4973,6 +4820,7 @@ mod tests {
         });
     }
 
+    /// Tracked recovery empties a section that holds only a partial index entry.
     #[test_traced]
     fn test_recovery_only_partial_entry() {
         let executor = deterministic::Runner::default();
@@ -4981,7 +4829,7 @@ mod tests {
 
             // Create and populate with single entry
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                open_tracked(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -5005,7 +4853,7 @@ mod tests {
 
             // Recovery truncates the partial index to zero entries.
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone())
+                open_tracked(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("reinitialization must succeed");
 
@@ -5034,6 +4882,7 @@ mod tests {
         });
     }
 
+    /// Tracked recovery of an index truncated ahead of its values keeps the shorter index.
     #[test_traced]
     fn test_recovery_crash_during_truncate_index_ahead() {
         // Simulates crash where index was truncated but glob wasn't
@@ -5046,7 +4895,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                open_tracked(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -5079,7 +4928,7 @@ mod tests {
 
             // Recovery on reinitialization should succeed (glob has orphan data)
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone())
+                open_tracked(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("reinitialization must succeed");
 
@@ -5104,6 +4953,7 @@ mod tests {
         });
     }
 
+    /// Tracked recovery of values truncated ahead of the index truncates the index to match.
     #[test_traced]
     fn test_recovery_crash_during_truncate_glob_ahead() {
         // Simulates crash where glob was truncated but index wasn't
@@ -5113,7 +4963,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                open_tracked(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -5143,7 +4993,7 @@ mod tests {
 
             // Recovery on reinitialization should detect index entries pointing beyond glob
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone())
+                open_tracked(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("reinitialization must succeed");
 
@@ -5178,13 +5028,16 @@ mod tests {
         });
     }
 
+    /// Reading a value with a size smaller than its frame fails.
     #[test_traced]
     fn test_oversized_get_value_invalid_size() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context, cfg).await.expect("Failed to init");
+                Oversized::init_with_checkpoint(context, cfg, (0, 0))
+                    .await
+                    .expect("Failed to init");
 
             let value: TestValue = [42; 16];
             let entry = TestEntry::new(1, 0, 0);
@@ -5218,13 +5071,16 @@ mod tests {
         });
     }
 
+    /// Reading a value one byte short fails to decode or verify.
     #[test_traced]
     fn test_oversized_get_value_wrong_size() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context, cfg).await.expect("Failed to init");
+                Oversized::init_with_checkpoint(context, cfg, (0, 0))
+                    .await
+                    .expect("Failed to init");
 
             let value: TestValue = [42; 16];
             let entry = TestEntry::new(1, 0, 0);
@@ -5251,6 +5107,7 @@ mod tests {
         });
     }
 
+    /// Tracked recovery removes a value section that has no index section.
     #[test_traced]
     fn test_recovery_values_has_orphan_section() {
         let executor = deterministic::Runner::default();
@@ -5259,7 +5116,7 @@ mod tests {
 
             // Create and populate with sections 1 and 2
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                open_tracked(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -5294,7 +5151,7 @@ mod tests {
 
             // Reinitializing should detect and remove the orphan section
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone())
+                open_tracked(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("reinitialization must succeed");
 
@@ -5309,6 +5166,7 @@ mod tests {
         });
     }
 
+    /// Tracked recovery removes every value section that has no index section.
     #[test_traced]
     fn test_recovery_values_has_multiple_orphan_sections() {
         let executor = deterministic::Runner::default();
@@ -5317,7 +5175,7 @@ mod tests {
 
             // Create and populate with only section 1
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                open_tracked(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -5353,7 +5211,7 @@ mod tests {
 
             // Reinitializing should detect and remove all orphan sections
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone())
+                open_tracked(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("reinitialization must succeed");
 
@@ -5367,6 +5225,7 @@ mod tests {
         });
     }
 
+    /// Tracked recovery of storage that holds only value sections removes them all.
     #[test_traced]
     fn test_recovery_index_empty_but_values_exist() {
         let executor = deterministic::Runner::default();
@@ -5396,7 +5255,7 @@ mod tests {
 
             // Initializing oversized should remove all orphan value sections
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                open_tracked(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -5408,6 +5267,7 @@ mod tests {
         });
     }
 
+    /// A section whose orphan value section tracked recovery removed accepts appends from zero.
     #[test_traced]
     fn test_recovery_orphan_section_append_after() {
         let executor = deterministic::Runner::default();
@@ -5416,7 +5276,7 @@ mod tests {
 
             // Create and populate with section 1
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                open_tracked(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -5453,7 +5313,7 @@ mod tests {
 
             // Reinitializing should remove orphan sections
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone())
+                open_tracked(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("reinitialization must succeed");
 
@@ -5490,7 +5350,7 @@ mod tests {
             drop(oversized);
 
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("third"), cfg)
+                open_tracked(context.child("third"), cfg, None)
                     .await
                     .expect("Failed to reinit after append");
 
@@ -5503,15 +5363,17 @@ mod tests {
         });
     }
 
+    /// A restore at the newest synced boundary keeps every section when no value section is
+    /// orphaned.
     #[test_traced]
-    fn test_recovery_no_orphan_sections() {
+    fn test_checkpoint_restore_keeps_every_synced_section() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
 
             // Create and populate with sections 1, 2, 3 (no orphans)
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                Oversized::init_with_checkpoint(context.child("first"), cfg.clone(), (0, 0))
                     .await
                     .expect("Failed to init");
 
@@ -5526,11 +5388,14 @@ mod tests {
             }
             drop(oversized);
 
-            // Reinitializing needs no orphan cleanup
-            let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg)
-                    .await
-                    .expect("reinitialization must succeed");
+            // Restore at the newest synced boundary.
+            let oversized: Oversized<_, TestEntry, TestValue> = Oversized::init_with_checkpoint(
+                context.child("second"),
+                cfg,
+                (3, TestEntry::SIZE as u64),
+            )
+            .await
+            .expect("reinitialization must succeed");
 
             // All sections should be valid
             for section in 1u64..=3 {
@@ -5543,6 +5408,7 @@ mod tests {
         });
     }
 
+    /// Tracked recovery keeps an empty index section and removes an orphan value section.
     #[test_traced]
     fn test_recovery_orphan_with_empty_index_section() {
         let executor = deterministic::Runner::default();
@@ -5551,7 +5417,7 @@ mod tests {
 
             // Create and populate section 1 with entries
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                open_tracked(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -5593,7 +5459,7 @@ mod tests {
 
             // Reinitializing should handle empty index section and remove orphan value section
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg)
+                open_tracked(context.child("second"), cfg, None)
                     .await
                     .expect("reinitialization must succeed");
 
@@ -5607,6 +5473,8 @@ mod tests {
         });
     }
 
+    /// Tracked recovery removes orphan value sections between and after non-contiguous index
+    /// sections.
     #[test_traced]
     fn test_recovery_orphan_sections_with_gaps() {
         // Test non-contiguous sections: index has [1, 3, 5], values has [1, 2, 3, 4, 5, 6]
@@ -5617,7 +5485,7 @@ mod tests {
 
             // Create index with sections 1, 3, 5 (gaps)
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                open_tracked(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -5655,7 +5523,7 @@ mod tests {
 
             // Reinitializing should remove orphan sections 2, 4, 6
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg)
+                open_tracked(context.child("second"), cfg, None)
                     .await
                     .expect("reinitialization must succeed");
 
@@ -5682,7 +5550,7 @@ mod tests {
             // Seed two sections with one synced entry each, so both hold durable values.
             let cfg = test_cfg();
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                open_tracked(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
             for section in 1..=2 {
@@ -5690,8 +5558,11 @@ mod tests {
                     .append(section, TestEntry::new(section, 0, 0), &[section as u8; 16])
                     .await
                     .expect("Failed to append");
-                oversized = oversized.sync(section).await.expect("Failed to sync");
             }
+
+            // One sync of every section publishes no marker, so the damage below lies above every
+            // floor.
+            oversized = oversized.sync_all().await.expect("Failed to sync");
             drop(oversized);
 
             // Keep both value blobs, but erase one index by truncation and the other by removal.
@@ -5729,7 +5600,7 @@ mod tests {
             // sections come back empty (the original entries are gone with their prefixes)
             // and the truncation is durable.
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone())
+                open_tracked(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("Failed to recover extended index");
             for section in 1..=2u64 {
@@ -5756,7 +5627,7 @@ mod tests {
 
             // The sentinel entries written after recovery survive a clean reopen.
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("third"), cfg)
+                open_tracked(context.child("third"), cfg, None)
                     .await
                     .expect("Failed to reopen sentinel");
             for section in 1..=2u64 {
@@ -5778,6 +5649,8 @@ mod tests {
         });
     }
 
+    /// Tracked recovery truncates value bytes past the last entry, so the next append lands at that
+    /// entry's end.
     #[test_traced]
     fn test_recovery_glob_trailing_garbage_truncated() {
         // Tests the bug fix: when value is written to glob but index entry isn't
@@ -5789,7 +5662,7 @@ mod tests {
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                open_tracked(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -5835,7 +5708,7 @@ mod tests {
 
             // Reinitializing should truncate the trailing garbage
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone())
+                open_tracked(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("reinitialization must succeed");
 
@@ -5868,6 +5741,7 @@ mod tests {
         });
     }
 
+    /// Tracked recovery drops an entry whose value range overflows.
     #[test_traced]
     fn test_recovery_entry_with_overflow_offset() {
         // Tests that an entry with offset near u64::MAX that would overflow
@@ -5879,7 +5753,7 @@ mod tests {
 
             // Create and populate with valid entry
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                open_tracked(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -5929,7 +5803,7 @@ mod tests {
             // Recovery on reinitialization should detect the invalid entry
             // (offset + size would overflow, and even with saturating_add it exceeds glob_size)
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone())
+                open_tracked(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("reinitialization must succeed");
 
@@ -5954,6 +5828,8 @@ mod tests {
         });
     }
 
+    /// A section that tracked recovery empties stays open, reuses its value offsets from zero, and
+    /// survives a restart.
     #[test_traced]
     fn test_empty_section_persistence() {
         // Tests that sections that become empty (all entries removed/truncated)
@@ -5964,7 +5840,7 @@ mod tests {
 
             // Create and populate section 1 with entries
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                open_tracked(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -5976,7 +5852,6 @@ mod tests {
                     .await
                     .expect("Failed to append");
             }
-            oversized = oversized.sync(1).await.expect("Failed to sync");
 
             // Also create section 2 to ensure it survives
             let value2: TestValue = [10; 16];
@@ -5985,7 +5860,10 @@ mod tests {
                 .append(2, entry2, &value2)
                 .await
                 .expect("Failed to append to section 2");
-            oversized = oversized.sync(2).await.expect("Failed to sync section 2");
+
+            // One sync of every section publishes no marker, so the damage below lies above every
+            // floor.
+            oversized = oversized.sync_all().await.expect("Failed to sync");
             drop(oversized);
 
             // Truncate section 1's index to 0 (making it empty)
@@ -5999,7 +5877,7 @@ mod tests {
 
             // On the first restart, recovery should handle empty section 1
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone())
+                open_tracked(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("reinitialization must succeed");
 
@@ -6039,7 +5917,7 @@ mod tests {
 
             // Verify persistence across a second restart
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("third"), cfg.clone())
+                open_tracked(context.child("third"), cfg.clone(), None)
                     .await
                     .expect("Failed to reinit again");
 
@@ -6055,6 +5933,7 @@ mod tests {
         });
     }
 
+    /// A value read whose size covers only the checksum fails.
     #[test_traced]
     fn test_get_value_size_equals_crc_size() {
         // Tests the boundary condition where size = 4 (just CRC, no data).
@@ -6063,7 +5942,9 @@ mod tests {
         executor.start(|context| async move {
             let cfg = test_cfg();
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context, cfg).await.expect("Failed to init");
+                Oversized::init_with_checkpoint(context, cfg, (0, 0))
+                    .await
+                    .expect("Failed to init");
 
             let value: TestValue = [42; 16];
             let entry = TestEntry::new(1, 0, 0);
@@ -6083,6 +5964,7 @@ mod tests {
         });
     }
 
+    /// A value read with one byte beyond the checksum fails.
     #[test_traced]
     fn test_get_value_size_just_over_crc() {
         // Tests size = 5 (CRC + 1 byte of data).
@@ -6091,7 +5973,9 @@ mod tests {
         executor.start(|context| async move {
             let cfg = test_cfg();
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context, cfg).await.expect("Failed to init");
+                Oversized::init_with_checkpoint(context, cfg, (0, 0))
+                    .await
+                    .expect("Failed to init");
 
             let value: TestValue = [42; 16];
             let entry = TestEntry::new(1, 0, 0);
@@ -6111,6 +5995,7 @@ mod tests {
         });
     }
 
+    /// Tracked recovery handles section numbers near u64::MAX.
     #[test_traced]
     fn test_recovery_maximum_section_numbers() {
         // Test recovery with very large section numbers near u64::MAX to check
@@ -6124,7 +6009,7 @@ mod tests {
 
             // Create and populate with large section numbers
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                open_tracked(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -6138,8 +6023,11 @@ mod tests {
                     .await
                     .expect("Failed to append");
                 locations.push((section, (position, offset, size)));
-                oversized = oversized.sync(section).await.expect("Failed to sync");
             }
+
+            // One sync of every section publishes no marker, so the damage below lies above every
+            // floor.
+            oversized = oversized.sync_all().await.expect("Failed to sync");
             drop(oversized);
 
             // Simulate crash: truncate glob for middle section
@@ -6154,7 +6042,7 @@ mod tests {
 
             // Reinitializing should recover without overflow panics
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone())
+                open_tracked(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("reinitialization must succeed");
 
@@ -6186,6 +6074,7 @@ mod tests {
         });
     }
 
+    /// Tracked recovery completes a truncation that an earlier recovery left partially applied.
     #[test_traced]
     fn test_recovery_crash_during_recovery_truncate() {
         // Tests a nested crash scenario. Initial crash leaves inconsistent state, then a second
@@ -6197,7 +6086,7 @@ mod tests {
 
             // Phase 1: Create valid data with 5 entries
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                open_tracked(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -6243,7 +6132,7 @@ mod tests {
             // Phase 4: Second recovery attempt should handle the inconsistent state
             // Index has 4 entries, but glob only supports 3.
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone())
+                open_tracked(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("Failed to reinit after nested crash");
 
@@ -6280,6 +6169,8 @@ mod tests {
         });
     }
 
+    /// Tracked recovery completes an orphan value cleanup that an earlier recovery left partially
+    /// applied.
     #[test_traced]
     fn test_recovery_crash_during_orphan_cleanup() {
         // Tests crash during orphan section cleanup: recovery starts removing
@@ -6290,7 +6181,7 @@ mod tests {
 
             // Phase 1: Create valid data in section 1
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                open_tracked(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to init");
 
@@ -6334,7 +6225,7 @@ mod tests {
 
             // Phase 4: Recovery should complete the cleanup
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), cfg.clone())
+                open_tracked(context.child("second"), cfg.clone(), None)
                     .await
                     .expect("reinitialization must succeed");
 
@@ -6365,14 +6256,16 @@ mod tests {
         });
     }
 
+    /// A tracked bounded open at index size zero empties the section and releases its value.
     #[test_traced]
-    fn test_truncate_to_zero_index_size() {
+    fn test_tracked_bounded_open_to_zero_index_size() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Seed one durable entry in section 0.
             let cfg = test_cfg();
-            let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context, cfg).await.expect("Failed to init");
-
+            let mut oversized = open_tracked(context.child("first"), cfg.clone(), None)
+                .await
+                .expect("Failed to init");
             let value: TestValue = [1; 16];
             let entry = TestEntry::new(1, 0, 0);
             (oversized, _, _, _) = oversized
@@ -6380,12 +6273,12 @@ mod tests {
                 .await
                 .expect("Failed to append");
             oversized = oversized.sync(0).await.expect("Failed to sync");
+            drop(oversized);
 
-            oversized = oversized
-                .test_reopen_at_most(0, 0)
+            // Bounding section 0 at zero bytes leaves it empty in both journals.
+            let oversized = open_tracked(context.child("bounded"), cfg, Some((0, 0)))
                 .await
                 .expect("truncate to zero index_size must not fail");
-
             assert_eq!(oversized.last(0).await.unwrap(), None);
             assert_eq!(oversized.size(0).unwrap(), 0);
             assert_eq!(oversized.value_size(0).await.unwrap(), 0);
@@ -6394,19 +6287,16 @@ mod tests {
         });
     }
 
+    /// A tracked bounded open at zero bytes of a missing section succeeds without creating it.
     #[test_traced]
-    fn test_init_at_most_zero_on_missing_section() {
+    fn test_tracked_bounded_open_zero_on_missing_section() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg();
-            let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context, cfg).await.expect("Failed to init");
-
-            oversized = oversized
-                .test_reopen_at_most(0, 0)
+            let oversized = open_tracked(context, test_cfg(), Some((0, 0)))
                 .await
                 .expect("truncate on missing section must not fail");
 
+            // The section stays absent and owns no value bytes.
             assert!(matches!(
                 oversized.last(0).await,
                 Err(Error::SectionOutOfRange(0))
@@ -6417,28 +6307,31 @@ mod tests {
         });
     }
 
+    /// A tracked bounded open past the end of a missing section requires no missing history.
     #[test_traced]
-    fn test_init_at_most_above_end_on_missing_section() {
+    fn test_tracked_bounded_open_above_end_on_missing_section() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg();
-            let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context, cfg).await.expect("Failed to init");
+            let journal = open_tracked(context, test_cfg(), Some((0, 1)))
+                .await
+                .expect("an upper bound must not require missing history");
 
-            let result = oversized.test_reopen_at_most(0, 1).await;
-            let journal = result.expect("an upper bound must not require missing history");
+            // The missing section reports an empty index.
             assert_eq!(journal.size(0).unwrap(), 0);
             journal.destroy().await.unwrap();
         });
     }
 
+    /// Reading the last entry of a pruned section reports the prune.
     #[test_traced]
     fn test_last_pruned_section_returns_error() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context, cfg).await.expect("Failed to init");
+                Oversized::init_with_checkpoint(context, cfg, (0, 0))
+                    .await
+                    .expect("Failed to init");
 
             let value: TestValue = [1; 16];
             (oversized, _, _, _) = oversized
@@ -6471,24 +6364,20 @@ mod tests {
     /// the page-1 rewrite lost. Page 1's 16-byte durable checksum slot still validates, so
     /// backward tail discovery adopts page 2 while page 1 is a short interior page. The
     /// unsynced values are lost.
-    async fn torn_rewrite_image(context: deterministic::Context, tracked: bool) {
-        let cfg = test_cfg();
-        let mut journal: Oversized<_, TestEntry, TestValue> = if tracked {
-            let mut replay = Oversized::init_with_metadata(
-                context.child("seed"),
-                cfg,
-                TORN_MARKERS.into(),
-                ReadOptions::default(),
-            )
-            .await
-            .unwrap();
-            while let Some(item) = replay.next().await {
-                item.unwrap();
-            }
-            replay.finish_tracked().await.unwrap()
-        } else {
-            Oversized::init(context.child("seed"), cfg).await.unwrap()
-        };
+    async fn torn_rewrite_image(context: deterministic::Context) {
+        let mut replay = Oversized::init_with_metadata(
+            context.child("seed"),
+            test_cfg(),
+            TORN_MARKERS.into(),
+            ReadOptions::default(),
+        )
+        .await
+        .unwrap();
+        while let Some(item) = replay.next().await {
+            item.unwrap();
+        }
+        let mut journal: Oversized<_, TestEntry, TestValue> =
+            replay.finish_tracked().await.unwrap();
         for id in 0..4u64 {
             (journal, _, _, _) = journal
                 .append(1, TestEntry::new(id, 0, 0), &[id as u8; 16])
@@ -6496,10 +6385,9 @@ mod tests {
                 .unwrap();
         }
         journal = journal.sync(1).await.unwrap();
-        if tracked {
-            // An empty flush publishes the section's marker.
-            journal = journal.sync(Vec::<u64>::new()).await.unwrap();
-        }
+
+        // An empty flush publishes the section's marker.
+        journal = journal.sync(Vec::<u64>::new()).await.unwrap();
         for id in 4..9u64 {
             (journal, _, _, _) = journal
                 .append(1, TestEntry::new(id, 0, 0), &[id as u8; 16])
@@ -6520,37 +6408,12 @@ mod tests {
             .unwrap();
     }
 
-    /// A bounded open keeps every synced entry below a torn index page rewrite. The cap is
-    /// resolved on the section's page-validated prefix, so entries on the short page are read
-    /// from the tip rather than refused by the page cache and skipped.
-    #[test_traced]
-    fn test_oversized_bounded_open_keeps_synced_entries_below_torn_rewrite() {
-        let chunk = TestEntry::SIZE as u64;
-        let (_, checkpoint) = deterministic::Runner::default()
-            .start_and_recover(|context| torn_rewrite_image(context, false));
-        deterministic::Runner::from(checkpoint).start(move |context| async move {
-            let journal: Oversized<_, TestEntry, TestValue> =
-                Oversized::init_at_most(context.child("bounded"), test_cfg(), 1, 9 * chunk)
-                    .await
-                    .unwrap();
-            assert_eq!(journal.size(1).unwrap(), 4 * chunk);
-            let entry = journal.get(1, 3).await.unwrap();
-            assert_eq!(
-                journal
-                    .get_value(1, entry.value_offset, entry.value_size)
-                    .await
-                    .unwrap(),
-                [3; 16]
-            );
-        });
-    }
-
     /// The tracked bounded open resolves its committed floor on the same page-validated prefix.
     #[test_traced]
     fn test_oversized_tracked_bounded_open_keeps_synced_entries_below_torn_rewrite() {
         let chunk = TestEntry::SIZE as u64;
-        let (_, checkpoint) = deterministic::Runner::default()
-            .start_and_recover(|context| torn_rewrite_image(context, true));
+        let (_, checkpoint) =
+            deterministic::Runner::default().start_and_recover(torn_rewrite_image);
         deterministic::Runner::from(checkpoint).start(move |context| async move {
             let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata_at_most(
                 context.child("bounded"),
@@ -6918,7 +6781,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = test_cfg();
             let mut journal: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                Oversized::init_with_checkpoint(context.child("first"), cfg.clone(), (0, 0))
                     .await
                     .unwrap();
             for section in 0..3u64 {
@@ -6966,7 +6829,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = test_cfg();
             let mut journal: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg.clone())
+                Oversized::init_with_checkpoint(context.child("first"), cfg.clone(), (0, 0))
                     .await
                     .unwrap();
             for section in 0..3u64 {
@@ -6996,6 +6859,74 @@ mod tests {
         });
     }
 
+    /// Restoring the empty checkpoint on empty storage opens a fresh journal without reading,
+    /// writing, syncing, or creating any blob, and that journal starts a history a later restore
+    /// reopens.
+    #[test_traced]
+    fn test_init_with_checkpoint_empty_opens_nothing() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Record every read, write, and durability operation of the restore.
+            let cfg = test_cfg();
+            let (recording, recordings) =
+                commonware_runtime::mocks::RecordingContext::new(context.child("restore"));
+            let pending = PendingSyncs::default();
+            pending.arm();
+            let delayed = DelayedSyncContext {
+                inner: recording,
+                pending: pending.clone(),
+            };
+            let journal = drive_pending_syncs(
+                &pending,
+                Oversized::<_, TestEntry, TestValue>::init_with_checkpoint(
+                    delayed,
+                    cfg.clone(),
+                    (0, 0),
+                ),
+            )
+            .await
+            .unwrap();
+            assert_eq!(journal.oldest_section(), None);
+            assert_eq!(pending.calls(), 0, "an empty restore must not sync");
+            let observed = recordings.snapshot();
+            assert!(observed.reads.is_empty(), "an empty restore must not read");
+            assert!(
+                observed.writes.is_empty(),
+                "an empty restore must not write"
+            );
+
+            // Neither partition exists, so the restore opened no blob.
+            for partition in [&cfg.index_partition, &cfg.value_partition] {
+                assert!(
+                    matches!(
+                        context.scan(partition).await,
+                        Err(RError::PartitionMissing(_))
+                    ),
+                    "an empty restore must not create {partition}"
+                );
+            }
+
+            // The fresh journal accepts an append that a restore at its synced boundary reopens.
+            pending.unblock();
+            let (journal, position, offset, size) = journal
+                .append(1, TestEntry::new(7, 0, 0), &[7; 16])
+                .await
+                .unwrap();
+            assert_eq!(position, 0);
+            drop(journal.sync(1).await.unwrap());
+            let journal = Oversized::<_, TestEntry, TestValue>::init_with_checkpoint(
+                context.child("reopen"),
+                cfg,
+                (1, TestEntry::SIZE as u64),
+            )
+            .await
+            .unwrap();
+            assert_eq!(journal.get(1, 0).await.unwrap().id, 7);
+            assert_eq!(journal.get_value(1, offset, size).await.unwrap(), [7; 16]);
+            journal.destroy().await.unwrap();
+        });
+    }
+
     /// Cancelling value validation cannot skip an entry or publish a marker beyond it.
     #[rstest::rstest]
     #[case::valid_finish(false, false)]
@@ -7011,7 +6942,7 @@ mod tests {
             const MARKERS: &str = "cancel-value-markers";
             let cfg = test_cfg();
             let mut journal: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("seed"), cfg.clone())
+                Oversized::init_with_checkpoint(context.child("seed"), cfg.clone(), (0, 0))
                     .await
                     .unwrap();
             let mut second_offset = 0;
@@ -7150,7 +7081,7 @@ mod tests {
             const SECTION: u64 = 1;
             let cfg = test_cfg();
             let mut journal: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("seed"), cfg.clone())
+                Oversized::init_with_checkpoint(context.child("seed"), cfg.clone(), (0, 0))
                     .await
                     .unwrap();
             for id in 0..4 {
@@ -7163,8 +7094,13 @@ mod tests {
 
             let (gated, gate) =
                 ReadGateContext::new(context.child("cancel"), cfg.index_partition.clone());
-            let journal: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(gated, cfg.clone()).await.unwrap();
+            let journal: Oversized<_, TestEntry, TestValue> = Oversized::init_with_checkpoint(
+                gated,
+                cfg.clone(),
+                (1, 4 * TestEntry::SIZE as u64),
+            )
+            .await
+            .unwrap();
             let mut replay = journal
                 .replay(SECTION, 0, NZUsize!(64), ReadOptions::default())
                 .await
@@ -7190,8 +7126,13 @@ mod tests {
             }
             assert!(matches!(replay.finish(), Err(Error::ReplayFailed)));
 
-            let journal: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("reopen"), cfg).await.unwrap();
+            let journal: Oversized<_, TestEntry, TestValue> = Oversized::init_with_checkpoint(
+                context.child("reopen"),
+                cfg,
+                (1, 4 * TestEntry::SIZE as u64),
+            )
+            .await
+            .unwrap();
             assert_eq!(journal.size(SECTION).unwrap(), 4 * TestEntry::SIZE as u64);
             for id in 0..4 {
                 assert_eq!(journal.get(SECTION, id).await.unwrap().id, id);

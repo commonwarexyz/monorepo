@@ -522,19 +522,6 @@ mod tests {
     use rand::Rng as _;
 
     impl<E: crate::Context, V: CodecShared> Glob<E, V> {
-        pub(in super::super) fn test_configuration(&self) -> (E, Config<V::Cfg>) {
-            let (context, partition, factory) = self.0.manager.test_configuration();
-            (
-                context,
-                Config {
-                    partition,
-                    write_buffer: factory.capacity,
-                    compression: self.0.compression,
-                    codec_config: self.0.codec_config.clone(),
-                },
-            )
-        }
-
         async fn test_reopen_section(self, section: u64, end: u64) -> Result<Self, Error> {
             let (context, partition, factory) = self.0.manager.test_configuration();
             let cfg = Config {
