@@ -931,6 +931,7 @@ pub mod fuzz {
         }
         let tight = F::reduce_tight(simd, long);
         assert_lanes(simd, tight, "tight 15 ab", |i| times(15, i));
+        // Debug counters reject a tight result whose bound exceeds TIGHT.
         let _ = tight.neg::<{ TIGHT + 1 }>(simd);
         let tight = F::reduce_signed_tight::<64>(
             simd,
@@ -942,6 +943,7 @@ pub mod fuzz {
         assert_lanes(simd, tight, "tight 15 ab - cd", |i| {
             reference::sub(times(15, i), rcd(i))
         });
+        // Debug counters reject a tight result whose bound exceeds TIGHT.
         let _ = tight.neg::<{ TIGHT + 1 }>(simd);
         assert_lanes(
             simd,
