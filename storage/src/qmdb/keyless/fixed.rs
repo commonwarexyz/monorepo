@@ -168,7 +168,6 @@ mod tests {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
-            commit_codec_config: (),
         };
         TestCompactDb::init(context, cfg, None).await.unwrap()
     }
@@ -323,7 +322,6 @@ mod tests {
                     write_buffer: NZUsize!(1024),
                     replay_buffer: NZUsize!(1024),
                 },
-                commit_codec_config: (),
             };
             let mut db = TestCompactDb::<F>::init(context.child("create"), cfg.clone(), None)
                 .await
