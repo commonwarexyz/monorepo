@@ -115,8 +115,7 @@ pub enum SummaryError {
 /// A summary's digest ([Digestible]) is what the next summary names as its parent, so the hasher
 /// `H` is part of the type. A certificate scheme over summaries comes from the certificate macros
 /// of `commonware_cryptography` and names the hasher along with the signature scheme and its fault
-/// model. For example, for SHA-256 and Ed25519 with up to `f` Byzantine validators out of
-/// `3f + 1`:
+/// model:
 ///
 /// ```
 /// mod scheme {

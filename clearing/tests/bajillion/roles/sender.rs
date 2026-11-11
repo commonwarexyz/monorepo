@@ -57,8 +57,8 @@ pub enum Outcome {
     /// The close settled a state of the pending request. The sender records that state's map and
     /// clears the request.
     Settled,
-    /// The close settled another map, such as a dropped request's, or it has no row of the sender
-    /// where the sender recorded a map. Openings of the row show its payments.
+    /// The close settled another map, or it has no row of the sender where the sender recorded a
+    /// map. Openings of the row show its payments.
     Conflict,
 }
 

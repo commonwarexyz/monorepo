@@ -136,9 +136,7 @@ pub struct Payout<P: PublicKey, A: Amount> {
 impl<P: PublicKey, A: Amount> Payout<P, A> {
     /// Stages the payout log's batch for one posted close. It appends `payouts` in account order,
     /// then a commit with no metadata that keeps the inactivity floor at zero, so no payout is
-    /// ever pruned.
-    ///
-    /// Fails if the log fails, for example because it already raised its floor.
+    /// ever pruned. It fails on a log whose floor a commit has raised.
     pub async fn stage<E, H, S>(
         log: &Payouts<E, P, H, S, A>,
         payouts: &Amounts<P, A>,

@@ -90,8 +90,7 @@
 //! what each role stores and where, and how it caches, batches, schedules, persists, and recovers.
 //!
 //! Each deployment also chooses the unsigned integer type of its amounts ([Amount]). The primitive
-//! unsigned integers implement it, and so does [commonware_codec::Uint], so a deployment that
-//! settles EVM tokens uses [commonware_codec::U256].
+//! unsigned integers implement it, and so does [commonware_codec::Uint].
 //!
 //! ```text
 //!   role        keeps                 calls
@@ -197,9 +196,9 @@
 //!   Its state of `e + 1` can still settle only if it builds on that row root, and the request is
 //!   dropped once none of its states can settle. Then compare the row root with the root of the map
 //!   recorded for `e`, or with the empty map's root when none is recorded. A different root shows
-//!   that the close settled another map, such as a dropped request's, and openings of the row show
-//!   its payments (V6). Otherwise the sender drops a request a close settled, builds on the wrong
-//!   root, or never learns that a close settled a map it did not record.
+//!   that the close settled another map, and openings of the row show its payments (V6). Otherwise
+//!   the sender drops a request a close settled, builds on the wrong root, or never learns that a
+//!   close settled a map it did not record.
 //!
 //! - **S6.** When a new request pays again the batch of a refused request of epoch `e`, sign it
 //!   only for epoch `e` or a later one. For `e + 1`, first resolve the post of `e`. For an epoch
@@ -635,7 +634,7 @@
 //! collapse to the one range [0, s) for the last posted payouts size s. Each gap between two ranges
 //! holds at least one unpaid payout, so with U payouts unpaid at most U + 1 ranges remain in any
 //! order of payment. An implementation may keep the paid indices in any form that answers whether
-//! an index is covered, such as a flag per index or ranges found through a caller-supplied hint.
+//! an index is covered.
 //!
 //! ```text
 //!   log index     0   1   2   3   4   5   6
@@ -666,8 +665,8 @@
 //! and the rest are varints, the canonical unsigned LEB128 of [commonware_codec::varint].
 //!
 //! 1. **Trees.** Payment maps and the matrix commit with the binary Merkle tree of
-//!    [commonware_storage::bmt] over the digests of their entries. An empty tree holds the single
-//!    node `H()`, so its root is `H(0u32 || H())`.
+//!    [commonware_storage::bmt] over the digests of their entries. An empty tree's root is
+//!    `H(0u32 || H())`.
 //!
 //!    ```text
 //!    payment map entry                 matrix row

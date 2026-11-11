@@ -7,11 +7,10 @@ use core::{
     ops::{BitOrAssign, Shl, ShrAssign},
 };
 
-/// An unsigned integer of `BITS` bits held in `LIMBS` limbs of 64 bits, such as [U256].
+/// An unsigned integer of `BITS` bits held in `LIMBS` limbs of 64 bits.
 ///
-/// It encodes as its value in big-endian over the fewest bytes that hold its bits, so a 256-bit
-/// integer encodes as 32 bytes. Decoding refuses an encoding with a bit set beyond the width, so
-/// every value has exactly one encoding.
+/// It encodes as its value in big-endian over the fewest bytes that hold its bits. Decoding refuses
+/// an encoding with a bit set beyond the width, so every value has exactly one encoding.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Uint<const BITS: usize, const LIMBS: usize>(ruint::Uint<BITS, LIMBS>);
 
