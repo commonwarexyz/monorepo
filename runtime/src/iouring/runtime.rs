@@ -1128,19 +1128,29 @@ pub struct Local {
     /// [`Wheel::bound`]: super::wheel::Wheel::bound
     pub timers_next: u64,
     /// Pending removals from `timers`: the registrations whose sleeps were
-    /// dropped, or completed early by a poll, on this worker while it was not
-    /// closing. Queuing their identities lets those drops skip the timers'
-    /// lock. Only this worker pushes and drains it: each registration here
-    /// removes the latest one and takes its slot, the next service pass, or
-    /// cleanup before closing `timers`, removes the rest, and each service
-    /// pass caps its capacity at [`DROPPED_CAPACITY`] (see [`super::sleep`]).
-    /// While any remain, the worker serves again rather than park.
+    /// dropped on this worker while it was not closing. Queuing their
+    /// identities lets those drops skip the timers' lock. Only this worker
+    /// pushes and drains it: each registration here removes the latest one
+    /// and takes its slot, the next service pass, or cleanup before closing
+    /// `timers`, removes the rest, and each service pass caps its capacity at
+    /// [`DROPPED_CAPACITY`] (see [`super::sleep`]). While any remain, the
+    /// worker serves again rather than park.
     pub timers_dropped: Vec<Id>,
     /// Reject new registration and send wakes to the global queue, while
     /// allowing idempotent cancellation.
     pub closing: bool,
-    /// Shared monotonic sample for the current service turn.
+    /// This worker's service time: the time at which it started or ran its
+    /// latest service pass, or at which the first poll of a sleep after an
+    /// idle wait read the clock (see `now_stale`). It never runs ahead of the
+    /// clock. A service pass samples it once for all of its work, and the
+    /// first poll of a sleep compares its deadline with it (see
+    /// [`super::sleep`]).
     pub now: Instant,
+    /// Whether this worker has waited idle since `now`. Set after every idle
+    /// wait and cleared by the next service pass, or by the first poll of a
+    /// sleep, which then reads the clock into `now` rather than compare its
+    /// deadline with a time from before the wait.
+    pub now_stale: bool,
     /// Root wake flag, set by local wakes or applied mailbox messages and
     /// taken before each root poll so a wake during the poll is kept.
     pub root_ready: bool,
@@ -1193,6 +1203,7 @@ impl Local {
             timers_dropped: Vec::new(),
             closing: false,
             now,
+            now_stale: false,
             root_ready: true,
             mailbox,
             deferred: Deferred::default(),
@@ -1988,12 +1999,17 @@ impl Worker {
     /// Service the io_uring ring and timers using one time sample, collecting
     /// callbacks, and return whether kernel service was deferred to an idle
     /// wait. Timer service first removes the registrations of sleeps dropped
-    /// or completed early on this worker since the last pass, then expires due
-    /// ones. A pool worker that is not closing also expires its peers' overdue
-    /// timers, at most once per [`RESCUE_INTERVAL`].
+    /// on this worker since the last pass, then expires due ones. A pool
+    /// worker that is not closing also expires its peers' overdue timers, at
+    /// most once per [`RESCUE_INTERVAL`].
     fn service(&mut self, defer_kernel_service: bool) -> bool {
         let mut local = self.local.borrow_mut();
+
+        // First polls of sleeps compare their deadlines with this time until
+        // the next pass or idle wait.
         local.now = Instant::now();
+        local.now_stale = false;
+
         let Local {
             seat,
             now,
@@ -2012,9 +2028,7 @@ impl Worker {
             .service(*now, defer_kernel_service, deferred);
         let outcome = result.expect("io_uring driver service failed");
 
-        // Sleeps polled on this thread complete at once if this time has
-        // reached their deadlines. The timers count it from their origin.
-        Sleep::set_turn(*now);
+        // The timers count this time from their origin.
         let nanos = timers.nanos(*now);
 
         // Registrations of sleeps dropped here leave first, in critical
@@ -2182,9 +2196,9 @@ impl Worker {
             Duration::from_micros(spinner_cfg.max_budget_us.try_into().unwrap_or(u64::MAX));
 
         // The first polls precede the first service pass, so sleeps polled in
-        // between compare their deadlines with the time of this start, not
-        // with a time that an earlier worker left on this thread.
-        Sleep::set_turn(Instant::now());
+        // between compare their deadlines with the time of this start, which
+        // follows the construction of the root.
+        self.local.borrow_mut().now = Instant::now();
 
         // A sleep polled with the root's waker on this thread may skip its
         // timers' lock, as with a task's waker (see [`super::sleep`]). The
@@ -2421,7 +2435,7 @@ impl Worker {
             // sleep created before the wait to be ahead. Marking the service
             // time stale leaves the clock read to such a poll, so a turn that
             // only repolls registered sleeps reads no clock for them.
-            Sleep::stale_turn();
+            self.local.borrow_mut().now_stale = true;
         }
     }
 }
