@@ -1912,6 +1912,7 @@ impl Worker {
             if !local.deferred.is_empty() {
                 continue;
             }
+
             if local.driver.as_ref().unwrap().is_empty() {
                 break;
             }
@@ -2066,6 +2067,7 @@ impl Worker {
             self.rescue_at = *now + RESCUE_INTERVAL;
             Timers::rescue_peers(shared.pool.timers(), seat.index as usize, *now, deferred);
         }
+
         local.update_pending();
         outcome
     }
@@ -2202,6 +2204,7 @@ impl Worker {
                 // While expiry is behind, a slice of polling ends the batch,
                 // so budgeted passes keep pace however long each poll runs.
                 let slice_end = self.backlog.then(|| Instant::now() + BACKLOG_SLICE);
+
                 for _ in 0..BATCH_SIZE {
                     let Some(runnable) = self.next_runnable(pool) else {
                         break;

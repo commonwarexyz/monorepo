@@ -78,6 +78,7 @@ impl Deadlines {
         if !self.wheel.contains(slot) {
             return false;
         }
+
         self.wheel.remove(slot);
 
         // An empty wheel has no firing time, and a nonempty one keeps the
@@ -85,6 +86,7 @@ impl Deadlines {
         if self.wheel.is_empty() {
             self.next = None;
         }
+
         true
     }
 
@@ -99,6 +101,7 @@ impl Deadlines {
         if self.next.is_none_or(|next| next > now) {
             return;
         }
+
         let now = now.nanos_since(self.origin);
         let mut budget = BUDGET;
         self.wheel
@@ -151,6 +154,7 @@ pub mod tests {
     fn expire(deadlines: &mut Deadlines, now: Instant) -> Vec<u32> {
         let mut fired = Vec::new();
         deadlines.expire(now, &mut fired);
+
         fired
     }
 
@@ -168,6 +172,7 @@ pub mod tests {
         // The removed deadline's firing time stays cached, early, until a
         // pass at it refreshes the bound to the survivor's firing time.
         let first = deadlines.fires_at(first);
+
         assert_eq!(deadlines.next_deadline(), Some(first));
         assert!(expire(&mut deadlines, first - Duration::from_nanos(1)).is_empty());
         assert!(expire(&mut deadlines, first).is_empty());
@@ -178,6 +183,7 @@ pub mod tests {
         let earlier = first + Duration::from_nanos(1);
         deadlines.insert(0, earlier);
         let fires = deadlines.fires_at(earlier);
+
         assert_eq!(fires, first + Duration::from_nanos(RESOLUTION));
         assert_eq!(deadlines.next_deadline(), Some(fires));
         assert!(expire(&mut deadlines, fires - Duration::from_nanos(1)).is_empty());
@@ -186,11 +192,16 @@ pub mod tests {
         // Removing the last deadline clears the bound, and one installed
         // after a long idle period caches its own firing time.
         deadlines.remove(1);
+
         assert_eq!(deadlines.next_deadline(), None);
+
         let after_idle = origin + Duration::from_secs(3600);
+
         assert!(expire(&mut deadlines, after_idle).is_empty());
+
         deadlines.insert(1, after_idle);
         let fires = deadlines.fires_at(after_idle);
+
         assert_eq!(deadlines.next_deadline(), Some(fires));
         assert_eq!(expire(&mut deadlines, fires), [1]);
     }
@@ -205,14 +216,18 @@ pub mod tests {
         let deadline = origin + Duration::from_nanos(RESOLUTION + 1);
         deadlines.insert(0, deadline);
         let fires = origin + Duration::from_nanos(2 * RESOLUTION);
+
         assert_eq!(deadlines.fires_at(deadline), fires);
         assert_eq!(deadlines.next_deadline(), Some(fires));
 
         // A later deadline leaves the bound, and one on a tick caches itself.
         deadlines.insert(1, fires + Duration::from_nanos(1));
+
         assert_eq!(deadlines.next_deadline(), Some(fires));
+
         let aligned = origin + Duration::from_nanos(RESOLUTION);
         deadlines.insert(2, aligned);
+
         assert_eq!(deadlines.next_deadline(), Some(aligned));
 
         // Each pass fires the deadlines due by its time and caches the next
@@ -233,6 +248,7 @@ pub mod tests {
         let origin = Instant::now();
         let mut deadlines = Deadlines::new(origin);
         let deadline = origin + Duration::from_secs(3600);
+
         for slot in 0..8 * BUDGET {
             deadlines.insert(slot, deadline);
         }
@@ -240,7 +256,9 @@ pub mod tests {
         // The bound falls to the bucket's start, and passes at the bounds
         // that follow refile the bucket down the levels and fire nothing.
         let fires = deadlines.fires_at(deadline);
+
         assert!(deadlines.next_deadline().unwrap() < fires);
+
         while let Some(bound) = deadlines.next_deadline().filter(|bound| *bound < fires) {
             assert!(expire(&mut deadlines, bound).is_empty());
         }
@@ -264,23 +282,30 @@ pub mod tests {
             RESOLUTION + 1,
             59_999_999_999,
         ];
+
         for (slot, offset) in offsets.iter().enumerate() {
             let deadline = origin + Duration::from_nanos(*offset);
             deadlines.insert(slot as u32, deadline);
             let fires = deadlines.fires_at(deadline);
+
             assert!(fires >= deadline);
             assert!(fires < deadline + Duration::from_nanos(RESOLUTION));
         }
+
         assert!(deadlines.next_deadline().unwrap() <= origin + Duration::from_nanos(RESOLUTION));
 
         // Each fires at its firing time, not one nanosecond earlier.
         let mut fired = Vec::new();
+
         for (slot, offset) in offsets.iter().enumerate() {
             let fires = deadlines.fires_at(origin + Duration::from_nanos(*offset));
             let before = expire(&mut deadlines, fires - Duration::from_nanos(1));
+
             assert!(!before.contains(&(slot as u32)), "fired early");
+
             fired.extend(before);
             fired.extend(expire(&mut deadlines, fires));
+
             assert!(fired.contains(&(slot as u32)), "fired late");
         }
 
@@ -311,13 +336,18 @@ pub mod tests {
         // The reused slot holds its new deadline, and the removed one never
         // fires.
         deadlines.insert(0, deadline + Duration::from_secs(1));
+
         assert!(deadlines.contains(0));
+
         let fires = deadlines.fires_at(deadline);
         let fired = expire(&mut deadlines, fires);
+
         assert_eq!(fired, [1]);
+
         let later = deadline + Duration::from_secs(1);
         let fires = deadlines.fires_at(later);
         let fired = expire(&mut deadlines, fires);
+
         assert_eq!(fired, [0]);
         assert_eq!(deadlines.next_deadline(), None);
     }
@@ -329,6 +359,7 @@ pub mod tests {
 
         // A deadline before the origin is due at once.
         deadlines.insert(0, origin - Duration::from_millis(1));
+
         assert!(deadlines.next_deadline().unwrap() <= origin);
         assert_eq!(expire(&mut deadlines, origin), [0]);
 
@@ -336,6 +367,7 @@ pub mod tests {
         let far = origin + Duration::from_secs(30 * 365 * 24 * 60 * 60);
         deadlines.insert(1, far);
         let fires = deadlines.fires_at(far);
+
         assert!(fires >= far && fires < far + Duration::from_nanos(RESOLUTION));
         assert!(deadlines.next_deadline().unwrap() <= fires);
         assert!(expire(&mut deadlines, far - Duration::from_secs(1)).is_empty());
@@ -348,6 +380,7 @@ pub mod tests {
     fn test_randomized_deadlines_match_an_ordered_model() {
         /// Waiter slots the model reuses.
         const SLOTS: u32 = 128;
+
         for seed in 0..8 {
             // The model: each live slot's firing time, and the same ordered
             // by firing time.
@@ -358,15 +391,18 @@ pub mod tests {
             let mut ordered = BTreeSet::<(u64, u32)>::new();
             let mut fired = Vec::new();
             let mut now = 0u64;
+
             for step in 0..20_000 {
                 match rng.random_range(0..8) {
                     // Install a past, current, near, or far deadline in a free
                     // slot.
                     0..=2 => {
                         let slot = rng.random_range(0..SLOTS);
+
                         if live.contains_key(&slot) {
                             continue;
                         }
+
                         let offset = match rng.random_range(0..5) {
                             0 => now.saturating_sub(rng.random_range(0..=10 * RESOLUTION)),
                             1 => now,
@@ -375,6 +411,7 @@ pub mod tests {
                                 now + rng.random_range(0..=30 * 365 * 24 * 3600 * 1_000_000_000u64)
                             }
                         };
+
                         // Independent rounding, without calling the wheel.
                         let firing = offset.div_ceil(RESOLUTION) * RESOLUTION;
                         deadlines.insert(slot, origin + Duration::from_nanos(offset));
@@ -386,11 +423,14 @@ pub mod tests {
                         if live.is_empty() {
                             continue;
                         }
+
                         let pick = rng.random_range(0..live.len());
                         let (&slot, &firing) = live.iter().nth(pick).unwrap();
+
                         // Cancellation and terminal completion both eagerly
                         // unlink their installed deadline.
                         assert!(deadlines.remove(slot));
+
                         live.remove(&slot);
                         ordered.remove(&(firing, slot));
                     }
@@ -402,21 +442,28 @@ pub mod tests {
                         } else {
                             rng.random_range(0..=10_000 * RESOLUTION)
                         };
+
                         let at = origin + Duration::from_nanos(now);
                         let mut passes = 0;
+
                         while deadlines.next_deadline().is_some_and(|bound| bound <= at) {
                             passes += 1;
+
                             assert!(
                                 passes <= 10 * SLOTS,
                                 "seed {seed}, step {step}: stalled expiry"
                             );
+
                             deadlines.expire(at, &mut fired);
+
                             for slot in fired.drain(..) {
                                 let firing = live.remove(&slot).expect("stale or duplicate expiry");
+
                                 assert!(firing <= now, "seed {seed}, step {step}: early expiry");
                                 assert!(ordered.remove(&(firing, slot)));
                             }
                         }
+
                         assert!(
                             ordered.first().is_none_or(|(firing, _)| *firing > now),
                             "seed {seed}, step {step}: due deadline survived"
@@ -427,6 +474,7 @@ pub mod tests {
                 // After every step, the same slots are installed and the
                 // bound is never after the earliest firing time.
                 assert_eq!(deadlines.len(), live.len(), "seed {seed}, step {step}");
+
                 for slot in 0..SLOTS {
                     assert_eq!(
                         deadlines.contains(slot),
@@ -434,6 +482,7 @@ pub mod tests {
                         "seed {seed}, step {step}"
                     );
                 }
+
                 match ordered.first() {
                     Some((firing, _)) => assert!(
                         deadlines.next_deadline().unwrap()

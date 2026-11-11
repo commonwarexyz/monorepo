@@ -173,6 +173,7 @@ impl InstantExt for Instant {
         if nanos == u64::MAX {
             return None;
         }
+
         self.checked_add(Duration::from_nanos(nanos))
     }
 }
@@ -221,6 +222,7 @@ impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
         // Evaluating the assertion rejects a too fine resolution at compile
         // time, for every instantiation.
         let () = Self::SPANS_U64;
+
         Self {
             links: Vec::new(),
             len: 0,
@@ -255,6 +257,7 @@ impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
         } else {
             deadline
         };
+
         deadline.div_ceil(RESOLUTION)
     }
 
@@ -299,6 +302,7 @@ impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
         if bucket < WHEEL_BUCKETS {
             let level = bucket / LEVEL_BUCKETS;
             self.occupied[level] &= !(1 << (bucket % LEVEL_BUCKETS));
+
             if self.occupied[level] == 0 {
                 self.levels &= !(1 << level);
             }
@@ -314,6 +318,7 @@ impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
         // a lower bound of the bucket's ticks without a walk.
         let entry = &mut self.buckets[bucket];
         let tail = entry.tail;
+
         if tail == NIL {
             entry.head = slot;
             entry.min = tick;
@@ -321,6 +326,7 @@ impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
             entry.min = entry.min.min(tick);
             self.links[tail as usize].next = slot;
         }
+
         entry.tail = slot;
         entry.count += 1;
 
@@ -350,16 +356,21 @@ impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
         if prev != NIL {
             self.links[prev as usize].next = next;
         }
+
         if next != NIL {
             self.links[next as usize].prev = prev;
         }
+
         let entry = &mut self.buckets[bucket];
+
         if prev == NIL {
             entry.head = next;
         }
+
         if next == NIL {
             entry.tail = prev;
         }
+
         entry.count -= 1;
 
         // An emptied bucket leaves the bitmaps, and an emptied detached
@@ -367,6 +378,7 @@ impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
         if entry.head == NIL {
             *entry = EMPTY;
             self.clear_occupied(bucket);
+
             if bucket == self.pending as usize {
                 self.pending = NONE;
             }
@@ -399,6 +411,7 @@ impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
         let block = self.base & !((1u64 << ((level + 1) * LEVEL_BITS)) - 1);
         let start = block | ((position as u64) << (level * LEVEL_BITS));
         assert!(start >= self.base);
+
         Some((level * LEVEL_BUCKETS + position, start))
     }
 
@@ -413,20 +426,24 @@ impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
         // one inserted and keep that storage until [`Self::clear`]. The last
         // index is the null link, which only growth could admit.
         let index = slot as usize;
+
         if index >= self.links.len() {
             assert_ne!(slot, NIL, "slot index reserved for the null link");
             self.links.resize(index + 1, ABSENT);
         }
+
         assert_eq!(self.links[index].bucket, NONE, "slot already resident");
 
         // A tick below the base is already due.
         let tick = Self::tick_of(deadline);
         self.links[index].tick = tick;
+
         let bucket = if tick < self.base {
             DUE
         } else {
             Self::bucket_for(tick, self.base)
         };
+
         self.link(slot, bucket);
         self.len += 1;
 
@@ -434,11 +451,13 @@ impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
         // reached at its first tick, the slot's tick without the bits of the
         // levels below. The due list is beyond the last level.
         let level = bucket / LEVEL_BUCKETS;
+
         let reach = if (1..LEVELS).contains(&level) && self.buckets[bucket].count > LAZY_SLOTS {
             tick & !((1 << (level * LEVEL_BITS)) - 1)
         } else {
             tick
         };
+
         reach * RESOLUTION
     }
 
@@ -478,14 +497,17 @@ impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
         // Slots inserted below the base fire first.
         while *budget > 0 {
             let slot = self.buckets[DUE].head;
+
             if slot == NIL {
                 break;
             }
+
             // A due slot that the pass may not fire ends it, so no later slot
             // fires ahead of it.
             if fires == 0 {
                 return;
             }
+
             self.detach(slot);
             fire(slot);
             *budget -= 1;
@@ -496,6 +518,7 @@ impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
         // order, until the budget runs out or no bucket starts by the target.
         // Partial refile units carry across buckets but not across passes.
         let mut refiles = 0;
+
         loop {
             while self.pending != NONE {
                 if *budget == 0 {
@@ -506,10 +529,12 @@ impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
                 // refiled elsewhere, so the drain always progresses.
                 let slot = self.buckets[self.pending as usize].head;
                 let tick = self.links[slot as usize].tick;
+
                 if tick <= target {
                     if fires == 0 {
                         return;
                     }
+
                     self.detach(slot);
                     fire(slot);
                     *budget -= 1;
@@ -520,6 +545,7 @@ impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
                     self.unlink(slot);
                     self.link(slot, Self::bucket_for(tick, self.base));
                     refiles += 1;
+
                     if refiles == REFILES_PER_UNIT {
                         refiles = 0;
                         *budget -= 1;
@@ -532,9 +558,11 @@ impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
             if *budget == 0 {
                 return;
             }
+
             let Some((bucket, start)) = self.next_event() else {
                 break;
             };
+
             if start > target {
                 break;
             }
@@ -568,13 +596,16 @@ impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
         // The due list, the detached bucket, and the earliest level bucket
         // together hold the earliest resident, whichever it is.
         let mut tick = u64::MAX;
+
         if self.buckets[DUE].head != NIL {
             tick = tick.min(self.buckets[DUE].min);
         }
+
         if self.pending != NONE {
             // The base is the detached bucket's start until it is drained.
             tick = tick.min(self.base);
         }
+
         if let Some((bucket, start)) = self.next_event() {
             // Every slot of a level zero bucket holds its start tick.
             let entry = &self.buckets[bucket];
@@ -584,6 +615,7 @@ impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
                 entry.min
             });
         }
+
         if tick == u64::MAX {
             return u64::MAX;
         }
@@ -628,10 +660,12 @@ pub mod tests {
             self.buckets.iter().all(|bucket| {
                 let mut count = 0;
                 let mut slot = bucket.head;
+
                 while slot != NIL {
                     count += 1;
                     slot = self.links[slot as usize].next;
                 }
+
                 count == bucket.count
             })
         }
@@ -646,6 +680,7 @@ pub mod tests {
     /// A log-uniform value below `2^max_bits`.
     fn scaled(rng: &mut TestRng, max_bits: u32) -> u64 {
         let bits = rng.random_range(0..=max_bits);
+
         if bits == 0 {
             0
         } else {
@@ -657,6 +692,7 @@ pub mod tests {
     fn test_instant_conversions_round_trip_and_saturate() {
         // Instants from the origin on round trip exactly.
         let origin = Instant::now();
+
         for nanos in [0, 1, FINE - 1, 1_000_000_007, 3_600_000_000_000] {
             let at = origin.after_nanos(nanos).unwrap();
             assert_eq!(at.nanos_since(origin), nanos);
@@ -667,15 +703,18 @@ pub mod tests {
         if let Some(earlier) = origin.checked_sub(Duration::from_secs(1)) {
             assert_eq!(earlier.nanos_since(origin), 0);
         }
+
         if let Some(far) = origin.checked_add(Duration::from_secs(600 * 365 * 24 * 60 * 60)) {
             assert_eq!(far.nanos_since(origin), u64::MAX);
         }
+
         assert_eq!(origin.after_nanos(u64::MAX), None);
 
         // A deadline's firing time converts back to an instant after it.
         let deadline = origin + Duration::from_nanos(FINE + 1);
         let firing = Wheel::<FINE>::rounded(deadline.nanos_since(origin));
         let fires = origin + Duration::from_nanos(2 * FINE);
+
         assert_eq!(origin.after_nanos(firing), Some(fires));
     }
 
@@ -704,6 +743,7 @@ pub mod tests {
         let mut free: Vec<u32> = Vec::new();
         let mut slots = 0u32;
         let mut fired = Vec::new();
+
         for step in 0..steps {
             match rng.random_range(0..12) {
                 // Insert a past, current, future, or end of time deadline,
@@ -715,27 +755,33 @@ pub mod tests {
                         2 => u64::MAX - scaled(&mut rng, 12),
                         _ => latest.saturating_add(scaled(&mut rng, max_bits)),
                     };
+
                     for member in 0..crowd {
                         let deadline = if member == 0 {
                             deadline
                         } else {
                             deadline.saturating_add(scaled(&mut rng, 16))
                         };
+
                         let slot = free.pop().unwrap_or_else(|| {
                             slots += 1;
                             slots - 1
                         });
+
                         let before = wheel.bound();
                         let reach = wheel.insert(slot, deadline);
                         let firing = Wheel::<RESOLUTION>::rounded(deadline);
+
                         assert!(firing >= deadline.min(Wheel::<RESOLUTION>::MAX));
                         assert!(firing - deadline.min(Wheel::<RESOLUTION>::MAX) < RESOLUTION);
                         assert!(live.insert(slot, firing).is_none());
+
                         order.insert((firing, slot));
 
                         // A cache lowered to the returned time stays at or
                         // below the bound, and never passes the firing time.
                         let bound = wheel.bound();
+
                         assert!(bound <= reach && reach <= firing, "reach at {step}");
                         assert!(bound >= before.min(reach), "lowered bound at {step}");
                     }
@@ -745,6 +791,7 @@ pub mod tests {
                     if live.is_empty() {
                         continue;
                     }
+
                     let pick = rng.random_range(0..live.len());
                     let (&slot, &firing) = live.iter().nth(pick).unwrap();
                     live.remove(&slot);
@@ -763,28 +810,36 @@ pub mod tests {
                             1 => 1,
                             _ => scaled(&mut rng, max_bits),
                         };
+
                         latest = latest.saturating_add(advance);
                         latest
                     };
+
                     let limited = rng.random_range(0..3) == 0;
+
                     let mut budget = if limited {
                         rng.random_range(1..=8)
                     } else {
                         u32::MAX
                     };
+
                     let allowance = budget;
 
                     // Every fired slot was live and due by the latest time, and
                     // each cost one unit of the budget.
                     fired.clear();
                     wheel.expire(now, &mut budget, &mut |slot| fired.push(slot));
+
                     assert!(
                         fired.len() <= (allowance - budget) as usize,
                         "uncharged firing at step {step}"
                     );
+
                     for slot in &fired {
                         let firing = live.remove(slot).expect("stale or duplicate firing");
+
                         assert!(firing <= latest, "early firing at step {step}");
+
                         order.remove(&(firing, *slot));
                         free.push(*slot);
                     }
@@ -802,7 +857,9 @@ pub mod tests {
             // After every step, the wheel holds the live slots and its bound
             // is never after the earliest firing time.
             assert_eq!(wheel.len(), live.len());
+
             let bound = wheel.bound();
+
             match order.first() {
                 None => assert_eq!(bound, u64::MAX, "bound of an empty wheel at {step}"),
                 Some((firing, _)) => assert!(bound <= *firing, "late bound at {step}"),
@@ -814,27 +871,34 @@ pub mod tests {
                 assert!(wheel.base * RESOLUTION <= latest, "base ahead at {step}");
                 assert!(bound <= wheel.base * RESOLUTION, "idle drain at {step}");
             }
+
             if step % 64 == 0 {
                 assert!(wheel.counts_match(), "bucket count at {step}");
             }
         }
+
         assert!(wheel.counts_match());
 
         // Expiring at the bound always fires or raises it.
         let mut passes = 0;
+
         while wheel.bound() != u64::MAX {
             let bound = wheel.bound();
             let before = wheel.len();
             let mut budget = u32::MAX;
             wheel.expire(bound.max(latest), &mut budget, &mut |_| {});
             latest = latest.max(bound);
+
             assert!(
                 wheel.len() < before || wheel.bound() > bound,
                 "no progress at {bound}"
             );
+
             passes += 1;
+
             assert!(passes <= 20 * (before + 1), "too many passes");
         }
+
         assert_eq!(wheel.len(), 0);
     }
 
@@ -871,6 +935,7 @@ pub mod tests {
         // A deadline inside a tick rounds up to the end of that tick.
         let mut wheel = Wheel::<FINE>::new(0);
         wheel.insert(0, 2_500);
+
         assert_eq!(Wheel::<FINE>::rounded(2_500), 3_072);
         assert_eq!(wheel.bound(), 3_072);
 
@@ -878,8 +943,11 @@ pub mod tests {
         let mut fired = Vec::new();
         let mut budget = u32::MAX;
         wheel.expire(3_071, &mut budget, &mut |slot| fired.push(slot));
+
         assert!(fired.is_empty());
+
         wheel.expire(3_072, &mut budget, &mut |slot| fired.push(slot));
+
         assert_eq!(fired, [0]);
     }
 
@@ -905,6 +973,7 @@ pub mod tests {
             u64::MAX,
         ];
         let mut wheel = Wheel::<FINE>::new(0);
+
         for (slot, deadline) in deadlines.iter().enumerate() {
             wheel.insert(slot as u32, *deadline);
         }
@@ -912,6 +981,7 @@ pub mod tests {
         // Expire at increasing times, never firing a slot before its rounded
         // deadline.
         let mut seen = 0;
+
         for now in [
             0,
             1023,
@@ -942,6 +1012,7 @@ pub mod tests {
         // A storm far enough ahead to sit on a high level, with deadlines
         // jittered by tens of nanoseconds.
         let deadline = 50_000_000;
+
         for slot in 0..1000u32 {
             wheel.insert(slot, deadline + u64::from(slot % 7) * 13);
         }
@@ -950,11 +1021,13 @@ pub mod tests {
         let mut fired = Vec::new();
         let mut budget = 256;
         wheel.expire(deadline - 2048, &mut budget, &mut |slot| fired.push(slot));
+
         assert!(fired.is_empty());
 
         // At one fixed time, each pass fires at most one budget.
         let now = Wheel::<FINE>::rounded(deadline + 100);
         let mut passes = 0;
+
         while !wheel.is_empty() {
             let mut budget = 256;
             let before = fired.len();
@@ -964,6 +1037,7 @@ pub mod tests {
             // Due slots of a detached bucket fire rather than refile.
             assert!(fired.len() > before, "pass {passes} fired nothing");
             assert!(fired.len() - before <= 256);
+
             if !wheel.is_empty() {
                 assert!(wheel.bound() <= now, "backlog left with a late bound");
             }
@@ -981,9 +1055,11 @@ pub mod tests {
         let mut wheel = Wheel::<FINE>::new(0);
         let deadline = 50_000_000;
         let later = REFILES_PER_UNIT * (BUDGET - 1);
+
         for slot in 0..later {
             wheel.insert(slot, deadline + FINE + u64::from(slot) * 64);
         }
+
         wheel.insert(later, deadline);
 
         // Once it is due, one pass refiles the later slots and still fires it.
@@ -991,15 +1067,18 @@ pub mod tests {
         let mut fired = Vec::new();
         let mut budget = BUDGET;
         wheel.expire(now, &mut budget, &mut |slot| fired.push(slot));
+
         assert_eq!(fired, [later]);
         assert_eq!(budget, 0);
 
         // The refiled slots fire at their own times.
         let end = Wheel::<FINE>::rounded(deadline + FINE + u64::from(later) * 64);
+
         while !wheel.is_empty() {
             let mut budget = BUDGET;
             wheel.expire(end, &mut budget, &mut |slot| fired.push(slot));
         }
+
         assert_eq!(fired.len(), later as usize + 1);
     }
 
@@ -1014,15 +1093,18 @@ pub mod tests {
         let start = (1 << 18) * FINE;
         let deadline = |slot: u32| 300_000_000 + u64::from(COUNT - 1 - slot) * 400;
         let mut wheel = Wheel::<FINE>::new(0);
+
         for slot in 0..COUNT {
             // Up to its lazy size the bucket is reached at its earliest
             // firing time, and beyond it at its start.
             let reach = wheel.insert(slot, deadline(slot));
+
             if slot < LAZY_SLOTS {
                 assert_eq!(reach, Wheel::<FINE>::rounded(deadline(slot)));
             } else {
                 assert_eq!(reach, start);
             }
+
             assert_eq!(wheel.bound(), reach);
         }
 
@@ -1033,22 +1115,27 @@ pub mod tests {
         let first = Wheel::<FINE>::rounded(deadline(COUNT - 1));
         let mut now = 0;
         let mut passes = 0;
+
         while wheel.bound() < first {
             now = now.max(wheel.bound());
             let mut budget = BUDGET;
             wheel.expire(now, &mut budget, &mut |slot| {
                 panic!("slot {slot} fired early")
             });
+
             passes += 1;
         }
+
         assert!(now < first, "refiled only at the first deadline");
         assert_eq!(passes, 15);
 
         // The first pass at the earliest firing time fires the earliest slot.
         assert_eq!(wheel.bound(), first);
+
         let mut fired = Vec::new();
         let mut budget = BUDGET;
         wheel.expire(first, &mut budget, &mut |slot| fired.push(slot));
+
         assert_eq!(fired, [COUNT - 1]);
     }
 
@@ -1058,8 +1145,10 @@ pub mod tests {
         // time, so its owner runs no pass before then.
         let deadline = |slot: u32| 300_000_000 + u64::from(LAZY_SLOTS - 1 - slot) * 400;
         let mut wheel = Wheel::<FINE>::new(0);
+
         for slot in 0..LAZY_SLOTS {
             let reach = wheel.insert(slot, deadline(slot));
+
             assert_eq!(reach, Wheel::<FINE>::rounded(deadline(slot)));
             assert_eq!(wheel.bound(), reach);
         }
@@ -1070,6 +1159,7 @@ pub mod tests {
         let mut fired = Vec::new();
         let mut budget = BUDGET;
         wheel.expire(first, &mut budget, &mut |slot| fired.push(slot));
+
         assert_eq!(fired, [LAZY_SLOTS - 1]);
         assert!(budget > 0);
     }
@@ -1081,6 +1171,7 @@ pub mod tests {
         let registered = 1_000_000_000;
         let deadline = |slot: u32| registered + 1_000_000 + u64::from(slot) * 400;
         let mut wheel = Wheel::<FINE>::new(0);
+
         for slot in 0..=LAZY_SLOTS {
             let reach = wheel.insert(slot, deadline(slot));
             assert_eq!(reach <= registered, slot == LAZY_SLOTS);
@@ -1092,6 +1183,7 @@ pub mod tests {
         wheel.expire(registered, &mut budget, &mut |slot| {
             panic!("slot {slot} fired early")
         });
+
         assert!(budget > 0);
         assert_eq!(wheel.bound(), Wheel::<FINE>::rounded(deadline(0)));
         assert_eq!(wheel.base, registered / FINE);
@@ -1103,10 +1195,13 @@ pub mod tests {
         // early instead of walking the bucket.
         let mut wheel = Wheel::<FINE>::new(0);
         let base = 1u64 << 40;
+
         for slot in 0..10_000u32 {
             wheel.insert(slot, base + u64::from(slot) * 2048);
         }
+
         assert_eq!(wheel.bound(), Wheel::<FINE>::rounded(base));
+
         for slot in 0..9_999u32 {
             wheel.remove(slot);
             assert!(wheel.bound() <= Wheel::<FINE>::rounded(base + u64::from(slot + 1) * 2048));
@@ -1117,6 +1212,7 @@ pub mod tests {
         let mut budget = u32::MAX;
         let mut fired = Vec::new();
         wheel.expire(wheel.bound(), &mut budget, &mut |slot| fired.push(slot));
+
         assert!(fired.is_empty());
         assert_eq!(
             wheel.bound(),
@@ -1130,6 +1226,7 @@ pub mod tests {
         // Four slots share one deadline.
         let mut wheel = Wheel::<FINE>::new(0);
         let deadline = 100 * FINE;
+
         for slot in 0..4u32 {
             wheel.insert(slot, deadline);
         }
@@ -1138,17 +1235,23 @@ pub mod tests {
         let mut budget = u32::MAX;
         let mut fired = Vec::new();
         wheel.expire(deadline - FINE, &mut budget, &mut |slot| fired.push(slot));
+
         assert!(fired.is_empty());
+
         let mut budget = 2;
         wheel.expire(deadline, &mut budget, &mut |slot| fired.push(slot));
+
         assert_eq!(fired.len(), 2);
 
         // The base is the detached level zero bucket's tick, so this joins it.
         wheel.insert(9, deadline);
+
         assert_eq!(wheel.links[9].bucket, wheel.pending);
         assert_eq!(wheel.bound(), deadline);
+
         let mut budget = u32::MAX;
         wheel.expire(deadline, &mut budget, &mut |slot| fired.push(slot));
+
         assert_eq!(fired.len(), 5);
         assert_eq!(wheel.bound(), u64::MAX);
     }
@@ -1158,26 +1261,33 @@ pub mod tests {
         // A budgeted pass leaves a partly drained detached bucket and two
         // occupied ones for clear to discard.
         let mut wheel = Wheel::<FINE>::new(0);
+
         for slot in 0..10u32 {
             wheel.insert(slot, 1_000_000 * u64::from(slot / 4));
         }
+
         let mut budget = 3;
         wheel.expire(5_000_000, &mut budget, &mut |_| {});
+
         assert_ne!(wheel.pending, NONE);
         assert_eq!(wheel.len(), 7);
 
         // Clearing leaves an empty wheel that holds no link storage.
         wheel.clear();
+
         assert_eq!(wheel.len(), 0);
         assert_eq!(wheel.bound(), u64::MAX);
         assert_eq!(wheel.capacity(), 0);
 
         // A cleared wheel accepts a slot again and fires it.
         wheel.insert(3, 7);
+
         assert_eq!(wheel.len(), 1);
+
         let mut budget = u32::MAX;
         let mut fired = Vec::new();
         wheel.expire(u64::MAX, &mut budget, &mut |slot| fired.push(slot));
+
         assert_eq!(fired, [3]);
     }
 }
