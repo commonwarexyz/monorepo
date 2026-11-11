@@ -10,7 +10,9 @@ use crate::{
 use commonware_cryptography::Digest;
 use commonware_utils::sequence::prefixed_u64::U64;
 
-const KEY: U64 = U64::new(0, 0);
+/// Metadata key of the frontier, the only record in its partition. It is part of the storage
+/// format.
+const FRONTIER_KEY: U64 = U64::new(0, 0);
 
 /// A pruning boundary and the digests pinned there, in [`Family::nodes_to_pin`] order.
 type Boundary<F, D> = (Location<F>, Vec<D>);
@@ -36,12 +38,15 @@ impl<F: Family, E: Context, D: Digest> Frontier<F, E, D> {
 
     /// The pruning boundary and the digests pinned there, or genesis if none was recorded.
     pub(crate) fn boundary(&self) -> Boundary<F, D> {
-        self.metadata.get(&KEY).cloned().unwrap_or_default()
+        self.metadata
+            .get(&FRONTIER_KEY)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Durably record `location` as the boundary, with `pins`.
     pub(crate) async fn set(mut self, location: Location<F>, pins: Vec<D>) -> Result<Self, Error> {
-        self.metadata.put(KEY, (location, pins));
+        self.metadata.put(FRONTIER_KEY, (location, pins));
         self.metadata = self.metadata.sync().await?;
         Ok(self)
     }
@@ -71,7 +76,7 @@ mod tests {
             )
             .await
             .unwrap();
-            metadata.put(KEY, vec![0; 8]);
+            metadata.put(FRONTIER_KEY, vec![0; 8]);
             drop(metadata.sync().await.unwrap());
             assert!(matches!(
                 Frontier::<mmr::Family, _, D>::open(context.child("open"), "frontier".into()).await,
