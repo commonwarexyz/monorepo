@@ -36,8 +36,6 @@ where
 {
     pub(super) batch: UnmerkleizedBatch<F, H, O, S>,
     db: Shared<Db<F, E, O, H, S>>,
-    metadata: Option<O::Metadata>,
-    inactivity_floor: Option<Location<F>>,
 }
 
 impl<F, E, O, H, S> Deref for CompactUnmerkleized<F, E, O, H, S>
@@ -63,16 +61,17 @@ where
     H: Hasher,
     S: Strategy,
 {
-    /// Sets the metadata committed by [`merkleize`](UnmerkleizedTrait::merkleize).
-    pub fn with_metadata(mut self, metadata: O::Metadata) -> Self {
-        self.metadata = Some(metadata);
+    /// Sets the metadata committed by [`merkleize`](UnmerkleizedTrait::merkleize). `None` clears
+    /// it.
+    pub fn with_metadata(mut self, metadata: impl Into<Option<O::Metadata>>) -> Self {
+        self.batch = self.batch.with_metadata(metadata);
         self
     }
 
     /// Sets the inactivity floor committed by [`merkleize`](UnmerkleizedTrait::merkleize)
-    /// (location 0 when unset).
-    pub const fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
-        self.inactivity_floor = Some(floor);
+    /// (inherited from the database or parent batch when unset).
+    pub fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
+        self.batch = self.batch.with_inactivity_floor(floor);
         self
     }
 }
@@ -90,14 +89,7 @@ where
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
         let db = self.db.read().await;
-        let merkleized = self
-            .batch
-            .merkleize(
-                &db,
-                self.metadata,
-                self.inactivity_floor.unwrap_or_default(),
-            )
-            .await?;
+        let merkleized = self.batch.merkleize(&db).await?;
         Ok(CompactMerkleized {
             inner: merkleized,
             db: self.db.clone(),
@@ -168,8 +160,6 @@ where
         CompactUnmerkleized {
             batch: self.inner.new_batch::<H>(),
             db: self.db.clone(),
-            metadata: None,
-            inactivity_floor: None,
         }
     }
 }
@@ -211,8 +201,6 @@ where
         CompactUnmerkleized {
             batch: database.new_batch(),
             db: shared,
-            metadata: None,
-            inactivity_floor: None,
         }
     }
 
@@ -280,15 +268,15 @@ mod tests {
     use commonware_macros::select;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Clock as _, Metrics as _, Runner as _, Supervisor as _,
-        buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks,
+        Clock as _, Metrics as _, Runner as _, Supervisor as _, buffer::paged::CacheRef,
+        deterministic, telemetry::metrics::count_running_tasks,
     };
     use commonware_storage::{
         journal::contiguous::{
             fixed::Config as FixedJournalConfig, variable::Config as JournalConfig,
         },
         merkle::{full::Config as MerkleConfig, mmb, mmr},
-        qmdb::{immutable, keyless, sync::source, verify_proof_and_pinned_nodes},
+        qmdb::{ProofExt as _, immutable, keyless, sync::source},
         translator::TwoCap,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, sequence::U64};
@@ -316,7 +304,7 @@ mod tests {
                     items_per_section: NZU64!(1),
                     compression: None,
                     codec_config,
-                    page_cache: CacheRef::from_pooler(&context, NZU16!(101), NZUsize!(11)),
+                    page_cache: CacheRef::new(NZU16!(101), NZUsize!(11)),
                     write_buffer: NZUsize!(1024),
                     replay_buffer: NZUsize!(1024),
                 },
@@ -325,7 +313,8 @@ mod tests {
                 .await
                 .unwrap();
             let batch = mutate(mutate(mutate(db.new_batch(), 1), 2), 3)
-                .merkleize(&db, Some(metadata(11)), Location::new(0))
+                .with_metadata(Some(metadata(11)))
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(batch).await.unwrap();
@@ -333,7 +322,9 @@ mod tests {
             let first = db.target();
             assert_eq!(first.size, Location::new(5));
             let batch = mutate(db.new_batch(), 4)
-                .merkleize(&db, Some(metadata(22)), Location::new(1))
+                .with_metadata(Some(metadata(22)))
+                .with_inactivity_floor(Location::new(1))
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(batch).await.unwrap();
@@ -386,7 +377,7 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(db.get_metadata(), Some(metadata(11)));
-            assert_eq!(db.inactivity_floor_loc(), Location::new(0));
+            assert_eq!(db.inactivity_floor(), Location::new(0));
             let request = sync::Request::Boundary {
                 size: first.size,
                 start: first.size - 1,
@@ -400,10 +391,9 @@ mod tests {
             else {
                 panic!("expected boundary response");
             };
-            assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
-                &proof,
+            assert!(proof.verify_with_pinned_nodes::<Sha256, _>(
                 first.size - 1,
-                &[op],
+                [&op],
                 &pinned_nodes,
                 &first.root
             ));
@@ -414,7 +404,9 @@ mod tests {
             assert_eq!(db.target(), first);
 
             let batch = mutate(db.new_batch(), 5)
-                .merkleize(&db, Some(metadata(33)), first.size - 1)
+                .with_metadata(Some(metadata(33)))
+                .with_inactivity_floor(first.size - 1)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(batch).await.unwrap();
@@ -619,7 +611,7 @@ mod tests {
             context: deterministic::Context,
             seeds: &[u64],
         ) -> (Arc<FullKeylessDb>, Vec<Target>) {
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(101), NZUsize!(11));
+            let page_cache = CacheRef::new(NZU16!(101), NZUsize!(11));
             let config = keyless::fixed::Config {
                 merkle: full_merkle_config(page_cache.clone()),
                 log: full_log_config(page_cache),
@@ -627,11 +619,11 @@ mod tests {
             let mut source = FullKeylessDb::init(context, config, None).await.unwrap();
             let mut targets = Vec::new();
             for &seed in seeds {
-                let floor = source.inactivity_floor_loc();
                 let batch = source
                     .new_batch()
                     .append(U64::new(seed))
-                    .merkleize(&source, Some(Self::commit_metadata(seed)), floor)
+                    .with_metadata(Some(Self::commit_metadata(seed)))
+                    .merkleize(&source)
                     .await
                     .unwrap();
                 source = source.apply_batch(batch).await.unwrap();
@@ -668,9 +660,9 @@ mod tests {
             context: deterministic::Context,
             seeds: &[u64],
         ) -> (Arc<FullImmutableDb>, Vec<Target>) {
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(101), NZUsize!(11));
+            let page_cache = CacheRef::new(NZU16!(101), NZUsize!(11));
             let config = immutable::fixed::Config {
-                merkle_config: full_merkle_config(page_cache.clone()),
+                merkle: full_merkle_config(page_cache.clone()),
                 log: full_log_config(page_cache),
                 translator: TwoCap,
                 init_buffer: NZUsize!(1 << 21),
@@ -678,11 +670,11 @@ mod tests {
             let mut source = FullImmutableDb::init(context, config, None).await.unwrap();
             let mut targets = Vec::new();
             for &seed in seeds {
-                let floor = source.inactivity_floor_loc();
                 let batch = source
                     .new_batch()
                     .set(immutable_key(seed), immutable_value(seed))
-                    .merkleize(&source, Some(Self::commit_metadata(seed)), floor)
+                    .with_metadata(Some(Self::commit_metadata(seed)))
+                    .merkleize(&source)
                     .await
                     .unwrap();
                 source = source.apply_batch(batch).await.unwrap();
@@ -705,7 +697,7 @@ mod tests {
         batch
     }
 
-    fn compact_config(context: &impl BufferPooler, suffix: &str) -> Config<(), Sequential> {
+    fn compact_config(suffix: &str) -> Config<(), Sequential> {
         Config {
             strategy: Sequential,
             witness: JournalConfig {
@@ -713,7 +705,7 @@ mod tests {
                 items_per_section: NZU64!(64),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(context, NZU16!(101), NZUsize!(11)),
+                page_cache: CacheRef::new(NZU16!(101), NZUsize!(11)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
@@ -733,13 +725,13 @@ mod tests {
         context: deterministic::Context,
         seeds: &[u64],
     ) -> (Arc<AdapterDb<O>>, Vec<Target>) {
-        let config = compact_config(&context, "source");
+        let config = compact_config("source");
         let mut source = AdapterDb::<O>::init(context, config, None).await.unwrap();
         let mut targets = Vec::new();
         for &seed in seeds {
-            let floor = source.inactivity_floor_loc();
             let batch = O::mutate(source.new_batch(), seed)
-                .merkleize(&source, Some(O::commit_metadata(seed)), floor)
+                .with_metadata(Some(O::commit_metadata(seed)))
+                .merkleize(&source)
                 .await
                 .unwrap();
             source = source.apply_batch(batch).await.unwrap();
@@ -800,7 +792,7 @@ mod tests {
 
     fn managed_db_apply_and_finalize_persists_batches<O: AdapterOperation>() {
         deterministic::Runner::default().start(|context| async move {
-            let config = compact_config(&context, "managed-db");
+            let config = compact_config("managed-db");
             let db = AdapterDb::<O>::init(context.child("db"), config.clone(), None)
                 .await
                 .unwrap();
@@ -848,7 +840,7 @@ mod tests {
 
     fn managed_db_apply_retains_each_bounded_initialization_target<O: AdapterOperation>() {
         deterministic::Runner::default().start(|context| async move {
-            let config = compact_config(&context, "apply-checkpoints");
+            let config = compact_config("apply-checkpoints");
             let db = AdapterDb::<O>::init(context.child("db"), config.clone(), None)
                 .await
                 .unwrap();
@@ -897,7 +889,7 @@ mod tests {
 
     fn managed_db_matches_sync_target_rejects_wrong_size<O: AdapterOperation>() {
         deterministic::Runner::default().start(|context| async move {
-            let config = compact_config(&context, "matches-sync-target");
+            let config = compact_config("matches-sync-target");
             let db = AdapterDb::<O>::init(context.child("db"), config, None)
                 .await
                 .unwrap();
@@ -930,7 +922,7 @@ mod tests {
 
     fn database_set_bounded_initialization_persists_aligned_target<O: AdapterOperation>() {
         deterministic::Runner::default().start(|context| async move {
-            let config = compact_config(&context, "aligned-bounded-init");
+            let config = compact_config("aligned-bounded-init");
             let db = AdapterDb::<O>::init(context.child("db"), config.clone(), None)
                 .await
                 .unwrap();
@@ -968,7 +960,7 @@ mod tests {
             let (_update_tx, update_rx) = ring::channel(NZUsize!(1));
             let synced = <AdapterDb<O> as StateSyncDb<_, _>>::sync_db(
                 context.child("target"),
-                compact_config(&context, "target"),
+                compact_config("target"),
                 source,
                 targets[0].clone(),
                 update_rx,
@@ -991,7 +983,7 @@ mod tests {
             let (_update_tx, update_rx) = ring::channel(NZUsize!(1));
             let synced = <AdapterDb<O> as StateSyncDb<_, _>>::sync_db(
                 context.child("target"),
-                compact_config(&context, "target"),
+                compact_config("target"),
                 source,
                 targets[0].clone(),
                 update_rx,
@@ -1020,7 +1012,7 @@ mod tests {
             let (reached_tx, mut reached_rx) = ring::channel(NZUsize!(1));
             let synced = <AdapterDb<O> as StateSyncDb<_, _>>::sync_db(
                 context.child("target"),
-                compact_config(&context, "target"),
+                compact_config("target"),
                 source,
                 targets[0].clone(),
                 update_rx,
@@ -1062,7 +1054,7 @@ mod tests {
         let (_finish_tx, finish_rx) = mpsc::channel(1);
         let (reached_tx, mut reached_rx) = ring::channel(NZUsize!(1));
         let client_context = context.child("client");
-        let client_config = compact_config(&client_context, "client");
+        let client_config = compact_config("client");
         let sync = <AdapterDb<O> as StateSyncDb<_, _>>::sync_db(
             client_context,
             client_config,
@@ -1133,7 +1125,7 @@ mod tests {
         let sync_handle = context.child("sync").spawn(move |context| async move {
             <AdapterDb<O> as StateSyncDb<_, _>>::sync_db(
                 context.child("target"),
-                compact_config(&context, "supersede-target"),
+                compact_config("supersede-target"),
                 superseding_source,
                 stale_target,
                 update_rx,
@@ -1165,7 +1157,7 @@ mod tests {
 
     fn managed_db_initializes_multiple_commit_ranges<O: AdapterOperation>() {
         deterministic::Runner::default().start(|context| async move {
-            let config = compact_config(&context, "bounded-init");
+            let config = compact_config("bounded-init");
             let mut db = AdapterDb::<O>::init(context.child("db"), config.clone(), None)
                 .await
                 .unwrap();
@@ -1173,9 +1165,9 @@ mod tests {
             // Commit three ranges so reopening at the first target spans multiple commits.
             let mut targets = Vec::new();
             for seed in [1u64, 2, 3] {
-                let floor = db.inactivity_floor_loc();
                 let batch = O::mutate(db.new_batch(), seed)
-                    .merkleize(&db, Some(O::commit_metadata(seed)), floor)
+                    .with_metadata(Some(O::commit_metadata(seed)))
+                    .merkleize(&db)
                     .await
                     .unwrap();
                 db = db.apply_batch(batch).await.unwrap();
@@ -1201,7 +1193,7 @@ mod tests {
     fn managed_db_prune_bounds_bounded_initialization_history<O: AdapterOperation>() {
         deterministic::Runner::default().start(|context| async move {
             // One witness entry per section so pruning takes effect at entry granularity.
-            let mut config = compact_config(&context, "prune");
+            let mut config = compact_config("prune");
             config.witness.items_per_section = NZU64!(1);
             let mut db = AdapterDb::<O>::init(context.child("db"), config.clone(), None)
                 .await
@@ -1210,9 +1202,9 @@ mod tests {
             // Commit three ranges, recording each target.
             let mut targets = Vec::new();
             for seed in [1u64, 2, 3] {
-                let floor = db.inactivity_floor_loc();
                 let batch = O::mutate(db.new_batch(), seed)
-                    .merkleize(&db, Some(O::commit_metadata(seed)), floor)
+                    .with_metadata(Some(O::commit_metadata(seed)))
+                    .merkleize(&db)
                     .await
                     .unwrap();
                 db = db.apply_batch(batch).await.unwrap();
@@ -1247,10 +1239,68 @@ mod tests {
         });
     }
 
+    fn unset_inactivity_floor_inherits_parent_floor<O: AdapterOperation>() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = compact_config("inherit-parent-floor");
+            let db = AdapterDb::<O>::init(context.child("db"), config, None)
+                .await
+                .unwrap();
+            let db = Shared::new("test", db);
+
+            let parent = mutate_managed::<O>(db.new_batch_for_test::<_>().await, 7)
+                .with_inactivity_floor(Location::new(1));
+            let parent = UnmerkleizedTrait::merkleize(parent).await.unwrap();
+            let child = mutate_managed::<O>(MerkleizedTrait::new_batch(&parent), 8);
+            let child = UnmerkleizedTrait::merkleize(child).await.unwrap();
+            assert_eq!(child.bounds().inactivity_floor, Location::new(1));
+        });
+    }
+
+    fn unset_inactivity_floor_inherits_applied_floor<O: AdapterOperation>() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = compact_config("inherit-applied-floor");
+            let db = AdapterDb::<O>::init(context.child("db"), config, None)
+                .await
+                .unwrap();
+            let db = Shared::new("test", db);
+
+            let first = mutate_managed::<O>(db.new_batch_for_test::<_>().await, 7)
+                .with_inactivity_floor(Location::new(1));
+            let first = UnmerkleizedTrait::merkleize(first).await.unwrap();
+            {
+                let (slot, database) = db.write().await;
+                let database = <AdapterDb<O> as ManagedDb<_>>::apply(database, first)
+                    .await
+                    .unwrap();
+                slot.put(database);
+            }
+
+            let next = mutate_managed::<O>(db.new_batch_for_test::<_>().await, 9);
+            let next = UnmerkleizedTrait::merkleize(next).await.unwrap();
+            assert_eq!(next.bounds().inactivity_floor, Location::new(1));
+            let (slot, database) = db.write().await;
+            let database = <AdapterDb<O> as ManagedDb<_>>::apply(database, next)
+                .await
+                .unwrap();
+            assert_eq!(database.inactivity_floor(), Location::new(1));
+            slot.put(database);
+        });
+    }
+
     macro_rules! adapter_tests {
         ($module:ident, $operation:ty) => {
             mod $module {
                 use super::*;
+
+                #[test]
+                fn unset_inactivity_floor_inherits_parent_floor() {
+                    super::unset_inactivity_floor_inherits_parent_floor::<$operation>();
+                }
+
+                #[test]
+                fn unset_inactivity_floor_inherits_applied_floor() {
+                    super::unset_inactivity_floor_inherits_applied_floor::<$operation>();
+                }
 
                 #[test]
                 fn managed_db_apply_and_finalize_persists_batches() {

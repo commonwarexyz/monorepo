@@ -3,10 +3,7 @@ use crate::{
     index::Unordered as Index,
     journal::contiguous::Contiguous,
     merkle::{Family, Location},
-    qmdb::{
-        any::{ValueEncoding, db::Db},
-        operation::Key,
-    },
+    qmdb::{any::db::Db, operation::Key, value::ValueEncoding},
 };
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
@@ -57,40 +54,4 @@ where
             Ok(None)
         }
     }
-}
-
-#[cfg(any(test, feature = "test-traits"))]
-crate::qmdb::any::traits::impl_db_any! {
-    [F, E, K, V, C, I, H, const N: usize, S] Db<F, E, C, I, H, Update<K, V>, N, S>
-    where {
-        F: crate::merkle::Family,
-        E: Context,
-        K: Key,
-        V: ValueEncoding + 'static,
-        C: crate::journal::contiguous::Mutable<Item = Operation<F, K, V>>,
-        I: Index<Value = crate::merkle::Location<F>> + Send + Sync + 'static,
-        H: Hasher,
-        S: Strategy,
-        Operation<F, K, V>: Codec,
-        V::Value: Send + Sync,
-    }
-    Family = F, Key = K, Value = V::Value, Digest = H::Digest
-}
-
-#[cfg(any(test, feature = "test-traits"))]
-crate::qmdb::any::traits::impl_provable! {
-    [F, E, K, V, C, I, H, const N: usize, S] Db<F, E, C, I, H, Update<K, V>, N, S>
-    where {
-        F: crate::merkle::Family,
-        E: Context,
-        K: Key,
-        V: ValueEncoding + 'static,
-        C: crate::journal::contiguous::Mutable<Item = Operation<F, K, V>>,
-        I: Index<Value = crate::merkle::Location<F>> + Send + Sync + 'static,
-        H: Hasher,
-        S: Strategy,
-        Operation<F, K, V>: Codec,
-        V::Value: Send + Sync,
-    }
-    Family = F, Operation = Operation<F, K, V>
 }

@@ -7,7 +7,6 @@
 
 use crate::qmdb::{
     current::tests::{fixed_config, variable_config},
-    floor::Proportional,
     sync::{
         Database as SyncDatabase,
         harness::{ConfigOf, SyncTestHarness},
@@ -16,9 +15,7 @@ use crate::qmdb::{
 use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_macros::test_traced;
 use commonware_parallel::Sequential;
-use commonware_runtime::{
-    BufferPooler, Metrics, Runner as _, Supervisor as _, deterministic, deterministic::Context,
-};
+use commonware_runtime::{Runner as _, Supervisor as _, deterministic, deterministic::Context};
 use commonware_utils::{NZU64, NZUsize, non_empty_range};
 use rand::Rng as _;
 
@@ -181,13 +178,10 @@ mod harnesses {
                     Operation::Delete(key) => {
                         batch = batch.write(key, None);
                     }
-                    Operation::CommitFloor(_, _) => {}
+                    Operation::Commit(_, _) => {}
                 }
             }
-            batch
-                .merkleize(&db, metadata, &mut Proportional)
-                .await
-                .unwrap()
+            batch.with_metadata(metadata).merkleize(&db).await.unwrap()
         };
         let db = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
@@ -210,13 +204,10 @@ mod harnesses {
                     Operation::Delete(key) => {
                         batch = batch.write(key, None);
                     }
-                    Operation::CommitFloor(_, _) => {}
+                    Operation::Commit(_, _) => {}
                 }
             }
-            batch
-                .merkleize(&db, metadata, &mut Proportional)
-                .await
-                .unwrap()
+            batch.with_metadata(metadata).merkleize(&db).await.unwrap()
         };
         let db = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
@@ -239,13 +230,10 @@ mod harnesses {
                     Operation::Delete(key) => {
                         batch = batch.write(key, None);
                     }
-                    Operation::CommitFloor(_, _) => {}
+                    Operation::Commit(_, _) => {}
                 }
             }
-            batch
-                .merkleize(&db, metadata, &mut Proportional)
-                .await
-                .unwrap()
+            batch.with_metadata(metadata).merkleize(&db).await.unwrap()
         };
         let db = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
@@ -268,13 +256,10 @@ mod harnesses {
                     Operation::Delete(key) => {
                         batch = batch.write(key, None);
                     }
-                    Operation::CommitFloor(_, _) => {}
+                    Operation::Commit(_, _) => {}
                 }
             }
-            batch
-                .merkleize(&db, metadata, &mut Proportional)
-                .await
-                .unwrap()
+            batch.with_metadata(metadata).merkleize(&db).await.unwrap()
         };
         let db = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
@@ -287,8 +272,8 @@ mod harnesses {
         type Db = UnorderedFixedDb<F>;
         type Metadata = Digest;
 
-        fn config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> ConfigOf<Self> {
-            fixed_config::<crate::translator::TwoCap>(suffix, pooler)
+        fn config(suffix: &str) -> ConfigOf<Self> {
+            fixed_config::<crate::translator::TwoCap>(suffix)
         }
 
         fn create_ops(
@@ -309,7 +294,7 @@ mod harnesses {
         }
 
         async fn init_db(ctx: Context) -> Self::Db {
-            let cfg = fixed_config::<crate::translator::TwoCap>("default", &ctx);
+            let cfg = fixed_config::<crate::translator::TwoCap>("default");
             Self::Db::init(ctx, cfg, None).await.unwrap()
         }
 
@@ -334,8 +319,8 @@ mod harnesses {
         type Db = UnorderedVariableDb<F>;
         type Metadata = Digest;
 
-        fn config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> ConfigOf<Self> {
-            variable_config::<crate::translator::TwoCap>(suffix, pooler)
+        fn config(suffix: &str) -> ConfigOf<Self> {
+            variable_config::<crate::translator::TwoCap>(suffix)
         }
 
         fn create_ops(
@@ -356,7 +341,7 @@ mod harnesses {
         }
 
         async fn init_db(ctx: Context) -> Self::Db {
-            let cfg = variable_config::<crate::translator::TwoCap>("default", &ctx);
+            let cfg = variable_config::<crate::translator::TwoCap>("default");
             Self::Db::init(ctx, cfg, None).await.unwrap()
         }
 
@@ -381,8 +366,8 @@ mod harnesses {
         type Db = OrderedFixedDb<F>;
         type Metadata = Digest;
 
-        fn config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> ConfigOf<Self> {
-            fixed_config::<crate::translator::OneCap>(suffix, pooler)
+        fn config(suffix: &str) -> ConfigOf<Self> {
+            fixed_config::<crate::translator::OneCap>(suffix)
         }
 
         fn create_ops(
@@ -403,7 +388,7 @@ mod harnesses {
         }
 
         async fn init_db(ctx: Context) -> Self::Db {
-            let cfg = fixed_config::<crate::translator::OneCap>("default", &ctx);
+            let cfg = fixed_config::<crate::translator::OneCap>("default");
             Self::Db::init(ctx, cfg, None).await.unwrap()
         }
 
@@ -428,8 +413,8 @@ mod harnesses {
         type Db = OrderedVariableDb<F>;
         type Metadata = Digest;
 
-        fn config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> ConfigOf<Self> {
-            variable_config::<crate::translator::OneCap>(suffix, pooler)
+        fn config(suffix: &str) -> ConfigOf<Self> {
+            variable_config::<crate::translator::OneCap>(suffix)
         }
 
         fn create_ops(
@@ -450,7 +435,7 @@ mod harnesses {
         }
 
         async fn init_db(ctx: Context) -> Self::Db {
-            let cfg = variable_config::<crate::translator::OneCap>("default", &ctx);
+            let cfg = variable_config::<crate::translator::OneCap>("default");
             Self::Db::init(ctx, cfg, None).await.unwrap()
         }
 
@@ -497,7 +482,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
         let target_context = context.child("target");
         let mut target_db: Db = Db::init(
             target_context.child("target"),
-            variable_config::<crate::translator::TwoCap>(&target_suffix, &target_context),
+            variable_config::<crate::translator::TwoCap>(&target_suffix),
             None,
         )
         .await
@@ -510,7 +495,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
             let merkleized = target_db
                 .new_batch()
                 .write(key, expected)
-                .merkleize(&target_db, None, &mut Proportional)
+                .merkleize(&target_db)
                 .await
                 .unwrap();
             target_db = target_db.apply_batch(merkleized).await.unwrap();
@@ -518,26 +503,26 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
         }
 
         assert!(
-            *target_db.inactivity_floor_loc() >= 256,
+            *target_db.inactivity_floor() >= 256,
             "expected inactivity floor past chunk 0"
         );
 
         let boundary = target_db.sync_boundary();
         let target_db = target_db.prune(boundary).await.unwrap();
 
-        let sync_root = SyncDatabase::root(&target_db);
+        let sync_root = SyncDatabase::ops_root(&target_db);
         let verification_root = target_db.root();
         let lower_bound = target_db.sync_boundary();
         let upper_bound = target_db.bounds().end;
 
         let client_suffix = context.next_u64().to_string();
-        let client_config = variable_config::<crate::translator::TwoCap>(&client_suffix, &context);
+        let client_config = variable_config::<crate::translator::TwoCap>(&client_suffix);
         let target_db = std::sync::Arc::new(target_db);
 
         // Sync targets the ops root, which is what the engine verifies. `build_db` reconstructs
         // the canonical root without authenticating it, so the assertions below compare it
         // against `verification_root`.
-        let synced_db: Db = crate::qmdb::sync::sync(crate::qmdb::sync::engine::Config {
+        let synced_db: Db = crate::qmdb::sync::sync(crate::qmdb::sync::Config {
             context: context.child("client"),
             db_config: client_config.clone(),
             fetch_batch_size: commonware_utils::NZU64!(64),
@@ -555,7 +540,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
         .await
         .unwrap();
 
-        assert_eq!(SyncDatabase::root(&synced_db), sync_root);
+        assert_eq!(SyncDatabase::ops_root(&synced_db), sync_root);
         assert_eq!(synced_db.root(), verification_root);
         assert_eq!(synced_db.sync_boundary(), lower_bound);
         assert_eq!(synced_db.get(&key).await.unwrap(), expected);
@@ -565,7 +550,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
         let reopened: Db = Db::init(context.child("reopened"), client_config, None)
             .await
             .unwrap();
-        assert_eq!(SyncDatabase::root(&reopened), sync_root);
+        assert_eq!(SyncDatabase::ops_root(&reopened), sync_root);
         assert_eq!(reopened.root(), verification_root);
         assert_eq!(reopened.sync_boundary(), lower_bound);
         assert_eq!(reopened.get(&key).await.unwrap(), expected);
@@ -595,7 +580,7 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
     let executor = deterministic::Runner::default();
     executor.start(|mut context: Context| async move {
         let suffix = context.next_u64().to_string();
-        let config = variable_config::<crate::translator::TwoCap>(&suffix, &context);
+        let config = variable_config::<crate::translator::TwoCap>(&suffix);
         let mut db: Db = Db::init(context.child("db"), config.clone(), None)
             .await
             .unwrap();
@@ -605,7 +590,7 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
             let merkleized = db
                 .new_batch()
                 .write(key, Some(Digest::from([round as u8; 32])))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
             db = db.apply_batch(merkleized).await.unwrap();
@@ -618,7 +603,7 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         let bounds = db.bounds();
         let local_start = bounds.start;
         let local_end = bounds.end;
-        let sync_root = SyncDatabase::root(&db);
+        let sync_root = SyncDatabase::ops_root(&db);
 
         assert!(local_start > crate::merkle::Location::new(0));
 

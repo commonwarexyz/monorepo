@@ -133,7 +133,7 @@ fn main() {
 
         // Configure network
         let max_peers_per_set = authenticated::peer_set_limit(&peer_keys, &public_key);
-        let mut p2p_cfg = discovery::Config::local(
+        let p2p_cfg = discovery::Config::local(
             Cups::<_, ChaCha20Poly1305>::new(
                 Sake {
                     signer: signer.clone(),
@@ -149,12 +149,8 @@ fn main() {
             bootstrappers,
             max_peers_per_set,
             config.message_size,
+            config.mailbox_size,
         );
-        p2p_cfg.mailbox_size = config.mailbox_size;
-
-        // Flood payloads stay `message_size` bytes, but the payload limit must also carry peer
-        // discovery gossip.
-        p2p_cfg.max_message_size = p2p_cfg.max_message_size.max(p2p_cfg.min_message_size());
 
         // Start p2p
         let (mut network, mut oracle) = discovery::Network::new(context.child("network"), p2p_cfg);

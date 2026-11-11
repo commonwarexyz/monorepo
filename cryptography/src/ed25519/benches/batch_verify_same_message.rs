@@ -3,7 +3,7 @@ use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
 };
 use commonware_math::algebra::Random;
-use commonware_parallel::{Rayon, Sequential};
+use commonware_parallel::{Rayon, Sequential, rayon::ThreadPoolBuilder};
 use commonware_utils::{NZUsize, TestRng, test_rng};
 use criterion::{BatchSize, Criterion, criterion_group};
 use rand::RngExt as _;
@@ -17,7 +17,8 @@ fn bench_batch_verify_same_message(c: &mut Criterion) {
     rng.fill(&mut msg);
     for n_signers in [1, 10, 100, 1000, 10000].into_iter() {
         for concurrency in [1, 8] {
-            let rayon = (concurrency > 1).then(|| Rayon::new(NZUsize!(concurrency)).unwrap());
+            let rayon = (concurrency > 1)
+                .then(|| Rayon::new(ThreadPoolBuilder::new(NZUsize!(concurrency))).unwrap());
             c.bench_function(
                 &format!("{}/pks={} conc={}", module_path!(), n_signers, concurrency),
                 |b| {
@@ -31,7 +32,6 @@ fn bench_batch_verify_same_message(c: &mut Criterion) {
                                 .collect::<Vec<_>>()
                         },
                         |batch| {
-                            #[allow(clippy::option_if_let_else)]
                             if let Some(rayon) = rayon.as_ref() {
                                 black_box(PublicKey::verify_batch(
                                     &mut verify_rng,

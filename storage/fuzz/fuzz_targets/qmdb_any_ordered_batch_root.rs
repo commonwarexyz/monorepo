@@ -3,17 +3,18 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_parallel::Sequential;
-use commonware_runtime::{
-    BufferPooler, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
-};
+use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{Family as MerkleFamily, Location, full::Config as MerkleConfig, mmb, mmr},
-    qmdb::any::{
-        FixedConfig as Config,
-        batch::{MerkleizedBatch, UnmerkleizedBatch},
-        ordered::{Update, fixed::Db as AnyDb},
-        traits::DbAny as _,
+    qmdb::{
+        any::{
+            batch::{MerkleizedBatch, UnmerkleizedBatch},
+            ordered::{
+                Update,
+                fixed::{Config, Db as AnyDb},
+            },
+        },
         value::FixedEncoding as FixedEncodingGeneric,
     },
     translator::OneCap,
@@ -122,10 +123,10 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     }
 }
 
-fn test_config(name: &str, pooler: &impl BufferPooler) -> Config<OneCap, Sequential> {
-    let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(2));
+fn test_config(name: &str) -> Config<OneCap, Sequential> {
+    let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(2));
     Config {
-        merkle_config: MerkleConfig {
+        merkle: MerkleConfig {
             journal_partition: format!("{name}-merkle"),
             metadata_partition: format!("{name}-meta"),
             items_per_blob: NZU64!(17),
@@ -134,7 +135,7 @@ fn test_config(name: &str, pooler: &impl BufferPooler) -> Config<OneCap, Sequent
             strategy: Sequential,
             page_cache: page_cache.clone(),
         },
-        journal_config: FConfig {
+        log: FConfig {
             partition: format!("{name}-log"),
             items_per_blob: NZU64!(13),
             write_buffer: NZUsize!(1024),
@@ -203,7 +204,7 @@ async fn merkleize<F: MerkleFamily>(
     model: &mut BTreeMap<Key, Value>,
 ) -> (Arc<Merkleized<F>>, Recorder<Key, Value>) {
     let mut policy = Recorder::new(plan, |seed| Value::new([seed; 32]));
-    let merkleized = batch.merkleize(db, None, &mut policy).await.unwrap();
+    let merkleized = batch.merkleize_with(db, &mut policy).await.unwrap();
     let bounds = merkleized.bounds();
     policy.check(
         model,
@@ -223,7 +224,7 @@ async fn rebuild<F: MerkleFamily>(
     original: &Recorder<Key, Value>,
 ) -> Arc<Merkleized<F>> {
     let mut policy = Recorder::new(plan, |seed| Value::new([seed; 32]));
-    let merkleized = batch.merkleize(db, None, &mut policy).await.unwrap();
+    let merkleized = batch.merkleize_with(db, &mut policy).await.unwrap();
     policy.assert_same_walk(original);
     merkleized
 }
@@ -283,18 +284,14 @@ async fn assert_recovers<F: MerkleFamily>(
     let db = db.commit().await.unwrap();
     assert_matches_model(&db, model).await;
     let root = db.root();
-    let floor = db.inactivity_floor_loc();
+    let floor = db.inactivity_floor();
     drop(db);
 
-    let db: Db<F> = Db::init(context.child("reopened"), test_config(name, context), None)
+    let db: Db<F> = Db::init(context.child("reopened"), test_config(name), None)
         .await
         .expect("reopen ordered any db");
     assert_eq!(db.root(), root, "root changed across reopen");
-    assert_eq!(
-        db.inactivity_floor_loc(),
-        floor,
-        "floor changed across reopen"
-    );
+    assert_eq!(db.inactivity_floor(), floor, "floor changed across reopen");
     assert_matches_model(&db, model).await;
     db.destroy().await.unwrap();
 }
@@ -303,7 +300,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let cfg = test_config(suffix, &context);
+        let cfg = test_config(suffix);
         let db: Db<F> = Db::init(context.child("storage"), cfg, None)
             .await
             .expect("init ordered any db");
@@ -319,7 +316,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
             );
             model.insert(key_from_seed(write.key), value_from_bytes(write.value));
         }
-        let floor = db.inactivity_floor_loc();
+        let floor = db.inactivity_floor();
         let (initial, _) = merkleize(&db, batch, floor, &input.initial_plan, &mut model).await;
         assert_batch_neighbors(&db, &initial, &model).await;
         let db = db.apply_batch(initial).await.unwrap();
@@ -334,7 +331,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 // committed location via the sibling's snapshot-bucket scan.
                 let batch = apply_mutations(db.new_batch(), &input.parent);
                 apply_to_model(&mut model, &input.parent);
-                let floor = db.inactivity_floor_loc();
+                let floor = db.inactivity_floor();
                 let (parent, _) =
                     merkleize(&db, batch, floor, &input.parent_plan, &mut model).await;
                 assert_batch_neighbors(&db, &parent, &model).await;
@@ -377,7 +374,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 // and position that suffix relative to the now-committed A.
                 let batch = apply_mutations(db.new_batch(), &input.parent);
                 apply_to_model(&mut model, &input.parent);
-                let floor = db.inactivity_floor_loc();
+                let floor = db.inactivity_floor();
                 let (a, _) = merkleize(&db, batch, floor, &input.parent_plan, &mut model).await;
                 assert_batch_neighbors(&db, &a, &model).await;
                 let batch = apply_mutations(a.new_batch::<Sha256>(), &input.child);
@@ -429,7 +426,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 // multi-diff ancestor walk against a committed-only reference.
                 let batch = apply_mutations(db.new_batch(), &input.parent);
                 apply_to_model(&mut model, &input.parent);
-                let floor = db.inactivity_floor_loc();
+                let floor = db.inactivity_floor();
                 let (parent, _) =
                     merkleize(&db, batch, floor, &input.parent_plan, &mut model).await;
                 assert_batch_neighbors(&db, &parent, &model).await;
@@ -482,7 +479,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 // mutations so the chain re-deletes and re-creates the same colliding keys.
                 let batch = apply_mutations(db.new_batch(), &input.parent);
                 apply_to_model(&mut model, &input.parent);
-                let floor = db.inactivity_floor_loc();
+                let floor = db.inactivity_floor();
                 let (a, _) = merkleize(&db, batch, floor, &input.parent_plan, &mut model).await;
                 assert_batch_neighbors(&db, &a, &model).await;
                 let batch = apply_mutations(a.new_batch::<Sha256>(), &input.child);

@@ -5,8 +5,8 @@
 //! [`crate::qmdb::keyless`] and [`crate::qmdb::immutable`] pin the operation type through
 //! aliases and add `append` and `set`, respectively.
 //!
-//! Mirrors the API of the full dbs ([`crate::qmdb::keyless::Keyless`],
-//! [`crate::qmdb::immutable::Immutable`]): `new_batch -> merkleize -> apply_batch -> commit /
+//! Mirrors the API of the full dbs ([`crate::qmdb::keyless::Db`],
+//! [`crate::qmdb::immutable::Db`]): `new_batch -> merkleize -> apply_batch -> commit /
 //! sync / start_sync`, pipelined batch chains, `StaleBatch` validation. It is backed by the
 //! peak-only [`crate::merkle::compact`]. Because history is discarded, the db has no `get` /
 //! `proof` / `bounds` methods. A merkleized batch can prove only its own operations, and only

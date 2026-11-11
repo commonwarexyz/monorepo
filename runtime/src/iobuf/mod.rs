@@ -1,43 +1,48 @@
 //! Buffer types for I/O operations.
 //!
 //! `IoBuf` and `IoBufMut` store readable/writable cursor state directly in the
-//! public handle, so `bytes::Buf` and `bytes::BufMut` hot paths are simple
-//! pointer/length arithmetic. Allocation ownership lives in a compact tagged
-//! owner reference. Runtime-owned heap buffers keep their owner record in a
-//! separate small allocation, and pooled buffers keep it in a per-slot side
-//! table owned by the size class. Caller-supplied `Vec<u8>` values converted
-//! to immutable buffers are adopted into the native heap form when their spare
-//! capacity can host the record (mutable conversions copy to preserve the
-//! caller's capacity). Caller-supplied [`Bytes`] values are held zero-copy by
-//! a small external owner. `owner.rs` documents the owner model.
+//! public handle, so the [`Buf`](bytes::Buf) and [`BufMut`](bytes::BufMut) hot
+//! paths are simple pointer/length arithmetic. Allocation ownership lives in a
+//! compact owner word, and `owner.rs` documents the owner model.
+//!
+//! Runtime-owned heap buffers allocate exactly the requested size and alignment
+//! ([`IoBufMut::with_capacity`] requests byte alignment). While one handle owns
+//! such a buffer, its owner word describes the allocation and nothing else is
+//! allocated, unless the layout or the spare capacity left at freeze is too
+//! large for the word. The first clone, slice, or partial split allocates one
+//! small shared owner record. Caller-supplied `Vec<u8>` values are adopted
+//! into the same native form without copying. Caller-supplied [`Bytes`] values
+//! are held zero-copy by an owner record that keeps the `Bytes` alive.
 //!
 //! Throughout this module, "native" means runtime-owned storage whose owner
 //! supports zero-copy mutable recovery through [`IoBuf::try_into_mut`]: heap
-//! allocations, pooled buffers, and adopted vecs, as opposed to external
-//! `Bytes` and `'static` views.
+//! allocations and adopted vecs, as opposed to external `Bytes` and
+//! `'static` views.
 //!
 //! # Conversions
 //!
-//! Every `From` conversion into [`IoBuf`] or [`IoBufs`] is zero-copy: the
-//! payload is never copied. Most conversions require at most one small owner
-//! allocation. A `Vec<u8>` that cannot host an inline owner may require two
-//! small metadata allocations: one for `bytes` shared ownership and one for
-//! the external owner. Conversions into [`IoBufMut`] or [`IoBufsMut`] are
-//! zero-copy where the source allocation can back a mutable handle and copy
-//! otherwise. Each mutable conversion documents which one it is, and
-//! conversions out of the handles document their cost on each impl.
+//! Every `From` conversion into [`IoBuf`] or [`IoBufs`] is zero-copy. A
+//! conversion from a byte source (`Vec<u8>`, `Bytes`, `BytesMut`,
+//! [`IoBufMut`], or a `'static` slice) allocates at most one small owner
+//! record. When a `BytesMut` still owns its vector directly and has spare
+//! capacity, freezing it also allocates a shared-ownership record. Collecting
+//! existing chunks into [`IoBufs`], from [`IoBuf`] collections or an
+//! [`IoBufsMut`], allocates chunk storage only for four or more chunks. It
+//! allocates no owner record, except where freezing an [`IoBufsMut`] chunk
+//! does (see [`IoBufMut::freeze`]).
 //!
-//! Untracked heap buffers allocate exactly the requested size and alignment
-//! ([`IoBufMut::with_capacity`] requests byte alignment), with the owner record
-//! in one extra small allocation. Adopted vecs host the record in their spare
-//! capacity, and pooled buffers use the side table.
+//! Conversions into [`IoBufMut`] or [`IoBufsMut`] reuse the source allocation
+//! where it can back a mutable handle and copy into a new one otherwise.
+//! Reusing a `Bytes` or `BytesMut` keeps its whole allocation as the capacity
+//! and moves readable bytes that start past its beginning to the front. Each
+//! mutable conversion, and each conversion out of the handles, documents its
+//! cost on its impl.
 //!
 //! Public types:
 //! - [`IoBuf`]: Immutable byte buffer
 //! - [`IoBufMut`]: Mutable byte buffer
 //! - [`IoBufs`]: Container for one or more immutable buffers
 //! - [`IoBufsMut`]: Container for one or more mutable buffers
-//! - [`BufferPool`]: Pool of reusable, aligned buffers
 //! - [`Builder`]: Assembles [`IoBufs`] from inline writes and zero-copy pieces
 //!
 //! # Examples
@@ -60,7 +65,8 @@
 //! let frozen = frozen.try_into_mut().unwrap_err();
 //! drop(head);
 //!
-//! // Unique again: the mutable handle returns with its spare capacity.
+//! // Once the view is gone, recovery returns the mutable handle with its
+//! // spare capacity.
 //! let mut recovered = frozen.try_into_mut().unwrap();
 //! assert_eq!(recovered.as_ref(), b"abcdef");
 //! assert_eq!(recovered.capacity(), 8);
@@ -72,43 +78,9 @@
 mod buf;
 mod bufs;
 mod owner;
-mod pool;
 
 pub use buf::{IoBuf, IoBufMut};
 pub use bufs::{Builder, EncodeExt, IoBufs, IoBufsMut};
-use crossbeam_utils::CachePadded;
-pub use pool::{
-    BufferPool, BufferPoolClassConfig, BufferPoolConfig, BufferPoolThreadCache, PoolError,
-};
-use std::mem::align_of;
-
-/// Returns the system page size.
-///
-/// On Unix systems, queries the actual page size via `sysconf`.
-/// On WebAssembly, defaults to 4KB.
-#[allow(clippy::missing_const_for_fn)]
-pub fn page_size() -> usize {
-    #[cfg(unix)]
-    {
-        // SAFETY: sysconf is safe to call.
-        let size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-        if size <= 0 {
-            4096 // Safe fallback if sysconf fails
-        } else {
-            size as usize
-        }
-    }
-
-    #[cfg(not(unix))]
-    {
-        4096
-    }
-}
-
-/// Returns the cache line size for the current architecture.
-pub const fn cache_line_size() -> usize {
-    align_of::<CachePadded<u8>>()
-}
 
 /// Panics for cursor or write operations that run past the available region.
 ///
@@ -118,124 +90,4 @@ pub const fn cache_line_size() -> usize {
 #[inline(never)]
 fn panic_advance(requested: usize, available: usize) -> ! {
     panic!("cannot advance past end of buffer: requested {requested}, available {available}");
-}
-
-/// Benchmark-only access to internal pool machinery.
-///
-/// Raw pooled buffers reference owner metadata stored by their freelist.
-/// Taking one requires the caller to keep that freelist alive, and returning
-/// one requires proof that it came from the target freelist:
-///
-/// ```compile_fail,E0133
-/// use commonware_runtime::iobuf::bench::{Freelist, PooledBuffer};
-///
-/// fn return_buffer(freelist: &Freelist, buffer: PooledBuffer) {
-///     freelist.put(buffer);
-/// }
-/// ```
-#[doc(hidden)]
-#[cfg(feature = "bench")]
-pub mod bench {
-    pub use super::owner::{PooledBuffer, PooledOwner};
-    use std::{
-        alloc::Layout,
-        num::{NonZeroU32, NonZeroUsize},
-    };
-
-    /// Raw freelist access for benchmarks.
-    ///
-    /// Pooled buffers carry no type-level identity for their originating
-    /// freelist, so return operations are unsafe at this public boundary.
-    pub struct Freelist(super::pool::Freelist);
-
-    impl Freelist {
-        /// Creates a fixed-capacity benchmark freelist.
-        pub fn new(
-            capacity: NonZeroU32,
-            parallelism: NonZeroUsize,
-            layout: Layout,
-            prefill: bool,
-        ) -> Self {
-            Self(super::pool::Freelist::new(
-                capacity,
-                parallelism,
-                layout,
-                prefill,
-            ))
-        }
-
-        /// Returns one available pooled buffer.
-        ///
-        /// ```compile_fail,E0133
-        /// use commonware_runtime::iobuf::bench::Freelist;
-        ///
-        /// fn take(freelist: &Freelist) {
-        ///     let _buffer = freelist.take();
-        /// }
-        /// ```
-        ///
-        /// # Safety
-        ///
-        /// The returned buffer references owner metadata stored by this
-        /// freelist. This freelist must remain alive until the buffer is
-        /// returned here or deallocated.
-        #[inline]
-        pub unsafe fn take(&self) -> Option<PooledBuffer> {
-            self.0.take()
-        }
-
-        /// Returns up to `max` available pooled buffers to `on_entry`.
-        ///
-        /// `on_entry` must not panic. A panic can strand claimed buffers
-        /// outside the freelist and leak their allocations.
-        ///
-        /// ```compile_fail,E0133
-        /// use commonware_runtime::iobuf::bench::Freelist;
-        ///
-        /// fn take_batch(freelist: &Freelist) {
-        ///     freelist.take_batch(1, |_| {});
-        /// }
-        /// ```
-        ///
-        /// # Safety
-        ///
-        /// Every buffer passed to `on_entry` references owner metadata stored
-        /// by this freelist. This freelist must remain alive until all such
-        /// buffers are returned here or deallocated.
-        #[inline]
-        pub unsafe fn take_batch(&self, max: usize, on_entry: impl FnMut(PooledBuffer)) -> usize {
-            self.0.take_batch(max, on_entry)
-        }
-
-        /// Returns one pooled buffer to this freelist.
-        ///
-        /// # Safety
-        ///
-        /// `buffer` must have been taken from this freelist, and its slot must
-        /// not already be available here.
-        #[inline]
-        pub unsafe fn put(&self, buffer: PooledBuffer) {
-            self.0.put(buffer);
-        }
-
-        /// Returns several pooled buffers to this freelist.
-        ///
-        /// If the iterator panics, buffers already accepted by this method may
-        /// leak.
-        ///
-        /// # Safety
-        ///
-        /// Every buffer must have been taken from this freelist. Their slots
-        /// must be unique within the batch and unavailable in the freelist.
-        #[inline]
-        pub unsafe fn put_batch(&self, buffers: impl IntoIterator<Item = PooledBuffer>) {
-            self.0.put_batch(buffers);
-        }
-
-        /// Drops every currently available pooled buffer.
-        #[inline]
-        pub fn drain(&self) -> usize {
-            self.0.drain()
-        }
-    }
 }

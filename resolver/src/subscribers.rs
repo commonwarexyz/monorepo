@@ -24,7 +24,7 @@ impl<K, S> Default for Tracker<K, S> {
 
 impl<K, S> Tracker<K, S>
 where
-    K: Clone + Ord,
+    K: Ord,
     S: Clone + Ord,
 {
     /// Create an empty subscriber tracker.
@@ -77,16 +77,13 @@ where
     where
         F: FnMut(&K, &S) -> bool,
     {
-        let mut removed = Vec::new();
-        self.entries.retain(|key, subscribers| {
-            subscribers.retain(|subscriber, _| predicate(key, subscriber));
-            let keep = !subscribers.is_empty();
-            if !keep {
-                removed.push(key.clone());
-            }
-            keep
-        });
-        removed
+        self.entries
+            .extract_if(.., |key, subscribers| {
+                subscribers.retain(|subscriber, _| predicate(key, subscriber));
+                subscribers.is_empty()
+            })
+            .map(|(key, _)| key)
+            .collect()
     }
 
     /// Return the subscribers currently waiting on a key, each paired with the
@@ -113,7 +110,7 @@ where
             self.entries.remove(key);
             return None;
         }
-        self.pending(key)
+        Self::non_empty(entry)
     }
 
     /// Clones a key's subscriber map into a [NonEmptyVec], or `None` when empty.
@@ -167,7 +164,7 @@ mod tests {
     fn retain_prunes_subscribers_and_reports_removed_keys() {
         let mut tracker = Tracker::new();
         tracker.insert(1, none(non_empty_vec![11]));
-        tracker.insert(2, none(non_empty_vec![20]));
+        tracker.insert(2, none(non_empty_vec![20, 21]));
 
         let removed = tracker.retain(|_, subscriber| *subscriber % 2 == 0);
 

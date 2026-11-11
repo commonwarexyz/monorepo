@@ -12,7 +12,7 @@ use commonware_codec::{
 use commonware_math::algebra::Random;
 #[commonware_macros::stability(ALPHA)]
 use commonware_utils::NZU64;
-use commonware_utils::{Array, Span};
+use commonware_utils::{Array, Span, Widen};
 #[commonware_macros::stability(ALPHA)]
 use core::num::NonZeroU64;
 use core::{convert::Infallible, fmt::Display, ops::Deref};
@@ -331,8 +331,7 @@ impl Transcript {
     /// assert_eq!(s1, s2);
     /// ```
     pub fn append(&mut self, mut data: impl bytes::Buf) -> &mut Self {
-        let length =
-            u64::try_from(data.remaining()).expect("transcript packet length does not fit in u64");
+        let length: u64 = Widen::widen(data.remaining());
         let pending = self
             .pending
             .checked_add(length)

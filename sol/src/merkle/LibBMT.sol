@@ -115,12 +115,12 @@ library LibBMT {
         return _range(root, leaves, start, data, elements.length, witnesses, proof.length, true, hasher);
     }
 
-    /// @notice Verify raw elements at arbitrary, distinct indices.
-    /// @dev Invalid bounds, malformed proofs and root mismatches return `false`.
+    /// @notice Verify raw elements at strictly ascending indices.
+    /// @dev Invalid bounds, unordered or repeated indices, malformed proofs and root mismatches return `false`.
     /// Empty inputs require an empty tree and proof.
     /// @param root Trusted root commitment.
     /// @param leaves Total leaf count, at most `2^32 - 1`.
-    /// @param indices Distinct zero-based leaf indices in the same order as `elements`.
+    /// @param indices Strictly ascending zero-based leaf indices in the same order as `elements`.
     /// @param elements Raw 32-byte leaf values.
     /// @param proof Exact Commonware sibling digests in ascending level and index order.
     /// @param hasher Hash implementation address, or `address(0)` for native Keccak256.
@@ -145,12 +145,12 @@ library LibBMT {
         return _multi(root, leaves, positions, data, elements.length, witnesses, proof.length, false, hasher);
     }
 
-    /// @notice Verify raw elements at arbitrary, distinct indices.
-    /// @dev Invalid bounds, malformed proofs and root mismatches return `false`.
+    /// @notice Verify raw elements at strictly ascending indices.
+    /// @dev Invalid bounds, unordered or repeated indices, malformed proofs and root mismatches return `false`.
     /// Empty inputs require an empty tree and proof.
     /// @param root Trusted root commitment.
     /// @param leaves Total leaf count, at most `2^32 - 1`.
-    /// @param indices Distinct zero-based leaf indices in the same order as `elements`.
+    /// @param indices Strictly ascending zero-based leaf indices in the same order as `elements`.
     /// @param elements Raw 32-byte leaf values.
     /// @param proof Exact Commonware sibling digests in ascending level and index order.
     /// @param hasher Hash implementation address, or `address(0)` for native Keccak256.
@@ -365,7 +365,7 @@ library LibBMT {
         }
     }
 
-    /// @dev Sort private index/digest pairs, reject duplicates, and compact each level in place.
+    /// @dev Hash leaves into strictly ascending private index/digest pairs and compact each level in place.
     function _multi(
         bytes32 root,
         uint256 leaves,
@@ -379,8 +379,6 @@ library LibBMT {
     ) private view returns (bool valid) {
         if (leaves > type(uint32).max || count > leaves) return false;
         if (count == 0) return _empty(root, leaves, proofLength, hasher);
-        uint256 base;
-        bool sorted = true;
         assembly ("memory-safe") {
             hasher := and(hasher, 0xffffffffffffffffffffffffffffffffffffffff)
             /// @dev Hash raw bytes through an external target and require exactly one digest.
@@ -400,15 +398,19 @@ library LibBMT {
                 case 0 { v := mload(p) }
                 default { v := calldataload(p) }
             }
-            base := mload(0x40)
-            mstore(0x40, add(base, shl(6, count)))
+            let base := mload(0x40)
+            let limit := add(base, shl(6, count))
+            mstore(0x40, limit)
             valid := 1
-            let previous := 0
+            // `next` is the smallest index the next pair may use. Hashing stops at the first invalid index.
+            let next := 0
             for { let i := 0 } lt(i, count) { i := add(i, 1) } {
                 let index := load(add(indices, shl(5, i)), cd)
-                if iszero(lt(index, leaves)) { valid := 0 }
-                if lt(index, previous) { sorted := 0 }
-                previous := index
+                if or(iszero(lt(index, leaves)), lt(index, next)) {
+                    valid := 0
+                    break
+                }
+                next := add(index, 1)
                 let target := add(base, shl(6, i))
                 mstore(target, index)
                 mstore(0, index)
@@ -420,31 +422,6 @@ library LibBMT {
                     default { hashed := externalHash(0x1c, 0x24, hasher) }
                     mstore(add(target, 0x20), hashed)
                 }
-            }
-        }
-        if (valid && !sorted) LibMerkle.sortPairs(base, count);
-        assembly ("memory-safe") {
-            hasher := and(hasher, 0xffffffffffffffffffffffffffffffffffffffff)
-            /// @dev Hash raw bytes through an external target and require exactly one digest.
-            function externalHash(pointer, length, targetHasher) -> digest {
-                let success := staticcall(gas(), targetHasher, pointer, length, 0, 0x20)
-                if iszero(and(success, eq(returndatasize(), 0x20))) {
-                    mstore(0, 0x832d9905) // `LibMerkle.HashFailed()`.
-                    // Each external hash result must be checked before traversal continues.
-                    // forge-lint: disable-next-line(require-revert-in-loop)
-                    revert(0x1c, 4)
-                }
-                digest := mload(0)
-            }
-            /// @dev Read one word from the selected input address space.
-            function load(p, calldataInput) -> v {
-                switch calldataInput
-                case 0 { v := mload(p) }
-                default { v := calldataload(p) }
-            }
-            let limit := add(base, shl(6, count))
-            for { let p := add(base, 0x40) } and(lt(p, limit), valid) { p := add(p, 0x40) } {
-                if eq(mload(p), mload(sub(p, 0x40))) { valid := 0 }
             }
             let cursor := proof
             let end := add(proof, shl(5, proofLength))
@@ -509,7 +486,8 @@ library LibBMT {
                 switch hasher
                 case 0 { hashed := keccak256(0x1c, 0x24) }
                 default { hashed := externalHash(0x1c, 0x24, hasher) }
-                valid := and(valid, and(eq(cursor, end), eq(root, hashed)))
+                // Only the first pair reaches the root, so exactly one may remain.
+                valid := and(and(valid, eq(count, 1)), and(eq(cursor, end), eq(root, hashed)))
             }
             for { let p := base } lt(p, limit) { p := add(p, 0x20) } { mstore(p, 0) }
         }

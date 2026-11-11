@@ -2,12 +2,10 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::blake3::Digest;
-use commonware_runtime::{
-    BufferPooler, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
-};
+use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
-    qmdb::store::db::{Config, Db},
+    qmdb::store::{Config, Db},
     translator::TwoCap,
 };
 use commonware_storage_fuzz::floor::{Plan, Recorder};
@@ -19,6 +17,7 @@ use std::{
 };
 
 const MAX_OPERATIONS: usize = 50;
+const MAX_GET_MANY_KEYS: usize = 8;
 
 type Key = Digest;
 type Value = Vec<u8>;
@@ -40,6 +39,9 @@ enum Operation {
     Get {
         key: [u8; 32],
     },
+    GetMany {
+        keys: Vec<[u8; 32]>,
+    },
     GetMetadata,
     Sync,
     Prune,
@@ -51,7 +53,7 @@ enum Operation {
 impl<'a> Arbitrary<'a> for Operation {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let choice: u8 = u.arbitrary()?;
-        match choice % 10 {
+        match choice % 11 {
             0 => {
                 let key = u.arbitrary()?;
                 let value_len: u16 = u.arbitrary()?;
@@ -88,6 +90,13 @@ impl<'a> Arbitrary<'a> for Operation {
             7 => Ok(Operation::OpCount),
             8 => Ok(Operation::InactivityFloorLoc),
             9 => Ok(Operation::SimulateFailure),
+            10 => {
+                let count = u.int_in_range(0..=MAX_GET_MANY_KEYS)?;
+                let keys = (0..count)
+                    .map(|_| u.arbitrary())
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Operation::GetMany { keys })
+            }
             _ => unreachable!(),
         }
     }
@@ -111,10 +120,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 const PAGE_SIZE: NonZeroU16 = NZU16!(125);
 const PAGE_CACHE_SIZE: usize = 8;
 
-fn test_config(
-    test_name: &str,
-    pooler: &impl BufferPooler,
-) -> Config<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
+fn test_config(test_name: &str) -> Config<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
     Config {
         log: VConfig {
             partition: format!("{test_name}-log"),
@@ -123,7 +129,7 @@ fn test_config(
             compression: None,
             codec_config: ((), ((0..=10000).into(), ())),
             items_per_section: NZU64!(7),
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+            page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
         },
         translator: TwoCap,
         init_cache: Some(NZUsize!(3)),
@@ -144,7 +150,7 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let cfg = test_config("store-fuzz-test", &context);
+        let cfg = test_config("store-fuzz-test");
         let mut db = StoreDb::init(context.child("storage"), cfg, None)
             .await
             .expect("Failed to init db");
@@ -174,30 +180,29 @@ fn fuzz(input: FuzzInput) {
                     let mut batch = db.new_batch();
                     for (key, value) in std::mem::take(&mut pending) {
                         keys.insert(key);
-                        batch = match value {
+                        match &value {
                             Some(v) => {
                                 model.insert(key, v.clone());
-                                batch.update(key, v)
                             }
                             None => {
                                 model.remove(&key);
-                                batch.delete(key)
                             }
-                        };
+                        }
+                        batch = batch.write(key, value);
                     }
-                    let changeset = batch.finalize(metadata_bytes.clone());
-                    let inherited = db.inactivity_floor_loc();
+                    let changeset = batch.with_metadata(metadata_bytes.clone()).finalize();
+                    let inherited = db.inactivity_floor();
                     let mut policy =
                         Recorder::new(plan, |seed| vec![seed; usize::from(seed % 16) + 1]);
                     let db = db
-                        .apply_batch(changeset, &mut policy)
+                        .apply_batch_with(changeset, &mut policy)
                         .await
                         .expect("Apply batch should not fail");
                     policy.check(
                         &mut model,
                         inherited,
-                        db.inactivity_floor_loc(),
-                        db.size() - 1,
+                        db.inactivity_floor(),
+                        db.bounds().end - 1,
                     );
                     db.commit().await.expect("Commit should not fail")
                 }
@@ -213,6 +218,52 @@ fn fuzz(input: FuzzInput) {
                     db
                 }
 
+                Operation::GetMany { keys: requested } => {
+                    // The store reads committed state, so compare it with the model for keys the
+                    // pending writes do not shadow.
+                    let requested: Vec<Digest> = requested.iter().copied().map(Digest).collect();
+                    let committed: Vec<Digest> = requested
+                        .iter()
+                        .copied()
+                        .filter(|key| !pending.contains_key(key))
+                        .collect();
+                    let got = db
+                        .get_many(&committed)
+                        .await
+                        .expect("Get many should not fail");
+                    assert_eq!(got.len(), committed.len());
+                    for (key, value) in committed.iter().zip(&got) {
+                        assert_eq!(
+                            value.as_ref(),
+                            model.get(key),
+                            "get_many diverged from model"
+                        );
+                    }
+
+                    // A batch holding the pending writes reads them first and the store otherwise.
+                    let mut batch = db.new_batch();
+                    for (key, value) in &pending {
+                        batch = batch.write(*key, value.clone());
+                    }
+                    let got = batch
+                        .get_many(&requested)
+                        .await
+                        .expect("Batch get many should not fail");
+                    assert_eq!(got.len(), requested.len());
+                    for (key, value) in requested.iter().zip(&got) {
+                        let expected = pending
+                            .get(key)
+                            .map_or_else(|| model.get(key), Option::as_ref);
+                        assert_eq!(
+                            value.as_ref(),
+                            expected,
+                            "batch get_many diverged from model"
+                        );
+                    }
+                    drop(batch);
+                    db
+                }
+
                 Operation::GetMetadata => {
                     let _ = db.get_metadata().await;
                     db
@@ -221,7 +272,7 @@ fn fuzz(input: FuzzInput) {
                 Operation::Sync => db.sync().await.expect("Sync should not fail"),
 
                 Operation::Prune => {
-                    let floor = db.inactivity_floor_loc();
+                    let floor = db.inactivity_floor();
                     db.prune(floor).await.expect("Prune should not fail")
                 }
 
@@ -231,16 +282,16 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 Operation::InactivityFloorLoc => {
-                    let _ = db.inactivity_floor_loc();
+                    let _ = db.inactivity_floor();
                     db
                 }
 
                 Operation::SimulateFailure => {
                     pending.clear();
-                    let floor = db.inactivity_floor_loc();
+                    let floor = db.inactivity_floor();
                     drop(db);
 
-                    let cfg = test_config("store-fuzz-test", &context);
+                    let cfg = test_config("store-fuzz-test");
                     let db = StoreDb::init(
                         context.child("db").with_attribute("instance", restarts),
                         cfg,
@@ -249,11 +300,7 @@ fn fuzz(input: FuzzInput) {
                     .await
                     .expect("Failed to init db");
                     restarts += 1;
-                    assert_eq!(
-                        db.inactivity_floor_loc(),
-                        floor,
-                        "floor changed across restart"
-                    );
+                    assert_eq!(db.inactivity_floor(), floor, "floor changed across restart");
                     assert_matches_model(&db, &model, &keys).await;
                     db
                 }

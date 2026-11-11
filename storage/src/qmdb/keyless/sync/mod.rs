@@ -7,7 +7,7 @@ use crate::{
     },
     qmdb::{
         self,
-        keyless::{Keyless, Metrics, Operation, operation::Codec},
+        keyless::{Db, Metrics, Operation, operation::OperationCodec},
         sync,
     },
 };
@@ -17,13 +17,12 @@ use commonware_parallel::Strategy;
 use commonware_utils::range::NonEmptyRange;
 use std::num::NonZeroU64;
 
-impl<F, E, V, C, H, S> sync::Database for Keyless<F, E, V, C, H, S>
+impl<F, E, V, C, H, S> sync::Database for Db<F, E, V, C, H, S>
 where
     F: Family,
     E: Context,
-    V: Codec,
+    V: OperationCodec,
     C: Mutable<Item = Operation<F, V>> + sync::Journal<F, Context = E, Op = Operation<F, V>>,
-    C::Config: Clone + Send,
     H: Hasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
@@ -36,7 +35,7 @@ where
     type Digest = H::Digest;
     type Context = E;
 
-    /// Returns a [Keyless] db initialized from data collected in the sync process.
+    /// Returns a [Db] initialized from data collected in the sync process.
     ///
     /// # Behavior
     ///
@@ -50,7 +49,7 @@ where
     ///
     /// # Returns
     ///
-    /// A [Keyless] db populated with the state from the given range.
+    /// A [Db] populated with the state from the given range.
     async fn from_sync_result(
         context: Self::Context,
         config: Self::Config,
@@ -129,7 +128,7 @@ where
         .await
     }
 
-    fn root(&self) -> Self::Digest {
+    fn ops_root(&self) -> Self::Digest {
         self.root()
     }
 }

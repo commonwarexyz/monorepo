@@ -22,7 +22,7 @@ fn bench_size<const SIZE: usize>(c: &mut Criterion) {
         |b| {
             b.to_async(&runner).iter_custom(|iters| async move {
                 let ctx = context::get::<commonware_runtime::tokio::Context>();
-                let cache = CacheRef::from_pooler(&ctx, PAGE_SIZE, NZUsize!(32));
+                let cache = CacheRef::new(PAGE_SIZE, NZUsize!(32));
                 let item = FixedBytes::new([0xAB; SIZE]);
                 let mut elapsed = Duration::ZERO;
                 for _ in 0..iters {

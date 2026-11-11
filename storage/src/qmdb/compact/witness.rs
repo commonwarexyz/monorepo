@@ -261,7 +261,7 @@ where
 /// The Merkle is built from the pinned nodes one operation below the commit plus the commit
 /// itself, then pruned back to its frontier. A zero size returns [`Error::DataCorrupted`], a
 /// non-commit operation returns [`Error::UnexpectedData`], and a floor beyond the commit returns
-/// [`Error::FloorBeyondSize`]. Merkle errors propagate unchanged.
+/// [`Error::FloorBeyondCommit`]. Merkle errors propagate unchanged.
 pub(super) fn restore<F, O, H, S>(
     strategy: S,
     witness: Witness<F, H::Digest, O>,
@@ -280,11 +280,11 @@ where
     let Some(last_commit_loc) = size.checked_sub(1) else {
         return Err(Error::DataCorrupted("invalid compact witness"));
     };
-    let Some(inactivity_floor_loc) = commit.has_floor() else {
+    let Some(inactivity_floor_loc) = commit.inactivity_floor() else {
         return Err(Error::UnexpectedData(last_commit_loc));
     };
     if inactivity_floor_loc > last_commit_loc {
-        return Err(Error::FloorBeyondSize(
+        return Err(Error::FloorBeyondCommit(
             inactivity_floor_loc,
             last_commit_loc,
         ));
@@ -342,17 +342,13 @@ pub(crate) mod tests {
 
     type Sha256Digest = <Sha256 as Hasher>::Digest;
 
-    fn journal_config<C>(
-        context: &deterministic::Context,
-        partition: &str,
-        codec_config: C,
-    ) -> variable::Config<C> {
+    fn journal_config<C>(partition: &str, codec_config: C) -> variable::Config<C> {
         variable::Config {
             partition: partition.into(),
             items_per_section: NZU64!(4),
             compression: None,
             codec_config,
-            page_cache: CacheRef::from_pooler(context, NZU16!(77), NZUsize!(9)),
+            page_cache: CacheRef::new(NZU16!(77), NZUsize!(9)),
             write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
         }
@@ -364,7 +360,7 @@ pub(crate) mod tests {
         partition: &str,
         entries: &[StoredWitness<F, Sha256Digest>],
     ) {
-        let cfg = journal_config(&context, partition, ());
+        let cfg = journal_config(partition, ());
         let mut journal = Journal::<_, F, Sha256Digest>::init(context, cfg)
             .await
             .unwrap();
@@ -404,7 +400,7 @@ pub(crate) mod tests {
             write_entries(context.child("write"), "witness-metadata-limit", &[stored]).await;
             let cfg = Config {
                 strategy: Sequential,
-                witness: journal_config(&context, "witness-metadata-limit", valid_cfg.clone()),
+                witness: journal_config("witness-metadata-limit", valid_cfg.clone()),
             };
             let mut restrictive = cfg.clone();
             restrictive.witness.codec_config = restrictive_cfg;
@@ -451,7 +447,7 @@ pub(crate) mod tests {
                     context.child("reject_tag"),
                     Config {
                         strategy: Sequential,
-                        witness: journal_config(&context, "witness-invalid-tag", valid_cfg),
+                        witness: journal_config("witness-invalid-tag", valid_cfg),
                     },
                     None,
                 )
@@ -517,7 +513,7 @@ pub(crate) mod tests {
                 let partition = format!("witness-bounded-selection-{index}");
                 let cfg = Config {
                     strategy: Sequential,
-                    witness: journal_config(&context, &partition, valid_cfg),
+                    witness: journal_config(&partition, valid_cfg),
                 };
                 let db = if imported {
                     // Seed an older history for the genesis import to replace.
@@ -525,12 +521,7 @@ pub(crate) mod tests {
                         Db::<F, _, O, Sha256, _>::init(context.child("seed"), cfg.clone(), None)
                             .await
                             .unwrap();
-                    let floor = seeded.inactivity_floor_loc();
-                    let batch = seeded
-                        .new_batch()
-                        .merkleize(&seeded, None, floor)
-                        .await
-                        .unwrap();
+                    let batch = seeded.new_batch().merkleize(&seeded).await.unwrap();
                     let seeded = seeded.apply_batch(batch).await.unwrap();
                     drop(seeded.sync().await.unwrap());
                     let db = Db::<F, _, O, Sha256, _>::init_from_sync(
@@ -547,8 +538,7 @@ pub(crate) mod tests {
                         .await
                         .unwrap()
                 };
-                let floor = db.inactivity_floor_loc();
-                let batch = db.new_batch().merkleize(&db, None, floor).await.unwrap();
+                let batch = db.new_batch().merkleize(&db).await.unwrap();
                 let db = db.apply_batch(batch).await.unwrap();
                 let db = db.sync().await.unwrap();
                 let selected = db.target();
@@ -641,7 +631,7 @@ pub(crate) mod tests {
         invalid_floor.commit = TestOp::Commit(None, Location::new(1));
         assert!(matches!(
             restore::<F, _, Sha256, _>(Sequential, invalid_floor),
-            Err(Error::FloorBeyondSize(floor, loc)) if floor == 1 && loc == 0
+            Err(Error::FloorBeyondCommit(floor, loc)) if floor == 1 && loc == 0
         ));
 
         let mut invalid_pins = genesis;

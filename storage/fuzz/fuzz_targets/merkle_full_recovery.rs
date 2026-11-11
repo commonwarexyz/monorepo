@@ -16,9 +16,7 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_parallel::Sequential;
-use commonware_runtime::{
-    BufferPooler, Handle, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
-};
+use commonware_runtime::{Handle, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::merkle::{
     Bagging::ForwardFold, Family as MerkleFamily, Location, Position, full::Config,
     hasher::Standard as StandardHasher, mem::Mem, mmb, mmr,
@@ -61,10 +59,10 @@ enum MerkleOperation {
 /// Fuzz input containing fault injection parameters and operations.
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
-    /// Page size for buffer pool.
+    /// Page size for the page cache.
     #[arbitrary(with = bounded_page_size)]
     page_size: u16,
-    /// Number of pages in the buffer pool cache.
+    /// Number of pages in the page cache.
     #[arbitrary(with = bounded_page_cache_size)]
     page_cache_size: usize,
     /// Items per blob.
@@ -94,7 +92,6 @@ struct FuzzInput {
 
 fn merkle_config(
     partition_suffix: &str,
-    pooler: &impl BufferPooler,
     page_size: NonZeroU16,
     page_cache_size: NonZeroUsize,
     items_per_blob: u64,
@@ -108,7 +105,7 @@ fn merkle_config(
         write_buffer,
         replay_buffer,
         strategy: Sequential,
-        page_cache: CacheRef::from_pooler(pooler, page_size, page_cache_size),
+        page_cache: CacheRef::new(page_size, page_cache_size),
     }
 }
 
@@ -380,7 +377,6 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 &hasher,
                 merkle_config(
                     &partition_suffix,
-                    &ctx,
                     page_size,
                     page_cache_size,
                     items_per_blob,
@@ -427,7 +423,6 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 &hasher,
                 merkle_config(
                     &recovery_partition_suffix,
-                    &ctx,
                     page_size,
                     page_cache_size,
                     items_per_blob,
@@ -450,7 +445,6 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
             &hasher,
             merkle_config(
                 &partition_suffix,
-                &ctx,
                 page_size,
                 page_cache_size,
                 items_per_blob,
@@ -545,7 +539,6 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
             &hasher,
             merkle_config(
                 &partition_suffix,
-                &ctx,
                 page_size,
                 page_cache_size,
                 items_per_blob,

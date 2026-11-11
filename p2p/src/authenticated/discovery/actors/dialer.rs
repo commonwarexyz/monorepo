@@ -14,8 +14,7 @@ use crate::authenticated::{
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf, Spawner,
-    StreamOf, spawn_cell,
+    Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf, Spawner, StreamOf, spawn_cell,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
 use commonware_stream::Upgrader;
@@ -75,8 +74,7 @@ where
     attempts: CounterFamily<metrics::Peer<U::PublicKey>>,
 }
 
-impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metrics, U: Upgrader>
-    Actor<E, U>
+impl<E: Spawner + Clock + Network + Resolver + CryptoRng + Metrics, U: Upgrader> Actor<E, U>
 where
     U::PublicKey: PublicKey,
 {

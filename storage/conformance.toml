@@ -594,6 +594,22 @@ hash = "9998fd0f05b90d7e4ef82369cb86c418476a259d7a3d1f5148c8cd13d75af73e"
 n_cases = 65536
 hash = "97d39f285e3cd575318130a3b64d5da8cc830f050beab6d465701be7e018784e"
 
+["commonware_storage::qmdb::current::unordered::tests::conformance::CodecConformance<constant::KeyValueProof<mmb::Family,Sha256Digest,32\n>>"]
+n_cases = 65536
+hash = "bf4a4809cb3e2b26be0993fded18542541e20b85267b83ee5e2a63d5b9db08ca"
+
+["commonware_storage::qmdb::current::unordered::tests::conformance::CodecConformance<constant::KeyValueProof<mmr::Family,Sha256Digest,32\n>>"]
+n_cases = 65536
+hash = "5aaae48dbe172c0e919f39bdaf6b3706704a2c027474202cde232555cdc26d66"
+
+["commonware_storage::qmdb::current::unordered::tests::conformance::CodecConformance<dynamic::KeyValueProof<mmb::Family,Sha256Digest>>"]
+n_cases = 65536
+hash = "9998fd0f05b90d7e4ef82369cb86c418476a259d7a3d1f5148c8cd13d75af73e"
+
+["commonware_storage::qmdb::current::unordered::tests::conformance::CodecConformance<dynamic::KeyValueProof<mmr::Family,Sha256Digest>>"]
+n_cases = 65536
+hash = "97d39f285e3cd575318130a3b64d5da8cc830f050beab6d465701be7e018784e"
+
 ["commonware_storage::qmdb::immutable::operation::fixed::tests::conformance::CodecConformance<FixedOp>"]
 n_cases = 65536
 hash = "1737c49c112fc9dfdc4dde3626d8ab08a9df8353b9a702e488d3a1fd8e9428dc"

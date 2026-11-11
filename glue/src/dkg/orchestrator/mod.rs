@@ -84,10 +84,12 @@
 //! the orchestrator enters the next epoch.
 //!
 //! The resolver asks only targets among the active epoch's [tracked peers],
-//! primary or secondary. A lagging node can therefore catch up from any honest
-//! tracked peer that is still connected to it, still holds the finalization,
-//! and sends it later-epoch traffic. [Reconfiguration] describes which peers
-//! qualify for a node one or more epochs behind.
+//! primary or secondary, so the finalization can come from any honest tracked
+//! peer that is still connected to the node, still holds it, and sends the node
+//! later-epoch traffic. Marshal fetches any blocks the node is missing below the
+//! final one from any tracked peer, so the next committee can serve them once
+//! the node's own committee has departed. [Reconfiguration] describes which
+//! peers qualify for a node one or more epochs behind.
 //!
 //! [tracked peers]: crate::dkg::types::Participants::tracked_peers
 //! [Reconfiguration]: crate::dkg#reconfiguration
@@ -109,6 +111,22 @@
 //! [`Provider`], and the network. [`SimplexConfig`] holds the per-epoch Simplex
 //! settings.
 //!
+//! # Message Sizes
+//!
+//! Each epoch's Simplex engine sends its votes, certificates, and resolver messages on the
+//! subchannel of its epoch:
+//!
+//! ```text
+//! Simplex message:
+//! +---------------------------------+-------------------------------------------+
+//! | epoch subchannel (varint, 1-10) | message (up to simplex::max_payload_size) |
+//! +---------------------------------+-------------------------------------------+
+//! ```
+//!
+//! [`max_payload_size`] is Simplex's
+//! [`max_payload_size`](commonware_consensus::simplex::max_payload_size) for the largest committee
+//! plus the widest epoch subchannel prefix.
+//!
 //! [`EpochInfo`]: crate::dkg::types::EpochInfo
 //! [`state_sync::Plan`]: crate::dkg::state_sync::Plan
 //! [`Gate`]: crate::dkg::fence::Gate
@@ -119,6 +137,9 @@ pub use mailbox::{Mailbox, Message};
 
 mod actor;
 pub use actor::{Actor, Config, SimplexConfig};
+
+mod limits;
+pub use limits::max_payload_size;
 
 #[cfg(test)]
 mod tests {
@@ -158,8 +179,8 @@ mod tests {
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
-        Acknowledgement, N3f1, NZU16, NZU32, NZU64, NZUsize, TestRng, acknowledgement::Exact,
-        non_empty, ordered::Set, probability, sequence::Unit,
+        Acknowledgement, N3f1, NZDuration, NZU16, NZU32, NZU64, NZUsize, TestRng,
+        acknowledgement::Exact, non_empty, ordered::Set, probability, sequence::Unit,
     };
     use std::{
         collections::HashSet,
@@ -171,7 +192,8 @@ mod tests {
     const VOTE_CHANNEL: u64 = 1;
     const CERTIFICATE_CHANNEL: u64 = 2;
     const RESOLVER_CHANNEL: u64 = 3;
-    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
+    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_024));
+
     const LINK: Link = Link {
         latency: Duration::from_millis(1),
         jitter: Duration::ZERO,
@@ -409,7 +431,7 @@ mod tests {
         {
             let public_key = fixture.participants[index].clone();
             let control = oracle.control(public_key.clone());
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16));
+            let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(16));
             let partition_prefix = format!("orchestrator-node-{index}");
 
             let (backfill_sender, backfill_receiver) = control
@@ -428,8 +450,8 @@ mod tests {
                     peer_provider: oracle.manager(),
                     blocker: control.clone(),
                     mailbox_size: NZUsize!(16),
-                    timeout: Duration::from_millis(200),
-                    fetch_retry_timeout: Duration::from_millis(100),
+                    fetch_timeout: NZDuration!(Duration::from_millis(200)),
+                    fetch_retry_delay: Duration::from_millis(100),
                     priority_requests: false,
                     priority_responses: false,
                 },
@@ -475,7 +497,7 @@ mod tests {
                     mailbox_size: NZUsize!(16),
                     view_retention: ViewDelta::new(8),
                     prunable_items_per_section: NZU64!(10),
-                    page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16)),
+                    page_cache: CacheRef::new(NZU16!(1024), NZUsize!(16)),
                     replay_buffer: NZUsize!(1024),
                     key_write_buffer: NZUsize!(1024),
                     value_write_buffer: NZUsize!(1024),
@@ -497,7 +519,12 @@ mod tests {
             )
             .await;
             let application = mocks::MockApplication::default();
-            let (fence, gate) = Fence::new(gate_epoch);
+
+            // Mark the epoch in the reshare actor's place, as the actor does
+            // once the epoch's scheme is registered.
+            let (fence, gate) = Fence::new();
+            fence.mark(gate_epoch);
+
             let (actor, mailbox) = Actor::new(
                 context.child("orchestrator"),
                 Config {
@@ -507,11 +534,10 @@ mod tests {
                     marshal: marshal.clone(),
                     application: application.clone(),
                     strategy: Sequential,
-                    simplex: mocks::simplex_config(&context),
+                    simplex: mocks::simplex_config(),
                     gate,
                     state_sync,
                     blocks_per_epoch: NZU64!(2),
-                    muxer_size: 16,
                     mailbox_size: NZUsize!(16),
                     partition_prefix,
                 },
@@ -668,7 +694,7 @@ mod tests {
             players.iter().cloned(),
         );
         mocks::TestBlock::new::<Sha256>(context, genesis.digest(), Height::new(1), 1)
-            .with_payload::<Sha256, mocks::TestBlsVariant, mocks::TestSigner>(
+            .with_payload::<Sha256, mocks::TestBlsVariant, mocks::TestPublicKey>(
             NZU32!(16),
             Payload::EpochInfo(info),
         )
@@ -681,7 +707,7 @@ mod tests {
     ) -> mocks::TestBlock {
         let info = make_epoch_info(Epoch::zero(), dealers, players);
         mocks::genesis_block(leader)
-            .with_payload::<Sha256, mocks::TestBlsVariant, mocks::TestSigner>(
+            .with_payload::<Sha256, mocks::TestBlsVariant, mocks::TestPublicKey>(
                 NZU32!(16),
                 Payload::EpochInfo(info),
             )
@@ -837,7 +863,7 @@ mod tests {
 
             let public_key = participants[0].clone();
             let control = oracle.control(public_key.clone());
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16));
+            let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(16));
             let partition_prefix = "orchestrator-marshal-shutdown".to_string();
 
             let finalizations_by_height =
@@ -879,7 +905,7 @@ mod tests {
                         mailbox_size: NZUsize!(16),
                         view_retention: ViewDelta::new(8),
                         prunable_items_per_section: NZU64!(10),
-                        page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16)),
+                        page_cache: CacheRef::new(NZU16!(1024), NZUsize!(16)),
                         replay_buffer: NZUsize!(1024),
                         key_write_buffer: NZUsize!(1024),
                         value_write_buffer: NZUsize!(1024),
@@ -891,7 +917,7 @@ mod tests {
                 )
                 .await;
 
-            let (_fence, gate) = Fence::new(Epoch::new(1));
+            let (_fence, gate) = Fence::new();
             let (actor, _mailbox): (_, super::Mailbox<mocks::TestBlock, Exact>) = Actor::new(
                 context.child("orchestrator"),
                 Config {
@@ -901,11 +927,10 @@ mod tests {
                     marshal: marshal.clone(),
                     application: mocks::MockApplication::default(),
                     strategy: Sequential,
-                    simplex: mocks::simplex_config(&context),
+                    simplex: mocks::simplex_config(),
                     gate,
                     state_sync: StateSyncPlan::disabled(),
                     blocks_per_epoch: NZU64!(2),
-                    muxer_size: 16,
                     mailbox_size: NZUsize!(16),
                     partition_prefix,
                 },
@@ -1114,7 +1139,7 @@ mod tests {
 
             let public_key = participants[0].clone();
             let control = oracle.control(public_key.clone());
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16));
+            let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(16));
             let partition_prefix = "orchestrator-in-band-directory".to_string();
 
             let backfill = control
@@ -1128,8 +1153,8 @@ mod tests {
                     peer_provider: oracle.manager(),
                     blocker: control.clone(),
                     mailbox_size: NZUsize!(16),
-                    timeout: Duration::from_millis(200),
-                    fetch_retry_timeout: Duration::from_millis(100),
+                    fetch_timeout: NZDuration!(Duration::from_millis(200)),
+                    fetch_retry_delay: Duration::from_millis(100),
                     priority_requests: false,
                     priority_responses: false,
                 },
@@ -1172,7 +1197,7 @@ mod tests {
                     mailbox_size: NZUsize!(16),
                     view_retention: ViewDelta::new(8),
                     prunable_items_per_section: NZU64!(10),
-                    page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16)),
+                    page_cache: CacheRef::new(NZU16!(1024), NZUsize!(16)),
                     replay_buffer: NZUsize!(1024),
                     key_write_buffer: NZUsize!(1024),
                     value_write_buffer: NZUsize!(1024),
@@ -1198,7 +1223,8 @@ mod tests {
             .await;
 
             let manager = mocks::DirectoryManager::new(oracle.manager());
-            let (_fence, gate) = Fence::new(synced_epoch);
+            let (fence, gate) = Fence::new();
+            fence.mark(synced_epoch);
             let (actor, mailbox): (_, super::Mailbox<AddressedBlock, Exact>) = Actor::new(
                 context.child("orchestrator"),
                 Config {
@@ -1208,11 +1234,10 @@ mod tests {
                     marshal: marshal.clone(),
                     application: mocks::MockApplication::default(),
                     strategy: Sequential,
-                    simplex: mocks::simplex_config(&context),
+                    simplex: mocks::simplex_config(),
                     gate,
                     state_sync,
                     blocks_per_epoch: NZU64!(2),
-                    muxer_size: 16,
                     mailbox_size: NZUsize!(16),
                     partition_prefix,
                 },

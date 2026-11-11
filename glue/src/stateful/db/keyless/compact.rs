@@ -12,7 +12,7 @@ use commonware_parallel::Strategy;
 use commonware_storage::{
     Context,
     merkle::Family,
-    qmdb::{any::value::ValueEncoding, keyless::Operation},
+    qmdb::{keyless::Operation, value::ValueEncoding},
 };
 
 impl<F, E, V, H, S> CompactUnmerkleized<F, E, Operation<F, V>, H, S>

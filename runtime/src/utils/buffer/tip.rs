@@ -1,4 +1,4 @@
-use crate::{BufferPool, IoBuf, IoBufMut};
+use crate::{IoBuf, IoBufMut};
 use bytes::BufMut;
 use std::ops::{Bound, RangeBounds};
 
@@ -14,7 +14,7 @@ use std::ops::{Bound, RangeBounds};
 /// - Draining paths ([Self::take] and grow-resize in [Self::resize]) hand buffered bytes to the
 ///   caller and reset the tip to a detached empty state.
 /// - Subsequent writes are copy-on-write: [Self::writable] recovers mutable ownership when
-///   backing is unique, otherwise allocates from the pool and copies existing bytes.
+///   backing is unique, otherwise allocates and copies existing bytes.
 pub(super) struct Buffer {
     /// The data to be written to the blob.
     ///
@@ -32,22 +32,18 @@ pub(super) struct Buffer {
 
     /// The maximum size of the buffer.
     capacity: usize,
-
-    /// Pool used to allocate backing buffers.
-    pool: BufferPool,
 }
 
 impl Buffer {
     /// Creates a new buffer with the provided `offset` and `capacity`.
     ///
     /// The buffer starts detached, mutable, and allocates backing on first write.
-    pub(super) fn new(offset: u64, capacity: usize, pool: BufferPool) -> Self {
+    pub(super) fn new(offset: u64, capacity: usize) -> Self {
         Self {
             data: IoBuf::default(),
             len: 0,
             offset,
             capacity,
-            pool,
         }
     }
 
@@ -145,7 +141,7 @@ impl Buffer {
     ///
     /// - If backing is uniquely owned and has enough capacity, no allocation occurs.
     /// - If backing is shared (for example, because a flushed/read view is still alive) or too
-    ///   small, a new pooled allocation is created and existing bytes are copied.
+    ///   small, a new allocation is created and existing bytes are copied.
     fn writable(&mut self, needed: usize) -> IoBufMut {
         let current = std::mem::take(&mut self.data);
         let source = match current.try_into_mut() {
@@ -160,7 +156,7 @@ impl Buffer {
         };
 
         let target = needed.max(self.capacity);
-        let mut grown = self.pool.alloc(target);
+        let mut grown = IoBufMut::with_capacity(target);
         grown.put_slice(&source.as_ref()[..self.len]);
         grown
     }
@@ -214,16 +210,10 @@ impl AsRef<[u8]> for Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telemetry::metrics::Registry;
-
-    fn test_pool() -> crate::BufferPool {
-        let mut registry = Registry::default();
-        crate::BufferPool::new(crate::BufferPoolConfig::for_storage(), &mut registry)
-    }
 
     #[test]
     fn test_tip_take() {
-        let mut buffer = Buffer::new(50, 100, test_pool());
+        let mut buffer = Buffer::new(50, 100);
         assert_eq!(buffer.size(), 50);
         assert!(buffer.is_empty());
         assert!(buffer.take().is_none());
@@ -245,8 +235,7 @@ mod tests {
 
     #[test]
     fn test_tip_resize() {
-        let pool = test_pool();
-        let mut buffer = Buffer::new(50, 100, pool);
+        let mut buffer = Buffer::new(50, 100);
         assert!(buffer.merge(&[1, 2, 3], buffer.size()));
         assert_eq!(buffer.size(), 53);
 
@@ -282,8 +271,7 @@ mod tests {
 
     #[test]
     fn test_tip_first_merge_from_empty() {
-        let pool = test_pool();
-        let mut buffer = Buffer::new(0, 16, pool);
+        let mut buffer = Buffer::new(0, 16);
         assert!(buffer.data.is_empty());
 
         assert!(buffer.merge(b"abc", 0));
@@ -293,7 +281,7 @@ mod tests {
     #[test]
     fn test_tip_merge_append_after_truncate() {
         for shared in [false, true] {
-            let mut buffer = Buffer::new(50, 8, test_pool());
+            let mut buffer = Buffer::new(50, 8);
             assert!(buffer.merge(b"abcdefgh", 50));
             let snapshot = shared.then(|| buffer.slice(..));
 
@@ -316,7 +304,7 @@ mod tests {
 
     #[test]
     fn test_tip_merge_after_take_and_truncate() {
-        let mut buffer = Buffer::new(50, 8, test_pool());
+        let mut buffer = Buffer::new(50, 8);
         assert!(buffer.merge(b"abcdef", 50));
         let (snapshot, offset) = buffer.take().unwrap();
         assert_eq!(offset, 50);
@@ -332,8 +320,7 @@ mod tests {
 
     #[test]
     fn test_tip_slice_uses_resolved_bounds() {
-        let pool = test_pool();
-        let mut buffer = Buffer::new(0, 16, pool);
+        let mut buffer = Buffer::new(0, 16);
 
         assert!(buffer.merge(b"stale", buffer.size()));
         let _ = buffer.take().expect("buffer should contain data");
@@ -344,8 +331,7 @@ mod tests {
 
     #[test]
     fn test_tip_writable_copies_when_slice_is_live() {
-        let pool = test_pool();
-        let mut buffer = Buffer::new(0, 16, pool);
+        let mut buffer = Buffer::new(0, 16);
 
         assert!(buffer.merge(b"abc", buffer.size()));
         let snapshot = buffer.slice(..);

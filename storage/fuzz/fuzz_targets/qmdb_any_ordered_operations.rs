@@ -10,15 +10,12 @@ use commonware_storage::{
     merkle::{Family as MerkleFamily, Location, Proof, mmb, mmr},
     mmr::full::Config as MerkleConfig,
     qmdb::{
+        ProofExt as _,
         any::{
-            FixedConfig as Config,
-            db::Db as AnyDb,
-            ordered::{Operation, Update},
-            traits::DbAny as _,
-            value::FixedEncoding,
+            Db as AnyDb,
+            ordered::{Operation, Update, fixed::Config},
         },
-        floor::Proportional,
-        verify_proof,
+        value::FixedEncoding,
     },
     translator::EightCap,
 };
@@ -101,13 +98,13 @@ async fn commit_pending<F: MerkleFamily>(
     pending_inserts: &mut HashMap<RawKey, RawValue>,
     pending_deletes: &mut HashSet<RawKey>,
 ) -> GenericDb<F> {
-    let inherited = db.inactivity_floor_loc();
+    let inherited = db.inactivity_floor();
     let mut batch = db.new_batch();
     for (k, v) in pending_writes.drain(..) {
         batch = batch.write(k, v);
     }
     let mut policy = Recorder::new(plan, |seed| Value::new([seed; 64]));
-    let merkleized = batch.merkleize(&db, None, &mut policy).await.unwrap();
+    let merkleized = batch.merkleize_with(&db, &mut policy).await.unwrap();
     let db = db
         .apply_batch(merkleized)
         .await
@@ -122,7 +119,7 @@ async fn commit_pending<F: MerkleFamily>(
     *committed_state = policy.check_raw(
         committed_state.drain(),
         inherited,
-        db.inactivity_floor_loc(),
+        db.inactivity_floor(),
         db.bounds().end - 1,
     );
     db
@@ -157,13 +154,9 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
     runner.start(|context| {
         let operations = data.operations.clone();
         async move {
-            let page_cache = CacheRef::from_pooler(
-                &context,
-                PAGE_SIZE,
-                NZUsize!(PAGE_CACHE_SIZE),
-            );
+            let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
             let cfg = Config::<EightCap, Sequential> {
-                merkle_config: MerkleConfig {
+                merkle: MerkleConfig {
                     journal_partition: format!("test-qmdb-mmr-journal-{suffix}"),
                     metadata_partition: format!("test-qmdb-mmr-metadata-{suffix}"),
                     items_per_blob: NZU64!(500000),
@@ -172,7 +165,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                     strategy: Sequential,
                     page_cache: page_cache.clone(),
                 },
-                journal_config: FConfig {
+                log: FConfig {
                     partition: format!("test-qmdb-log-journal-{suffix}"),
                     items_per_blob: NZU64!(500000),
                     write_buffer: NZUsize!(1024),
@@ -185,8 +178,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                 init_concurrency: (),
             };
 
-            let mut db: GenericDb<F> =
-                commonware_storage::qmdb::any::init(context.child("storage"), cfg, None)
+            let mut db = GenericDb::<F>::init(context.child("storage"), cfg, None)
                     .await
                     .expect("init qmdb");
 
@@ -261,8 +253,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                                 .expect("proof should not fail");
 
                             assert!(
-                                verify_proof::<Sha256, _, _>(
-                                    &proof,
+                                proof.verify::<Sha256, _>(
                                     adjusted_start,
                                     &log,
                                     &current_root),
@@ -292,8 +283,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                             if let Ok(res) = db
                                 .proof(adjusted_start, *max_ops)
                                 .await {
-                                    let _ = verify_proof::<Sha256, _, _>(
-                                        &proof,
+                                    let _ = proof.verify::<Sha256, _>(
                                         adjusted_start,
                                         &res.1,
                                         &current_root);
@@ -379,7 +369,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                 assert_neighbors(&db, &committed_state, key).await;
             }
 
-            let batch = db.new_batch().merkleize(&db, None, &mut Proportional).await.unwrap();
+            let batch = db.new_batch().merkleize(&db).await.unwrap();
             let db = db
                 .apply_batch(batch)
                 .await

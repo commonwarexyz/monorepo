@@ -6,7 +6,7 @@ use super::operation::Operation;
 pub use crate::qmdb::compact::Config;
 use crate::{
     merkle::{Family, Location},
-    qmdb::{any::value::ValueEncoding, compact, operation::Key},
+    qmdb::{compact, operation::Key, value::ValueEncoding},
 };
 use commonware_codec::CodecShared;
 use commonware_cryptography::Hasher;
@@ -71,8 +71,8 @@ mod tests {
     use crate::{
         merkle::{Location, mmb, mmr},
         qmdb::{
-            any::value::{FixedEncoding, VariableEncoding},
             compact::db::tests::{TestBatch, TestOperation, compact_db_tests, open_db},
+            value::{FixedEncoding, VariableEncoding},
         },
     };
     use commonware_codec::RangeCfg;
@@ -150,12 +150,11 @@ mod tests {
             let (first, last) = (Sha256::fill(1), Sha256::fill(2));
 
             let twice = open_db::<TestOp>(context.child("twice"), "compact-set-twice").await;
-            let floor = twice.inactivity_floor_loc();
             let batch = twice
                 .new_batch()
                 .set(key, first)
                 .set(key, last)
-                .merkleize(&twice, None, floor)
+                .merkleize(&twice)
                 .await
                 .unwrap();
             let applied_start = twice.size();
@@ -169,7 +168,7 @@ mod tests {
             let batch = once
                 .new_batch()
                 .set(key, last)
-                .merkleize(&once, None, floor)
+                .merkleize(&once)
                 .await
                 .unwrap();
             let once = once.apply_batch(batch).await.unwrap();
@@ -185,12 +184,11 @@ mod tests {
             let (v1, v2) = (Sha256::fill(1), Sha256::fill(2));
 
             let forward = open_db::<TestOp>(context.child("forward"), "compact-set-forward").await;
-            let floor = forward.inactivity_floor_loc();
             let batch = forward
                 .new_batch()
                 .set(k1, v1)
                 .set(k2, v2)
-                .merkleize(&forward, None, floor)
+                .merkleize(&forward)
                 .await
                 .unwrap();
             let forward = forward.apply_batch(batch).await.unwrap();
@@ -200,7 +198,7 @@ mod tests {
                 .new_batch()
                 .set(k2, v2)
                 .set(k1, v1)
-                .merkleize(&reverse, None, floor)
+                .merkleize(&reverse)
                 .await
                 .unwrap();
             let reverse = reverse.apply_batch(batch).await.unwrap();

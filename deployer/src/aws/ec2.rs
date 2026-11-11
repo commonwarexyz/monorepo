@@ -2,7 +2,7 @@
 
 use super::{METRICS_PORT, SYSTEM_PORT};
 use crate::aws::{
-    PortConfig,
+    BandwidthWeighting, PortConfig,
     utils::{
         DEPLOYER_MAX_PORT, DEPLOYER_MIN_PORT, DEPLOYER_PROTOCOL, MAX_SDK_ATTEMPTS, RETRY_INTERVAL,
         SDK_INITIAL_BACKOFF, SDK_MAX_BACKOFF, exact_cidr,
@@ -20,7 +20,8 @@ use aws_sdk_ec2::{
     operation::run_instances::RunInstancesError,
     primitives::Blob,
     types::{
-        BlockDeviceMapping, EbsBlockDevice, EphemeralNvmeSupport, Filter, InstanceStateName,
+        BlockDeviceMapping, EbsBlockDevice, EphemeralNvmeSupport, Filter,
+        InstanceBandwidthWeighting, InstanceNetworkPerformanceOptionsRequest, InstanceStateName,
         InstanceTypeInfo, ResourceType, SecurityGroup, SummaryStatus, Tag, TagSpecification,
         VpcPeeringConnectionStateReasonCode,
     },
@@ -456,6 +457,16 @@ pub(crate) fn parse_storage_class(
     })
 }
 
+impl From<BandwidthWeighting> for InstanceBandwidthWeighting {
+    fn from(weighting: BandwidthWeighting) -> Self {
+        match weighting {
+            BandwidthWeighting::Default => Self::Default,
+            BandwidthWeighting::Vpc1 => Self::Vpc1,
+            BandwidthWeighting::Ebs1 => Self::Ebs1,
+        }
+    }
+}
+
 /// Validates configured EBS options.
 ///
 /// Source docs for EBS request-side limits:
@@ -546,6 +557,7 @@ async fn try_launch_instances(
     storage_class: VolumeType,
     storage_iops: Option<i32>,
     storage_throughput: Option<i32>,
+    bandwidth_weighting: BandwidthWeighting,
     key_name: &str,
     subnet_id: &str,
     sg_id: &str,
@@ -568,7 +580,7 @@ async fn try_launch_instances(
 
     // Send one request because `launch_instances` owns subnet selection, retry classification,
     // and retry cadence.
-    let resp = client
+    let request = client
         .run_instances()
         .image_id(ami_id)
         .instance_type(instance_type)
@@ -598,7 +610,19 @@ async fn try_launch_instances(
                 .device_name("/dev/sda1")
                 .ebs(ebs.build())
                 .build(),
-        )
+        );
+
+    // The standard split is left unset so instance types without configurable weighting launch
+    // unchanged.
+    let request = match bandwidth_weighting {
+        BandwidthWeighting::Default => request,
+        BandwidthWeighting::Vpc1 | BandwidthWeighting::Ebs1 => request.network_performance_options(
+            InstanceNetworkPerformanceOptionsRequest::builder()
+                .bandwidth_weighting(bandwidth_weighting.into())
+                .build(),
+        ),
+    };
+    let resp = request
         .customize()
         .config_override(aws_sdk_ec2::config::Builder::new().retry_config(RetryConfig::disabled()))
         .send()
@@ -666,6 +690,7 @@ pub async fn launch_instances(
     storage_class: VolumeType,
     storage_iops: Option<i32>,
     storage_throughput: Option<i32>,
+    bandwidth_weighting: BandwidthWeighting,
     key_name: &str,
     subnets: &[(String, String)],
     az_support: &BTreeMap<String, BTreeSet<String>>,
@@ -726,6 +751,7 @@ pub async fn launch_instances(
                     storage_class.clone(),
                     storage_iops,
                     storage_throughput,
+                    bandwidth_weighting,
                     key_name,
                     subnet_id,
                     sg_id,
@@ -1348,7 +1374,7 @@ mod tests {
         InstanceType, LaunchSdkError, Region, VolumeType, is_retryable_launch_error,
         launch_instances,
     };
-    use crate::aws::Error;
+    use crate::aws::{BandwidthWeighting, Error};
     use aws_config::{BehaviorVersion, retry::RetryConfig};
     use aws_sdk_ec2::{
         Client,
@@ -1512,7 +1538,10 @@ mod tests {
         client_with_retry(responses, RetryConfig::disabled())
     }
 
-    async fn launch(client: &Client) -> Result<(Vec<String>, String), Error> {
+    async fn launch(
+        client: &Client,
+        bandwidth_weighting: BandwidthWeighting,
+    ) -> Result<(Vec<String>, String), Error> {
         let subnets = vec![
             ("us-east-1a".to_string(), "subnet-a".to_string()),
             ("us-east-1b".to_string(), "subnet-b".to_string()),
@@ -1537,6 +1566,7 @@ mod tests {
             VolumeType::Gp3,
             None,
             None,
+            bandwidth_weighting,
             "key-test",
             &subnets,
             &az_support,
@@ -1577,13 +1607,42 @@ mod tests {
             replay_response(200, LAUNCH_SUCCESS),
         ]);
 
-        let (instances, az) = launch(&client)
+        let (instances, az) = launch(&client, BandwidthWeighting::Default)
             .await
             .expect("capacity should be retried after every eligible AZ fails");
 
         assert_eq!(instances, ["i-test"]);
         assert_eq!(az, "us-east-1a");
         assert_eq!(connector.request_count(), 3);
+    }
+
+    #[tokio::test]
+    async fn default_weighting_leaves_network_performance_options_unset() {
+        let (client, connector) = client(vec![replay_response(200, LAUNCH_SUCCESS)]);
+
+        launch(&client, BandwidthWeighting::Default)
+            .await
+            .expect("launch should succeed");
+
+        // Instance types without configurable weighting reject the option, so the standard split
+        // must be expressed by omitting it rather than by sending "default".
+        let bodies = connector.request_bodies();
+        assert_eq!(bodies.len(), 1);
+        assert!(!bodies[0].contains("BandwidthWeighting"));
+    }
+
+    #[tokio::test]
+    async fn vpc_1_weighting_is_sent_as_network_performance_option() {
+        let (client, connector) = client(vec![replay_response(200, LAUNCH_SUCCESS)]);
+
+        launch(&client, BandwidthWeighting::Vpc1)
+            .await
+            .expect("launch should succeed");
+
+        // The option travels in the RunInstances query body under its AWS name.
+        let bodies = connector.request_bodies();
+        assert_eq!(bodies.len(), 1);
+        assert!(bodies[0].contains("NetworkPerformanceOptions.BandwidthWeighting=vpc-1"));
     }
 
     #[tokio::test]
@@ -1596,7 +1655,7 @@ mod tests {
             RetryConfig::standard().with_max_attempts(2),
         );
 
-        let (instances, az) = launch(&client)
+        let (instances, az) = launch(&client, BandwidthWeighting::Default)
             .await
             .expect("capacity failure should advance to the next AZ");
 
@@ -1614,7 +1673,7 @@ mod tests {
             replay_response(200, LAUNCH_SUCCESS),
         ]);
 
-        launch(&client)
+        launch(&client, BandwidthWeighting::Default)
             .await
             .expect("a transient failure should retry the same subnet");
 
@@ -1631,7 +1690,7 @@ mod tests {
             replay_response(200, LAUNCH_SUCCESS),
         ]);
 
-        launch(&client)
+        launch(&client, BandwidthWeighting::Default)
             .await
             .expect("a typed transient connector failure should retry the same subnet");
 
@@ -1644,9 +1703,12 @@ mod tests {
     async fn permanent_service_errors_are_not_retried() {
         for (status, body) in [(400, UNAUTHORIZED_ERROR), (400, OPT_IN_REQUIRED_ERROR)] {
             let (client, connector) = client(vec![replay_response(status, body)]);
-            let result = tokio::time::timeout(Duration::from_millis(50), launch(&client))
-                .await
-                .expect("permanent service error must return immediately");
+            let result = tokio::time::timeout(
+                Duration::from_millis(50),
+                launch(&client, BandwidthWeighting::Default),
+            )
+            .await
+            .expect("permanent service error must return immediately");
             assert!(result.is_err());
             assert_eq!(connector.request_count(), 1);
         }
@@ -1657,9 +1719,12 @@ mod tests {
         for body in [UNAUTHORIZED_ERROR, OPT_IN_REQUIRED_ERROR, VCPU_LIMIT_ERROR] {
             let (client, connector) = client(vec![replay_response(500, body)]);
 
-            let result = tokio::time::timeout(Duration::from_millis(50), launch(&client))
-                .await
-                .expect("a fatal service code must return immediately despite its status");
+            let result = tokio::time::timeout(
+                Duration::from_millis(50),
+                launch(&client, BandwidthWeighting::Default),
+            )
+            .await
+            .expect("a fatal service code must return immediately despite its status");
 
             assert!(result.is_err());
             assert_eq!(connector.request_count(), 1);
@@ -1674,7 +1739,7 @@ mod tests {
                 replay_response(200, LAUNCH_SUCCESS),
             ]);
 
-            launch(&client)
+            launch(&client, BandwidthWeighting::Default)
                 .await
                 .expect("transient service errors should retry the same subnet");
 
@@ -1692,7 +1757,7 @@ mod tests {
             replay_response(200, LAUNCH_SUCCESS),
         ]);
 
-        let (instances, az) = launch(&client)
+        let (instances, az) = launch(&client, BandwidthWeighting::Default)
             .await
             .expect("the remaining AZ should be retried");
 
@@ -1710,7 +1775,7 @@ mod tests {
         events.push(replay_response(200, LAUNCH_SUCCESS));
         let (client, connector) = client(events);
 
-        let (instances, az) = launch(&client)
+        let (instances, az) = launch(&client, BandwidthWeighting::Default)
             .await
             .expect("regional capacity exhaustion should remain retryable");
 

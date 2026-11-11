@@ -135,15 +135,9 @@ impl<D: Digest, S> CertificateVerifier<D> for S where
 /// This trait binds a [`CertificateScheme`] to the [`Subject`] subject type and
 /// [`N3f1`] fault model used by the simplex protocol. It is automatically
 /// implemented for any compatible scheme.
-pub trait Scheme<D: Digest>:
-    CertificateVerifier<D> + for<'a> CertificateScheme<Subject<'a, D> = Subject<'a, D>>
-{
-}
+pub trait Scheme<D: Digest>: CertificateVerifier<D> + CertificateScheme {}
 
-impl<D: Digest, S> Scheme<D> for S where
-    S: CertificateVerifier<D> + for<'a> CertificateScheme<Subject<'a, D> = Subject<'a, D>>
-{
-}
+impl<D: Digest, S> Scheme<D> for S where S: CertificateVerifier<D> + CertificateScheme {}
 
 // Constants for domain separation in signature verification
 // These are used to prevent cross-protocol attacks and message-type confusion

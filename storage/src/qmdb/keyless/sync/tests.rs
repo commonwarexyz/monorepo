@@ -11,8 +11,8 @@ use crate::{
         self,
         keyless::{self, Operation, fixed, variable},
         sync::{
-            self, Engine, Target,
-            engine::{Config, NextStep},
+            self, Config, Engine, Target,
+            engine::NextStep,
             harness::{
                 CompactConfigOf, CompactOpOf, CompactSyncTestHarness, ConfigOf, DbOf, JournalOf,
                 OpOf, PAGE_CACHE_SIZE, PAGE_SIZE, SyncTestHarness, compact_engine_config,
@@ -24,12 +24,9 @@ use crate::{
         },
     },
 };
-use commonware_codec::Encode;
 use commonware_cryptography::{Sha256, sha256};
 use commonware_macros::{boxed, select};
-use commonware_runtime::{
-    BufferPooler, Metrics, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
-};
+use commonware_runtime::{Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_utils::{
     NZU64, NZUsize, TestRng,
     channel::{oneshot, ring},
@@ -71,7 +68,7 @@ pub(crate) trait KeylessCompactSyncTestHarness: CompactSyncTestHarness {
 /// An exhausted source fails with [`sync::EngineError::InvalidResponse`].
 pub(crate) fn test_engine_rejects_invalid_responses<H: SyncTestHarness>()
 where
-    OpOf<H>: Encode + Clone,
+    OpOf<H>: Clone,
     Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>
         + sync::SourceFor<DbOf<H>>,
 {
@@ -84,9 +81,8 @@ where
     ) -> Config<DbOf<H>, S>
     where
         S: sync::SourceFor<DbOf<H>>,
-        OpOf<H>: Encode,
     {
-        let db_config = H::config(suffix, &context);
+        let db_config = H::config(suffix);
         Config {
             context,
             target: target.clone(),
@@ -106,7 +102,7 @@ where
         let target_db = H::init_db(context.child("target")).await;
         let target_db = H::apply_ops(target_db, H::create_ops(5), Some(H::sample_metadata())).await;
         let bounds = H::bounds(&target_db);
-        let target_root = H::db_root(&target_db);
+        let target_root = H::ops_root(&target_db);
         let target_db = Arc::new(target_db);
         let (size, start) = (bounds.end, bounds.start);
         // The arm mapping below assumes every request is an Operations request, which
@@ -159,7 +155,7 @@ where
         .await
         .unwrap();
         assert_eq!(source.take_verdicts().await, vec![false, true]);
-        assert_eq!(H::db_root(&synced), target_root);
+        assert_eq!(H::ops_root(&synced), target_root);
         H::destroy(synced).await;
 
         // An empty batch is invalid regardless of its proof.
@@ -233,7 +229,7 @@ where
 /// last commit matches the source's bounds, floor, and root, and holds every operation.
 pub(crate) fn test_sync_full_range_with_floor_at_last_commit<H: KeylessSyncTestHarness>()
 where
-    OpOf<H>: Encode + Clone,
+    OpOf<H>: Clone,
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
 {
     let executor = deterministic::Runner::default();
@@ -245,14 +241,14 @@ where
         let source_db =
             H::apply_ops_raising_floor(source_db, ops.clone(), Some(H::sample_metadata())).await;
         let bounds = H::bounds(&source_db);
-        let floor = H::inactivity_floor_loc(&source_db);
+        let floor = H::inactivity_floor(&source_db);
         assert_eq!(floor, bounds.end.checked_sub(1).unwrap());
-        let root = H::db_root(&source_db);
+        let root = H::ops_root(&source_db);
 
         // Sync a fresh client over the full range.
         let source_db = Arc::new(source_db);
         let config = Config {
-            db_config: H::config("full_range_floor_at_last_commit", &context),
+            db_config: H::config("full_range_floor_at_last_commit"),
             fetch_batch_size: NZU64!(10),
             target: Target {
                 root,
@@ -269,8 +265,8 @@ where
         let synced: DbOf<H> = sync::sync(config).await.unwrap();
 
         assert_eq!(H::bounds(&synced), bounds);
-        assert_eq!(H::inactivity_floor_loc(&synced), floor);
-        assert_eq!(H::db_root(&synced), root);
+        assert_eq!(H::inactivity_floor(&synced), floor);
+        assert_eq!(H::ops_root(&synced), root);
         H::assert_ops_applied(&synced, start, &ops).await;
 
         H::destroy(synced).await;
@@ -310,7 +306,7 @@ impl<S: Source<Op: Send>> Source for DelayedBoundary<S> {
 /// applied without a second boundary request, and sync completes at a later target.
 pub(crate) fn test_target_updates_preserve_delayed_boundary<H: KeylessSyncTestHarness>()
 where
-    OpOf<H>: Encode + Clone,
+    OpOf<H>: Clone,
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
     JournalOf<H>: Contiguous,
 {
@@ -324,19 +320,19 @@ where
         let start = H::bounds(&target_db).start;
         assert!(*start > 0);
         let initial_target = Target {
-            root: H::db_root(&target_db),
+            root: H::ops_root(&target_db),
             range: non_empty_range!(start, H::bounds(&target_db).end),
         };
         let target_db =
             H::apply_ops_raising_floor(target_db, H::create_ops_seeded(10, 1), None).await;
         let next_target = Target {
-            root: H::db_root(&target_db),
+            root: H::ops_root(&target_db),
             range: non_empty_range!(start, H::bounds(&target_db).end),
         };
         let target_db =
             H::apply_ops_raising_floor(target_db, H::create_ops_seeded(10, 2), None).await;
         let final_target = Target {
-            root: H::db_root(&target_db),
+            root: H::ops_root(&target_db),
             range: non_empty_range!(start, H::bounds(&target_db).end),
         };
 
@@ -347,7 +343,7 @@ where
         let (update_tx, update_rx) = ring::channel(NZUsize!(1));
         let config = Config {
             context: context.child("client"),
-            db_config: H::config("delayed_boundary", &context),
+            db_config: H::config("delayed_boundary"),
             target: initial_target,
             source: DelayedBoundary {
                 source: target_db.clone(),
@@ -392,7 +388,7 @@ where
         assert!(update_tx.send_lossy(final_target.clone()));
         drop(update_tx);
         let synced = client.sync().await.unwrap();
-        assert_eq!(H::db_root(&synced), final_target.root);
+        assert_eq!(H::ops_root(&synced), final_target.root);
         assert_eq!(H::bounds(&synced), start..final_target.range.end());
         H::destroy(synced).await;
         H::destroy(Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("single source"))).await;
@@ -438,7 +434,7 @@ impl<S: Source<Op: Send>> Source for StalledBoundary<S> {
 /// bound into them, without fetching them again.
 pub(crate) fn test_target_update_keeps_operations_above_moved_floor<H: KeylessSyncTestHarness>()
 where
-    OpOf<H>: Encode + Clone,
+    OpOf<H>: Clone,
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
     JournalOf<H>: Contiguous,
 {
@@ -452,14 +448,14 @@ where
         let floor = H::bounds(&target_db).start;
         assert!(*floor > 0);
         let initial_target = Target {
-            root: H::db_root(&target_db),
+            root: H::ops_root(&target_db),
             range: non_empty_range!(floor, H::bounds(&target_db).end),
         };
         let target_db =
             H::apply_ops_raising_floor(target_db, H::create_ops_seeded(10, 1), None).await;
         let next_floor = floor.checked_add(2).unwrap();
         let next_target = Target {
-            root: H::db_root(&target_db),
+            root: H::ops_root(&target_db),
             range: non_empty_range!(next_floor, H::bounds(&target_db).end),
         };
 
@@ -468,7 +464,7 @@ where
         let (update_tx, update_rx) = ring::channel(NZUsize!(1));
         let config = Config {
             context: context.child("client"),
-            db_config: H::config("moved_floor", &context),
+            db_config: H::config("moved_floor"),
             target: initial_target,
             source: StalledBoundary {
                 source: target_db.clone(),
@@ -496,7 +492,7 @@ where
         assert!(update_tx.send_lossy(next_target.clone()));
         drop(update_tx);
         let synced = client.sync().await.unwrap();
-        assert_eq!(H::db_root(&synced), next_target.root);
+        assert_eq!(H::ops_root(&synced), next_target.root);
         H::destroy(synced).await;
         H::destroy(Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("single source"))).await;
     });
@@ -508,15 +504,15 @@ pub(crate) fn test_replay_sync_single_op_range<F: Family>() {
     deterministic::Runner::default().start(|mut context| async move {
         let suffix = format!("single-op-{}", context.next_u64());
         // Per-op section/blob sizes so pruning to the floor retains exactly one operation.
-        let fine_config = |sfx: &str, pooler: &deterministic::Context| {
-            let mut config = harnesses::VariableHarness::<F>::config(sfx, pooler);
+        let fine_config = |sfx: &str| {
+            let mut config = harnesses::VariableHarness::<F>::config(sfx);
             config.log.items_per_section = NZU64!(1);
             config.merkle.items_per_blob = NZU64!(1);
             config
         };
         let source = DbOf::<harnesses::VariableHarness<F>>::init(
             context.child("source"),
-            fine_config(&suffix, &context),
+            fine_config(&suffix),
             None,
         )
         .await
@@ -527,7 +523,7 @@ pub(crate) fn test_replay_sync_single_op_range<F: Family>() {
             .new_batch()
             .append(vec![1, 2, 3])
             .append(vec![4, 5, 6])
-            .merkleize(&source, None, Location::new(0))
+            .merkleize(&source)
             .await
             .unwrap();
         let source = source.apply_batch(batch).await.unwrap();
@@ -539,7 +535,9 @@ pub(crate) fn test_replay_sync_single_op_range<F: Family>() {
         let floor = source.bounds().end;
         let batch = source
             .new_batch()
-            .merkleize(&source, Some(metadata.clone()), floor)
+            .with_metadata(Some(metadata.clone()))
+            .with_inactivity_floor(floor)
+            .merkleize(&source)
             .await
             .unwrap();
         let source = source.apply_batch(batch).await.unwrap();
@@ -552,9 +550,9 @@ pub(crate) fn test_replay_sync_single_op_range<F: Family>() {
         let source = Arc::new(source);
 
         // The sync range holds only the floor commit, so one boundary response supplies all of it.
-        let client: DbOf<harnesses::VariableHarness<F>> = sync::sync(sync::engine::Config {
+        let client: DbOf<harnesses::VariableHarness<F>> = sync::sync(sync::Config {
             context: context.child("client"),
-            db_config: fine_config(&format!("{suffix}-client"), &context),
+            db_config: fine_config(&format!("{suffix}-client")),
             fetch_batch_size: NZU64!(2),
             target: sync::Target {
                 root: target_root,
@@ -590,11 +588,11 @@ pub(crate) fn test_compact_sync_root_mismatch_preserves_existing_state<
         // Seed the destination partition with two durable commits. When the harness can tighten
         // the metadata limit, the client's limit rejects their metadata. A failed import must
         // neither decode nor replace them.
-        let client_cfg = H::config(&suffix, &context);
+        let client_cfg = H::config(&suffix);
         let mut seeded = H::init(context.child("seed"), client_cfg.clone(), None).await;
         let mut seeded_targets = Vec::new();
         for i in 1u8..=2 {
-            let floor = H::inactivity_floor_loc(&seeded);
+            let floor = H::inactivity_floor(&seeded);
             seeded = H::apply(seeded, &[H::value(i)], Some(H::value(i)), floor).await;
             seeded = H::sync(seeded).await;
             seeded_targets.push(H::target(&seeded));
@@ -677,7 +675,7 @@ pub(crate) fn test_compact_sync_replaces_undecodable_witnesses<F: Family>() {
         let suffix = format!("compact-keyless-undecodable-{}", context.next_u64());
 
         // Persist metadata at the original limit, then tighten it below that length.
-        let client_cfg = H::<F>::config(&suffix, &context);
+        let client_cfg = H::<F>::config(&suffix);
         let seeded = H::<F>::init(context.child("seed"), client_cfg.clone(), None).await;
         let seeded = H::<F>::apply(seeded, &[vec![1]], Some(vec![1, 2, 3]), Location::new(0)).await;
         drop(H::<F>::sync(seeded).await);
@@ -720,21 +718,20 @@ pub(crate) fn test_compact_sync_replaces_undecodable_witnesses<F: Family>() {
 
 pub(crate) mod harnesses {
     use super::*;
-    use crate::{journal::contiguous::Mutable, qmdb::any::value::ValueEncoding};
+    use crate::{journal::contiguous::Mutable, qmdb::value::ValueEncoding};
     use commonware_codec::{CodecShared, EncodeShared, Read};
     use commonware_parallel::Sequential;
     use commonware_utils::sequence::U64;
 
     type VariableDb<F> = variable::Db<F, deterministic::Context, Vec<u8>, Sha256, Sequential>;
-    type VariableOp<F> = Operation<F, crate::qmdb::any::value::VariableEncoding<Vec<u8>>>;
+    type VariableOp<F> = Operation<F, crate::qmdb::value::VariableEncoding<Vec<u8>>>;
 
     fn variable_config(
         suffix: &str,
-        pooler: &(impl BufferPooler + Metrics),
     ) -> variable::Config<(commonware_codec::RangeCfg<usize>, ()), Sequential> {
         const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(5);
 
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         keyless::Config {
             merkle: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
@@ -787,7 +784,8 @@ pub(crate) mod harnesses {
                 }
             }
         }
-        let merkleized = batch.merkleize(&db, metadata, floor).await.unwrap();
+        let batch = batch.with_metadata(metadata).with_inactivity_floor(floor);
+        let merkleized = batch.merkleize(&db).await.unwrap();
         db.apply_batch(merkleized).await.unwrap()
     }
 
@@ -798,8 +796,8 @@ pub(crate) mod harnesses {
         type Db = VariableDb<F>;
         type Metadata = Vec<u8>;
 
-        fn config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> ConfigOf<Self> {
-            variable_config(suffix, pooler)
+        fn config(suffix: &str) -> ConfigOf<Self> {
+            variable_config(suffix)
         }
 
         fn create_ops(n: usize) -> Vec<OpOf<Self>> {
@@ -816,7 +814,7 @@ pub(crate) mod harnesses {
 
         async fn init_db(mut ctx: deterministic::Context) -> Self::Db {
             let seed = ctx.next_u64();
-            let config = variable_config(&format!("sync-test-{seed}"), &ctx);
+            let config = variable_config(&format!("sync-test-{seed}"));
             VariableDb::<F>::init(ctx, config, None).await.unwrap()
         }
 
@@ -841,17 +839,18 @@ pub(crate) mod harnesses {
             ops: Vec<OpOf<Self>>,
             metadata: Option<Self::Metadata>,
         ) -> Self::Db {
-            let floor = db.inactivity_floor_loc();
+            let floor = db.inactivity_floor();
             variable_apply_ops::<F>(db, ops, metadata, floor).await
         }
 
         async fn prune(db: Self::Db, loc: Location<Self::Family>) -> Self::Db {
             // Prune requires the floor to be at or beyond the prune target, so commit `loc` as
             // the floor unless the floor already exceeds it.
-            let db = if db.inactivity_floor_loc() > loc {
+            let db = if db.inactivity_floor() > loc {
                 db
             } else {
-                let merkleized = db.new_batch().merkleize(&db, None, loc).await.unwrap();
+                let batch = db.new_batch().with_inactivity_floor(loc);
+                let merkleized = batch.merkleize(&db).await.unwrap();
                 let db = db.apply_batch(merkleized).await.unwrap();
                 db.commit().await.unwrap()
             };
@@ -866,11 +865,11 @@ pub(crate) mod harnesses {
             db.sync_boundary()
         }
 
-        fn inactivity_floor_loc(db: &Self::Db) -> Location<Self::Family> {
-            db.inactivity_floor_loc()
+        fn inactivity_floor(db: &Self::Db) -> Location<Self::Family> {
+            db.inactivity_floor()
         }
 
-        fn db_root(db: &Self::Db) -> sha256::Digest {
+        fn ops_root(db: &Self::Db) -> sha256::Digest {
             db.root()
         }
 
@@ -924,11 +923,11 @@ pub(crate) mod harnesses {
         variable::CompactDb<F, deterministic::Context, Vec<u8>, Sha256, Sequential>;
     type FixedDb<F> = fixed::Db<F, deterministic::Context, U64, Sha256, Sequential>;
     type CompactFixedDb<F> = fixed::CompactDb<F, deterministic::Context, U64, Sha256, Sequential>;
-    type FullDb<F, V, C> = keyless::Keyless<F, deterministic::Context, V, C, Sha256, Sequential>;
+    type FullDb<F, V, C> = keyless::Db<F, deterministic::Context, V, C, Sha256, Sequential>;
     type CompactDb<F, V> = keyless::CompactDb<F, deterministic::Context, V, Sha256, Sequential>;
 
-    fn fixed_config(suffix: &str, pooler: &impl BufferPooler) -> fixed::Config<Sequential> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    fn fixed_config(suffix: &str) -> fixed::Config<Sequential> {
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         keyless::Config {
             merkle: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
@@ -949,11 +948,7 @@ pub(crate) mod harnesses {
         }
     }
 
-    fn compact_config<C>(
-        suffix: &str,
-        pooler: &impl BufferPooler,
-        codec_config: C,
-    ) -> keyless::CompactConfig<C, Sequential> {
+    fn compact_config<C>(suffix: &str, codec_config: C) -> keyless::CompactConfig<C, Sequential> {
         keyless::CompactConfig {
             strategy: Sequential,
             witness: crate::journal::contiguous::variable::Config {
@@ -961,7 +956,7 @@ pub(crate) mod harnesses {
                 items_per_section: NZU64!(64),
                 compression: None,
                 codec_config,
-                page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
@@ -983,7 +978,8 @@ pub(crate) mod harnesses {
         for value in values {
             batch = batch.append(value.clone());
         }
-        let batch = batch.merkleize(&db, metadata, floor).await.unwrap();
+        let batch = batch.with_metadata(metadata).with_inactivity_floor(floor);
+        let batch = batch.merkleize(&db).await.unwrap();
         db.apply_batch(batch).await.unwrap()
     }
 
@@ -1003,13 +999,14 @@ pub(crate) mod harnesses {
         for value in values {
             batch = batch.append(value.clone());
         }
-        let batch = batch.merkleize(&db, metadata, floor).await.unwrap();
+        let batch = batch.with_metadata(metadata).with_inactivity_floor(floor);
+        let batch = batch.merkleize(&db).await.unwrap();
         db.apply_batch(batch).await.unwrap()
     }
 
-    fn compact_import<F, V, C>(
+    fn compact_import<F, V>(
         ctx: deterministic::Context,
-        config: &keyless::CompactConfig<C, Sequential>,
+        config: &keyless::CompactConfig<<Operation<F, V> as Read>::Cfg, Sequential>,
         last_commit_loc: Location<F>,
         pinned_nodes: Vec<sha256::Digest>,
         op: Operation<F, V>,
@@ -1017,8 +1014,7 @@ pub(crate) mod harnesses {
     where
         F: Family,
         V: ValueEncoding,
-        Operation<F, V>: EncodeShared + Read<Cfg = C>,
-        C: Clone + Send + Sync + 'static,
+        Operation<F, V>: CodecShared,
     {
         CompactDb::init_from_sync(ctx, config.clone(), last_commit_loc, pinned_nodes, op)
     }
@@ -1063,8 +1059,8 @@ pub(crate) mod harnesses {
         type Full = VariableDb<F>;
         type Value = Vec<u8>;
 
-        fn config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> CompactConfigOf<Self> {
-            compact_config(suffix, pooler, ((0..=10000).into(), ()))
+        fn config(suffix: &str) -> CompactConfigOf<Self> {
+            compact_config(suffix, ((0..=10000).into(), ()))
         }
 
         fn with_witness_items_per_section(
@@ -1088,7 +1084,7 @@ pub(crate) mod harnesses {
         }
 
         async fn init_full(ctx: deterministic::Context, suffix: &str) -> Self::Full {
-            let config = variable_config(suffix, &ctx);
+            let config = variable_config(suffix);
             Self::Full::init(ctx, config, None).await.unwrap()
         }
 
@@ -1152,8 +1148,8 @@ pub(crate) mod harnesses {
             db.size()
         }
 
-        fn inactivity_floor_loc(db: &Self::Db) -> Location<F> {
-            db.inactivity_floor_loc()
+        fn inactivity_floor(db: &Self::Db) -> Location<F> {
+            db.inactivity_floor()
         }
 
         fn metadata(db: &Self::Db) -> Option<Self::Value> {
@@ -1198,8 +1194,8 @@ pub(crate) mod harnesses {
         type Full = FixedDb<F>;
         type Value = U64;
 
-        fn config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> CompactConfigOf<Self> {
-            compact_config(suffix, pooler, ())
+        fn config(suffix: &str) -> CompactConfigOf<Self> {
+            compact_config(suffix, ())
         }
 
         fn with_witness_items_per_section(
@@ -1223,7 +1219,7 @@ pub(crate) mod harnesses {
         }
 
         async fn init_full(ctx: deterministic::Context, suffix: &str) -> Self::Full {
-            let config = fixed_config(suffix, &ctx);
+            let config = fixed_config(suffix);
             Self::Full::init(ctx, config, None).await.unwrap()
         }
 
@@ -1287,8 +1283,8 @@ pub(crate) mod harnesses {
             db.size()
         }
 
-        fn inactivity_floor_loc(db: &Self::Db) -> Location<F> {
-            db.inactivity_floor_loc()
+        fn inactivity_floor(db: &Self::Db) -> Location<F> {
+            db.inactivity_floor()
         }
 
         fn metadata(db: &Self::Db) -> Option<Self::Value> {
@@ -1424,7 +1420,7 @@ fn test_keyless_local_pinned_nodes_rejects_target_before_local_lower_bound() {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
         let suffix = context.next_u64().to_string();
-        let config = H::config(&suffix, &context);
+        let config = H::config(&suffix);
         let mut db = H::init_db_with_config(context.child("db"), config.clone()).await;
         // Each batch raises the floor to its commit, so the prune below needs no floor commit.
         for seed in 0..3u64 {
@@ -1442,7 +1438,7 @@ fn test_keyless_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         let local_start = bounds.start;
         let local_end = bounds.end;
         assert!(local_start > Location::new(0));
-        let sync_root = H::db_root(&db);
+        let sync_root = H::ops_root(&db);
 
         // Reopen the operation journal independently to probe the persisted Merkle boundary.
         drop(db);

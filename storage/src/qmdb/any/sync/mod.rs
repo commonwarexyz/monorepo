@@ -2,7 +2,7 @@
 //! Contains the implementation of [crate::qmdb::sync::Database] for [Db], covering every
 //! variant (ordered/unordered, fixed/variable, any snapshot index).
 //!
-//! Callers verifying `any` sync proofs directly should use [`crate::qmdb::verify_proof`].
+//! Callers verifying `any` sync proofs directly should use [`crate::qmdb::ProofExt::verify`].
 
 use crate::{
     Context,
@@ -99,7 +99,6 @@ where
     C: Mutable<Item = Operation<F, U>>
         + sync::Journal<F, Context = E, Op = Operation<F, U>>
         + 'static,
-    <C as sync::Journal<F>>::Config: Clone + Send,
     I: IndexFactory + SnapshotBuild<F> + Unordered<Value = Location<F>>,
     H: Hasher,
     U: Update,
@@ -129,7 +128,7 @@ where
     ) -> Result<Self, qmdb::Error<F>> {
         build_db::<F, _, U, _, H, _, N, _>(
             context,
-            config.merkle_config,
+            config.merkle,
             log,
             config.translator,
             pinned_nodes,
@@ -165,14 +164,14 @@ where
 
         qmdb::sync::local_pinned_nodes::<F, _, H, S>(
             context,
-            config.merkle_config.clone(),
+            config.merkle.clone(),
             target,
             inactivity_floor,
         )
         .await
     }
 
-    fn root(&self) -> Self::Digest {
+    fn ops_root(&self) -> Self::Digest {
         Self::root(self)
     }
 }

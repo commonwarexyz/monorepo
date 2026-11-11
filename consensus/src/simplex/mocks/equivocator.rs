@@ -70,6 +70,11 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: elector::Config<S>, H: H
     ) {
         let (mut vote_sender, _) = vote_network;
         let (_, mut certificate_receiver) = certificate_network;
+        let signer = self
+            .scheme
+            .me()
+            .and_then(|m| m.signer())
+            .expect("equivocator must sign");
 
         loop {
             // Listen to recovered certificates
@@ -107,7 +112,7 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: elector::Config<S>, H: H
             // Check if we are the leader for the next view, otherwise move on
             let input = <L::Elector as Elector<S>>::Mode::input(Some(&certificate));
             let leader = self.elector.elect(next_round, input);
-            if leader != self.scheme.me().unwrap() {
+            if leader != signer {
                 continue;
             }
 
@@ -117,7 +122,7 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: elector::Config<S>, H: H
                 .participants()
                 .iter()
                 .enumerate()
-                .filter(|(index, _)| Participant::from_usize(*index) != self.scheme.me().unwrap())
+                .filter(|(index, _)| Participant::from_usize(*index) != signer)
                 .choose(self.context.as_mut())
                 .unwrap();
 
@@ -133,11 +138,7 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: elector::Config<S>, H: H
             let proposal_b = Proposal::new(next_round, view, digest_b);
 
             // Broadcast payloads via relay so nodes can verify
-            let me = self
-                .scheme
-                .participants()
-                .key(self.scheme.me().unwrap())
-                .unwrap();
+            let me = self.scheme.participants().key(signer).unwrap();
             self.relay
                 .broadcast(me, Recipients::All, (digest_a, payload_a));
             self.relay
@@ -158,9 +159,7 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: elector::Config<S>, H: H
                 .participants()
                 .iter()
                 .enumerate()
-                .filter(|(index, key)| {
-                    Participant::from_usize(*index) != self.scheme.me().unwrap() && *key != victim
-                })
+                .filter(|(index, key)| Participant::from_usize(*index) != signer && *key != victim)
                 .map(|(_, key)| key.clone())
                 .collect();
             vote_sender.send(

@@ -6,24 +6,15 @@
 //!
 //! See [Db] for the main database type.
 
+pub use crate::qmdb::any::unordered::fixed::{Operation, Update};
 use crate::{
-    Context,
     index::unordered::Index,
-    journal::contiguous::fixed::Journal,
-    merkle::{Graftable, Location},
-    qmdb::{
-        Error,
-        any::{FixedValue, unordered::fixed::Operation, value::FixedEncoding},
-        current::FixedConfig as Config,
-    },
-    translator::Translator,
+    journal::contiguous::fixed::{Config as JournalConfig, Journal},
+    merkle::Location,
+    qmdb::{current, value::FixedEncoding},
 };
-use commonware_cryptography::Hasher;
-use commonware_parallel::Strategy;
-use commonware_runtime::Spawner;
-use commonware_utils::Array;
 
-/// A specialization of [super::db::Db] for unordered key spaces and fixed-size values.
+/// A specialization of [crate::qmdb::current::Db] for unordered key spaces and fixed-size values.
 pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
     F,
     E,
@@ -36,41 +27,23 @@ pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
     S,
 >;
 
-impl<
-    F: Graftable,
-    E: Context + Spawner,
-    K: Array,
-    V: FixedValue,
-    H: Hasher,
-    T: Translator,
-    const N: usize,
-    S: Strategy,
-> Db<F, E, K, V, H, T, N, S>
-{
-    /// Initializes a [Db] authenticated database from the given `config`.
-    /// The configured [`Strategy`] is used to parallelize merkleization.
-    /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
-    /// while `None` selects the latest retained state. Initialization fails with
-    /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity floor,
-    /// and with [Error::Journal] ([`crate::journal::Error::ItemPruned`]) if the selected commit
-    /// itself has been pruned.
-    pub async fn init(
-        context: E,
-        config: Config<T, S>,
-        max_size: Option<Location<F>>,
-    ) -> Result<Self, Error<F>> {
-        crate::qmdb::current::init(context, config, max_size).await
-    }
-}
+/// Configuration for a [Db].
+pub type Config<T, S> = current::Config<T, JournalConfig, S>;
 
 pub mod partitioned {
-    //! A partitioned variant of [super] that uses a partitioned index for the snapshot.
+    //! A variant of [super] that uses a partitioned index for the snapshot, dividing the key space
+    //! into `2^(P*8)` partitions. See [Any's counterpart] for when to use one.
     //!
-    //! See [crate::qmdb::any::unordered::fixed::partitioned] for details on partitioned indices and
-    //! when to use them.
+    //! See [Db] for the generic type, or use the convenience aliases:
+    //! - [p256::Db] for 256 partitions (P=1)
+    //! - [p64k::Db] for 65,536 partitions (P=2)
+    //!
+    //! [Any's counterpart]: crate::qmdb::any::unordered::fixed::partitioned
 
     use super::*;
+    pub use super::{Operation, Update};
     use crate::index::partitioned::unordered::Index;
+    use core::num::NonZeroUsize;
 
     /// A partitioned variant of [super::Db].
     ///
@@ -91,32 +64,21 @@ pub mod partitioned {
             S,
         >;
 
-    impl<
-        F: Graftable,
-        E: Context + Spawner,
-        K: Array,
-        V: FixedValue,
-        H: Hasher,
-        T: Translator,
-        const P: usize,
-        const N: usize,
-        S: Strategy,
-    > Db<F, E, K, V, H, T, P, N, S>
-    {
-        /// Initializes a [Db] authenticated database from the given `config`.
-        /// The configured [`Strategy`] is used to parallelize merkleization.
-        /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
-        /// while `None` selects the latest retained state. Initialization fails with
-        /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity
-        /// floor, and with [Error::Journal] ([`crate::journal::Error::ItemPruned`]) if the selected
-        /// commit itself has been pruned.
-        pub async fn init(
-            context: E,
-            config: Config<T, S, core::num::NonZeroUsize>,
-            max_size: Option<Location<F>>,
-        ) -> Result<Self, Error<F>> {
-            crate::qmdb::current::init(context, config, max_size).await
-        }
+    /// Configuration for a [Db].
+    pub type Config<T, S> = current::Config<T, JournalConfig, S, NonZeroUsize>;
+
+    /// Convenience type aliases for 256 partitions (P=1).
+    pub mod p256 {
+        /// Fixed-value DB with 256 partitions.
+        pub type Db<F, E, K, V, H, T, const N: usize, S> = super::Db<F, E, K, V, H, T, 1, N, S>;
+        pub use super::Config;
+    }
+
+    /// Convenience type aliases for 65,536 partitions (P=2).
+    pub mod p64k {
+        /// Fixed-value DB with 65,536 partitions.
+        pub type Db<F, E, K, V, H, T, const N: usize, S> = super::Db<F, E, K, V, H, T, 2, N, S>;
+        pub use super::Config;
     }
 }
 
@@ -128,8 +90,8 @@ pub mod test {
         merkle::full::Config as MerkleConfig,
         mmr,
         qmdb::{
+            any::batch::Slot,
             current::{
-                FixedConfig,
                 tests::{fixed_config, fixed_config_partitioned},
                 unordered::tests as shared,
             },
@@ -138,7 +100,7 @@ pub mod test {
         translator::{OneCap, TwoCap},
     };
     use commonware_codec::FixedSize;
-    use commonware_cryptography::{Sha256, sha256::Digest};
+    use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
@@ -166,8 +128,77 @@ pub mod test {
 
     /// Return a [Db] database initialized with a fixed config.
     async fn open_db(context: deterministic::Context, partition_prefix: String) -> CurrentTest {
-        let cfg = fixed_config::<TwoCap>(&partition_prefix, &context);
+        let cfg = fixed_config::<TwoCap>(&partition_prefix);
         CurrentTest::init(context, cfg, None).await.unwrap()
+    }
+
+    /// Metadata set before staging survives `stage` and `expand`, can be replaced or cleared on the
+    /// staged handle, and is not inherited by child batches.
+    #[test_traced]
+    fn test_staged_metadata_carries_and_is_not_inherited() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = open_db(context, "batch-options".into()).await;
+            let key = Digest::from([1; 32]);
+            let other = Digest::from([2; 32]);
+            let value = Digest::from([3; 32]);
+            let metadata = Digest::from([4; 32]);
+            let explicit = db
+                .new_batch()
+                .write(key, Some(value))
+                .with_metadata(metadata)
+                .merkleize_with(&db, &mut Proportional)
+                .await
+                .unwrap();
+            let (staged, _) = db
+                .new_batch()
+                .with_metadata(metadata)
+                .stage(&[&key], &db)
+                .await
+                .unwrap();
+            let (staged, _, _) = staged.expand(&[&other], &db).await.unwrap();
+            let staged = staged
+                .merkleize(vec![Slot::Put(value), Slot::Keep], vec![], &db)
+                .await
+                .unwrap();
+            assert_eq!(staged.root(), explicit.root());
+            let (overridden, _) = db
+                .new_batch()
+                .with_metadata(Digest::from([5; 32]))
+                .stage(&[&key], &db)
+                .await
+                .unwrap();
+            let overridden = overridden
+                .with_metadata(metadata)
+                .merkleize_with(vec![Slot::Put(value)], vec![], &db, &mut Proportional)
+                .await
+                .unwrap();
+            assert_eq!(overridden.root(), explicit.root());
+            let child = staged.new_batch::<Sha256>().merkleize(&db).await.unwrap();
+            let sibling = staged
+                .new_batch::<Sha256>()
+                .with_metadata(metadata)
+                .with_metadata(None);
+            let sibling = sibling.merkleize(&db).await.unwrap();
+            assert_eq!(child.root(), sibling.root());
+            let (cleared, _) = staged
+                .new_batch::<Sha256>()
+                .with_metadata(metadata)
+                .stage(&[&key], &db)
+                .await
+                .unwrap();
+            let (cleared, _, _) = cleared.expand(&[&other], &db).await.unwrap();
+            let cleared = cleared
+                .with_metadata(None)
+                .merkleize(vec![Slot::Keep, Slot::Keep], vec![], &db)
+                .await
+                .unwrap();
+            assert_eq!(child.root(), cleared.root());
+            let db = db.apply_batch(staged).await.unwrap();
+            assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
+            let db = db.apply_batch(cleared).await.unwrap();
+            assert_eq!(db.get_metadata().await.unwrap(), None);
+            db.destroy().await.unwrap();
+        });
     }
 
     #[test_traced("INFO")]
@@ -179,7 +210,7 @@ pub mod test {
             let batch = db
                 .new_batch()
                 .write(key, Some(value))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(batch).await.unwrap();
@@ -225,7 +256,7 @@ pub mod test {
             for i in 0..2000u64 {
                 seed = seed.write(key(i), Some(val(i)));
             }
-            let seed = seed.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let seed = seed.merkleize(&db).await.unwrap();
             let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
             let make = |salt: u64| -> Vec<(Digest, Option<Digest>)> {
@@ -254,7 +285,7 @@ pub mod test {
                     for (k, v) in make(900) {
                         p = p.write(k, v);
                     }
-                    Some(p.merkleize(&db, None, &mut Proportional).await.unwrap())
+                    Some(p.merkleize(&db).await.unwrap())
                 } else {
                     None
                 };
@@ -270,11 +301,7 @@ pub mod test {
                 for (k, v) in &muts {
                     nb = nb.write(*k, *v);
                 }
-                let normal_root = nb
-                    .merkleize(&db, None, &mut Proportional)
-                    .await
-                    .unwrap()
-                    .root();
+                let normal_root = nb.merkleize(&db).await.unwrap().root();
 
                 let keys: Vec<&Digest> = muts.iter().map(|(k, _)| k).collect();
                 let mut fb = new_batch();
@@ -284,11 +311,7 @@ pub mod test {
                 for (k, v) in &muts {
                     fb = fb.write(*k, *v);
                 }
-                let fused_root = fb
-                    .merkleize(&db, None, &mut Proportional)
-                    .await
-                    .unwrap()
-                    .root();
+                let fused_root = fb.merkleize(&db).await.unwrap().root();
                 assert_eq!(normal_root, fused_root, "root mismatch at depth={depth}");
             }
         });
@@ -300,13 +323,13 @@ pub mod test {
     );
 
     /// A staged read that resolved in a grandparent's diff must survive that grandparent
-    /// committing and being freed before `Staged::merkleize`, through the current layer:
+    /// being applied and dropped before `Staged::merkleize`, through the current layer:
     /// the re-derived bases feed the grafted bitmap and `compute_current_layer`, so the
     /// staged root must match the explicit path's and the full lifecycle must read back.
     /// Mirrors the `any::unordered::variable` coverage of this interleaving (see
     /// `StagedLoc`).
     #[test_traced("WARN")]
-    pub fn test_current_unordered_fixed_staged_ancestor_commit_before_merkleize() {
+    pub fn test_current_unordered_fixed_staged_ancestor_applied_before_merkleize() {
         fn key(i: u64) -> Digest {
             Sha256::hash(&[&i.to_be_bytes()])
         }
@@ -323,7 +346,7 @@ pub mod test {
             for i in 0..8u64 {
                 seed = seed.write(key(i), Some(val(i)));
             }
-            let seed = seed.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let seed = seed.merkleize(&db).await.unwrap();
             let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
             // Grandparent -> parent chain. The parent touches neither staged key, so the
@@ -332,41 +355,37 @@ pub mod test {
                 .new_batch()
                 .write(key(0), Some(val(1_000)))
                 .write(key(100), Some(val(1_001)))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let parent = grandparent
                 .new_batch::<Sha256>()
                 .write(key(1), Some(val(1_002)))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
 
-            let read_keys = [key(0), key(100)];
-            let keys: Vec<&Digest> = read_keys.iter().collect();
-            let (values, staged) = parent
+            let keys = [key(0), key(100)];
+            let (staged, values) = parent
                 .new_batch::<Sha256>()
                 .stage(&keys, &db)
                 .await
                 .unwrap();
             assert_eq!(values, vec![Some(val(1_000)), Some(val(1_001))]);
 
-            // Commit and free the grandparent: the staged resolutions' locations migrate
-            // into the committed region, retiring their recorded bases.
+            // Apply and drop the grandparent, so the staged resolutions' locations migrate
+            // into the database region, retiring their recorded bases.
             let db = db.apply_batch(grandparent).await.unwrap();
 
-            let updates = vec![(0, Some(val(2_000))), (1, Some(val(2_001)))];
-            let staged = staged
-                .merkleize(updates, Vec::new(), None, &db, &mut Proportional)
-                .await
-                .unwrap();
+            let slots = vec![Slot::Put(val(2_000)), Slot::Put(val(2_001))];
+            let staged = staged.merkleize(slots, Vec::new(), &db).await.unwrap();
 
-            // The explicit path over the same post-commit state must agree.
+            // The explicit path over the same applied state must agree.
             let explicit_root = parent
                 .new_batch::<Sha256>()
                 .write(key(0), Some(val(2_000)))
                 .write(key(100), Some(val(2_001)))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap()
                 .root();
@@ -400,7 +419,7 @@ pub mod test {
                 let batch = db
                     .new_batch()
                     .write(key, Some(value))
-                    .merkleize(&db, None, &mut Proportional)
+                    .merkleize(&db)
                     .await
                     .unwrap();
                 last_batch_boundary = batch.sync_boundary();
@@ -490,7 +509,7 @@ pub mod test {
             }
         }
 
-        let cfg = fixed_config_partitioned::<OneCap>(partition, &context);
+        let cfg = fixed_config_partitioned::<OneCap>(partition);
         let db = PartDb::<P, Sequential>::init(context.child("populate"), cfg, None)
             .await
             .unwrap();
@@ -502,7 +521,7 @@ pub mod test {
             let v = Sha256::hash(&[&(i * 7).to_be_bytes()]);
             batch = batch.write(k, Some(v));
         }
-        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+        let merkleized = batch.merkleize(&db).await.unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
@@ -517,7 +536,7 @@ pub mod test {
             let k = Sha256::hash(&[&i.to_be_bytes()]);
             batch = batch.write(k, None);
         }
-        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+        let merkleized = batch.merkleize(&db).await.unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
@@ -531,7 +550,7 @@ pub mod test {
         // Reopen at each concurrency. All rebuild (snapshot + bitmap) from the same log and must
         // match the original root and serve the expected value for every key.
         for &concurrency in concurrency_sweep {
-            let mut cfg = fixed_config_partitioned::<OneCap>(partition, &context);
+            let mut cfg = fixed_config_partitioned::<OneCap>(partition);
             cfg.init_concurrency = core::num::NonZeroUsize::new(concurrency).unwrap();
             let ctx = context
                 .child("reopen")
@@ -584,25 +603,25 @@ pub mod test {
         }
         // One operation per page makes the initialization truncation page aligned and one blob
         // keeps both branches' writes overlapping.
-        fn db_config(ctx: &deterministic::Context) -> FixedConfig<TwoCap, Sequential> {
+        fn db_config() -> Config<TwoCap, Sequential> {
             let page_size = std::num::NonZeroU16::new(
                 <Operation<mmr::Family, Digest, Digest> as FixedSize>::SIZE as u16,
             )
             .unwrap();
-            FixedConfig {
-                merkle_config: MerkleConfig {
+            Config {
+                merkle: MerkleConfig {
                     journal_partition: "rebranch-merkle-journal".into(),
                     metadata_partition: "rebranch-merkle-metadata".into(),
                     items_per_blob: NZU64!(100_000),
                     write_buffer: NZUsize!(4096),
                     replay_buffer: NZUsize!(4096),
                     strategy: Sequential,
-                    page_cache: CacheRef::from_pooler(ctx, NZU16!(1024), NZUsize!(64)),
+                    page_cache: CacheRef::new(NZU16!(1024), NZUsize!(64)),
                 },
-                journal_config: JournalConfig {
+                log: JournalConfig {
                     partition: "rebranch-ops-journal".into(),
                     items_per_blob: NZU64!(100_000),
-                    page_cache: CacheRef::from_pooler(ctx, page_size, NZUsize!(64)),
+                    page_cache: CacheRef::new(page_size, NZUsize!(64)),
                     write_buffer: NZUsize!(1300),
                     replay_buffer: NZUsize!(4096),
                 },
@@ -624,7 +643,7 @@ pub mod test {
         );
         let ((root_a, root_b, root_n), checkpoint) = deterministic::Runner::new(runtime)
             .start_and_recover(|ctx| async move {
-                let db = CurrentTest::init(ctx.child("initial"), db_config(&ctx), None)
+                let db = CurrentTest::init(ctx.child("initial"), db_config(), None)
                     .await
                     .unwrap();
 
@@ -633,7 +652,7 @@ pub mod test {
                 for i in 1..=100 {
                     batch = batch.write(key(i), Some(value(1, i)));
                 }
-                let batch = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+                let batch = batch.merkleize(&db).await.unwrap();
                 let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
                 assert_eq!(*db.bounds().end, 103);
                 let root_a = db.root();
@@ -643,20 +662,17 @@ pub mod test {
                 for i in 2..=50 {
                     batch = batch.write(key(i), Some(value(2, i)));
                 }
-                let batch = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+                let batch = batch.merkleize(&db).await.unwrap();
                 let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
                 assert_eq!(*db.bounds().end, 203);
                 let root_b = db.root();
                 drop(db);
 
                 // Reopen at A, discarding B.
-                let db = CurrentTest::init(
-                    ctx.child("bounded"),
-                    db_config(&ctx),
-                    Some(Location::new(103)),
-                )
-                .await
-                .unwrap();
+                let db =
+                    CurrentTest::init(ctx.child("bounded"), db_config(), Some(Location::new(103)))
+                        .await
+                        .unwrap();
                 assert_eq!(*db.bounds().end, 103);
                 assert_eq!(db.root(), root_a);
 
@@ -668,7 +684,7 @@ pub mod test {
                 for i in 1..=20 {
                     batch = batch.write(key(100 + i), Some(value(4, i)));
                 }
-                let batch = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+                let batch = batch.merkleize(&db).await.unwrap();
                 let root_n = batch.root();
                 let applied_start = db.bounds().end;
                 let db = db.apply_batch(batch).await.unwrap();
@@ -681,7 +697,7 @@ pub mod test {
 
         let ((size, root), checkpoint) =
             deterministic::Runner::from(checkpoint).start_and_recover(|ctx| async move {
-                let db = CurrentTest::init(ctx.child("reopen"), db_config(&ctx), None)
+                let db = CurrentTest::init(ctx.child("reopen"), db_config(), None)
                     .await
                     .unwrap();
 
@@ -719,7 +735,7 @@ pub mod test {
                 let batch = db
                     .new_batch()
                     .write(key(1), Some(value(5, 1)))
-                    .merkleize(&db, None, &mut Proportional)
+                    .merkleize(&db)
                     .await
                     .unwrap();
                 let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
@@ -730,7 +746,7 @@ pub mod test {
             });
 
         deterministic::Runner::from(checkpoint).start(|ctx| async move {
-            let db = CurrentTest::init(ctx.child("restart"), db_config(&ctx), None)
+            let db = CurrentTest::init(ctx.child("restart"), db_config(), None)
                 .await
                 .unwrap();
             assert_eq!(*db.bounds().end, size);

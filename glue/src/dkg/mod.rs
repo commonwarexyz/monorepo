@@ -50,6 +50,10 @@
 //! still sign ordinary blocks, but cannot propose or complete verification of the final block.
 //! If the network has advanced to a later epoch, marshal delivers the intervening boundaries.
 //!
+//! A validator that holds a share for the current epoch takes part in its ceremony and must stay
+//! online for the whole epoch. If it follows the ceremony, it counts as a faulty validator at the
+//! final block, so that block finalizes only if `2f + 1` other validators vote to finalize it.
+//!
 //! Players that miss private dealings may recover through public reveals, which expose their
 //! shares. To keep a share private, join while still a next player and be online before the
 //! dealing window (see [Offline Players](reshare#offline-players)).
@@ -75,14 +79,18 @@
 //! As [Catching Up](orchestrator#catching-up) describes, a lagging node catches up only from
 //! peers it tracks. Each epoch's tracked peers include the next two committees, so a node one
 //! or two epochs behind still tracks the current committee, however much it changed, and any
-//! of its honest members can serve the node. A node further behind needs a tracked peer that
-//! is still in the current committee or still follows the chain and relays its certificates.
-//! Without one, it must be restarted through [state sync](#state-sync).
+//! of its honest members can serve the final block and every block the node is missing below
+//! it. A node further behind needs a tracked peer that is still in the current committee or
+//! still follows the chain and relays its certificates. Without one, it must be restarted
+//! through [state sync](#state-sync).
 //!
-//! A peer can serve the lagging node until its [marshal retention](#marshal-retention) prunes
-//! the finalization, as long as the two stay connected. Current-epoch nodes keep dialing
-//! lagging members of the current committee, but disconnect any other lagging node once it
-//! falls out of their `tracked_peer_sets` most recent peer sets.
+//! A peer serves the lagging node only while the two stay connected and the peer still holds
+//! the missing blocks. Current-epoch nodes keep dialing lagging members of the current
+//! committee. They disconnect other lagging nodes once those nodes fall out of their
+//! `tracked_peer_sets` most recent peer sets, except for configured bootstrap peers in
+//! authenticated discovery. [Marshal retention](#marshal-retention) is a window behind each
+//! peer's processed height, so with the minimum retention a node that stopped `k` blocks into
+//! an epoch must finish catching up before the chain is `k` blocks into the next one.
 //!
 //! # Marshal Delivery
 //!
@@ -104,11 +112,97 @@
 //!
 //! Serving [`probe`] requests also requires the boundary finalization and block for every
 //! epoch served.
+//!
+//! The reshare actor treats every block marshal has processed as applied, and its journal stores
+//! dealer logs but not the last block it applied, so a node's marshal, application, and reshare
+//! partitions must be restored from the same point. If chain storage is restored ahead of the
+//! reshare journal, the actor derives the next epoch from an incomplete set of dealer logs and
+//! rejects the valid final block.
+//!
+//! # Message Sizes
+//!
+//! The reshare [`Actor`](reshare::Actor) sends each dealing and acknowledgement as a
+//! [`Message`](types::Message) on the subchannel of its epoch. Dealer logs and epoch artifacts
+//! travel in application blocks as a [`Payload`](types::Payload).
+//!
+//! ```text
+//! Every message is prefixed by its epoch:
+//! +---------------------------------+
+//! | epoch subchannel (varint, 1-10) |
+//! +---------------------------------+
+//!
+//! Dealing (tag 0):
+//! +---------+---------------------+--------------------------------------+------------+
+//! | tag (1) | count (varint, 1-5) | commitment (count x V::Public::SIZE) | share (32) |
+//! +---------+---------------------+--------------------------------------+------------+
+//!
+//! Acknowledgement (tag 1):
+//! +---------+--------------------------------+
+//! | tag (1) | signature (P::Signature::SIZE) |
+//! +---------+--------------------------------+
+//!
+//! Payload with a dealer log (tag 0):
+//! +---------+------------------+---------------------+--------------------------------------+
+//! | tag (1) | dealer (P::SIZE) | count (varint, 1-5) | commitment (count x V::Public::SIZE) |
+//! +---------+------------------+---------------------+--------------------------------------+
+//! | results | signature (P::Signature::SIZE)                                                |
+//! +---------+-------------------------------------------------------------------------------+
+//!
+//! Results, one entry per player (tag 0):
+//! +---------+---------------+---------------------+-------------------------+
+//! | tag (1) | players (set) | count (varint, 1-5) | entries (count x entry) |
+//! +---------+---------------+---------------------+-------------------------+
+//!
+//! Results with too many reveals (tag 1):
+//! +---------+
+//! | tag (1) |
+//! +---------+
+//!
+//! Entry with an acknowledgement (tag 0):
+//! +---------+--------------------------------+
+//! | tag (1) | signature (P::Signature::SIZE) |
+//! +---------+--------------------------------+
+//!
+//! Entry with a revealed share (tag 1):
+//! +---------+------------+
+//! | tag (1) | share (32) |
+//! +---------+------------+
+//!
+//! Payload with an epoch artifact (tag 1):
+//! +---------+-------------+----------------------+-------------+
+//! | tag (1) | outcome (1) | epoch (varint, 1-10) | output      |
+//! +---------+-----+-------+------------+---------+-------------+
+//! | players (set) | next players (set) | directory (encoded D) |
+//! +---------------+--------------------+-----------------------+
+//!
+//! Output:
+//! +--------------+----------+------------+-------------------------------------------------+
+//! | summary (32) | mode (1) | total (4)  | count (varint, 1-5)                             |
+//! +--------------+----------+------------+---------------+---------------+-----------------+
+//! | commitment (count x V::Public::SIZE) | dealers (set) | players (set) | revealed (set)  |
+//! +--------------------------------------+---------------+---------------+-----------------+
+//!
+//! Set:
+//! +---------------------+------------------------+
+//! | count (varint, 1-5) | keys (count x P::SIZE) |
+//! +---------------------+------------------------+
+//! ```
+//!
+//! `V` is the BLS variant, `P` the participant key, and `D` the epoch's [`Directory`]. Every
+//! `count` is at most the participant bound given to [`max_payload_size`] or
+//! [`Payload::max_encode_size`](types::Payload::max_encode_size). [`max_payload_size`] is the
+//! larger of the dealing and acknowledgement bounds plus the widest epoch subchannel prefix.
+//! [`Payload::max_encode_size`](types::Payload::max_encode_size) is the larger of the two payload
+//! bounds, with the directory bound of the payload's type.
+//!
+//! Size application blocks to carry [`Payload::max_encode_size`](types::Payload::max_encode_size).
+//! [`orchestrator::max_payload_size`] covers Simplex on epoch subchannels,
+//! [`probe::max_payload_size`] the probe, and [`bootstrap::max_payload_size`] the one-shot engine.
 
 use crate::dkg::{network::Directory, types::SchemeInfo};
 use commonware_consensus::{Block, types::Epoch};
 use commonware_cryptography::{
-    PublicKey, Signer,
+    PublicKey,
     bls12381::{
         dkg::feldman_desmedt::DealerPrivMsg,
         primitives::{group::Share, variant::Variant},
@@ -120,6 +214,8 @@ use std::future::Future;
 
 pub mod bootstrap;
 pub mod fence;
+mod limits;
+pub use limits::max_payload_size;
 pub mod network;
 pub mod orchestrator;
 pub mod probe;
@@ -135,14 +231,14 @@ pub trait ReshareBlock: Block {
     /// BLS variant used by the DKG payload.
     type Variant: Variant;
 
-    /// Signer type used by DKG payloads.
-    type Signer: Signer;
+    /// Participant public key type carried by DKG payloads.
+    type PublicKey: PublicKey;
 
     /// Transport directory type carried by this block's epoch artifacts.
-    type Directory: Directory<<Self::Signer as Signer>::PublicKey>;
+    type Directory: Directory<Self::PublicKey>;
 
     /// Returns the [`Payload`](types::Payload) carried by this block, if any.
-    fn payload(&self) -> Option<types::Payload<Self::Variant, Self::Signer, Self::Directory>>;
+    fn payload(&self) -> Option<types::Payload<Self::Variant, Self::PublicKey, Self::Directory>>;
 }
 
 /// Installs epoch-scoped threshold schemes into the consensus [`Provider`].

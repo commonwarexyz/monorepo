@@ -7,10 +7,10 @@ use crate::{
     },
     qmdb::{
         self, Error,
-        any::ValueEncoding,
         immutable::{self, Metrics, Operation},
         operation::Key,
         sync,
+        value::ValueEncoding,
     },
     translator::Translator,
 };
@@ -20,7 +20,7 @@ use commonware_parallel::Strategy;
 use commonware_utils::range::NonEmptyRange;
 use std::num::NonZeroU64;
 
-impl<F, E, K, V, C, H, T, S> sync::Database for immutable::Immutable<F, E, K, V, C, H, T, S>
+impl<F, E, K, V, C, H, T, S> sync::Database for immutable::Db<F, E, K, V, C, H, T, S>
 where
     F: Family,
     E: Context,
@@ -28,7 +28,6 @@ where
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, K, V>> + sync::Journal<F, Context = E, Op = Operation<F, K, V>>,
     C::Item: EncodeShared,
-    C::Config: Clone + Send,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -41,7 +40,7 @@ where
     type Digest = H::Digest;
     type Context = E;
 
-    /// Returns an [Immutable](immutable::Immutable) initialized from data collected in the sync process.
+    /// Returns a [Db](immutable::Db) initialized from data collected in the sync process.
     ///
     /// # Behavior
     ///
@@ -55,7 +54,7 @@ where
     ///
     /// # Returns
     ///
-    /// A [super::Immutable] db populated with the state from the given range.
+    /// A [super::Db] populated with the state from the given range.
     /// Its inactivity floor comes from the final commit, while the Merkle pruning boundary is
     /// the range start.
     async fn from_sync_result(
@@ -72,7 +71,7 @@ where
         let merkle = Merkle::<F, _, _, S>::init_sync(
             context.child("merkle"),
             full::SyncConfig {
-                config: db_config.merkle_config,
+                config: db_config.merkle,
                 range: range.clone(),
                 pinned_nodes,
             },
@@ -144,14 +143,14 @@ where
 
         sync::local_pinned_nodes::<F, _, H, S>(
             context,
-            config.merkle_config.clone(),
+            config.merkle.clone(),
             target,
             inactivity_floor,
         )
         .await
     }
 
-    fn root(&self) -> Self::Digest {
+    fn ops_root(&self) -> Self::Digest {
         self.root()
     }
 }

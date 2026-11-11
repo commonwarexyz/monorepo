@@ -68,7 +68,7 @@ where
     /// targets for that key (the fetch will try any available peer).
     ///
     /// If the engine has shut down, this is a no-op.
-    fn fetch_all<D>(&mut self, keys: Vec<D>) -> Feedback
+    fn fetch_all<D>(&mut self, keys: impl IntoIterator<Item = D>) -> Feedback
     where
         D: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
     {
@@ -102,16 +102,17 @@ where
 
     /// Send a targeted fetch to the peer actor.
     ///
-    /// Targets may be primary or secondary peers of the latest tracked peer set. A target in
-    /// neither set is skipped until a later peer set includes it, and a target blocked for
+    /// Targets may be any peers of the latest tracked peer set, primary or secondary. A target
+    /// outside that set is skipped until a later peer set includes it, and a target blocked for
     /// invalid data is skipped until the network unblocks it.
     ///
     /// If a fetch is already in progress for this key:
     /// - If the existing fetch has targets, the new targets are added to the set.
     /// - If the existing fetch has no targets, it remains unrestricted.
     ///
-    /// To clear targeting and fall back to any primary peer, call [`fetch`](Self::fetch).
-    /// Targets are automatically cleared when the fetch succeeds or is canceled.
+    /// To clear targeting and fall back to any peer of the latest tracked peer set, call
+    /// [`fetch`](Self::fetch). Targets are automatically cleared when the fetch succeeds or is
+    /// canceled.
     ///
     /// If the engine has shut down, this is a no-op.
     fn fetch_targeted(
@@ -134,7 +135,10 @@ where
     /// Send targeted fetches to the peer actor for a batch of keys.
     ///
     /// If the engine has shut down, this is a no-op.
-    fn fetch_all_targeted<D>(&mut self, keys: Vec<(D, NonEmptyVec<Self::PublicKey>)>) -> Feedback
+    fn fetch_all_targeted<D>(
+        &mut self,
+        keys: impl IntoIterator<Item = (D, NonEmptyVec<Self::PublicKey>)>,
+    ) -> Feedback
     where
         D: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
     {

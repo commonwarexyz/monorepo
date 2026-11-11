@@ -81,7 +81,7 @@ impl EarlyLintPass for SpanNameStyle {
         if segment.ident.as_str() != "instrument" {
             return;
         }
-        let Some(AttrArgs::Delimited(args)) = normal.item.args.unparsed_ref() else {
+        let AttrArgs::Delimited(args) = &normal.item.args else {
             return;
         };
 

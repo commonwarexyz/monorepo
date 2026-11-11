@@ -6,7 +6,7 @@ use super::operation::Operation;
 pub use crate::qmdb::compact::Config;
 use crate::{
     merkle::{Family, Location},
-    qmdb::{any::value::ValueEncoding, compact},
+    qmdb::{compact, value::ValueEncoding},
 };
 use commonware_codec::CodecShared;
 use commonware_cryptography::Hasher;
@@ -56,6 +56,11 @@ where
     S: Strategy,
     Operation<F, V>: CodecShared,
 {
+    /// The location that the next appended value will be placed at.
+    pub fn size(&self) -> Location<F> {
+        self.base.size + self.mutations.len() as u64
+    }
+
     /// Append `value`.
     pub fn append(mut self, value: V::Value) -> Self {
         self.mutations.push(value);
@@ -69,11 +74,12 @@ mod tests {
     use crate::{
         merkle::{Location, mmb, mmr},
         qmdb::{
-            any::value::{FixedEncoding, VariableEncoding},
             compact::db::tests::{TestBatch, TestOperation, compact_db_tests, open_db},
+            value::{FixedEncoding, VariableEncoding},
         },
     };
     use commonware_codec::RangeCfg;
+    use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_utils::sequence::U64;
@@ -140,18 +146,42 @@ mod tests {
         compact_db_tests!(VariableTestOp<mmb::Family>);
     }
 
+    /// A batch's `size` is the location of its next append, from the database's size or its
+    /// parent's tip.
+    #[test_traced("INFO")]
+    fn test_compact_batch_size() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = open_db::<TestOp>(context.child("db"), "keyless-batch-size").await;
+            let start = db.size();
+
+            let batch = db.new_batch();
+            assert_eq!(batch.size(), start);
+            let batch = batch.append(U64::new(1)).append(U64::new(2));
+            assert_eq!(batch.size(), start + 2);
+
+            // The commit follows the appends, and a child appends after it.
+            let merkleized = batch.merkleize(&db).await.unwrap();
+            assert_eq!(merkleized.bounds().tip.size, start + 3);
+            let child = merkleized.new_batch::<Sha256>().append(U64::new(3));
+            assert_eq!(child.size(), start + 4);
+
+            let db = db.apply_batch(merkleized).await.unwrap();
+            assert_eq!(db.size(), start + 3);
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// Appends are ordered: the same values in a different order give a different root.
     #[test_traced("INFO")]
     fn test_compact_append_order_is_significant() {
         deterministic::Runner::default().start(|context| async move {
             let forward =
                 open_db::<TestOp>(context.child("forward"), "compact-append-forward").await;
-            let floor = forward.inactivity_floor_loc();
             let batch = forward
                 .new_batch()
                 .append(U64::new(1))
                 .append(U64::new(2))
-                .merkleize(&forward, None, floor)
+                .merkleize(&forward)
                 .await
                 .unwrap();
             let applied_start = forward.size();
@@ -167,7 +197,7 @@ mod tests {
                 .new_batch()
                 .append(U64::new(2))
                 .append(U64::new(1))
-                .merkleize(&reverse, None, floor)
+                .merkleize(&reverse)
                 .await
                 .unwrap();
             let reverse = reverse.apply_batch(batch).await.unwrap();

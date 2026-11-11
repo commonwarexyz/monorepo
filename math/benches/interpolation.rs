@@ -1,7 +1,11 @@
+use commonware_allocator::mimalloc;
 use commonware_math::{fields::goldilocks::F, poly::Interpolator};
 use commonware_utils::{Faults, N3f1, TryFromIterator, ordered::BiMap};
 use core::num::NonZeroU32;
 use criterion::{Criterion, criterion_group, criterion_main};
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 fn bench_interpolator_creation(c: &mut Criterion) {
     for &n in &[4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096] {
@@ -23,4 +27,5 @@ fn bench_interpolator_creation(c: &mut Criterion) {
 }
 
 criterion_group!(benches, bench_interpolator_creation,);
+
 criterion_main!(benches);

@@ -34,6 +34,21 @@
 //! Result objects borrow the working buffers. Dropping a result resets its encoder
 //! or decoder for another round with the same configuration.
 //!
+//! # Working Space
+//!
+//! A coder sizes its working space when it is created or reset: up to
+//! `2 * (original_count + recovery_count).next_power_of_two()` shards of `shard_bytes` bytes,
+//! each rounded up to whole [`SHARD_CHUNK_BYTES`] blocks. The space is one allocation that a
+//! reset can grow but never shrinks. Creating or resetting a coder returns an error for
+//! unsupported shard counts, a zero or odd `shard_bytes`, or a working space larger than
+//! `isize::MAX` bytes, the largest allocation a `Vec` can hold.
+//!
+//! Callers that take shard counts or widths from an untrusted source must bound them against
+//! their own memory budget before creating or resetting a coder. Wide shards can be coded as
+//! independent byte ranges so that the range width, not the shard width, sets the working space.
+//! The ranges produce the same bytes as coding each shard whole when every range except the last
+//! is a whole number of [`SHARD_CHUNK_BYTES`] blocks, as [algorithm > Shard] explains.
+//!
 //! # Changes vs. Upstream
 //!
 //! This module vendors [`reed_solomon_simd`].
@@ -66,6 +81,7 @@
 //!
 //! [`reed_solomon_simd`]: https://crates.io/crates/reed-solomon-simd
 //! [`thiserror`]: https://docs.rs/thiserror
+//! [algorithm > Shard]: crate::reed_solomon::algorithm#shard
 
 #![allow(
     clippy::multiple_inherent_impl,

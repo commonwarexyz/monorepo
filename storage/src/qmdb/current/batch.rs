@@ -2,6 +2,7 @@
 //!
 //! Wraps the [`any::batch`] API.
 
+pub use crate::qmdb::any::batch::Slot;
 use crate::{
     Context,
     index::Unordered as UnorderedIndex,
@@ -14,18 +15,16 @@ use crate::{
     qmdb::{
         Error,
         any::{
-            self, ValueEncoding,
-            batch::{DiffCursors, DiffEntry, Staged as AnyStaged},
+            self,
+            batch::{DiffCursors, DiffEntry, RetainedAncestors, Staged as AnyStaged},
             operation::{Operation, update},
         },
         bitmap::{Candidates, Shared, fill_from},
         chain::Bounds,
-        current::{
-            db::{compute_db_root, partial_chunk, read_graft_inputs},
-            grafting,
-        },
-        floor::Policy,
+        current::{db::compute_ops_root_witness, grafting, proof::OpsRootWitness},
+        floor::{Policy, Proportional},
         operation::Key,
+        value::ValueEncoding,
     },
 };
 use ahash::AHashMap;
@@ -36,7 +35,7 @@ use commonware_utils::{
     Widen,
     bitmap::{self, Readable as _},
 };
-use core::ops::Range;
+use core::{borrow::Borrow, ops::Range};
 use std::sync::Arc;
 
 /// Speculative chunk-level bitmap overlay: materialized bytes for every chunk that differs from
@@ -55,7 +54,7 @@ pub(crate) struct ChunkOverlay<const N: usize> {
 
 /// Parent-bitmap dimensions captured once per overlay. `chunk_mut` needs them on every newly
 /// materialized chunk, and reading each through a `Base` chain costs a lock acquisition on
-/// the shared committed bitmap, so they are read once instead of per touched chunk.
+/// the DB's shared bitmap, so they are read once instead of per touched chunk.
 #[derive(Clone, Copy, Debug, Default)]
 struct Dimensions {
     len: u64,
@@ -141,10 +140,10 @@ impl<const N: usize> ChunkOverlay<N> {
 }
 
 /// Bitmap-accelerated candidate scan over a layered `BitmapBatch` chain. Fills `out` with up to
-/// `limit` floor candidates in `[floor, tip)`, returning the next scan location. Skips
-/// locations where the layered bitmap bit is unset (including locations superseded by
-/// uncommitted ancestors), avoiding I/O reads for inactive operations. Produces the same
-/// sequence as repeatedly calling the `next_candidate` test oracle over the chain.
+/// `limit` floor candidates in `[floor, tip)`, returning the next scan location. Skips locations
+/// where the layered bitmap bit is unset (including locations superseded by unapplied ancestors),
+/// avoiding I/O reads for inactive operations. Produces the same sequence as repeatedly calling the
+/// `next_candidate` test oracle over the chain.
 ///
 /// Each fill scans with one set-bit iterator: overlay chunks resolve lock-free and the applied
 /// base is locked once per untouched chunk, rather than several times per candidate. The
@@ -162,103 +161,43 @@ impl<F: Graftable, const N: usize> Candidates<F> for &BitmapBatch<N> {
     }
 }
 
-/// Adapter that resolves ops MMR nodes for a batch's `compute_current_layer`.
+/// Reads nodes from a batch chain layered over the database's [`Mem`] it extends.
 ///
-/// Tries the batch chain's sync [`Readable`] first (which covers nodes appended or overwritten
-/// by the batch, plus anything still in the in-memory MMR). Falls through to the base's async
-/// [`MerkleStorage`].
-struct BatchStorageAdapter<
-    'a,
-    F: Graftable,
-    D: Digest,
-    R: Readable<Family = F, Digest = D>,
-    S: MerkleStorage<F, Digest = D>,
-> {
+/// Nodes the chain appended or updated come from the chain, and every other position comes from
+/// the `Mem`.
+struct Layered<'a, R: Readable> {
     batch: &'a R,
-    base: &'a S,
-    _phantom: core::marker::PhantomData<(F, D)>,
+    mem: &'a Mem<R::Family, R::Digest>,
 }
 
-impl<
-    'a,
-    F: Graftable,
-    D: Digest,
-    R: Readable<Family = F, Digest = D>,
-    S: MerkleStorage<F, Digest = D>,
-> BatchStorageAdapter<'a, F, D, R, S>
-{
-    const fn new(batch: &'a R, base: &'a S) -> Self {
-        Self {
-            batch,
-            base,
-            _phantom: core::marker::PhantomData,
-        }
-    }
-}
+impl<R: Readable> Readable for Layered<'_, R> {
+    type Family = R::Family;
+    type Digest = R::Digest;
 
-impl<F: Graftable, D: Digest, R: Readable<Family = F, Digest = D>, S: MerkleStorage<F, Digest = D>>
-    MerkleStorage<F> for BatchStorageAdapter<'_, F, D, R, S>
-{
-    type Digest = D;
-
-    fn size(&self) -> Position<F> {
-        self.batch.size()
-    }
-    async fn get_node(&self, pos: Position<F>) -> Result<Option<D>, merkle::Error<F>> {
-        if let Some(node) = self.batch.get_node(pos) {
-            return Ok(Some(node));
-        }
-        self.base.get_node(pos).await
-    }
-
-    async fn get_nodes(&self, positions: &[Position<F>]) -> Result<Vec<D>, merkle::Error<F>> {
-        let mut nodes = vec![None; positions.len()];
-        let mut base_positions = Vec::with_capacity(positions.len());
-
-        // Look up nodes already in the batch chain.
-        for (slot, &pos) in nodes.iter_mut().zip(positions) {
-            match self.batch.get_node(pos) {
-                Some(node) => *slot = Some(node),
-                None => base_positions.push(pos),
-            }
-        }
-
-        // Look up remaining nodes from the base.
-        let base_nodes = if base_positions.is_empty() {
-            Vec::new()
-        } else {
-            self.base.get_nodes(&base_positions).await?
-        };
-        let mut base_nodes = base_nodes.into_iter();
-        Ok(nodes
-            .into_iter()
-            .map(|node| node.unwrap_or_else(|| base_nodes.next().expect("one node per base read")))
-            .collect())
-    }
-}
-
-/// Layers a [`GenericMerkleizedBatch`] over a [`Mem`] for node resolution.
-///
-/// [`GenericMerkleizedBatch::get_node`] only covers the batch chain; committed positions
-/// return `None`. This adapter falls through to the committed Mem for those positions.
-struct BatchOverMem<'a, F: Graftable, D: Digest, S: Strategy> {
-    batch: &'a GenericMerkleizedBatch<F, D, S>,
-    mem: &'a Mem<F, D>,
-}
-
-impl<F: Graftable, D: Digest, S: Strategy> Readable for BatchOverMem<'_, F, D, S> {
-    type Family = F;
-    type Digest = D;
-
-    fn size(&self) -> Position<F> {
+    fn size(&self) -> Position<R::Family> {
         self.batch.size()
     }
 
-    fn get_node(&self, pos: Position<F>) -> Option<D> {
+    fn get_node(&self, pos: Position<R::Family>) -> Option<R::Digest> {
         if let Some(d) = self.batch.get_node(pos) {
             return Some(d);
         }
         self.mem.get_node(pos)
+    }
+}
+
+impl<R: Readable> MerkleStorage<R::Family> for Layered<'_, R> {
+    type Digest = R::Digest;
+
+    fn size(&self) -> Position<R::Family> {
+        Readable::size(self)
+    }
+
+    async fn get_node(
+        &self,
+        pos: Position<R::Family>,
+    ) -> Result<Option<R::Digest>, merkle::Error<R::Family>> {
+        Ok(Readable::get_node(self, pos))
     }
 }
 
@@ -307,34 +246,16 @@ where
 /// Wraps an [`any::batch::MerkleizedBatch`] and adds the bitmap and grafted MMR state needed to
 /// compute the canonical root.
 ///
-/// # Branch validity
+/// # Batch validity
 ///
-/// A `MerkleizedBatch` is a branch-scoped view rooted at a specific committed prefix of the DB. It
-/// is not an immutable snapshot.
+/// Reads through this batch succeed only while the DB is at a state of the batch's chain: its
+/// recorded database boundary, an ancestor's tip, or this batch's own tip once it is applied.
 ///
-/// Internally, the batch chain terminates in the DB's committed bitmap via `BitmapBatch::Base`.
-/// That committed bitmap evolves in place as [`Db::apply_batch`](super::db::Db::apply_batch) and
-/// [`Db::prune`](super::db::Db::prune) update the DB.
-///
-/// Reads through this batch's chain, constructing child batches from it, and applying it later are
-/// only semantically correct while its ancestor chain is still the committed prefix of the DB. In
-/// other words, every successful [`apply_batch`](super::db::Db::apply_batch) since this batch was
-/// merkleized must have applied an ancestor of this batch.
-///
-/// Once a non-ancestor batch is applied, this batch and all of its descendants become invalid
-/// objects. The library does not guard against continued use after that point.
-///
-/// Applying an invalid batch is caught by the any-layer authenticated lineage check and returns
-/// [`Error::StaleBatch`] without mutating committed state, so `apply_batch` itself cannot corrupt
-/// the DB.
-///
-/// Rules of thumb:
-/// - Drop any `Arc<MerkleizedBatch>` you no longer intend to apply.
-/// - Extending a batch after `apply_batch` has consumed it (building a child off the just-applied
-///   parent) is safe. The committed bitmap now equals the parent's post-apply state, so child reads
-///   are consistent.
-/// - Extending a batch after a different branch has been applied is not safe. Do not call `get`,
-///   `new_batch`, or `apply_batch` on that branch again.
+/// Once the DB moves to any other state, for example because a sibling or one of this batch's
+/// descendants was applied, this batch is stale, as is each of its descendants whose chain does
+/// not include the new state. Reads through a stale batch return [`Error::StaleRead`], and
+/// applying it or merkleizing a child of it returns [`Error::StaleBatch`] without changing the
+/// database (see [`crate::qmdb::chain`]).
 pub struct MerkleizedBatch<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
 {
     /// Inner any-layer batch (ops MMR, diff, floor, commit loc, sizes).
@@ -346,8 +267,14 @@ pub struct MerkleizedBatch<F: Graftable, D: Digest, U: update::Update, const N: 
     /// COW bitmap state (for use as a parent in speculative batches).
     pub(crate) bitmap: BitmapBatch<N>,
 
-    /// The canonical root (ops root + grafted root + partial chunk).
+    /// The canonical root, including the ops, grafted, pending, and partial contributions.
     pub(crate) canonical_root: D,
+
+    /// Witness binding the ops root to `canonical_root`.
+    pub(crate) ops_root_witness: OpsRootWitness<F, D>,
+
+    /// Physical bitmap pruning boundary when the batch was merkleized.
+    pruned_chunks: u64,
 }
 
 impl<F, H, U, const N: usize, S: Strategy> UnmerkleizedBatch<F, H, U, N, S>
@@ -369,6 +296,13 @@ where
         }
     }
 
+    /// Set the metadata recorded in this batch's commit. Defaults to `None` and is not inherited by
+    /// child batches. Carries over to the batch returned by [`Self::stage`].
+    pub fn with_metadata(mut self, metadata: impl Into<Option<U::Value>>) -> Self {
+        self.inner = self.inner.with_metadata(metadata);
+        self
+    }
+
     /// Record a mutation. Use `Some(value)` for update/create, `None` for delete.
     ///
     /// If the same key is written multiple times within a batch, the last
@@ -378,7 +312,11 @@ where
         self
     }
 
-    /// Read through: mutations -> ancestor diffs -> committed DB.
+    /// Read through: mutations -> ancestor diffs -> database.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain.
     pub async fn get<E, C, I>(
         &self,
         key: &U::Key,
@@ -399,9 +337,13 @@ where
     /// during merkleize. Use [`stage`](Self::stage) for keys that may be written. When the writable
     /// subset is known and much smaller than the full read set, call `get_many` for the read-only
     /// keys first, then [`stage`](Self::stage) only the writable keys.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain.
     pub async fn get_many<E, C, I>(
         &self,
-        keys: &[&U::Key],
+        keys: &[impl Borrow<U::Key> + Sync],
         db: &super::db::Db<F, E, C, I, H, U, N, S>,
     ) -> Result<Vec<Option<U::Value>>, Error<F>>
     where
@@ -412,20 +354,19 @@ where
         self.inner.get_many(keys, &db.any).await
     }
 
-    /// Batch read multiple keys and return a staged batch for the same keys.
+    /// Batch read multiple keys and return `(staged, values)` for the same keys.
     ///
-    /// Returns results in the same order as the input keys. The staged batch records updates by
-    /// read index: the initial keys occupy `0..keys.len()`, and each [`expand`](Staged::expand)
-    /// appends another index range.
+    /// Returns results in the same order as the input keys. The initial keys occupy staged read
+    /// slots `0..keys.len()`, and each [`expand`](Staged::expand) appends another range of slots.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain.
+    /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain.
     pub async fn stage<E, C, I>(
         self,
-        keys: &[&U::Key],
+        keys: &[impl Borrow<U::Key> + Sync],
         db: &super::db::Db<F, E, C, I, H, U, N, S>,
-    ) -> Result<(Vec<Option<U::Value>>, Staged<F, H, U, N, S>), Error<F>>
+    ) -> Result<(Staged<F, H, U, N, S>, Vec<Option<U::Value>>), Error<F>>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
@@ -436,14 +377,14 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
-        let (values, inner) = inner.stage(keys, &db.any).await?;
+        let (inner, values) = inner.stage(keys, &db.any).await?;
         Ok((
-            values,
             Staged {
                 inner,
                 grafted_parent,
                 bitmap_parent,
             },
+            values,
         ))
     }
 }
@@ -455,10 +396,29 @@ where
     H: Hasher,
     Operation<F, U>: Codec,
 {
-    /// Expand this staged batch with more reads.
+    /// The number of staged read slots: the keys passed to [`stage`](UnmerkleizedBatch::stage)
+    /// plus every [`expand`](Self::expand) range. [`merkleize`](Staged::merkleize) takes one
+    /// [`Slot`] per staged read.
+    pub const fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Whether no reads are staged.
+    pub const fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Set the metadata recorded in the commit, replacing any set before staging.
+    pub fn with_metadata(mut self, metadata: impl Into<Option<U::Value>>) -> Self {
+        self.inner = self.inner.with_metadata(metadata);
+        self
+    }
+
+    /// Expand this staged batch with more reads, returning `(self, range, values)`.
     ///
-    /// Existing read indices remain stable. Newly read keys are appended to the staged read set and
-    /// assigned the returned range. The returned values are in the same order as `keys`.
+    /// Existing slots keep their positions. Newly read keys are appended to the staged read set
+    /// and assigned the returned range of slots. The returned values are in the same order as
+    /// `keys`.
     ///
     /// Expansion does not deduplicate against previously staged keys and does not observe values the
     /// caller has computed for earlier staged slots but not yet passed to
@@ -466,12 +426,12 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain.
+    /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain.
     pub async fn expand<E, C, I>(
         self,
-        keys: &[&U::Key],
+        keys: &[impl Borrow<U::Key> + Sync],
         db: &super::db::Db<F, E, C, I, H, U, N, S>,
-    ) -> Result<(Range<usize>, Vec<Option<U::Value>>, Self), Error<F>>
+    ) -> Result<(Self, Range<usize>, Vec<Option<U::Value>>), Error<F>>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
@@ -482,15 +442,15 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
-        let (range, values, inner) = inner.expand(keys, &db.any).await?;
+        let (inner, range, values) = inner.expand(keys, &db.any).await?;
         Ok((
-            range,
-            values,
             Self {
                 inner,
                 grafted_parent,
                 bitmap_parent,
             },
+            range,
+            values,
         ))
     }
 }
@@ -503,35 +463,56 @@ where
     H: Hasher,
     Operation<F, update::Unordered<K, V>>: Codec,
 {
-    /// Record updates for staged reads and upserts for unread keys, advance the inactivity floor
-    /// with [`Policy`], then merkleize.
+    /// Apply `slots` to staged reads and `unstaged` writes to unread keys, advance the inactivity
+    /// floor with [`Proportional`], then merkleize.
     ///
-    /// Consumes the staged handle and write vectors. Call [`expand`](Staged::expand) before this
-    /// method if more keys must be read into the staged index space.
+    /// Consumes the staged handle, `slots`, and `unstaged`. Call [`expand`](Staged::expand) before
+    /// this method if more keys must be read into the staged read set.
     ///
-    /// A `Some` value is an upsert. `None` is a delete. Update indices refer to the staged read
-    /// set: the initial `stage` input followed by any [`expand`](Staged::expand) ranges. `metadata`
-    /// is committed with the returned batch.
+    /// `slots` holds one [`Slot`] per staged read, in the order of the initial `stage` input
+    /// followed by any [`expand`](Staged::expand) ranges. A key staged more than once takes its
+    /// last put or delete. Metadata set before or after staging (see [`Self::with_metadata`]) is
+    /// committed with the returned batch.
+    ///
+    /// The root is independent of slot order. Staging the keys in another order, or writing a key
+    /// through a different slot, merkleizes to the same root when each key's final put or delete
+    /// stays the same.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain or is not the
-    /// database instance that created the batch.
+    /// Returns [`Error::StaleBatch`] if `db` is not at a state of this batch's chain, an unapplied
+    /// ancestor was dropped, or `db` is not the database instance that created the batch.
     ///
     /// # Panics
     ///
-    /// Panics if any update's `read_index` is out of the staged read range.
+    /// Panics if `slots` does not hold one entry per staged read.
+    pub async fn merkleize<E, C, I>(
+        self,
+        slots: Vec<Slot<V::Value>>,
+        unstaged: Vec<(K, Option<V::Value>)>,
+        db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+    ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, N, S>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+    {
+        self.merkleize_with(slots, unstaged, db, &mut Proportional)
+            .await
+    }
+
+    /// Like [`Self::merkleize`], but advances the inactivity floor with `policy` instead of
+    /// [`Proportional`]. Has the same errors and panics.
     #[tracing::instrument(
         name = "qmdb.current.unordered.batch.merkleize.staged",
         level = "info",
         skip_all,
-        fields(updates = updates.len() as u64, upserts = upserts.len() as u64),
+        fields(slots = slots.len() as u64, unstaged = unstaged.len() as u64),
     )]
-    pub async fn merkleize<E, C, I, P>(
+    pub async fn merkleize_with<E, C, I, P>(
         self,
-        updates: Vec<(usize, Option<V::Value>)>,
-        upserts: Vec<(K, Option<V::Value>)>,
-        metadata: Option<V::Value>,
+        slots: Vec<Slot<V::Value>>,
+        unstaged: Vec<(K, Option<V::Value>)>,
         db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, N, S>
@@ -549,14 +530,19 @@ where
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
 
         let (prepared, staged) = inner
-            .resolve_updates_prefetched(updates, upserts, &db.any, &*policy, &bitmap_parent)
+            .resolve_updates_prefetched(slots, unstaged, &db.any, &*policy, &bitmap_parent)
             .await?;
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_walk(metadata, staged, &bitmap_parent, policy)
+            .walk_floor_and_merkleize(staged, &bitmap_parent, policy)
             .await?;
-        let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
-        drop(retained_ancestors);
-        result
+        compute_current_layer(
+            inner,
+            retained_ancestors,
+            db,
+            &grafted_parent,
+            &bitmap_parent,
+        )
+        .await
     }
 }
 
@@ -568,35 +554,56 @@ where
     H: Hasher,
     Operation<F, update::Ordered<K, V>>: Codec,
 {
-    /// Record updates for staged reads and upserts for unread keys, advance the inactivity floor
-    /// with [`Policy`], then merkleize.
+    /// Apply `slots` to staged reads and `unstaged` writes to unread keys, advance the inactivity
+    /// floor with [`Proportional`], then merkleize.
     ///
-    /// Consumes the staged handle and write vectors. Call [`expand`](Staged::expand) before this
-    /// method if more keys must be read into the staged index space.
+    /// Consumes the staged handle, `slots`, and `unstaged`. Call [`expand`](Staged::expand) before
+    /// this method if more keys must be read into the staged read set.
     ///
-    /// A `Some` value is an upsert. `None` is a delete. Update indices refer to the staged read
-    /// set: the initial `stage` input followed by any [`expand`](Staged::expand) ranges. `metadata`
-    /// is committed with the returned batch.
+    /// `slots` holds one [`Slot`] per staged read, in the order of the initial `stage` input
+    /// followed by any [`expand`](Staged::expand) ranges. A key staged more than once takes its
+    /// last put or delete. Metadata set before or after staging (see [`Self::with_metadata`]) is
+    /// committed with the returned batch.
+    ///
+    /// The root is independent of slot order. Staging the keys in another order, or writing a key
+    /// through a different slot, merkleizes to the same root when each key's final put or delete
+    /// stays the same.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain or is not the
-    /// database instance that created the batch.
+    /// Returns [`Error::StaleBatch`] if `db` is not at a state of this batch's chain, an unapplied
+    /// ancestor was dropped, or `db` is not the database instance that created the batch.
     ///
     /// # Panics
     ///
-    /// Panics if any update's `read_index` is out of the staged read range.
+    /// Panics if `slots` does not hold one entry per staged read.
+    pub async fn merkleize<E, C, I>(
+        self,
+        slots: Vec<Slot<V::Value>>,
+        unstaged: Vec<(K, Option<V::Value>)>,
+        db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+    ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, N, S>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
+        I: crate::index::Ordered<Value = Location<F>> + 'static,
+    {
+        self.merkleize_with(slots, unstaged, db, &mut Proportional)
+            .await
+    }
+
+    /// Like [`Self::merkleize`], but advances the inactivity floor with `policy` instead of
+    /// [`Proportional`]. Has the same errors and panics.
     #[tracing::instrument(
         name = "qmdb.current.ordered.batch.merkleize.staged",
         level = "info",
         skip_all,
-        fields(updates = updates.len() as u64, upserts = upserts.len() as u64),
+        fields(slots = slots.len() as u64, unstaged = unstaged.len() as u64),
     )]
-    pub async fn merkleize<E, C, I, P>(
+    pub async fn merkleize_with<E, C, I, P>(
         self,
-        updates: Vec<(usize, Option<V::Value>)>,
-        upserts: Vec<(K, Option<V::Value>)>,
-        metadata: Option<V::Value>,
+        slots: Vec<Slot<V::Value>>,
+        unstaged: Vec<(K, Option<V::Value>)>,
         db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
         policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, N, S>
@@ -612,14 +619,19 @@ where
             bitmap_parent,
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
-        let (inner, staged) = inner.resolve_updates(updates, upserts, db.any.strategy());
+        let (inner, staged) = inner.resolve_updates(slots, unstaged, db.any.strategy());
         let prepared = inner.prepare(&db.any)?;
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_walk(metadata, staged, &bitmap_parent, policy)
+            .walk_floor_and_merkleize(staged, &bitmap_parent, policy)
             .await?;
-        let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
-        drop(retained_ancestors);
-        result
+        compute_current_layer(
+            inner,
+            retained_ancestors,
+            db,
+            &grafted_parent,
+            &bitmap_parent,
+        )
+        .await
     }
 }
 
@@ -632,22 +644,35 @@ where
     H: Hasher,
     Operation<F, update::Unordered<K, V>>: Codec,
 {
-    /// Resolve mutations into operations, advance the inactivity floor with [`Policy`], merkleize,
-    /// and return an `Arc<MerkleizedBatch>`.
+    /// Resolve mutations into operations, advance the inactivity floor with
+    /// [`Proportional`], merkleize, and return an `Arc<MerkleizedBatch>`.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain or is not the
-    /// database instance that created the batch.
+    /// Returns [`Error::StaleBatch`] if `db` is not at a state of this batch's chain, an unapplied
+    /// ancestor was dropped, or `db` is not the database instance that created the batch.
+    pub async fn merkleize<E, C, I>(
+        self,
+        db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+    ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, N, S>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+    {
+        self.merkleize_with(db, &mut Proportional).await
+    }
+
+    /// Like [`Self::merkleize`], but advances the inactivity floor with `policy` instead of
+    /// [`Proportional`]. Has the same errors.
     #[tracing::instrument(
         name = "qmdb.current.unordered.batch.merkleize",
         level = "info",
         skip_all
     )]
-    pub async fn merkleize<E, C, I, P>(
+    pub async fn merkleize_with<E, C, I, P>(
         self,
         db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
-        metadata: Option<V::Value>,
         policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, N, S>
     where
@@ -664,11 +689,16 @@ where
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
         let prepared = inner.prepare(&db.any)?;
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_walk(metadata, Vec::new(), &bitmap_parent, policy)
+            .walk_floor_and_merkleize(Vec::new(), &bitmap_parent, policy)
             .await?;
-        let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
-        drop(retained_ancestors);
-        result
+        compute_current_layer(
+            inner,
+            retained_ancestors,
+            db,
+            &grafted_parent,
+            &bitmap_parent,
+        )
+        .await
     }
 }
 
@@ -681,22 +711,35 @@ where
     H: Hasher,
     Operation<F, update::Ordered<K, V>>: Codec,
 {
-    /// Resolve mutations into operations, advance the inactivity floor with [`Policy`], merkleize,
-    /// and return an `Arc<MerkleizedBatch>`.
+    /// Resolve mutations into operations, advance the inactivity floor with
+    /// [`Proportional`], merkleize, and return an `Arc<MerkleizedBatch>`.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain or is not the
-    /// database instance that created the batch.
+    /// Returns [`Error::StaleBatch`] if `db` is not at a state of this batch's chain, an unapplied
+    /// ancestor was dropped, or `db` is not the database instance that created the batch.
+    pub async fn merkleize<E, C, I>(
+        self,
+        db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+    ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, N, S>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
+        I: crate::index::Ordered<Value = Location<F>> + 'static,
+    {
+        self.merkleize_with(db, &mut Proportional).await
+    }
+
+    /// Like [`Self::merkleize`], but advances the inactivity floor with `policy` instead of
+    /// [`Proportional`]. Has the same errors.
     #[tracing::instrument(
         name = "qmdb.current.ordered.batch.merkleize",
         level = "info",
         skip_all
     )]
-    pub async fn merkleize<E, C, I, P>(
+    pub async fn merkleize_with<E, C, I, P>(
         self,
         db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
-        metadata: Option<V::Value>,
         policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, N, S>
     where
@@ -713,11 +756,16 @@ where
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
         let prepared = inner.prepare(&db.any)?;
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_walk(metadata, Vec::new(), &bitmap_parent, policy)
+            .walk_floor_and_merkleize(Vec::new(), &bitmap_parent, policy)
             .await?;
-        let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
-        drop(retained_ancestors);
-        result
+        compute_current_layer(
+            inner,
+            retained_ancestors,
+            db,
+            &grafted_parent,
+            &bitmap_parent,
+        )
+        .await
     }
 }
 
@@ -725,11 +773,11 @@ where
 /// ancestor diffs. Avoids iterating raw operations.
 ///
 /// Pushes: one bit per operation in the batch. All false except active diff entries (whose `loc`
-/// falls in the batch) and the CommitFloor (last op).
+/// falls in the batch) and the Commit (last op).
 ///
-/// Clears: previous CommitFloor, plus the most recent superseded location for each mutated key. We
-/// search back through ancestors to find the most recent active location; if none exists, we clear
-/// the committed DB location (`base_old_loc`).
+/// Clears: previous Commit, plus the most recent superseded location for each mutated key. We
+/// search back through ancestors to find the most recent active location, and if none exists, we
+/// clear the key's database location (`base_old_loc`).
 #[allow(clippy::type_complexity)]
 fn build_chunk_overlay<F: Graftable, U, B: bitmap::Readable<N>, const N: usize>(
     base: &B,
@@ -745,11 +793,11 @@ where
     let appended_chunks = (batch_len as u64).div_ceil(ChunkOverlay::<N>::CHUNK_BITS) as usize;
     let mut overlay = ChunkOverlay::new(base, total_bits, diff.len() + appended_chunks + 1);
 
-    // 1. CommitFloor (last op) is always active.
+    // 1. Commit (last op) is always active.
     let commit_loc = batch_base + batch_len as u64 - 1;
     overlay.set_bit(base, commit_loc);
 
-    // 2. Inactivate previous CommitFloor.
+    // 2. Inactivate previous Commit.
     overlay.clear_bit(base, batch_base - 1);
 
     // 3. Set active bits + clear superseded locations from the diff. The diff is key-sorted,
@@ -787,7 +835,7 @@ where
     overlay
 }
 
-/// Merkleize grafted chunk digests while retaining the live ancestor chain.
+/// Merkleize grafted chunk digests while retaining the reachable ancestors.
 async fn merkleize_grafted_batch<F, H, S, const N: usize>(
     strategy: &S,
     grafted_parent: Arc<GenericMerkleizedBatch<F, H::Digest, S>>,
@@ -828,11 +876,17 @@ where
 /// Compute the current layer (bitmap + grafted MMR + canonical root) on top of a merkleized any
 /// batch.
 ///
+/// The any batch must have been prepared and merkleized against `db`.
+///
 /// Builds a chunk overlay from the diff, computes grafted MMR leaves from dirty chunks, and
 /// produces the `Arc<MerkleizedBatch>` directly.
+///
+/// `_retained_ancestors` is held only to keep ancestor batches alive while grafting and root
+/// computation read their nodes through weak parent links.
 async fn compute_current_layer<F, E, U, C, I, H, const N: usize, S>(
     inner: Arc<any::batch::MerkleizedBatch<F, H::Digest, U, S>>,
-    current_db: &super::db::Db<F, E, C, I, H, U, N, S>,
+    _retained_ancestors: RetainedAncestors<F, H::Digest, U, S>,
+    db: &super::db::Db<F, E, C, I, H, U, N, S>,
     grafted_parent: &Arc<merkle::batch::MerkleizedBatch<F, H::Digest, S>>,
     bitmap_parent: &BitmapBatch<N>,
 ) -> Result<Arc<MerkleizedBatch<F, H::Digest, U, N, S>>, Error<F>>
@@ -859,8 +913,14 @@ where
     );
 
     let grafting_height = grafting::height::<N>();
-    let ops_tree_adapter =
-        BatchStorageAdapter::new(&inner.journal_batch, &current_db.any.log.merkle);
+
+    // Merkleization reads ops-tree nodes only from memory. Graft roots of chunks the database has
+    // already grafted come from its retained roots, and all other nodes come from the batch chain
+    // or the database's `Mem`.
+    let ops_tree = Layered {
+        batch: &inner.journal_batch,
+        mem: db.any.log.merkle.mem(),
+    };
 
     // Snapshot ops_leaves for the post-batch state (the canonical root we're about to compute
     // sees this many ops). Thread it through `graftable_chunks` derivation and root computation.
@@ -877,7 +937,7 @@ where
     let graftable_overlay = grafting::graftable_chunks::<F>(*overlay_ops_leaves, grafting_height)
         .min(new_complete_chunks as u64) as usize;
     let graftable_parent = *grafted_parent.leaves() as usize;
-    let pruned_chunks = bitmap_parent.pruned_chunks();
+    let pruned_chunks = overlay.parent.pruned_chunks;
     assert!(
         pruned_chunks <= graftable_parent
             && graftable_parent <= graftable_overlay
@@ -885,43 +945,45 @@ where
         "invariant violated: pruned={pruned_chunks} graftable_parent={graftable_parent} graftable_overlay={graftable_overlay} new_complete={new_complete_chunks}"
     );
 
-    // Build the set of chunk indices whose grafted-leaf needs (re)computing:
-    //   1) Dirty chunks (bits changed in this batch) within the graftable range.
+    // Collect graft inputs for the chunks whose grafted leaf needs (re)computing:
+    //   1) Dirty chunks (bits changed in this batch) already in the parent's grafted tree.
     //   2) Pending -> graftable transitions: chunks newly graftable because the ops tree built
     //      their h=G ancestor in this batch. Their bitmap bytes may not be dirty (the chunk
     //      became graftable via ops growth alone) but they need a grafted-leaf entry now.
     let mut chunk_indices_to_update: Vec<usize> = overlay
         .chunks
         .iter()
-        .filter(|&(&idx, _)| idx < graftable_overlay && idx >= pruned_chunks)
+        .filter(|&(&idx, _)| idx < graftable_parent && idx >= pruned_chunks)
         .map(|(&idx, _)| idx)
         .collect();
-    chunk_indices_to_update.extend(graftable_parent..graftable_overlay);
     chunk_indices_to_update.sort_unstable();
-    chunk_indices_to_update.dedup();
-    let chunks_to_update = chunk_indices_to_update.into_iter().map(|idx| {
+
+    // Newly graftable chunks come last, in ascending order, so they append to the grafted tree as
+    // its next leaves.
+    let new_chunks = graftable_parent..graftable_overlay;
+    let mut graft_inputs = Vec::with_capacity(chunk_indices_to_update.len() + new_chunks.len());
+    for idx in chunk_indices_to_update.into_iter().chain(new_chunks) {
         let chunk = overlay
             .get(idx)
             .copied()
             .unwrap_or_else(|| bitmap_parent.get_chunk(idx));
-        (idx, chunk)
-    });
+        let digest = db.graft_roots.get_or_read::<F, N>(idx, &ops_tree)?;
+        graft_inputs.push((idx, digest, chunk));
+    }
 
-    // Prefetch each chunk's covering ops-tree node, then run graft hashing and the grafted
-    // MMR build/merkleize as one job through the strategy (against a snapshot of the
-    // committed grafted tree). An empty graft set hashes nothing, so it merkleizes without
-    // submitting a job.
-    let graft_inputs = read_graft_inputs::<F, _, N>(&ops_tree_adapter, chunks_to_update).await?;
+    // Run graft hashing and the grafted batch's build and merkleization as one strategy job,
+    // against a snapshot of the DB's grafted tree. An empty graft set hashes nothing, so it
+    // merkleizes without submitting a job.
     let grafted_batch = if graft_inputs.is_empty() {
         let grafted_hasher = grafting::hasher::<F, H>(grafting_height);
         grafted_parent
             .new_batch()
-            .merkleize(&current_db.grafted_tree, &grafted_hasher)
+            .merkleize(&db.grafted_tree, &grafted_hasher)
     } else {
         merkleize_grafted_batch::<F, H, S, N>(
-            &current_db.strategy,
+            &db.strategy,
             Arc::clone(grafted_parent),
-            &current_db.grafted_tree,
+            &db.grafted_tree,
             graft_inputs,
             grafting_height,
         )
@@ -929,7 +991,7 @@ where
     };
 
     // Build the layered bitmap (parent + overlay) before computing the canonical root, so that
-    // compute_db_root sees newly completed chunks. Using bitmap_parent alone would miss chunks
+    // the root witness sees newly completed chunks. Using bitmap_parent alone would miss chunks
     // that transitioned from partial to complete in this batch.
     let bitmap_batch = BitmapBatch::Layer(Arc::new(BitmapBatchLayer {
         parent: bitmap_parent.clone(),
@@ -937,47 +999,44 @@ where
         shared: Arc::clone(bitmap_parent.shared()),
     }));
 
-    // Compute canonical root. The grafted batch alone cannot resolve committed nodes,
-    // so layer it over the committed grafted MMR.
+    // Compute the canonical root. Grafted nodes the batch chain appended or updated come from the
+    // chain, and every other grafted node comes from the database's grafted tree.
     let ops_root = inner.root();
-    let layered = BatchOverMem {
+    let grafted_tree = Layered {
         batch: &grafted_batch,
-        mem: &current_db.grafted_tree,
+        mem: &*db.grafted_tree,
     };
     let grafted_storage =
-        grafting::Storage::<F, H, _, _>::new(&layered, grafting_height, &ops_tree_adapter);
-    // Compute partial chunk (last incomplete chunk, if any). The partial chunk lives at
-    // index `new_complete_chunks` (the chunk currently being filled with bits) -- distinct
-    // from `graftable_overlay` (the grafted-tree boundary). At gh >= 3, partial and pending can
-    // coexist; this branch only handles partial. The pending chunk (when present) is read
-    // from the bitmap inside `compute_db_root` via `pending_chunk()`.
-    let partial = partial_chunk::<_, N>(&bitmap_batch);
-    let canonical_root = compute_db_root::<F, H, _, _, N>(
+        grafting::Storage::<F, H, _, _>::new(&grafted_tree, grafting_height, &ops_tree);
+
+    let ops_root_witness = compute_ops_root_witness::<F, H, _, _, N>(
         &bitmap_batch,
         &grafted_storage,
         overlay_ops_leaves,
-        partial,
         inner.bounds.inactivity_floor,
-        &ops_root,
     )
     .await?;
+    let canonical_root = ops_root_witness.root::<H>(&ops_root);
 
     Ok(Arc::new(MerkleizedBatch {
         inner,
         grafted: grafted_batch,
         bitmap: bitmap_batch,
         canonical_root,
+        ops_root_witness,
+        pruned_chunks: Widen::widen(pruned_chunks),
     }))
 }
 
-/// A view of the committed bitmap plus zero or more speculative overlay `Layer`s.
+/// A view of the DB's bitmap plus zero or more speculative overlay `Layer`s.
 ///
-/// The chain terminates in a `Base` that references the shared committed bitmap. No validity
-/// check is performed. Callers must ensure they only read through batches whose chains are
-/// still valid prefixes of committed state (see [`Shared`]'s docs).
+/// The chain terminates in a `Base` that references the DB's shared bitmap. This enum performs no
+/// validity check of its own. Merkleization validates the database commitment and the bitmap
+/// instance before computing a root (see [`crate::qmdb::chain`]), and child construction may
+/// read the shared bitmap's length to trim applied layers without validating the chain.
 #[derive(Clone, Debug)]
 pub(crate) enum BitmapBatch<const N: usize> {
-    /// Chain terminal: shared reference to the committed bitmap.
+    /// Chain terminal: shared reference to the DB's bitmap.
     Base(Arc<Shared<N>>),
     /// Speculative layer on top of a parent batch.
     Layer(Arc<BitmapBatchLayer<N>>),
@@ -1007,9 +1066,9 @@ impl<const N: usize> BitmapBatch<N> {
 
     /// Return [`Error::StaleBatch`] unless this chain terminates in `bitmap`.
     ///
-    /// Each database instance owns one committed bitmap, so this binds a batch to the instance
-    /// that created it. Another instance with the same commitment cannot stand in for it, because
-    /// the retained chain reads the originating instance's bitmap.
+    /// Each database instance owns one bitmap, so this binds a batch to the instance that created
+    /// it. Another instance with the same commitment cannot stand in for it, because the retained
+    /// chain reads the originating instance's bitmap.
     fn ensure_based_on<F: Graftable>(&self, bitmap: &Arc<Shared<N>>) -> Result<(), Error<F>> {
         if Arc::ptr_eq(self.shared(), bitmap) {
             Ok(())
@@ -1018,9 +1077,9 @@ impl<const N: usize> BitmapBatch<N> {
         }
     }
 
-    /// Return a chain equivalent to `self` with any `Layer` whose overlay is now fully committed
-    /// replaced by a direct reference to the committed bitmap. Since `apply_batch` commits
-    /// contiguous prefixes, committed `Layer`s are always at the bottom of the chain.
+    /// Return a chain equivalent to `self` with any `Layer` whose overlay is fully applied replaced
+    /// by a direct reference to the DB's bitmap. Since `apply_batch` applies contiguous prefixes,
+    /// applied `Layer`s are always at the bottom of the chain.
     fn trim_committed(&self) -> Self {
         let shared = self.shared();
         let committed = bitmap::Readable::<N>::len(shared.as_ref());
@@ -1107,24 +1166,75 @@ impl<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
         self.inner.root()
     }
 
-    /// Return the [`Bounds`] of the batch.
+    /// Return the witness binding [`Self::ops_root`] to [`Self::root`].
+    pub const fn ops_root_witness(&self) -> &OpsRootWitness<F, D> {
+        &self.ops_root_witness
+    }
+
+    /// Return the number of bitmap chunks pruned when this batch was merkleized.
+    pub const fn pruned_chunks(&self) -> u64 {
+        self.pruned_chunks
+    }
+
+    /// Return the bitmap chunks this batch wrote, ascending by index.
+    ///
+    /// No chunk is below [`Self::pruned_chunks`]. Replaying a chain's chunks in order reproduces
+    /// each batch's unpruned chunks.
+    pub fn chunks(&self) -> Vec<(u64, [u8; N])> {
+        // A `Base` bitmap has no overlay, so its batch wrote no chunks. The sort gives equal
+        // results an equal order.
+        let mut chunks: Vec<(u64, [u8; N])> = match &self.bitmap {
+            BitmapBatch::Base(_) => Vec::new(),
+            BitmapBatch::Layer(layer) => layer
+                .overlay
+                .chunks
+                .iter()
+                .map(|(&index, &chunk)| (Widen::widen(index), chunk))
+                .collect(),
+        };
+        chunks.sort_unstable_by_key(|(index, _)| *index);
+        chunks
+    }
+
+    /// Return the grafted nodes this batch appended or overwrote, ascending by operations-tree
+    /// position.
+    ///
+    /// Replaying a chain's nodes in order reproduces each batch's grafted tree.
+    pub fn grafted_nodes(&self) -> Vec<(Position<F>, D)> {
+        // The sort gives equal results an equal order.
+        let mut nodes: Vec<(Position<F>, D)> = self
+            .grafted
+            .local_nodes()
+            .map(|(pos, digest)| {
+                (
+                    grafting::grafted_to_ops_pos::<F>(pos, grafting::height::<N>()),
+                    digest,
+                )
+            })
+            .collect();
+        nodes.sort_unstable_by_key(|(pos, _)| *pos);
+        nodes
+    }
+
+    /// Return the ops-level [`Bounds`] of the batch.
+    ///
+    /// All commitments (`base`, `db`, `tip`, and `ancestors`) contain ops roots. In particular,
+    /// `bounds().tip.root` equals [`Self::ops_root`], not [`Self::root`].
     pub fn bounds(&self) -> &Bounds<F, D> {
         self.inner.bounds()
     }
 
     /// Return the operations this batch appends to the ops log and the location of the first.
     ///
-    /// Delegates to the wrapped ops-level batch. The bitmap state contributes to the
-    /// canonical root but appends no log operations. There are no matching proof or
-    /// pinned-node methods: an ops-level proof verifies only against [`Self::ops_root`],
-    /// never the grafted [`Self::root`] that blocks commit to.
+    /// The bitmap contributes to the canonical root but appends no operations.
+    /// [`Self::ops_pinned_nodes`] is the frontier they extend.
     pub fn operations(&self) -> (Location<F>, Arc<Vec<Operation<F, U>>>) {
         self.inner.operations()
     }
 
     /// Return the batch's safe sync boundary.
     ///
-    /// This equals the boundary [`super::db::Db::sync_boundary`] reports once this batch is applied.
+    /// This equals the boundary [`super::Db::sync_boundary`] reports once this batch is applied.
     pub fn sync_boundary(&self) -> Location<F> {
         // Derive from the commit's chunk-aligned inactivity floor, the same quantity the DB uses
         // after apply. Deliberately not the physical bitmap pruning boundary, which can lag the
@@ -1143,12 +1253,12 @@ where
 {
     /// Create a new speculative batch of operations with this batch as its parent.
     ///
-    /// All unapplied ancestors in the chain must be kept alive until the child (or any
-    /// descendant) is merkleized. Otherwise, `merkleize` returns [`Error::StaleBatch`].
+    /// Every unapplied ancestor in the chain must be held until the child (or any descendant) is
+    /// merkleized. Otherwise, `merkleize` returns [`Error::StaleBatch`].
     ///
-    /// This is only valid while `self` is still on the winning branch. If a different branch has
-    /// been applied since `self` was created, `self` is no longer a valid parent and must not be
-    /// extended.
+    /// A child can be created from a stale parent. While the database is at none of the chain's
+    /// states, the child's reads return [`Error::StaleRead`], and merkleizing it returns
+    /// [`Error::StaleBatch`].
     pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, U, N, S>
     where
         H: Hasher<Digest = D>,
@@ -1160,10 +1270,27 @@ where
         )
     }
 
-    /// Read through: local diff -> ancestor diffs -> committed DB.
+    /// Return the operations-tree frontier at this batch's first operation, with the order, errors,
+    /// and retention of [`any::batch::MerkleizedBatch::pinned_nodes`]. Replaying
+    /// [`Self::operations`] onto it at the batch's inactivity floor recomputes [`Self::ops_root`].
+    pub fn ops_pinned_nodes<E, C, I, H>(
+        &self,
+        db: &super::db::Db<F, E, C, I, H, U, N, S>,
+    ) -> Result<Vec<D>, Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>>,
+        H: Hasher<Digest = D>,
+    {
+        self.inner.pinned_nodes(&db.any)
+    }
+
+    /// Read through: local diff -> ancestor diffs -> database.
     ///
-    /// This is only valid while `self` remains on the committed prefix. If a non-ancestor batch
-    /// has been applied since `self` was merkleized, do not read through it.
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain.
     pub async fn get<E, C, I, H>(
         &self,
         key: &U::Key,
@@ -1181,9 +1308,13 @@ where
     /// Batch read multiple keys.
     ///
     /// Returns results in the same order as the input keys.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain.
     pub async fn get_many<E, C, I, H>(
         &self,
-        keys: &[&U::Key],
+        keys: &[impl Borrow<U::Key> + Sync],
         db: &super::db::Db<F, E, C, I, H, U, N, S>,
     ) -> Result<Vec<Option<U::Value>>, Error<F>>
     where
@@ -1208,6 +1339,10 @@ where
     ///
     /// Includes this batch's changes and its ancestors' changes. The query key need not be
     /// active. Returns `None` if there is no greater key, without wrapping.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain.
     pub async fn get_next_key<E, C, I, H>(
         &self,
         key: &K,
@@ -1226,6 +1361,10 @@ where
     ///
     /// Includes this batch's changes and its ancestors' changes. The query key need not be
     /// active. Returns `None` if there is no smaller key, without wrapping.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain.
     pub async fn get_prev_key<E, C, I, H>(
         &self,
         key: &K,
@@ -1252,11 +1391,10 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    /// Create an initial [`MerkleizedBatch`] from the current committed DB state.
+    /// Create a [`MerkleizedBatch`] with no operations at the DB's current state.
     ///
-    /// The returned batch is rooted at the current committed prefix, but it is not a persistent
-    /// snapshot across later divergent commits. If some other branch is applied afterward, this
-    /// batch is no longer valid and must not be read through, extended, or applied.
+    /// Once the DB moves to another state, reads through it return [`Error::StaleRead`] and
+    /// applying it returns [`Error::StaleBatch`].
     pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, U, N, S>> {
         let grafted = self.grafted_snapshot();
         Arc::new(MerkleizedBatch {
@@ -1264,177 +1402,32 @@ where
             grafted,
             bitmap: BitmapBatch::Base(Arc::clone(&self.any.bitmap)),
             canonical_root: self.root,
+            ops_root_witness: self.ops_root_witness.clone(),
+            pruned_chunks: Widen::widen(self.any.bitmap.pruned_chunks()),
         })
-    }
-}
-
-#[cfg(any(test, feature = "test-traits"))]
-mod trait_impls {
-    use super::*;
-    use crate::{
-        journal::contiguous::Mutable,
-        qmdb::any::traits::{
-            BatchableDb, MerkleizedBatch as MerkleizedBatchTrait,
-            UnmerkleizedBatch as UnmerkleizedBatchTrait,
-        },
-    };
-    use std::future::Future;
-
-    type CurrentDb<F, E, C, I, H, U, const N: usize, S> =
-        crate::qmdb::current::db::Db<F, E, C, I, H, U, N, S>;
-
-    impl<F, K, V, H, E, C, I, const N: usize, S>
-        UnmerkleizedBatchTrait<CurrentDb<F, E, C, I, H, update::Unordered<K, V>, N, S>>
-        for UnmerkleizedBatch<F, H, update::Unordered<K, V>, N, S>
-    where
-        F: Graftable,
-        K: Key,
-        V: ValueEncoding,
-        H: Hasher,
-        E: Context,
-        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
-        I: UnorderedIndex<Value = Location<F>> + 'static,
-        S: Strategy,
-        Operation<F, update::Unordered<K, V>>: Codec,
-    {
-        type Family = F;
-        type K = K;
-        type V = V::Value;
-        type Metadata = V::Value;
-        type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, N, S>>;
-
-        fn write(self, key: K, value: Option<V::Value>) -> Self {
-            Self::write(self, key, value)
-        }
-
-        async fn merkleize<P: Policy<F, K, V::Value> + Send>(
-            self,
-            db: &CurrentDb<F, E, C, I, H, update::Unordered<K, V>, N, S>,
-            metadata: Option<V::Value>,
-            policy: &mut P,
-        ) -> Result<Self::Merkleized, crate::qmdb::Error<F>> {
-            self.merkleize(db, metadata, policy).await
-        }
-    }
-
-    impl<F, K, V, H, E, C, I, const N: usize, S>
-        UnmerkleizedBatchTrait<CurrentDb<F, E, C, I, H, update::Ordered<K, V>, N, S>>
-        for UnmerkleizedBatch<F, H, update::Ordered<K, V>, N, S>
-    where
-        F: Graftable,
-        K: Key,
-        V: ValueEncoding,
-        H: Hasher,
-        E: Context,
-        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
-        I: crate::index::Ordered<Value = Location<F>> + 'static,
-        S: Strategy,
-        Operation<F, update::Ordered<K, V>>: Codec,
-    {
-        type Family = F;
-        type K = K;
-        type V = V::Value;
-        type Metadata = V::Value;
-        type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, N, S>>;
-
-        fn write(self, key: K, value: Option<V::Value>) -> Self {
-            Self::write(self, key, value)
-        }
-
-        async fn merkleize<P: Policy<F, K, V::Value> + Send>(
-            self,
-            db: &CurrentDb<F, E, C, I, H, update::Ordered<K, V>, N, S>,
-            metadata: Option<V::Value>,
-            policy: &mut P,
-        ) -> Result<Self::Merkleized, crate::qmdb::Error<F>> {
-            self.merkleize(db, metadata, policy).await
-        }
-    }
-
-    impl<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
-        MerkleizedBatchTrait for Arc<MerkleizedBatch<F, D, U, N, S>>
-    where
-        Operation<F, U>: Codec,
-    {
-        type Digest = D;
-
-        fn root(&self) -> D {
-            MerkleizedBatch::root(self)
-        }
-    }
-
-    impl<F, E, K, V, C, I, H, const N: usize, S> BatchableDb
-        for CurrentDb<F, E, C, I, H, update::Unordered<K, V>, N, S>
-    where
-        F: Graftable,
-        E: Context,
-        K: Key,
-        V: ValueEncoding,
-        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
-        I: UnorderedIndex<Value = Location<F>> + 'static,
-        H: Hasher,
-        S: Strategy,
-        Operation<F, update::Unordered<K, V>>: Codec,
-    {
-        type Family = F;
-        type K = K;
-        type V = V::Value;
-        type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, N, S>>;
-        type Batch = UnmerkleizedBatch<F, H, update::Unordered<K, V>, N, S>;
-
-        fn new_batch(&self) -> Self::Batch {
-            self.new_batch()
-        }
-
-        fn apply_batch(
-            self,
-            batch: Self::Merkleized,
-        ) -> impl Future<Output = Result<Self, crate::qmdb::Error<F>>> {
-            self.apply_batch(batch)
-        }
-    }
-
-    impl<F, E, K, V, C, I, H, const N: usize, S> BatchableDb
-        for CurrentDb<F, E, C, I, H, update::Ordered<K, V>, N, S>
-    where
-        F: Graftable,
-        E: Context,
-        K: Key,
-        V: ValueEncoding,
-        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
-        I: crate::index::Ordered<Value = Location<F>> + 'static,
-        H: Hasher,
-        S: Strategy,
-        Operation<F, update::Ordered<K, V>>: Codec,
-    {
-        type Family = F;
-        type K = K;
-        type V = V::Value;
-        type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, N, S>>;
-        type Batch = UnmerkleizedBatch<F, H, update::Ordered<K, V>, N, S>;
-
-        fn new_batch(&self) -> Self::Batch {
-            self.new_batch()
-        }
-
-        fn apply_batch(
-            self,
-            batch: Self::Merkleized,
-        ) -> impl Future<Output = Result<Self, crate::qmdb::Error<F>>> {
-            self.apply_batch(batch)
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{mmb, mmr, utils::detached::block_strategy};
-    use commonware_cryptography::Sha256;
+    use crate::{
+        mmb, mmr,
+        qmdb::{
+            ProofExt,
+            current::{tests::fixed_config, unordered::fixed},
+            floor::Hold,
+        },
+        translator::OneCap,
+        utils::detached::block_strategy,
+    };
+    use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
-    use commonware_parallel::{Manual, Rayon};
+    use commonware_parallel::{Rayon, Sequential, mocks::Explorer, rayon::ThreadPoolBuilder};
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_utils::{NZUsize, bitmap::Prunable as BitMap};
     use std::{
+        collections::BTreeMap,
         future::Future as _,
         task::Context as TaskContext,
         time::{Duration, Instant},
@@ -1444,8 +1437,21 @@ mod tests {
     const N: usize = 4;
     type Bm = BitMap<N>;
     type GraftedBatch =
-        Arc<GenericMerkleizedBatch<mmb::Family, <Sha256 as Hasher>::Digest, Manual<Rayon>>>;
+        Arc<GenericMerkleizedBatch<mmb::Family, <Sha256 as Hasher>::Digest, Explorer>>;
     type Location = mmr::Location;
+
+    impl<F, H, U, const BYTES: usize, S: Strategy> Staged<F, H, U, BYTES, S>
+    where
+        F: Graftable,
+        U: update::Update,
+        H: Hasher,
+        Operation<F, U>: Codec,
+    {
+        /// The location each staged read slot resolved to, or `None` for an unresolved slot.
+        pub(crate) fn resolved_locs(&self) -> Vec<Option<any::batch::StagedLoc<F>>> {
+            self.inner.resolved_locs()
+        }
+    }
 
     fn make_bitmap(bits: &[bool]) -> Bm {
         let mut bm = Bm::new();
@@ -1456,7 +1462,7 @@ mod tests {
     }
 
     fn grafted_chain(
-        strategy: &Manual<Rayon>,
+        strategy: &Explorer,
         mem: &Arc<Mem<mmb::Family, <Sha256 as Hasher>::Digest>>,
     ) -> (GraftedBatch, GraftedBatch) {
         let hasher = grafting::hasher::<mmb::Family, Sha256>(grafting::height::<1>());
@@ -1475,8 +1481,8 @@ mod tests {
     /// A detached grafted-tree merkleization owns the full ancestor chain after cancellation.
     #[test_traced]
     fn test_grafted_merkleize_retains_ancestors_after_cancellation() {
-        let strategy = Rayon::new(NZUsize!(2)).unwrap();
-        let manual = strategy.manual();
+        let pool = Rayon::new(ThreadPoolBuilder::new(NZUsize!(2))).unwrap();
+        let strategy = Explorer::parallel(&pool);
         let mem = Arc::new(Mem::<mmb::Family, <Sha256 as Hasher>::Digest>::new());
         let grafting_height = grafting::height::<1>();
         let graft_inputs = || vec![(0, Sha256::hash(&[b"replacement"]), [1u8; 1])];
@@ -1484,11 +1490,11 @@ mod tests {
         let mut context = TaskContext::from_waker(&waker);
 
         // Observe the worker result so a missing grandparent fails the test directly.
-        let (a, b) = grafted_chain(&manual, &mem);
+        let (a, b) = grafted_chain(&strategy, &mem);
         let ancestor = Arc::downgrade(&a);
-        let release = block_strategy(&strategy, 2);
+        let release = block_strategy(&pool, 2);
         let mut merkleize = Box::pin(merkleize_grafted_batch::<mmb::Family, Sha256, _, 1>(
-            &manual,
+            &strategy,
             Arc::clone(&b),
             &mem,
             graft_inputs(),
@@ -1502,11 +1508,11 @@ mod tests {
         assert!(ancestor.upgrade().is_none());
 
         // Drop the waiter while the worker is queued to prove the guard moved with it.
-        let (a, b) = grafted_chain(&manual, &mem);
+        let (a, b) = grafted_chain(&strategy, &mem);
         let ancestor = Arc::downgrade(&a);
-        let release = block_strategy(&strategy, 2);
+        let release = block_strategy(&pool, 2);
         let mut merkleize = Box::pin(merkleize_grafted_batch::<mmb::Family, Sha256, _, 1>(
-            &manual,
+            &strategy,
             Arc::clone(&b),
             &mem,
             graft_inputs(),
@@ -1531,7 +1537,7 @@ mod tests {
 
     #[test]
     fn chunk_overlay_pushes() {
-        use crate::qmdb::any::value::FixedEncoding;
+        use crate::qmdb::value::FixedEncoding;
         use commonware_utils::sequence::FixedBytes;
 
         type K = FixedBytes<4>;
@@ -1569,18 +1575,18 @@ mod tests {
         let overlay = build_chunk_overlay::<mmr::Family, U, _, N>(&base, 4, 4, &diff, &[]);
 
         // Chunk 0 should have: bits 0-3 from base (all set), bit 4 set (key1), bits 5-6 false
-        // (inactive), bit 7 set (CommitFloor at loc 7). Also bit 3 cleared (previous commit).
+        // (inactive), bit 7 set (Commit at loc 7). Also bit 3 cleared (previous commit).
         let c0 = overlay.get(0).expect("chunk 0 should be dirty");
         assert_ne!(c0[0] & (1 << 4), 0); // key1 active
         assert_eq!(c0[0] & (1 << 5), 0); // inactive
         assert_eq!(c0[0] & (1 << 6), 0); // inactive
-        assert_ne!(c0[0] & (1 << 7), 0); // CommitFloor
+        assert_ne!(c0[0] & (1 << 7), 0); // Commit
         assert_eq!(c0[0] & (1 << 3), 0); // previous commit cleared
     }
 
     #[test]
     fn chunk_overlay_clears() {
-        use crate::qmdb::any::value::FixedEncoding;
+        use crate::qmdb::value::FixedEncoding;
         use commonware_utils::sequence::FixedBytes;
 
         type K = FixedBytes<4>;
@@ -1637,7 +1643,7 @@ mod tests {
     /// partial chunk data, not zero it out.
     #[test]
     fn chunk_overlay_preserves_partial_parent_chunk() {
-        use crate::qmdb::any::value::FixedEncoding;
+        use crate::qmdb::value::FixedEncoding;
         use commonware_utils::sequence::FixedBytes;
 
         type K = FixedBytes<4>;
@@ -1649,7 +1655,7 @@ mod tests {
 
         // Segment of 20 ops starting at loc 20. This pushes total to 40 bits, completing chunk 0
         // (32 bits) and starting chunk 1. Diff: only one active key at loc 35 (in chunk 1), plus
-        // CommitFloor at loc 39. No active bits land in chunk 0's new region (bits 20-31).
+        // Commit at loc 39. No active bits land in chunk 0's new region (bits 20-31).
         let key1 = FixedBytes::from([1, 0, 0, 0]);
         let mut diff = vec![(
             key1,
@@ -1799,10 +1805,10 @@ mod tests {
         let bits = [true, false, true, true, false, false, true, false];
         let base = make_bitmap(&bits);
 
-        // Flat committed base.
+        // Flat base.
         let flat = BitmapBatch::Base(Arc::new(Shared::new(make_bitmap(&bits))));
 
-        // One layer: clears committed bits 3 and 6, appends 8..12 (only 9 set).
+        // One layer: clears base bits 3 and 6, appends 8..12 (only 9 set).
         let shared = Arc::new(Shared::new(make_bitmap(&bits)));
         let mut overlay = ChunkOverlay::new(&base, 12, 1);
         overlay.clear_bit(&base, 3);
@@ -1867,10 +1873,10 @@ mod tests {
                 assert_matches(name, &chain, tip);
             }
 
-            // Prefetch-then-live handoff: the prefetch is clamped to the committed
-            // boundary and the live scan resumes from the continuation with the
-            // post-batch tip. The handoff emits exactly every set bit in `[floor, len)`
-            // and every location in `[len, tip)`.
+            // Prefetch-then-scan handoff: the prefetch is clamped to `committed` and the
+            // remaining scan resumes from the continuation with the post-batch tip. The
+            // handoff emits exactly every set bit in `[floor, len)` and every location in
+            // `[len, tip)`.
             let tip = len + 3;
             let cap = tip as usize;
             let pruned_bits = bitmap::Readable::<N>::pruned_bits(&chain);
@@ -1893,7 +1899,7 @@ mod tests {
         let base = make_bitmap(&bits);
         let shared = Arc::new(Shared::new(make_bitmap(&bits)));
 
-        // Layer 1 clears committed bit 3 and appends bits 8..12 (only 9 set).
+        // Layer 1 clears base bit 3 and appends bits 8..12 (only 9 set).
         let mut overlay1 = ChunkOverlay::new(&base, 12, 2);
         overlay1.clear_bit(&base, 3);
         overlay1.set_bit(&base, 9);
@@ -1915,10 +1921,9 @@ mod tests {
             shared,
         }));
 
-        // Bits cleared by any layer are skipped (no wasted log reads), set bits -- committed
-        // or appended, from whichever layer materialized the chunk last -- are emitted
-        // ascending, and locations at or beyond the layered length up to `tip` are emitted
-        // sequentially.
+        // Bits cleared by any layer are skipped (no wasted log reads), set bits (base or appended,
+        // from whichever layer materialized the chunk last) are emitted ascending, and locations at
+        // or beyond the layered length up to `tip` are emitted sequentially.
         let scan = |mut chain: &BitmapBatch<N>, tip: u64| {
             let mut got = Vec::new();
             chain.fill(Location::new(0), tip, 16, &mut got);
@@ -1940,9 +1945,8 @@ mod tests {
         let base = make_bitmap(&bits);
         let shared = Arc::new(Shared::new(make_bitmap(&bits)));
 
-        // Layer touches only chunk 1: clears committed bit 35 and appends bits 40..44
-        // (only 41 set). Chunk 0 stays unmaterialized, so the scan must fall through to
-        // the committed base there.
+        // Layer touches only chunk 1: clears base bit 35 and appends bits 40..44 (only 41 set).
+        // Chunk 0 stays unmaterialized, so the scan must fall through to the base there.
         let mut overlay = ChunkOverlay::new(&base, 44, 1);
         overlay.clear_bit(&base, 35);
         overlay.set_bit(&base, 41);
@@ -1962,11 +1966,10 @@ mod tests {
 
     //
     // `trim_committed` is called from `MerkleizedBatch::new_batch` to strip any `Layer`s whose
-    // overlays have already been absorbed into the shared committed bitmap by a prior apply.
-    // The implementation is a single loop that collects uncommitted overlays top-down and
-    // rebuilds a fresh chain rooted at `Base`. These tests cover distinct input shapes directly,
-    // without going through the full Db/batch machinery, so the function's structural output
-    // can be asserted.
+    // overlays have already been absorbed into the DB's shared bitmap by a prior apply. The
+    // implementation is a single loop that collects unapplied overlays top-down and rebuilds a
+    // fresh chain rooted at `Base`. These tests cover distinct input shapes directly, without going
+    // through the full Db/batch machinery, so the function's structural output can be asserted.
 
     /// Build a chain `Base(shared) -> Layer(len=L1) -> Layer(len=L2) -> ...` from a list of
     /// overlay lengths (bottom to top). Each constructed `Layer` caches `shared` per the
@@ -1999,10 +2002,10 @@ mod tests {
         lens
     }
 
-    /// Input is already a bare `Base` with no speculative layers on top -- the loop body never
-    /// runs, `kept` stays empty, and the result is a freshly constructed `Base` pointing at the
-    /// same `Shared`. Real-world trigger: `MerkleizedBatch::new_batch` on a batch whose
-    /// chain was previously trimmed flat (e.g., immediately after an apply collapsed everything).
+    /// Input is already a bare `Base` with no speculative layers on top. The loop body never runs,
+    /// `kept` stays empty, and the result is a freshly constructed `Base` pointing at the same
+    /// `Shared`. Real-world trigger: `MerkleizedBatch::new_batch` on a batch whose chain was
+    /// previously trimmed flat (e.g., immediately after an apply collapsed everything).
     #[test]
     fn trim_committed_already_base() {
         let shared = Arc::new(Shared::<N>::new(make_bitmap(&[true; 64])));
@@ -2015,14 +2018,15 @@ mod tests {
         }
     }
 
-    /// Every layer has been absorbed by prior applies -- the loop breaks on the first iteration
+    /// Every layer has been absorbed by prior applies. The loop breaks on the first iteration
     /// and `kept` stays empty, so the result is a bare `Base`. This is the steady-state
     /// "extend a just-applied batch" flow: after `apply_batch(A)`, `A`'s own layer has
     /// `overlay.len == committed` and the next `new_batch` call should start from a clean
     /// terminal.
     #[test]
     fn trim_committed_all_committed() {
-        // `shared.len() == 64`; the single layer's `overlay.len == 32 (<= 64)`, so it's committed.
+        // `shared.len() == 64` and the single layer's `overlay.len == 32 (<= 64)`, so it is
+        // applied.
         let shared = Arc::new(Shared::<N>::new(make_bitmap(&[true; 64])));
         let chain = make_chain(&shared, &[32]);
         let result = chain.trim_committed();
@@ -2033,13 +2037,13 @@ mod tests {
         }
     }
 
-    /// Every layer is still speculative -- the loop walks all the way to `Base` without
+    /// Every layer is still speculative. The loop walks all the way to `Base` without
     /// breaking, and `kept` holds every overlay. The rebuilt chain is structurally equivalent
     /// to the input (same overlay lens, same shared terminal). Real-world trigger: speculating
     /// multiple batches deep (A, then B off A, then C off B) without `apply_batch` in between.
     #[test]
     fn trim_committed_none_committed() {
-        // `shared.len() == 32`; both overlays have `len > 32`, so neither is committed.
+        // `shared.len() == 32` and both overlays have `len > 32`, so neither is applied.
         let shared = Arc::new(Shared::<N>::new(make_bitmap(&[true; 32])));
         let chain = make_chain(&shared, &[64, 96]);
         let result = chain.trim_committed();
@@ -2047,36 +2051,386 @@ mod tests {
         assert_eq!(chain_overlays(&result), vec![64, 96]);
     }
 
-    /// Exactly one layer is uncommitted (the newest) on top of a committed prefix -- the
-    /// dominant pattern in chained growth. The loop collects the one uncommitted overlay, and
-    /// the rebuild produces `Layer(Base, overlay_B)`. Also verifies the rebuilt layer carries
-    /// the cached `shared` reference correctly. Real-world trigger: apply parent A, then B
-    /// held alive off A, then `B.new_batch()` to build C.
+    /// Exactly one layer is unapplied (the newest) on top of an applied prefix. This is the
+    /// dominant pattern in chained growth. The loop collects the one unapplied overlay, and the
+    /// rebuild produces `Layer(Base, overlay_B)`. Also verifies the rebuilt layer carries the
+    /// cached `shared` reference correctly. Real-world trigger: apply parent A, keep B (built on
+    /// A) held, then call `B.new_batch()` to build C.
     #[test]
     fn trim_committed_exactly_one_uncommitted() {
-        // `shared.len() == 64`; committed layer (`overlay.len == 64`) + uncommitted (`96`).
+        // `shared.len() == 64`, so the first layer (`overlay.len == 64`) is applied and the second
+        // (`96`) is not.
         let shared = Arc::new(Shared::<N>::new(make_bitmap(&[true; 64])));
         let chain = make_chain(&shared, &[64, 96]);
         let result = chain.trim_committed();
-        // The committed layer is gone; only the uncommitted overlay remains.
+
+        // The applied layer is gone, and only the unapplied overlay remains.
         assert_eq!(chain_overlays(&result), vec![96]);
+
         // And the rebuilt layer's `shared` field still points at the original terminal.
         assert!(Arc::ptr_eq(result.shared(), &shared));
     }
 
-    /// Two or more uncommitted layers on top of a committed prefix -- exercises the loop's
+    /// Two or more unapplied layers on top of an applied prefix. This exercises the loop's
     /// iterated `kept.push` and the rebuild's iterated `Arc::new(BitmapBatchLayer)`, including
     /// the cached `shared` wire-through on every reconstructed layer. Real-world trigger:
-    /// build A, then B off A, then C off B; apply only A; then call `C.new_batch()`.
+    /// build A, then B off A, then C off B, apply only A, and call `C.new_batch()`.
     #[test]
     fn trim_committed_multiple_uncommitted() {
-        // `shared.len() == 64`; committed layer (64), then two uncommitted (96, 128).
+        // `shared.len() == 64`, so the first layer (64) is applied and the next two (96, 128)
+        // are not.
         let shared = Arc::new(Shared::<N>::new(make_bitmap(&[true; 64])));
         let chain = make_chain(&shared, &[64, 96, 128]);
         let result = chain.trim_committed();
-        // Committed layer dropped; uncommitted pair preserved in order.
+
+        // The applied layer is gone, and the unapplied pair stays in order.
         assert_eq!(chain_overlays(&result), vec![96, 128]);
+
         // Every reconstructed layer must still cache the original shared terminal.
         assert!(Arc::ptr_eq(result.shared(), &shared));
+    }
+
+    type TestDb<F, const N: usize> =
+        fixed::Db<F, deterministic::Context, Digest, Digest, Sha256, OneCap, N, Sequential>;
+
+    type TestUpdate = update::Unordered<Digest, crate::qmdb::value::FixedEncoding<Digest>>;
+
+    /// What a batch wrote: its pruned boundary, chunks, and grafted nodes.
+    #[derive(Debug, PartialEq)]
+    struct Writes<F: Graftable, const N: usize> {
+        pruned_chunks: u64,
+        chunks: Vec<(u64, [u8; N])>,
+        nodes: Vec<(Position<F>, Digest)>,
+    }
+
+    impl<F: Graftable, const N: usize> Writes<F, N> {
+        fn of(batch: &MerkleizedBatch<F, Digest, TestUpdate, N, Sequential>) -> Self {
+            let writes = Self {
+                pruned_chunks: batch.pruned_chunks(),
+                chunks: batch.chunks(),
+                nodes: batch.grafted_nodes(),
+            };
+
+            // Both lists ascend without repeats, and no chunk is below the pruned boundary.
+            assert!(writes.chunks.windows(2).all(|pair| pair[0].0 < pair[1].0));
+            assert!(writes.nodes.windows(2).all(|pair| pair[0].0 < pair[1].0));
+            assert!(
+                writes
+                    .chunks
+                    .iter()
+                    .all(|(idx, _)| *idx >= writes.pruned_chunks)
+            );
+            writes
+        }
+    }
+
+    /// A mirror that holds bitmap chunks by chunk index and grafted nodes by operations-tree
+    /// position. It is seeded from the database and advanced only by applying writes.
+    struct Mirror<F: Graftable, const N: usize> {
+        chunks: BTreeMap<u64, [u8; N]>,
+        nodes: BTreeMap<Position<F>, Digest>,
+    }
+
+    impl<F: Graftable, const N: usize> Mirror<F, N> {
+        /// Seed a mirror with the database's unpruned bitmap chunks and grafted nodes.
+        fn from_db(db: &TestDb<F, N>) -> Self {
+            // Copy every unpruned chunk, including a trailing partial chunk.
+            let bitmap = db.bitmap();
+            let chunks = (bitmap.pruned_chunks() as u64..bitmap.len().div_ceil((N * 8) as u64))
+                .map(|idx| (idx, bitmap.get_chunk(idx as usize)))
+                .collect();
+
+            // Copy every grafted node the database retains, keyed by operations-tree position.
+            let nodes = (0..*db.grafted_tree.size())
+                .filter_map(|pos| {
+                    db.grafted_tree.get_node(Position::new(pos)).map(|digest| {
+                        (
+                            grafting::grafted_to_ops_pos::<F>(
+                                Position::new(pos),
+                                grafting::height::<N>(),
+                            ),
+                            digest,
+                        )
+                    })
+                })
+                .collect();
+            Self { chunks, nodes }
+        }
+
+        /// Insert every chunk and node in `writes` into the mirror, replacing any existing entry.
+        fn apply(&mut self, writes: &Writes<F, N>) {
+            self.chunks.extend(writes.chunks.iter().copied());
+            self.nodes.extend(writes.nodes.iter().copied());
+        }
+
+        /// Check that the mirror holds every unpruned chunk and grafted node `db` retains.
+        fn check(&self, db: &TestDb<F, N>) {
+            let expected = Self::from_db(db);
+            for (idx, chunk) in &expected.chunks {
+                assert_eq!(self.chunks.get(idx), Some(chunk));
+            }
+            for (pos, digest) in &expected.nodes {
+                assert_eq!(self.nodes.get(pos), Some(digest));
+            }
+        }
+    }
+
+    /// Check that a batch's witness binds its operations root to its canonical root, and that an
+    /// ops-level proof of its operations and pinned nodes verifies under that operations root.
+    fn check_frontier<F: Graftable, const N: usize>(
+        batch: &MerkleizedBatch<F, Digest, TestUpdate, N, Sequential>,
+        db: &TestDb<F, N>,
+    ) {
+        assert!(
+            batch
+                .ops_root_witness()
+                .verify::<Sha256>(&batch.ops_root(), &batch.root())
+        );
+        let (start, operations) = batch.operations();
+        let pins = batch.ops_pinned_nodes(db).unwrap();
+        let proof = batch.inner.proof(&db.any).unwrap();
+        assert!(proof.verify_with_pinned_nodes::<Sha256, _>(
+            start,
+            operations.iter(),
+            &pins,
+            &batch.ops_root(),
+        ));
+    }
+
+    /// Write the hash of `round` to the key hashed from each index in `keys`.
+    fn write_keys<F: Graftable, const N: usize>(
+        mut batch: UnmerkleizedBatch<F, Sha256, TestUpdate, N, Sequential>,
+        keys: Range<u64>,
+        round: u64,
+    ) -> UnmerkleizedBatch<F, Sha256, TestUpdate, N, Sequential> {
+        let value = Sha256::hash(&[&round.to_be_bytes()]);
+        for key in keys {
+            batch = batch.write(Sha256::hash(&[&key.to_be_bytes()]), Some(value));
+        }
+        batch
+    }
+
+    /// Replay a parent and its child, both merkleized before either is applied, into a mirror.
+    async fn replay_chained<F: Graftable, const N: usize>(ctx: deterministic::Context) {
+        // The parent writes more than two chunks of operations, so it appends grafted nodes. The
+        // child rewrites every key, so its writes both overwrite nodes the parent appended and
+        // append nodes of their own.
+        let mut db = TestDb::<F, N>::init(
+            ctx.child("storage"),
+            fixed_config::<OneCap>("chained"),
+            None,
+        )
+        .await
+        .unwrap();
+        let mut mirror = Mirror::from_db(&db);
+        let count = (N * 16 + 5) as u64;
+        let parent = write_keys(db.new_batch(), 0..count, 0)
+            .merkleize_with(&db, &mut Hold)
+            .await
+            .unwrap();
+        let child = write_keys(parent.new_batch::<Sha256>(), 0..count, 1)
+            .merkleize_with(&db, &mut Hold)
+            .await
+            .unwrap();
+        let parent_writes = Writes::of(&parent);
+        let child_writes = Writes::of(&child);
+        let parent_wrote = |pos: &Position<F>| {
+            parent_writes
+                .nodes
+                .binary_search_by_key(pos, |&(p, _)| p)
+                .is_ok()
+        };
+        assert!(child_writes.nodes.iter().any(|(pos, _)| parent_wrote(pos)));
+        assert!(child_writes.nodes.iter().any(|(pos, _)| !parent_wrote(pos)));
+
+        // Writes cover only their own batch: an empty child of the written parent writes the one
+        // chunk its commit lands in.
+        let empty = parent
+            .new_batch::<Sha256>()
+            .merkleize_with(&db, &mut Hold)
+            .await
+            .unwrap();
+        assert_eq!(Writes::of(&empty).chunks.len(), 1);
+
+        // Each batch's frontier is checked before either is applied.
+        check_frontier(&parent, &db);
+        check_frontier(&child, &db);
+
+        // Applying the parent's writes and then the child's keeps the mirror in step with the
+        // database.
+        db = db.apply_batch(parent).await.unwrap();
+        mirror.apply(&parent_writes);
+        mirror.check(&db);
+        db = db.apply_batch(child).await.unwrap();
+        mirror.apply(&child_writes);
+        mirror.check(&db);
+
+        // Rewriting every key leaves an earlier complete chunk all zero, so its grafted leaf is the
+        // operations-tree subtree root it covers. Reading that root from the operations tree checks
+        // the mirror independently of the writes, and the mirror holds it in place of the leaf the
+        // parent grafted while the chunk was nonzero.
+        let zero = mirror
+            .chunks
+            .iter()
+            .find(|(idx, chunk)| **idx < db.bitmap().complete_chunks() as u64 && **chunk == [0; N])
+            .map(|(&idx, _)| idx)
+            .expect("a complete chunk must be all zero after every key is rewritten");
+        let pos = F::subtree_root_position(
+            merkle::Location::new(zero * (N * 8) as u64),
+            grafting::height::<N>(),
+        );
+        let raw = db.any.log.merkle.get_node(pos).await.unwrap().unwrap();
+        assert_eq!(mirror.nodes.get(&pos), Some(&raw));
+        db.destroy().await.unwrap();
+    }
+
+    /// A child's writes overwrite and extend its unapplied parent's grafted nodes, and replaying
+    /// both in order reproduces MMR and MMB databases and a database with 64-byte chunks.
+    #[test_traced]
+    fn test_writes_replay_chained_batches() {
+        deterministic::Runner::default().start(|ctx| async move {
+            replay_chained::<mmr::Family, 32>(ctx.child("mmr")).await;
+            replay_chained::<mmb::Family, 32>(ctx.child("mmb")).await;
+            replay_chained::<mmr::Family, 64>(ctx.child("mmr64")).await;
+        });
+    }
+
+    /// Writes carry the grafted leaf of a chunk that becomes graftable through operations-tree
+    /// growth alone.
+    #[test_traced]
+    fn test_writes_pending_chunk_becomes_graftable_without_bitmap_write() {
+        deterministic::Runner::default().start(|ctx| async move {
+            // In MMB, chunk 0 becomes graftable only once the operations tree reaches
+            // `graftable_at` operations.
+            let mut db = TestDb::<mmb::Family, 32>::init(
+                ctx.child("pending"),
+                fixed_config::<OneCap>("pending"),
+                None,
+            )
+            .await
+            .unwrap();
+            let mut mirror = Mirror::from_db(&db);
+            let height = grafting::height::<32>();
+            let chunk_root = mmb::Family::subtree_root_position(mmb::Location::new(0), height);
+            let graftable_at = mmb::Family::peak_birth_size(chunk_root, height);
+
+            // With the genesis commit and its own commit, the parent ends one operation short of
+            // `graftable_at`, leaving chunk 0 complete but pending. Its writes keep the mirror in
+            // step.
+            let parent = write_keys(db.new_batch(), 0..graftable_at - 3, 0)
+                .merkleize_with(&db, &mut Hold)
+                .await
+                .unwrap();
+            assert_eq!(*parent.bounds().tip.size, graftable_at - 1);
+            assert!(parent.ops_root_witness().pending_chunk_digest.is_some());
+            let writes = Writes::of(&parent);
+            db = db.apply_batch(Arc::clone(&parent)).await.unwrap();
+            mirror.apply(&writes);
+            mirror.check(&db);
+
+            // An empty batch adds one commit, so it reaches `graftable_at` and grafts chunk 0.
+            let transition = parent
+                .new_batch::<Sha256>()
+                .merkleize_with(&db, &mut Hold)
+                .await
+                .unwrap();
+            assert_eq!(*transition.bounds().tip.size, graftable_at);
+            assert!(transition.ops_root_witness().pending_chunk_digest.is_none());
+
+            // The empty batch writes none of chunk 0's bits, yet chunk 0's grafted leaf is the only
+            // node in its writes. The mirror holds no grafted nodes before applying those writes
+            // and matches the database after.
+            let writes = Writes::of(&transition);
+            assert!(!writes.chunks.iter().any(|(idx, _)| *idx == 0));
+            assert_eq!(writes.nodes.len(), 1);
+            assert!(mirror.nodes.is_empty());
+            db = db.apply_batch(transition).await.unwrap();
+            mirror.apply(&writes);
+            mirror.check(&db);
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Saved writes are unchanged after apply, prune, staleness, and dropped ancestors, and a
+    /// batch held unmerkleized across a prune records the new pruning boundary.
+    #[test_traced]
+    fn test_writes_survive_apply_prune_and_stale_ancestors() {
+        deterministic::Runner::default().start(|ctx| async move {
+            // Four rounds of rewriting the same 256 keys under a proportional floor policy
+            // leave enough inactive operations below the floor for a later prune to remove
+            // whole chunks.
+            let mut db = TestDb::<mmr::Family, 32>::init(
+                ctx.child("lifecycle"),
+                fixed_config::<OneCap>("lifecycle"),
+                None,
+            )
+            .await
+            .unwrap();
+            for round in 0..4u64 {
+                let batch = write_keys(db.new_batch(), 0..256, round)
+                    .merkleize(&db)
+                    .await
+                    .unwrap();
+                db = db.apply_batch(batch).await.unwrap();
+            }
+
+            // Save the writes of an unapplied parent and a child that rewrites the first 16 keys,
+            // and seed a mirror, before anything is pruned.
+            let parent = db.new_batch().merkleize(&db).await.unwrap();
+            let child = write_keys(parent.new_batch::<Sha256>(), 0..16, 4)
+                .merkleize_with(&db, &mut Hold)
+                .await
+                .unwrap();
+            let saved = Writes::of(&child);
+            let saved_parent = Writes::of(&parent);
+            let mut mirror = Mirror::from_db(&db);
+            assert_eq!(saved.pruned_chunks, 0);
+
+            // The parent's saved writes keep the mirror in step.
+            db = db.apply_batch(Arc::clone(&parent)).await.unwrap();
+            mirror.apply(&saved_parent);
+            mirror.check(&db);
+
+            // Pruning to the sync boundary removes at least one chunk. A batch at the database's
+            // own state writes nothing and keeps its writes across the prune, and a fresh batch at
+            // the pruned state records the new boundary. A copy of the child is written before the
+            // prune and held unmerkleized across it.
+            let base = db.to_batch();
+            let saved_base = Writes::of(&base);
+            assert!(saved_base.chunks.is_empty() && saved_base.nodes.is_empty());
+            let held = write_keys(parent.new_batch::<Sha256>(), 0..16, 4);
+            let boundary = db.sync_boundary();
+            db = db.prune(boundary).await.unwrap();
+            assert!(db.bitmap().pruned_chunks() > 0);
+            assert_eq!(Writes::of(&base), saved_base);
+            assert_eq!(
+                db.to_batch().pruned_chunks(),
+                db.bitmap().pruned_chunks() as u64
+            );
+
+            // A batch captures the pruning boundary when it is merkleized, so the held copy records
+            // the new boundary.
+            let post_prune = held.merkleize_with(&db, &mut Hold).await.unwrap();
+            let post_grafts = Writes::of(&post_prune);
+            assert_eq!(
+                post_grafts.pruned_chunks,
+                db.bitmap().pruned_chunks() as u64
+            );
+
+            // The post-prune child's writes keep the mirror in step.
+            db = db.apply_batch(post_prune).await.unwrap();
+            mirror.apply(&post_grafts);
+            mirror.check(&db);
+
+            // Once the database moves past the saved child's chain, reading the child's frontier
+            // fails as stale. The child's writes stay unchanged after the parent is dropped and
+            // the database is destroyed.
+            let successor = db.new_batch().merkleize_with(&db, &mut Hold).await.unwrap();
+            db = db.apply_batch(successor).await.unwrap();
+            assert!(matches!(child.ops_pinned_nodes(&db), Err(Error::StaleRead)));
+            drop(parent);
+            db.destroy().await.unwrap();
+            assert_eq!(Writes::of(&child), saved);
+        });
     }
 }

@@ -1,0 +1,48 @@
+use super::{
+    job::{HeapJob, JobRef},
+    registry::{Placement, Registry},
+    unwind,
+};
+use std::{mem, sync::Arc};
+
+#[cfg(test)]
+mod test;
+
+/// Spawns `func` in `registry` under `placement`.
+///
+/// # Safety
+///
+/// `registry` must not have terminated.
+pub(super) unsafe fn spawn_in<F>(func: F, registry: &Arc<Registry>, placement: Placement)
+where
+    F: FnOnce() + Send + 'static,
+{
+    // We assert that this does not hold any references (we know
+    // this because of the `'static` bound in the interface);
+    // moreover, we assert that the code below is not supposed to
+    // be able to panic, and hence the data won't leak but will be
+    // enqueued into some deque for later execution.
+    let abort_guard = unwind::AbortIfPanic; // just in case we are wrong, and code CAN panic
+    // SAFETY: the caller guarantees `registry` has not terminated.
+    let job_ref = unsafe { spawn_job(func, registry) };
+    registry.place(placement, job_ref);
+    mem::forget(abort_guard);
+}
+
+unsafe fn spawn_job<F>(func: F, registry: &Arc<Registry>) -> JobRef
+where
+    F: FnOnce() + Send + 'static,
+{
+    // Ensure that registry cannot terminate until this job has
+    // executed. This ref is decremented at the (*) below.
+    registry.increment_terminate_count();
+
+    HeapJob::new({
+        let registry = Arc::clone(registry);
+        move || {
+            registry.catch_unwind(func);
+            registry.terminate(); // (*) permit registry to terminate now
+        }
+    })
+    .into_static_job_ref()
+}
