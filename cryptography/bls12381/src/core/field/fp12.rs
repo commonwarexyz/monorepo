@@ -1039,7 +1039,7 @@ pub mod fuzz {
 
     /// Draws an element of the cyclotomic subgroup: `a^((p^6 - 1)(p^2 + 1))` for a drawn nonzero
     /// `a`.
-    pub(crate) fn cyclotomic(u: &mut Unstructured<'_>) -> arbitrary::Result<Element> {
+    fn cyclotomic(u: &mut Unstructured<'_>) -> arbitrary::Result<Element> {
         let mut a = element(u)?;
         if a == reference::ZERO {
             a = reference::ONE;
@@ -1115,7 +1115,7 @@ pub mod fuzz {
 
     /// Returns the same extension value with every component at integer bound `2 + K`, given
     /// loaded components with integer bound `2`.
-    fn widen<const K: u64, S: Simd, F: Field<S>>(simd: S, value: Fp2<F>) -> Fp2<F> {
+    pub(crate) fn widen<const K: u64, S: Simd, F: Field<S>>(simd: S, value: Fp2<F>) -> Fp2<F> {
         let zero = Fp2::<F>::load(simd, &[], &[0; FP2_BYTES]);
         value.sub::<K, S>(simd, zero).carry(simd)
     }
@@ -1398,7 +1398,7 @@ pub mod fuzz {
     }
 
     /// Returns the embedding of the coefficient `c0` of `a`: its coefficients of even degree.
-    fn even(a: &Element) -> Element {
+    pub(crate) fn even(a: &Element) -> Element {
         let mut even = *a;
         for coefficient in even.iter_mut().skip(1).step_by(2) {
             *coefficient = fp2::ZERO;

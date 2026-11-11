@@ -335,8 +335,8 @@ pub mod fuzz {
         fp::testing::{Kernel, Target},
         fp12::{
             BYTES, ONE,
-            fuzz::element,
-            reference::{self, Element},
+            fuzz::{element, even},
+            reference,
         },
     };
     use arbitrary::{Arbitrary, Unstructured};
@@ -377,14 +377,6 @@ pub mod fuzz {
         }
     }
 
-    /// Returns whether an element lies in `Fp6`: its coefficients of odd degree in `w` are zero.
-    fn in_subfield(a: &Element) -> bool {
-        a.iter()
-            .skip(1)
-            .step_by(2)
-            .all(|c| *c == reference::ZERO[0])
-    }
-
     /// Runs [`Plan::FinalExponentiation`].
     fn final_exponentiations(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
         let target = Target::draw(u)?;
@@ -413,7 +405,8 @@ pub mod fuzz {
                 assert!(x == reference::ZERO, "zero, {label}");
                 continue;
             }
-            if in_subfield(&a[lane]) {
+            // Elements of Fp6 have no coefficients of odd degree in w.
+            if even(&a[lane]) == a[lane] {
                 assert!(x == reference::ONE, "subfield, {label}");
             }
             assert!(
@@ -434,7 +427,10 @@ pub mod fuzz {
         use super::*;
         use crate::core::{
             curve::g1,
-            field::fp::{rns::Rns, unsat28::Unsat28, unsat49::Unsat49},
+            field::{
+                fp::{rns::Rns, unsat28::Unsat28, unsat49::Unsat49},
+                fp12::fuzz::widen,
+            },
         };
         use commonware_invariants::minifuzz;
         use commonware_simd::emulated::{EmulatedScalar, EmulatedX86V4C};
@@ -452,8 +448,7 @@ pub mod fuzz {
         /// Checks, in debug builds, that steps from points at the coordinate bounds return points
         /// within them and lines within the documented bounds.
         fn check_steps<S: Simd, F: Field<S>>(simd: S) {
-            let zero = Fp2::<F>::load(simd, &[], &[0; FP2_BYTES]);
-            let widen = |value: Fp2<F>| value.sub::<{ g2::BOUND - 2 }, S>(simd, zero).carry(simd);
+            let widen = |value| widen::<{ g2::BOUND - 2 }, S, F>(simd, value);
             let p = [g1::GENERATOR[0], g1::GENERATOR[1]];
             let q = [g2::GENERATOR[0], g2::GENERATOR[1]];
             let pair = Pair::<F>::load(simd, &[], &(p, q));
