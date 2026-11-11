@@ -171,6 +171,7 @@ use std::{
     sync::{Arc, mpsc},
     task::Poll,
     thread::{self, JoinHandle},
+    time::Instant,
 };
 
 cfg_if::cfg_if! {
@@ -268,11 +269,17 @@ impl Pool {
             }
         };
 
+        // Every worker's timers count from one origin, so that a peer
+        // converts its time once to check all of them.
+        let origin = Instant::now();
+
         Self {
             idle: CachePadded::new(Idle::new()),
             mailboxes: mailboxes.into(),
             queues: (0..workers).map(|_| queue()).collect(),
-            timers: (0..workers).map(|_| Arc::new(Timers::new())).collect(),
+            timers: (0..workers)
+                .map(|_| Arc::new(Timers::new(origin)))
+                .collect(),
             global_len: CachePadded::new(AtomicUsize::new(0)),
             global: CachePadded::new(Mutex::new(GlobalQueue {
                 open: true,
@@ -1131,6 +1138,20 @@ pub mod tests {
             for task in tasks {
                 task.clear();
             }
+        }
+    }
+
+    /// A rescue compares its own worker's count of time with every peer's
+    /// bound, so all of a pool's timers count from one origin.
+    #[test]
+    fn test_pool_timers_share_one_origin() {
+        let pool = pool(3);
+        let origin = pool.timers()[0].instant(0);
+
+        assert!(origin.is_some());
+
+        for timers in pool.timers() {
+            assert_eq!(timers.instant(0), origin);
         }
     }
 
