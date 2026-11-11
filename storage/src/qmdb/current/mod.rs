@@ -508,8 +508,8 @@ where
     let (mut metadata, mut pruned_chunks, mut pinned_nodes) =
         db::init_metadata(context.child("metadata"), &metadata_partition).await?;
 
-    // Pruned chunks are recorded only once the log holds the operations above them, so beside a
-    // log holding no positions they are stale. Clear them before the any database opens the log.
+    // An interrupted destroy can leave pruning metadata from the old database beside a log reset
+    // to position zero. Normal pruning never produces that combination.
     if pruned_chunks > 0 && J::span(context.child("span"), &cfg.log).await? == (0..0) {
         warn!("crash repair: discarding grafted metadata beside an empty log");
         metadata.clear();

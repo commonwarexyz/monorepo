@@ -39,9 +39,9 @@
 //!
 //! # Replay
 //!
-//! During application initialization, it is very common to replay data from `Journal` to recover
-//! some in-memory state. `Journal` is heavily optimized for this pattern: [Journal::init] returns
-//! a [Recovery] yielding all items in order of their `section` and `offset`, and
+//! Opening a `Journal` requires replaying all of its data, which applications commonly use to
+//! recover some in-memory state. `Journal` is heavily optimized for this pattern: [Journal::init]
+//! returns a [Recovery] yielding all items in order of their `section` and `offset`, and
 //! [Recovery::finish] returns the journal once the recovery is exhausted.
 //!
 //! # Compression

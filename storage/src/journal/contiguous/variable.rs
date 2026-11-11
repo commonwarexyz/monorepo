@@ -1982,8 +1982,8 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         // Surface a failed data sync before the offsets journal stages its clear.
         let blobs = self.blobs.wait_for_sync().await?;
 
-        // Remove the data blobs under the clear the offsets journal stages. Recovery finishes a
-        // staged clear, data partition included, so an interrupted destroy reopens fresh.
+        // Record the pending clear in the offsets journal before deleting the data blobs. If
+        // deletion is interrupted, reopening finishes clearing both data and offsets.
         self.offsets.destroy_cleared(|| blobs.destroy()).await
     }
 
@@ -2541,8 +2541,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// # Crash Safety
     ///
-    /// An interrupted destroy leaves a journal that reopens either as a crash would recover it or
-    /// as a fresh journal at position zero, and that a retried destroy removes.
+    /// If destruction is interrupted, reopening either recovers the journal normally or creates an
+    /// empty journal at position zero.
     pub async fn destroy(self) -> Result<(), Error> {
         self.0.destroy().await
     }

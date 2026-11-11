@@ -581,16 +581,19 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
 ///
 /// # Repair
 ///
-/// Like
-/// [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
-/// and
-/// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
-/// the first invalid data read will be considered the new end of the journal (and the
-/// underlying [Blob] will be truncated to the last valid item). Repair occurs during
-/// replay so clean initialization reads only each blob's terminal page. A section that retains
-/// data above its validation floor must be replayed from position zero before it accepts new
-/// appends. A section restored from a checkpoint, or one that ends at its floor, accepts them at
-/// once.
+/// Opening reads each blob's last page to determine its length. If that page is incomplete or
+/// fails its checksum check, opening searches backward for a valid page and discards the damaged
+/// suffix. It does not scan the earlier pages.
+///
+/// Replay checks items in order. Torn pages or incomplete trailing items cause the section to be
+/// truncated to the last complete, validated item.
+///
+/// Each section has a validation floor marking the prefix already known to be durable. Recovery
+/// must preserve that prefix. Damage requiring truncation below the floor is an error.
+///
+/// A section with data beyond its floor must be replayed from position zero before accepting new
+/// appends. Sections restored from a checkpoint, or ending at their floor, can accept appends
+/// immediately.
 ///
 /// Mutating functions consume the journal and return it only on success: an error (or a dropped
 /// future) destroys the handle. [Journal::replay] consumes the journal into an owned [Replay]

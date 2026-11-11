@@ -360,7 +360,7 @@ pub trait Mutable: Contiguous + Sized {
     ///
     /// # Crash Safety
     ///
-    /// An interrupted destroy leaves a journal that reopens either as a crash would recover it or
-    /// empty at position zero.
+    /// If destruction is interrupted, reopening either recovers the journal normally or creates an
+    /// empty journal at position zero.
     fn destroy(self) -> impl std::future::Future<Output = Result<(), Error>> + Send;
 }

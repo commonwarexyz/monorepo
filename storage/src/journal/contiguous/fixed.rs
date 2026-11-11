@@ -1803,8 +1803,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ///
     /// # Crash Safety
     ///
-    /// An interrupted destroy leaves a journal that reopens either as a crash would recover it or
-    /// as a fresh journal at position zero, and that a retried destroy removes.
+    /// If destruction is interrupted, reopening either recovers the journal normally or creates an
+    /// empty journal at position zero.
     pub async fn destroy(self) -> Result<(), Error> {
         self.0.destroy().await
     }

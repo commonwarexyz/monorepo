@@ -732,8 +732,8 @@ where
         // retaining the entire `self` in the future.
         let Self { any, metadata, .. } = self;
 
-        // The log decides the outcome, so the any database goes first. Its grafted metadata is
-        // needed to reopen a pruned database until then, and reopening discards it afterwards.
+        // Delete the log before the grafted metadata. If destroy stops while the old log still
+        // exists, the metadata is needed to reopen it.
         any.destroy().await?;
         metadata.destroy().await?;
         Ok(())
