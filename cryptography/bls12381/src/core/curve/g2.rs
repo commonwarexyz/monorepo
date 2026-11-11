@@ -572,11 +572,12 @@ pub(crate) mod fuzz {
         /// Scales loaded coordinate components, with integer bound `2`, by `16`, to integer
         /// bound [`BOUND`].
         fn widen<S: Simd, F: Field<S>>(simd: S, point: Point<F>) -> Point<F> {
+            const { assert!(2 * 2 * 8 == BOUND) };
             let widen = |value: Fp2<F>| {
                 value
                     .double(simd)
                     .carry(simd)
-                    .mul_small::<{ BOUND / 4 }, S>(simd)
+                    .mul_small::<8, S>(simd)
                     .carry(simd)
             };
             Point {

@@ -334,11 +334,12 @@ pub(crate) mod fuzz {
         /// Scales loaded coordinates, with integer bound `2`, by `36`, to integer bound `72`,
         /// in two steps that keep positional limb bounds within the value limits.
         fn widen<S: Simd, F: Field<S>>(simd: S, point: Point<F>) -> Point<F> {
+            const { assert!(2 * 6 * 6 <= BOUND) };
             let widen = |value: F| {
                 value
                     .mul_small::<6>(simd)
                     .carry(simd)
-                    .mul_small::<{ BOUND / 12 }>(simd)
+                    .mul_small::<6>(simd)
                     .carry(simd)
             };
             Point {
