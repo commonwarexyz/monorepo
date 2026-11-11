@@ -157,7 +157,7 @@ impl Space<Scalar> for G2 {
     /// the running time and memory accesses depend on them. A sequential strategy runs one kernel
     /// over all points, and a parallel one splits them into batches of a few hundred points.
     fn msm(points: &[Self], scalars: &[Scalar], strategy: &impl Strategy) -> Self {
-        msm(points, scalars, strategy)
+        msm::batched(points, scalars, strategy)
     }
 }
 
