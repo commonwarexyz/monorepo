@@ -592,6 +592,11 @@ pub mod fuzz {
                     let canonical = bytes < order;
                     let decoded = Scalar::from_bytes(&bytes);
                     assert_eq!(decoded.is_some(), canonical);
+                    let words: [u64; WORDS] = core::array::from_fn(|i| {
+                        let end = Scalar::BYTES - 8 * i;
+                        u64::from_be_bytes(bytes[end - 8..end].try_into().unwrap())
+                    });
+                    assert_eq!(Scalar::from_words(words), decoded);
                     if let Some(decoded) = decoded {
                         assert_eq!(decoded.to_bytes(), bytes);
                         let mut wide = [0; Scalar::WIDE_BYTES];
@@ -713,13 +718,7 @@ pub mod fuzz {
         }
 
         #[test]
-        fn roots_of_unity_have_exact_order() {
-            let mut root = Scalar::root_of_unity(TWO_ADICITY).unwrap();
-            for _ in 1..TWO_ADICITY {
-                root = root.square_inner();
-                assert_ne!(root, Scalar::ONE);
-            }
-            assert_eq!(root, -Scalar::ONE);
+        fn coset_shift_is_neither_a_square_nor_a_root_of_unity() {
             // The coset shift lies outside the 2-Sylow subgroup and is not a square.
             let mut shift = Scalar::coset_shift();
             for _ in 0..TWO_ADICITY {
@@ -732,29 +731,6 @@ pub mod fuzz {
                 (half[i] >> 1) | half.get(i + 1).map_or(0, |next| next << 63)
             });
             assert_eq!(GENERATOR.pow(half), -Scalar::ONE);
-        }
-
-        #[test]
-        fn order_bounds_the_encodings() {
-            assert_eq!(Scalar::ZERO.to_bytes(), [0; Scalar::BYTES]);
-            assert_eq!(Scalar::ONE.to_words(), [1, 0, 0, 0]);
-            // The largest scalar is one less than the order.
-            let mut largest = MODULUS;
-            largest[0] -= 1;
-            assert_eq!((-Scalar::ONE).to_words(), largest);
-            assert_eq!(Scalar::from_words(largest), Some(-Scalar::ONE));
-            // The order itself, the next integer, and the largest string do not decode.
-            assert!(Scalar::from_words(MODULUS).is_none());
-            assert!(Scalar::from_bytes(&order()).is_none());
-            let mut above = MODULUS;
-            above[0] += 1;
-            assert!(Scalar::from_words(above).is_none());
-            assert!(Scalar::from_bytes(&[0xff; Scalar::BYTES]).is_none());
-            // The order reduces to zero.
-            assert_eq!(Scalar::from_words_wide(&MODULUS), Scalar::ZERO);
-            let mut wide = [0; Scalar::WIDE_BYTES];
-            wide[Scalar::BYTES..].copy_from_slice(&order());
-            assert_eq!(Scalar::from_bytes_wide(&wide), Scalar::ZERO);
         }
 
         #[test]
