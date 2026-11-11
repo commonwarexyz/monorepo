@@ -13,8 +13,15 @@ use crate::core::{
     field::{MAX_LANES, arithmetic::Field},
 };
 use alloc::{vec, vec::Vec};
+use commonware_math::algebra::Additive;
+use commonware_parallel::Strategy;
 use commonware_simd::Simd;
-use core::ops::RangeInclusive;
+use core::{num::NonZeroUsize, ops::RangeInclusive};
+
+/// Fewest elements of [`batched`] that a parallel strategy gives one kernel. Every kernel pays
+/// for its own bucket sums and doublings, which cost about as much as adding a few hundred
+/// elements.
+pub const MSM_BATCH: NonZeroUsize = NonZeroUsize::new(256).unwrap();
 
 /// Window widths that [`Method::choose`] considers for Straus's method.
 const STRAUS_WIDTHS: RangeInclusive<u32> = 2..=8;
@@ -424,4 +431,31 @@ impl<G: Group> Kernel for Msm<'_, G> {
             Method::Pippenger(width) => pippenger::<S, F, G>(simd, elements, scalars, width),
         }
     }
+}
+
+/// Returns the sum of the points times their scalars, in variable time, through one [`Msm`] per
+/// batch of at least [`MSM_BATCH`] points that the strategy runs.
+pub fn batched<G: Group + Additive>(
+    points: &[G],
+    scalars: &[Scalar],
+    strategy: &impl Strategy,
+) -> G {
+    let count = points.len().min(scalars.len());
+    let (points, scalars) = (&points[..count], &scalars[..count]);
+    strategy.run_batches(count, MSM_BATCH, 1, |batches| {
+        batches
+            .map_collect_vec(
+                |ranges| ranges,
+                |range| {
+                    Msm {
+                        elements: &points[range.clone()],
+                        scalars: &scalars[range],
+                        method: None,
+                    }
+                    .dispatch()
+                },
+            )
+            .iter()
+            .fold(G::zero(), |sum, batch| sum + batch)
+    })
 }
