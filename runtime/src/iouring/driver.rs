@@ -735,12 +735,14 @@ impl State {
             // pressure can fail it with ENOMEM. That ends the wait like the
             // others, and the next blocking park installs another. Anything
             // else breaks an invariant, such as EINVAL from a kernel without
-            // IORING_OP_FUTEX_WAIT.
+            // IORING_OP_FUTEX_WAIT. The wait ended whatever its result, so it
+            // is recorded before the check, and a panic leaves no live wait
+            // behind for cleanup's parks and the drop's cancel.
+            self.ring_wait_needed = true;
             assert!(
                 matches!(-result, 0 | libc::EAGAIN | libc::ECANCELED | libc::ENOMEM),
                 "ring futex wait failed: {result}"
             );
-            self.ring_wait_needed = true;
             return;
         }
 
