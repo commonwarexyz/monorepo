@@ -94,127 +94,173 @@ pub trait Curve: CryptoGroup<Scalar = Scalar> + Copy {
     fn blst_msm(points: &[Self::Blst], scalars: &[u8]) -> Self::Blst;
 }
 
-macro_rules! curve {
-    (
-        $group:ident, $name:literal, $point:ident, $affine:ident, $generator:ident, $add:ident,
-        $double:ident, $mult:ident, $to_affine:ident, $sum:ident, $scratch:ident,
-        $pippenger:ident
-    ) => {
-        impl Curve for $group {
-            const NAME: &'static str = $name;
+impl Curve for G1 {
+    const NAME: &'static str = "g1";
 
-            type Blst = blst::$point;
-            type BlstAffine = blst::$affine;
+    type Blst = blst::blst_p1;
+    type BlstAffine = blst::blst_p1_affine;
 
-            fn sum(points: &[Self]) -> Self {
-                $group::sum(points)
-            }
+    fn sum(points: &[Self]) -> Self {
+        Self::sum(points)
+    }
 
-            fn mul_each(points: &mut [Self], scalars: &[Scalar]) {
-                $group::mul_each(points, scalars);
-            }
+    fn mul_each(points: &mut [Self], scalars: &[Scalar]) {
+        Self::mul_each(points, scalars);
+    }
 
-            fn blst_generator() -> Self::Blst {
-                // SAFETY: blst returns a pointer to its static generator.
-                unsafe { *blst::$generator() }
-            }
+    fn blst_generator() -> Self::Blst {
+        // SAFETY: blst returns a pointer to its static generator.
+        unsafe { *blst::blst_p1_generator() }
+    }
 
-            fn blst_add(a: &Self::Blst, b: &Self::Blst) -> Self::Blst {
-                let mut out = Self::Blst::default();
-                // SAFETY: every pointer references a valid point.
-                unsafe { blst::$add(&mut out, a, b) };
-                out
-            }
+    fn blst_add(a: &Self::Blst, b: &Self::Blst) -> Self::Blst {
+        let mut out = Self::Blst::default();
+        // SAFETY: every pointer references a valid point.
+        unsafe { blst::blst_p1_add_or_double(&mut out, a, b) };
+        out
+    }
 
-            fn blst_double(a: &Self::Blst) -> Self::Blst {
-                let mut out = Self::Blst::default();
-                // SAFETY: every pointer references a valid point.
-                unsafe { blst::$double(&mut out, a) };
-                out
-            }
+    fn blst_double(a: &Self::Blst) -> Self::Blst {
+        let mut out = Self::Blst::default();
+        // SAFETY: every pointer references a valid point.
+        unsafe { blst::blst_p1_double(&mut out, a) };
+        out
+    }
 
-            fn blst_mul(a: &Self::Blst, scalar: &Scalar) -> Self::Blst {
-                let bytes = le_bytes(scalar);
-                let mut out = Self::Blst::default();
-                // SAFETY: every pointer references a valid point, and the scalar holds 255 bits.
-                unsafe { blst::$mult(&mut out, a, bytes.as_ptr(), 255) };
-                out
-            }
+    fn blst_mul(a: &Self::Blst, scalar: &Scalar) -> Self::Blst {
+        let bytes = le_bytes(scalar);
+        let mut out = Self::Blst::default();
+        // SAFETY: every pointer references a valid point, and the scalar holds 255 bits.
+        unsafe { blst::blst_p1_mult(&mut out, a, bytes.as_ptr(), 255) };
+        out
+    }
 
-            fn blst_to_affine(points: &[Self::Blst]) -> Vec<Self::BlstAffine> {
-                let mut out = vec![Self::BlstAffine::default(); points.len()];
-                let pointers: Vec<*const Self::Blst> = points.iter().map(ptr::from_ref).collect();
-                // SAFETY: `pointers` holds one valid point per output slot.
-                unsafe { blst::$to_affine(out.as_mut_ptr(), pointers.as_ptr(), points.len()) };
-                out
-            }
+    fn blst_to_affine(points: &[Self::Blst]) -> Vec<Self::BlstAffine> {
+        let mut out = vec![Self::BlstAffine::default(); points.len()];
+        let pointers: Vec<*const Self::Blst> = points.iter().map(ptr::from_ref).collect();
+        // SAFETY: `pointers` holds one valid point per output slot.
+        unsafe { blst::blst_p1s_to_affine(out.as_mut_ptr(), pointers.as_ptr(), points.len()) };
+        out
+    }
 
-            fn blst_sum(points: &[Self::Blst]) -> Self::Blst {
-                let affine = Self::blst_to_affine(points);
-                // blst reads one contiguous array through the first of null-terminated pointers.
-                let points = [affine.as_ptr(), ptr::null()];
-                let mut out = Self::Blst::default();
-                // SAFETY: the array holds `affine.len()` points.
-                unsafe { blst::$sum(&mut out, points.as_ptr(), affine.len()) };
-                out
-            }
+    fn blst_sum(points: &[Self::Blst]) -> Self::Blst {
+        let affine = Self::blst_to_affine(points);
+        // blst reads one contiguous array through the first of null-terminated pointers.
+        let points = [affine.as_ptr(), ptr::null()];
+        let mut out = Self::Blst::default();
+        // SAFETY: the array holds `affine.len()` points.
+        unsafe { blst::blst_p1s_add(&mut out, points.as_ptr(), affine.len()) };
+        out
+    }
 
-            fn blst_msm(points: &[Self::Blst], scalars: &[u8]) -> Self::Blst {
-                let affine = Self::blst_to_affine(points);
-                // SAFETY: blst returns the scratch size in bytes for any point count.
-                let scratch = unsafe { blst::$scratch(points.len()) };
-                let mut scratch = vec![0u64; scratch.div_ceil(8)];
-                // blst reads one contiguous array through the first of null-terminated pointers.
-                let points = [affine.as_ptr(), ptr::null()];
-                let scalars = [scalars.as_ptr(), ptr::null()];
-                let mut out = Self::Blst::default();
-                // SAFETY: the arrays hold `affine.len()` points and as many 255-bit scalars, and
-                // the scratch space has the size blst requested.
-                unsafe {
-                    blst::$pippenger(
-                        &mut out,
-                        points.as_ptr(),
-                        affine.len(),
-                        scalars.as_ptr(),
-                        255,
-                        scratch.as_mut_ptr(),
-                    )
-                };
-                out
-            }
-        }
-    };
+    fn blst_msm(points: &[Self::Blst], scalars: &[u8]) -> Self::Blst {
+        let affine = Self::blst_to_affine(points);
+        // SAFETY: blst returns the scratch size in bytes for any point count.
+        let scratch = unsafe { blst::blst_p1s_mult_pippenger_scratch_sizeof(points.len()) };
+        let mut scratch = vec![0u64; scratch.div_ceil(8)];
+        // blst reads one contiguous array through the first of null-terminated pointers.
+        let points = [affine.as_ptr(), ptr::null()];
+        let scalars = [scalars.as_ptr(), ptr::null()];
+        let mut out = Self::Blst::default();
+        // SAFETY: the arrays hold `affine.len()` points and as many 255-bit scalars, and the
+        // scratch space has the size blst requested.
+        unsafe {
+            blst::blst_p1s_mult_pippenger(
+                &mut out,
+                points.as_ptr(),
+                affine.len(),
+                scalars.as_ptr(),
+                255,
+                scratch.as_mut_ptr(),
+            )
+        };
+        out
+    }
 }
 
-curve!(
-    G1,
-    "g1",
-    blst_p1,
-    blst_p1_affine,
-    blst_p1_generator,
-    blst_p1_add_or_double,
-    blst_p1_double,
-    blst_p1_mult,
-    blst_p1s_to_affine,
-    blst_p1s_add,
-    blst_p1s_mult_pippenger_scratch_sizeof,
-    blst_p1s_mult_pippenger
-);
+impl Curve for G2 {
+    const NAME: &'static str = "g2";
 
-curve!(
-    G2,
-    "g2",
-    blst_p2,
-    blst_p2_affine,
-    blst_p2_generator,
-    blst_p2_add_or_double,
-    blst_p2_double,
-    blst_p2_mult,
-    blst_p2s_to_affine,
-    blst_p2s_add,
-    blst_p2s_mult_pippenger_scratch_sizeof,
-    blst_p2s_mult_pippenger
-);
+    type Blst = blst::blst_p2;
+    type BlstAffine = blst::blst_p2_affine;
+
+    fn sum(points: &[Self]) -> Self {
+        Self::sum(points)
+    }
+
+    fn mul_each(points: &mut [Self], scalars: &[Scalar]) {
+        Self::mul_each(points, scalars);
+    }
+
+    fn blst_generator() -> Self::Blst {
+        // SAFETY: blst returns a pointer to its static generator.
+        unsafe { *blst::blst_p2_generator() }
+    }
+
+    fn blst_add(a: &Self::Blst, b: &Self::Blst) -> Self::Blst {
+        let mut out = Self::Blst::default();
+        // SAFETY: every pointer references a valid point.
+        unsafe { blst::blst_p2_add_or_double(&mut out, a, b) };
+        out
+    }
+
+    fn blst_double(a: &Self::Blst) -> Self::Blst {
+        let mut out = Self::Blst::default();
+        // SAFETY: every pointer references a valid point.
+        unsafe { blst::blst_p2_double(&mut out, a) };
+        out
+    }
+
+    fn blst_mul(a: &Self::Blst, scalar: &Scalar) -> Self::Blst {
+        let bytes = le_bytes(scalar);
+        let mut out = Self::Blst::default();
+        // SAFETY: every pointer references a valid point, and the scalar holds 255 bits.
+        unsafe { blst::blst_p2_mult(&mut out, a, bytes.as_ptr(), 255) };
+        out
+    }
+
+    fn blst_to_affine(points: &[Self::Blst]) -> Vec<Self::BlstAffine> {
+        let mut out = vec![Self::BlstAffine::default(); points.len()];
+        let pointers: Vec<*const Self::Blst> = points.iter().map(ptr::from_ref).collect();
+        // SAFETY: `pointers` holds one valid point per output slot.
+        unsafe { blst::blst_p2s_to_affine(out.as_mut_ptr(), pointers.as_ptr(), points.len()) };
+        out
+    }
+
+    fn blst_sum(points: &[Self::Blst]) -> Self::Blst {
+        let affine = Self::blst_to_affine(points);
+        // blst reads one contiguous array through the first of null-terminated pointers.
+        let points = [affine.as_ptr(), ptr::null()];
+        let mut out = Self::Blst::default();
+        // SAFETY: the array holds `affine.len()` points.
+        unsafe { blst::blst_p2s_add(&mut out, points.as_ptr(), affine.len()) };
+        out
+    }
+
+    fn blst_msm(points: &[Self::Blst], scalars: &[u8]) -> Self::Blst {
+        let affine = Self::blst_to_affine(points);
+        // SAFETY: blst returns the scratch size in bytes for any point count.
+        let scratch = unsafe { blst::blst_p2s_mult_pippenger_scratch_sizeof(points.len()) };
+        let mut scratch = vec![0u64; scratch.div_ceil(8)];
+        // blst reads one contiguous array through the first of null-terminated pointers.
+        let points = [affine.as_ptr(), ptr::null()];
+        let scalars = [scalars.as_ptr(), ptr::null()];
+        let mut out = Self::Blst::default();
+        // SAFETY: the arrays hold `affine.len()` points and as many 255-bit scalars, and the
+        // scratch space has the size blst requested.
+        unsafe {
+            blst::blst_p2s_mult_pippenger(
+                &mut out,
+                points.as_ptr(),
+                affine.len(),
+                scalars.as_ptr(),
+                255,
+                scratch.as_mut_ptr(),
+            )
+        };
+        out
+    }
+}
 
 /// A pair of points in blst.
 pub type BlstPair = (blst::blst_p1, blst::blst_p2);
