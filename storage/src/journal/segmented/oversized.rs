@@ -51,7 +51,8 @@
 
 use super::{
     fixed::{
-        Config as FixedConfig, Journal as FixedJournal, RecoveryPreflight, Replay as FixedReplay,
+        Config as FixedConfig, Journal as FixedJournal, Recovery as FixedRecovery,
+        Replay as FixedReplay,
     },
     glob::{Config as GlobConfig, Glob, Recovery as GlobRecovery},
 };
@@ -267,7 +268,7 @@ impl<E: Context, I: Record, V: CodecShared> From<Pending<E, I, V>> for Oversized
     fn from(recovery: Pending<E, I, V>) -> Self {
         Self {
             index: recovery.index,
-            values: recovery.values.into(),
+            values: recovery.values.finish(),
             tracking: None,
         }
     }
@@ -338,7 +339,7 @@ impl<E: Context, I: Record, V: CodecShared> Pending<E, I, V> {
     /// Verify every floor's terminal value extent before repair can mutate either journal.
     fn validate_value_floors(
         values: &GlobRecovery<E, V>,
-        preflight: &RecoveryPreflight<E, I>,
+        preflight: &FixedRecovery<E, I>,
     ) -> Result<(), Error> {
         for (&section, entry) in preflight.boundaries() {
             let required = Self::boundary_value_end(section, entry)?;
@@ -360,7 +361,7 @@ impl<E: Context, I: Record, V: CodecShared> Pending<E, I, V> {
     /// the checkpoint section's terminal value end.
     fn validate_restore_values(
         values: &GlobRecovery<E, V>,
-        preflight: &RecoveryPreflight<E, I>,
+        preflight: &FixedRecovery<E, I>,
         section: u64,
     ) -> Result<u64, Error> {
         // Every earlier section is immutable under the checkpoint, so its terminal index entry
@@ -475,7 +476,7 @@ impl<E: Context, I: Record, V: CodecShared> Pending<E, I, V> {
         }
         Ok(Oversized {
             index: self.index,
-            values: self.values.into(),
+            values: self.values.finish(),
             tracking: Some(tracking),
         })
     }
@@ -3399,7 +3400,7 @@ mod tests {
                 GlobRecovery::init(context.child("glob"), glob_cfg, u64::MAX)
                     .await
                     .expect("Failed to init glob")
-                    .into();
+                    .finish();
             (glob, _) = glob.prune(2).await.expect("Failed to prune glob");
             glob = glob.sync_all().await.expect("Failed to sync glob");
             drop(glob);
@@ -4082,7 +4083,7 @@ mod tests {
                 GlobRecovery::init(context.child("glob"), glob_cfg, u64::MAX)
                     .await
                     .expect("Failed to init glob")
-                    .into();
+                    .finish();
             let orphan_value: TestValue = [99; 16];
             (glob, _, _) = glob
                 .append(3, &orphan_value)
@@ -4141,7 +4142,7 @@ mod tests {
                 GlobRecovery::init(context.child("glob"), glob_cfg, u64::MAX)
                     .await
                     .expect("Failed to init glob")
-                    .into();
+                    .finish();
 
             for section in 2u64..=4 {
                 let orphan_value: TestValue = [section as u8; 16];
@@ -4187,7 +4188,7 @@ mod tests {
                 GlobRecovery::init(context.child("glob"), glob_cfg, u64::MAX)
                     .await
                     .expect("Failed to init glob")
-                    .into();
+                    .finish();
 
             for section in 1u64..=3 {
                 let orphan_value: TestValue = [section as u8; 16];
@@ -4247,7 +4248,7 @@ mod tests {
                 GlobRecovery::init(context.child("glob"), glob_cfg, u64::MAX)
                     .await
                     .expect("Failed to init glob")
-                    .into();
+                    .finish();
 
             for section in 2u64..=3 {
                 let orphan_value: TestValue = [section as u8; 16];
@@ -4389,7 +4390,7 @@ mod tests {
                 GlobRecovery::init(context.child("glob"), glob_cfg, u64::MAX)
                     .await
                     .expect("Failed to init glob")
-                    .into();
+                    .finish();
             let orphan_value: TestValue = [2; 16];
             (glob, _, _) = glob
                 .append(2, &orphan_value)
@@ -4461,7 +4462,7 @@ mod tests {
                 GlobRecovery::init(context.child("glob"), glob_cfg, u64::MAX)
                     .await
                     .expect("Failed to init glob")
-                    .into();
+                    .finish();
 
             for section in [2u64, 4, 6] {
                 let orphan_value: TestValue = [section as u8; 16];
@@ -5158,7 +5159,7 @@ mod tests {
                 GlobRecovery::init(context.child("glob"), glob_cfg, u64::MAX)
                     .await
                     .expect("Failed to init glob")
-                    .into();
+                    .finish();
 
             for section in 2u64..=4 {
                 let orphan_value: TestValue = [section as u8; 16];

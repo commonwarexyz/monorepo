@@ -405,13 +405,6 @@ impl<E: Context, V: CodecShared> Glob<E, V> {
 /// Owns value sections until paired initialization has finished.
 pub struct Recovery<E: Context, V: Codec>(Box<Inner<E, V>>);
 
-impl<E: Context, V: CodecShared> From<Recovery<E, V>> for Glob<E, V> {
-    /// Publish every value section after paired recovery.
-    fn from(recovery: Recovery<E, V>) -> Self {
-        Self(recovery.0)
-    }
-}
-
 impl<E: Context, V: CodecShared> Recovery<E, V> {
     /// Open value sections through `ceiling` under paired initialization ownership. Later sections
     /// stay closed until paired recovery removes them.
@@ -480,6 +473,11 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
         self.0 = inner;
         Ok(self)
     }
+
+    /// Publish every value section after paired recovery.
+    pub fn finish(self) -> Glob<E, V> {
+        Glob(self.0)
+    }
 }
 
 /// Flip one byte inside value frame `frame` of the blob at `name`, breaking that frame's CRC
@@ -516,12 +514,12 @@ mod tests {
     use commonware_utils::{NZUsize, probability};
     use rand::Rng as _;
 
-    /// Open every value section through the crate-internal open path.
+    /// Open every value section.
     async fn init_glob<E: crate::Context, V: CodecShared>(
         context: E,
         cfg: Config<V::Cfg>,
     ) -> Result<Glob<E, V>, Error> {
-        Ok(Recovery::init(context, cfg, u64::MAX).await?.into())
+        Ok(Recovery::init(context, cfg, u64::MAX).await?.finish())
     }
 
     impl<E: crate::Context, V: CodecShared> Glob<E, V> {
@@ -536,7 +534,7 @@ mod tests {
             _ = self.sync_all().await?;
             let pending = Recovery::init(context, cfg, u64::MAX).await?;
             let pending = pending.truncate_section(section, end).await?;
-            Ok(pending.into())
+            Ok(pending.finish())
         }
     }
 

@@ -222,7 +222,7 @@ impl<const COMPRESSED: bool> StorageWorkload for SegmentedGlobWorkload<COMPRESSE
         let mut journal: glob::Glob<_, Vec<u8>> =
             glob::Recovery::init(context.child("journal"), config, u64::MAX)
                 .await?
-                .into();
+                .finish();
 
         let items_count = context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4);
         let mut data_to_write = vec![Vec::new(); items_count];

@@ -93,7 +93,7 @@ enum PreflightMode {
 }
 
 /// Non-mutating recovery evidence and authorized work bound to the storage that produced it.
-pub struct RecoveryPreflight<E: Storage + Metrics, A: CodecFixed> {
+pub struct Recovery<E: Storage + Metrics, A: CodecFixed> {
     context: E,
     cfg: Config,
 
@@ -104,7 +104,7 @@ pub struct RecoveryPreflight<E: Storage + Metrics, A: CodecFixed> {
     mode: PreflightMode,
 }
 
-impl<E: Storage + Metrics, A: CodecFixedShared> RecoveryPreflight<E, A> {
+impl<E: Storage + Metrics, A: CodecFixedShared> Recovery<E, A> {
     /// Terminal entries captured at each validated boundary.
     pub(crate) const fn boundaries(&self) -> &BTreeMap<u64, Option<A>> {
         &self.boundaries
@@ -150,7 +150,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         context: E,
         cfg: Config,
         minimum_items: &BTreeMap<u64, u64>,
-    ) -> Result<RecoveryPreflight<E, A>, Error> {
+    ) -> Result<Recovery<E, A>, Error> {
         let stored = Self::stored(&context, &cfg).await?;
         let page_size = cfg.page_cache.page_size();
         let mut floors = BTreeMap::new();
@@ -182,7 +182,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
             boundaries.insert(section, Some(entry));
         }
 
-        Ok(RecoveryPreflight {
+        Ok(Recovery {
             context,
             cfg,
             boundaries,
@@ -196,7 +196,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         cfg: Config,
         section: u64,
         size: u64,
-    ) -> Result<RecoveryPreflight<E, A>, Error> {
+    ) -> Result<Recovery<E, A>, Error> {
         // The checkpoint can only identify a boundary between fixed-size items.
         if !size.is_multiple_of(Self::CHUNK_SIZE_U64) {
             return Err(Error::Corruption(format!(
@@ -251,7 +251,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
             boundaries.insert(candidate, entry);
         }
         boundaries.entry(section).or_insert(None);
-        Ok(RecoveryPreflight {
+        Ok(Recovery {
             context,
             cfg,
             boundaries,
@@ -291,7 +291,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         }
     }
 
-    /// See [RecoveryPreflight::finish].
+    /// See [Recovery::finish].
     async fn init(context: E, cfg: Config, mode: PreflightMode) -> Result<Self, Error> {
         // Restore never opens a section above its checkpoint. The truncation below removes those
         // sections unread.
@@ -615,7 +615,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         context: E,
         cfg: Config,
         minimum_items: &BTreeMap<u64, u64>,
-    ) -> Result<RecoveryPreflight<E, A>, Error> {
+    ) -> Result<Recovery<E, A>, Error> {
         Inner::preflight_floors(context, cfg, minimum_items).await
     }
 
@@ -625,7 +625,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         cfg: Config,
         section: u64,
         size: u64,
-    ) -> Result<RecoveryPreflight<E, A>, Error> {
+    ) -> Result<Recovery<E, A>, Error> {
         Inner::preflight_restore(context, cfg, section, size).await
     }
 
@@ -1109,7 +1109,7 @@ mod tests {
         },
     };
 
-    /// Open a journal with no validation floors through the crate-internal open path.
+    /// Open a journal with no validation floors.
     async fn init_journal<E: Storage + Metrics, A: CodecFixedShared>(
         context: E,
         cfg: Config,
