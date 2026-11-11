@@ -647,33 +647,6 @@ impl<S: X86V4C> Rns<S> {
         }
     }
 
-    /// Loads the first element, or `fill` when there is none.
-    ///
-    /// The integer's 50-bit digits convert into the second basis with floor fractions, which
-    /// underestimate the quotient by at most one and so leave an integer below `2p`.
-    #[inline(always)]
-    pub fn load(simd: S, elements: &[[u8; BYTES]], fill: &[u8; BYTES]) -> Self {
-        let element = elements.first().unwrap_or(fill);
-        let digits = limbs_from_words::<MODULI, BITS>(words_from_bytes(element));
-        let k = quotient(&digits, &TO_RNS.fraction);
-        let quotient = (simd.u64_splat(k & MASK), simd.u64_splat(k >> WORD));
-        let n = Self::convert(simd, &digits, quotient, &TO_RNS, &N);
-        Self {
-            m: Self::expand(simd, n),
-            n,
-            bound: DebugCounter::new(2),
-        }
-    }
-
-    /// Stores the canonical element into the first of `elements`, if any.
-    #[inline(always)]
-    pub fn store(self, simd: S, elements: &mut [[u8; BYTES]]) {
-        self.bound.assert_le(LIMIT);
-        if let Some(element) = elements.first_mut() {
-            *element = bytes_from_words(&canonical(&scalars(simd, self.n)));
-        }
-    }
-
     /// Loads residues in this module's representation, the first basis then the second, bounded
     /// by `bound * p`.
     ///
@@ -765,58 +738,8 @@ impl<S: X86V4C> Rns<S> {
         madd(simd, wide, rotated, constant(simd, &diagonals[D]))
     }
 
-    /// Returns `self + rhs`.
-    ///
-    /// Residue sums are at most `4q`, and one conditional subtraction of `2q` restores `[0, 2q]`.
-    #[inline(always)]
-    pub fn add(mut self, simd: S, rhs: Self) -> Self {
-        self.bound.add(rhs.bound);
-        self.bound.assert_le(LIMIT);
-        let sum = simd.u64_add(self.m, rhs.m);
-        self.m = subtract_below(simd, sum, constant(simd, &TWICE_M));
-        let sum = simd.u64_add(self.n, rhs.n);
-        self.n = subtract_below(simd, sum, constant(simd, &TWICE_N));
-        self
-    }
-
-    /// Returns `self + K * p - rhs`, which is `self - rhs`.
-    ///
-    /// The residues of `self + 2q + K * p - rhs` are below `5q`; conditional subtractions of `2q`
-    /// and then `q` restore `[0, 2q]`.
-    #[inline(always)]
-    pub fn sub<const K: u64>(mut self, simd: S, rhs: Self) -> Self {
-        self.bound.sub_with_bias(rhs.bound, K);
-        self.bound.assert_le(LIMIT);
-        let [bias_m, bias_n] = const { bias(K) };
-        let difference = simd.u64_sub(constant(simd, &bias_m), rhs.m);
-        let sum = simd.u64_add(self.m, difference);
-        let sum = subtract_below(simd, sum, constant(simd, &TWICE_M));
-        self.m = subtract_below(simd, sum, constant(simd, &M.moduli));
-        let difference = simd.u64_sub(constant(simd, &bias_n), rhs.n);
-        let sum = simd.u64_add(self.n, difference);
-        let sum = subtract_below(simd, sum, constant(simd, &TWICE_N));
-        self.n = subtract_below(simd, sum, constant(simd, &N.moduli));
-        self
-    }
-
-    /// Returns `K * p - self`, which is `-self`.
-    ///
-    /// The residues of `2q + K * p - self` are below `3q`; one conditional subtraction of `q`
-    /// restores `[0, 2q]`.
-    #[inline(always)]
-    pub fn neg<const K: u64>(self, simd: S) -> Self {
-        let mut bound = DebugCounter::new(0);
-        bound.sub_with_bias(self.bound, K);
-        bound.assert_le(LIMIT);
-        let [bias_m, bias_n] = const { bias(K) };
-        let difference = simd.u64_sub(constant(simd, &bias_m), self.m);
-        let m = subtract_below(simd, difference, constant(simd, &M.moduli));
-        let difference = simd.u64_sub(constant(simd, &bias_n), self.n);
-        let n = subtract_below(simd, difference, constant(simd, &N.moduli));
-        Self { m, n, bound }
-    }
-
-    /// Returns `self * rhs`.
+    /// Returns `self * rhs` for any operands up to [`LIMIT`], whose result may exceed
+    /// [`REDUCED`]; [`Field::mul`] restricts it to operands whose result does not.
     ///
     /// The first basis reduces its products into the quotient, already in `[0, 2q]`. Its
     /// conversion accumulates eight rotations of the quotient into the second basis's products,
@@ -824,7 +747,7 @@ impl<S: X86V4C> Rns<S> {
     ///
     /// Runs through [`Field::kernel`], which inlines it.
     #[inline(always)]
-    pub fn mul(self, simd: S, rhs: Self) -> Self {
+    fn mul_loose(self, simd: S, rhs: Self) -> Self {
         Self::kernel(
             simd,
             #[inline(always)]
@@ -832,7 +755,7 @@ impl<S: X86V4C> Rns<S> {
         )
     }
 
-    /// Body of [`Self::mul`], inlined into the calling kernel.
+    /// Body of [`Self::mul_loose`], inlined into the calling kernel.
     #[inline(always)]
     fn multiply(self, simd: S, rhs: Self) -> Self {
         // The product is below A * B * p^2 plus at most LIFT * M multiples of p, and the
@@ -1156,14 +1079,31 @@ impl<S: X86V4C> Field<S> for Rns<S> {
         operation.x86_v4c(simd)
     }
 
+    /// Loads the first element, or `fill` when there is none.
+    ///
+    /// The integer's 50-bit digits convert into the second basis with floor fractions, which
+    /// underestimate the quotient by at most one and so leave an integer below `2p`.
     #[inline(always)]
     fn load(simd: S, elements: &[[u8; BYTES]], fill: &[u8; BYTES]) -> Self {
-        Self::load(simd, elements, fill)
+        let element = elements.first().unwrap_or(fill);
+        let digits = limbs_from_words::<MODULI, BITS>(words_from_bytes(element));
+        let k = quotient(&digits, &TO_RNS.fraction);
+        let quotient = (simd.u64_splat(k & MASK), simd.u64_splat(k >> WORD));
+        let n = Self::convert(simd, &digits, quotient, &TO_RNS, &N);
+        Self {
+            m: Self::expand(simd, n),
+            n,
+            bound: DebugCounter::new(2),
+        }
     }
 
+    /// Stores the canonical element into the first of `elements`, if any.
     #[inline(always)]
     fn store(self, simd: S, elements: &mut [[u8; BYTES]]) {
-        Self::store(self, simd, elements);
+        self.bound.assert_le(LIMIT);
+        if let Some(element) = elements.first_mut() {
+            *element = bytes_from_words(&canonical(&scalars(simd, self.n)));
+        }
     }
 
     type Raw = [u64; RESIDUES];
@@ -1184,19 +1124,49 @@ impl<S: X86V4C> Field<S> for Rns<S> {
         Self::from_residues(simd, lanes[0], A)
     }
 
+    /// Residue sums are at most `4q`, and one conditional subtraction of `2q` restores `[0, 2q]`.
     #[inline(always)]
-    fn add(self, simd: S, rhs: Self) -> Self {
-        Self::add(self, simd, rhs)
+    fn add(mut self, simd: S, rhs: Self) -> Self {
+        self.bound.add(rhs.bound);
+        self.bound.assert_le(LIMIT);
+        let sum = simd.u64_add(self.m, rhs.m);
+        self.m = subtract_below(simd, sum, constant(simd, &TWICE_M));
+        let sum = simd.u64_add(self.n, rhs.n);
+        self.n = subtract_below(simd, sum, constant(simd, &TWICE_N));
+        self
     }
 
+    /// The residues of `self + 2q + K * p - rhs` are below `5q`; conditional subtractions of `2q`
+    /// and then `q` restore `[0, 2q]`.
     #[inline(always)]
-    fn sub<const K: u64>(self, simd: S, rhs: Self) -> Self {
-        Self::sub::<K>(self, simd, rhs)
+    fn sub<const K: u64>(mut self, simd: S, rhs: Self) -> Self {
+        self.bound.sub_with_bias(rhs.bound, K);
+        self.bound.assert_le(LIMIT);
+        let [bias_m, bias_n] = const { bias(K) };
+        let difference = simd.u64_sub(constant(simd, &bias_m), rhs.m);
+        let sum = simd.u64_add(self.m, difference);
+        let sum = subtract_below(simd, sum, constant(simd, &TWICE_M));
+        self.m = subtract_below(simd, sum, constant(simd, &M.moduli));
+        let difference = simd.u64_sub(constant(simd, &bias_n), rhs.n);
+        let sum = simd.u64_add(self.n, difference);
+        let sum = subtract_below(simd, sum, constant(simd, &TWICE_N));
+        self.n = subtract_below(simd, sum, constant(simd, &N.moduli));
+        self
     }
 
+    /// The residues of `2q + K * p - self` are below `3q`; one conditional subtraction of `q`
+    /// restores `[0, 2q]`.
     #[inline(always)]
     fn neg<const K: u64>(self, simd: S) -> Self {
-        Self::neg::<K>(self, simd)
+        let mut bound = DebugCounter::new(0);
+        bound.sub_with_bias(self.bound, K);
+        bound.assert_le(LIMIT);
+        let [bias_m, bias_n] = const { bias(K) };
+        let difference = simd.u64_sub(constant(simd, &bias_m), self.m);
+        let m = subtract_below(simd, difference, constant(simd, &M.moduli));
+        let difference = simd.u64_sub(constant(simd, &bias_n), self.n);
+        let n = subtract_below(simd, difference, constant(simd, &N.moduli));
+        Self { m, n, bound }
     }
 
     #[inline(always)]
@@ -1352,10 +1322,11 @@ impl<S: X86V4C> Field<S> for Rns<S> {
         <Self as Field<S>>::reduce_each_signed::<SUMS, K>(simd, sums)
     }
 
-    /// Multiplies with [`Rns::mul`], whose single product needs no quotient fold.
+    /// Multiplies with [`Rns::mul_loose`], whose single product needs no quotient fold, and
+    /// checks that the result is at most [`REDUCED`].
     #[inline(always)]
     fn mul(self, simd: S, rhs: Self) -> Self {
-        let product = Self::mul(self, simd, rhs);
+        let product = Self::mul_loose(self, simd, rhs);
         product.bound.assert_le(REDUCED);
         product
     }
@@ -1684,11 +1655,11 @@ pub mod fuzz {
                 Self::Add | Self::LooseAdd => a.add(simd, b),
                 Self::Sub => a.sub::<2>(simd, b),
                 Self::Neg => a.neg::<2>(simd),
-                Self::Mul | Self::LooseMul => a.mul(simd, b),
+                Self::Mul | Self::LooseMul => a.mul_loose(simd, b),
                 Self::Chain => {
                     let three = a.double(simd).add(simd, a);
                     three
-                        .mul(simd, b.sub::<2>(simd, a))
+                        .mul_loose(simd, b.sub::<2>(simd, a))
                         .sub::<{ LIFT + 1 }>(simd, b)
                 }
                 Self::LooseDoubling => {
@@ -1696,13 +1667,13 @@ pub mod fuzz {
                     for _ in 0..DOUBLINGS {
                         a = a.double(simd);
                     }
-                    a.mul(simd, b)
+                    a.mul_loose(simd, b)
                 }
                 Self::LooseSub => {
                     let difference = a.sub::<{ LIMIT - 2 }>(simd, b);
-                    difference.mul(simd, difference)
+                    difference.mul_loose(simd, difference)
                 }
-                Self::LooseNeg => a.neg::<LIMIT>(simd).mul(simd, b),
+                Self::LooseNeg => a.neg::<LIMIT>(simd).mul_loose(simd, b),
             }
         }
     }
@@ -1765,7 +1736,7 @@ pub mod fuzz {
                     (load(a), a, 2)
                 }
                 _ => (
-                    values[i].mul(simd, values[j]),
+                    values[i].mul_loose(simd, values[j]),
                     reference::mul(expected[i], expected[j]),
                     (bounds[i] * bounds[j]).div_ceil(M_OVER_P) + LIFT,
                 ),
@@ -2016,8 +1987,8 @@ pub mod fuzz {
             assert!(catch_unwind(|| at(LIMIT - 1).sub::<2>(simd, at(1))).is_err());
             assert!(catch_unwind(|| at(3).neg::<3>(simd)).is_ok());
             assert!(catch_unwind(|| at(4).neg::<3>(simd)).is_err());
-            assert!(catch_unwind(|| at(LIMIT).mul(simd, at(LIMIT))).is_ok());
-            assert!(catch_unwind(|| at(LIMIT + 1).mul(simd, at(LIMIT))).is_err());
+            assert!(catch_unwind(|| at(LIMIT).mul_loose(simd, at(LIMIT))).is_ok());
+            assert!(catch_unwind(|| at(LIMIT + 1).mul_loose(simd, at(LIMIT))).is_err());
             assert!(catch_unwind(|| at(LIMIT + 1).store(simd, &mut [[0; BYTES]])).is_err());
         }
 
