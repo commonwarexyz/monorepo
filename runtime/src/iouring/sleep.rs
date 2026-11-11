@@ -1987,15 +1987,21 @@ mod loom_tests {
     use std::task::Wake;
 
     /// End every registration of `timers`, by closure if `close` is set and
-    /// by expiry otherwise, and wake their wakers after the lock, as a
-    /// worker's callback batch does.
+    /// by a peer's rescue otherwise, and wake their wakers after the lock, as
+    /// a worker's callback batch does. A rescue records no pass time, so the
+    /// repolls that follow see the ending only through the epoch, which is
+    /// what the models check. An owner's expiry would record a pass time that
+    /// completes them whatever the epoch says.
     fn end_here(timers: &Timers, close: bool) {
         let mut deferred = Deferred::default();
 
         if close {
             timers.close(&mut deferred);
         } else {
-            timers.expire(u64::MAX, BUDGET, &mut deferred);
+            // A rescue skips timers whose lock another thread holds, so retry.
+            while !timers.rescue(u64::MAX, &mut deferred) {
+                thread::yield_now();
+            }
         }
 
         for waker in deferred.wakes.drain(..) {
