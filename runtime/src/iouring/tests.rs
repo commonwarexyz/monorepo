@@ -1123,8 +1123,10 @@ fn claim_then_mail() -> [Turn; 2] {
     })
 }
 
-/// How long a worker gets to finish a sync once its permit is released,
-/// well before worker zero's ten second process metrics tick.
+/// How long a test waits for progress that must not need a rescue, such as a
+/// sync after its permit is released or a turn that must finish without the
+/// inbox lock another thread holds, before it gives up. It is well before
+/// worker zero's ten second process metrics tick.
 const RESCUE: Duration = Duration::from_secs(5);
 
 /// Unpark the worker of `unparker` unless `progress` reports within

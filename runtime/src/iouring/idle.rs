@@ -1064,7 +1064,7 @@ pub mod tests {
         }
     }
 
-    /// A parker whose last look sees the global queue runs, and its look
+    /// A worker whose last look sees the global queue runs, and its look
     /// stops before the run queues. If it returned the last count, it hands
     /// the duty on, so a backlog whose kicks that count suppressed still
     /// reaches a parked worker.
@@ -1125,7 +1125,7 @@ pub mod tests {
         release(&pool, &mut [&mut r0, &mut r1, &mut r2, &mut r3], tasks);
     }
 
-    /// A parker whose empty run queue is pinned by a thief's claim returns
+    /// A worker whose empty run queue is pinned by a thief's claim returns
     /// `Wait` with a live publication, since the thief holds a search count. It
     /// searches after the thief frees the slots and hands on the last search
     /// count.

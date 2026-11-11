@@ -96,7 +96,7 @@
 //!
 //! ```text
 //! worker zero                            worker i (1..n)
-//!   Pool::new (mailboxes, run queues)
+//!   Pool::new (mailboxes, run queues, parkers)
 //!   enter, start worker i ------------->   enter, report ready
 //!   build and drive the root               drive tasks
 //!   root ends: close the task set,

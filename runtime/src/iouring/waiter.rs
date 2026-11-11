@@ -436,8 +436,9 @@ impl Waiters {
             WaiterState::CancelRequested => None,
         };
 
-        // Permit waiters use only the driver's native wake source. Accounting
-        // precedes their release. File and buffer owners remain deferred.
+        // Permit waiters wake only through their driver's acquisition waker,
+        // which runs no user code. Accounting precedes their release. File and
+        // buffer owners remain deferred.
         let (output, resources) = waiter.request.complete(result);
         drop(waiter.durability);
         deferred.resources.push(resources);

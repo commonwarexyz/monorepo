@@ -329,7 +329,7 @@ mod tests {
         let mailbox = Mailbox::new(parker.unparker());
         mailbox.unparker.unpark();
 
-        // The word moved, but the worker's parker reports no mail, so the
+        // The word moved, but the worker's mailbox reports no mail, so the
         // worker skips the take.
         assert!(parker.moved(0));
         assert!(!mailbox.has_mail());
