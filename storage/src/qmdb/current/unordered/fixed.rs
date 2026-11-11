@@ -14,7 +14,7 @@ use crate::{
     qmdb::{current, value::FixedEncoding},
 };
 
-/// A specialization of [super::db::Db] for unordered key spaces and fixed-size values.
+/// A specialization of [crate::qmdb::current::Db] for unordered key spaces and fixed-size values.
 pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
     F,
     E,

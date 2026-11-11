@@ -7,11 +7,11 @@ use crate::{
     },
     qmdb::{
         self,
-        keyless::{CompactDb, Db, Metrics, Operation, operation::OperationCodec},
+        keyless::{Db, Metrics, Operation, operation::OperationCodec},
         sync,
     },
 };
-use commonware_codec::{EncodeShared, Read};
+use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_utils::range::NonEmptyRange;
@@ -133,68 +133,6 @@ where
             inactivity_floor,
         )
         .await
-    }
-
-    fn ops_root(&self) -> Self::Digest {
-        self.root()
-    }
-}
-
-impl<F, E, V, H, S> sync::Database for CompactDb<F, E, V, H, S>
-where
-    F: Family,
-    E: Context,
-    V: OperationCodec,
-    H: Hasher,
-    S: Strategy,
-    Operation<F, V>: EncodeShared,
-    Operation<F, V>: Read,
-{
-    type Family = F;
-    type Op = Operation<F, V>;
-    type Journal = sync::journal::Memory<F, E, Operation<F, V>>;
-    type Config = super::CompactConfig<<Operation<F, V> as Read>::Cfg, S>;
-    type Digest = H::Digest;
-    type Context = E;
-    type Hasher = H;
-
-    async fn from_sync_result(
-        context: Self::Context,
-        config: Self::Config,
-        log: Self::Journal,
-        pinned_nodes: Option<Vec<Self::Digest>>,
-        range: NonEmptyRange<Location<F>>,
-        _apply_batch_size: NonZeroU64,
-    ) -> Result<Self, qmdb::Error<F>> {
-        crate::qmdb::compact::from_sync_result(
-            context,
-            config,
-            log,
-            pinned_nodes,
-            range,
-            Self::init_from_sync,
-        )
-        .await
-    }
-
-    async fn persist_sync_result(self) -> Result<Self, qmdb::Error<F>> {
-        self.sync().await
-    }
-
-    async fn discard_local_state(
-        _context: Self::Context,
-        _config: &Self::Config,
-    ) -> Result<(), qmdb::Error<F>> {
-        Ok(())
-    }
-
-    async fn local_pinned_nodes(
-        _context: Self::Context,
-        _config: &Self::Config,
-        _target: &sync::Target<F, Self::Digest>,
-        _journal: &Self::Journal,
-    ) -> Result<Option<Vec<Self::Digest>>, qmdb::Error<F>> {
-        Ok(None)
     }
 
     fn ops_root(&self) -> Self::Digest {

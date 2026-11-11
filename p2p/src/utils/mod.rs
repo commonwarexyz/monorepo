@@ -20,6 +20,7 @@ pub mod mux;
 ///
 /// Import as `PeerSetsAtIndexBase` (or similar) and define a local
 /// `type PeerSetsAtIndex<P> = PeerSetsAtIndexBase<...>` with the primary/secondary types you use.
+#[derive(Clone)]
 pub(crate) struct PeerSetsAtIndex<Primary, Secondary> {
     pub(crate) primary: Primary,
     pub(crate) secondary: Secondary,
