@@ -258,6 +258,18 @@ pub mod fuzz {
         Ok(())
     }
 
+    /// A kernel whose representations [`Plan::Representations`] compares.
+    #[derive(Clone, Copy, Debug, Arbitrary)]
+    enum GroupKernel {
+        Msm,
+        Sum,
+        MulEach,
+        Multiply,
+        Add,
+        Double,
+        Endomorphism,
+    }
+
     /// A group fuzzing operation, run on either group.
     #[derive(Clone, Copy, Debug, Arbitrary)]
     pub enum Plan {
@@ -392,13 +404,13 @@ pub mod fuzz {
                     assert_eq!(Endomorphism(p).dispatch(), p * &G::eigenvalue());
                 }
                 Self::Representations => {
-                    let kind = u.int_in_range(0u8..=6)?;
+                    let kernel = GroupKernel::arbitrary(u)?;
                     let count = length(u, MAX_LANES + 3)?;
                     let (elements, _) = elements::<G>(u, count.max(2))?;
                     let scalars = scalars(u, count.max(1))?;
                     let method = method(u)?;
-                    match kind {
-                        0 => check_representations(
+                    match kernel {
+                        GroupKernel::Msm => check_representations(
                             u,
                             Msm {
                                 elements: &elements[..count],
@@ -406,18 +418,24 @@ pub mod fuzz {
                                 method,
                             },
                         )?,
-                        1 => check_representations(u, Sum(&elements[..count]))?,
-                        2 => check_representations(u, Each(&elements[..count], &scalars[..count]))?,
-                        3 => check_representations(
+                        GroupKernel::Sum => check_representations(u, Sum(&elements[..count]))?,
+                        GroupKernel::MulEach => {
+                            check_representations(u, Each(&elements[..count], &scalars[..count]))?
+                        }
+                        GroupKernel::Multiply => check_representations(
                             u,
                             Multiply {
                                 element: elements[0],
                                 scalar: scalars[0],
                             },
                         )?,
-                        4 => check_representations(u, Add(elements[0], elements[1]))?,
-                        5 => check_representations(u, Double(elements[0]))?,
-                        _ => check_representations(u, Endomorphism(elements[0]))?,
+                        GroupKernel::Add => {
+                            check_representations(u, Add(elements[0], elements[1]))?
+                        }
+                        GroupKernel::Double => check_representations(u, Double(elements[0]))?,
+                        GroupKernel::Endomorphism => {
+                            check_representations(u, Endomorphism(elements[0]))?
+                        }
                     }
                 }
             }

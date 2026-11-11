@@ -378,6 +378,14 @@ pub mod fuzz {
         }
     }
 
+    /// A kernel whose representations [`Plan::Representations`] compares.
+    #[derive(Clone, Copy, Debug, Arbitrary)]
+    enum PairingKernel {
+        MultiPairing,
+        Separate,
+        Product,
+    }
+
     /// A pairing fuzzing operation.
     #[derive(Clone, Copy, Debug, Arbitrary)]
     pub enum Plan {
@@ -413,7 +421,8 @@ pub mod fuzz {
                 }
                 Self::Each => {
                     // Outputs beyond the pairs are unchanged, and pairs beyond the outputs are
-                    // ignored.
+                    // ignored. A few pairs suffice, since each costs a pairing:
+                    // Representations covers the lane counts of every representation.
                     const LONGEST: usize = 6;
                     let count = LONGEST - u.int_in_range(0..=LONGEST)?;
                     let (pairs, _) = pairs(u, count)?;
@@ -426,16 +435,21 @@ pub mod fuzz {
                     }
                 }
                 Self::Representations => {
-                    let kind = u.int_in_range(0u8..=2)?;
+                    let kernel = PairingKernel::arbitrary(u)?;
                     // More pairs than share their squarings on one lane, or than the lanes of
                     // the widest representation.
-                    let longest = if kind == 1 { MAX_LANES } else { SHARED } + 1;
+                    let longest = match kernel {
+                        PairingKernel::Separate => MAX_LANES,
+                        PairingKernel::MultiPairing | PairingKernel::Product => SHARED,
+                    } + 1;
                     let count = longest - u.int_in_range(0..=longest)?;
                     let (pairs, _) = pairs(u, count)?;
-                    match kind {
-                        0 => check_representations(u, MultiPairing(&pairs))?,
-                        1 => check_representations(u, Separate(&pairs))?,
-                        _ => {
+                    match kernel {
+                        PairingKernel::MultiPairing => {
+                            check_representations(u, MultiPairing(&pairs))?
+                        }
+                        PairingKernel::Separate => check_representations(u, Separate(&pairs))?,
+                        PairingKernel::Product => {
                             let product = Product(GT::arbitrary(u)?, GT::arbitrary(u)?);
                             check_representations(u, product)?;
                         }
