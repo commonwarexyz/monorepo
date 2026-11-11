@@ -697,9 +697,15 @@ pub mod fuzz {
     /// from the input, with distinct elements in every lane.
     #[derive(Clone, Copy, Debug, Arbitrary)]
     pub enum Plan {
-        /// Checks loads, stores, raw forms, selections, and every value and product operation,
-        /// including long and tight accumulations, against the reference.
-        Operations,
+        /// Checks loads and stores with fills, selections, and raw forms.
+        LoadStore,
+        /// Checks sums, multiples, differences, negations, carries, and products of values,
+        /// including readied sums.
+        Values,
+        /// Checks reduced products and their sums, differences, cross terms, and quadratic forms.
+        Products,
+        /// Checks sums of [`Field::PRODUCTS`] products and tight reductions of longer sums.
+        Accumulation,
         /// Checks inversion against the reference, mapping zero to zero.
         Inverse,
     }
@@ -718,7 +724,10 @@ pub mod fuzz {
             u: &mut Unstructured<'_>,
         ) -> arbitrary::Result<()> {
             match self {
-                Self::Operations => operations::<S, F>(simd, u),
+                Self::LoadStore => load_store::<S, F>(simd, u),
+                Self::Values => values::<S, F>(simd, u),
+                Self::Products => products::<S, F>(simd, u),
+                Self::Accumulation => accumulation::<S, F>(simd, u),
                 Self::Inverse => inverse::<S, F>(simd, u),
             }
         }
@@ -762,7 +771,7 @@ pub mod fuzz {
         }
     }
 
-    fn operations<S: Simd, F: Field<S>>(
+    fn load_store<S: Simd, F: Field<S>>(
         simd: S,
         u: &mut Unstructured<'_>,
     ) -> arbitrary::Result<()> {
@@ -797,14 +806,48 @@ pub mod fuzz {
         let (a, ra) = draw::<S, F>(simd, u)?;
         let (b, rb) = draw::<S, F>(simd, u)?;
         let (c, rc) = draw::<S, F>(simd, u)?;
-        let (d, rd) = draw::<S, F>(simd, u)?;
-        let mul = |x: &[Element], y: &[Element], i: usize| reference::mul(x[i], y[i]);
-        let rab = |i| mul(&ra, &rb, i);
-        let rcd = |i| mul(&rc, &rd, i);
-        let ab = a.product(simd, b);
-        let cd = c.product(simd, d);
-        assert_lanes(simd, F::reduce(simd, ab), "reduce(a * b)", rab);
-        assert_lanes(simd, F::mul(a, simd, b), "a * b", rab);
+        let rab = |i: usize| reference::mul(ra[i], rb[i]);
+        // Selection picks each lane independently and keeps the larger bounds.
+        let scaled = a.mul_small::<12>(simd).carry(simd);
+        let mask = match u.int_in_range(0..=2)? {
+            0 => u.arbitrary()?,
+            1 => 0,
+            _ => u64::MAX,
+        };
+        assert_lanes(simd, a.select(simd, scaled, mask), "select", |i| {
+            if (mask >> i) & 1 == 1 {
+                reference::mul(ra[i], small(12))
+            } else {
+                ra[i]
+            }
+        });
+        // Raw forms load each lane from its own entry without conversion, as valid operands.
+        let mut raw = vec![F::Raw::default(); lanes];
+        a.store_raw::<2>(simd, &mut raw);
+        let reversed: Vec<&F::Raw> = raw.iter().rev().collect();
+        assert_lanes(
+            simd,
+            F::load_raw::<2>(simd, &reversed),
+            "reversed raw a",
+            |i| ra[lanes - 1 - i],
+        );
+        F::mul(a, simd, b).store_raw::<TIGHT>(simd, &mut raw);
+        let ordered: Vec<&F::Raw> = raw.iter().collect();
+        let loaded = F::load_raw::<TIGHT>(simd, &ordered);
+        assert_lanes(simd, loaded, "raw ab", rab);
+        assert_lanes(simd, F::mul(loaded, simd, c), "raw ab * c", |i| {
+            reference::mul(rab(i), rc[i])
+        });
+        Ok(())
+    }
+
+    fn values<S: Simd, F: Field<S>>(simd: S, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+        let (a, ra) = draw::<S, F>(simd, u)?;
+        let (b, rb) = draw::<S, F>(simd, u)?;
+        let (c, rc) = draw::<S, F>(simd, u)?;
+        assert_lanes(simd, F::mul(a, simd, b), "a * b", |i| {
+            reference::mul(ra[i], rb[i])
+        });
         assert_lanes(simd, a.add(simd, b), "a + b", |i| {
             reference::add(ra[i], rb[i])
         });
@@ -828,6 +871,36 @@ pub mod fuzz {
             reference::sub(ra[i], rb[i])
         });
         assert_lanes(simd, a.neg::<3>(simd), "-a", |i| reference::neg(ra[i]));
+        // Sums of up to sixteen values multiply once readied.
+        let mut factor = a;
+        for _ in 1..16 {
+            // Keep additions within the representation's limb limits.
+            factor = factor.add(simd, a).ready::<16>(simd);
+        }
+        assert_lanes(
+            simd,
+            F::mul(factor.ready::<16>(simd), simd, b),
+            "16a * b",
+            |i| reference::mul(reference::mul(ra[i], small(16)), rb[i]),
+        );
+        let sum_ab = a.add(simd, b).ready::<2>(simd);
+        assert_lanes(simd, F::mul(sum_ab, simd, c), "(a + b) * c", |i| {
+            reference::mul(reference::add(ra[i], rb[i]), rc[i])
+        });
+        Ok(())
+    }
+
+    fn products<S: Simd, F: Field<S>>(simd: S, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+        let (a, ra) = draw::<S, F>(simd, u)?;
+        let (b, rb) = draw::<S, F>(simd, u)?;
+        let (c, rc) = draw::<S, F>(simd, u)?;
+        let (d, rd) = draw::<S, F>(simd, u)?;
+        let mul = |x: &[Element], y: &[Element], i: usize| reference::mul(x[i], y[i]);
+        let rab = |i| mul(&ra, &rb, i);
+        let rcd = |i| mul(&rc, &rd, i);
+        let ab = a.product(simd, b);
+        let cd = c.product(simd, d);
+        assert_lanes(simd, F::reduce(simd, ab), "reduce(a * b)", rab);
         assert_lanes(simd, F::reduce(simd, F::lift(a, simd)), "lift(a)", |i| {
             ra[i]
         });
@@ -899,6 +972,21 @@ pub mod fuzz {
             "imaginary again",
             cross,
         );
+        Ok(())
+    }
+
+    fn accumulation<S: Simd, F: Field<S>>(
+        simd: S,
+        u: &mut Unstructured<'_>,
+    ) -> arbitrary::Result<()> {
+        let (a, ra) = draw::<S, F>(simd, u)?;
+        let (b, rb) = draw::<S, F>(simd, u)?;
+        let (c, rc) = draw::<S, F>(simd, u)?;
+        let (d, rd) = draw::<S, F>(simd, u)?;
+        let rab = |i: usize| reference::mul(ra[i], rb[i]);
+        let rcd = |i: usize| reference::mul(rc[i], rd[i]);
+        let ab = a.product(simd, b);
+        let cd = c.product(simd, d);
         // A sum of PRODUCTS products reduces, and is a valid subtrahend.
         let times = |n: usize, i| reference::mul(rab(i), small(n as u64));
         let mut full = ab;
@@ -951,48 +1039,6 @@ pub mod fuzz {
             "tight ab",
             rab,
         );
-        // Sums of up to sixteen values multiply once readied.
-        let mut factor = a;
-        for _ in 1..16 {
-            // Keep additions within the representation's limb limits.
-            factor = factor.add(simd, a).ready::<16>(simd);
-        }
-        assert_lanes(
-            simd,
-            F::mul(factor.ready::<16>(simd), simd, b),
-            "16a * b",
-            |i| reference::mul(reference::mul(ra[i], small(16)), rb[i]),
-        );
-        let sum_ab = a.add(simd, b).ready::<2>(simd);
-        assert_lanes(simd, F::mul(sum_ab, simd, c), "(a + b) * c", |i| {
-            reference::mul(reference::add(ra[i], rb[i]), rc[i])
-        });
-        // Selection picks each lane independently and keeps the larger bounds.
-        let mask = match u.int_in_range(0..=2)? {
-            0 => u.arbitrary()?,
-            1 => 0,
-            _ => u64::MAX,
-        };
-        assert_lanes(simd, a.select(simd, scaled, mask), "select", |i| {
-            if (mask >> i) & 1 == 1 { r12(i) } else { ra[i] }
-        });
-        // Raw forms load each lane from its own entry without conversion, as valid operands.
-        let mut raw = vec![F::Raw::default(); lanes];
-        a.store_raw::<2>(simd, &mut raw);
-        let reversed: Vec<&F::Raw> = raw.iter().rev().collect();
-        assert_lanes(
-            simd,
-            F::load_raw::<2>(simd, &reversed),
-            "reversed raw a",
-            |i| ra[lanes - 1 - i],
-        );
-        F::mul(a, simd, b).store_raw::<TIGHT>(simd, &mut raw);
-        let ordered: Vec<&F::Raw> = raw.iter().collect();
-        let loaded = F::load_raw::<TIGHT>(simd, &ordered);
-        assert_lanes(simd, loaded, "raw ab", rab);
-        assert_lanes(simd, F::mul(loaded, simd, c), "raw ab * c", |i| {
-            reference::mul(rab(i), rc[i])
-        });
         Ok(())
     }
 
@@ -1017,8 +1063,23 @@ pub mod fuzz {
         use commonware_invariants::minifuzz;
 
         #[test]
-        fn minifuzz_operations() {
-            minifuzz::test(|u| Plan::Operations.run(u));
+        fn minifuzz_load_store() {
+            minifuzz::test(|u| Plan::LoadStore.run(u));
+        }
+
+        #[test]
+        fn minifuzz_values() {
+            minifuzz::test(|u| Plan::Values.run(u));
+        }
+
+        #[test]
+        fn minifuzz_products() {
+            minifuzz::test(|u| Plan::Products.run(u));
+        }
+
+        #[test]
+        fn minifuzz_accumulation() {
+            minifuzz::test(|u| Plan::Accumulation.run(u));
         }
 
         #[test]
