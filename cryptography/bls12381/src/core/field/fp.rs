@@ -186,7 +186,7 @@ pub(crate) mod reference {
     }
 
     /// `-p^(-1) mod 2^64`.
-    const INV: u64 = montgomery::negated_inverse(MODULUS[0]);
+    pub(super) const INV: u64 = montgomery::negated_inverse(MODULUS[0]);
 
     /// `2^768 mod p`, which undoes a Montgomery multiplication's division by `2^384`.
     const R2: Element = power_of_two(768);
@@ -291,9 +291,8 @@ pub(crate) mod testing {
     /// `2^(-392) mod p`: a Montgomery multiplication divides by `2^384`, so dividing one by it
     /// twice and multiplying by `2^376` leaves `2^(-392)`.
     const R_INVERSE: Element = {
-        let inv = montgomery::negated_inverse(MODULUS[0]);
-        let half = montgomery::mul(&reference::ONE, &reference::ONE, &MODULUS, inv);
-        montgomery::mul(&half, &power_of_two(384 - 8), &MODULUS, inv)
+        let half = montgomery::mul(&reference::ONE, &reference::ONE, &MODULUS, reference::INV);
+        montgomery::mul(&half, &power_of_two(384 - 8), &MODULUS, reference::INV)
     };
 
     /// Draws a big-endian integer below `2^384`, biased toward zero, one, `p - 1`, `p`, and the

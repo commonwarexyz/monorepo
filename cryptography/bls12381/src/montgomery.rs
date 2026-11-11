@@ -416,10 +416,7 @@ pub mod fuzz {
 
     /// Converts a drawn integer below `2^382` to limbs and back.
     fn limbs_round_trip(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
-        let mut words = [0; WORDS];
-        for (word, bytes) in words.iter_mut().zip(u.bytes(8 * WORDS)?.as_chunks::<8>().0) {
-            *word = u64::from_le_bytes(*bytes);
-        }
+        let mut words: [u64; WORDS] = u.arbitrary()?;
         words[WORDS - 1] >>= 2;
         assert_eq!(
             from_limbs::<WORDS, LIMBS>(&to_limbs::<WORDS, LIMBS>(&words)),
@@ -440,7 +437,7 @@ pub mod fuzz {
                 // 2^382 mod p.
                 let mut top = [0; WORDS];
                 top[WORDS - 1] = 1 << 62;
-                reference::reduce(&reference::to_bytes(top))
+                reference::mul(top, reference::ONE)
             }
             // Small and sparse values exercise long runs of even division steps.
             9 => {
