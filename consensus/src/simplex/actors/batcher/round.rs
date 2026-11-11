@@ -1,6 +1,6 @@
 use super::{
     Verifier,
-    verifier::{Batch, ProposalState},
+    verifier::{Batch, ConstructJob, Constructed, ProposalState},
     votes::{ObservedVote, Outcome, VoteTracker},
 };
 use crate::{
@@ -17,7 +17,6 @@ use crate::{
 };
 use commonware_cryptography::Digest;
 use commonware_p2p::Blocker;
-use commonware_parallel::Strategy;
 use commonware_utils::{N3f1, ordered::Quorum};
 use rand_core::CryptoRng;
 use std::sync::Arc;
@@ -384,37 +383,27 @@ impl<
         Some(proposal)
     }
 
-    /// Attempts to construct a certificate from the first ready kind (notarizes,
-    /// nullifies, then finalizes), recording it before returning it to the caller.
-    ///
-    /// Once polled, construction moves the buffered votes into the worker. Do not
-    /// cancel unless the round will also be discarded.
-    pub async fn try_construct<E: CryptoRng>(
-        &mut self,
-        rng: &mut E,
-        strategy: &impl Strategy,
-    ) -> Option<Batch<Certificate<S, D>>> {
-        let result = if let Some(result) = self
-            .verifier
-            .try_construct_notarization(rng, strategy)
-            .await
+    /// Returns a job for the first ready kind, in the order notarize, nullify, finalize. A kind
+    /// with an unfinished job is not ready. So each kind has at most one unfinished job at a time.
+    /// The job owns its votes. Votes that arrive later stay buffered. The caller must submit the
+    /// job and pass its result to [Self::finish_construct].
+    pub fn begin_construct<E: CryptoRng>(&mut self, rng: &mut E) -> Option<ConstructJob<S, D>> {
+        [Kind::Notarization, Kind::Nullification, Kind::Finalization]
+            .into_iter()
+            .find_map(|kind| self.verifier.begin_construct(kind, rng))
+    }
+
+    /// Merges the job's verified votes back and records its certificate.
+    /// Does not record it again if the round already has a certificate of this kind.
+    /// Returns the job's batch, so the caller can forward the certificate.
+    pub fn finish_construct(&mut self, result: Constructed<S, D>) -> Batch<Certificate<S, D>> {
+        let batch = self.verifier.finish_construct(result);
+        if let Some(certificate) = &batch.certificate
+            && !self.has_certificate(certificate.kind())
         {
-            result
-        } else if let Some(result) = self
-            .verifier
-            .try_construct_nullification(rng, strategy)
-            .await
-        {
-            result
-        } else {
-            self.verifier
-                .try_construct_finalization(rng, strategy)
-                .await?
-        };
-        if let Some(certificate) = &result.certificate {
             self.record_certificate(certificate);
         }
-        Some(result)
+        batch
     }
 
     /// Returns whether `signer` has a nullify vote.
@@ -445,5 +434,29 @@ impl<
             .map(Participant::from_usize)
             .filter(|&p| self.is_missing_voter(proposal, p))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_parallel::Strategy;
+
+    impl<
+        S: Scheme<D>,
+        B: Blocker<PublicKey = S::PublicKey>,
+        D: Digest,
+        R: Reporter<Activity = Activity<S, D>>,
+    > Round<S, B, D, R>
+    {
+        /// Runs the first ready construction job to completion.
+        pub(crate) async fn try_construct<E: CryptoRng>(
+            &mut self,
+            rng: &mut E,
+            strategy: &impl Strategy,
+        ) -> Option<Batch<Certificate<S, D>>> {
+            let result = self.begin_construct(rng)?.spawn(strategy).await;
+            Some(self.finish_construct(result))
+        }
     }
 }
