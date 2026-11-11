@@ -970,11 +970,10 @@ pub(crate) mod reference {
 pub mod fuzz {
     use super::{reference::Element, *};
     use crate::core::field::{
-        fp::{rns::Rns, testing::Backend, unsat28::Unsat28, unsat49::Unsat49},
+        fp::testing::{Kernel, Target},
         fp2::reference as fp2,
     };
     use arbitrary::{Arbitrary, Unstructured};
-    use commonware_simd::{Operation, X86V4C};
     use std::{vec, vec::Vec};
 
     /// Largest number of operations in a chain.
@@ -1009,101 +1008,11 @@ pub mod fuzz {
         }
     }
 
-    /// A computation on the lanes of values, generic over the backend and representation.
-    pub(crate) trait Kernel {
-        /// The stored results.
-        type Output;
-
-        /// Runs the computation in representation `F`.
-        fn run<S: Simd, F: Field<S>>(&self, simd: S) -> Self::Output;
-    }
-
-    /// A base field representation.
-    #[derive(Clone, Copy, Debug)]
-    enum Representation {
-        Unsat49,
-        Unsat28,
-        Rns,
-    }
-
-    /// An emulated backend and a representation it supports: residues require x86v4c.
-    #[derive(Clone, Copy, Debug)]
-    pub(crate) struct Target {
-        backend: Backend,
-        representation: Representation,
-    }
-
-    /// Runs a kernel in a representation, as an operation of any backend.
-    struct Execute<'a, K>(&'a K, Representation);
-
-    impl<S: Simd, K: Kernel> Operation<S> for Execute<'_, K> {
-        type Output = K::Output;
-
-        fn portable(self, simd: S) -> K::Output {
-            match self.1 {
-                Representation::Unsat49 => self.0.run::<S, Unsat49<S>>(simd),
-                Representation::Unsat28 => self.0.run::<S, Unsat28<S>>(simd),
-                Representation::Rns => unreachable!("residues require x86v4c"),
-            }
-        }
-
-        fn x86_v4c(self, simd: S) -> K::Output
-        where
-            S: X86V4C,
-        {
-            match self.1 {
-                Representation::Rns => self.0.run::<S, Rns<S>>(simd),
-                _ => self.portable(simd),
-            }
-        }
-    }
-
-    /// Returns the lane count of a representation.
-    struct Lanes;
-
-    impl Kernel for Lanes {
-        type Output = usize;
-
-        fn run<S: Simd, F: Field<S>>(&self, _: S) -> usize {
-            F::LANES
-        }
-    }
-
-    impl Target {
-        /// Draws any emulated backend and representation.
-        pub(crate) fn draw(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
-            let backend = Backend::draw(u)?;
-            let representations = if matches!(backend, Backend::X86V4C) {
-                2
-            } else {
-                1
-            };
-            let representation = [
-                Representation::Unsat28,
-                Representation::Unsat49,
-                Representation::Rns,
-            ][u.int_in_range(0..=representations)?];
-            Ok(Self {
-                backend,
-                representation,
-            })
-        }
-
-        /// Runs a kernel on this target.
-        pub(crate) fn run<K: Kernel>(self, kernel: &K) -> K::Output {
-            self.backend.execute(Execute(kernel, self.representation))
-        }
-
-        /// Returns the number of elements a value holds on this target.
-        pub(crate) fn lanes(self) -> usize {
-            self.run(&Lanes)
-        }
-
-        /// Draws a lane count from one to [`Self::lanes`], every lane when the input is exhausted.
-        pub(crate) fn draw_lanes(self, u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
-            let lanes = self.lanes();
-            Ok(lanes - u.int_in_range(0..=lanes - 1)?)
-        }
+    /// Draws a lane count from one to the lanes of `target`, every lane when the input is
+    /// exhausted.
+    fn draw_lanes(target: Target, u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
+        let lanes = target.lanes();
+        Ok(lanes - u.int_in_range(0..=lanes - 1)?)
     }
 
     /// Draws an extension element with canonical components, requiring the bytes it reads.
@@ -1382,7 +1291,7 @@ pub mod fuzz {
     impl Kernel for Chain<'_> {
         type Output = Vec<Vec<[u8; BYTES]>>;
 
-        fn run<S: Simd, F: Field<S>>(&self, simd: S) -> Self::Output {
+        fn run<S: Simd, F: Field<S>>(self, simd: S) -> Self::Output {
             let loaded = load::<S, F>(simd, self.inputs);
             let coefficients = Fp12::<F>::frobenius_coefficients(simd);
             let mut y = loaded.a;
@@ -1408,7 +1317,7 @@ pub mod fuzz {
     /// Runs [`Plan::Chain`], or [`Plan::CyclotomicChain`] when `cyclotomic` is set.
     fn chain(u: &mut Unstructured<'_>, cyclotomic: bool) -> arbitrary::Result<()> {
         let target = Target::draw(u)?;
-        let lanes = target.draw_lanes(u)?;
+        let lanes = draw_lanes(target, u)?;
         let values = (0..lanes)
             .map(|_| Values::draw(u, cyclotomic))
             .collect::<arbitrary::Result<Vec<_>>>()?;
@@ -1421,7 +1330,7 @@ pub mod fuzz {
             .map(|_| u.choose(choices).copied())
             .collect::<arbitrary::Result<Vec<_>>>()?;
         let inputs: Vec<_> = values.iter().map(Values::encode).collect();
-        let outputs = target.run(&Chain {
+        let outputs = target.run(Chain {
             inputs: &inputs,
             steps: &steps,
         });
@@ -1466,7 +1375,7 @@ pub mod fuzz {
     impl Kernel for Subfield<'_> {
         type Output = Vec<[u8; BYTES]>;
 
-        fn run<S: Simd, F: Field<S>>(&self, simd: S) -> Self::Output {
+        fn run<S: Simd, F: Field<S>>(self, simd: S) -> Self::Output {
             let x = load::<S, F>(simd, self.inputs);
             let a = x.a.c0;
             let t = match self.operation {
@@ -1505,7 +1414,7 @@ pub mod fuzz {
     /// Runs [`Plan::Subfield`].
     fn subfield(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
         let target = Target::draw(u)?;
-        let lanes = target.draw_lanes(u)?;
+        let lanes = draw_lanes(target, u)?;
         let operation = *u.choose(&[
             Operation6::Product,
             Operation6::Square,
@@ -1517,7 +1426,7 @@ pub mod fuzz {
             .map(|_| Values::draw(u, false))
             .collect::<arbitrary::Result<Vec<_>>>()?;
         let inputs: Vec<_> = values.iter().map(Values::encode).collect();
-        let outputs = target.run(&Subfield {
+        let outputs = target.run(Subfield {
             inputs: &inputs,
             operation,
         });
@@ -1553,7 +1462,7 @@ pub mod fuzz {
     impl Kernel for LaneProduct<'_> {
         type Output = Vec<[u8; BYTES]>;
 
-        fn run<S: Simd, F: Field<S>>(&self, simd: S) -> Self::Output {
+        fn run<S: Simd, F: Field<S>>(self, simd: S) -> Self::Output {
             let value = load_wide::<S, F>(simd, self.elements, &self.fill);
             let product = check_bound(simd, value.product_of_lanes(simd));
             store(simd, product, F::LANES)
@@ -1578,7 +1487,7 @@ pub mod fuzz {
             expected = reference::mul(&expected, element);
         }
         let encoded: Vec<_> = elements.iter().map(reference::encode).collect();
-        let outputs = target.run(&LaneProduct {
+        let outputs = target.run(LaneProduct {
             elements: &encoded,
             fill: reference::encode(&fill),
         });
