@@ -406,7 +406,8 @@ where
 /// Generates a BLS12-381 multisig signing scheme wrapper for a specific protocol.
 ///
 /// This macro creates a complete wrapper struct with constructors, `Scheme` trait
-/// implementation, and a `fixture` function for testing.
+/// implementation, and a `fixture` function for testing when this crate's `mocks` feature is
+/// enabled.
 ///
 /// # Parameters
 ///
@@ -444,28 +445,29 @@ where
 #[macro_export]
 macro_rules! impl_certificate_bls12381_multisig {
     ($subject:ty, $namespace:ty, $faults:ty) => {
-        /// Generates a test fixture with Ed25519 identities and BLS12-381 multisig schemes.
-        ///
-        /// Returns a [`commonware_cryptography::certificate::mocks::Fixture`] whose keys and
-        /// scheme instances share a consistent ordering.
-        #[cfg(feature = "mocks")]
-        #[allow(dead_code)]
-        pub fn fixture<V, R>(
-            rng: &mut R,
-            namespace: &[u8],
-            n: u32,
-        ) -> $crate::certificate::mocks::Fixture<Scheme<$crate::ed25519::PublicKey, V>>
-        where
-            V: $crate::bls12381::primitives::variant::Variant,
-            R: rand_core::CryptoRng,
-        {
-            $crate::bls12381::certificate::multisig::mocks::fixture::<_, V, _>(
-                rng,
-                namespace,
-                n,
-                Scheme::signer,
-                Scheme::verifier,
-            )
+        $crate::cfg_mocks! {
+            /// Generates a test fixture with Ed25519 identities and BLS12-381 multisig schemes.
+            ///
+            /// Returns a [`commonware_cryptography::certificate::mocks::Fixture`] whose keys and
+            /// scheme instances share a consistent ordering.
+            #[allow(dead_code)]
+            pub fn fixture<V, R>(
+                rng: &mut R,
+                namespace: &[u8],
+                n: u32,
+            ) -> $crate::certificate::mocks::Fixture<Scheme<$crate::ed25519::PublicKey, V>>
+            where
+                V: $crate::bls12381::primitives::variant::Variant,
+                R: rand_core::CryptoRng,
+            {
+                $crate::bls12381::certificate::multisig::mocks::fixture::<_, V, _>(
+                    rng,
+                    namespace,
+                    n,
+                    Scheme::signer,
+                    Scheme::verifier,
+                )
+            }
         }
 
         /// BLS12-381 multi-signature signing scheme wrapper.

@@ -882,6 +882,28 @@ impl<S: Scheme, Sc: Clone + Send + Sync + 'static> crate::certificate::Provider
 #[cfg(feature = "mocks")]
 pub mod mocks;
 
+/// Emits the given items when this crate's `mocks` feature is enabled.
+///
+/// A `cfg` in an exported macro is evaluated against the features of the crate that invokes the
+/// macro. A fixture wrapped in this macro exists exactly when the mocks it is built from do,
+/// whatever features the invoking crate defines.
+#[cfg(feature = "mocks")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! cfg_mocks {
+    ($($item:item)*) => {
+        $($item)*
+    };
+}
+
+/// Emits nothing, as this crate's `mocks` feature is disabled.
+#[cfg(not(feature = "mocks"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! cfg_mocks {
+    ($($item:item)*) => {};
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

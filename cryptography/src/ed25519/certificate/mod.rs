@@ -398,7 +398,8 @@ impl Read for Certificate {
 /// Generates an Ed25519 signing scheme wrapper for a specific protocol.
 ///
 /// This macro creates a complete wrapper struct with constructors, `Scheme` trait
-/// implementation, and a `fixture` function for testing.
+/// implementation, and a `fixture` function for testing when this crate's `mocks` feature is
+/// enabled.
 ///
 /// # Parameters
 ///
@@ -426,27 +427,28 @@ impl Read for Certificate {
 #[macro_export]
 macro_rules! impl_certificate_ed25519 {
     ($subject:ty, $namespace:ty, $faults:ty) => {
-        /// Generates a test fixture with Ed25519 identities and signing schemes.
-        ///
-        /// Returns a [`commonware_cryptography::certificate::mocks::Fixture`] whose keys and
-        /// scheme instances share a consistent ordering.
-        #[cfg(feature = "mocks")]
-        #[allow(dead_code)]
-        pub fn fixture<R>(
-            rng: &mut R,
-            namespace: &[u8],
-            n: u32,
-        ) -> $crate::certificate::mocks::Fixture<Scheme>
-        where
-            R: rand_core::CryptoRng,
-        {
-            $crate::ed25519::certificate::mocks::fixture(
-                rng,
-                namespace,
-                n,
-                Scheme::signer,
-                Scheme::verifier,
-            )
+        $crate::cfg_mocks! {
+            /// Generates a test fixture with Ed25519 identities and signing schemes.
+            ///
+            /// Returns a [`commonware_cryptography::certificate::mocks::Fixture`] whose keys and
+            /// scheme instances share a consistent ordering.
+            #[allow(dead_code)]
+            pub fn fixture<R>(
+                rng: &mut R,
+                namespace: &[u8],
+                n: u32,
+            ) -> $crate::certificate::mocks::Fixture<Scheme>
+            where
+                R: rand_core::CryptoRng,
+            {
+                $crate::ed25519::certificate::mocks::fixture(
+                    rng,
+                    namespace,
+                    n,
+                    Scheme::signer,
+                    Scheme::verifier,
+                )
+            }
         }
 
         /// Ed25519 signing scheme wrapper.
