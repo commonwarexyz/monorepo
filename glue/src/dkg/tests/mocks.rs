@@ -136,17 +136,15 @@ pub(crate) fn blocks(
         .last_key_value()
         .map_or(Height::zero(), |(height, _)| *height);
     let encoded = Arc::new(encoded);
-    let expected = digests.clone();
     marshal::blocks::Blocks::new(
         tip,
         NZUsize!(8),
         move |height| digests.get(&height).copied(),
         move |height| {
             let encoded = encoded.get(&height).cloned();
-            let digest = expected.get(&height).copied();
             async move {
                 let block = TestBlock::decode_cfg(encoded?, &()).expect("test block must decode");
-                Some(Digested::precomputed(block, digest?))
+                Some(ready(block))
             }
         },
     )

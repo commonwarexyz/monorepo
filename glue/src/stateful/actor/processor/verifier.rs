@@ -16,13 +16,13 @@ use commonware_consensus::{
         core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
     },
 };
-use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
+use commonware_cryptography::{Digested, Digestible};
 use commonware_runtime::{
     Clock, Supervisor,
     telemetry::{metrics::histogram::Timer, traces::TracedExt as _},
 };
-use std::future::{Future, pending};
-use tracing::{Instrument as _, debug, info_span, warn};
+use std::future::Future;
+use tracing::{Instrument as _, info_span, warn};
 
 /// A request's recovery path and the execution steps that remain before it completes.
 ///
@@ -85,30 +85,30 @@ where
     ///
     /// A verification of a cached block, or of a block at or below the branch anchor's height,
     /// needs no execution and is answered from the cache or the canonical block at that height.
-    /// Unavailable selected history leaves a verification pending, so it abstains, and makes
-    /// recovery return [`PrepareBatchesError::Incomplete`].
-    pub(in crate::stateful::actor) fn prepare<S, V>(
+    /// Returns [`PrepareBatchesError::Incomplete`] if that canonical block or the selected
+    /// history is unavailable.
+    pub(in crate::stateful::actor) fn prepare<V>(
         &self,
         context: E,
-        marshal: MarshalMailbox<S, V>,
+        marshal: MarshalMailbox<A::SigningScheme, V>,
         block: Option<Digested<A::Block>>,
         parent: Digested<A::Block>,
         blocks: Blocks<A::Block>,
-    ) -> impl Future<Output = Result<Prepared<A::Block>, PrepareBatchesError>> + Send + use<E, A, S, V>
+    ) -> impl Future<Output = Result<Prepared<A::Block>, PrepareBatchesError>> + Send + use<E, A, V>
     where
-        S: Scheme,
         V: MarshalVariant<ApplicationBlock = A::Block>,
     {
         let execution = self.execution.clone();
         async move {
-            let verify = block.is_some();
-            let timer = verify.then(|| execution.metrics.verify_duration.timer(&context));
+            let timer = block
+                .is_some()
+                .then(|| execution.metrics.verify_duration.timer(&context));
 
             // A cached block was already processed, and a block at or below the branch anchor
             // cannot be processed on the applied state, so both are answered without execution:
             // the cached block is valid, and the other is valid only if it is the canonical block
-            // at its height. A canonical block marshal cannot return yet leaves the verification
-            // pending.
+            // at its height. A canonical block marshal cannot return yet leaves the history
+            // incomplete.
             if let Some(block) = &block {
                 let digest = block.digest();
                 let cached = execution.pending_contains(&digest);
@@ -119,7 +119,7 @@ where
                     } else {
                         async {
                             if block.height() == anchor.height {
-                                return digest == anchor.digest;
+                                return Ok(digest == anchor.digest);
                             }
                             let Some(canonical) =
                                 marshal.get_block(Identifier::Height(block.height())).await
@@ -129,16 +129,16 @@ where
                                     anchor_height = anchor.height.get(),
                                     "verification waiting on missing canonical block"
                                 );
-                                return pending().await;
+                                return Err(PrepareBatchesError::Incomplete);
                             };
-                            canonical.digest() == digest
+                            Ok(canonical.digest() == digest)
                         }
                         .instrument(info_span!(
                             "stateful.processor.is_already_processed",
                             height = block.height().traced(),
                             digest = %digest,
                         ))
-                        .await
+                        .await?
                     };
                     return if valid {
                         Ok(Prepared {
@@ -153,17 +153,8 @@ where
                 }
             }
 
-            // Find the missing path unless the parent is already cached or the branch anchor. A
-            // verification waits on unavailable history, since it can still become available, and
-            // a proposal declines.
-            let replay = match execution.prepare_replay(&context, &blocks, parent).await {
-                Ok(path) => path,
-                Err(PrepareBatchesError::Incomplete) if verify => {
-                    debug!("verification waiting on unavailable selected history");
-                    return pending().await;
-                }
-                Err(error) => return Err(error),
-            };
+            // Find the missing path unless the parent is already cached or the branch anchor.
+            let replay = execution.prepare_replay(&context, &blocks, parent).await?;
 
             Ok(Prepared {
                 block,
@@ -177,8 +168,8 @@ where
     /// Returns the next action: acquiring or processing each block on the missing path in height
     /// order, then processing the block itself when verifying.
     ///
-    /// Returns [`PrepareBatchesError::Invalid`] if the recovery target is not the selected block
-    /// at its height or does not extend the acquired path.
+    /// Returns [`PrepareBatchesError::Invalid`] if the recovery target does not extend the
+    /// acquired path.
     pub(in crate::stateful::actor) fn next(
         &self,
         context: &E,
@@ -191,8 +182,8 @@ where
                 Some(next) => next,
                 None if !path.exhausted() => return Ok(Next::Acquire),
                 None => {
+                    let path = prepared.replay.take().expect("the replay path is present");
                     self.execution.finish_replay(context, path);
-                    prepared.replay = None;
                     return self.next(context, prepared);
                 }
             },
@@ -219,25 +210,18 @@ where
     /// Acquires the next missing block for a request whose [`Self::next`] returned
     /// [`Next::Acquire`], without borrowing the application.
     ///
-    /// Unavailable selected history leaves a verification pending, so it abstains, and makes
-    /// recovery return [`PrepareBatchesError::Incomplete`]. Dropping the future releases the
-    /// path's acquisitions.
+    /// Returns [`PrepareBatchesError::Incomplete`] if the selected history is unavailable.
+    /// Dropping the future releases the path's acquisitions.
     pub(in crate::stateful::actor) async fn acquire(
         mut prepared: Prepared<A::Block>,
     ) -> Result<Prepared<A::Block>, PrepareBatchesError> {
-        let verify = prepared.block.is_some();
-        let path = prepared
+        prepared
             .replay
             .as_mut()
-            .expect("an acquiring request must have a replay path");
-        match path.acquire().await {
-            Ok(()) => Ok(prepared),
-            Err(PrepareBatchesError::Incomplete) if verify => {
-                debug!("verification waiting on unavailable recovery history");
-                pending().await
-            }
-            Err(error) => Err(error),
-        }
+            .expect("an acquiring request must have a replay path")
+            .acquire()
+            .await?;
+        Ok(prepared)
     }
 
     /// Processes one block from [`Self::next`] as a candidate, sharing the call with concurrent

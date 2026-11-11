@@ -548,7 +548,6 @@ struct ScriptedProducer {
     context: Arc<deterministic::Context>,
     kind: Kind,
     bodies: Arc<HashMap<D, (u64, Bytes)>>,
-    notarized: Arc<HashMap<Round, (u64, Bytes)>>,
     missing: Arc<BTreeSet<u64>>,
     tail: Option<u64>,
     observations: Shared,
@@ -610,12 +609,9 @@ impl resolver_p2p::Producer for ScriptedProducer {
         let now = self.context.current();
         let mut observations = self.observations.lock();
 
-        // Bodies by digest carry only the block. Notarized requests by round carry the
-        // notarization followed by its block. Both share one availability and hold policy.
         let found = match key {
             Key::Block(digest) => self.bodies.get(&digest).cloned(),
-            Key::Notarized { round } => self.notarized.get(&round).cloned(),
-            Key::Finalized { .. } => None,
+            Key::Notarized { .. } | Key::Finalized { .. } => None,
         };
         let Some((height, body)) = found else {
             observations.other_requests += 1;
@@ -720,8 +716,8 @@ fn run(scenario: Scenario) {
         let candidate = chain.last().expect("chain must not be empty").clone();
         let selected = &chain[..depth as usize];
 
-        // Peers serve every body by digest and every notarization with its block by round. The
-        // scenario decides which selected bodies are already local.
+        // Peers serve every body by digest. The scenario decides which selected bodies
+        // are already local.
         let local = scenario.local_heights();
         let missing = (1..=depth)
             .filter(|height| !local.contains(height))
@@ -734,19 +730,6 @@ fn run(scenario: Scenario) {
                     (block.digest(), (block.height.get(), body))
                 })
                 .collect::<HashMap<D, (u64, Bytes)>>(),
-        );
-        let notarized = Arc::new(
-            chain
-                .iter()
-                .map(|block| {
-                    let mut response = notarization(&schemes, &peers[..3], block).encode().to_vec();
-                    response.extend_from_slice(&block.encode());
-                    (
-                        block.context.round,
-                        (block.height.get(), Bytes::from(response)),
-                    )
-                })
-                .collect::<HashMap<Round, (u64, Bytes)>>(),
         );
         let missing_shared = Arc::new(missing.clone());
         let observations: Shared = Arc::new(Mutex::new(Observations::default()));
@@ -810,7 +793,6 @@ fn run(scenario: Scenario) {
                         context: Arc::new(context.child("producer").with_attribute("index", index)),
                         kind: scenario.kind,
                         bodies: bodies.clone(),
-                        notarized: notarized.clone(),
                         missing: missing_shared.clone(),
                         tail: missing
                             .iter()

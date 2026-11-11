@@ -34,7 +34,7 @@ use std::{
     pin::Pin,
     task::{Context, Poll, ready},
 };
-use tracing::{Instrument as _, Span, info_span};
+use tracing::{Instrument as _, Span, debug, info_span};
 
 /// A verification request that holds its caller's block and parent through [`WeakBlock`]s.
 ///
@@ -109,7 +109,8 @@ where
     /// A finished execution step awaiting the end of pruning.
     Ready { prepared: Box<Prepared<A::Block>> },
     /// Finding or acquiring the request's missing blocks. `future` is `None` while maintenance
-    /// pauses acquisition.
+    /// pauses acquisition, or while a verification waits for unavailable history until the next
+    /// maintenance restarts its search.
     Acquiring {
         future: Option<BoxFuture<'static, PhaseResult<A::Block>>>,
     },
@@ -421,9 +422,9 @@ where
         }
     }
 
-    /// Handles a request whose phase ended: a cancelled request is dropped, a failed phase
-    /// rejects it, a finished step is classified under the current admission, and an admitted
-    /// request advances.
+    /// Handles a request whose phase ended: a cancelled request is dropped, a failed phase is
+    /// handled by [`Handler::fail`], a finished step is classified under the current admission,
+    /// and an admitted request advances.
     fn complete(&mut self, completion: Completion<E, A>, actions: &mut VecDeque<Action<E, A>>) {
         let Completion {
             request,
@@ -431,13 +432,16 @@ where
             result,
         } = completion;
 
-        // A cancelled request is dropped without a reply, and a failed phase rejects it.
+        // A cancelled request is dropped without a reply.
         let Some(result) = result else {
             return;
         };
-        let Ok(prepared) = result else {
-            request.reject();
-            return;
+        let prepared = match result {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.fail(request, error);
+                return;
+            }
         };
 
         // Pruning holds completed requests. Finalization admits successors of the winner and
@@ -469,6 +473,26 @@ where
         self.advance(request, prepared, actions);
     }
 
+    /// Answers a request whose phase failed with `error`.
+    ///
+    /// Invalid history rejects the request. Unavailable history declines a proposal. A
+    /// verification abstains, and its search stays paused until maintenance restarts it.
+    fn fail(&mut self, request: Request<E, A>, error: PrepareBatchesError) {
+        match error {
+            PrepareBatchesError::Invalid => request.reject(),
+            PrepareBatchesError::Incomplete => match request {
+                Request::Verify(_) => {
+                    debug!("verification waiting on unavailable history");
+                    self.jobs.push(Work {
+                        request: Some(request),
+                        phase: Phase::Acquiring { future: None },
+                    });
+                }
+                Request::Recover(_) => request.reject(),
+            },
+        }
+    }
+
     /// Starts the request's next acquisition or execution step, or answers the request once no
     /// step remains.
     ///
@@ -483,11 +507,13 @@ where
             return;
         }
 
-        // A recovery target that is not selected or does not extend its acquired path rejects
-        // the request.
-        let Ok(next) = self.verifier.next(&self.context, &mut prepared) else {
-            request.reject();
-            return;
+        // A recovery target that does not extend its acquired path fails the request.
+        let next = match self.verifier.next(&self.context, &mut prepared) {
+            Ok(next) => next,
+            Err(error) => {
+                self.fail(request, error);
+                return;
+            }
         };
         match next {
             // Each processing call owns an application clone, so different blocks can execute

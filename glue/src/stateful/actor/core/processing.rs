@@ -2743,6 +2743,80 @@ mod tests {
         });
     }
 
+    /// A verification below the branch anchor is decided by marshal's canonical block at its
+    /// height. While marshal does not hold that block, the verification abstains instead of
+    /// answering.
+    #[test]
+    fn missing_canonical_block_leaves_verification_pending() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let mut signing = context.child("signing");
+            let scheme =
+                scheme_mocks::fixture(&mut signing, b"missing-canonical", 1).schemes[0].clone();
+            let marshal = fixtures::marshal_fixture(
+                context.child("marshal"),
+                "missing-canonical",
+                scheme,
+                None,
+                NZUsize!(1),
+                true,
+            )
+            .await;
+            let app = GatedApp {
+                process_gates: Arc::default(),
+                proposal_gate: Arc::default(),
+                process_valid: true,
+                observed_contexts: Arc::default(),
+            };
+            let processor = Processor::new(
+                app,
+                test_databases(),
+                anchor(0, 0),
+                StatefulMetrics::new(&context),
+                None,
+                Sequential,
+            );
+            let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let processing = Processing {
+                context: ContextCell::new(context.child("processing")),
+                mailbox: receiver,
+                provider: (),
+                marshal: marshal.mailbox.clone(),
+                processor,
+                deferred_verifications: Vec::new(),
+            };
+            let actor = context.child("loop").spawn(move |_| processing.run());
+            let mut mailbox = Mailbox::new(sender);
+
+            // Apply two finalized blocks that marshal does not store, so the branch anchor is
+            // at height 2.
+            let genesis = TestBlock::new(0, 0);
+            let block1 = TestBlock::child(&genesis, 1);
+            let block2 = TestBlock::child(&block1, 1);
+            for block in [block1, block2] {
+                let (acknowledgement, waiter) = Exact::handle();
+                let _ = mailbox.report(Update::Block(digested(block), acknowledgement));
+                waiter.await.expect("finalized block must be acknowledged");
+            }
+
+            // A different block at height 1 stays pending after marshal reports it has no
+            // canonical block there.
+            let conflicting = TestBlock::child(&genesis, 2);
+            let mut verify = Box::pin(verify_with(
+                &mut mailbox,
+                (context.child("verify"), conflicting.context()),
+                [digested(conflicting), digested(genesis)],
+            ));
+            assert!(poll!(&mut verify).is_pending());
+            context.sleep(Duration::from_secs(1)).await;
+            assert!(poll!(&mut verify).is_pending());
+
+            drop(verify);
+            actor.abort();
+            let _ = actor.await;
+            marshal.abort().await;
+        });
+    }
+
     #[test]
     fn pending_proposal_does_not_block_active_verification() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {

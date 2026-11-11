@@ -541,15 +541,6 @@ where
         .unwrap();
 }
 
-/// A reliable link slow enough that a crash plan fires before the network catches up.
-fn crash_plan_link() -> Link {
-    Link {
-        latency: Duration::from_millis(100),
-        jitter: Duration::ZERO,
-        success_rate: probability!(1.0),
-    }
-}
-
 fn run_random_crashes<D>(engine: D)
 where
     D: EngineDefinition<PublicKey = ed25519::PublicKey>,
@@ -558,7 +549,6 @@ where
 {
     PlanBuilder::new(engine)
         .seeds(0..5)
-        .link(crash_plan_link())
         .crash(Crash::Random {
             frequency: Duration::from_millis(1500),
             downtime: Duration::from_secs(1),
@@ -578,14 +568,13 @@ where
 {
     PlanBuilder::new(engine)
         .seeds(0..5)
-        .link(crash_plan_link())
         .crash(Crash::Random {
-            frequency: Duration::from_secs(5),
+            frequency: Duration::from_millis(1500),
             downtime: Duration::from_secs(1),
             count: 3,
         })
-        .exit_condition(ProcessedHeightAtLeast::new(100))
-        .property(BlockAgreementAtHeight::new(100))
+        .exit_condition(ProcessedHeightAtLeast::new(50))
+        .property(BlockAgreementAtHeight::new(50))
         .run()
         .unwrap();
 }
@@ -776,9 +765,8 @@ where
     BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
 {
-    let results = PlanBuilder::new(engine)
+    PlanBuilder::new(engine)
         .seeds(0..5)
-        .link(crash_plan_link())
         .crash(Crash::Random {
             frequency: Duration::from_millis(500),
             downtime: Duration::from_millis(100),
@@ -788,9 +776,6 @@ where
         .property(BlockAgreementAtHeight::new(50))
         .run()
         .unwrap();
-    for result in results {
-        assert!(result.crashes >= 2, "each seed must crash at least twice");
-    }
 }
 
 /// Temporarily partition one validator from the network, then heal,

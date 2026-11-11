@@ -130,8 +130,12 @@ enum ReplayStart<D: Digest> {
 /// Missing blocks between cached or applied state and a recovery target, acquired forward from
 /// the selected branch and processed oldest first.
 ///
+/// The range yields each block at its requested height, so the path checks only that each block
+/// names the preceding one as its parent.
+///
 /// The path holds at most the range's window of acquired bodies, plus the held target and the
-/// block awaiting processing.
+/// block awaiting processing. The branch it reads may retain a further window of bodies below a
+/// history suffix (see [`Blocks`]).
 struct ReplayPath<B: Block> {
     /// Selected branch ending at the target.
     blocks: Blocks<B>,
@@ -144,15 +148,15 @@ struct ReplayPath<B: Block> {
     /// block below it has been acquired.
     target: Option<Digested<B>>,
 
-    /// Height and digest of the block that the next acquired block must extend.
-    expected: (Height, B::Digest),
+    /// Digest of the block that the next acquired block must extend.
+    expected: B::Digest,
 
     /// The acquired block awaiting processing.
     next: Option<Digested<B>>,
 
-    /// Recovery timer and the number of blocks handed out for processing, recorded once the
-    /// path is exhausted.
-    measurement: Option<(Timer, usize)>,
+    /// Recovery timer and the number of blocks the path hands out for processing, recorded once
+    /// the path is exhausted.
+    measurement: (Timer, u64),
 }
 
 impl<B: Block> ReplayPath<B> {
@@ -165,8 +169,8 @@ impl<B: Block> ReplayPath<B> {
     /// must not hold an acquired block.
     ///
     /// Returns [`PrepareBatchesError::Invalid`] if the block does not extend the preceding one or
-    /// if the range ends early or reports any error other than [`BlocksError::Unavailable`].
-    /// Returns [`PrepareBatchesError::Incomplete`] on [`BlocksError::Unavailable`].
+    /// if the range reports any error other than [`BlocksError::Unavailable`]. Returns
+    /// [`PrepareBatchesError::Incomplete`] on [`BlocksError::Unavailable`].
     async fn acquire(&mut self) -> Result<(), PrepareBatchesError> {
         assert!(
             self.next.is_none(),
@@ -177,20 +181,19 @@ impl<B: Block> ReplayPath<B> {
             .as_mut()
             .expect("a block below the target must remain to be acquired");
 
-        // The range yields every height through the target's parent unless it fails first, so
-        // an early end leaves the target without valid history.
-        let Some(acquired) = range.next().await else {
-            warn!(
-                expected_height = self.expected.0.get(),
-                "selected history ended below the recovery target"
-            );
-            return Err(PrepareBatchesError::Invalid);
-        };
+        // The range yields every height through the target's parent unless it fails first, and
+        // the path releases it at that last height and is not acquired again after a failure.
+        let acquired = range
+            .next()
+            .await
+            .expect("a retained range must yield a block through the target's parent");
 
         // Unavailable history leaves the target undecided. Any other range error rejects it.
         let block = acquired.map_err(|error| match error {
             BlocksError::Unavailable => PrepareBatchesError::Incomplete,
-            _ => PrepareBatchesError::Invalid,
+            BlocksError::InvalidHeight
+            | BlocksError::InvalidParent
+            | BlocksError::InvalidDigest => PrepareBatchesError::Invalid,
         })?;
         self.extend(&block)?;
 
@@ -209,19 +212,17 @@ impl<B: Block> ReplayPath<B> {
     /// Checks that `block` extends the preceding block on the path and records it as the parent
     /// of the next one.
     fn extend(&mut self, block: &Digested<B>) -> Result<(), PrepareBatchesError> {
-        let (height, digest) = self.expected;
-        if block.height().previous() != Some(height) || block.parent() != digest {
+        if block.parent() != self.expected {
             warn!(
                 block = ?block.digest(),
                 block_height = block.height().get(),
                 parent = ?block.parent(),
-                expected_height = height.get(),
-                expected_parent = ?digest,
+                expected_parent = ?self.expected,
                 "received non-contiguous selected history"
             );
             return Err(PrepareBatchesError::Invalid);
         }
-        self.expected = (block.height(), block.digest());
+        self.expected = block.digest();
         Ok(())
     }
 
@@ -229,40 +230,23 @@ impl<B: Block> ReplayPath<B> {
     /// with the selected branch ending at its parent. Returns `None` while the next block below
     /// the target remains to be acquired or once the path is exhausted.
     ///
-    /// Returns [`PrepareBatchesError::Invalid`] if the target is not the selected block at its
-    /// height or does not extend the preceding block.
+    /// Returns [`PrepareBatchesError::Invalid`] if the target does not extend the preceding block.
     fn take(&mut self) -> Result<Option<ReplayStep<B>>, PrepareBatchesError> {
         let block = match self.next.take() {
             Some(block) => block,
             None if self.range.is_some() => return Ok(None),
 
-            // Every block below the target has been acquired, so the target comes next. Its
-            // selected digest may have become resident while the path was acquired.
+            // Every block below the target has been acquired, so the target comes next.
             None => {
                 let Some(target) = self.target.take() else {
                     return Ok(None);
                 };
-                if self
-                    .blocks
-                    .digest(target.height())
-                    .is_some_and(|digest| digest != target.digest())
-                {
-                    warn!(
-                        target = ?target.digest(),
-                        "recovery target is no longer the selected block"
-                    );
-                    return Err(PrepareBatchesError::Invalid);
-                }
                 self.extend(&target)?;
                 target
             }
         };
 
-        // Each handed-out block counts toward the recovery depth and carries the branch ending at
-        // its parent.
-        if let Some((_, depth)) = &mut self.measurement {
-            *depth += 1;
-        }
+        // Each handed-out block carries the branch ending at its parent.
         let blocks = self.blocks.ending_at(
             block
                 .height()
@@ -1208,7 +1192,11 @@ where
                     Ok(Some(_)) => resume = Some(height),
                     Ok(None) => break self.branch_anchor(),
                     Err(BlocksError::Unavailable) => return Err(PrepareBatchesError::Incomplete),
-                    Err(_) => return Err(PrepareBatchesError::Invalid),
+                    Err(
+                        BlocksError::InvalidHeight
+                        | BlocksError::InvalidParent
+                        | BlocksError::InvalidDigest,
+                    ) => return Err(PrepareBatchesError::Invalid),
                 },
             }
         };
@@ -1218,24 +1206,29 @@ where
             .previous()
             .expect("target above the branch anchor must have a parent");
 
+        // The path hands out every height above the start through the target.
+        let depth = target
+            .height()
+            .delta_from(anchor.height)
+            .map_or(0, |delta| delta.get());
+
         // The range covers the heights above the start through the target's parent, so there is
         // none when the start is the parent.
         Ok(Some(ReplayPath {
             range: (anchor.height < end).then(|| blocks.range(anchor.height.next()..=end)),
             blocks: blocks.clone(),
             target: Some(target),
-            expected: (anchor.height, anchor.digest),
+            expected: anchor.digest,
             next: None,
-            measurement: Some((timer, 0)),
+            measurement: (timer, depth),
         }))
     }
 
     /// Records the recovery latency and depth of an exhausted `path`.
-    fn finish_replay(&self, context: &E, path: &mut ReplayPath<A::Block>) {
-        if let Some((timer, depth)) = path.measurement.take() {
-            let _ = self.metrics.rebuild_pending_depth.try_set(depth);
-            timer.observe(context);
-        }
+    fn finish_replay(&self, context: &E, path: ReplayPath<A::Block>) {
+        let (timer, depth) = path.measurement;
+        let _ = self.metrics.rebuild_pending_depth.try_set(depth);
+        timer.observe(context);
     }
 
     #[cfg(test)]
@@ -1260,7 +1253,7 @@ where
                 flight.await?;
             }
         }
-        self.finish_replay(context, &mut path);
+        self.finish_replay(context, path);
         Ok(())
     }
 }

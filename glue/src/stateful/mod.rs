@@ -271,8 +271,11 @@ pub trait Application<E>: Clone + Send + 'static {
     ///
     /// A range can fail with a [`blocks::Error`](commonware_consensus::marshal::blocks::Error).
     /// `Unavailable` means the history could not be acquired and is not a verdict, so keep the
-    /// call pending. `InvalidParent`, `InvalidHeight`, and `InvalidDigest` mean the supplied
-    /// history is inconsistent, so a candidate is invalid under it.
+    /// call pending. A candidate's call is dropped once consensus abandons every request
+    /// waiting on it. No request owns a finalized block's call, so nothing cancels it. If it
+    /// waits on history that marshal did not retain, it never ends and [`Stateful`] makes no
+    /// further progress. `InvalidParent`, `InvalidHeight`, and `InvalidDigest` mean the
+    /// supplied history is inconsistent, so a candidate is invalid under it.
     ///
     /// For a [`Finality::Candidate`], check every rule a vote depends on: signatures, the
     /// context, the selected history, and the parent's state. Return [`None`] only for permanent
