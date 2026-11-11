@@ -3731,9 +3731,14 @@ fn test_tasks_spread_across_workers_and_complete() {
 /// A wake of an idle task queues it on the waker's worker, so a pair started on
 /// two workers converges onto the first waker's worker and stays there. The
 /// other worker parks first, and a lone queued runnable kicks no parked worker.
+/// Should that worker wake and look anyway, the longest steal age keeps it
+/// from taking either end of the pair while it waits alone.
 #[test]
 fn test_chatty_pair_converges_onto_one_worker() {
-    Runner::new(config().with_worker_threads(2)).start(|context| async move {
+    let cfg = config()
+        .with_worker_threads(2)
+        .with_steal_age(MAX_STEAL_AGE);
+    Runner::new(cfg).start(|context| async move {
         let pool = context.shared.pool.clone();
         let (request, mut requests) = commonware_utils::channel::mpsc::channel::<ThreadId>(1);
         let (response, mut responses) = commonware_utils::channel::mpsc::channel::<ThreadId>(1);
@@ -3764,7 +3769,8 @@ fn test_chatty_pair_converges_onto_one_worker() {
         }
 
         // Worker one parks after its last look, which could otherwise steal a
-        // lone queued end of the pair.
+        // lone queued end of the pair, such as the requester, which is ripe at
+        // once while its spawn keeps it alone here.
         spin_until(|| is_waiting(&pool, 1), "worker one never parked");
 
         // The requester starts here. Its first request moves the responder
@@ -4184,11 +4190,15 @@ fn test_operation_and_sleep_follow_their_task_to_another_worker() {
 /// A wake on a pool worker queues the woken task on that worker, even while
 /// another worker is parked and could take it from the global queue. Every
 /// other worker is parked when the wake happens, and a lone queued runnable
-/// kicks none, so the task waits there for the waker's poll, although a
-/// searching worker could steal it.
+/// kicks none, so the task waits there for the waker's poll. A worker that
+/// woke and looked anyway could steal it only once it had waited the steal
+/// age, which outlasts the waker's poll.
 #[test]
 fn test_wake_on_a_pool_worker_keeps_the_task_there() {
-    Runner::new(config().with_worker_threads(3)).start(|context| async move {
+    let cfg = config()
+        .with_worker_threads(3)
+        .with_steal_age(MAX_STEAL_AGE);
+    Runner::new(cfg).start(|context| async move {
         let pool = context.shared.pool.clone();
         every_worker_waits(&pool).await;
         let (wake, woken) = oneshot::channel::<()>();
@@ -4505,11 +4515,18 @@ fn test_foreign_wake_behind_a_long_poll_runs_before_the_run_queue() {
 /// age does not starve the run queue. Each wake's push finds the only worker
 /// busy and leaves an unserved hint that is due once the poll before it
 /// returns, so every take could serve the global queue ahead of the run
-/// queue. After each such take the worker pops its run queue first, so
-/// between two pops of its run queue it takes at most two global runnables,
-/// one for a hint and one for the global queue interval.
-#[test]
-fn test_unserved_global_stream_lets_the_run_queue_progress() {
+/// queue. After each such take the worker pops its run queue first, so with a
+/// global queue interval of 3 or more it takes at most two global runnables
+/// between two pops of its run queue, one for a hint and one for the
+/// interval. With an interval of 2 the interval can take once before a hinted
+/// take and once after it, so it takes at most three. With an interval of 1
+/// every take serves the global queue first, as
+/// [`Config::with_global_queue_interval`] says, so no such bound holds.
+#[rstest::rstest]
+#[case::two(2)]
+#[case::three(3)]
+#[case::default(config().global_queue_interval())]
+fn test_unserved_global_stream_lets_the_run_queue_progress(#[case] interval: u32) {
     /// Links in each chain of foreign wakes.
     const LINKS: usize = 16;
     /// Run queue tasks, enough that the run queue stays at least half full
@@ -4535,7 +4552,8 @@ fn test_unserved_global_stream_lets_the_run_queue_progress() {
         .unwrap();
     }
 
-    Runner::new(config()).start(|context| async move {
+    let cfg = config().with_global_queue_interval(interval);
+    Runner::new(cfg).start(|context| async move {
         // A run queue at least half full takes one runnable per global take,
         // so no take moves a link here and both chains stay global.
         let local = Recorded::spawn(&context, LOCAL);
@@ -4564,9 +4582,17 @@ fn test_unserved_global_stream_lets_the_run_queue_progress() {
             first.max(second) <= LOCAL - HALF,
             "the run queue fell below half full, {first} and {second} of its tasks ran"
         );
+
+        // The chains alternate in the global queue, so 2 * LINKS + 1 global
+        // runnables have run once the first chain's last link runs. With at
+        // most `most` of them between two pops of the run queue, they fall
+        // into at least `least` + 1 groups, with a pop between each two.
+        let most = if interval == 2 { 3 } else { 2 };
+        let least = (2 * LINKS + 1).div_ceil(most) - 1;
         assert!(
-            first.min(second) >= LINKS,
-            "the global stream starved the run queue, {first} and {second} of its tasks ran"
+            first.min(second) >= least,
+            "the global stream starved the run queue, {first} and {second} of its tasks ran \
+             with interval {interval}"
         );
     });
 }
@@ -4636,6 +4662,7 @@ fn test_run_queue_pop_at_the_interval_pays_the_hint_debt() {
             task.await.unwrap();
         }
 
+        // Each pusher's two pushed tasks ran before the next pusher.
         let mut expected = Vec::new();
         for pusher in 0..PUSHERS - 1 {
             expected.extend([("pusher", pusher), ("pushed", pusher), ("pushed", pusher)]);
@@ -4708,22 +4735,20 @@ fn test_rayon_call_hands_off_the_run_queue() {
         // in the Rayon pool and blocks this worker until it returns.
         let strategy = Explorer::parallel(&context.strategy(NonZeroUsize::new(1).unwrap()));
         let worker = thread::current().id();
-        let pending = Arc::new(AtomicBool::new(false));
         let done = Arc::new(AtomicBool::new(false));
         let (sender, receiver) = oneshot::channel::<()>();
         let task = context.child("queued").spawn({
-            let pending = pending.clone();
             let done = done.clone();
             move |_| async move {
-                pending.store(true, Ordering::Release);
                 receiver.await.unwrap();
                 done.store(true, Ordering::Release);
             }
         });
-        while !pending.load(Ordering::Acquire) {
-            reschedule().await;
-        }
-        context.sleep(Duration::from_millis(10)).await;
+
+        // Once both workers wait, the task's first poll has returned, so the
+        // wake below finds it idle rather than inside a poll on worker one,
+        // which may have stolen it, being a spawn alone in this run queue.
+        every_worker_waits(&context.shared.pool).await;
 
         // The wake queues the task alone in this worker's run queue.
         let deadline = Instant::now() + AGE / 2;
@@ -4753,6 +4778,111 @@ fn test_rayon_call_hands_off_the_run_queue() {
         assert_ne!(joined, worker, "the join must run in the Rayon pool");
         assert!(ran, "the queued task must run while this worker blocks");
         task.await.unwrap();
+    });
+}
+
+/// What keeps a pool worker's block hook from handing off its run queue.
+#[derive(Clone, Copy, Debug)]
+enum HandOffGuard {
+    /// The worker's local state is borrowed when the hook runs.
+    Borrowed,
+    /// The worker is closing.
+    Closing,
+    /// The pool's global queue has closed.
+    ClosedQueue,
+    /// The pool has no other worker.
+    OneWorker,
+}
+
+/// A pool worker's block hook leaves its run queue in place when it cannot
+/// hand it off: while the worker's local state is borrowed, which the hook
+/// must not borrow again, on a closing worker, once the global queue has
+/// closed, which refuses the batch without taking any of it, and in a pool of
+/// one worker, which has no other worker to run it. Once the borrow ends or
+/// the worker no longer closes, the same hook hands the run queue off.
+#[rstest::rstest]
+#[case::borrowed(HandOffGuard::Borrowed)]
+#[case::closing(HandOffGuard::Closing)]
+#[case::closed_queue(HandOffGuard::ClosedQueue)]
+#[case::one_worker(HandOffGuard::OneWorker)]
+fn test_block_hook_keeps_a_run_queue_it_cannot_hand_off(#[case] guard: HandOffGuard) {
+    let workers = if matches!(guard, HandOffGuard::OneWorker) {
+        1
+    } else {
+        2
+    };
+    let cfg = config()
+        .with_worker_threads(workers)
+        .with_steal_age(MAX_STEAL_AGE);
+    Runner::new(cfg).start(|context| async move {
+        let pool = context.shared.pool.clone();
+        let woken = Recorded::spawn(&context, 1);
+        every_worker_waits(&pool).await;
+
+        {
+            // The wake queues the task alone in this worker's run queue, where
+            // it kicks no parked worker and the longest steal age keeps a
+            // worker that looks anyway from taking it.
+            let local = Local::current().unwrap();
+            let queued = || local.borrow().ready().len();
+            woken.wake();
+            assert_eq!(queued(), 1);
+
+            // The hook runs under the guard.
+            match guard {
+                HandOffGuard::Borrowed => {
+                    let _held = local.borrow_mut();
+                    spill_before_block();
+                }
+                HandOffGuard::Closing => {
+                    local.borrow_mut().closing = true;
+                    spill_before_block();
+                    local.borrow_mut().closing = false;
+                }
+                HandOffGuard::ClosedQueue => {
+                    pool.close();
+                    spill_before_block();
+                }
+                HandOffGuard::OneWorker => spill_before_block(),
+            }
+
+            assert_eq!(queued(), 1, "the hook moved the run queue under {guard:?}");
+            assert!(
+                !pool.has_global(),
+                "the hook pushed into the global queue under {guard:?}"
+            );
+
+            // Without the borrow or the closing flag, the hook hands the
+            // runnable to the global queue, where worker one takes it.
+            if matches!(guard, HandOffGuard::Borrowed | HandOffGuard::Closing) {
+                spill_before_block();
+                assert_eq!(queued(), 0, "the hook kept a run queue it could hand off");
+            }
+        }
+        for task in woken.tasks {
+            task.await.unwrap();
+        }
+    });
+}
+
+/// Only a pool worker installs the block hook, since a dedicated or blocking
+/// task's worker has no run queue to hand off. Such a task finds its thread's
+/// hook unset.
+#[test]
+fn test_dedicated_worker_installs_no_block_hook() {
+    Runner::new(config()).start(|context| async move {
+        // This pool worker's thread holds its hook while the worker runs.
+        let hook = commonware_parallel::set_block_hook(None);
+        assert!(hook.is_some(), "a pool worker installs the block hook");
+        commonware_parallel::set_block_hook(hook);
+
+        for mode in [Execution::Dedicated, Execution::Shared(true)] {
+            let hooked = placed(context.child("unhooked"), Some(mode))
+                .spawn(|_| async { commonware_parallel::set_block_hook(None).is_some() })
+                .await
+                .unwrap();
+            assert!(!hooked, "a {mode:?} worker installed the block hook");
+        }
     });
 }
 
@@ -5611,62 +5741,6 @@ fn test_tasks_queued_behind_a_long_poll_wake_a_parked_worker_to_steal(#[case] ag
     }
 }
 
-/// A lone runnable queued behind a long poll is claimed by an idle worker
-/// that looks for work before it parks. A foreign spawn claims worker one,
-/// which runs it, finds nothing to steal, and holds before it publishes
-/// itself idle until the root has woken one idle task into this worker's run
-/// queue. The root then stays in its poll, and worker one's last look finds
-/// the lone runnable, which it steals and runs at once with no steal age.
-#[test]
-fn test_lone_runnable_behind_a_long_poll_is_claimed_by_an_idle_worker() {
-    let cfg = config()
-        .with_worker_threads(2)
-        .with_steal_age(Duration::ZERO);
-    Runner::new(cfg).start(|context| async move {
-        let pool = context.shared.pool.clone();
-        let woken = Recorded::spawn(&context, 1);
-
-        // Once both workers wait, the task's first poll has returned.
-        every_worker_waits(&pool).await;
-
-        let holding = Arc::new(AtomicBool::new(false));
-        let queued = Arc::new(AtomicBool::new(false));
-        on_next_park(&pool, 1, ParkPoint::BeforeIdle, {
-            let holding = holding.clone();
-            let queued = queued.clone();
-            move || {
-                holding.store(true, Ordering::SeqCst);
-                spin_until(
-                    || queued.load(Ordering::SeqCst),
-                    "the root never queued the lone runnable",
-                );
-            }
-        });
-        let spawner = context.child("trigger");
-        let trigger = thread::spawn(move || spawner.spawn(|_| async {}))
-            .join()
-            .unwrap();
-        spin_until(
-            || holding.load(Ordering::SeqCst),
-            "worker one never searched",
-        );
-
-        // Wake the task into this worker's run queue, where it is alone, and
-        // stay in the root's poll, as a long poll would.
-        assert_eq!(woken.wakers.lock().len(), 1, "the task is idle");
-        woken.wake();
-        queued.store(true, Ordering::SeqCst);
-        spin_until(
-            || woken.ran() == 1,
-            "the lone runnable behind the long poll was not claimed",
-        );
-        trigger.await.unwrap();
-        for task in woken.tasks {
-            task.await.unwrap();
-        }
-    });
-}
-
 /// Spawn a task that returns pending on its first poll, keeping its waker in
 /// the returned slot, and records the thread and start of its second poll,
 /// when it completes, in the other returned slot.
@@ -5703,13 +5777,20 @@ fn spawn_thread_recorder(
 /// default age as well. A foreign spawn claims worker one, which runs it, finds
 /// nothing to steal, and holds before it publishes itself idle until the root
 /// has woken one idle task into this worker's run queue. The root then stays
-/// in its poll. Worker one's last look finds the lone runnable young, so it
-/// waits only until the runnable ripens, looks again and steals it, no sooner
-/// than the steal age after the wake and within a timed wake of that.
+/// in its poll. With no steal age, worker one's last look finds the lone
+/// runnable, which it steals and runs at once. Otherwise that look finds it
+/// young, so worker one waits only until the runnable ripens, looks again and
+/// steals it, no sooner than the steal age after the wake and within a timed
+/// wake of that. Worker one waits on its futex, or in its io_uring ring while
+/// it holds a pending receive, so the re-look must bound either wait.
 #[rstest::rstest]
+#[case::lone_runnable_behind_a_long_poll_is_claimed_by_an_idle_worker(Duration::ZERO)]
 #[case::twenty_milliseconds(Duration::from_millis(20))]
 #[case::default(DEFAULT_STEAL_AGE)]
-fn test_young_lone_runnable_behind_a_long_poll_is_taken_once_it_ripens(#[case] age: Duration) {
+fn test_young_lone_runnable_behind_a_long_poll_is_taken_once_it_ripens(
+    #[case] age: Duration,
+    #[values(false, true)] in_ring: bool,
+) {
     /// How much later than the steal age the relook may run on a loaded host.
     const WAKE_SLACK: Duration = Duration::from_secs(1);
     let cfg = config().with_worker_threads(2).with_steal_age(age);
@@ -5718,7 +5799,11 @@ fn test_young_lone_runnable_behind_a_long_poll_is_taken_once_it_ripens(#[case] a
         let root = thread::current().id();
         let (task, waker, ran_on) = spawn_thread_recorder(&context);
 
-        // Once both workers wait, the task's first poll has returned.
+        // Worker one holds a receive in its io_uring ring when `in_ring`,
+        // kept pending with its peer until the test ends.
+        let (_, _peer) = occupy_worker_one(&context, in_ring);
+
+        // Once both workers wait, the tasks' first polls have returned.
         every_worker_waits(&pool).await;
 
         let holding = Arc::new(AtomicBool::new(false));
@@ -5727,6 +5812,12 @@ fn test_young_lone_runnable_behind_a_long_poll_is_taken_once_it_ripens(#[case] a
             let holding = holding.clone();
             let queued = queued.clone();
             move || {
+                // Worker one's next wait is in its io_uring ring exactly when
+                // the receive is pending there.
+                let local = Local::current().unwrap();
+                let pending = !local.borrow().driver.as_ref().unwrap().is_empty();
+                drop(local);
+                assert_eq!(pending, in_ring, "worker one waits in the wrong place");
                 holding.store(true, Ordering::SeqCst);
                 spin_until(
                     || queued.load(Ordering::SeqCst),
@@ -5746,12 +5837,14 @@ fn test_young_lone_runnable_behind_a_long_poll_is_taken_once_it_ripens(#[case] a
         // Wake the task into this worker's run queue, where it is alone, and
         // stay in the root's poll, as a long poll would.
         let queued_at = Instant::now();
-        waker.lock().take().unwrap().wake();
+        waker.lock().take().expect("the task is idle").wake();
         queued.store(true, Ordering::SeqCst);
-        spin_until(
-            || ran_on.lock().is_some(),
-            "the young lone runnable was never taken",
-        );
+        let never_taken = if age.is_zero() {
+            "the lone runnable behind the long poll was not claimed"
+        } else {
+            "the young lone runnable was never taken"
+        };
+        spin_until(|| ran_on.lock().is_some(), never_taken);
         let (stolen_on, polled_at) = ran_on.lock().unwrap();
         let waited = polled_at.duration_since(queued_at);
         assert_ne!(stolen_on, root, "the owner ran it");
@@ -5771,12 +5864,17 @@ fn test_young_lone_runnable_behind_a_long_poll_is_taken_once_it_ripens(#[case] a
 /// worker's run queue, where it is alone, while worker one looks for work
 /// before it parks. That look finds the lone runnable younger than the steal
 /// age and leaves it, so this worker polls it once the first poll returns. A
-/// look that took it at once would split the pair.
+/// look that took it at once would split the pair. A wake from this worker's
+/// own service, as of readers woken by completions on its io_uring ring or by
+/// its expired timers, queues the woken task the same way, so the same look
+/// leaves a runnable its worker's service woke as well. Worker one is held
+/// before its next look until the second task has run, so only the look
+/// before its wait could have taken it, however late this worker polls it.
 #[test]
 fn test_lone_runnable_behind_a_short_poll_stays_with_its_owner() {
     let cfg = config()
         .with_worker_threads(2)
-        .with_steal_age(Duration::from_secs(1));
+        .with_steal_age(MAX_STEAL_AGE);
     Runner::new(cfg).start(|context| async move {
         let pool = context.shared.pool.clone();
         let root = thread::current().id();
@@ -5811,6 +5909,16 @@ fn test_lone_runnable_behind_a_short_poll_stays_with_its_owner() {
                     "worker one never searched",
                 );
 
+                // Worker one's next look follows its wait, so holding it there
+                // until the second task has run keeps a re-look, once the
+                // second task ripens, from taking it.
+                on_next_park(&pool, 1, ParkPoint::AfterMessages, {
+                    let ran_on = ran_on.clone();
+                    move || {
+                        spin_until(|| ran_on.lock().is_some(), "the second task never ran");
+                    }
+                });
+
                 // Wake the second task here, then return once worker one's
                 // look has refused it as young and waits to look again, as a
                 // short poll would.
@@ -5832,108 +5940,6 @@ fn test_lone_runnable_behind_a_short_poll_stays_with_its_owner() {
             root,
             "the lone runnable was stolen from behind a short poll"
         );
-    });
-}
-
-/// Two tasks that their worker's own service wakes together stay on that
-/// worker while their polls are short, as readers woken by completions on its
-/// io_uring ring do. Worker one is held before it publishes itself idle, while
-/// both tasks start here and wait. Once both wait, this worker registers a
-/// timer for each that is already due, so its next service pass wakes both
-/// into its run queue, and the first to run releases worker one, then returns
-/// only once worker one has looked for work. That look finds the other task
-/// alone and younger than the steal age, so it leaves it, and this worker
-/// polls it next. A look that took a runnable its worker's service woke at
-/// once would split the pair.
-#[test]
-fn test_lone_runnable_woken_by_its_worker_service_stays_with_its_owner() {
-    let cfg = config()
-        .with_worker_threads(2)
-        .with_steal_age(Duration::from_secs(1));
-    Runner::new(cfg).start(|context| async move {
-        let pool = context.shared.pool.clone();
-        let root = thread::current().id();
-        every_worker_waits(&pool).await;
-
-        // Hold worker one before it publishes itself idle, so neither the
-        // spawns nor the wakes below reach it, until a task releases it.
-        let holding = Arc::new(AtomicBool::new(false));
-        let released = Arc::new(AtomicBool::new(false));
-        on_next_park(&pool, 1, ParkPoint::BeforeIdle, {
-            let holding = holding.clone();
-            let released = released.clone();
-            move || {
-                holding.store(true, Ordering::SeqCst);
-                spin_until(
-                    || released.load(Ordering::SeqCst),
-                    "no task released worker one",
-                );
-            }
-        });
-        let spawner = context.child("trigger");
-        let trigger = thread::spawn(move || spawner.spawn(|_| async {}))
-            .join()
-            .unwrap();
-        spin_until(
-            || holding.load(Ordering::SeqCst),
-            "worker one never searched",
-        );
-
-        // Both tasks start on this worker, the only one running, and wait
-        // until a wake, leaving their wakers here.
-        let wakers = Arc::new(Mutex::new(Vec::new()));
-        let first = Arc::new(AtomicBool::new(false));
-        let ran = Arc::new(AtomicUsize::new(0));
-        let readers: Vec<_> = (0..2)
-            .map(|_| {
-                let wakers = wakers.clone();
-                let (first, ran) = (first.clone(), ran.clone());
-                let (pool, released) = (pool.clone(), released.clone());
-                context.child("reader").spawn(move |_| async move {
-                    let mut waited = false;
-                    poll_fn(|cx| {
-                        if waited {
-                            return Poll::Ready(());
-                        }
-                        waited = true;
-                        wakers.lock().push(cx.waker().clone());
-                        Poll::Pending
-                    })
-                    .await;
-                    ran.fetch_add(1, Ordering::SeqCst);
-                    if !first.swap(true, Ordering::SeqCst) {
-                        // The other task waits alone in this run queue while
-                        // worker one looks, as behind a short poll, until
-                        // that look has refused it as young.
-                        released.store(true, Ordering::SeqCst);
-                        spin_until(
-                            || pool.relooking(1) || ran.load(Ordering::SeqCst) == 2,
-                            "worker one never refused the young lone runnable",
-                        );
-                    }
-                    thread::current().id()
-                })
-            })
-            .collect();
-
-        // Once both wait, one service pass of this worker expires a due timer
-        // for each, which wakes both here.
-        while wakers.lock().len() < 2 {
-            reschedule().await;
-        }
-        let local = Local::current().unwrap();
-        for waker in mem::take(&mut *wakers.lock()) {
-            local.borrow_mut().timers.insert_due(waker);
-        }
-        drop(local);
-        for reader in readers {
-            assert_eq!(
-                reader.await.unwrap(),
-                root,
-                "a runnable woken by its worker's service was stolen from behind a short poll"
-            );
-        }
-        trigger.await.unwrap();
     });
 }
 

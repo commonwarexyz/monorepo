@@ -924,17 +924,11 @@ pub mod tests {
         /// claims on ordinary queues.
         #[cfg(feature = "loom")]
         pub(crate) fn shared_rounding_down() -> Self {
-            Self(Arc::new(CachePadded::new(Inner {
-                head: AtomicU64::new(pack(0, 0)),
-                tail: AtomicU32::new(0),
-                marked: AtomicU64::new(UNMARKED),
-                owned: AtomicBool::new(false),
-                exclusive: false,
-                round_down: true,
-                slots: (0..CAPACITY)
-                    .map(|_| UnsafeCell::new(MaybeUninit::uninit()))
-                    .collect(),
-            })))
+            let mut queue = Self::shared();
+            Arc::get_mut(&mut queue.0)
+                .expect("a new queue has no other handle")
+                .round_down = true;
+            queue
         }
 
         /// Claim the oldest `count` values as a thief paused after its claim
@@ -1880,11 +1874,12 @@ pub mod tests {
         assert_eq!(drain(&mut owner), [0, 1, 2, 3]);
     }
 
-    /// An owner pushing, popping and overflowing against two stealing threads
-    /// hands every value out once and drops it once.
-    #[test]
-    fn test_owner_and_two_thieves_account_for_every_value_once() {
-        let total = if cfg!(miri) { 64 } else { 4096 };
+    /// Race an owner that pushes `total` values against two threads that keep
+    /// stealing, and check that every value is handed out once and dropped
+    /// once. After pushing `value`, the owner pops up to `pops(value, queued)`
+    /// values, where `queued` is how many it then holds. Returns the longest
+    /// queue a push reported, its own value included.
+    fn race_two_thieves(total: usize, pops: impl Fn(usize, usize) -> usize) -> usize {
         let queue = Arc::new(Queue::<Counted>::shared());
         let mut owner = queue.owner();
         let done = Arc::new(AtomicBool::new(false));
@@ -1907,9 +1902,7 @@ pub mod tests {
                     // Keep stealing until a steal finds nothing after the owner is done.
                     loop {
                         if queue.steal_into(&mut into) > 0 {
-                            for value in drain(&mut into) {
-                                seen.push(value.0);
-                            }
+                            seen.extend(drain(&mut into).into_iter().map(|value| value.0));
                         } else if done.load(Ordering::Acquire) {
                             break;
                         } else {
@@ -1926,22 +1919,21 @@ pub mod tests {
         barrier.wait();
 
         // Push every value, collecting what a claim or an overflow hands back,
-        // and pop after the first push and every third push after it to race
-        // the thieves.
+        // and pop as `pops` asks to race the thieves.
+        let mut deepest = 0;
         for value in 0..total {
             match owner.push(Counted(value, drops.clone())) {
-                Push::Pushed(_) => {}
+                Push::Pushed(queued) => deepest = deepest.max(queued),
                 Push::Claimed(value) => seen.push(value.0),
                 Push::Overflow(batch, value) => {
                     seen.extend(batch.map(|value| value.0));
                     seen.push(value.0);
                 }
             }
-
-            if value % 3 == 0
-                && let Some(value) = owner.pop()
-            {
-                seen.push(value.0);
+            for _ in 0..pops(value, owner.len()) {
+                if let Some(value) = owner.pop() {
+                    seen.push(value.0);
+                }
             }
         }
 
@@ -1958,78 +1950,35 @@ pub mod tests {
         seen.sort_unstable();
         assert_eq!(seen, (0..total).collect::<Vec<_>>());
         assert_eq!(drops.load(Ordering::Relaxed), total);
+        deepest
     }
 
-    /// An owner that pops almost every value as it pushes it keeps its queue
-    /// a value or two deep, so steals contend with its pops for lone values.
-    /// Every value is handed out once and dropped once.
+    /// An owner pushing, popping and overflowing against two stealing threads
+    /// hands every value out once and drops it once.
+    #[test]
+    fn test_owner_and_two_thieves_account_for_every_value_once() {
+        let total = if cfg!(miri) { 64 } else { 4096 };
+
+        // Pop after the first push and every third push after it, so the
+        // queue grows until steals or an overflow move values out.
+        race_two_thieves(total, |value, _| usize::from(value % 3 == 0));
+    }
+
+    /// An owner that keeps its queue at most two values deep makes steals
+    /// contend with its pops for lone values. Every value is handed out once
+    /// and dropped once.
     #[test]
     fn test_lone_values_race_two_thieves_for_every_value_once() {
         let total = if cfg!(miri) { 64 } else { 20_000 };
-        let queue = Arc::new(Queue::<Counted>::shared());
-        let mut owner = queue.owner();
-        let done = Arc::new(AtomicBool::new(false));
-        let barrier = Arc::new(Barrier::new(3));
-        let drops = Arc::new(AtomicUsize::new(0));
 
-        let thieves: Vec<_> = (0..2)
-            .map(|_| {
-                let queue = queue.clone();
-                let done = done.clone();
-                let barrier = barrier.clone();
+        // After an odd push, keep one value, and after an even push, none, so
+        // every push finds at most one value queued. Thieves can steal the
+        // lone value an odd push leaves, and the pops after an even push end
+        // with a lone value that a steal can race.
+        let deepest = race_two_thieves(total, |value, queued| queued.saturating_sub(value % 2));
 
-                thread::spawn(move || {
-                    let destination = Queue::shared();
-                    let mut into = destination.owner();
-                    let mut seen = Vec::new();
-                    barrier.wait();
-
-                    // Steal until a steal finds nothing after the owner is done.
-                    loop {
-                        if queue.steal_into(&mut into) > 0 {
-                            seen.extend(drain(&mut into).into_iter().map(|value| value.0));
-                        } else if done.load(Ordering::Acquire) {
-                            break;
-                        } else {
-                            thread::yield_now();
-                        }
-                    }
-                    seen
-                })
-            })
-            .collect();
-
-        let mut seen = Vec::new();
-        barrier.wait();
-
-        // Pop after all but every fourth push, so the queue stays a value or
-        // two deep and most steals contend for a lone value.
-        for value in 0..total {
-            match owner.push(Counted(value, drops.clone())) {
-                Push::Pushed(_) => {}
-                Push::Claimed(value) => seen.push(value.0),
-                Push::Overflow(batch, value) => {
-                    seen.extend(batch.map(|value| value.0));
-                    seen.push(value.0);
-                }
-            }
-            if value % 4 != 0
-                && let Some(value) = owner.pop()
-            {
-                seen.push(value.0);
-            }
-        }
-        done.store(true, Ordering::Release);
-
-        for thief in thieves {
-            seen.extend(thief.join().unwrap());
-        }
-        seen.extend(drain(&mut owner).into_iter().map(|value| value.0));
-
-        // Every value is handed out once and dropped once.
-        seen.sort_unstable();
-        assert_eq!(seen, (0..total).collect::<Vec<_>>());
-        assert_eq!(drops.load(Ordering::Relaxed), total);
+        // No push left more than the one value the pops keep and its own.
+        assert!(deepest <= 2, "a push left {deepest} values queued");
     }
 
     /// Queues and owners move between threads, queues are shared, and owners
@@ -2253,71 +2202,66 @@ mod loom_tests {
         });
     }
 
-    /// A thief that accepts only the lone value at the queue's first count
-    /// races the owner, which pops that value and then pushes another, alone
-    /// at the next count, here at zero and at the 55-bit maximum. The claim
-    /// and the pop arbitrate the first value, so it comes out once, and the
-    /// thief never takes the second, whose count it refuses whether its claim
-    /// sees it first or after a failed exchange.
+    /// A thief that accepts only the first lone value races the owner, which
+    /// pops that value and then pushes another, alone at the next count. One
+    /// thief accepts the first value's count, and the other accepts marked
+    /// values, with the first value pushed marked and the second not, since a
+    /// mark names only the count it was pushed at. Each runs at zero and at
+    /// the 55-bit maximum. The claim and the pop arbitrate the first value,
+    /// so it comes out once, and the thief never takes the second, whether
+    /// its claim sees it first or after a failed exchange. Loom runs the
+    /// owner's pop and push between the thief's head load and its exchange,
+    /// so a claim that kept its first decision would take the second value.
     #[test]
     fn test_lone_claim_takes_only_an_accepted_count() {
         for start in [0, REAL_MASK] {
-            loom::model(move || {
-                let queue = Queue::at(start, false);
-                let mut owner = queue.owner();
-                assert!(matches!(owner.push(0), Push::Pushed(1)));
+            for by_mark in [false, true] {
+                loom::model(move || {
+                    let queue = Queue::at(start, false);
+                    let mut owner = queue.owner();
+                    assert!(matches!(
+                        if by_mark {
+                            owner.push_marked(0)
+                        } else {
+                            owner.push(0)
+                        },
+                        Push::Pushed(1)
+                    ));
 
-                let thief = thread::spawn(move || {
-                    let destination = Queue::shared();
-                    let mut into = destination.owner();
-                    let moved = queue.steal_into_if(&mut into, |real, _| real == start);
-                    let seen = drain(&mut into);
-                    assert_eq!(seen.len(), moved);
-                    seen
+                    // The thief accepts the first value by its count or by its
+                    // mark.
+                    let thief = thread::spawn(move || {
+                        let destination = Queue::shared();
+                        let mut into = destination.owner();
+                        let moved = queue.steal_into_if(&mut into, |real, marked| {
+                            if by_mark { marked } else { real == start }
+                        });
+                        let seen = drain(&mut into);
+                        assert_eq!(seen.len(), moved);
+                        seen
+                    });
+
+                    // The owner pops the first value and queues the second
+                    // alone.
+                    let mut seen: Vec<_> = owner.pop().into_iter().collect();
+                    assert!(matches!(owner.push(1), Push::Pushed(_)));
+
+                    // The thief never takes the second value, and each comes
+                    // out once.
+                    let stolen = thief.join().unwrap();
+                    let refused = if by_mark {
+                        "an unmarked lone value was claimed"
+                    } else {
+                        "a refused lone value was claimed"
+                    };
+                    assert!(!stolen.contains(&1), "{refused}");
+                    seen.extend(stolen);
+                    seen.extend(drain(&mut owner));
+                    seen.sort_unstable();
+                    assert_eq!(seen, [0, 1]);
                 });
-
-                let mut seen: Vec<_> = owner.pop().into_iter().collect();
-                assert!(matches!(owner.push(1), Push::Pushed(_)));
-                let stolen = thief.join().unwrap();
-                assert!(!stolen.contains(&1), "a refused lone value was claimed");
-                seen.extend(stolen);
-                seen.extend(drain(&mut owner));
-                seen.sort_unstable();
-                assert_eq!(seen, [0, 1]);
-            });
+            }
         }
-    }
-
-    /// A thief that accepts only marked lone values races its owner, which
-    /// pops a marked value and then pushes an unmarked one, alone at the next
-    /// count. The mark names only the count it was pushed at, so the thief
-    /// never takes the second value, whether its claim sees it first or after
-    /// a failed exchange, and the claim and the pop arbitrate the first.
-    #[test]
-    fn test_marked_lone_claim_takes_only_the_marked_value() {
-        loom::model(|| {
-            let queue = Queue::shared();
-            let mut owner = queue.owner();
-            assert!(matches!(owner.push_marked(0), Push::Pushed(1)));
-
-            let thief = thread::spawn(move || {
-                let destination = Queue::shared();
-                let mut into = destination.owner();
-                let moved = queue.steal_into_if(&mut into, |_, marked| marked);
-                let seen = drain(&mut into);
-                assert_eq!(seen.len(), moved);
-                seen
-            });
-
-            let mut seen: Vec<_> = owner.pop().into_iter().collect();
-            assert!(matches!(owner.push(1), Push::Pushed(_)));
-            let stolen = thief.join().unwrap();
-            assert!(!stolen.contains(&1), "an unmarked lone value was claimed");
-            seen.extend(stolen);
-            seen.extend(drain(&mut owner));
-            seen.sort_unstable();
-            assert_eq!(seen, [0, 1]);
-        });
     }
 
     /// A thief that sees a marked value through the tail sees its mark as
