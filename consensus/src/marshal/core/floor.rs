@@ -435,6 +435,15 @@ mod tests {
         Sha256::fill(byte)
     }
 
+    /// Returns a block request for `digest(1)` with `retention`.
+    fn request(retention: Annotation) -> Request<TestDigest> {
+        match retention {
+            Annotation::Subscription => Request::subscription(digest(1)),
+            Annotation::Round(round) => Request::finalized_by_round(digest(1), round),
+            Annotation::Height(height) => Request::finalized_by_height(digest(1), height),
+        }
+    }
+
     #[test]
     fn cutoff_orders_by_covered_rounds() {
         let epoch = Epoch::new(3);
@@ -511,10 +520,7 @@ mod tests {
 
         // Every round of the covered epoch is denied, including its last view.
         for view in [0, 40, u64::MAX] {
-            floor.fetch_if_permitted(
-                &mut resolver,
-                Request::new(digest(1), Annotation::Round(round(view))),
-            );
+            floor.fetch_if_permitted(&mut resolver, request(Annotation::Round(round(view))));
         }
         assert!(resolver.fetches().is_empty());
 
@@ -522,9 +528,9 @@ mod tests {
         // subscriptions are admitted.
         let next = Round::new(Epoch::new(1), View::zero());
         let admitted = [
-            Request::new(digest(1), Annotation::Round(next)),
-            Request::new(digest(1), Annotation::Height(Height::new(11))),
-            Request::new(digest(1), Annotation::Subscription),
+            request(Annotation::Round(next)),
+            request(Annotation::Height(Height::new(11))),
+            request(Annotation::Subscription),
             Request::finalized(Height::new(11)),
         ];
         for request in admitted {
@@ -702,7 +708,7 @@ mod tests {
             Annotation::Round(round(4)),
             Annotation::Round(round(5)),
         ] {
-            floor.fetch_if_permitted(&mut resolver, Request::new(digest(1), retention));
+            floor.fetch_if_permitted(&mut resolver, request(retention));
         }
         assert!(resolver.fetches().is_empty());
 
@@ -713,7 +719,7 @@ mod tests {
             Annotation::Subscription,
         ];
         for retention in retained {
-            floor.fetch_if_permitted(&mut resolver, Request::new(digest(1), retention));
+            floor.fetch_if_permitted(&mut resolver, request(retention));
         }
         let fetches = resolver.fetches();
         assert_eq!(fetches.len(), retained.len());
@@ -732,7 +738,7 @@ mod tests {
         );
         let mut resolver = TestResolver::default();
         let retention = Annotation::Height(Height::zero());
-        floor.fetch_if_permitted(&mut resolver, Request::new(digest(1), retention));
+        floor.fetch_if_permitted(&mut resolver, request(retention));
         let fetches = resolver.fetches();
         assert_eq!(fetches.len(), 1);
         assert_eq!(fetches[0].key, Key::Block(digest(1)));

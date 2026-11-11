@@ -14066,11 +14066,8 @@ mod tests {
             // stops before block 22 is acknowledged.
             let covered = Round::new(Epoch::new(1), View::new(60));
             resolver.record_fetch(
-                handler::Request::new(
-                    Sha256::hash(&[b"covered"]),
-                    handler::Annotation::Round(covered),
-                )
-                .into_inner(),
+                handler::Request::finalized_by_round(Sha256::hash(&[b"covered"]), covered)
+                    .into_inner(),
             );
             assert_eq!(application.acknowledge_next(), Some(Height::new(21)));
             assert_eq!(
@@ -14134,11 +14131,8 @@ mod tests {
             // dispatches floor block 10.
             let covered = Round::new(Epoch::zero(), View::new(60));
             resolver.record_fetch(
-                handler::Request::new(
-                    Sha256::hash(&[b"covered"]),
-                    handler::Annotation::Round(covered),
-                )
-                .into_inner(),
+                handler::Request::finalized_by_round(Sha256::hash(&[b"covered"]), covered)
+                    .into_inner(),
             );
             let handle = actor.start(application.clone(), buffer, (resolver_rx, resolver.clone()));
             wait_until(&context, Duration::from_secs(5), "floor dispatch", || {
@@ -14320,11 +14314,8 @@ mod tests {
             // Block 21 was stored by walkback without a finalization. Acknowledge it as is.
             let covered = Round::new(Epoch::new(1), View::new(60));
             resolver.record_fetch(
-                handler::Request::new(
-                    Sha256::hash(&[b"covered"]),
-                    handler::Annotation::Round(covered),
-                )
-                .into_inner(),
+                handler::Request::finalized_by_round(Sha256::hash(&[b"covered"]), covered)
+                    .into_inner(),
             );
             assert_eq!(application.acknowledge_next(), Some(Height::new(21)));
             assert_eq!(
@@ -15549,13 +15540,10 @@ mod tests {
             // The resolver also holds requests for the same commitment under height and round
             // annotations.
             let retained_round = Round::new(Epoch::zero(), View::new(10));
-            resolver.fetch(handler::Request::new(
+            resolver.fetch(handler::Request::finalized_by_height(commitment, height));
+            resolver.fetch(handler::Request::finalized_by_round(
                 commitment,
-                handler::Annotation::Height(height),
-            ));
-            resolver.fetch(handler::Request::new(
-                commitment,
-                handler::Annotation::Round(retained_round),
+                retained_round,
             ));
 
             // The finalized delivery satisfies the exact caller for its block.

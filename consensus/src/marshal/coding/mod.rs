@@ -4142,10 +4142,11 @@ mod tests {
         });
     }
 
-    /// A finalization archived without its block does not authenticate the body that startup
-    /// repair fetches, so marshal recomputes its shards before storing it at that height.
+    /// A finalization archived without its block names the commitment that startup repair
+    /// fetches, so marshal rebuilds the delivered body from it without recomputing its shards
+    /// and stores it at that height.
     #[test_traced("WARN")]
-    fn test_coding_certificate_only_repair_recomputes_shards() {
+    fn test_coding_certificate_only_repair_skips_recoding() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture {
@@ -4196,14 +4197,14 @@ mod tests {
                 })
                 .expect("startup repair fetch must be requested");
 
-            // The archived certificate alone does not make the delivery trusted, so the body is
-            // recoded before it fills that height.
+            // The request was issued from the archived certificate, so the body fills that
+            // height without being recoded.
             assert!(resolver.deliver(fetch, candidate.encode()).await);
             let delivered = acquisition.await.expect("acquisition must resolve");
             assert_eq!(delivered.commitment(), commitment);
             assert!(
-                delivered.shard(0).is_some(),
-                "certificate-only repair must recompute shards"
+                delivered.shard(0).is_none(),
+                "certificate-only repair must not recompute shards"
             );
             assert_eq!(
                 mailbox
@@ -4276,10 +4277,9 @@ mod tests {
         });
     }
 
-    /// Retention annotations on an exact-body request carry no trust, so its delivery is recoded
-    /// and is not stored at the height an annotation names.
-    #[test_traced("WARN")]
-    fn test_coding_retention_annotations_do_not_authenticate_delivery() {
+    /// Delivers an acquired block whose request also carries `finality`, a retention reason
+    /// issued only from finality evidence, and checks that marshal trusts and archives it.
+    fn coalesced_block_delivery_trusts(finality: handler::Annotation) {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture {
@@ -4299,17 +4299,19 @@ mod tests {
                 .clone()
                 .expect("recording resolver should keep its sender");
 
-            // Hold an acquisition so the delivery has a waiting subscriber.
             let (_, candidate) = missing_candidate(participants[0].clone());
             let commitment = candidate.commitment();
             let height = Height::new(1);
             let subscription = mailbox.acquire(commitment);
             context.sleep(Duration::from_millis(100)).await;
 
-            // Retention annotations cannot authenticate a coding root or finalize a block.
+            // One key can carry a subscriber without finality evidence and a
+            // finalized-chain subscriber at once. The finalized subscriber alone
+            // binds the coding root, so the shared delivery decodes without
+            // recomputing it and lands in the finalized archive.
             let mut subscribers =
                 NonEmptyVec::new((handler::Annotation::Subscription, tracing::Span::none()));
-            subscribers.push((handler::Annotation::Height(height), tracing::Span::none()));
+            subscribers.push((finality, tracing::Span::none()));
             let (response, response_rx) = oneshot::channel();
             assert!(
                 resolver_tx
@@ -4329,15 +4331,27 @@ mod tests {
                 "coalesced delivery should validate"
             );
 
-            // The delivered block carries recomputed shards and is not archived.
             let delivered = subscription.await.expect("subscription dropped");
             assert_eq!(delivered.commitment(), commitment);
             assert!(
-                delivered.shard(0).is_some(),
-                "untrusted delivery must recompute shards"
+                delivered.shard(0).is_none(),
+                "coalesced delivery should not recompute shards"
             );
-            assert!(mailbox.get_block(height).await.is_none());
+            assert!(mailbox.get_block(height).await.is_some());
         });
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_coalesced_block_delivery_trusts_finalized_subscriber() {
+        coalesced_block_delivery_trusts(handler::Annotation::Height(Height::new(1)));
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_coalesced_block_delivery_trusts_round_subscriber() {
+        coalesced_block_delivery_trusts(handler::Annotation::Round(Round::new(
+            Epoch::zero(),
+            View::new(1),
+        )));
     }
 
     #[test_traced("WARN")]

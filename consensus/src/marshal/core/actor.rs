@@ -148,10 +148,6 @@ where
     finalized_subscriptions: FinalizedSubscriptions<V>,
     // Commitments known certified above the finalized tip
     certified: Certified<V::Commitment>,
-    // Parent commitment most recently requested by finalized gap repair. Repair
-    // derives it from an archived finalized block, so it stays evidence of
-    // finality after its gap closes.
-    repair_parent: Option<V::Commitment>,
     // Defers application dispatch of finalized-archive writes until a sync
     // covering them completes
     dispatch_gate: DispatchGate,
@@ -297,7 +293,6 @@ where
                 prefetch: Prefetches::new(config.max_repair.get()),
                 finalized_subscriptions: FinalizedSubscriptions::new(),
                 certified: Certified::new(),
-                repair_parent: None,
                 dispatch_gate: DispatchGate::default(),
                 staged: Staged::new(config.max_pending_acks.get().saturating_mul(2)),
                 cache,
@@ -885,7 +880,7 @@ where
                     debug!(?round, ?commitment, "finalized block missing");
                     self.floor.fetch_if_permitted(
                         resolver,
-                        Request::new(commitment, Annotation::Round(round)),
+                        Request::finalized_by_round(commitment, round),
                     );
                 }
             }
@@ -1197,7 +1192,7 @@ where
             } else if let Some(block) = buffer.find_by_commitment(commitment).await {
                 self.prefetch.complete(block);
             } else {
-                resolver.fetch(Request::new(commitment, Annotation::Subscription));
+                resolver.fetch(Request::subscription(commitment));
             }
         }
     }
@@ -1239,7 +1234,7 @@ where
         if fetch {
             let active = self.prefetch.retire(commitment);
             if !active && !self.block_subscriptions.fetching(&commitment) {
-                resolver.fetch(Request::new(commitment, Annotation::Subscription));
+                resolver.fetch(Request::subscription(commitment));
             }
         }
         self.block_subscriptions
@@ -1315,7 +1310,7 @@ where
 
         debug!(?round, ?commitment, "starting fetch for floor block");
         self.floor
-            .fetch_if_permitted(resolver, Request::new(commitment, Annotation::Round(round)));
+            .fetch_if_permitted(resolver, Request::finalized_by_round(commitment, round));
         self
     }
 
@@ -1540,17 +1535,21 @@ where
         } = message;
         match delivery.key {
             Key::Block(commitment) => {
-                // Local finality, gap-repair, or certification evidence for the commitment lets
-                // decoding trust it. Without such evidence, decoding recomputes the commitment.
+                // Finality evidence (a cached finalization or a request issued from finality
+                // evidence) or certification evidence for the commitment lets decoding trust it.
+                // Without such evidence, decoding recomputes the commitment.
                 let digest = V::commitment_to_inner(commitment);
                 let finalization = self
                     .cache
                     .get_finalization_for(digest)
                     .await
                     .filter(|certificate| certificate.proposal.payload == commitment);
-                let repairing = self.repair_parent == Some(commitment);
+                let finalized = delivery
+                    .subscribers
+                    .iter()
+                    .any(|(annotation, _)| annotation.finalized());
                 let certified = self.certified.contains_commitment(&commitment);
-                let expected = if finalization.is_some() || repairing || certified {
+                let expected = if finalization.is_some() || finalized || certified {
                     ExpectedCommitment::Trusted(commitment)
                 } else {
                     ExpectedCommitment::Untrusted(commitment)
@@ -1597,11 +1596,11 @@ where
                 }
 
                 // Store the block under the strongest local evidence for its commitment: finality
-                // (a cached finalization, the repair walk, or the finalized archives),
-                // certification above the processed height, or a held notarization that names it.
-                // Otherwise it is not stored.
+                // (a cached finalization, a request issued from finality evidence, or the
+                // finalized archives), certification above the processed height, or a held
+                // notarization that names it. Otherwise it is not stored.
                 if finalization.is_some()
-                    || repairing
+                    || finalized
                     || self.finalized_commitment(height).await == Some(commitment)
                 {
                     (self, _) = self
@@ -2332,7 +2331,7 @@ where
                     // Request the missing block.
                     self.floor.fetch_if_permitted(
                         resolver,
-                        Request::new(commitment, Annotation::Height(last_finalized)),
+                        Request::finalized_by_height(commitment, last_finalized),
                     );
                 }
             }
@@ -2386,10 +2385,9 @@ where
                     let parent_height = height
                         .previous()
                         .expect("cursor above gap start has a parent");
-                    self.repair_parent = Some(parent_commitment);
                     self.floor.fetch_if_permitted(
                         resolver,
-                        Request::new(parent_commitment, Annotation::Height(parent_height)),
+                        Request::finalized_by_height(parent_commitment, parent_height),
                     );
                     break 'cache_repair;
                 }

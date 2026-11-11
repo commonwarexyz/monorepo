@@ -181,19 +181,41 @@ impl<D: Digest> Producer for Handler<D> {
 /// Local retention metadata for a resolver request.
 ///
 /// Peers never see this metadata. Multiple retention reasons can share one
-/// commitment, and response validation is independent of these reasons.
+/// commitment.
+///
+/// A [`Key::Block`] request is issued with [`Round`](Annotation::Round) or
+/// [`Height`](Annotation::Height) only for a commitment marshal holds finality
+/// evidence for: a verified finalization that names it, or the parent link of an
+/// archived finalized block. A block delivery that carries either reason is
+/// therefore decoded without recomputing commitment material and, when above the
+/// processed height, archived as finalized.
+/// [`Subscription`](Annotation::Subscription) carries no evidence.
+///
+/// A [`Key::Finalized`] response carries its own certificate, so its
+/// [`Height`](Annotation::Height) only bounds retention.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Annotation {
     /// Retain until the block arrives or the caller or prefetch lease that owns the request
-    /// releases it.
+    /// releases it. Carries no evidence for the commitment.
     Subscription,
-    /// Retain until the processed round floor covers this round.
+    /// Retain until the processed round floor covers this round. On a block request, a
+    /// finalization at this round names the commitment.
     Round(Round),
-    /// Retain until the processed height floor reaches this height.
+    /// Retain until the processed height floor reaches this height. On a block request, the
+    /// commitment is finalized at this height.
     Height(Height),
 }
 
 impl Annotation {
+    /// Returns whether a block request with this reason is issued from finality evidence for
+    /// its commitment.
+    pub(crate) const fn finalized(self) -> bool {
+        match self {
+            Self::Subscription => false,
+            Self::Round(_) | Self::Height(_) => true,
+        }
+    }
+
     /// Returns whether this retention survives the inclusive processed height floor.
     fn above_height_floor(self, floor: Height) -> bool {
         match self {
@@ -243,11 +265,35 @@ pub struct Request<D: Digest> {
 
 impl<D: Digest> Request<D> {
     /// Fetch a block by commitment for the given local retention reason.
-    pub const fn new(commitment: D, retention: Annotation) -> Self {
+    const fn new(commitment: D, retention: Annotation) -> Self {
         Self {
             key: Key::Block(commitment),
             retention,
         }
+    }
+
+    /// Fetch a block by commitment for a caller or prefetch lease.
+    ///
+    /// The request carries no evidence for `commitment`.
+    pub const fn subscription(commitment: D) -> Self {
+        Self::new(commitment, Annotation::Subscription)
+    }
+
+    /// Fetch a finalized-chain block by commitment when only its finalization round is known.
+    ///
+    /// `commitment` must be the payload of a verified finalization at `round`. Its delivery is
+    /// decoded without recomputing commitment material and handled as a finalized block.
+    pub const fn finalized_by_round(commitment: D, round: Round) -> Self {
+        Self::new(commitment, Annotation::Round(round))
+    }
+
+    /// Fetch a finalized-chain block by commitment when its height is known.
+    ///
+    /// `commitment` must be the payload of a verified finalization at `height` or the parent
+    /// commitment of the archived finalized block above it. Its delivery is decoded without
+    /// recomputing commitment material and handled as a finalized block.
+    pub const fn finalized_by_height(commitment: D, height: Height) -> Self {
+        Self::new(commitment, Annotation::Height(height))
     }
 
     /// Fetch a finalization and its application block by height.
