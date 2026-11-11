@@ -45,16 +45,26 @@
 //! wait marks the service time stale rather than reading the clock. The next
 //! first poll on the worker reads the clock instead, records that time as the
 //! current service time, and compares the deadline with it alone. Repolls of
-//! registered sleeps compare no time, so a worker that wakes only to repoll
-//! held sleeps reads no clock for them. A registered sleep completes once its
-//! registration fires, at its owner's expiry or a peer's rescue, or once its
-//! worker closes.
+//! registered sleeps read neither the service time nor the clock, so a worker
+//! that wakes only to repoll held sleeps reads no clock for them.
+//!
+//! A repoll of a registered sleep instead compares the deadline with the time
+//! of its registering worker's latest expiry pass, which the worker's timers
+//! publish (see [`Timers::expire`]). That time never runs ahead of the clock
+//! either, so a deadline at or before it has passed, and the poll completes
+//! the sleep at once, on any thread, whether or not that pass fired the
+//! registration. A pass that ran out of fires leaves due registrations
+//! waiting, and a task that holds several of them, woken by the one that
+//! fired, completes the others at their repolls. A registered sleep otherwise
+//! completes once its registration fires, at its owner's expiry or a peer's
+//! rescue, or once its worker closes.
 //!
 //! Polls on any thread act on the registering worker's timers directly. So
 //! does a drop on any thread but the registering worker's, or on that worker
 //! once it is closing, which removes the registration at once. A drop on the
 //! registering worker otherwise queues the registration's identity in the
-//! worker's [`Local`] without a lock (see below).
+//! worker's [`Local`] without a lock (see below). A poll that completes a
+//! sleep early ends its registration as a drop on its thread would.
 //!
 //! Waker clones, wakes, and waker destruction never run under the timers' lock
 //! or a worker borrow, since they may reenter the runtime. A pending poll
@@ -74,8 +84,8 @@
 //! poll it (expiry, rescue, closure) advances the timers' epoch inside its
 //! critical section, before it runs the deferred wake that consumes the
 //! stored waker. The owner's removal of a registration that its sleep
-//! dropped advances nothing (see below). A sleeper caches the epoch at which
-//! it last saw its registration waiting.
+//! dropped or completed early advances nothing (see below). A sleeper caches
+//! the epoch at which it last saw its registration waiting.
 //!
 //! Matching the stored waker's identity alone is not enough. Once an ending
 //! consumes that waker, a waker implementation may give its identity to
@@ -131,8 +141,10 @@
 //! wakes of requests that complete in the same service pass, and those of its
 //! rescue of stalled peers, can add more. A saturated pool worker therefore
 //! fires only what its run queue can take, and the sleeps that one task
-//! multiplexes complete at that rate, although their wakes reach a single
-//! task. It fires them in the wheel's order, bucket by bucket in time order.
+//! multiplexes fire at that rate, although their wakes reach a single task.
+//! Those that the task repolls once a pass has reached their deadlines
+//! complete without their fires (see above). It fires them in the wheel's
+//! order, bucket by bucket in time order.
 //! Within a bucket that a pass reaches after some of its deadlines passed, as
 //! a worker that is behind reaches buckets of 65 us on level one and of 4.2 ms
 //! on level two, the due ones fire in registration order rather than deadline
@@ -184,15 +196,15 @@
 //! capacity beyond [`DROPPED_CAPACITY`] to it. A callback that drops a sleep
 //! after the service pass makes the worker serve again before it parks.
 //!
-//! An identity queued after its registration fired is stale. The drop of a
-//! sleep that did not observe the firing queues one, as when its select took
-//! another branch, or when its poll observed the firing and then unwound. It
-//! no longer matches its slot's generation, so its removal never reaches a
-//! later registration in that slot. A peer's rescue can also fire a queued
-//! registration first and wake its sleep's waker once, a spurious wake that
-//! the future contract allows, and the removal then finds nothing. No sleep
-//! remains to poll a queued registration, so its removal ends nothing that the
-//! epoch guards.
+//! An identity queued after its registration fired is stale. An early
+//! completion queues one, and so does the drop of a sleep that did not observe
+//! the firing, such as one whose select took another branch, or whose poll
+//! observed it and then unwound. It no longer matches its slot's generation,
+//! so its removal never reaches a later registration in that slot. A peer's
+//! rescue can also fire a queued registration first and wake its sleep's
+//! waker once, a spurious wake that the future contract allows, and the
+//! removal then finds nothing. No sleep remains to poll a queued
+//! registration, so its removal ends nothing that the epoch guards.
 //!
 //! # Bounds and Lock Order
 //!
@@ -229,10 +241,10 @@
 //! registrations as expiry does, advancing the epoch before their wakes, so a
 //! lock-free poll cannot miss it. The worker is closing by then, so no drop
 //! queues afterwards. Closed timers hold no registration. A poll that takes
-//! the lock reports closure, and a drop or a removal of queued identities
-//! finds nothing to remove. A sleep that observes closure completes if its
-//! deadline has passed by then, as every fired one's has, and its poll panics
-//! otherwise, since a sleep has no error output.
+//! the lock reports closure, and a drop, an early completion, or a removal of
+//! queued identities finds nothing to remove. A sleep that observes closure
+//! completes if its deadline has passed by then, as every fired one's has, and
+//! its poll panics otherwise, since a sleep has no error output.
 
 use super::{
     runtime::{Deferred, Local, MAX_TIMEOUT},
@@ -326,9 +338,9 @@ struct Registrations {
     closed: bool,
     /// Number of critical sections in which expiry, rescue or closure ended a
     /// waiting registration, advanced by [`Timers::end`]. The owner's removal
-    /// of a registration that its sleep dropped leaves it alone, since no
-    /// sleeper remains to read it for that registration. A sleeper caches it
-    /// whenever it sees its registration waiting.
+    /// of a registration that its sleep dropped or completed early leaves it
+    /// alone, since no sleeper remains to read it for that registration. A
+    /// sleeper caches it whenever it sees its registration waiting.
     epoch: u64,
 }
 
@@ -420,6 +432,8 @@ pub struct Timers {
     /// Time of the owner's latest expiry pass in nanoseconds since the origin,
     /// zero before the first. Written only by the owner. Peers read it to
     /// leave an owner that is still serving its due registrations to itself.
+    /// It never runs ahead of the clock, so repolls of registered sleeps
+    /// complete those whose deadlines it has reached, even before they fire.
     served: CachePadded<AtomicU64>,
     /// The registrations' epoch as polls read it without the lock. Stored
     /// only under the lock, by [`Self::end`], before the ended
@@ -504,8 +518,8 @@ impl Timers {
     /// wakes deferred to `deferred`, and advance the epoch before the lock is
     /// released if the pass ended any waiting registration. Expiry, rescue
     /// and closure end waiting registrations only through the [`Ending`] of
-    /// such a pass. Only a sleep itself, or the owner for a sleep dropped on
-    /// it, removes one any other way.
+    /// such a pass. Only a sleep itself, or the owner for a sleep dropped or
+    /// completed early on it, removes one any other way.
     fn end(
         &self,
         registrations: &mut Registrations,
@@ -606,7 +620,7 @@ impl Timers {
         let sleeper = Sleeper {
             timers: self.clone(),
             id,
-            deadline,
+            deadline: nanos,
             identity,
             epoch,
         };
@@ -634,7 +648,8 @@ impl Timers {
         });
 
         // Peers read the bound to find due registrations, and the pass time
-        // to leave an owner that serves them itself alone.
+        // to leave an owner that serves them itself alone. Repolls read the
+        // pass time to complete sleeps whose deadlines it has reached.
         let bound = registrations.wheel.bound();
         self.published.store(bound, Ordering::Relaxed);
         self.served.store(now, Ordering::Relaxed);
@@ -840,9 +855,10 @@ struct Sleeper {
     timers: Arc<Timers>,
     /// Identity in the timers.
     id: Id,
-    /// The sleep's deadline, which a poll that observes closure compares with
-    /// the clock.
-    deadline: Instant,
+    /// The sleep's deadline in nanoseconds since the timers' origin, which
+    /// every poll compares with the owner's latest expiry pass time, and a
+    /// poll that observes closure with the clock.
+    deadline: u64,
     /// The stored waker's identity, which a poll may match to skip the
     /// lock while the registration waits, updated whenever this sleeper
     /// stores a waker.
@@ -853,10 +869,12 @@ struct Sleeper {
 }
 
 impl Sleeper {
-    /// Poll the registration, which is ready once it has fired or its worker
-    /// has closed. Firing removed it and closure discarded it, so the sleeper
-    /// needs no [`Self::abandon`] afterwards, and one after closure finds
-    /// nothing.
+    /// Poll the registration. A deadline at or before the time of the owner's
+    /// latest expiry pass completes it at once, fired or not, ending the
+    /// registration as a drop would (see [`Self::abandon`]). Otherwise it is
+    /// ready once it has fired or its worker has closed. Every ready result
+    /// ends the registration, so the sleeper needs no [`Self::abandon`]
+    /// afterwards, and one after closure finds nothing.
     ///
     /// A poll at an unchanged epoch returns pending without the lock if its
     /// waker matches [`Identity`], a task waker or this thread's root waker
@@ -868,6 +886,16 @@ impl Sleeper {
     /// stored waker's identity cannot recur before its wake (see the module
     /// documentation). Any other poll locks.
     fn poll(&mut self, cx: &Context<'_>) -> Poll<Outcome> {
+        // The owner's latest expiry pass time never runs ahead of the clock,
+        // so a deadline that it has reached has passed. The sleep completes
+        // without a clock read, and its registration ends as a drop's would,
+        // without a lock on the open owner. A stale load only leaves the
+        // completion to a later poll or to the firing.
+        if self.deadline <= self.timers.served.load(Ordering::Relaxed) {
+            self.abandon();
+            return Poll::Ready(Outcome::Fired);
+        }
+
         // An ending that this load misses wakes the stored waker, and the
         // poll that this wake schedules follows this one and reads the
         // advanced epoch.
@@ -958,12 +986,13 @@ impl Sleeper {
         }
     }
 
-    /// End the registration of a dropped sleep in one access to the current
-    /// worker. On the registering worker, while it is not closing, this takes
-    /// no lock: the registration's identity joins the worker's queue, whose
-    /// registrations its next service pass, or its cleanup before closure,
-    /// removes, unless its next registrations remove them first. Anywhere else
-    /// the registration is removed at once, and its waker, if it still waited,
+    /// End the registration of a dropped sleep, or of one that a poll
+    /// completed early, in one access to the current worker. On the
+    /// registering worker, while it is not closing, this takes no lock: the
+    /// registration's identity joins the worker's queue, whose registrations
+    /// its next service pass, or its cleanup before closure, removes, unless
+    /// its next registrations remove them first. Anywhere else the
+    /// registration is removed at once, and its waker, if it still waited,
     /// goes to the current worker's callback batch, or is dropped at once on a
     /// thread without a worker.
     fn abandon(&self) {
@@ -1128,7 +1157,8 @@ impl Future for Sleep {
                 // stays registered, so every poll observes the closure again,
                 // and its drop finds nothing in the closed timers.
                 assert!(
-                    outcome == Outcome::Fired || sleeper.deadline <= Instant::now(),
+                    outcome == Outcome::Fired
+                        || sleeper.deadline <= sleeper.timers.nanos(Instant::now()),
                     "io_uring sleep polled after its worker closed"
                 );
                 this.state = State::Done;
@@ -1324,6 +1354,24 @@ pub mod tests {
             self.epoch.load(Ordering::Relaxed)
         }
 
+        /// The time of the owner's latest expiry pass.
+        fn served(&self) -> u64 {
+            self.served.load(Ordering::Relaxed)
+        }
+
+        /// The owner's expiry pass at `now`, as [`Self::expire`] runs it,
+        /// with the published pass time left as it was, as a poll that loaded
+        /// it before the pass sees it. A poll that loads the new time completes
+        /// every deadline that it reached without the lock, so tests of how
+        /// polls observe endings under the lock fire through this.
+        fn expire_unseen(&self, now: u64, fires: u32, deferred: &mut Deferred) -> u64 {
+            let served = self.served();
+            let bound = self.expire(now, fires, deferred);
+            self.served.store(served, Ordering::Relaxed);
+
+            bound
+        }
+
         /// Whether the owner's cleanup closed the timers.
         pub(crate) fn is_closed(&self) -> bool {
             self.guard().closed
@@ -1501,10 +1549,12 @@ pub mod tests {
     #[test]
     fn test_lock_free_poll_state_is_one_word() {
         // What a poll may match without the lock is the address of a task's
-        // or root's waker, one word with a niche, and an unregistered sleep's
-        // deadline fits beside the niche in a registered sleep's deadline.
+        // or root's waker, one word with a niche. A registration keeps its
+        // deadline as one word of its timers' nanoseconds, which a repoll
+        // compares with their pass time, and a sleep adds one word for the
+        // tag of its state.
         assert_eq!(size_of::<Identity>(), size_of::<usize>());
-        assert_eq!(size_of::<Sleeper>(), 56);
+        assert_eq!(size_of::<Sleeper>(), 48);
         assert_eq!(size_of::<Sleep>(), 56);
     }
 
@@ -1559,8 +1609,12 @@ pub mod tests {
         assert!(deferred.is_empty());
 
         // At the rounded deadline, the pass defers the wake to the caller, and
-        // the next poll reports the firing.
-        assert_eq!(timers.expire(firing, BUDGET, &mut deferred), u64::MAX);
+        // the next poll, which has not seen the pass time, observes the firing
+        // under the lock.
+        assert_eq!(
+            timers.expire_unseen(firing, BUDGET, &mut deferred),
+            u64::MAX
+        );
         assert_eq!(timers.published(), u64::MAX);
         assert_eq!(count.get(), 0, "woken under the expiry pass");
 
@@ -1620,7 +1674,8 @@ pub mod tests {
 
     #[test]
     fn test_close_wakes_pending_and_reports_closed() {
-        // Fire one of four registrations, leaving the others pending.
+        // Fire one of four registrations, leaving the others pending, in a
+        // pass whose time the polls below have not seen.
         let timers = Arc::new(Timers::new());
         let (count, waker) = counter();
         let deadline = later();
@@ -1629,7 +1684,7 @@ pub mod tests {
         let queued = register(&timers, deadline + 1_000_000, &waker);
         let mut fired = register(&timers, deadline, &waker);
         let mut deferred = Deferred::default();
-        timers.expire(deadline + RESOLUTION, BUDGET, &mut deferred);
+        timers.expire_unseen(deadline + RESOLUTION, BUDGET, &mut deferred);
         run(&mut deferred);
 
         assert_eq!(count.get(), 1);
@@ -1706,14 +1761,14 @@ pub mod tests {
     #[test]
     fn test_fired_sleep_completes_after_closure() {
         // A registration whose deadline has passed fires, and its timers
-        // close before its sleep observes the firing.
+        // close before its sleep observes the firing or the pass time.
         let timers = Arc::new(Timers::new());
         let (count, waker) = counter();
         let deadline = Instant::now();
         let mut sleep = registered(&timers, deadline, &waker);
         let epoch = timers.epoch();
         let mut deferred = Deferred::default();
-        timers.expire(timers.nanos(deadline) + RESOLUTION, BUDGET, &mut deferred);
+        timers.expire_unseen(timers.nanos(deadline) + RESOLUTION, BUDGET, &mut deferred);
 
         assert_eq!(timers.epoch(), epoch + 1);
 
@@ -1894,6 +1949,47 @@ pub mod tests {
         assert_eq!(count.get(), 1 + 4 * budget);
     }
 
+    #[test]
+    fn test_repoll_completes_a_deadline_that_the_latest_pass_reached() {
+        // Two registrations at one deadline, polled with one waker, as a task
+        // that holds both would poll them.
+        let timers = Arc::new(Timers::new());
+        let (count, waker) = counter();
+        let deadline = later();
+        let mut first = register(&timers, deadline, &waker);
+        let mut second = register(&timers, deadline, &waker);
+
+        // A pass before the deadline completes neither.
+        let mut deferred = Deferred::default();
+        timers.expire(deadline - 1, BUDGET, &mut deferred);
+
+        assert!(deferred.is_empty());
+        assert!(poll_with(&mut first, &waker).is_pending());
+        assert!(poll_with(&mut second, &waker).is_pending());
+
+        // A pass with room for one fire reaches the deadline and fires one of
+        // them, whose wake reaches the task.
+        timers.expire(deadline + RESOLUTION, 1, &mut deferred);
+        run(&mut deferred);
+
+        assert_eq!(count.get(), 1);
+        assert_eq!(timers.live(), 1);
+
+        // The task's repolls complete both. The one that the pass left
+        // waiting completes before any pass fires it, and its removal wakes
+        // nothing.
+        assert_eq!(poll_with(&mut first, &waker), Poll::Ready(Outcome::Fired));
+        assert_eq!(poll_with(&mut second, &waker), Poll::Ready(Outcome::Fired));
+        assert_eq!(timers.live(), 0);
+        assert_eq!(timers.resident(), 0);
+
+        // No later pass fires it.
+        timers.expire(deadline + 2 * RESOLUTION, BUDGET, &mut deferred);
+
+        assert!(deferred.is_empty());
+        assert_eq!(count.get(), 1);
+    }
+
     /// Run `test` inside a runtime task's poll, with that task's waker.
     fn with_task_waker(test: impl FnOnce(&Waker) + Send + 'static) {
         Runner::default().start(|context| async move {
@@ -2034,10 +2130,10 @@ pub mod tests {
         assert_eq!(locks() - before, 2);
         assert_eq!(Arc::strong_count(&second), 3);
 
-        // Once fired, a poll with a changed waker locks once and reports the
-        // firing without a clone.
+        // Once fired, a poll with a changed waker that has not seen the pass
+        // time locks once and reports the firing without a clone.
         let mut deferred = Deferred::default();
-        timers.expire(deadline + RESOLUTION, BUDGET, &mut deferred);
+        timers.expire_unseen(deadline + RESOLUTION, BUDGET, &mut deferred);
         run(&mut deferred);
 
         assert_eq!((first.get(), second.get()), (0, 1));
@@ -2061,10 +2157,12 @@ pub mod tests {
             type End = fn(&Timers, u64, &mut Deferred);
 
             // Expiry, rescue, and closure each end a waiting registration.
+            // Polls that see the expiry's pass time complete without the
+            // lock, so the poll below must not see it.
             let ends: [(End, Outcome); 3] = [
                 (
                     |timers, now, deferred| {
-                        timers.expire(now, BUDGET, deferred);
+                        timers.expire_unseen(now, BUDGET, deferred);
                     },
                     Outcome::Fired,
                 ),
@@ -2279,14 +2377,14 @@ pub mod tests {
         let deadline = later();
 
         // Register, refresh (a clone and a displaced drop), repoll unchanged,
-        // expire and wake, and observe the firing.
+        // expire and wake, and observe the firing under the lock.
         let mut fired = register(&timers, deadline, &wakers[0]);
 
         assert!(poll_with(&mut fired, &wakers[1]).is_pending());
         assert!(poll_with(&mut fired, &wakers[1]).is_pending());
 
         let mut deferred = Deferred::default();
-        timers.expire(deadline + RESOLUTION, BUDGET, &mut deferred);
+        timers.expire_unseen(deadline + RESOLUTION, BUDGET, &mut deferred);
         run(&mut deferred);
 
         assert_eq!(
@@ -3013,9 +3111,10 @@ pub mod tests {
 
         // An expiry consumes the stored waker, after which a later root
         // waker may take its address. Whatever the address of a third root's
-        // waker, its poll locks and observes the firing.
+        // waker, its poll locks and observes the firing, since it has not seen
+        // the pass time.
         let mut deferred = Deferred::default();
-        timers.expire(later() + RESOLUTION, BUDGET, &mut deferred);
+        timers.expire_unseen(later() + RESOLUTION, BUDGET, &mut deferred);
         run(&mut deferred);
 
         drop(waker);
@@ -3025,6 +3124,48 @@ pub mod tests {
 
             assert_eq!(poll_with(&mut sleeper, &waker), Poll::Ready(Outcome::Fired));
             assert_eq!(locks() - before, 1);
+        });
+    }
+
+    #[test]
+    fn test_repoll_on_the_owner_queues_a_registration_that_its_pass_reached() {
+        Runner::default().start(|context| async move {
+            // A dedicated worker's timers are private, so nothing else
+            // registers or serves them.
+            context
+                .dedicated()
+                .spawn(|_| async {
+                    // A sleep registers on its worker with a waker of another
+                    // kind, which no later poll matches without the lock.
+                    let deadline = Instant::now() + 5 * UNCHECKED_SLEEP;
+                    let mut sleep = Sleep::at(deadline);
+                    pend(&mut sleep, Waker::noop());
+                    let (timers, id) = registration(&sleep);
+
+                    // The worker's expiry passes reach the deadline.
+                    while timers.served() < timers.nanos(deadline) {
+                        reschedule().await;
+                    }
+
+                    // The next poll completes the sleep without a lock and
+                    // queues its registration, fired or not, as a drop on its
+                    // worker would.
+                    let before = locks();
+
+                    assert!(poll!(&mut sleep).is_ready());
+                    assert!(matches!(sleep.state, State::Done));
+                    assert_eq!(locks(), before);
+                    assert_eq!(queued(), 1);
+
+                    // The next service pass removes it, unless it has fired.
+                    reschedule().await;
+
+                    assert_eq!(queued(), 0);
+                    assert!(!timers.holds(id));
+                    assert_eq!(timers.live(), 0);
+                })
+                .await
+                .unwrap();
         });
     }
 
@@ -4009,10 +4150,10 @@ pub mod tests {
             sleeper
         };
 
-        // An expiry consumes the stored waker, and the last clone goes, which
-        // frees the allocation.
+        // An expiry, whose pass time the poll below has not seen, consumes the
+        // stored waker, and the last clone goes, which frees the allocation.
         let mut deferred = Deferred::default();
-        timers.expire(later() + RESOLUTION, BUDGET, &mut deferred);
+        timers.expire_unseen(later() + RESOLUTION, BUDGET, &mut deferred);
         run(&mut deferred);
 
         drop(first);
