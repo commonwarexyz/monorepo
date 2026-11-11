@@ -721,13 +721,10 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 }
 
 #[cfg(test)]
-pub(super) mod tests {
+mod tests {
     use super::*;
     use commonware_runtime::{
-        BlobVersion, Clock as _, Name, ReadOptions, Runner as _, Spawner as _, Supervisor,
-        WriteOptions,
-        buffer::paged::Writer,
-        deterministic,
+        BlobVersion, Clock as _, Name, Runner as _, Spawner as _, Supervisor, deterministic,
         telemetry::metrics::{Metric, Registered},
     };
     use commonware_utils::{NZU16, channel::oneshot, sync::Mutex};
@@ -742,67 +739,6 @@ pub(super) mod tests {
             atomic::{AtomicUsize, Ordering},
         },
     };
-
-    /// Materialize a crash that retains new page bytes but loses their checksum lengths.
-    pub(in super::super) async fn seed_torn_suffix<E: Storage>(
-        context: &E,
-        partition: &str,
-        section: u64,
-        page: &[u8],
-        suffix_pages: usize,
-    ) {
-        // Seed one acknowledged page whose physical encoding can prefix the crash image.
-        let physical = page.len() + CHECKSUM_SIZE as usize;
-        let source = format!("{partition}-source");
-        let (raw, size) = context.open(&source, b"source").await.unwrap();
-        let raw = Arc::new(raw);
-        let cache = CacheRef::new(
-            (page.len() as u16).try_into().unwrap(),
-            commonware_utils::NZUsize!(4),
-        );
-        let writer = Writer::new(Arc::clone(&raw), size, 2 * page.len(), cache)
-            .await
-            .unwrap();
-        let (writer, _) = writer.append(page).await.unwrap();
-        let writer = writer.sync().await.unwrap();
-        let acknowledged = raw
-            .read_at(0, physical, ReadOptions::default())
-            .await
-            .unwrap()
-            .coalesce();
-
-        // The empty tip and page-aligned direct append issue one unsynced write wholly beyond
-        // the acknowledged page. The raw handle shares the writer's open and observes those bytes.
-        let (writer, _) = writer
-            .append_owned(page.repeat(suffix_pages).into())
-            .await
-            .unwrap();
-        let mut image = raw
-            .read_at(0, physical * (suffix_pages + 1), ReadOptions::default())
-            .await
-            .unwrap()
-            .coalesce()
-            .as_ref()
-            .to_vec();
-        assert_eq!(&image[..physical], acknowledged.as_ref());
-        drop(writer);
-        drop(raw);
-
-        // Clear the unacknowledged pages' length slots to model torn checksum publication.
-        for page_index in 1..=suffix_pages {
-            let footer = page_index * physical + page.len();
-            image[footer..footer + 2].fill(0);
-            image[footer + 6..footer + 8].fill(0);
-        }
-        let (blob, _) = context
-            .open(partition, &section.to_be_bytes())
-            .await
-            .unwrap();
-        blob.write_at(0, image, WriteOptions::default())
-            .await
-            .unwrap();
-        blob.sync().await.unwrap();
-    }
 
     impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         pub fn test_configuration(&self) -> (E, String, F) {
