@@ -1,8 +1,13 @@
 //! The variable-time multi-scalar multiplication, by Straus's or Pippenger's method, whichever
 //! costs less for the count of elements.
 //!
+//! [`batched`] implements `Space::msm` for both groups: it runs one [`Msm`] kernel per batch
+//! of the strategy and adds the results. [`Msm`] takes the method that [`Method::choose`]
+//! estimates cheapest for its count and lane width.
+//!
 //! [`Msm`] converts each element once and keeps every intermediate point in the
-//! representation's own form, through raw coordinates.
+//! representation's own form, through raw coordinates. Both methods skip zero digits and index
+//! tables or buckets by the digits, so the operations and memory accesses depend on the scalars.
 
 use super::{
     Scalar,
