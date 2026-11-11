@@ -44,7 +44,7 @@ pub mod fuzz {
         field::{
             MAX_LANES,
             arithmetic::Field,
-            fp::{rns::Rns, testing::Backend, unsat28::Unsat28, unsat49::Unsat49},
+            fp::testing::{self, Target},
         },
     };
     use arbitrary::{Arbitrary, Unstructured};
@@ -53,7 +53,7 @@ pub mod fuzz {
         Sequential,
         mocks::{Explorer, pooled},
     };
-    use commonware_simd::{Operation, Simd, X86V4C};
+    use commonware_simd::Simd;
     use core::{fmt::Debug, num::NonZeroUsize};
     use std::vec::Vec;
 
@@ -217,48 +217,31 @@ pub mod fuzz {
         }
     }
 
-    /// Runs a kernel in every representation of a backend, checking that they compute the same
-    /// output.
-    ///
-    /// Representations with different lane counts may sum in different orders, which changes the
-    /// projective coordinates but not the element.
-    struct Representations<K>(K);
+    /// Runs a group kernel as a kernel of the field testing harness.
+    struct Grouped<K>(K);
 
-    impl<S: Simd, K: Kernel<Output: PartialEq + Debug> + Copy> Operation<S> for Representations<K> {
+    impl<K: Kernel + Copy> testing::Kernel for Grouped<K> {
         type Output = K::Output;
 
-        fn portable(self, simd: S) -> K::Output {
-            simd.execute(|simd: S| {
-                let expected = self.0.run::<S, Unsat49<S>>(simd);
-                assert_eq!(self.0.run::<S, Unsat28<S>>(simd), expected);
-                expected
-            })
-        }
-
-        // Residues require x86v4c.
-        fn x86_v4c(self, simd: S) -> K::Output
-        where
-            S: X86V4C,
-        {
-            let kernel = self.0;
-            let expected = self.portable(simd);
-            simd.execute(|simd: S| assert_eq!(kernel.run::<S, Rns<S>>(simd), expected));
-            expected
+        fn run<S: Simd, F: Field<S>>(self, simd: S) -> K::Output {
+            simd.execute(|simd: S| self.0.run::<S, F>(simd))
         }
     }
 
-    /// Checks that every representation of an emulated backend drawn from the input computes
-    /// what the kernel's dispatch does.
+    /// Checks that a representation and emulated backend drawn from the input compute what the
+    /// kernel's dispatch does.
+    ///
+    /// Representations with different lane counts may sum in different orders, which changes the
+    /// projective coordinates but not the element.
     pub fn check_representations<K: Kernel<Output: PartialEq + Debug> + Copy>(
         u: &mut Unstructured<'_>,
         kernel: K,
     ) -> arbitrary::Result<()> {
-        let output = Backend::draw(u)?.execute(Representations(kernel));
-        assert_eq!(output, kernel.dispatch());
+        assert_eq!(Target::draw(u)?.run(Grouped(kernel)), kernel.dispatch());
         Ok(())
     }
 
-    /// A kernel whose representations [`Plan::Representations`] compares.
+    /// A kernel that [`Plan::Representations`] runs on a drawn target.
     #[derive(Clone, Copy, Debug, Arbitrary)]
     enum GroupKernel {
         Msm,
@@ -534,7 +517,7 @@ pub mod fuzz {
         #[test]
         fn minifuzz_representations() {
             minifuzz::Builder::default()
-                .with_min_iterations(4)
+                .with_min_iterations(16)
                 .test(|u| {
                     Plan::Representations.run::<G1>(u)?;
                     Plan::Representations.run::<G2>(u)
