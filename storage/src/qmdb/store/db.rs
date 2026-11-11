@@ -39,6 +39,14 @@ use tracing::{debug, warn};
 
 type Error = crate::qmdb::Error<crate::mmr::Family>;
 
+/// The [Config] that [Db::init] takes for a store over index `I`.
+type InitConfig<K, V, I, S> = Config<
+    <I as IndexFactory>::Translator,
+    <Operation<crate::mmr::Family, K, V> as Read>::Cfg,
+    S,
+    <I as SnapshotBuild<crate::mmr::Family>>::Concurrency,
+>;
+
 /// Configuration for initializing a [Db](super::Db).
 #[derive(Clone)]
 pub struct Config<T: Translator, C, S: Strategy, B = ()> {
@@ -377,12 +385,7 @@ where
     #[boxed]
     pub async fn init(
         context: E,
-        cfg: Config<
-            I::Translator,
-            <Operation<crate::mmr::Family, K, V> as Read>::Cfg,
-            S,
-            <I as SnapshotBuild<crate::mmr::Family>>::Concurrency,
-        >,
+        cfg: InitConfig<K, V, I, S>,
         max_size: Option<Location>,
     ) -> Result<Self, Error>
     where
