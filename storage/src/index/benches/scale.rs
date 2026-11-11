@@ -8,10 +8,10 @@
 //!
 //! Sizes are taken from numeric CLI args, e.g.
 //! `cargo bench -p commonware-storage --bench index_scale -- 500000000`. With no args it runs the
-//! default 20M/100M tier, but only when built with `--cfg huge_bench` -- so a bare `cargo bench`
-//! (including CI's full-suite run) does nothing. Non-numeric args restrict which variants run by
-//! name, e.g. `-- 1000000000 partitioned_ordered_3` runs only the SoA index at 1B (the heavy flat
-//! baselines would need ~40+ GB at that size).
+//! default 20M/100M tier, but only with `COMMONWARE_BENCH_FULL=1` (`just bench-full`) -- so a bare
+//! `cargo bench` does nothing. Non-numeric args restrict which variants run by name, e.g.
+//! `-- 1000000000 partitioned_ordered_3` runs only the SoA index at 1B (the heavy flat baselines
+//! would need ~40+ GB at that size).
 //!
 //! A `batch=<size>` arg sets the `get_many` batch size (default [DEFAULT_BATCH]). Each batch's keys
 //! are sorted before the call, as a caller iterating sorted keys passes them.
@@ -136,7 +136,7 @@ fn measure<I: Unordered<Value = u64>>(
 
 fn main() {
     // Sizes come from numeric CLI args (e.g. `-- 500000000`). With none, use the default tier when
-    // built with `--cfg huge_bench`; otherwise no-op, so a bare `cargo bench` does nothing.
+    // `COMMONWARE_BENCH_FULL=1` is set; otherwise no-op, so a bare `cargo bench` does nothing.
     // Numeric args are sizes; other args name the variants to run (default: all). Flag-style args
     // (e.g. the `--bench` that `cargo bench` injects into the harness) are ignored.
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -154,12 +154,12 @@ fn main() {
         .collect();
     let sizes = if !args.is_empty() {
         args
-    } else if cfg!(huge_bench) {
+    } else if commonware_bench::full() {
         DEFAULT_ITEMS.to_vec()
     } else {
         eprintln!(
-            "index_scale is opt-in; pass key counts (e.g. `-- 500000000`), or build with \
-             `--cfg huge_bench` for the default 20M/100M tier"
+            "index_scale is opt-in; pass key counts (e.g. `-- 500000000`), or set \
+             COMMONWARE_BENCH_FULL=1 for the default 20M/100M tier"
         );
         return;
     };
