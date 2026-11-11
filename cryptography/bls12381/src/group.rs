@@ -38,6 +38,7 @@ pub mod fuzz {
         kernel::{Add, Double, Group, Kernel, Multiply, MultiplyEach, Sum},
         msm::{self, MSM_BATCH, Msm},
     };
+    #[cfg(feature = "fuzz")]
     pub use super::{pairing::fuzz as pairing, scalar::fuzz as scalar};
     use crate::core::{
         curve::Points,
