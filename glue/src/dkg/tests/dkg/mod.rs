@@ -2,12 +2,13 @@ mod harness;
 mod properties;
 
 use crate::simulate::action::{Action, Crash, Schedule};
+use commonware_cryptography::secp256r1;
 use commonware_macros::{test_group, test_traced};
 use commonware_p2p::simulated::Link;
 use commonware_utils::probability;
 use harness::{
-    DkgEngine, good_link, run_activation_failure_completes_empty, run_closed_network_receiver,
-    run_plan, run_restart_after_completion, run_restart_after_failure,
+    DkgEngine, ExternalSigner, good_link, run_activation_failure_completes_empty,
+    run_closed_network_receiver, run_plan, run_restart_after_completion, run_restart_after_failure,
     run_restart_completion_state_is_fresh, run_restart_without_share, run_schedule,
     run_share_without_final_block,
 };
@@ -20,6 +21,51 @@ fn dkg_e2e_completes_for_all_participants() {
         DkgEngine::new(4),
         good_link(),
         vec![],
+        ExpectedOutcome::Success,
+        [0],
+    );
+}
+
+/// Secp256r1 node identities run the ceremony to the same outcome as Ed25519.
+#[test]
+fn dkg_e2e_completes_with_secp256r1_identities() {
+    run_plan(
+        DkgEngine::<secp256r1::standard::PrivateKey>::with_identities(4),
+        good_link(),
+        vec![],
+        ExpectedOutcome::Success,
+        [0],
+    );
+}
+
+/// Identities whose key is held outside the engine run the ceremony through
+/// the Secp256r1 scheme over their own signer.
+#[test]
+fn dkg_e2e_completes_with_external_signers() {
+    run_plan(
+        DkgEngine::<ExternalSigner>::with_identities(4),
+        good_link(),
+        vec![],
+        ExpectedOutcome::Success,
+        [0],
+    );
+}
+
+/// A restarted participant with an external signer recovers its ceremony state
+/// and every participant completes.
+#[test_group("slow")]
+#[test_traced("INFO")]
+fn dkg_e2e_scheduled_restart_with_external_signers() {
+    let engine = DkgEngine::<ExternalSigner>::with_identities(4);
+    let restarted = engine.participant(0);
+    run_plan(
+        engine,
+        good_link(),
+        vec![Crash::Schedule(
+            Schedule::new()
+                .at(Duration::from_millis(80), Action::Crash(restarted.clone()))
+                .at(Duration::from_millis(250), Action::Restart(restarted)),
+        )],
         ExpectedOutcome::Success,
         [0],
     );
