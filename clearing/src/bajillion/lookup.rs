@@ -263,7 +263,7 @@ mod tests {
     use super::*;
     use commonware_codec::{DecodeExt as _, Encode as _};
     use commonware_cryptography::{Sha256, sha256::Digest};
-    use commonware_storage::bmt::Builder;
+    use commonware_storage::bmt::{Builder, MAX_LEVELS};
 
     type TestLookup = Lookup<u64, u64, Digest>;
 
@@ -433,6 +433,41 @@ mod tests {
             verify(&lookup, 5, &list(1).1.root()),
             Err(InvalidOpening)
         ));
+    }
+
+    /// The opening of an absent key between two entries proves both neighbors. In this list the
+    /// neighbors sit at positions 2^17 - 1 and 2^17, and that proof holds more siblings than a
+    /// single path can hold. The opening still round-trips and verifies.
+    #[test]
+    fn test_opens_absent_key_across_subtrees() {
+        // The lower neighbor is the last entry of the tree's left half. Its path within that half
+        // has 17 siblings. The right half holds enough entries that the upper neighbor's path
+        // within it has 16 siblings.
+        let (entries, tree) = list((1 << 17) + (1 << 15) + 1);
+        let key = 10 * (1 << 17) + 5;
+        let lookup = TestLookup::new(&entries, &tree, &key);
+        let Lookup::NonMember {
+            position,
+            lower,
+            upper,
+            proof,
+        } = &lookup
+        else {
+            panic!("key must be absent");
+        };
+        assert_eq!(*position, 1 << 17);
+        assert!(
+            lower.is_some() && upper.is_some(),
+            "the key must have both neighbors"
+        );
+        assert!(
+            proof.siblings.len() > MAX_LEVELS,
+            "the proof must hold more siblings than one path"
+        );
+
+        // The opening encodes and decodes back to itself, and it proves the key absent.
+        assert_eq!(TestLookup::decode(lookup.encode()).unwrap(), lookup);
+        assert_eq!(verify(&lookup, key, &tree.root()).unwrap(), None);
     }
 
     /// Openings round-trip, and a tag naming neither variant is refused.
