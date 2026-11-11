@@ -434,7 +434,9 @@ impl<E: Context, I: Record, V: CodecShared> Pending<E, I, V> {
         Ok(self)
     }
 
-    /// Truncate value suffixes that became unreachable while fixed replay repaired index pages.
+    /// Truncate each section's values to the end of its last index entry. Bytes past it are left
+    /// when replay repairs index pages or validation truncates a section at its first invalid
+    /// value.
     async fn align_values_to_index(mut self) -> Result<Self, Error> {
         let sections = self.index.sections().collect::<Vec<_>>();
         let mut value_truncations = BTreeMap::new();
@@ -479,48 +481,6 @@ impl<E: Context, I: Record, V: CodecShared> Pending<E, I, V> {
             values: self.values.finish(),
             tracking: Some(tracking),
         })
-    }
-
-    /// Derive the value boundary owned by `section`'s last entry after an index truncate.
-    ///
-    /// A truncate to zero may leave no section behind, which owns no value bytes.
-    async fn retained_value_end(&self, section: u64, index_size: u64) -> Result<u64, Error> {
-        match self.index.last(section).await {
-            Ok(Some(entry)) => {
-                let (offset, size) = entry.value_location();
-                offset
-                    .checked_add(u64::from(size))
-                    .ok_or(Error::OffsetOverflow)
-            }
-            Ok(None) => Ok(0),
-            Err(Error::SectionOutOfRange(_)) if index_size == 0 => Ok(0),
-            Err(e) => Err(e),
-        }
-    }
-
-    /// Truncate only the given section to a specific index size.
-    ///
-    /// Other sections are unaffected.
-    /// The value size is derived from the last entry after truncating the index.
-    ///
-    /// Both truncations are made durable before returning.
-    async fn truncate_pending_section(
-        mut self,
-        section: u64,
-        index_size: u64,
-    ) -> Result<Self, Error> {
-        // Persist the shorter index before discarding the values it no longer references.
-        self.index = self
-            .index
-            .truncate_pending_section(section, index_size)
-            .await?;
-
-        // The durable index prefix owns the retained value boundary. Release its value suffix only
-        // after deriving that boundary from the now-authoritative index.
-        let value_size = self.retained_value_end(section, index_size).await?;
-        self.values = self.values.truncate_section(section, value_size).await?;
-        self.values = self.values.sync(section).await?;
-        Ok(self)
     }
 
     /// Replay unpublished index sections without releasing recovery ownership.
@@ -984,10 +944,7 @@ impl<E: Context, I: Record, V: CodecShared> Recovery<E, I, V> {
 
     /// Finish marker-aware startup recovery and return the tracked journal.
     pub async fn finish(self) -> Result<Oversized<E, I, V>, Error> {
-        if self.in_progress || self.interrupted {
-            return Err(Error::ReplayFailed);
-        }
-        if self.validation.failed {
+        if self.in_progress || self.interrupted || self.validation.failed {
             return Err(Error::ReplayFailed);
         }
         let mut journal = Pending {
@@ -995,12 +952,14 @@ impl<E: Context, I: Record, V: CodecShared> Recovery<E, I, V> {
             values: self.values,
         };
 
-        // Apply each section's first invalid position only after replay releases the index
-        // journal, then publish the exact retained lengths as the next marker generation.
+        // Apply each section's first invalid position to the index only after replay releases the
+        // index journal. Each truncation is durable before the alignment truncates the values past
+        // it, and the exact retained lengths are then published as the next marker generation.
         let chunk_size = FixedJournal::<E, I>::CHUNK_SIZE as u64;
         for (section, items) in self.validation.truncations {
             let index_size = items.checked_mul(chunk_size).ok_or(Error::OffsetOverflow)?;
-            journal = journal
+            journal.index = journal
+                .index
                 .truncate_pending_section(section, index_size)
                 .await?;
         }

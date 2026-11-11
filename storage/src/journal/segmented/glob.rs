@@ -440,18 +440,6 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
         Ok(self)
     }
 
-    /// Truncate only the given section to a specific size.
-    ///
-    /// Other sections are unaffected. A shorter length is durable when this returns.
-    pub(crate) async fn truncate_section(mut self, section: u64, size: u64) -> Result<Self, Error> {
-        self.0.manager = self
-            .0
-            .manager
-            .truncate_pending_section(section, size)
-            .await?;
-        Ok(self)
-    }
-
     /// Durably truncate the selected independent value sections.
     pub(crate) async fn truncate_sections(
         mut self,
@@ -543,7 +531,9 @@ mod tests {
             };
             _ = self.sync_all().await?;
             let pending = Recovery::init(context, cfg).await?;
-            let pending = pending.truncate_section(section, end).await?;
+            let pending = pending
+                .truncate_sections(&BTreeMap::from([(section, end)]))
+                .await?;
             Ok(pending.finish())
         }
     }
