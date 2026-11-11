@@ -360,6 +360,10 @@
 //! stops the operator but does not restore the omitted payment, because claims pay balances as of
 //! the last post.
 //!
+//! A receipt binds only the close of its own epoch. If the ledger halts before that close posts,
+//! on a challenge to an earlier post or by the deployment's policy, no close settles the receipt
+//! and its sender keeps the amount.
+//!
 //! - **R1.** Rely on a receipt only if it names this account as receiver, [Receipt::verify] accepts
 //!   it under the deployment's namespace and operator key, the close of its epoch has not posted,
 //!   and the ledger has not halted. Verify it before comparing it with the receipts held. Otherwise
