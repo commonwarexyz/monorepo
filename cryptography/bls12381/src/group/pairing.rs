@@ -198,11 +198,10 @@ impl Kernel for Pairings<'_> {
     #[cfg_attr(not(debug_assertions), inline(always))]
     fn run<S: Simd, F: Field<S>>(self, simd: S) {
         const { assert!(F::LANES <= MAX_LANES) };
-        // The fill pair in projective coordinates, which convert to its affine coordinates.
+        // Pairs with an identity hold points with denominator one, which the conversion to
+        // affine coordinates accepts; their outputs are replaced by one.
         let filler = (P_FILL, g2::GENERATOR);
         let count = self.0.len().min(self.1.len());
-        // Pairs with an identity pair to one, so their lanes hold the fill pair, which the
-        // conversion to affine coordinates accepts.
         let points: Vec<_> = self.0[..count]
             .iter()
             .map(|(p, q)| {
