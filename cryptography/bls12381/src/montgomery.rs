@@ -381,7 +381,7 @@ pub(crate) const fn invert<const N: usize, const L: usize>(
     from_limbs(&normalize(d, f[L - 1], &modulus))
 }
 
-/// Fuzz plan checking the signed limb conversions and the safegcd inversion.
+/// Fuzz plan checking the arithmetic, the signed limb conversions, and the safegcd inversion.
 #[cfg(any(test, feature = "fuzz"))]
 pub mod fuzz {
     use super::*;
@@ -394,9 +394,12 @@ pub mod fuzz {
     /// `MODULUS^(-1) mod 2^62`.
     const INVERSE: u64 = inverse_mod_limb(MODULUS[0]);
 
-    /// A limb conversion or inversion check on the base field modulus.
+    /// An arithmetic, limb conversion, or inversion check on the base field modulus.
     #[derive(Clone, Copy, Debug, Arbitrary)]
     pub enum Plan {
+        /// Check that addition, negation, and multiplication match schoolbook arithmetic reduced
+        /// by binary long division, which share no code with them.
+        Arithmetic,
         /// Check that an integer below `2^382` survives conversion to signed limbs and back.
         LimbsRoundTrip,
         /// Check that inversion returns the canonical inverse of a nonzero element, and zero
@@ -408,10 +411,102 @@ pub mod fuzz {
         /// Runs the operation using the remaining input.
         pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
             match self {
+                Self::Arithmetic => arithmetic(u),
                 Self::LimbsRoundTrip => limbs_round_trip(u),
                 Self::Inversions => inversions(u),
             }
         }
+    }
+
+    /// Returns `a - b` for `a` at least `b`.
+    fn difference<const N: usize>(a: [u64; N], b: &[u64; N]) -> [u64; N] {
+        let mut difference = a;
+        let mut borrow = false;
+        for (word, b) in difference.iter_mut().zip(b) {
+            let (word_difference, low) = word.overflowing_sub(*b);
+            let (word_difference, high) = word_difference.overflowing_sub(u64::from(borrow));
+            *word = word_difference;
+            borrow = low || high;
+        }
+        assert!(!borrow, "difference is negative");
+        difference
+    }
+
+    /// Returns a little-endian integer modulo the base field modulus, by binary long division.
+    fn remainder(value: &[u64]) -> [u64; WORDS] {
+        let mut remainder = [0; WORDS];
+        for bit in (0..64 * value.len()).rev() {
+            // The remainder is below p < 2^383, so doubling it fits.
+            let mut carry = (value[bit / 64] >> (bit % 64)) & 1;
+            for word in &mut remainder {
+                (*word, carry) = ((*word << 1) | carry, *word >> 63);
+            }
+            if remainder.iter().rev().ge(MODULUS.iter().rev()) {
+                remainder = difference(remainder, &MODULUS);
+            }
+        }
+        remainder
+    }
+
+    /// Returns the schoolbook product `a * b`.
+    fn product(a: &[u64; WORDS], b: &[u64; WORDS]) -> [u64; 2 * WORDS] {
+        let mut product = [0; 2 * WORDS];
+        for (i, a) in a.iter().enumerate() {
+            let mut carry = 0u128;
+            for (j, b) in b.iter().enumerate() {
+                let sum = product[i + j] as u128 + *a as u128 * *b as u128 + carry;
+                product[i + j] = sum as u64;
+                carry = sum >> 64;
+            }
+            product[i + WORDS] = carry as u64;
+        }
+        product
+    }
+
+    /// Draws a canonical element, biased toward zero and `p - 1`.
+    fn element(u: &mut Unstructured<'_>) -> arbitrary::Result<[u64; WORDS]> {
+        Ok(match u.int_in_range(0..=3)? {
+            1 => [0; WORDS],
+            2 => {
+                let mut largest = MODULUS;
+                largest[0] -= 1;
+                largest
+            }
+            _ => reference::canonical(u)?,
+        })
+    }
+
+    /// Checks the sum, negation, and Montgomery product of drawn elements, and the product of
+    /// any integer below `2^384` by an element.
+    fn arithmetic(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+        let a = element(u)?;
+        let b = element(u)?;
+        let wide: [u64; WORDS] = u.arbitrary()?;
+        let mut sum = [0; WORDS + 1];
+        let mut carry = 0u128;
+        for (word, (a, b)) in sum.iter_mut().zip(a.iter().zip(&b)) {
+            let wide_sum = *a as u128 + *b as u128 + carry;
+            *word = wide_sum as u64;
+            carry = wide_sum >> 64;
+        }
+        sum[WORDS] = carry as u64;
+        assert_eq!(add(&a, &b, &MODULUS), remainder(&sum), "{a:x?} + {b:x?}");
+        assert_eq!(
+            neg(&a, &MODULUS),
+            remainder(&difference(MODULUS, &a)),
+            "-{a:x?}"
+        );
+        // A Montgomery product divides by 2^384, so it times 2^384 is the product.
+        for a in [a, wide] {
+            let mut shifted = [0; 2 * WORDS];
+            shifted[WORDS..].copy_from_slice(&mul(&a, &b, &MODULUS, reference::INV));
+            assert_eq!(
+                remainder(&shifted),
+                remainder(&product(&a, &b)),
+                "{a:x?} * {b:x?}"
+            );
+        }
+        Ok(())
     }
 
     /// Converts a drawn integer below `2^382` to limbs and back.
@@ -466,6 +561,11 @@ pub mod fuzz {
     mod tests {
         use super::*;
         use commonware_invariants::minifuzz;
+
+        #[test]
+        fn minifuzz_arithmetic() {
+            minifuzz::test(|u| Plan::Arithmetic.run(u));
+        }
 
         #[test]
         fn minifuzz_limbs_round_trip() {

@@ -166,6 +166,9 @@ const fn bias<const N: usize, const BITS: u32>(k: u64) -> [u64; N] {
 }
 
 /// Reference arithmetic on canonical integers, for testing representations.
+///
+/// Its field operations are the [`montgomery`] functions of the scalar field, which
+/// [`Plan::Arithmetic`](crate::montgomery::fuzz::Plan::Arithmetic) checks independently.
 #[cfg(any(test, feature = "fuzz"))]
 pub(crate) mod reference {
     use super::*;
@@ -186,7 +189,7 @@ pub(crate) mod reference {
     }
 
     /// `-p^(-1) mod 2^64`.
-    pub(super) const INV: u64 = montgomery::negated_inverse(MODULUS[0]);
+    pub(crate) const INV: u64 = montgomery::negated_inverse(MODULUS[0]);
 
     /// `2^768 mod p`, which undoes a Montgomery multiplication's division by `2^384`.
     const R2: Element = power_of_two(768);
