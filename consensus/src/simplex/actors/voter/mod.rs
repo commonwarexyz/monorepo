@@ -681,7 +681,7 @@ mod tests {
     ) where
         S: Scheme<Sha256Digest>,
     {
-        let mut journal = Journal::<_, Artifact<S, Sha256Digest>>::init(
+        let mut replay = Journal::<_, Artifact<S, Sha256Digest>>::init(
             context.child("journal"),
             JConfig {
                 partition,
@@ -689,10 +689,16 @@ mod tests {
                 codec_config: scheme.certificate_codec_config(),
                 page_cache,
                 write_buffer: NZUsize!(1024 * 1024),
+                replay_buffer: NZUsize!(1024 * 1024),
             },
+            ReadOptions::DONT_CACHE,
         )
         .await
         .expect("unable to initialize voter journal");
+        while let Some(artifact) = replay.next().await {
+            artifact.expect("unable to replay voter journal");
+        }
+        let mut journal = replay.finish().expect("unable to replay voter journal");
         for artifact in artifacts {
             assert_eq!(artifact.view(), view);
             (journal, _, _) = journal
@@ -14298,7 +14304,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest>,
     {
-        let journal = Journal::<_, Artifact<S, Sha256Digest>>::init(
+        let mut replay = Journal::<_, Artifact<S, Sha256Digest>>::init(
             context.child("journal"),
             JConfig {
                 partition,
@@ -14306,14 +14312,12 @@ mod tests {
                 codec_config: scheme.certificate_codec_config(),
                 page_cache,
                 write_buffer: NZUsize!(1024 * 1024),
+                replay_buffer: NZUsize!(1024 * 1024),
             },
+            ReadOptions::DONT_CACHE,
         )
         .await
         .expect("unable to initialize voter journal");
-        let mut replay = journal
-            .replay(0, 0, NZUsize!(1024 * 1024), ReadOptions::DONT_CACHE)
-            .await
-            .expect("unable to replay voter journal");
         let mut finalizations = 0;
         while let Some(artifact) = replay.next().await {
             let (_, _, _, artifact) = artifact.expect("unable to replay voter journal");

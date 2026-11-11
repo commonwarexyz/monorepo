@@ -178,7 +178,9 @@ where
         replay_buffer: NonZeroUsize,
         mut secret_store: SS,
     ) -> Self {
-        let events = Journal::init(
+        // Replay rebuilds the epoch caches in memory, so journal pages need
+        // not remain in the OS page cache.
+        let mut replay = Journal::init(
             context.child("events"),
             JournalConfig {
                 partition: format!("{partition_prefix}_events"),
@@ -186,7 +188,9 @@ where
                 codec_config: max_participants,
                 page_cache,
                 write_buffer,
+                replay_buffer,
             },
+            ReadOptions::DONT_CACHE,
         )
         .await
         .expect("failed to initialize reshare event journal");
@@ -195,13 +199,6 @@ where
 
         let mut epochs = BTreeMap::<Epoch, EpochCache<V, P>>::new();
         let events = {
-            // Replay rebuilds the epoch caches in memory, so journal pages need
-            // not remain in the OS page cache.
-            let mut replay = events
-                .replay(0, 0, replay_buffer, ReadOptions::DONT_CACHE)
-                .await
-                .expect("failed to replay reshare events");
-
             while let Some(result) = replay.next().await {
                 let (section, _, _, event) = result.expect("failed to read reshare event");
                 let epoch = Epoch::new(section);

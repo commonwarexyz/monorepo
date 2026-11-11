@@ -26,7 +26,7 @@ use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{GaugeExt, histogram, status::Status},
 };
-use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
+use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal, Recovery};
 use commonware_utils::{
     N3f1, PrioritySet, Widen,
     futures::{Pool as FuturesPool, rebind},
@@ -233,8 +233,8 @@ impl<
         self.epoch = latest;
 
         // Initialize Journal
-        let journal = self.open_journal().await;
-        let (journal, unverified_heights) = self.replay(journal).await;
+        let replay = self.open_journal().await;
+        let (journal, unverified_heights) = self.replay(replay).await;
         self.journal = Some(journal);
 
         // Request digests for unverified heights
@@ -823,18 +823,11 @@ impl<
     /// Returns the journal and a list of unverified pending heights that need digest requests.
     async fn replay(
         &mut self,
-        journal: Journal<E, Activity<P::Scheme, D>>,
+        mut replay: Recovery<E, Activity<P::Scheme, D>>,
     ) -> (Journal<E, Activity<P::Scheme, D>>, Vec<Height>) {
         let mut tip = Height::default();
         let mut certified = Vec::new();
         let mut acks = Vec::new();
-
-        // Replay rebuilds the engine's in-memory state, so journal pages need
-        // not remain in the OS page cache.
-        let mut replay = journal
-            .replay(0, 0, self.journal_replay_buffer, ReadOptions::DONT_CACHE)
-            .await
-            .expect("replay failed");
         while let Some(msg) = replay.next().await {
             let (_, _, _, activity) = msg.expect("replay failed");
             match activity {
@@ -946,16 +939,20 @@ impl<
         (replay.finish().expect("replay failed"), unverified)
     }
 
-    /// Opens the engine's activity journal.
-    async fn open_journal(&mut self) -> Journal<E, Activity<P::Scheme, D>> {
+    /// Opens the engine's activity journal and returns the recovery that replays it.
+    async fn open_journal(&mut self) -> Recovery<E, Activity<P::Scheme, D>> {
         let cfg = JConfig {
             partition: self.journal_partition.clone(),
             compression: self.journal_compression,
             codec_config: P::Scheme::certificate_codec_config_unbounded(),
             page_cache: self.journal_page_cache.clone(),
             write_buffer: self.journal_write_buffer,
+            replay_buffer: self.journal_replay_buffer,
         };
-        Journal::init(self.context.child("journal"), cfg)
+
+        // Replay rebuilds the engine's in-memory state, so journal pages need
+        // not remain in the OS page cache.
+        Journal::init(self.context.child("journal"), cfg, ReadOptions::DONT_CACHE)
             .await
             .expect("init failed")
     }
@@ -1080,8 +1077,9 @@ mod tests {
             },
         );
         engine.epoch = epoch;
-        let journal = engine.open_journal().await;
-        engine.journal = Some(journal);
+        let mut replay = engine.open_journal().await;
+        assert!(replay.next().await.is_none());
+        engine.journal = Some(replay.finish().expect("replay failed"));
         engine
     }
 
