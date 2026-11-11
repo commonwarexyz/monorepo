@@ -146,8 +146,9 @@ impl<P: PublicKey, H: Hasher, A: Amount> Matrix<P, H, A> {
 
     /// Opens the amount `sender` paid `receiver`, proving that it paid nothing if it did not.
     ///
-    /// An opening reveals the payment it opens or, when it proves that payment absent, the sender's
-    /// payments to the receivers on either side.
+    /// An opening reveals the payment it opens. When it proves that payment absent, it reveals the
+    /// sender's payments to the receivers on either side or, for a sender without a row, the
+    /// senders on either side and the roots of their payment maps.
     pub fn open(&self, sender: &P, receiver: &P) -> Opening<P, H::Digest, A> {
         let row = Lookup::new(&self.inner.rows, &self.inner.tree, sender);
         let entry = match &row {

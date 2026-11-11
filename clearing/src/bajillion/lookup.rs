@@ -20,9 +20,9 @@ const NON_MEMBER: u8 = 1;
 /// Opens the value bound to one key in a list that is strictly increasing by key and committed with
 /// a binary Merkle tree.
 ///
-/// The tree's root binds the number of entries, so an opening also proves whether an entry is the
-/// first or last. An opening is sound only under the root of a sorted list, because an unsorted
-/// list can prove a present key absent.
+/// Each leaf is bound to its position and the root binds the number of entries, so an opening also
+/// proves whether an entry is the first or last. An opening is sound only under the root of a
+/// sorted list, because an unsorted list can prove a present key absent.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Lookup<K, V, D: Digest> {
     /// The key is present.

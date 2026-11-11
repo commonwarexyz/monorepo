@@ -5,12 +5,13 @@
 //! reference validator replayed on fresh databases for each history, so the summaries, balances,
 //! proofs, and openings it serves are the real ones.
 //!
-//! The model keeps its own record of what it sent, what was acknowledged, what each receiver
-//! kept, what was deposited, and what was claimed. From that record it predicts the outcome of
-//! every step before running it, and it computes every balance and payout the posted closes
-//! should produce. A step whose outcome differs from the prediction is a violation. To predict a
-//! step, the model reads a role only for the epoch it is in and the queues the ledger holds, and
-//! its record determines both.
+//! The model keeps its own record of what it sent, what was acknowledged, what each receiver kept,
+//! what was deposited, and what was claimed. From that record it predicts the outcome of every step
+//! before running it, and it computes every balance and payout the posted closes should produce. A
+//! step whose outcome differs from the prediction is a violation. To predict a step, the model
+//! reads only two things from the roles: the epoch a role is in and the queues the ledger holds.
+//! Its own record is enough to derive the epoch and the queued deposits, but not the forced
+//! withdrawals.
 //!
 //! The model explores every order of sends, deliveries, replies, lost replies, duplicated requests,
 //! copies put in flight again after their sender stopped awaiting them, closes with every count the
@@ -82,18 +83,17 @@
 //! (R1, R2) and audit each post (R3). The omission workloads break O7 once and show its
 //! consequence.
 //!
-//! The replay runs the validator's checks, applications, and services (V1, V3, V5, V6) from the
-//! genesis checkpoint (V2), and the records it writes (V4) are replayed from the model's own
-//! copies. The ledger starts at genesis (L1), queues requests (L2), posts (L5), pays each payout
-//! once (L6), halts on a challenge (L7), drains its queues at a halt (L8), and pays each claim
-//! once (L9).
+//! The replay runs the validator's checks, applications, and services (V1, V5, V6) from the genesis
+//! checkpoint (V2), and the records it writes (V4) are replayed from the model's own copies. The
+//! ledger starts at genesis (L1), queues requests (L2), posts (L5), pays each payout once (L6),
+//! halts on a challenge (L7), drains its queues at a halt (L8), and pays each claim once (L9).
 //!
-//! Outside the model are O3's floor and O8's reassembly (the reference operator applies each
-//! close at its cut and never has a close rejected), the restart branches of V2 and V4, V3's
-//! second read of the queue, the read order of O1, the limits of O5 and V7, and the overflow
-//! refusal of L3. L4, L10, and L11 depend on the chain's transfers and callers. No workload
-//! reaches the third epoch of payments in which a copy admitted twice would debit its sender
-//! twice, so the admission invariant catches the second admission itself.
+//! Outside the model are O3's floor and O8's reassembly (the reference operator applies each close
+//! at its cut and never has a close rejected), the restart branches of V2 and V4, V3's reads of the
+//! ledger's queues, the read order of O1, the limits of O5 and V7, and the overflow refusal of L3.
+//! L4, L10, and L11 depend on the chain's transfers and callers. No workload reaches the third
+//! epoch of payments in which a copy admitted twice would debit its sender twice, so the admission
+//! invariant catches the second admission itself.
 
 use super::*;
 use crate::roles::{

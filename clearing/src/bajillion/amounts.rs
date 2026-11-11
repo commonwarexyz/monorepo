@@ -44,9 +44,11 @@ pub(crate) fn leaf<H: Hasher, P: PublicKey, A: Amount>(account: &P, amount: A) -
 
 /// Nonzero amounts per account, sorted by account.
 ///
-/// Their root ([Amounts::root]) is that of a binary Merkle tree whose leaves are the `(account,
-/// amount)` entries in account order. It also binds the number of entries, so a [Lookup] of two
-/// adjacent entries proves that an account between them has no amount.
+/// Their root ([Amounts::root]) is the root of a binary Merkle tree whose leaves are the `(account,
+/// amount)` entries in account order. Each leaf is bound to its position, so a [Lookup] of two
+/// adjacent entries proves that an account between them has no amount, and the first entry alone
+/// proves the same for an account before it. The root also binds the number of entries, so the last
+/// entry alone proves the same for an account after it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Amounts<P: PublicKey, A: Amount> {
     entries: Vec<(P, A)>,
