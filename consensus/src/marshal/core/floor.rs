@@ -403,7 +403,7 @@ mod tests {
     use commonware_resolver::Fetch;
     use commonware_utils::{NZU64, Widen, sync::Mutex};
     use rstest::rstest;
-    use std::{fmt::Debug, num::NonZeroU64, sync::Arc};
+    use std::sync::Arc;
 
     type TestDigest = <Sha256 as commonware_cryptography::Hasher>::Digest;
     type TestScheme = simplex_ed25519::Scheme;
@@ -616,6 +616,7 @@ mod tests {
 
     #[test]
     fn retained_from_counts_views_below_an_epoch_in_heights() {
+        // Epochs hold three heights, and the window is ten views.
         let epocher = FixedEpocher::new(NZU64!(3));
         let at = |epoch, view| Round::new(Epoch::new(epoch), View::new(view));
         let retained = |epoch, view| retained_from(&epocher, at(epoch, view), ViewDelta::new(10));
@@ -638,10 +639,10 @@ mod tests {
     }
 
     /// An epocher whose epochs hold the given numbers of heights in order from genesis.
-    #[derive(Clone, Debug)]
-    struct UnevenEpocher(Vec<(Height, Height)>);
+    #[derive(Clone)]
+    struct ListedEpocher(Vec<(Height, Height)>);
 
-    impl UnevenEpocher {
+    impl ListedEpocher {
         fn new(lengths: &[u64]) -> Self {
             let mut first = 0;
             Self(
@@ -659,13 +660,9 @@ mod tests {
         fn bounds(&self, epoch: Epoch) -> Option<(Height, Height)> {
             self.0.get(usize::try_from(epoch.get()).ok()?).copied()
         }
-
-        fn epochs(&self) -> u64 {
-            Widen::widen(self.0.len())
-        }
     }
 
-    impl Epocher for UnevenEpocher {
+    impl Epocher for ListedEpocher {
         fn containing(&self, height: Height) -> Option<EpochInfo> {
             let (epoch, (first, last)) =
                 (0..).zip(&self.0).find(|(_, (_, last))| height <= *last)?;
@@ -681,22 +678,35 @@ mod tests {
         }
     }
 
-    /// Checks that `retained_from` keeps the whole window and no extra earlier epoch, for rounds in
-    /// the first `epochs` epochs of `epocher`.
-    fn assert_keeps_window<E: Epocher + Debug>(epocher: &E, epochs: u64) {
+    #[rstest]
+    #[case::length_2(&[2; 9])]
+    #[case::length_3(&[3; 9])]
+    #[case::length_4(&[4; 9])]
+    #[case::length_5(&[5; 9])]
+    #[case::length_6(&[6; 9])]
+    // Epochs of one height sit between longer ones. Epoch six holds 14 heights, so it can cover a
+    // whole window by itself.
+    #[case::mixed(&[3, 1, 6, 1, 1, 4, 14, 2, 5])]
+    // Every epoch after genesis holds one height, so each view the window lacks keeps one more
+    // earlier epoch, back to genesis.
+    #[case::one_height(&[2, 1, 1, 1, 1, 1, 1, 1, 1])]
+    fn retained_from_keeps_the_fewest_epochs_that_cover_the_window(#[case] lengths: &[u64]) {
+        // Build the layout. The checks below count each epoch's heights as the fewest views it can
+        // span.
+        let epocher = ListedEpocher::new(lengths);
         let heights = |epoch: u64| {
             let epoch = Epoch::new(epoch);
             epocher.last(epoch).unwrap().get() - epocher.first(epoch).unwrap().get() + 1
         };
 
-        // The largest window reaches genesis from the start of every epoch checked, and views run
-        // up to it.
+        // The largest window reaches genesis from the start of every epoch, and views run up to it.
+        let epochs: u64 = Widen::widen(lengths.len());
         let largest = epocher.first(Epoch::new(epochs - 1)).unwrap().get() + 1;
         for window in 1..=largest {
             for epoch in 0..epochs {
                 for view in 0..=largest {
                     let witnessed = Round::new(Epoch::new(epoch), View::new(view));
-                    let retained = retained_from(epocher, witnessed, ViewDelta::new(window));
+                    let retained = retained_from(&epocher, witnessed, ViewDelta::new(window));
 
                     // Within the witnessed epoch, exactly the window stays.
                     if view >= window {
@@ -712,7 +722,7 @@ mod tests {
                     let missing = window - view;
                     let lowest = retained.epoch().get();
                     let covered: u64 = (lowest..epoch).map(heights).sum();
-                    let case = format!("{window} views behind {witnessed} under {epocher:?}");
+                    let case = format!("{window} views behind {witnessed}");
                     assert!(
                         lowest == 0 || covered >= missing,
                         "the kept epochs must span {case}"
@@ -724,24 +734,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[rstest]
-    fn retained_from_keeps_the_window_without_a_spare_epoch(#[values(2, 3, 4, 5, 6)] length: u64) {
-        let epocher = FixedEpocher::new(NonZeroU64::new(length).unwrap());
-        assert_keeps_window(&epocher, 9);
-    }
-
-    #[rstest]
-    // Epochs of one height sit between longer ones. Epoch six holds 14 heights, so it can cover a
-    // whole window by itself.
-    #[case::mixed(&[3, 1, 6, 1, 1, 4, 14, 2, 5])]
-    // Every epoch after genesis holds one height, so each view the window lacks keeps one more
-    // earlier epoch, back to genesis.
-    #[case::one_height(&[2, 1, 1, 1, 1, 1, 1, 1, 1])]
-    fn retained_from_keeps_the_window_across_uneven_epochs(#[case] lengths: &[u64]) {
-        let epocher = UnevenEpocher::new(lengths);
-        assert_keeps_window(&epocher, epocher.epochs());
     }
 
     fn floor() -> State<TestScheme, TestDigest> {
