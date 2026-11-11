@@ -18,12 +18,6 @@ pub struct DebugCounter {
 }
 
 impl DebugCounter {
-    /// Returns whether bound tracking is enabled.
-    #[cfg(test)]
-    pub const fn live() -> bool {
-        cfg!(debug_assertions)
-    }
-
     /// Creates a counter with the supplied upper bound.
     pub const fn new(upper: u64) -> Self {
         let _ = upper;
