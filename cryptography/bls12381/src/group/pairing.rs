@@ -378,7 +378,7 @@ pub mod fuzz {
         }
     }
 
-    /// A kernel whose representations [`Plan::Representations`] compares.
+    /// A kernel that [`Plan::Representations`] runs on a drawn target.
     #[derive(Clone, Copy, Debug, Arbitrary)]
     enum PairingKernel {
         MultiPairing,
@@ -493,7 +493,7 @@ pub mod fuzz {
         #[test]
         fn minifuzz_representations() {
             minifuzz::Builder::default()
-                .with_min_iterations(2)
+                .with_min_iterations(4)
                 .test(|u| Plan::Representations.run(u));
         }
 
