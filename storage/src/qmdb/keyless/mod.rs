@@ -318,7 +318,7 @@ where
         // The journal always ends with a commit operation.
         let op = self.journal.read(*self.journal.size() - 1).await?;
         let Operation::Commit(metadata, _floor) = op else {
-            return Ok(None);
+            unreachable!("last operation is not a commit");
         };
 
         Ok(metadata)
