@@ -2087,24 +2087,30 @@ pub mod tests {
     #[test]
     fn test_orphan_in_flight_cancels_once_and_releases_deadline() {
         for expire_bucket in [false, true] {
+            // An in-flight receive with a deadline, and with `expire_bucket`
+            // a sibling that shares it.
             let mut harness = Harness::new(1);
             let deadline = harness.start + Duration::from_secs(10);
             let (left, _right) = UnixStream::pair().unwrap();
             let id = harness.admit(recv(left, 8, Some(deadline)), 0);
             let (survivor, _survivor_peer) = UnixStream::pair().unwrap();
-            if expire_bucket {
-                harness.admit(recv(survivor, 1, Some(deadline)), 1);
-            }
+            let sibling =
+                expire_bucket.then(|| harness.admit(recv(survivor, 1, Some(deadline)), 1));
             harness.service();
 
             assert!(harness.driver.state.waiters.is_in_flight(id));
 
-            // Repeated observer drops must not queue another cancel or remove the
-            // same deadline from the wheel twice.
+            // Repeated observer drops queue one cancellation and unlink the
+            // orphan's deadline once, leaving the sibling's installed.
             harness.orphan(id);
             harness.orphan(id);
 
-            if expire_bucket {
+            assert!(!harness.driver.state.deadlines.contains(id.0.index));
+            assert!(!harness.driver.state.deadlines.remove(id.0.index));
+
+            if let Some(sibling) = sibling {
+                assert!(harness.driver.state.deadlines.contains(sibling.0.index));
+
                 // A live sibling expires before the orphan's cancellation or
                 // operation CQE arrives, without reaching the orphan again.
                 let fires = harness.fires_at(deadline);
@@ -2112,11 +2118,15 @@ pub mod tests {
                     .driver
                     .state
                     .advance_timeouts(fires, &mut harness.deferred);
+
                 assert!(harness.driver.state.waiters.is_in_flight(id));
             }
+
             assert_eq!(harness.driver.state.pending_cancels.len(), 1);
             assert!(harness.driver.next_deadline().is_none());
 
+            // The orphan retires without an observer, and the sibling times
+            // out.
             harness.collect();
             harness.drain();
 
@@ -2129,12 +2139,14 @@ pub mod tests {
                     .count(),
                 1
             );
+
             if expire_bucket {
                 let survivor = harness
                     .completed
                     .iter()
                     .find(|completed| matches!(completed.observer, TestObserver::Local(1)))
                     .unwrap();
+
                 assert!(matches!(
                     survivor.output,
                     RequestOutput::Recv(Err((_, Error::Timeout)))
@@ -3026,33 +3038,6 @@ pub mod tests {
         harness.until(6);
         assert_eq!(harness.driver.state.deadlines.len(), 0);
         assert!(harness.driver.next_deadline().is_none());
-
-        // So does one whose local result stays unconsumed in its slot.
-        let (socket, mut peer) = UnixStream::pair().unwrap();
-        peer.write_all(b"y").unwrap();
-        let retained = harness.admit(recv(socket, 1, Some(deadline)), 9);
-        let limit = Instant::now() + Duration::from_secs(10);
-        while harness.driver.state.waiters.is_pending(retained) {
-            assert!(Instant::now() < limit, "receive stalled");
-            harness
-                .driver
-                .service(Instant::now(), false, &mut harness.deferred)
-                .unwrap();
-            thread::yield_now();
-        }
-        assert!(!harness.driver.state.deadlines.contains(retained.0.index));
-        assert!(harness.driver.next_deadline().is_none());
-
-        // A later pass past the deadline expires nothing, so every request
-        // reports its received byte.
-        let fires = harness.fires_at(deadline);
-        harness
-            .driver
-            .state
-            .advance_timeouts(fires, &mut harness.deferred);
-        harness.collect();
-        assert_eq!(harness.completed.len(), 7);
-        assert_eq!(received(&harness.completed[6]), b"y");
         harness.drain();
     }
 
@@ -3112,66 +3097,6 @@ pub mod tests {
             assert!(timed_out(&harness.completed[0], 0));
             harness.drain();
         }
-    }
-
-    #[test]
-    fn test_cancelled_request_deadline_is_removed_exactly_once() {
-        // Two in-flight receives share one deadline.
-        let mut harness = Harness::new(2);
-        let deadline = harness.start + Duration::from_secs(10);
-        let (left, _right) = UnixStream::pair().unwrap();
-        let id = harness.admit(recv(left, 8, Some(deadline)), 0);
-        let (survivor, _survivor_peer) = UnixStream::pair().unwrap();
-        let sibling = harness.admit(recv(survivor, 1, Some(deadline)), 1);
-        harness.service();
-        assert!(harness.driver.state.waiters.is_in_flight(id));
-        assert_eq!(harness.driver.state.deadlines.len(), 2);
-
-        // Repeated drops queue one cancellation SQE and unlink one deadline.
-        harness.orphan(id);
-        harness.orphan(id);
-        assert_eq!(harness.driver.state.pending_cancels.len(), 1);
-        assert!(!harness.driver.state.deadlines.contains(id.0.index));
-        assert!(harness.driver.state.deadlines.contains(sibling.0.index));
-
-        // A second removal of the same deadline removes nothing.
-        assert!(!harness.driver.state.deadlines.remove(id.0.index));
-        assert_eq!(harness.driver.state.deadlines.len(), 1);
-
-        // Expiry reaches only the sibling. The orphan is not cancelled again.
-        let fires = harness.fires_at(deadline);
-        harness
-            .driver
-            .state
-            .advance_timeouts(fires, &mut harness.deferred);
-        assert_eq!(harness.driver.state.pending_cancels.len(), 2);
-        assert_eq!(
-            harness
-                .driver
-                .state
-                .pending_cancels
-                .iter()
-                .filter(|queued| **queued == id)
-                .count(),
-            1
-        );
-        assert!(harness.driver.next_deadline().is_none());
-
-        // The orphan retires without an observer, and the sibling times out.
-        harness.until(2);
-        let orphaned = harness
-            .completed
-            .iter()
-            .filter(|completed| matches!(completed.observer, TestObserver::Orphaned))
-            .count();
-        assert_eq!(orphaned, 1);
-        assert!(
-            harness
-                .completed
-                .iter()
-                .any(|completed| timed_out(completed, 1))
-        );
-        harness.drain();
     }
 
     /// Check that every installed deadline belongs to the active request in

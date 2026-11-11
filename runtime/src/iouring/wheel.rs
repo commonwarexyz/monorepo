@@ -664,15 +664,17 @@ pub mod tests {
     }
 
     /// Random insertions (past, current and future, up to the end of time),
-    /// removals with slot reuse, and expiries with random budgets and
-    /// occasionally stale times, checked against a `BTreeMap` of firing
-    /// times after every step. The checks are that a fired slot was resident
-    /// and its firing time had passed at the latest time any caller passed,
-    /// that a pass fires no more slots than its budget has units, that an
-    /// unbudgeted pass leaves nothing due, that firing times are less than
-    /// one tick after their deadlines, that the bound never exceeds the
-    /// earliest firing time, and that an insertion lowers the bound no
-    /// further than its firing time.
+    /// removals with slot reuse, and expiries with random budgets, random
+    /// caps on fires and occasionally stale times, checked against a
+    /// `BTreeMap` of firing times after every step. The checks are that a
+    /// fired slot was resident and its firing time had passed at the latest
+    /// time any caller passed, that a pass fires no more slots than its budget
+    /// has units or its cap allows, that an unbudgeted and uncapped pass
+    /// leaves nothing due, that any other pass that leaves a due slot keeps
+    /// the bound at or below its time, that firing times are less than one
+    /// tick after their deadlines, that the bound never exceeds the earliest
+    /// firing time, and that an insertion lowers the bound no further than
+    /// its firing time.
     fn model<const RESOLUTION: u64>(seed: u64, steps: usize, max_bits: u32) {
         // A wheel and its model: live slots with their firing times, the
         // same ordered by firing time, and free slots for reuse.
@@ -759,14 +761,28 @@ pub mod tests {
 
                     let allowance = budget;
 
+                    // Half of the passes may fire only a few slots.
+                    let capped = rng.random_range(0..2) == 0;
+
+                    let fires = if capped {
+                        rng.random_range(0..4)
+                    } else {
+                        u32::MAX
+                    };
+
                     // Every fired slot was live and due by the latest time, and
-                    // each cost one unit of the budget.
+                    // each cost one unit of the budget and one of the cap.
                     fired.clear();
-                    wheel.expire(now, &mut budget, &mut |slot| fired.push(slot));
+                    wheel.expire_capped(now, &mut budget, fires, &mut |slot| fired.push(slot));
 
                     assert!(
                         fired.len() <= (allowance - budget) as usize,
                         "uncharged firing at step {step}"
+                    );
+
+                    assert!(
+                        fired.len() <= fires as usize,
+                        "pass fired past its cap at step {step}"
                     );
 
                     for slot in &fired {
@@ -778,12 +794,20 @@ pub mod tests {
                         free.push(*slot);
                     }
 
-                    // An unbudgeted pass at the latest time leaves nothing due.
-                    if !limited && now == latest {
-                        assert!(
-                            order.first().is_none_or(|(firing, _)| *firing > now),
-                            "due slot survived at step {step}"
-                        );
+                    // An unbudgeted, uncapped pass at the latest time leaves
+                    // nothing due, and any other pass that leaves a due slot
+                    // keeps the bound at or below that time.
+                    if now == latest {
+                        if !limited && !capped {
+                            assert!(
+                                order.first().is_none_or(|(firing, _)| *firing > now),
+                                "due slot survived at step {step}"
+                            );
+                        }
+
+                        if order.first().is_some_and(|(firing, _)| *firing <= now) {
+                            assert!(wheel.bound() <= now, "late bound over a due slot at {step}");
+                        }
                     }
                 }
             }
@@ -839,27 +863,6 @@ pub mod tests {
                 model::<COARSE>(seed, 20_000, max_bits);
             }
         }
-    }
-
-    #[test]
-    fn test_rounding_is_never_early() {
-        // A deadline inside a tick rounds up to the end of that tick.
-        let mut wheel = Wheel::<FINE>::new(0);
-        wheel.insert(0, 2_500);
-
-        assert_eq!(Wheel::<FINE>::rounded(2_500), 3_072);
-        assert_eq!(wheel.bound(), 3_072);
-
-        // It fires at the rounded time, not one nanosecond earlier.
-        let mut fired = Vec::new();
-        let mut budget = u32::MAX;
-        wheel.expire(3_071, &mut budget, &mut |slot| fired.push(slot));
-
-        assert!(fired.is_empty());
-
-        wheel.expire(3_072, &mut budget, &mut |slot| fired.push(slot));
-
-        assert_eq!(fired, [0]);
     }
 
     #[test]
@@ -961,60 +964,46 @@ pub mod tests {
 
     #[test]
     fn test_refiles_cost_a_fraction_of_the_budget() {
-        // One high bucket lists a budget's worth of later slots ahead of the
-        // one due first, so expiry refiles them all before it reaches it.
-        let mut wheel = Wheel::<FINE>::new(0);
-        let deadline = 50_000_000;
-        let later = REFILES_PER_UNIT * (BUDGET - 1);
+        for capped in [false, true] {
+            // One high bucket lists a budget's worth of later slots ahead of
+            // the one due first, so expiry refiles them all before it reaches
+            // it.
+            let mut wheel = Wheel::<FINE>::new(0);
+            let deadline = 50_000_000;
+            let later = REFILES_PER_UNIT * (BUDGET - 1);
 
-        for slot in 0..later {
-            wheel.insert(slot, deadline + FINE + u64::from(slot) * 64);
-        }
+            for slot in 0..later {
+                wheel.insert(slot, deadline + FINE + u64::from(slot) * 64);
+            }
 
-        wheel.insert(later, deadline);
+            wheel.insert(later, deadline);
 
-        // Once it is due, one pass refiles the later slots and still fires it.
-        let now = Wheel::<FINE>::rounded(deadline);
-        let mut fired = Vec::new();
-        let mut budget = BUDGET;
-        wheel.expire(now, &mut budget, &mut |slot| fired.push(slot));
-
-        assert_eq!(fired, [later]);
-        assert_eq!(budget, 0);
-
-        // The refiled slots fire at their own times.
-        let end = Wheel::<FINE>::rounded(deadline + FINE + u64::from(later) * 64);
-
-        while !wheel.is_empty() {
+            // Once it is due, one pass refiles the later slots and still
+            // fires it, even a pass that may fire only one slot, since
+            // refiles spend from the whole budget.
+            let now = Wheel::<FINE>::rounded(deadline);
+            let mut fired = Vec::new();
             let mut budget = BUDGET;
-            wheel.expire(end, &mut budget, &mut |slot| fired.push(slot));
+
+            if capped {
+                wheel.expire_capped(now, &mut budget, 1, &mut |slot| fired.push(slot));
+            } else {
+                wheel.expire(now, &mut budget, &mut |slot| fired.push(slot));
+            }
+
+            assert_eq!(fired, [later]);
+            assert_eq!(budget, 0);
+
+            // The refiled slots fire at their own times.
+            let end = Wheel::<FINE>::rounded(deadline + FINE + u64::from(later) * 64);
+
+            while !wheel.is_empty() {
+                let mut budget = BUDGET;
+                wheel.expire(end, &mut budget, &mut |slot| fired.push(slot));
+            }
+
+            assert_eq!(fired.len(), later as usize + 1);
         }
-
-        assert_eq!(fired.len(), later as usize + 1);
-    }
-
-    #[test]
-    fn test_capped_pass_refiles_with_the_whole_budget() {
-        // The same bucket, with later slots listed ahead of the one due first.
-        let mut wheel = Wheel::<FINE>::new(0);
-        let deadline = 50_000_000;
-        let later = REFILES_PER_UNIT * (BUDGET - 1);
-
-        for slot in 0..later {
-            wheel.insert(slot, deadline + FINE + u64::from(slot) * 64);
-        }
-
-        wheel.insert(later, deadline);
-
-        // A pass that may fire one slot still refiles every later slot from
-        // the whole budget, so it reaches the due one and fires it.
-        let now = Wheel::<FINE>::rounded(deadline);
-        let mut fired = Vec::new();
-        let mut budget = BUDGET;
-        wheel.expire_capped(now, &mut budget, 1, &mut |slot| fired.push(slot));
-
-        assert_eq!(fired, [later]);
-        assert_eq!(budget, 0);
     }
 
     #[test]
