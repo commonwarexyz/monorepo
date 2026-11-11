@@ -515,9 +515,10 @@ impl Drop for Driver {
                     Some(libc::EINTR) => continue,
                     _ => {
                         // The wait may still be queued at the word's address,
-                        // so keep the word allocated.
-                        warn!(%error, "failed to cancel the ring futex wait");
+                        // so keep the word allocated. Keep it before the
+                        // warning, whose subscriber can panic.
                         mem::forget(self.state.unparker.clone());
+                        warn!(%error, "failed to cancel the ring futex wait");
                         return;
                     }
                 },
@@ -801,6 +802,7 @@ pub mod tests {
         task::Wake,
         thread,
     };
+    use tracing_subscriber::layer::SubscriberExt as _;
 
     /// Bound of a timed wait that times out. It leaves the deadline in the
     /// future when `Driver::enter` samples the clock on a loaded runner, so
@@ -913,6 +915,16 @@ pub mod tests {
 
         // SAFETY: `fd` is a new open descriptor that nothing else owns.
         unsafe { OwnedFd::from_raw_fd(fd) }
+    }
+
+    /// A tracing layer that panics on every event, standing in for a
+    /// subscriber that panics while recording a warning.
+    struct PanicOnEvent;
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PanicOnEvent {
+        fn on_event(&self, _: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+            panic!("subscriber panicked on an event");
+        }
     }
 
     /// Destination of a result collected by the harness.
@@ -2525,6 +2537,48 @@ pub mod tests {
         // still queued.
         assert_eq!(handles(&parker), handles_without_driver + 1);
         assert_eq!(wake(&unparker, 2), 1, "the ring wait was cancelled");
+        drop(ring);
+    }
+
+    /// A drop whose cancel fails keeps the word allocated before it reports
+    /// the failure, so a tracing subscriber that panics on the warning cannot
+    /// free the word under the wait left queued.
+    #[test]
+    fn test_failed_cancel_keeps_the_word_if_the_warning_panics() {
+        // A park with a short deadline leaves its ring wait queued.
+        let parker = Parker::new();
+        let unparker = parker.unparker();
+        let handles_without_driver = handles(&parker);
+        let mut driver = Driver::new(
+            &RingConfig::default(),
+            Duration::from_secs(60),
+            unparker.clone(),
+            Instant::now(),
+        )
+        .unwrap();
+        assert!(
+            driver
+                .park(&parker, 0, Some(Instant::now() + Duration::from_millis(2)))
+                .unwrap()
+        );
+
+        // Drop the driver off its owner thread, so its cancel fails, under a
+        // subscriber that panics on the warning. A duplicate descriptor keeps
+        // the ring, and so the wait, alive.
+        let ring = hold_ring(&driver);
+        let panicked = thread::spawn(move || {
+            let subscriber = tracing_subscriber::registry().with(PanicOnEvent);
+            tracing::subscriber::with_default(subscriber, || {
+                catch_unwind(AssertUnwindSafe(|| drop(driver))).is_err()
+            })
+        })
+        .join()
+        .unwrap();
+        assert!(panicked, "the warning did not reach the subscriber");
+
+        // The wait is still queued, and the drop kept one handle on its word.
+        assert_eq!(wake(&unparker, 2), 1, "the ring wait was cancelled");
+        assert_eq!(handles(&parker), handles_without_driver + 1);
         drop(ring);
     }
 
