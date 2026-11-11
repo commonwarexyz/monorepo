@@ -1,8 +1,13 @@
-//! Representation-neutral base field arithmetic.
+//! The [`Field`] trait: base field arithmetic on several elements at once, which the extension
+//! fields, curve formulas, and kernels are written over once for every representation.
 //!
-//! Representations choose when factors need carrying and whether products reduce eagerly or
-//! accumulate before a shared reduction. SIMD operation profiles choose the representation;
-//! this trait shares arithmetic without selecting a backend.
+//! SIMD operation profiles choose the representation: [`Unsat49`], [`Unsat28`], or [`Rns`]. A
+//! formula forms products with [`Field::product`], adds them with [`Field::accumulate`] or
+//! [`Field::accumulate_product`], and reduces each sum once with [`Field::reduce`] or one of its
+//! variants. Positional representations reduce every product eagerly; [`Rns`] holds sums of
+//! products unreduced. A [`Signed`] sum defers a subtraction of products to its reduction.
+//! Representations differ in when values need carrying, so a formula is correct for all of them
+//! only if it keeps every operand within the bounds below.
 //!
 //! # Bounds
 //!
@@ -22,9 +27,13 @@
 //! integer bound; canonicalization returns an integer below `p`.
 //!
 //! A formula must establish each operation's input bounds and keep its outputs within the limits
-//! below. A valid value is not necessarily a valid operand for every operation. Bounds are static
-//! usage rules: debug counters verify them, but never choose where to carry or reduce. With debug
-//! assertions disabled, the counters and checks disappear; the arithmetic requirements remain.
+//! below. A valid value is not necessarily a valid operand for every operation. Generic formulas
+//! must account for these bounds between calls as well. For repeated point operations, a
+//! coordinate contract can bound the inputs and show that the outputs satisfy the same contract;
+//! coordinates need not be canonical between operations.
+//!
+//! Debug builds check the bounds with counters, which never decide where to carry or reduce.
+//! Release builds do not check them, and results are unspecified when a formula violates them.
 //!
 //! # Representation limits
 //!
@@ -80,14 +89,13 @@
 //!
 //! # Tight reductions
 //!
-//! An eager product is already reduced, so a sum of them keeps the sum of their integer bounds and
-//! [`Field::reduce`] only carries it. Long sums, such as the coefficients of products in the higher
-//! extensions, would then return values whose integer bounds grow with every chained multiplication.
-//! [`Field::reduce_tight`] returns integer bound at most [`TIGHT`] in every representation, whatever
-//! the sum's bound: [`Unsat49`] pays one more product, by one, [`Unsat28`] subtracts the multiple
-//! of `p` that its top limb covers, and wide products reduce as usual.
-//! Between products of such sums, [`Field::carry_product`] restores the limb bound of eager sums, so
-//! they keep accumulating; wide sums need no carrying and keep their term bounds.
+//! An eager product is already reduced, so [`Field::reduce`] only carries a sum of them, and the
+//! result keeps the sum of their integer bounds. Chained multiplications of long sums, such as the
+//! coefficients of products in the higher extensions, would grow that bound at every step.
+//! [`Field::reduce_tight`] returns integer bound at most [`TIGHT`] in every representation,
+//! whatever the sum's bound. Between products of such sums, [`Field::carry_product`] restores the
+//! limb bound of eager sums so that they can keep accumulating; wide sums need no carrying and
+//! keep their term bounds.
 //!
 //! # Signed sums
 //!
@@ -106,39 +114,6 @@
 //! bound `1`, and its negative sum is the two known products, with their bounds added.
 //! [`Rns`] overrides it with two products and an accumulation, giving a positive wide integer
 //! bound `A0 * B1 + A1 * B0` with two terms and no negative sum.
-//!
-//! # Accumulating products
-//!
-//! [`Field::accumulate_product`] returns a sum plus one more product. The default forms the
-//! product and accumulates it; wide products multiply-add into the sum's accumulators, which costs
-//! nothing beyond the products. Formulas accumulate a product this way whenever they do not reuse
-//! it, and the bounds are those of [`Field::product`] followed by [`Field::accumulate`].
-//!
-//! [`Field::quadratic`] forms the product of two elements `a[0] + a[1] i` and `b[0] + b[1] i` of
-//! the quadratic extension with `i^2 = -1`, as a [`Signed`] sum per component: the real component
-//! is `a[0] b[0]` less `a[1] b[1]`, and the imaginary component is `a[0] b[1] + a[1] b[0]`, which
-//! [`Field::cross`] forms. [`Field::accumulate_quadratic`] and [`Field::subtract_quadratic`]
-//! add such a product to, or subtract it from, a pair of signed sums; the defaults form the
-//! product and add or subtract it as [`Signed::add`] and [`Signed::sub`] do, and [`Rns`]
-//! multiply-adds each of the four products into the sum it belongs to.
-//!
-//! Where accumulating a product costs nothing beyond its multiplications, formulas over the
-//! higher extensions multiply every pair of coefficients and accumulate each product into the sum
-//! it belongs to, rather than forming Karatsuba's fewer products of sums and combining them with
-//! many more additions. [`Field::SCHOOLBOOK`] selects those formulas.
-//!
-//! Generic formulas must account for all of these bounds, including between calls. For repeated
-//! point operations, a coordinate contract can bound the inputs and show that the outputs satisfy
-//! the same contract. This does not require canonical coordinates between operations.
-//!
-//! # Several reductions
-//!
-//! [`Field::reduce_each`], [`Field::reduce_each_signed`], and [`Field::reduce_each_signed_tight`]
-//! reduce `N` sums that a closure forms by index, each under the rules of [`Field::reduce`],
-//! [`Field::reduce_signed`], or [`Field::reduce_signed_tight`]. The defaults reduce each sum right
-//! after forming it. [`Rns`] reductions are long dependency chains, so it runs each step of the
-//! reduction for several sums before the next, which overlaps their chains; formulas pass it up to
-//! [`Field::INTERLEAVE`] sums at once.
 //!
 //! [`Unsat49`]: super::fp::unsat49::Unsat49
 //! [`Unsat28`]: super::fp::unsat28::Unsat28
@@ -273,20 +248,20 @@ pub trait Field<S: Simd>: Copy {
     )]
     const PRODUCTS: usize;
 
-    /// Most sums whose reductions one call of [`Self::reduce_each`] or its variants interleaves,
-    /// at most [`UNROLLED`].
+    /// Most sums whose reductions one call of [`Self::reduce_each`] or its variants overlaps, at
+    /// most [`UNROLLED`].
     ///
-    /// The defaults reduce one sum after another. Extension formulas reduce every coefficient of a
-    /// result in one call only when this covers all their components, and otherwise reduce each
-    /// coefficient in its own kernel.
+    /// Extension formulas reduce every coefficient of a result in one call only when this covers
+    /// all of them, and otherwise reduce each coefficient in its own kernel.
     const INTERLEAVE: usize = 1;
 
-    /// Whether formulas over the higher extensions form the product of every pair of
-    /// coefficients and accumulate each as it forms, through [`Self::accumulate_quadratic`],
-    /// rather than Karatsuba's fewer products of sums combined with more additions.
+    /// Whether formulas over the higher extensions multiply every pair of coefficients and
+    /// accumulate each product into the sum it belongs to, through
+    /// [`Self::accumulate_quadratic`], rather than form Karatsuba's fewer products of sums and
+    /// combine them with more additions.
     ///
-    /// Set where [`Self::accumulate_product`] costs no more than [`Self::product`], so that
-    /// every product lands in the sum it belongs to and the additions disappear.
+    /// Set where [`Self::accumulate_product`] costs no more than [`Self::product`], so that the
+    /// additions disappear.
     const SCHOOLBOOK: bool = false;
 
     /// Loads up to [`Self::LANES`] big-endian integers, filling the remaining lanes with `fill`.
@@ -299,10 +274,11 @@ pub trait Field<S: Simd>: Copy {
     /// Requires valid value bounds. Entries beyond [`Self::LANES`] are unchanged.
     fn store(self, simd: S, elements: &mut [[u8; BYTES]]);
 
-    /// Runs an operation of base field, quadratic, or sextic extension size, such as a reduction
-    /// or an [`Fp2`] or [`Fp6`] product, as its own kernel when the representation's
-    /// multiplication is large enough to be worth outlining, so that formulas call one copy;
-    /// representations whose operations are small run it inline.
+    /// Runs an operation of base field, [`Fp2`], or [`Fp6`] size, such as a reduction or a
+    /// product.
+    ///
+    /// The default runs it as its own kernel, so that formulas call one copy of it. A
+    /// representation whose operations are small enough may run it inline instead.
     ///
     /// [`Fp2`]: super::fp2::Fp2
     /// [`Fp6`]: super::fp6::Fp6
@@ -406,9 +382,8 @@ pub trait Field<S: Simd>: Copy {
     /// Returns `sum + a * b`, under the requirements of [`Self::product`] for the factors and of
     /// [`Self::accumulate`] for the sum.
     ///
-    /// The default forms the product and accumulates it. Representations with wide products
-    /// multiply-add into the sum's accumulators instead, which costs nothing beyond the products,
-    /// so formulas accumulate a product this way whenever they do not reuse it.
+    /// Formulas accumulate every product they do not reuse this way: it may cost less than
+    /// forming the product and accumulating it, which the default does.
     #[inline(always)]
     fn accumulate_product(simd: S, sum: Self::Product, a: Self, b: Self) -> Self::Product {
         Self::accumulate(simd, sum, a.product(simd, b))
@@ -430,9 +405,6 @@ pub trait Field<S: Simd>: Copy {
 
     /// Returns `sum + value`, lifting the value as [`Self::lift`] does and accumulating it as
     /// [`Self::accumulate`] does.
-    ///
-    /// The default lifts the value and accumulates it; representations with wide products
-    /// multiply-add into the sum's accumulators, as for [`Self::accumulate_product`].
     #[inline(always)]
     fn accumulate_lift(simd: S, sum: Self::Product, value: Self) -> Self::Product {
         Self::accumulate(simd, sum, value.lift(simd))
@@ -456,8 +428,8 @@ pub trait Field<S: Simd>: Copy {
     /// Reduces a sum of products to integer bound at most [`TIGHT`], whatever the sum's integer
     /// bound, and prepares its limbs for reuse.
     ///
-    /// The input must satisfy the limits of [`Self::reduce`]. Eager sums take one more step, which
-    /// costs at most one product; wide sums reduce exactly as for [`Self::reduce`].
+    /// The input must satisfy the limits of [`Self::reduce`]. Costs at most one product more than
+    /// [`Self::reduce`].
     fn reduce_tight(simd: S, product: Self::Product) -> Self;
 
     /// Returns `self * rhs`.
@@ -472,12 +444,12 @@ pub trait Field<S: Simd>: Copy {
     /// Returns `a[0] * b[1] + a[1] * b[0]` as a product, given `p0 = a[0] * b[0]` and
     /// `p1 = a[1] * b[1]`.
     ///
-    /// The default uses Karatsuba: one product of the sums `a[0] + a[1]` and `b[0] + b[1]`, less the
-    /// two known products, which form the negative sum. A representation whose products cost less
-    /// than those additions and the subtraction overrides it with the two products.
-    ///
     /// Inputs must be ready and their pairwise sums must satisfy `ready::<2>`. The known products
-    /// must accumulate within their accumulator.
+    /// must accumulate within their accumulator. The [module documentation](self#signed-sums)
+    /// gives the bounds of the result.
+    ///
+    /// The default uses Karatsuba: one product of the sums `a[0] + a[1]` and `b[0] + b[1]`, less
+    /// the two known products, which form the negative sum.
     #[inline(always)]
     fn cross(
         simd: S,
@@ -516,8 +488,7 @@ pub trait Field<S: Simd>: Copy {
     /// component, under the requirements of [`Self::quadratic`] and of [`Self::accumulate`] for
     /// each sum.
     ///
-    /// The default forms the product and adds it as [`Signed::add`] does. Representations with
-    /// wide products multiply-add each product into the sum it belongs to.
+    /// The default forms the product and adds it as [`Signed::add`] does.
     #[inline(always)]
     fn accumulate_quadratic(
         simd: S,
@@ -537,7 +508,6 @@ pub trait Field<S: Simd>: Copy {
     /// each sum.
     ///
     /// The default forms the product and subtracts it as [`Signed::sub`] does, without a bias.
-    /// Representations with wide products multiply-add each product into the sum it belongs to.
     #[inline(always)]
     fn subtract_quadratic(
         simd: S,
@@ -571,9 +541,9 @@ pub trait Field<S: Simd>: Copy {
     /// Returns `sums(0)`, ..., `sums(N - 1)`, each reduced as [`Self::reduce`] does.
     ///
     /// Calls `sums` once for each index, in increasing order, so that it may form the sums as
-    /// they are requested. The default reduces each sum right after forming it; representations
-    /// whose reductions are long dependency chains form several sums first and interleave their
-    /// reductions, as [`Self::INTERLEAVE`] documents.
+    /// they are requested. A representation may form several sums before reducing them and
+    /// overlap their reductions, up to [`Self::INTERLEAVE`] sums; the default reduces each sum
+    /// right after forming it.
     #[inline(always)]
     fn reduce_each<const N: usize>(
         simd: S,
@@ -640,9 +610,9 @@ pub trait Field<S: Simd>: Copy {
     ///
     /// Requires a ready value with integer bound at most [`TIGHT`], so that every power stays
     /// within the limits of [`Self::mul`]. Returns the documented multiplication bounds.
-    /// The default exponentiates with fixed four-bit windows, at the cost of about `380`
-    /// squarings and `110` multiplications over every lane at once, and runs as its own kernel;
-    /// a representation of single elements inverts in scalar arithmetic instead.
+    ///
+    /// The default runs as its own kernel and exponentiates with fixed four-bit windows, which
+    /// costs about `380` squarings and `110` multiplications over every lane at once.
     #[inline(always)]
     fn invert(self, simd: S) -> Self {
         simd.execute(
