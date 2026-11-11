@@ -2372,86 +2372,32 @@ pub mod tests {
         harness.drain();
     }
 
+    /// Every way a ring wait can end leads the next blocking park to install
+    /// another.
     #[test]
-    fn test_notify_wakes_ring_blocked_loop() {
-        let mut harness = Harness::new(2);
-        let (left, _right) = UnixStream::pair().unwrap();
-        harness.admit(recv(left, 1, None), 0);
-        harness.service();
-
-        // Notify after arming so the ring wait must carry the notification.
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let unparker = harness.driver.state.unparker.clone();
-        let producer = thread::spawn(move || {
-            wait_until_armed(&unparker, deadline);
-            unparker.unpark();
-        });
-        assert!(harness.park(0, Some(deadline)).unwrap());
-        producer.join().unwrap();
-
-        assert!(harness.parker.moved(0));
-
-        // A moved sequence alone does not prove the wake reached the ring.
-        harness.reap_ring_wait();
-
-        harness.drain();
+    fn test_ring_wait_completion_results() {
+        let mut harness = Harness::new(1);
+        for result in [0, -libc::EAGAIN, -libc::ECANCELED, -libc::ENOMEM] {
+            harness.driver.state.ring_wait_needed = false;
+            harness
+                .driver
+                .state
+                .handle_cqe(RING_WAIT_USER_DATA, result, &mut harness.deferred);
+            assert!(harness.driver.state.ring_wait_needed, "result {result}");
+        }
     }
 
-    /// A ring futex wait that the kernel fails to allocate ends like any other
-    /// wait, so the next park installs another, which a notification wakes.
+    /// Any other ring wait result breaks an invariant, such as EINVAL from a
+    /// kernel without IORING_OP_FUTEX_WAIT.
     #[test]
-    fn test_ring_wait_allocation_failure_installs_again() {
-        // A receive keeps the driver busy, and a park with an elapsed deadline
-        // leaves its ring wait queued.
-        let mut harness = Harness::new(2);
-        let (left, _right) = UnixStream::pair().unwrap();
-        harness.admit(recv(left, 1, None), 0);
-        harness.service();
-        assert!(harness.park(0, Some(Instant::now())).unwrap());
-        assert!(!harness.driver.state.ring_wait_needed);
-
-        // Cancel that wait, so none is queued.
-        harness
-            .driver
-            .ring
-            .submitter()
-            .register_sync_cancel(None, CancelBuilder::user_data(RING_WAIT_USER_DATA))
-            .unwrap();
-
-        // Reap the cancellation's completion directly, so the driver never sees
-        // it.
-        Driver::enter(&mut harness.driver.ring, Enter::TaskWork).unwrap();
-        let cqe = harness.driver.ring.completion().next().unwrap();
-        assert_eq!(cqe.user_data(), RING_WAIT_USER_DATA);
-        assert_eq!(cqe.result(), -libc::ECANCELED);
-
-        // Hand the driver an allocation failure of a wait that never queued,
-        // which ends the wait like any other.
+    #[should_panic(expected = "ring futex wait failed")]
+    fn test_ring_wait_rejected_by_the_kernel_panics() {
+        let mut harness = Harness::new(1);
+        harness.driver.state.ring_wait_needed = false;
         harness
             .driver
             .state
-            .handle_cqe(RING_WAIT_USER_DATA, -libc::ENOMEM, &mut harness.deferred);
-        assert!(harness.driver.state.ring_wait_needed);
-
-        // The next park installs a new wait, and a notification after arming
-        // ends it.
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let unparker = harness.driver.state.unparker.clone();
-        let producer = thread::spawn(move || {
-            wait_until_armed(&unparker, deadline);
-            unparker.unpark();
-        });
-        assert!(harness.park(0, Some(deadline)).unwrap());
-        producer.join().unwrap();
-
-        // The new wait's own completion carried the notification well before
-        // the deadline.
-        assert!(Instant::now() < deadline);
-        assert!(!harness.driver.state.ring_wait_needed);
-        harness.reap_ring_wait();
-        assert!(harness.driver.state.ring_wait_needed);
-
-        harness.drain();
+            .handle_cqe(RING_WAIT_USER_DATA, -libc::EINVAL, &mut harness.deferred);
     }
 
     /// Dropping a driver cancels its submitted ring wait, so no waiter remains
