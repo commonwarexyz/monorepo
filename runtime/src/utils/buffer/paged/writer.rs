@@ -27,7 +27,8 @@
 //! Each physical page ends in a two-slot CRC record. The slots let a partial page be rewritten
 //! without clobbering its last durable contents, so an interrupted write loses at most unsynced
 //! bytes. [Writer::new] backs up over any trailing bytes not covered by a valid checksum,
-//! treating them as an incomplete write.
+//! treating them as an incomplete write. It also zeroes any checksum slot such a write left
+//! behind, so a later interrupted write cannot bring those bytes back.
 //!
 //! # Recovery
 //!
@@ -164,7 +165,9 @@ impl<B: Blob> Recovery<B> {
     ///
     /// `blob` must already hold `original_blob_size` physical bytes. Reads are cached through
     /// `cache_ref` and appends stage in a write buffer of capacity `capacity`. Trims any invalid
-    /// tail so the blob ends at a checksum-validated page. Earlier pages are not scanned.
+    /// tail so the blob ends at a checksum-validated page. If that page is partial, also zeroes a
+    /// checksum slot that an interrupted write or shrink left behind. Earlier pages are not
+    /// scanned.
     ///
     /// Before appending, the tail-page contents must be durable: either pass a blob with no writes
     /// since it was opened or call [Self::sync]. Until then, recovery may read or truncate the
@@ -193,11 +196,37 @@ impl<B: Blob> Recovery<B> {
         let capacity = adjusted_capacity(capacity, page_size);
 
         // A valid tail may still include unsynced writes from the wrapped blob handle.
-        let needs_sync = !invalid_data_found;
+        let mut sync_state = if invalid_data_found {
+            SyncState::Clean
+        } else {
+            SyncState::Dirty
+        };
+
+        // The next rewrite of a partial tail page lands its checksum in the other slot. If a torn
+        // write left part of a checksum there, a second torn write could complete it over bytes
+        // beyond the valid length, so that slot is zeroed before the page can be rewritten.
+        if let Some((_, active, false)) = &partial_page_state {
+            let slot_offset = pages * (page_size + CHECKSUM_SIZE) - CHECKSUM_SIZE
+                + active.slot.other().offset() as u64;
+            warn!(
+                page = pages - 1,
+                "zeroing checksum slot left by a torn write"
+            );
+            sync_state
+                .write_at(
+                    &blob,
+                    slot_offset,
+                    Checksum::slot_bytes(0, 0).to_vec(),
+                    WriteOptions::SYNC | WriteOptions::DONT_CACHE,
+                )
+                .await?;
+        }
 
         // Retain a partial page in the tip buffer; complete pages remain backed by the blob.
         let (current_page, partial_page_state, partial_data) = match partial_page_state {
-            Some((partial_page, crc_record)) => (pages - 1, Some(crc_record), Some(partial_page)),
+            Some((partial_page, crc_record, _)) => {
+                (pages - 1, Some(crc_record), Some(partial_page))
+            }
             None => (pages, None, None),
         };
 
@@ -214,11 +243,7 @@ impl<B: Blob> Recovery<B> {
             current_page,
             partial_page_state,
             durable_page_state: partial_page_state,
-            sync_state: if needs_sync {
-                SyncState::Dirty
-            } else {
-                SyncState::Clean
-            },
+            sync_state,
             id: cache_ref.next_id(),
             cache_ref,
             buffer,
@@ -454,9 +479,9 @@ impl<B: Blob> Writer<B> {
     /// A tuple of `(partial_page, page_count, invalid_data_found)`:
     ///
     /// - `partial_page`: If the last valid page is partial (contains fewer than `page_size` logical
-    ///   bytes), returns `Some((data, checksum))` containing the logical data and its active
-    ///   checksum.
-    ///   Returns `None` if the last valid page is full or if no valid pages exist.
+    ///   bytes), returns `Some((data, checksum, inert))` containing the logical data, its active
+    ///   checksum, and whether the page's other checksum slot is zeroed or covers a prefix of that
+    ///   data. Returns `None` if the last valid page is full or if no valid pages exist.
     ///
     /// - `page_count`: The number of pages in the blob up to and including the last valid page
     ///   found (whether or not it's partial). Note that it's possible earlier pages may be invalid
@@ -469,7 +494,7 @@ impl<B: Blob> Writer<B> {
         blob: &B,
         blob_size: u64,
         page_size: u64,
-    ) -> Result<(Option<(IoBuf, ActiveChecksum)>, u64, bool), Error> {
+    ) -> Result<(Option<(IoBuf, ActiveChecksum, bool)>, u64, bool), Error> {
         let physical_page_size = page_size + CHECKSUM_SIZE;
         let partial_bytes = blob_size % physical_page_size;
         let mut last_page_end = blob_size - partial_bytes;
@@ -498,9 +523,10 @@ impl<B: Blob> Writer<B> {
                     let len = checksum.len as u64;
                     if len != page_size {
                         // The page is partial (logical data doesn't fill the page).
+                        let inert = Checksum::other_slot_is_inert(buf.as_ref(), &checksum);
                         let logical_bytes = buf.slice(..len as usize);
                         return Ok((
-                            Some((logical_bytes, checksum)),
+                            Some((logical_bytes, checksum, inert)),
                             last_page_end / physical_page_size,
                             invalid_data_found,
                         ));
@@ -1405,7 +1431,10 @@ mod tests {
     use super::*;
     use crate::{
         Buf, Handle, IoBufsMut, Runner as _, Spawner as _, Storage as _, Supervisor as _,
-        buffer::{paged::CHECKSUM_SLOT_SIZE, tests::SyncTrackingBlob},
+        buffer::{
+            paged::{CHECKSUM_SLOT_LEN_SIZE, CHECKSUM_SLOT_SIZE},
+            tests::SyncTrackingBlob,
+        },
         deterministic,
         mocks::{
             DelayedSyncBlob, RecordingContext, WriteFaultContext, WriteFaults, next_pending_sync,
@@ -1418,6 +1447,7 @@ mod tests {
     use std::{
         cell::Cell,
         num::NonZeroU16,
+        ops::Range,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
@@ -3977,25 +4007,36 @@ mod tests {
         Checksum::read(&mut Copying(&page_bytes[crc_start..])).unwrap()
     }
 
-    /// Blob wrapper that turns one write into a durable partial write followed by an error.
+    /// Blob wrapper that makes only some bytes of one write durable and then fails that write.
     struct PartialWriteBlob<B: Blob> {
         inner: B,
         writes: Arc<AtomicUsize>,
         read_options: Arc<Mutex<Vec<ReadOptions>>>,
         failed_write_len: Arc<AtomicUsize>,
         fail_on: usize,
-        partial_len: usize,
+        kept: [Range<usize>; 2],
     }
 
     impl<B: Blob> PartialWriteBlob<B> {
+        /// Wraps `inner` to fail write `fail_on` after its first `partial_len` bytes are durable.
         fn new(inner: B, fail_on: usize, partial_len: usize) -> Self {
+            Self::keeping(inner, fail_on, 0..partial_len)
+        }
+
+        /// Wraps `inner` to fail write `fail_on` after only its `kept` bytes are durable.
+        fn keeping(inner: B, fail_on: usize, kept: Range<usize>) -> Self {
+            Self::torn(inner, fail_on, [kept, 0..0])
+        }
+
+        /// Wraps `inner` to fail write `fail_on` after its `kept` byte ranges are durable.
+        fn torn(inner: B, fail_on: usize, kept: [Range<usize>; 2]) -> Self {
             Self {
                 inner,
                 writes: Arc::new(AtomicUsize::new(0)),
                 read_options: Arc::new(Mutex::new(Vec::new())),
                 failed_write_len: Arc::new(AtomicUsize::new(0)),
                 fail_on,
-                partial_len,
+                kept,
             }
         }
 
@@ -4045,10 +4086,18 @@ mod tests {
             if write == self.fail_on {
                 let bytes = bufs.coalesce();
                 self.failed_write_len.store(bytes.len(), Ordering::SeqCst);
-                let partial_len = self.partial_len.min(bytes.len());
-                self.inner
-                    .write_at(offset, bytes.slice(..partial_len), options)
-                    .await?;
+
+                // Only the kept ranges reach the blob, clamped to this write, and they are durable
+                // before the write fails.
+                for kept in &self.kept {
+                    let kept = kept.start.min(bytes.len())..kept.end.min(bytes.len());
+                    if kept.is_empty() {
+                        continue;
+                    }
+                    self.inner
+                        .write_at(offset + kept.start as u64, bytes.slice(kept), options)
+                        .await?;
+                }
                 if !options.contains(WriteOptions::SYNC) {
                     self.inner.sync().await?;
                 }
@@ -5852,6 +5901,221 @@ mod tests {
             assert_eq!(recovered.size(), 50);
             let read = recovered.read_at(0, 50).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), &data[..50]);
+        });
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+    ///
+    /// A shrink torn while it retires the old checksum slot can leave that slot's CRC on the
+    /// page. Recovery zeroes the slot, so a torn rewrite that lands only a length there cannot
+    /// revalidate the bytes the shrink removed.
+    #[test_traced("DEBUG")]
+    fn pr_5651_regression_torn_shrink() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
+            let first_slot = PAGE_SIZE.get() as usize;
+            let first_slot_len = first_slot..first_slot + CHECKSUM_SLOT_LEN_SIZE;
+            let data: Vec<u8> = (1u8..=80).collect();
+
+            // Commit 80 bytes, placing their checksum in the first slot.
+            let (blob, size) = context
+                .open("test_partition", b"torn_shrink")
+                .await
+                .unwrap();
+            let mut writer = Recovery::open(blob, size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+            (writer, _) = writer.append(&data).await.unwrap();
+            writer = writer.sync().await.unwrap();
+            drop(writer);
+
+            // Shrink to 50 bytes, tearing the write that retires the first slot after its
+            // length field.
+            let (blob, size) = context
+                .open("test_partition", b"torn_shrink")
+                .await
+                .unwrap();
+            let blob = PartialWriteBlob::new(blob, 3, CHECKSUM_SLOT_LEN_SIZE);
+            let failed_write_len = blob.failed_write_len();
+            let writer = Recovery::open(blob, size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+            assert!(
+                writer.truncate(50).await.is_err(),
+                "the torn retirement must fail"
+            );
+            assert_eq!(failed_write_len.load(Ordering::SeqCst), CHECKSUM_SLOT_SIZE);
+
+            // Recovery selects the shorter checksum.
+            let (blob, size) = context
+                .open("test_partition", b"torn_shrink")
+                .await
+                .unwrap();
+            let writer = Recovery::open(blob, size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+            assert_eq!(writer.size(), 50);
+            drop(writer);
+
+            // Grow the page back to 80 bytes with different contents. The new checksum goes to the
+            // first slot, and the rewrite is torn down to that slot's length field.
+            let (blob, size) = context
+                .open("test_partition", b"torn_shrink")
+                .await
+                .unwrap();
+            let blob = PartialWriteBlob::keeping(blob, 1, first_slot_len);
+            let failed_write_len = blob.failed_write_len();
+            let mut writer = Recovery::open(blob, size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+            (writer, _) = writer.append(&[0xAA; 30]).await.unwrap();
+            assert!(writer.sync().await.is_err(), "the torn rewrite must fail");
+            assert_eq!(failed_write_len.load(Ordering::SeqCst), physical_page_size);
+
+            // The bytes the shrink removed stay removed.
+            let (blob, size) = context
+                .open("test_partition", b"torn_shrink")
+                .await
+                .unwrap();
+            let writer = Recovery::open(blob, size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(writer.size(), 50);
+            let read = writer.read_at(0, 50).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), &data[..50]);
+        });
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+    ///
+    /// A torn append can leave its bytes and CRC on the page without their length. Recovery
+    /// zeroes the slot, so a torn rewrite that lands only a length there cannot revalidate the
+    /// bytes recovery discarded.
+    #[test_traced("DEBUG")]
+    fn pr_5651_regression_torn_append() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
+            let second_slot = PAGE_SIZE.get() as usize + CHECKSUM_SLOT_SIZE;
+            let second_slot_len = second_slot..second_slot + CHECKSUM_SLOT_LEN_SIZE;
+            let data: Vec<u8> = (1u8..=50).collect();
+
+            // Commit 50 bytes, placing their checksum in the first slot.
+            let (blob, size) = context
+                .open("test_partition", b"torn_append")
+                .await
+                .unwrap();
+            let mut writer = Recovery::open(blob, size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+            (writer, _) = writer.append(&data).await.unwrap();
+            writer = writer.sync().await.unwrap();
+            drop(writer);
+
+            // Append 60 bytes to fill the page and start the next one. The first page's new
+            // checksum goes to the second slot. The write is torn so that the first page lands
+            // without that slot's length field, followed by a fragment of the next page.
+            let (blob, size) = context
+                .open("test_partition", b"torn_append")
+                .await
+                .unwrap();
+            let kept = [
+                0..second_slot_len.start,
+                second_slot_len.end..physical_page_size + 4,
+            ];
+            let blob = PartialWriteBlob::torn(blob, 1, kept);
+            let failed_write_len = blob.failed_write_len();
+            let mut writer = Recovery::open(blob, size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+            (writer, _) = writer.append(&[0x11; 60]).await.unwrap();
+            assert!(writer.sync().await.is_err(), "the torn append must fail");
+            assert_eq!(
+                failed_write_len.load(Ordering::SeqCst),
+                2 * physical_page_size
+            );
+
+            // Recovery trims the fragment and discards the append.
+            let (blob, size) = context
+                .open("test_partition", b"torn_append")
+                .await
+                .unwrap();
+            assert_eq!(size as usize, physical_page_size + 4);
+            let writer = Recovery::open(blob, size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+            assert_eq!(writer.size(), 50);
+            drop(writer);
+
+            // Append 60 different bytes, tearing the write down to that length field.
+            let (blob, size) = context
+                .open("test_partition", b"torn_append")
+                .await
+                .unwrap();
+            let blob = PartialWriteBlob::keeping(blob, 1, second_slot_len);
+            let failed_write_len = blob.failed_write_len();
+            let mut writer = Recovery::open(blob, size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+            (writer, _) = writer.append(&[0xAA; 60]).await.unwrap();
+            assert!(writer.sync().await.is_err(), "the torn append must fail");
+            assert_eq!(
+                failed_write_len.load(Ordering::SeqCst),
+                2 * physical_page_size
+            );
+
+            // The discarded append stays discarded.
+            let (blob, size) = context
+                .open("test_partition", b"torn_append")
+                .await
+                .unwrap();
+            let writer = Recovery::open(blob, size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(writer.size(), 50);
+            let read = writer.read_at(0, 50).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), data.as_slice());
+        });
+    }
+
+    /// Recovery writes nothing when the other slot holds the checksum of a shorter prefix of the
+    /// page.
+    #[test_traced("DEBUG")]
+    fn test_recovery_open_keeps_prefix_checksum() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let data: Vec<u8> = (1u8..=80).collect();
+
+            // Commit 50 bytes, then 30 more, leaving the 50-byte checksum beside the 80-byte one.
+            let (blob, size) = context
+                .open("test_partition", b"prefix_checksum")
+                .await
+                .unwrap();
+            let mut writer = Recovery::open(blob, size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+            (writer, _) = writer.append(&data[..50]).await.unwrap();
+            writer = writer.sync().await.unwrap();
+            (writer, _) = writer.append(&data[50..]).await.unwrap();
+            writer = writer.sync().await.unwrap();
+            drop(writer);
+
+            // Reopening leaves the page untouched.
+            let (blob, size) = context
+                .open("test_partition", b"prefix_checksum")
+                .await
+                .unwrap();
+            let blob = PartialWriteBlob::new(blob, usize::MAX, 0);
+            let writes = blob.write_count();
+            let writer = Recovery::open(blob, size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(writer.size(), 80);
+            assert_eq!(writes.load(Ordering::SeqCst), 0);
         });
     }
 
