@@ -1,4 +1,8 @@
-//! Base field arithmetic, by representation.
+//! The base field representations, each an implementation of [`Field`](super::arithmetic::Field):
+//!
+//! - [`unsat49`]: `S::U64_LANES` elements in radix-`2^49` limbs, on every backend.
+//! - [`unsat28`]: `S::U32_LANES` elements in radix-`2^28` limbs, on every backend.
+//! - [`rns`]: one element as residues, on x86v4c, with unreduced sums of products.
 //!
 //! Every representation exchanges elements as [`BYTES`]-byte big-endian integers.
 

@@ -1,7 +1,8 @@
 //! Montgomery arithmetic on canonical multi-word integers, shared by the prime fields.
 //!
-//! Every function takes little-endian words below the modulus and returns the same; the
-//! functions are `const fn` so field constants can be derived at compile time.
+//! Integers are little-endian words. Unless a function states otherwise, it takes integers below
+//! the modulus and returns the same. The functions are `const fn` so that field constants can be
+//! derived at compile time.
 
 /// Computes `-m^(-1) mod 2^64` for an odd modulus word `m` by Newton iteration.
 pub(crate) const fn negated_inverse(m: u64) -> u64 {
@@ -114,6 +115,8 @@ pub(crate) const fn power_of_two<const N: usize>(k: u32, modulus: &[u64; N]) -> 
 
 /// Returns `a * b / 2^(64 N) mod modulus` (CIOS Montgomery multiplication) for an odd modulus
 /// below `2^(64 N - 1)`, given `inv = -modulus^(-1) mod 2^64`.
+///
+/// `a` may be any integer below `2^(64 N)`; `b` must be below the modulus.
 pub(crate) const fn mul<const N: usize>(
     a: &[u64; N],
     b: &[u64; N],
@@ -348,19 +351,18 @@ const fn normalize<const L: usize>(mut r: [i64; L], sign: i64, modulus: &[i64; L
 /// Returns `a^(-1) mod modulus` for `a` below the odd modulus, or zero for zero, in constant time,
 /// given `inverse = modulus^(-1) mod 2^62` from [`inverse_mod_limb`].
 ///
-/// This is the safegcd of Bernstein and Yang, "Fast constant-time gcd computation and modular
-/// inversion" (2019), in batches of [`STEPS`] division steps on the low limbs, with the
-/// transition matrix of each batch applied to `(f, g)` and, modulo the modulus, to `(d, e)`, as in
-/// libsecp256k1's implementation. The values are signed limbs of [`LIMB`] bits; `L` limbs
-/// must hold the modulus with two spare bits. The invariant `f = d a` and `g = e a` modulo the
-/// modulus ends, once `g` reaches zero and `f` is `1` or `-1`, with `d` the inverse up to the sign
-/// of `f`. The number of batches covers the bound of `(49 b + 57) / 17` steps for `b`-bit
-/// inputs.
+/// `L` signed limbs of [`LIMB`] bits must hold the modulus with two spare bits.
 pub(crate) const fn invert<const N: usize, const L: usize>(
     a: &[u64; N],
     modulus: &[u64; N],
     inverse: u64,
 ) -> [u64; N] {
+    // This is the safegcd of Bernstein and Yang, "Fast constant-time gcd computation and modular
+    // inversion" (2019), in batches of STEPS division steps on the low limbs, with the transition
+    // matrix of each batch applied to (f, g) and, modulo the modulus, to (d, e), as in
+    // libsecp256k1's implementation. The invariant f = d a and g = e a modulo the modulus ends,
+    // once g reaches zero and f is 1 or -1, with d the inverse up to the sign of f. The number of
+    // batches covers the bound of (49 b + 57) / 17 steps for b-bit inputs.
     const { assert!(62 * L >= 64 * N + 2) };
     let batches = (49 * 64 * N as u32 + 57).div_ceil(17).div_ceil(STEPS);
     let modulus = to_limbs::<N, L>(modulus);
