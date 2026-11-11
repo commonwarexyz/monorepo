@@ -11,16 +11,18 @@ runs:
         echo 1 | sudo tee /sys/module/zswap/parameters/enabled
         cat /sys/module/zswap/parameters/enabled
         # This is the first network step of most jobs, so a package mirror that cannot be reached
-        # must not fail the job. Retry the install, then continue without dynamic swap. Some
-        # callers check out only this action, so the loop does not use a shared script.
+        # must not fail the job. Try the install twice, each step bounded so that a mirror that
+        # does not resolve cannot use up a short job's timeout, then continue without dynamic
+        # swap. Some callers check out only this action, so the loop does not use a shared script.
         installed=false
-        for attempt in 1 2 3; do
-          if sudo apt-get update && sudo apt-get install --yes --no-install-recommends swapspace; then
+        for attempt in 1 2; do
+          if sudo timeout 45 apt-get update &&
+            sudo timeout 45 apt-get install --yes --no-install-recommends swapspace; then
             installed=true
             break
           fi
-          echo "apt-get failed (attempt $attempt of 3)" >&2
-          sleep $((attempt * 15))
+          echo "apt-get failed (attempt $attempt of 2)" >&2
+          sleep 5
         done
         if [ "$installed" = true ]; then
           sudo install -d -m 700 /mnt/swapspace

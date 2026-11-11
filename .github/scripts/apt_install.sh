@@ -7,7 +7,8 @@ set -eo pipefail
 
 attempts=4
 for attempt in $(seq 1 "$attempts"); do
-  if sudo apt-get update && sudo apt-get install --yes "$@"; then
+  # Bound each step so that a mirror that does not resolve fails fast enough to retry.
+  if sudo timeout 120 apt-get update && sudo timeout 300 apt-get install --yes "$@"; then
     exit 0
   fi
   if [ "$attempt" -lt "$attempts" ]; then
