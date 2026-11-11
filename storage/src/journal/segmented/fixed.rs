@@ -24,21 +24,17 @@ use super::manager::{
     AppendFactory, Config as ManagerConfig, Manager, section_from_name, stored_names,
 };
 use crate::journal::Error;
-use commonware_codec::{CodecFixed, CodecFixedShared, Copying, DecodeExt as _, ReadExt as _};
+use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
     Blob, Error as RError, Handle, Metrics, ReadOptions, Storage,
     buffer::paged::{CacheRef, Recovery as PagedRecovery, Replay as BlobReplay, Writer},
 };
-use commonware_utils::{Cached, NZUsize};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     marker::PhantomData,
     num::{NonZeroU16, NonZeroUsize},
 };
 use tracing::{trace, warn};
-
-// Reusable scratch for [`Inner::try_get_sync`], sized to one item
-commonware_utils::thread_local_cache!(static READ_SCRATCH: Vec<u8>);
 
 /// State for replaying a single section's blob.
 struct SectionReplay<B: Blob> {
@@ -94,7 +90,7 @@ enum PreflightMode {
 }
 
 /// Non-mutating recovery evidence and authorized work bound to the storage that produced it.
-pub(crate) struct RecoveryPreflight<E: Storage + Metrics, A: CodecFixed> {
+pub struct RecoveryPreflight<E: Storage + Metrics, A: CodecFixed> {
     context: E,
     cfg: Config,
 
@@ -112,7 +108,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> RecoveryPreflight<E, A> {
     }
 
     /// Apply the preflighted recovery work and open the journal writer.
-    pub(crate) async fn finish(self) -> Result<Journal<E, A>, Error> {
+    pub async fn finish(self) -> Result<Journal<E, A>, Error> {
         Ok(Journal(Box::new(
             Inner::init(self.context, self.cfg, self.mode).await?,
         )))
@@ -401,69 +397,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         A::decode(buf.coalesce()).map_err(Error::Codec)
     }
 
-    /// See [Journal::get_many].
-    async fn get_many(
-        &self,
-        section: u64,
-        positions: &[u64],
-        buf: &mut [u8],
-    ) -> Result<(Vec<A>, usize), Error> {
-        assert!(
-            positions.is_sorted_by(|a, b| a < b),
-            "positions must be strictly increasing"
-        );
-        if positions.is_empty() {
-            return Ok((Vec::new(), 0));
-        }
-        assert!(
-            buf.len() >= positions.len() * Self::CHUNK_SIZE,
-            "get_many requires buf.len() >= positions.len() * CHUNK_SIZE"
-        );
-        let buf = &mut buf[..positions.len() * Self::CHUNK_SIZE];
-        let blob = self
-            .manager
-            .get(section)?
-            .ok_or(Error::SectionOutOfRange(section))?;
-
-        let mut offsets = positions.to_vec();
-        for offset in &mut offsets {
-            *offset = offset
-                .checked_mul(Self::CHUNK_SIZE_U64)
-                .ok_or(Error::ItemOutOfRange(*offset))?;
-        }
-
-        let hits = blob
-            .read_many_into(buf, &offsets, NZUsize!(Self::CHUNK_SIZE))
-            .await?;
-
-        let mut items = Vec::with_capacity(positions.len());
-        for i in 0..positions.len() {
-            let slice = &buf[i * Self::CHUNK_SIZE..(i + 1) * Self::CHUNK_SIZE];
-            items.push(A::decode(Copying(slice)).map_err(Error::Codec)?);
-        }
-        Ok((items, hits))
-    }
-
-    /// See [Journal::try_get_sync].
-    fn try_get_sync(&self, section: u64, position: u64) -> Option<A> {
-        let blob = self.manager.get(section).ok()??;
-        let offset = position.checked_mul(Self::CHUNK_SIZE_U64)?;
-        let remaining = blob.size().checked_sub(offset)?;
-        if remaining < Self::CHUNK_SIZE_U64 {
-            return None;
-        }
-        let mut scratch =
-            Cached::take(&READ_SCRATCH, || Ok::<_, ()>(Vec::new()), |_| Ok(())).unwrap();
-        if scratch.len() < Self::CHUNK_SIZE {
-            scratch.resize(Self::CHUNK_SIZE, 0);
-        }
-        let buf = &mut scratch[..Self::CHUNK_SIZE];
-        if !blob.try_read_sync_into(buf, offset) {
-            return None;
-        }
-        A::decode(Copying(buf)).ok()
-    }
-
     /// See [Journal::last].
     async fn last(&self, section: u64) -> Result<Option<A>, Error> {
         let blob = self
@@ -498,12 +431,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         Ok((self, handle))
     }
 
-    /// See [Journal::sync_all].
-    async fn sync_all(mut self: Box<Self>) -> Result<Box<Self>, Error> {
-        self.manager = self.manager.sync_all().await?;
-        Ok(self)
-    }
-
     /// See [Journal::prune].
     async fn prune(mut self: Box<Self>, min: u64) -> Result<(Box<Self>, bool), Error> {
         let (manager, pruned) = self.manager.prune(min).await?;
@@ -513,11 +440,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
             self.floors.retain(|section, _| *section >= min);
         }
         Ok((self, pruned))
-    }
-
-    /// See [Journal::pruned].
-    const fn pruned(&self, section: u64) -> bool {
-        self.manager.pruned(section)
     }
 
     /// See [Journal::oldest_section].
@@ -566,14 +488,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
     async fn destroy(self) -> Result<(), Error> {
         self.manager.destroy().await
     }
-
-    /// See [Journal::clear].
-    async fn clear(mut self: Box<Self>) -> Result<Box<Self>, Error> {
-        self.manager = self.manager.clear().await?;
-        self.unrecovered.clear();
-        self.floors.clear();
-        Ok(self)
-    }
 }
 
 /// A segmented journal with fixed-size entries.
@@ -611,67 +525,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Size of each entry.
     pub const CHUNK_SIZE: usize = Inner::<E, A>::CHUNK_SIZE;
 
-    /// Open through `(section, logical byte end)` and remove later sections.
-    ///
-    /// An end inside an item rounds down. All retained data is validated before returning. Payload
-    /// reads stop at the bound, but every section name is validated, including names above it.
-    pub async fn init_at_most(
-        context: E,
-        cfg: Config,
-        section: u64,
-        end: u64,
-    ) -> Result<Self, Error> {
-        let replay_buffer = cfg.write_buffer;
-        let mut end = end - end % Self::CHUNK_SIZE as u64;
-        super::manager::truncate_paged_tail(
-            &context,
-            &cfg.partition,
-            cfg.page_cache.page_size(),
-            section,
-            end,
-        )
-        .await?;
-        let mut journal = Self::init(context, cfg).await?;
-
-        // Resolve a torn page before truncation tries to rewrite its partial checksum.
-        if end > 0
-            && journal
-                .0
-                .manager
-                .get(section)?
-                .is_some_and(|blob| end < blob.size())
-        {
-            end = journal
-                .recoverable_prefix_len_at_most(section, end, replay_buffer)
-                .await?;
-        }
-        journal.0.manager = journal
-            .0
-            .manager
-            .truncate_pending(section, end - end % Self::CHUNK_SIZE as u64)
-            .await?;
-        let mut replay = journal
-            .replay(0, 0, replay_buffer, ReadOptions::default())
-            .await?;
-        while let Some(item) = replay.next().await {
-            item?;
-        }
-        replay.finish()
-    }
-
-    /// Initialize a new `Journal` instance.
-    ///
-    /// Backing blobs are opened without scanning their full page prefixes. Use `replay` to validate
-    /// and iterate over all items before appending to a retained section.
-    pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
-        let mode = PreflightMode::Floors {
-            floors: BTreeMap::new(),
-        };
-        Ok(Self(Box::new(Inner::init(context, cfg, mode).await?)))
-    }
-
     /// Prove validation floors without opening a writer or mutating their blobs.
-    pub(crate) async fn preflight_floors(
+    pub async fn preflight_floors(
         context: E,
         cfg: Config,
         minimum_items: &BTreeMap<u64, u64>,
@@ -679,26 +534,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         Inner::preflight_floors(context, cfg, minimum_items).await
     }
 
-    /// Return the longest item-aligned prefix of `section` within `end` that lies within validated
-    /// page prefixes, or `end` itself when the section does not exist. Reads only pages that
-    /// intersect the prefix below `end`.
-    pub(crate) async fn recoverable_prefix_len_at_most(
-        &self,
-        section: u64,
-        end: u64,
-        buffer: NonZeroUsize,
-    ) -> Result<u64, Error> {
-        let Some(blob) = self.0.manager.get(section)? else {
-            return Ok(end);
-        };
-        let recoverable = blob
-            .recoverable_prefix_len_at_most(0, end, buffer, ReadOptions::default())
-            .await?;
-        Ok(recoverable - recoverable % Self::CHUNK_SIZE as u64)
-    }
-
     /// Prove every checkpoint-covered index byte without mutating damage.
-    pub(crate) async fn preflight_restore(
+    pub async fn preflight_restore(
         context: E,
         cfg: Config,
         section: u64,
@@ -729,27 +566,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// - [Error::ItemOutOfRange] if the position is beyond the blob size.
     pub async fn get(&self, section: u64, position: u64) -> Result<A, Error> {
         self.0.get(section, position).await
-    }
-
-    /// Read multiple items from the same section into a caller buffer.
-    ///
-    /// `buf` must be at least `positions.len() * CHUNK_SIZE` bytes. All positions must be
-    /// strictly increasing and within the section's bounds.
-    ///
-    /// Returns the decoded items and the number served without a blob read (page cache or tip
-    /// buffer hits).
-    pub async fn get_many(
-        &self,
-        section: u64,
-        positions: &[u64],
-        buf: &mut [u8],
-    ) -> Result<(Vec<A>, usize), Error> {
-        self.0.get_many(section, positions, buf).await
-    }
-
-    /// Get an item if it can be done synchronously (e.g. without I/O), returning `None` otherwise.
-    pub fn try_get_sync(&self, section: u64, position: u64) -> Option<A> {
-        self.0.try_get_sync(section, position)
     }
 
     /// Read the last item in a section, if any.
@@ -847,25 +663,11 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         Ok((self, handle))
     }
 
-    /// Sync all sections to storage.
-    pub async fn sync_all(mut self) -> Result<Self, Error> {
-        self.0 = self.0.sync_all().await?;
-        Ok(self)
-    }
-
     /// Prune all sections less than `min`. Returns true if any were pruned.
     pub async fn prune(mut self, min: u64) -> Result<(Self, bool), Error> {
         let (inner, pruned) = self.0.prune(min).await?;
         self.0 = inner;
         Ok((self, pruned))
-    }
-
-    /// Returns true when `section` is below the prune floor.
-    ///
-    /// The floor only tracks prunes from the current execution and resets at init, so a
-    /// section pruned in a previous execution reports false.
-    pub fn pruned(&self, section: u64) -> bool {
-        self.0.pruned(section)
     }
 
     /// Returns the oldest section number, if any blobs exist.
@@ -908,14 +710,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Remove all underlying blobs.
     pub async fn destroy(self) -> Result<(), Error> {
         self.0.destroy().await
-    }
-
-    /// Clear all data, resetting the journal to an empty state.
-    ///
-    /// Unlike `destroy`, this keeps the journal alive so it can be reused.
-    pub async fn clear(mut self) -> Result<Self, Error> {
-        self.0 = self.0.clear().await?;
-        Ok(self)
     }
 }
 
@@ -1164,7 +958,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::codec::View;
     use commonware_codec::FixedSize;
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
@@ -1187,23 +980,31 @@ mod tests {
         },
     };
 
+    /// Sync every section the journal holds.
+    async fn sync_sections<E: Storage + Metrics, A: CodecFixedShared>(
+        journal: Journal<E, A>,
+    ) -> Result<Journal<E, A>, Error> {
+        let sections = journal.sections().collect::<Vec<_>>();
+        journal.sync(sections).await
+    }
+
+    /// Open a journal with no validation floors through the crate-internal open path.
+    async fn init_journal<E: Storage + Metrics, A: CodecFixedShared>(
+        context: E,
+        cfg: Config,
+    ) -> Result<Journal<E, A>, Error> {
+        Journal::preflight_floors(context, cfg, &BTreeMap::new())
+            .await?
+            .finish()
+            .await
+    }
+
     impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
-        pub(in super::super) async fn test_reopen_at_most(
+        pub(in super::super) async fn test_reopen_section(
             self,
             section: u64,
             end: u64,
         ) -> Result<Self, Error> {
-            let (context, partition, factory) = self.0.manager.test_configuration();
-            let cfg = Config {
-                partition,
-                write_buffer: factory.write_buffer,
-                page_cache: factory.page_cache_ref,
-            };
-            _ = self.sync_all().await?;
-            Self::init_at_most(context, cfg, section, end).await
-        }
-
-        async fn test_reopen_section(self, section: u64, end: u64) -> Result<Self, Error> {
             let (context, partition, factory) = self.0.manager.test_configuration();
             let replay_buffer = factory.write_buffer;
             let cfg = Config {
@@ -1211,8 +1012,8 @@ mod tests {
                 write_buffer: replay_buffer,
                 page_cache: factory.page_cache_ref,
             };
-            _ = self.sync_all().await?;
-            let mut journal = Self::init(context, cfg).await?;
+            _ = sync_sections(self).await?;
+            let mut journal = init_journal(context, cfg).await?;
             journal.0.manager = journal
                 .0
                 .manager
@@ -1251,18 +1052,6 @@ mod tests {
         }
     }
 
-    #[test_traced]
-    fn test_fixed_cached_get_preserves_owned_byte_fields() {
-        deterministic::Runner::default().start(|context| async move {
-            let cfg = test_cfg();
-            let mut journal = Journal::init(context, cfg).await.unwrap();
-            (journal, _) = journal.append(1, &View::new(7)).await.unwrap();
-            let decoded = journal.try_get_sync(1, 0).unwrap();
-            journal.destroy().await.unwrap();
-            assert_eq!(decoded.bytes.as_ref(), &7u64.to_be_bytes());
-        });
-    }
-
     fn lazy_recovery_cfg(partition: &str) -> Config {
         Config {
             partition: partition.into(),
@@ -1288,7 +1077,7 @@ mod tests {
 
     /// Seed each section with sixteen durable u64 items.
     async fn seed<E: Storage + Metrics>(context: &E, cfg: &Config, sections: RangeInclusive<u64>) {
-        let mut journal = Journal::init(context.child("seed"), cfg.clone())
+        let mut journal = init_journal(context.child("seed"), cfg.clone())
             .await
             .expect("failed to init");
         for section in sections {
@@ -1299,196 +1088,7 @@ mod tests {
                     .expect("failed to append");
             }
         }
-        journal.sync_all().await.expect("failed to sync");
-    }
-
-    #[test]
-    fn test_segmented_capped_init_bounds_torn_suffix_reads() {
-        deterministic::Runner::default().start(|context| async move {
-            for source_section in [0, 1] {
-                for cap in [0, 8] {
-                    // Compare a short and long discarded suffix behind the same retained cap.
-                    let mut counts = Vec::new();
-                    for pages in [16, 4096] {
-                        let partition = format!("torn-cap-{source_section}-{cap}-{pages}");
-                        let page: Vec<u8> = (0..9u64).flat_map(u64::to_be_bytes).collect();
-                        assert_eq!(page.len(), 72);
-                        super::super::manager::tests::seed_torn_suffix(
-                            &context,
-                            &partition,
-                            source_section,
-                            &page,
-                            pages,
-                        )
-                        .await;
-
-                        // Bounded initialization must read independently of the discarded suffix.
-                        let cfg = Config {
-                            partition,
-                            page_cache: CacheRef::new(NZU16!(72), NZUsize!(4)),
-                            write_buffer: NZUsize!(144),
-                        };
-                        let (recorded, recordings) = RecordingContext::new(context.child("cap"));
-                        let mut journal =
-                            Journal::<_, u64>::init_at_most(recorded, cfg.clone(), 0, cap)
-                                .await
-                                .unwrap();
-                        let retained = if source_section == 0 { cap } else { 0 };
-                        assert_eq!(journal.size(0).unwrap(), retained);
-                        counts.push(recordings.snapshot().reads.len());
-
-                        // Appending after the cap must not reconnect any discarded items.
-                        (journal, _) = journal.append(0, &999).await.unwrap();
-                        drop(journal.sync_all().await.unwrap());
-                        let journal = Journal::<_, u64>::init(context.child("reopen"), cfg)
-                            .await
-                            .unwrap();
-                        let mut replay = journal
-                            .replay(0, 0, NZUsize!(144), ReadOptions::default())
-                            .await
-                            .unwrap();
-                        let mut actual = Vec::new();
-                        while let Some(item) = replay.next().await {
-                            actual.push(item.unwrap().2);
-                        }
-                        replay.finish().unwrap();
-                        let expected = if retained == 0 {
-                            vec![999]
-                        } else {
-                            vec![0, 999]
-                        };
-                        assert_eq!(actual, expected);
-                    }
-
-                    // Suffix length must not change the number of reads needed for the same cap.
-                    assert_eq!(
-                        counts[0], counts[1],
-                        "discarded suffix reads grew: {counts:?}"
-                    );
-                }
-            }
-        });
-    }
-
-    #[test_traced]
-    fn test_bounded_initialization_bounds_scan() {
-        deterministic::Runner::default().start(|context| async move {
-            // Seed different journal lengths under the same page and buffer configuration.
-            let mut counts = Vec::new();
-            for count in [128, 65536] {
-                let cfg = Config {
-                    partition: format!("fixed-cap-scan-{count}"),
-                    page_cache: CacheRef::new(NZU16!(64), NZUsize!(4)),
-                    write_buffer: NZUsize!(65536),
-                };
-                let mut journal = Journal::<_, u64>::init(
-                    context.child(if count == 128 {
-                        "seed_small"
-                    } else {
-                        "seed_large"
-                    }),
-                    cfg.clone(),
-                )
-                .await
-                .unwrap();
-                for value in 0..count {
-                    (journal, _) = journal.append(0, &value).await.unwrap();
-                }
-                _ = journal.sync_all().await.unwrap();
-
-                // Record the reads required to reopen at the same one-item boundary.
-                let (recorded, recordings) =
-                    RecordingContext::new(context.child(if count == 128 {
-                        "cap_small"
-                    } else {
-                        "cap_large"
-                    }));
-                let journal = Journal::<_, u64>::init_at_most(recorded, cfg, 0, 8)
-                    .await
-                    .unwrap();
-                assert_eq!(journal.section_len(0).unwrap(), 1);
-                counts.push(recordings.snapshot().reads.len());
-            }
-
-            // Work below the cap must be independent of the discarded journal length.
-            assert_eq!(
-                counts[0], counts[1],
-                "same one-item cap: small/large suffix read counts {counts:?}"
-            );
-        });
-    }
-
-    #[rstest::rstest]
-    #[case(30)]
-    #[case(31)]
-    #[case(32)]
-    fn test_bounded_initialization_recovers_torn_page(#[case] tail: u64) {
-        deterministic::Runner::default().start(|context| async move {
-            for cap in [0, 8, 16, 20, 24, 28, 29, 30, 31, 32, u64::MAX] {
-                // Seed two sections so the bound must repair one and remove the later section.
-                let cfg = Config {
-                    partition: format!("capped-torn-{cap}"),
-                    page_cache: CacheRef::new(NZU16!(5), NZUsize!(4)),
-                    write_buffer: NZUsize!(256),
-                };
-                let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
-                    .await
-                    .unwrap();
-                for value in 0..4 {
-                    (journal, _) = journal.append(0, &value).await.unwrap();
-                }
-                (journal, _) = journal.append(1, &100).await.unwrap();
-                _ = journal.sync_all().await.unwrap();
-
-                // A valid page prefix may end inside the last item after an interrupted append.
-                let (blob, size) = context
-                    .open(&cfg.partition, &0u64.to_be_bytes())
-                    .await
-                    .unwrap();
-                let partial = commonware_runtime::buffer::paged::Recovery::open(
-                    blob,
-                    size,
-                    cfg.write_buffer.get(),
-                    cfg.page_cache.clone(),
-                )
-                .await
-                .unwrap();
-                partial.truncate(tail).await.unwrap();
-
-                // A valid later page survives after the torn page in section zero.
-                corrupt_page(&context, &cfg.partition, &0u64.to_be_bytes(), 4, 5).await;
-                let journal =
-                    Journal::<_, u64>::init_at_most(context.child("cap"), cfg.clone(), 0, cap)
-                        .await
-                        .unwrap();
-                let expected_bytes = cap.min(16) / 8 * 8;
-                assert_eq!(journal.size(0).unwrap(), expected_bytes, "cap {cap}");
-                assert_eq!(journal.newest_section(), Some(0));
-                drop(journal);
-
-                // A normal restart must retain the repaired prefix and append at its exact end.
-                let journal = Journal::<_, u64>::init(context.child("reopen"), cfg)
-                    .await
-                    .unwrap();
-                let mut replay = journal
-                    .replay(0, 0, NZUsize!(256), ReadOptions::default())
-                    .await
-                    .unwrap();
-                let mut count = 0;
-                while let Some(item) = replay.next().await {
-                    let item = item.unwrap();
-                    assert_eq!(item.0, 0);
-                    assert_eq!(item.2, count);
-                    count += 1;
-                }
-                assert_eq!(count, expected_bytes / 8);
-                let mut journal = replay.finish().unwrap();
-                let position;
-                (journal, position) = journal.append(0, &99).await.unwrap();
-                assert_eq!(position, expected_bytes / 8);
-                journal.destroy().await.unwrap();
-            }
-        });
+        sync_sections(journal).await.expect("failed to sync");
     }
 
     #[test_traced]
@@ -1496,7 +1096,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
-            let mut journal = Journal::init(context.child("storage"), cfg.clone())
+            let mut journal = init_journal(context.child("storage"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -1558,14 +1158,14 @@ mod tests {
                 page_cache: CacheRef::new(NZU16!(PAGE_SIZE as u16), NZUsize!(CACHE_PAGES)),
                 write_buffer: NZUsize!(WRITE_BUFFER),
             };
-            let mut journal = Journal::<_, u64>::init(context.child("journal"), cfg)
+            let mut journal = init_journal::<_, u64>(context.child("journal"), cfg)
                 .await
                 .unwrap();
             for section in 0..SECTIONS {
                 for value in 0..items {
                     (journal, _) = journal.append(section, &value).await.unwrap();
                 }
-                journal = journal.sync_all().await.unwrap();
+                journal = sync_sections(journal).await.unwrap();
             }
 
             for section in 0..SECTIONS {
@@ -1573,7 +1173,7 @@ mod tests {
                 assert_eq!(journal.get(section, items - 1).await.unwrap(), items - 1);
                 (journal, _) = journal.append(section, &items).await.unwrap();
             }
-            journal = journal.sync_all().await.unwrap();
+            journal = sync_sections(journal).await.unwrap();
             for section in 0..SECTIONS {
                 assert_eq!(journal.get(section, items).await.unwrap(), items);
             }
@@ -1591,7 +1191,7 @@ mod tests {
                     page_cache: CacheRef::new(page_size, PAGE_CACHE_SIZE),
                     write_buffer: NZUsize!(1),
                 };
-                let mut journal = Journal::init(context.child("initial"), cfg.clone())
+                let mut journal = init_journal(context.child("initial"), cfg.clone())
                     .await
                     .unwrap();
                 for section in [1, 3] {
@@ -1604,10 +1204,10 @@ mod tests {
                         assert_eq!(journal.get(section, position).await.unwrap(), item);
                     }
                 }
-                journal = journal.sync_all().await.unwrap();
+                journal = sync_sections(journal).await.unwrap();
                 drop(journal);
 
-                let journal = Journal::<_, Digest>::init(context, cfg).await.unwrap();
+                let journal = init_journal::<_, Digest>(context, cfg).await.unwrap();
                 let mut replay = journal
                     .replay(0, 0, NZUsize!(128), ReadOptions::default())
                     .await
@@ -1636,7 +1236,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
-            let journal = Journal::<_, Digest>::init(context.child("storage"), cfg)
+            let journal = init_journal::<_, Digest>(context.child("storage"), cfg)
                 .await
                 .expect("failed to init");
 
@@ -1656,7 +1256,7 @@ mod tests {
         executor.start(|context| async move {
             let (context, recordings) = RecordingContext::new(context);
             let cfg = aligned_cfg();
-            let mut journal = Journal::init(context.child("storage"), cfg)
+            let mut journal = init_journal(context.child("storage"), cfg)
                 .await
                 .expect("failed to init");
 
@@ -1716,7 +1316,7 @@ mod tests {
             let (context, recordings) = RecordingContext::new(context);
             let cfg = aligned_cfg();
             let page_cache = cfg.page_cache.clone();
-            let mut journal = Journal::<_, [u8; 16]>::init(context.child("storage"), cfg)
+            let mut journal = init_journal::<_, [u8; 16]>(context.child("storage"), cfg)
                 .await
                 .unwrap();
 
@@ -1739,14 +1339,18 @@ mod tests {
             }
             assert!(replay.next().await.is_none());
             let journal = replay.finish().unwrap();
-            for position in 0..2 {
-                assert!(journal.try_get_sync(1, position).is_none());
+
+            // Each page is read from storage on first access, since the replay cached nothing.
+            for value in 0..2 {
+                recordings.clear();
+                assert_eq!(journal.get(1, u64::from(value)).await.unwrap(), [value; 16]);
+                assert!(
+                    !recordings.snapshot().reads.is_empty(),
+                    "a page the replay read must not be cached"
+                );
             }
 
-            recordings.clear();
-            assert_eq!(journal.get(1, 0).await.unwrap(), [0; 16]);
-            assert!(!recordings.snapshot().reads.is_empty());
-            assert_eq!(journal.try_get_sync(1, 0), Some([0; 16]));
+            // A second read of a page is served from the cache.
             recordings.clear();
             assert_eq!(journal.get(1, 0).await.unwrap(), [0; 16]);
             assert!(recordings.snapshot().reads.is_empty());
@@ -1769,7 +1373,7 @@ mod tests {
             // replay, whose 448-byte budget holds sixteen 28-byte physical pages and reads them
             // four pages at a time.
             recordings.clear();
-            let journal = Journal::<_, u64>::init(context.child("reopen"), cfg)
+            let journal = init_journal::<_, u64>(context.child("reopen"), cfg)
                 .await
                 .expect("failed to reopen");
             assert_eq!(recordings.snapshot().reads.len(), 1);
@@ -1797,19 +1401,19 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
-            let mut journal = Journal::init(context.child("seed"), cfg.clone())
+            let mut journal = init_journal(context.child("seed"), cfg.clone())
                 .await
                 .expect("failed to init");
             (journal, _) = journal
                 .append(1, &test_digest(0))
                 .await
                 .expect("failed to append");
-            journal = journal.sync_all().await.expect("failed to sync");
+            journal = sync_sections(journal).await.expect("failed to sync");
             drop(journal);
 
             // A tail page can hide an earlier torn page. Reopened sections remain append-locked
             // until ordered replay has validated their full retained prefix.
-            let journal = Journal::init(context.child("reopen"), cfg)
+            let journal = init_journal(context.child("reopen"), cfg)
                 .await
                 .expect("failed to reopen");
             journal.append(1, &test_digest(1)).await.unwrap();
@@ -1826,7 +1430,7 @@ mod tests {
 
             // Every nonempty retained section is append-locked, not only the oldest or the
             // newest.
-            let journal = Journal::<_, u64>::init(context.child("reopen"), cfg)
+            let journal = init_journal::<_, u64>(context.child("reopen"), cfg)
                 .await
                 .expect("failed to reopen");
             journal.append(2, &2).await.unwrap();
@@ -1895,7 +1499,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = lazy_recovery_cfg("segmented-fixed-empty-restore");
-            let mut journal = Journal::init(context.child("seed"), cfg.clone())
+            let mut journal = init_journal(context.child("seed"), cfg.clone())
                 .await
                 .expect("failed to init");
             for section in 0..=2 {
@@ -1904,7 +1508,7 @@ mod tests {
                     .await
                     .expect("failed to append");
             }
-            journal = journal.sync_all().await.expect("failed to sync");
+            journal = sync_sections(journal).await.expect("failed to sync");
             journal = journal
                 .test_reopen_section(1, 0)
                 .await
@@ -1981,7 +1585,7 @@ mod tests {
         executor.start(|context| async move {
             let (context, recordings) = RecordingContext::new(context);
             let cfg = aligned_cfg();
-            let mut journal = Journal::init(context.child("seed"), cfg.clone())
+            let mut journal = init_journal(context.child("seed"), cfg.clone())
                 .await
                 .expect("failed to init");
             for value in 0..2 {
@@ -2015,14 +1619,14 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
-            let mut journal = Journal::<_, Digest>::init(context.child("storage"), cfg)
+            let mut journal = init_journal::<_, Digest>(context.child("storage"), cfg)
                 .await
                 .expect("failed to init");
             (journal, _) = journal
                 .append(1, &test_digest(0))
                 .await
                 .expect("failed to append");
-            journal = journal.sync_all().await.expect("failed to sync");
+            journal = sync_sections(journal).await.expect("failed to sync");
 
             let replay = journal
                 .replay(0, 0, NZUsize!(1024), ReadOptions::default())
@@ -2037,7 +1641,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
-            let mut journal = Journal::init(context.child("first"), cfg.clone())
+            let mut journal = init_journal(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -2054,10 +1658,10 @@ mod tests {
                     .expect("failed to append");
             }
 
-            journal = journal.sync_all().await.expect("failed to sync");
+            journal = sync_sections(journal).await.expect("failed to sync");
             drop(journal);
 
-            let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+            let mut journal = init_journal::<_, Digest>(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to re-init");
 
@@ -2100,7 +1704,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
-            let mut journal = Journal::init(context.child("first"), cfg.clone())
+            let mut journal = init_journal(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -2118,10 +1722,10 @@ mod tests {
                     .await
                     .expect("failed to append");
             }
-            journal = journal.sync_all().await.expect("failed to sync");
+            journal = sync_sections(journal).await.expect("failed to sync");
             drop(journal);
 
-            let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+            let mut journal = init_journal::<_, Digest>(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to re-init");
 
@@ -2213,7 +1817,7 @@ mod tests {
                 .await;
             assert!(matches!(result, Err(Error::ItemOutOfRange(100))));
 
-            let journal = Journal::<_, Digest>::init(context.child("third"), cfg.clone())
+            let journal = init_journal::<_, Digest>(context.child("third"), cfg.clone())
                 .await
                 .expect("failed to re-init");
             let result = journal
@@ -2221,7 +1825,7 @@ mod tests {
                 .await;
             assert!(matches!(result, Err(Error::ItemOutOfRange(u64::MAX))));
 
-            let journal = Journal::<_, Digest>::init(context.child("fourth"), cfg.clone())
+            let journal = init_journal::<_, Digest>(context.child("fourth"), cfg.clone())
                 .await
                 .expect("failed to re-init");
             journal.destroy().await.expect("failed to destroy");
@@ -2233,7 +1837,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
-            let mut journal = Journal::init(context.child("storage"), cfg.clone())
+            let mut journal = init_journal(context.child("storage"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -2243,7 +1847,7 @@ mod tests {
                     .await
                     .expect("failed to append");
             }
-            journal = journal.sync_all().await.expect("failed to sync");
+            journal = sync_sections(journal).await.expect("failed to sync");
 
             (journal, _) = journal.prune(3).await.expect("failed to prune");
 
@@ -2267,7 +1871,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
-            let mut journal = Journal::init(context.child("storage"), cfg.clone())
+            let mut journal = init_journal(context.child("storage"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -2277,207 +1881,13 @@ mod tests {
                     .await
                     .expect("failed to append");
             }
-            journal = journal.sync_all().await.expect("failed to sync");
+            journal = sync_sections(journal).await.expect("failed to sync");
 
             (journal, _) = journal.prune(10).await.expect("failed to prune");
             assert_eq!(journal.oldest_section(), None);
-            assert!(journal.pruned(3));
-            assert!(journal.pruned(9));
-            assert!(!journal.pruned(10));
-
-            journal.destroy().await.expect("failed to destroy");
-        });
-    }
-
-    #[test_traced]
-    fn test_segmented_fixed_truncate() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg();
-            let mut journal = Journal::init(context.child("storage"), cfg.clone())
-                .await
-                .expect("failed to init");
-
-            // Create sections 1, 2, 3
-            for section in 1u64..=3 {
-                (journal, _) = journal
-                    .append(section, &test_digest(section))
-                    .await
-                    .expect("failed to append");
-            }
-            journal = journal.sync_all().await.expect("failed to sync");
-
-            // Verify all sections exist
-            for section in 1u64..=3 {
-                let size = journal.size(section).expect("failed to get size");
-                assert!(size > 0, "section {section} should have data");
-            }
-
-            // Truncate to section 1 (should remove sections 2, 3)
-            let size = journal.size(1).expect("failed to get size");
-            journal = journal
-                .test_reopen_at_most(1, size)
-                .await
-                .expect("failed to truncate");
-
-            // Verify section 1 still has data
-            let size = journal.size(1).expect("failed to get size");
-            assert!(size > 0, "section 1 should still have data");
-
-            // Verify sections 2, 3 are removed
-            for section in 2u64..=3 {
-                let size = journal.size(section).expect("failed to get size");
-                assert_eq!(size, 0, "section {section} should be removed");
-            }
-
-            // Verify data in section 1 is still readable
-            let item = journal.get(1, 0).await.expect("failed to get");
-            assert_eq!(item, test_digest(1));
-
-            journal.destroy().await.expect("failed to destroy");
-        });
-    }
-
-    #[test_traced]
-    fn test_segmented_fixed_truncate_max_section() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg();
-            let mut journal = Journal::init(context.child("storage"), cfg.clone())
-                .await
-                .expect("failed to init");
-
-            // Append to the maximal section. `section + 1` has no representable successor.
-            (journal, _) = journal
-                .append(u64::MAX, &test_digest(0))
-                .await
-                .expect("failed to append");
-            journal = journal.sync_all().await.expect("failed to sync");
-
-            // Truncating the maximal section removes no sections above it and must not panic.
-            let size = journal.size(u64::MAX).expect("failed to get size");
-            journal = journal
-                .test_reopen_at_most(u64::MAX, size)
-                .await
-                .expect("failed to truncate");
-
-            // The section is intact and readable.
-            assert_eq!(journal.size(u64::MAX).expect("failed to get size"), size);
-            assert_eq!(journal.get(u64::MAX, 0).await.unwrap(), test_digest(0));
-
-            journal.destroy().await.expect("failed to destroy");
-        });
-    }
-
-    #[test_traced]
-    fn test_segmented_fixed_truncate_many_sections() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg();
-            let mut journal = Journal::init(context.child("storage"), cfg.clone())
-                .await
-                .expect("failed to init");
-
-            // Create sections 1-10
-            for section in 1u64..=10 {
-                (journal, _) = journal
-                    .append(section, &test_digest(section))
-                    .await
-                    .expect("failed to append");
-            }
-            journal = journal.sync_all().await.expect("failed to sync");
-
-            // Truncate to section 5 (should remove sections 6-10)
-            let size = journal.size(5).expect("failed to get size");
-            journal = journal
-                .test_reopen_at_most(5, size)
-                .await
-                .expect("failed to truncate");
-
-            // Verify sections 1-5 still have data
-            for section in 1u64..=5 {
-                let size = journal.size(section).expect("failed to get size");
-                assert!(size > 0, "section {section} should still have data");
-            }
-
-            // Verify sections 6-10 are removed
-            for section in 6u64..=10 {
-                let size = journal.size(section).expect("failed to get size");
-                assert_eq!(size, 0, "section {section} should be removed");
-            }
-
-            // Verify data integrity via replay
-            {
-                let mut replay = journal
-                    .replay(0, 0, NZUsize!(1024), ReadOptions::default())
-                    .await
-                    .expect("failed to replay");
-                let mut items = Vec::new();
-                while let Some(result) = replay.next().await {
-                    let (section, _, item) = result.expect("failed to read");
-                    items.push((section, item));
-                }
-                journal = replay.finish().expect("failed to finish replay");
-                assert_eq!(items.len(), 5);
-                for (i, (section, item)) in items.iter().enumerate() {
-                    assert_eq!(*section, (i + 1) as u64);
-                    assert_eq!(*item, test_digest((i + 1) as u64));
-                }
-            }
-
-            journal.destroy().await.expect("failed to destroy");
-        });
-    }
-
-    #[test_traced]
-    fn test_segmented_fixed_truncate_persistence() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg();
-
-            // Create sections 1-5
-            let mut journal = Journal::init(context.child("first"), cfg.clone())
-                .await
-                .expect("failed to init");
-            for section in 1u64..=5 {
-                (journal, _) = journal
-                    .append(section, &test_digest(section))
-                    .await
-                    .expect("failed to append");
-            }
-            journal = journal.sync_all().await.expect("failed to sync");
-
-            // Truncate to section 2
-            let size = journal.size(2).expect("failed to get size");
-            journal = journal
-                .test_reopen_at_most(2, size)
-                .await
-                .expect("failed to truncate");
-            journal = journal.sync_all().await.expect("failed to sync");
-            drop(journal);
-
-            // Re-init and verify only sections 1-2 exist
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
-                .await
-                .expect("failed to re-init");
-
-            // Verify sections 1-2 have data
-            for section in 1u64..=2 {
-                let size = journal.size(section).expect("failed to get size");
-                assert!(size > 0, "section {section} should have data after restart");
-            }
-
-            // Verify sections 3-5 are gone
-            for section in 3u64..=5 {
-                let size = journal.size(section).expect("failed to get size");
-                assert_eq!(size, 0, "section {section} should be gone after restart");
-            }
-
-            // Verify data integrity
-            let item1 = journal.get(1, 0).await.expect("failed to get");
-            assert_eq!(item1, test_digest(1));
-            let item2 = journal.get(2, 0).await.expect("failed to get");
-            assert_eq!(item2, test_digest(2));
+            assert!(journal.0.manager.prune_guard(3).is_err());
+            assert!(journal.0.manager.prune_guard(9).is_err());
+            assert!(journal.0.manager.prune_guard(10).is_ok());
 
             journal.destroy().await.expect("failed to destroy");
         });
@@ -2488,7 +1898,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
-            let mut journal = Journal::init(context.child("first"), cfg.clone())
+            let mut journal = init_journal(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -2498,7 +1908,7 @@ mod tests {
                     .await
                     .expect("failed to append");
             }
-            journal = journal.sync_all().await.expect("failed to sync");
+            journal = sync_sections(journal).await.expect("failed to sync");
             drop(journal);
 
             let (blob, size) = context
@@ -2509,7 +1919,7 @@ mod tests {
             blob.sync().await.expect("failed to sync");
 
             drop(blob);
-            let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+            let mut journal = init_journal::<_, Digest>(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to re-init");
 
@@ -2540,7 +1950,7 @@ mod tests {
             let cfg = test_cfg();
 
             // Create and populate journal
-            let mut journal = Journal::init(context.child("first"), cfg.clone())
+            let mut journal = init_journal(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -2550,11 +1960,11 @@ mod tests {
                     .await
                     .expect("failed to append");
             }
-            journal = journal.sync_all().await.expect("failed to sync");
+            journal = sync_sections(journal).await.expect("failed to sync");
             drop(journal);
 
             // Reopen and verify data persisted
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg)
+            let journal = init_journal::<_, Digest>(context.child("second"), cfg)
                 .await
                 .expect("failed to re-init");
 
@@ -2572,7 +1982,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
-            let mut journal = Journal::init(context.child("first"), cfg.clone())
+            let mut journal = init_journal(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -2591,7 +2001,7 @@ mod tests {
                 .expect("failed to sync sections");
 
             // Only the synced sections survive the unclean drop.
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg)
+            let journal = init_journal::<_, Digest>(context.child("second"), cfg)
                 .await
                 .expect("failed to re-init");
             assert_eq!(
@@ -2616,7 +2026,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
-            let mut journal = Journal::init(context.child("storage"), cfg.clone())
+            let mut journal = init_journal(context.child("storage"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -2643,7 +2053,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
-            let mut journal = Journal::init(context.child("first"), cfg.clone())
+            let mut journal = init_journal(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -2660,7 +2070,7 @@ mod tests {
                 .append(10, &test_digest(1000))
                 .await
                 .expect("failed to append");
-            journal = journal.sync_all().await.expect("failed to sync");
+            journal = sync_sections(journal).await.expect("failed to sync");
 
             // Verify random access to each section
             assert_eq!(journal.get(1, 0).await.unwrap(), test_digest(100));
@@ -2680,7 +2090,7 @@ mod tests {
 
             // Drop and reopen to test replay
             drop(journal);
-            let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+            let mut journal = init_journal::<_, Digest>(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to re-init");
 
@@ -2734,7 +2144,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
-            let mut journal = Journal::init(context.child("first"), cfg.clone())
+            let mut journal = init_journal(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -2761,7 +2171,7 @@ mod tests {
                 .await
                 .expect("failed to append");
 
-            journal = journal.sync_all().await.expect("failed to sync");
+            journal = sync_sections(journal).await.expect("failed to sync");
 
             // Verify section lengths
             assert_eq!(journal.section_len(1).unwrap(), 1);
@@ -2770,7 +2180,7 @@ mod tests {
 
             // Drop and reopen to test replay
             drop(journal);
-            let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+            let mut journal = init_journal::<_, Digest>(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to re-init");
 
@@ -2831,13 +2241,13 @@ mod tests {
                 page_cache: CacheRef::new(NZU16!(LOGICAL_PAGE_SIZE as u16), NZUsize!(4)),
                 write_buffer: NZUsize!(128),
             };
-            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+            let mut journal = init_journal::<_, u64>(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
             for value in [11u64, 22, 33, 44] {
                 (journal, _) = journal.append(SECTION, &value).await.unwrap();
             }
-            journal = journal.sync_all().await.unwrap();
+            journal = sync_sections(journal).await.unwrap();
             drop(journal);
 
             let (blob, size) = context
@@ -2873,7 +2283,7 @@ mod tests {
             )
             .await;
 
-            let journal = Journal::<_, u64>::init(context.child("recover"), cfg)
+            let journal = init_journal::<_, u64>(context.child("recover"), cfg)
                 .await
                 .unwrap();
             let journal = replay_all(journal).await;
@@ -2891,13 +2301,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = aligned_cfg();
-            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+            let mut journal = init_journal::<_, u64>(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
             for value in 0..6 {
                 (journal, _) = journal.append(SECTION, &value).await.unwrap();
             }
-            journal = journal.sync_all().await.unwrap();
+            journal = sync_sections(journal).await.unwrap();
             drop(journal);
 
             // The three 16-byte logical pages each contain two complete u64 items. Tear the
@@ -2911,7 +2321,7 @@ mod tests {
             // must still scan forward, truncate to page 0's 16-byte prefix, and discard items 2-5.
             corrupt_page(&context, &cfg.partition, &SECTION.to_be_bytes(), 1, 16).await;
 
-            let mut journal = Journal::<_, u64>::init(context.child("recover"), cfg.clone())
+            let mut journal = init_journal::<_, u64>(context.child("recover"), cfg.clone())
                 .await
                 .unwrap();
             journal = replay_all(journal).await;
@@ -2928,9 +2338,9 @@ mod tests {
             let position;
             (journal, position) = journal.append(SECTION, &99).await.unwrap();
             assert_eq!(position, 2);
-            journal.sync_all().await.unwrap();
+            sync_sections(journal).await.unwrap();
 
-            let journal = Journal::<_, u64>::init(context.child("reopen"), cfg)
+            let journal = init_journal::<_, u64>(context.child("reopen"), cfg)
                 .await
                 .unwrap();
             assert_eq!(journal.section_len(SECTION).unwrap(), 3);
@@ -2953,13 +2363,13 @@ mod tests {
         executor.start(|context| async move {
             // Six u64 items fill three 16-byte pages.
             let cfg = aligned_cfg();
-            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+            let mut journal = init_journal::<_, u64>(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
             for value in 0..6 {
                 (journal, _) = journal.append(SECTION, &value).await.unwrap();
             }
-            journal = journal.sync_all().await.unwrap();
+            journal = sync_sections(journal).await.unwrap();
             drop(journal);
 
             // Tearing interior page 1 leaves items 0-1, and replay repairs it on the first read.
@@ -2991,7 +2401,7 @@ mod tests {
                 inner: context.child("second"),
                 pending: pending.clone(),
             };
-            let journal = Journal::<_, u64>::init(gated, cfg.clone()).await.unwrap();
+            let journal = init_journal::<_, u64>(gated, cfg.clone()).await.unwrap();
             let mut replay = journal
                 .replay(0, 0, NZUsize!(1024), ReadOptions::default())
                 .await
@@ -3019,7 +2429,7 @@ mod tests {
             assert!(matches!(replay.finish(), Err(Error::ReplayFailed)));
 
             // Re-initialization repairs from durable state.
-            let journal = Journal::<_, u64>::init(context.child("third"), cfg)
+            let journal = init_journal::<_, u64>(context.child("third"), cfg)
                 .await
                 .unwrap();
             let journal = replay_all(journal).await;
@@ -3047,7 +2457,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
-            let mut journal = Journal::init(context.child("first"), cfg.clone())
+            let mut journal = init_journal(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -3058,7 +2468,7 @@ mod tests {
                     .await
                     .expect("failed to append");
             }
-            journal = journal.sync_all().await.expect("failed to sync");
+            journal = sync_sections(journal).await.expect("failed to sync");
 
             // Verify all 3 items are readable
             for i in 0u64..3 {
@@ -3078,7 +2488,7 @@ mod tests {
 
             // Reopen and drain recovery. Writer removes the torn physical tail while replay rounds
             // the remaining logical prefix down to complete items.
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+            let journal = init_journal::<_, Digest>(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to re-init");
             let journal = replay_all(journal).await;
@@ -3109,74 +2519,11 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journal_clear() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "clear-test".into(),
-                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                write_buffer: NZUsize!(1024),
-            };
-
-            let mut journal: Journal<_, Digest> =
-                Journal::init(context.child("journal"), cfg.clone())
-                    .await
-                    .expect("Failed to initialize journal");
-
-            // Append items across multiple sections
-            for section in 0..5u64 {
-                for i in 0..10u64 {
-                    (journal, _) = journal
-                        .append(section, &test_digest(section * 1000 + i))
-                        .await
-                        .expect("Failed to append");
-                }
-                journal = journal.sync(section).await.expect("Failed to sync");
-            }
-
-            // Verify we have data
-            assert_eq!(journal.get(0, 0).await.unwrap(), test_digest(0));
-            assert_eq!(journal.get(4, 0).await.unwrap(), test_digest(4000));
-
-            // Clear the journal
-            journal = journal.clear().await.expect("Failed to clear");
-
-            // After clear, all reads should fail
-            for section in 0..5u64 {
-                assert!(matches!(
-                    journal.get(section, 0).await,
-                    Err(Error::SectionOutOfRange(s)) if s == section
-                ));
-            }
-
-            // Append new data after clear
-            for i in 0..5u64 {
-                (journal, _) = journal
-                    .append(10, &test_digest(i * 100))
-                    .await
-                    .expect("Failed to append after clear");
-            }
-            journal = journal.sync(10).await.expect("Failed to sync after clear");
-
-            // New data should be readable
-            assert_eq!(journal.get(10, 0).await.unwrap(), test_digest(0));
-
-            // Old sections should still be missing
-            assert!(matches!(
-                journal.get(0, 0).await,
-                Err(Error::SectionOutOfRange(0))
-            ));
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
     fn test_last_missing_section_returns_error() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
-            let journal = Journal::<_, Digest>::init(context.child("storage"), cfg.clone())
+            let journal = init_journal::<_, Digest>(context.child("storage"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -3193,12 +2540,13 @@ mod tests {
         });
     }
 
+    /// The last entry of a section truncated to zero bytes is absent.
     #[test_traced]
     fn test_last_after_truncate_to_zero() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
-            let mut journal = Journal::init(context.child("storage"), cfg.clone())
+            let mut journal = init_journal(context.child("storage"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -3208,7 +2556,8 @@ mod tests {
 
             assert!(journal.last(0).await.unwrap().is_some());
 
-            journal = journal.test_reopen_at_most(0, 0).await.unwrap();
+            // Truncating the section to zero bytes leaves it present and empty.
+            journal = journal.test_reopen_section(0, 0).await.unwrap();
             assert_eq!(journal.last(0).await.unwrap(), None);
 
             journal.destroy().await.unwrap();
@@ -3220,13 +2569,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
-            let mut journal = Journal::<_, Digest>::init(context.child("storage"), cfg.clone())
+            let mut journal = init_journal::<_, Digest>(context.child("storage"), cfg.clone())
                 .await
                 .expect("failed to init");
 
             (journal, _) = journal.append(0, &test_digest(0)).await.unwrap();
             (journal, _) = journal.append(1, &test_digest(1)).await.unwrap();
-            journal = journal.sync_all().await.unwrap();
+            journal = sync_sections(journal).await.unwrap();
 
             (journal, _) = journal.prune(1).await.unwrap();
 
@@ -3235,124 +2584,6 @@ mod tests {
                 Err(Error::AlreadyPrunedToSection(1))
             ));
             assert!(journal.last(1).await.unwrap().is_some());
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_get_many_empty() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg();
-            let mut journal = Journal::init(context.child("storage"), cfg).await.unwrap();
-            (journal, _) = journal.append(0, &test_digest(0)).await.unwrap();
-            assert_eq!(journal.section_len(0).unwrap(), 1);
-
-            let mut buf = [];
-            let (items, hits) = journal.get_many(0, &[], &mut buf).await.unwrap();
-            assert!(items.is_empty());
-            assert_eq!(hits, 0);
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_get_many_single_section() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg();
-            let mut journal = Journal::init(context.child("storage"), cfg).await.unwrap();
-
-            for i in 0..5 {
-                (journal, _) = journal.append(0, &test_digest(i)).await.unwrap();
-            }
-            assert_eq!(journal.section_len(0).unwrap(), 5);
-
-            // Read all 5 items in one call. The reusable buffer is intentionally oversized:
-            // get_many slices it to the exact length the batch needs.
-            let chunk = Journal::<deterministic::Context, Digest>::CHUNK_SIZE;
-            let mut buf = vec![0u8; 6 * chunk];
-            let (items, _) = journal
-                .get_many(0, &[0, 1, 2, 3, 4], &mut buf)
-                .await
-                .unwrap();
-
-            for (i, item) in items.iter().enumerate() {
-                assert_eq!(*item, test_digest(i as u64));
-            }
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_get_many_subset() {
-        // Read a sparse subset of positions.
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg();
-            let mut journal = Journal::init(context.child("storage"), cfg).await.unwrap();
-
-            for i in 0..10 {
-                (journal, _) = journal.append(0, &test_digest(i)).await.unwrap();
-            }
-            assert_eq!(journal.section_len(0).unwrap(), 10);
-
-            let chunk = Journal::<deterministic::Context, Digest>::CHUNK_SIZE;
-            let positions = [1, 4, 7, 9];
-            let mut buf = vec![0u8; positions.len() * chunk];
-            let (items, _) = journal.get_many(0, &positions, &mut buf).await.unwrap();
-
-            for (i, &pos) in positions.iter().enumerate() {
-                assert_eq!(items[i], test_digest(pos));
-            }
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_get_many_bad_section() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg();
-            let journal = Journal::<_, Digest>::init(context.child("storage"), cfg)
-                .await
-                .unwrap();
-
-            let mut buf = vec![0u8; 64];
-            let err = journal.get_many(99, &[0], &mut buf).await.unwrap_err();
-            assert!(matches!(err, Error::SectionOutOfRange(99)));
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_get_many_matches_get() {
-        // Verify batch read matches individual reads.
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg();
-            let mut journal = Journal::init(context.child("storage"), cfg).await.unwrap();
-
-            for i in 0..8 {
-                (journal, _) = journal.append(0, &test_digest(i)).await.unwrap();
-            }
-            assert_eq!(journal.section_len(0).unwrap(), 8);
-            journal = journal.sync_all().await.unwrap();
-
-            let chunk = Journal::<deterministic::Context, Digest>::CHUNK_SIZE;
-            let positions: Vec<u64> = (0..8).collect();
-            let mut buf = vec![0u8; positions.len() * chunk];
-            let (batch, _) = journal.get_many(0, &positions, &mut buf).await.unwrap();
-
-            for pos in &positions {
-                let single = journal.get(0, *pos).await.unwrap();
-                assert_eq!(batch[*pos as usize], single);
-            }
 
             journal.destroy().await.unwrap();
         });
@@ -3368,7 +2599,7 @@ mod tests {
                 pending: pending.clone(),
             };
             let cfg = test_cfg();
-            let mut journal = Journal::init(context.child("storage"), cfg)
+            let mut journal = init_journal(context.child("storage"), cfg)
                 .await
                 .expect("failed to init");
 
@@ -3424,7 +2655,7 @@ mod tests {
                 pending: pending.clone(),
             };
             let cfg = test_cfg();
-            let mut journal = Journal::init(context.child("storage"), cfg)
+            let mut journal = init_journal(context.child("storage"), cfg)
                 .await
                 .expect("failed to init");
 
@@ -3468,70 +2699,6 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_segmented_fixed_clear_waits_for_in_flight_start_sync() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let pending = PendingSyncs::default();
-            let context = DelayedSyncContext {
-                inner: context,
-                pending: pending.clone(),
-            };
-            let cfg = test_cfg();
-            let mut journal = Journal::init(context.child("storage"), cfg)
-                .await
-                .expect("failed to init");
-
-            (journal, _) = journal
-                .append(1, &test_digest(0))
-                .await
-                .expect("failed to append");
-            let handle;
-            (journal, handle) = journal.start_sync(1).await.expect("failed to start sync");
-            assert!(!pending.lock().is_empty());
-
-            let started = Arc::new(AtomicUsize::new(0));
-            let completed = Arc::new(AtomicUsize::new(0));
-            let started_clone = started.clone();
-            let completed_clone = completed.clone();
-            let waiter = context.inner.child("clear").spawn(|_| async move {
-                started_clone.fetch_add(1, Ordering::Relaxed);
-                journal = journal.clear().await.expect("failed to clear");
-                completed_clone.fetch_add(1, Ordering::Relaxed);
-                journal
-            });
-
-            while started.load(Ordering::Relaxed) == 0 {
-                commonware_runtime::reschedule().await;
-            }
-            commonware_runtime::reschedule().await;
-            assert_eq!(
-                completed.load(Ordering::Relaxed),
-                0,
-                "clear must wait for in-flight syncs"
-            );
-
-            release_pending_syncs(&pending);
-            handle
-                .await
-                .expect("sync handle should complete despite clearing");
-            while completed.load(Ordering::Relaxed) == 0 {
-                commonware_runtime::reschedule().await;
-            }
-            let mut journal = waiter.await.expect("clear task failed");
-
-            // The journal must remain usable after clear.
-            assert_eq!(journal.oldest_section(), None);
-            let position;
-            (journal, position) = journal
-                .append(1, &test_digest(1))
-                .await
-                .expect("failed to append after clear");
-            assert_eq!(position, 0);
-            journal.destroy().await.expect("failed to destroy");
-        });
-    }
-
-    #[test_traced]
     fn test_segmented_fixed_prune_surfaces_failed_in_flight_start_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -3541,7 +2708,7 @@ mod tests {
                 pending: pending.clone(),
             };
             let cfg = test_cfg();
-            let mut journal = Journal::init(context.child("storage"), cfg)
+            let mut journal = init_journal(context.child("storage"), cfg)
                 .await
                 .expect("failed to init");
 
@@ -3572,17 +2739,17 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             const SECTION: u64 = 0;
             let cfg = aligned_cfg();
-            let mut journal = Journal::<_, u64>::init(context.child("seed"), cfg.clone())
+            let mut journal = init_journal::<_, u64>(context.child("seed"), cfg.clone())
                 .await
                 .unwrap();
             for value in 0..6 {
                 (journal, _) = journal.append(SECTION, &value).await.unwrap();
             }
-            drop(journal.sync_all().await.unwrap());
+            drop(sync_sections(journal).await.unwrap());
 
             let (gated, gate) =
                 ReadGateContext::new(context.child("cancel"), cfg.partition.clone());
-            let journal = Journal::<_, u64>::init(gated, cfg.clone()).await.unwrap();
+            let journal = init_journal::<_, u64>(gated, cfg.clone()).await.unwrap();
             let mut replay = journal
                 .replay(SECTION, 0, NZUsize!(16), ReadOptions::default())
                 .await
@@ -3609,7 +2776,7 @@ mod tests {
             }
             assert!(matches!(replay.finish(), Err(Error::ReplayFailed)));
 
-            let journal = Journal::<_, u64>::init(context.child("reopen"), cfg)
+            let journal = init_journal::<_, u64>(context.child("reopen"), cfg)
                 .await
                 .unwrap();
             let mut replay = journal

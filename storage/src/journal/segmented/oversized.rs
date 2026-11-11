@@ -234,11 +234,9 @@ impl Validation {
 /// Combines a fixed-size index journal with glob storage for variable-length values.
 /// Provides coordinated operations and crash recovery.
 ///
-/// Mutating functions consume the journal and return it only on success: an error (or a dropped
-/// future) destroys the handle. [Oversized::replay] consumes the journal into an owned [Replay]
-/// reader, which returns it via [Replay::finish] once exhausted. Mutations on pruned sections
-/// fail with [Error::AlreadyPrunedToSection]. Check [Oversized::pruned] first to keep the
-/// handle.
+/// Mutating functions consume the journal and return it only on success, so an error or a dropped
+/// future destroys the handle. Mutations on pruned sections fail with
+/// [Error::AlreadyPrunedToSection].
 pub struct Oversized<E: Context, I: Record, V: Codec> {
     index: FixedJournal<E, I>,
     values: Glob<E, V>,
@@ -253,27 +251,24 @@ struct Pending<E: Context, I: Record, V: Codec> {
     /// Unpublished values; bytes owned by a discarded index suffix are released only after its
     /// truncation is durable.
     values: GlobRecovery<E, V>,
-
-    /// Marker and barrier state carried through tracked recovery into the published journal.
-    tracking: Option<Tracking<E>>,
 }
 
 impl<E: Context, I: Record, V: CodecShared> std::fmt::Debug for Oversized<E, I, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Oversized")
-            .field("oldest_section", &self.oldest_section())
-            .field("newest_section", &self.newest_section())
+            .field("oldest_section", &self.index.oldest_section())
+            .field("newest_section", &self.index.newest_section())
             .finish_non_exhaustive()
     }
 }
 
 impl<E: Context, I: Record, V: CodecShared> From<Pending<E, I, V>> for Oversized<E, I, V> {
-    /// Publish both journals after paired recovery.
+    /// Publish both journals after checkpoint restore. A restored journal keeps no markers.
     fn from(recovery: Pending<E, I, V>) -> Self {
         Self {
             index: recovery.index,
             values: recovery.values.into(),
-            tracking: recovery.tracking,
+            tracking: None,
         }
     }
 }
@@ -324,11 +319,7 @@ impl<E: Context, I: Record, V: CodecShared> Pending<E, I, V> {
                 (index, values.sync(section).await?)
             }
         };
-        Ok(Self {
-            index,
-            values,
-            tracking: None,
-        })
+        Ok(Self { index, values })
     }
 
     /// Return the value boundary owned by an optional terminal index entry.
@@ -467,13 +458,11 @@ impl<E: Context, I: Record, V: CodecShared> Pending<E, I, V> {
     /// Markers rise to each section's replayed length without syncing the data journals: the
     /// retained entries were readable when the run began, which the [commonware_runtime::Storage]
     /// durability contract makes crash-durable, and recovery truncations are durable before this
-    /// runs.
-    async fn reconcile_markers(mut self) -> Result<Self, Error> {
-        let mut tracking = self
-            .tracking
-            .take()
-            .expect("tracked replay preserves its recovery state");
-
+    /// runs. Returns the published tracked journal.
+    async fn reconcile_markers(
+        self,
+        mut tracking: Tracking<E>,
+    ) -> Result<Oversized<E, I, V>, Error> {
         let mut dirty = false;
         for section in self.index.sections() {
             let items = self.index.section_len(section)?;
@@ -484,8 +473,11 @@ impl<E: Context, I: Record, V: CodecShared> Pending<E, I, V> {
             (tracking.metadata, marker) = tracking.metadata.start_sync().await?;
             tracking.marker_sync_pending = Some(marker.boxed().shared());
         }
-        self.tracking = Some(tracking);
-        Ok(self)
+        Ok(Oversized {
+            index: self.index,
+            values: self.values.into(),
+            tracking: Some(tracking),
+        })
     }
 
     /// Derive the value boundary owned by `section`'s last entry after an index truncate.
@@ -535,17 +527,14 @@ impl<E: Context, I: Record, V: CodecShared> Pending<E, I, V> {
         self,
         buffer: NonZeroUsize,
         read_options: ReadOptions,
-        validation: Validation,
-    ) -> Result<Replay<E, I, V>, Error> {
+        tracking: Tracking<E>,
+    ) -> Result<Recovery<E, I, V>, Error> {
         let index = self.index.replay(0, 0, buffer, read_options).await?;
-        let phase = ReplayPhase::Tracked {
-            values: self.values,
-            validation,
-        };
-        Ok(Replay {
+        Ok(Recovery {
             index,
-            phase,
-            tracking: self.tracking,
+            values: self.values,
+            validation: Validation::new(),
+            tracking,
             in_progress: false,
             interrupted: false,
         })
@@ -585,17 +574,17 @@ impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
         Ok(journal.cleanup_orphan_value_sections().await?.into())
     }
 
-    /// Initialize using durable per-section validation markers and return the required full replay.
+    /// Initialize using durable per-section validation markers and return the [Recovery] to drain.
     ///
-    /// The caller must drain the replay and call [Replay::finish_tracked]. Entries below each
-    /// durable marker are retained after their cross-journal boundary is proven. Entries above it
-    /// are value-validated in order and the first invalid entry truncates its section.
+    /// The caller must drain it and call [Recovery::finish]. Entries below each durable marker are
+    /// retained after their cross-journal boundary is proven. Entries above it are value-validated
+    /// in order and the first invalid entry truncates its section.
     pub async fn init_with_metadata(
         context: E,
         cfg: Config<V::Cfg>,
         metadata_partition: String,
         read_options: ReadOptions,
-    ) -> Result<Replay<E, I, V>, Error> {
+    ) -> Result<Recovery<E, I, V>, Error> {
         let replay_buffer = cfg.replay_buffer;
 
         // Open the commit markers before the data they constrain.
@@ -619,18 +608,15 @@ impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
 
         // Every advertised prefix is proven before ordinary suffix repair may mutate either
         // journal. An empty sidecar commits no prefix, so replay validates every value.
-        let mut journal =
-            Pending::init(context, cfg, RecoveryMode::Floors { floors: &floors }).await?;
+        let journal = Pending::init(context, cfg, RecoveryMode::Floors { floors: &floors }).await?;
 
         // Keep the durable floors attached while replay validates each uncommitted suffix.
-        journal.tracking = Some(Tracking {
+        let tracking = Tracking {
             metadata,
             marker_sync_pending: None,
             barriers: BTreeMap::new(),
-        });
-        journal
-            .replay(replay_buffer, read_options, Validation::new())
-            .await
+        };
+        journal.replay(replay_buffer, read_options, tracking).await
     }
 
     /// Append entry + value.
@@ -671,54 +657,11 @@ impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
         self.index.get(section, position).await
     }
 
-    /// Get the last entry for a section, if any.
-    ///
-    /// Returns `Ok(None)` if the section is empty.
-    ///
-    /// # Errors
-    ///
-    /// - [Error::AlreadyPrunedToSection] if the section has been pruned.
-    /// - [Error::SectionOutOfRange] if the section doesn't exist.
-    pub async fn last(&self, section: u64) -> Result<Option<I>, Error> {
-        self.index.last(section).await
-    }
-
     /// Get value using offset/size from entry.
     ///
     /// The offset should be the byte offset from `append()` or from the entry's `value_location()`.
     pub async fn get_value(&self, section: u64, offset: u64, size: u32) -> Result<V, Error> {
         self.values.get(section, offset, size).await
-    }
-
-    /// Consumes the journal and returns an owned [Replay] reader over index entries
-    /// starting from `start_position` in `start_section`.
-    ///
-    /// Setup flushes the index journal's buffered pages so the reader observes every
-    /// accepted write. Every backing index-journal read performed by the returned
-    /// replay uses `read_options`, including reads after advancing to another
-    /// section.
-    pub async fn replay(
-        self,
-        start_section: u64,
-        start_position: u64,
-        buffer: NonZeroUsize,
-        read_options: ReadOptions,
-    ) -> Result<Replay<E, I, V>, Error> {
-        let Self {
-            index,
-            values,
-            tracking,
-        } = self;
-        let index = index
-            .replay(start_section, start_position, buffer, read_options)
-            .await?;
-        Ok(Replay {
-            index,
-            phase: ReplayPhase::Live(values),
-            tracking,
-            in_progress: false,
-            interrupted: false,
-        })
     }
 
     /// Start a joint data sync and publish only previously completed tracked boundaries.
@@ -842,16 +785,6 @@ impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
         ))
     }
 
-    /// Sync all sections.
-    pub async fn sync_all(mut self) -> Result<Self, Error> {
-        if self.tracking.is_some() {
-            let sections = self.index.sections().collect::<BTreeSet<_>>();
-            return self.sync(sections).await;
-        }
-        (self.index, self.values) = try_join(self.index.sync_all(), self.values.sync_all()).await?;
-        Ok(self)
-    }
-
     /// Prune both journals. Returns true if any sections were pruned.
     ///
     /// Prunes index first, then glob. This order ensures crash safety:
@@ -903,24 +836,6 @@ impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
         }
     }
 
-    /// Returns true when `section` is below the prune floor.
-    ///
-    /// The floor only tracks prunes from the current execution and resets at init, so a
-    /// section pruned in a previous execution reports false.
-    pub fn pruned(&self, section: u64) -> bool {
-        self.index.pruned(section)
-    }
-
-    /// Returns the oldest section number, if any exist.
-    pub fn oldest_section(&self) -> Option<u64> {
-        self.index.oldest_section()
-    }
-
-    /// Returns the newest section number, if any exist.
-    pub fn newest_section(&self) -> Option<u64> {
-        self.index.newest_section()
-    }
-
     /// Destroy all underlying storage.
     pub async fn destroy(mut self) -> Result<(), Error> {
         // Remove tracked floors first so an interrupted destroy can only force conservative
@@ -934,42 +849,38 @@ impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
     }
 }
 
-/// Owned replay reader over an [Oversized]'s index entries.
+/// Validating startup recovery returned by [Oversized::init_with_metadata].
 ///
-/// Yields `(section, position, entry)` in order. Dropping the reader before it is exhausted
-/// destroys the journal: recovery is re-initialization. Call [Replay::finish] on an exhausted
-/// reader to get the journal back.
-pub struct Replay<E: Context, I: Record, V: Codec> {
+/// Yields `(section, position, entry)` in order, verifying each value at or above its section's
+/// durable marker until the first invalid one. Dropping it before [Recovery::finish] destroys the
+/// handle, and the owner must initialize again.
+pub struct Recovery<E: Context, I: Record, V: Codec> {
     index: FixedReplay<E, I>,
-    /// Value ownership phase, with validation state only during tracked startup recovery.
-    phase: ReplayPhase<E, V>,
-    tracking: Option<Tracking<E>>,
+
+    /// Value recovery owner that validates entries at or above each durable floor until the
+    /// first invalid value.
+    values: GlobRecovery<E, V>,
+
+    /// Cursor and deferred truncation state for the replay.
+    validation: Validation,
+
+    /// Durable markers whose floors bound value validation.
+    tracking: Tracking<E>,
+
     in_progress: bool,
     interrupted: bool,
 }
 
-/// Retain the ownership phase while an index replay is in progress.
-enum ReplayPhase<E: Context, V: Codec> {
-    Live(Glob<E, V>),
-    Tracked {
-        /// Value recovery owner used to validate entries at or above each durable floor until
-        /// the first invalid value.
-        values: GlobRecovery<E, V>,
-        /// Cursor and deferred truncation state for the tracked startup replay.
-        validation: Validation,
-    },
-}
-
-impl<E: Context, I: Record, V: CodecShared> Replay<E, I, V> {
+impl<E: Context, I: Record, V: CodecShared> Recovery<E, I, V> {
     /// Returns the next `(section, position, entry)`, or `None` once every section is
     /// exhausted.
     ///
     /// An index error ends the section that produced it, and iteration continues with
     /// the next section. A value-verification error is returned without ending its
-    /// section and dooms the tracked replay: finishing it fails with
+    /// section and dooms the recovery: finishing it fails with
     /// [Error::ReplayFailed]. Errors while mutating storage to repair a section end the
     /// replay. Dropping a pending call also ends it. The next call returns
-    /// [Error::ReplayInterrupted] and both finishing methods fail.
+    /// [Error::ReplayInterrupted] and [Recovery::finish] fails.
     pub async fn next(&mut self) -> Option<Result<(u64, u64, I), Error>> {
         if self.interrupted {
             return None;
@@ -994,9 +905,7 @@ impl<E: Context, I: Record, V: CodecShared> Replay<E, I, V> {
                 Ok(entry) => entry,
                 Err(err) => return Some(Err(err)),
             };
-            let ReplayPhase::Tracked { values, validation } = &mut self.phase else {
-                return Some(Ok((section, position, entry)));
-            };
+            let validation = &mut self.validation;
 
             // Each section validates forward from its durable floor. Once one value fails, later
             // entries in that section are outside the retained prefix and are not yielded.
@@ -1004,8 +913,6 @@ impl<E: Context, I: Record, V: CodecShared> Replay<E, I, V> {
                 validation.current_section = Some(section);
                 validation.floor = self
                     .tracking
-                    .as_ref()
-                    .expect("tracked replay preserves its recovery state")
                     .metadata
                     .get(&SectionKey::new(section))
                     .copied()
@@ -1020,7 +927,7 @@ impl<E: Context, I: Record, V: CodecShared> Replay<E, I, V> {
             }
 
             let (offset, size) = entry.value_location();
-            match values.verify(section, offset, size).await {
+            match self.values.verify(section, offset, size).await {
                 Ok(true) => return Some(Ok((section, position, entry))),
                 Ok(false) => {
                     validation.truncations.push((section, position));
@@ -1034,56 +941,33 @@ impl<E: Context, I: Record, V: CodecShared> Replay<E, I, V> {
         }
     }
 
-    /// Returns the journal.
-    ///
-    /// Fails when the reader was not fully drained or yielded an error: the journal is
-    /// destroyed and recovery is re-initialization.
-    pub fn finish(self) -> Result<Oversized<E, I, V>, Error> {
-        if self.in_progress || self.interrupted {
-            return Err(Error::ReplayFailed);
-        }
-        let ReplayPhase::Live(values) = self.phase else {
-            return Err(Error::ReplayFailed);
-        };
-        Ok(Oversized {
-            index: self.index.finish()?,
-            values,
-            tracking: self.tracking,
-        })
-    }
-
     /// Finish marker-aware startup recovery and return the tracked journal.
-    pub async fn finish_tracked(self) -> Result<Oversized<E, I, V>, Error> {
+    pub async fn finish(self) -> Result<Oversized<E, I, V>, Error> {
         if self.in_progress || self.interrupted {
             return Err(Error::ReplayFailed);
         }
-        let ReplayPhase::Tracked { values, validation } = self.phase else {
-            return Err(Error::ReplayFailed);
-        };
-        if validation.failed {
+        if self.validation.failed {
             return Err(Error::ReplayFailed);
         }
         let mut journal = Pending {
             index: self.index.finish()?,
-            values,
-            tracking: self.tracking,
+            values: self.values,
         };
 
         // Apply each section's first invalid position only after replay releases the index
         // journal, then publish the exact retained lengths as the next marker generation.
         let chunk_size = FixedJournal::<E, I>::CHUNK_SIZE as u64;
-        for (section, items) in validation.truncations {
+        for (section, items) in self.validation.truncations {
             let index_size = items.checked_mul(chunk_size).ok_or(Error::OffsetOverflow)?;
             journal = journal
                 .truncate_pending_section(section, index_size)
                 .await?;
         }
-        Ok(journal
+        journal
             .align_values_to_index()
             .await?
-            .reconcile_markers()
-            .await?
-            .into())
+            .reconcile_markers(self.tracking)
+            .await
     }
 }
 
@@ -1105,6 +989,14 @@ mod tests {
     };
     use commonware_utils::{NZU16, NZUsize, probability};
     use std::time::Duration;
+
+    /// Return the durable byte length of a section's value blob.
+    fn durable_value_size(context: &deterministic::Context, cfg: &Config<()>, section: u64) -> u64 {
+        context
+            .logical_blob(&cfg.value_partition, &section.to_be_bytes())
+            .expect("value blob must exist")
+            .len() as u64
+    }
 
     /// Convert offset + size to byte end position (for truncation tests).
     fn byte_end(offset: u64, size: u32) -> u64 {
@@ -1200,7 +1092,7 @@ mod tests {
                     .await
                     .unwrap();
             }
-            journal = journal.sync_all().await.unwrap();
+            journal = journal.sync([1, 2]).await.unwrap();
 
             // The value sync materializes a crash image with durable value tails and
             // index additions still confined to the larger index write buffers.
@@ -1214,7 +1106,7 @@ mod tests {
                     .await
                     .unwrap();
             }
-            journal.values = journal.values.sync_all().await.unwrap();
+            journal.values = journal.values.sync([1, 2]).await.unwrap();
             drop(journal);
 
             // Reopen and replay the index, leaving each section's value tail longer than its
@@ -1228,11 +1120,7 @@ mod tests {
                 },
                 pending: outer.clone(),
             };
-            let Pending {
-                index,
-                values,
-                tracking,
-            } = Pending::<_, TestEntry, TestValue>::init(
+            let Pending { index, values } = Pending::<_, TestEntry, TestValue>::init(
                 delayed,
                 cfg.clone(),
                 RecoveryMode::Floors {
@@ -1251,7 +1139,6 @@ mod tests {
             let recovery = Pending {
                 index: replay.finish().unwrap(),
                 values,
-                tracking,
             };
             for section in 1..=2 {
                 assert_eq!(
@@ -1306,7 +1193,7 @@ mod tests {
                     [section as u8; 16],
                 );
                 assert_eq!(
-                    journal.values.size(section).unwrap(),
+                    durable_value_size(&context, &cfg, section),
                     offset + u64::from(size),
                 );
             }
@@ -1351,7 +1238,7 @@ mod tests {
         while let Some(item) = replay.next().await {
             item?;
         }
-        replay.finish_tracked().await
+        replay.finish().await
     }
 
     /// A tracked reopen whose markers already match every replayed section writes no marker
@@ -1392,7 +1279,7 @@ mod tests {
                 ids.push(item.unwrap().2.id);
             }
             assert_eq!(ids, vec![0, 1]);
-            drop(replay.finish_tracked().await.unwrap());
+            drop(replay.finish().await.unwrap());
             assert!(
                 recordings.snapshot().writes.is_empty(),
                 "unchanged markers must not be rewritten"
@@ -1651,7 +1538,7 @@ mod tests {
                 .append(1, TestEntry::new(2, 0, 0), &[2; 16])
                 .await
                 .unwrap();
-            _ = journal.sync_all().await.unwrap();
+            _ = journal.sync(1).await.unwrap();
             let mut metadata = Metadata::<_, SectionKey, u64>::init(
                 context.child("markers"),
                 MetadataConfig {
@@ -1858,7 +1745,7 @@ mod tests {
             let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
             oversized.index = oversized
                 .index
-                .test_reopen_at_most(1, chunk)
+                .test_reopen_section(1, chunk)
                 .await
                 .expect("Failed to truncate index");
             oversized.index = oversized.index.sync(1).await.expect("Failed to sync index");
@@ -1917,7 +1804,7 @@ mod tests {
             let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
             oversized.index = oversized
                 .index
-                .test_reopen_at_most(1, chunk)
+                .test_reopen_section(1, chunk)
                 .await
                 .expect("Failed to truncate index");
             oversized.index = oversized.index.sync(1).await.expect("Failed to sync index");
@@ -1935,7 +1822,7 @@ mod tests {
             let entry = oversized.get(1, 0).await.expect("Failed to get");
             let (offset, size) = entry.value_location();
             assert_eq!(
-                oversized.values.size(1).expect("glob size"),
+                durable_value_size(&context, &test_cfg(), 1),
                 byte_end(offset, size),
                 "orphaned value bytes must be truncated"
             );
@@ -2205,7 +2092,7 @@ mod tests {
             assert_adopted_entries_consistent(&oversized).await;
             let last = oversized.get(1, 1).await.expect("Failed to get");
             assert_eq!(
-                oversized.values.size(1).expect("glob size"),
+                durable_value_size(&context, &entry_cfg(), 1),
                 byte_end(last.value_offset, last.value_size),
                 "values of dropped entries must be released"
             );
@@ -2253,7 +2140,7 @@ mod tests {
                     .await
                     .expect("reinitialization must succeed");
             assert_eq!(oversized.size(1).expect("size"), chunk);
-            assert_eq!(oversized.newest_section(), Some(1));
+            assert_eq!(oversized.index.newest_section(), Some(1));
             assert_adopted_entries_consistent(&oversized).await;
             oversized.destroy().await.expect("Failed to destroy");
         });
@@ -2287,7 +2174,7 @@ mod tests {
                 .append(3, TestEntry::new(4, 0, 0), &[4; 16])
                 .await
                 .expect("failed to append discardable entry");
-            oversized = oversized.sync_all().await.expect("failed to sync");
+            oversized = oversized.sync([1, 2, 3]).await.expect("failed to sync");
             drop(oversized);
 
             // Restore owns no bytes in sections 2 and 3. The valid final page hides section 2's
@@ -2357,7 +2244,7 @@ mod tests {
                     .await
                     .unwrap();
             }
-            journal = journal.sync_all().await.unwrap();
+            journal = journal.sync(1).await.unwrap();
             let mut tracking = journal.tracking.take().unwrap();
             assert!(tracking.stage_marker(1, 1));
             tracking.metadata = tracking.metadata.sync().await.unwrap();
@@ -2385,7 +2272,7 @@ mod tests {
             // matches the retained entry, so no marker generation is written.
             assert_eq!(pending.calls(), 2);
             assert_eq!(journal.size(1).unwrap(), chunk);
-            assert_eq!(journal.last(1).await.unwrap().unwrap().id, 0);
+            assert_eq!(journal.get(1, 0).await.unwrap().id, 0);
             journal.destroy().await.unwrap();
         });
     }
@@ -2418,7 +2305,10 @@ mod tests {
                         .unwrap();
                 }
             }
-            journal = journal.sync_all().await.unwrap();
+            journal = journal
+                .sync((1..=SECTIONS).collect::<Vec<_>>())
+                .await
+                .unwrap();
             drop(journal);
 
             // Remove every index section above `kept` and leave every value section.
@@ -2434,7 +2324,7 @@ mod tests {
                 open_tracked(context.child("restart"), cfg.clone())
                     .await
                     .unwrap();
-            assert_eq!(journal.newest_section(), Some(kept));
+            assert_eq!(journal.index.newest_section(), Some(kept));
             for section in 1..=kept {
                 assert_eq!(
                     journal.size(section).unwrap(),
@@ -2486,13 +2376,13 @@ mod tests {
                 .unwrap();
             assert_eq!(first, 0);
             assert_eq!(start, 0);
-            journal = journal.sync_all().await.unwrap();
+            journal = journal.sync([kept, kept + 1]).await.unwrap();
             drop(journal);
 
             // A clean reopen keeps the recovered prefix and both appended entries.
             let journal: Oversized<_, TestEntry, TestValue> =
                 open_tracked(context.child("reopen"), cfg).await.unwrap();
-            assert_eq!(journal.newest_section(), Some(kept + 1));
+            assert_eq!(journal.index.newest_section(), Some(kept + 1));
             for section in 1..kept {
                 assert_eq!(
                     journal.size(section).unwrap(),
@@ -2537,7 +2427,7 @@ mod tests {
                 .append(2, TestEntry::new(2, 0, 0), &[2; 16])
                 .await
                 .expect("Failed to append");
-            oversized = oversized.sync_all().await.expect("Failed to sync");
+            oversized = oversized.sync([1, 2]).await.expect("Failed to sync");
             drop(oversized);
 
             // Truncate section 1's values, simulating lost durable state below the
@@ -2606,7 +2496,7 @@ mod tests {
                     .append(2, TestEntry::new(3, 0, 0), &[3; 16])
                     .await
                     .expect("failed to append later section");
-                oversized = oversized.sync_all().await.expect("failed to sync");
+                oversized = oversized.sync([1, 2]).await.expect("failed to sync");
                 drop(oversized);
 
                 // Checkpoint recovery trusts the completed durability boundary and reads only its
@@ -2642,21 +2532,7 @@ mod tests {
                     oversized.get(1, 1).await,
                     Err(Error::Runtime(RError::InvalidChecksum))
                 ));
-                let mut replay = oversized
-                    .replay(1, 0, NZUsize!(1024), ReadOptions::default())
-                    .await
-                    .unwrap();
-                let error = loop {
-                    match replay.next().await.expect("corrupt section must fail") {
-                        Ok(_) => continue,
-                        Err(error) => break error,
-                    }
-                };
-                assert!(
-                    matches!(error, Error::Runtime(RError::InvalidChecksum)),
-                    "{error:?}"
-                );
-                assert!(matches!(replay.finish(), Err(Error::ReplayFailed)));
+                drop(oversized);
 
                 let (blob, actual_size) = context
                     .open(&cfg.index_partition, &1u64.to_be_bytes())
@@ -2693,7 +2569,7 @@ mod tests {
                 .append(2, TestEntry::new(2, 0, 0), &[2; 16])
                 .await
                 .expect("Failed to append");
-            oversized = oversized.sync_all().await.expect("Failed to sync");
+            oversized = oversized.sync([1, 2]).await.expect("Failed to sync");
 
             // Corrupt entry 1's committed value in place (sizes unchanged)
             oversized
@@ -2728,126 +2604,11 @@ mod tests {
         });
     }
 
-    /// A replay of an empty journal is exhausted from the start.
+    /// Finishing a tracked startup replay before it is drained fails.
     #[test_traced]
-    fn test_oversized_replay_empty_finishes_immediately() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg();
-            let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init_with_checkpoint(context, cfg, (0, 0))
-                    .await
-                    .expect("Failed to init");
-
-            // An empty journal's reader is exhausted from the start
-            let replay = oversized
-                .replay(0, 0, NZUsize!(1024), ReadOptions::default())
-                .await
-                .expect("Failed to replay");
-            let oversized = replay.finish().expect("failed to finish replay");
-            oversized.destroy().await.expect("Failed to destroy");
-        });
-    }
-
-    /// A completed live replay returns the journal for further appends under either recovery
-    /// contract.
-    #[test_traced]
-    fn test_live_replay_preserves_append_and_recovery() {
+    fn test_tracked_replay_finish_before_drain_fails() {
         deterministic::Runner::default().start(|context| async move {
-            for tracked in [false, true] {
-                let context = context.child(if tracked { "tracked" } else { "checkpoint" });
-                let cfg = test_cfg();
-
-                // Open each recovery contract and establish an empty journal.
-                let mut journal: Oversized<_, TestEntry, TestValue> = if tracked {
-                    let mut replay = Oversized::init_with_metadata(
-                        context.child("oversized"),
-                        cfg.clone(),
-                        "replay-markers".into(),
-                        ReadOptions::default(),
-                    )
-                    .await
-                    .unwrap();
-                    while let Some(item) = replay.next().await {
-                        item.unwrap();
-                    }
-                    replay.finish_tracked().await.unwrap()
-                } else {
-                    Oversized::init_with_checkpoint(context.child("init"), cfg.clone(), (0, 0))
-                        .await
-                        .unwrap()
-                };
-
-                // Every completed live replay returns the same journal for the next append.
-                for id in 0..3 {
-                    let position;
-                    (journal, position, _, _) = journal
-                        .append(1, TestEntry::new(id, 0, 0), &[id as u8; 16])
-                        .await
-                        .unwrap();
-                    assert_eq!(position, id);
-                    let mut replay = journal
-                        .replay(0, 0, NZUsize!(1024), ReadOptions::default())
-                        .await
-                        .unwrap();
-                    let mut ids = Vec::new();
-                    while let Some(item) = replay.next().await {
-                        let (section, position, entry) = item.unwrap();
-                        assert_eq!(section, 1);
-                        assert_eq!(position, entry.id);
-                        ids.push(entry.id);
-                    }
-                    assert_eq!(ids, (0..=id).collect::<Vec<_>>());
-                    journal = replay.finish().unwrap();
-                }
-                (journal, _, _, _) = journal
-                    .append(1, TestEntry::new(3, 0, 0), &[3; 16])
-                    .await
-                    .unwrap();
-                _ = journal.sync_all().await.unwrap();
-
-                // Reopening must publish all four paired entries under either contract.
-                let journal: Oversized<_, TestEntry, TestValue> = if tracked {
-                    let mut replay = Oversized::init_with_metadata(
-                        context.child("oversized"),
-                        cfg,
-                        "replay-markers".into(),
-                        ReadOptions::default(),
-                    )
-                    .await
-                    .unwrap();
-                    while let Some(item) = replay.next().await {
-                        item.unwrap();
-                    }
-                    replay.finish_tracked().await.unwrap()
-                } else {
-                    Oversized::init_with_checkpoint(
-                        context.child("reopen"),
-                        cfg,
-                        (1, 4 * TestEntry::SIZE as u64),
-                    )
-                    .await
-                    .unwrap()
-                };
-                for id in 0..4 {
-                    let entry = journal.get(1, id).await.unwrap();
-                    assert_eq!(entry.id, id);
-                    let (offset, size) = entry.value_location();
-                    assert_eq!(
-                        journal.get_value(1, offset, size).await.unwrap(),
-                        [id as u8; 16]
-                    );
-                }
-                journal.destroy().await.unwrap();
-            }
-        });
-    }
-
-    /// A tracked startup replay finishes only through finish_tracked, and a live replay only
-    /// through finish.
-    #[test_traced]
-    fn test_replay_completion_requires_matching_phase() {
-        deterministic::Runner::default().start(|context| async move {
+            // Seed one durable entry.
             let cfg = test_cfg();
             let mut journal: Oversized<_, TestEntry, TestValue> =
                 Oversized::init_with_checkpoint(context.child("seed"), cfg.clone(), (0, 0))
@@ -2857,57 +2618,18 @@ mod tests {
                 .append(1, TestEntry::new(1, 0, 0), &[1; 16])
                 .await
                 .unwrap();
-            _ = journal.sync_all().await.unwrap();
+            _ = journal.sync(1).await.unwrap();
 
+            // A replay that has not yielded its entry must not finish.
             let replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
                 context.child("oversized"),
                 cfg.clone(),
-                "completion-markers".into(),
+                MARKERS.into(),
                 ReadOptions::default(),
             )
             .await
             .unwrap();
-            assert!(matches!(
-                replay.finish_tracked().await,
-                Err(Error::ReplayFailed)
-            ));
-
-            let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
-                context.child("oversized"),
-                cfg.clone(),
-                "completion-markers".into(),
-                ReadOptions::default(),
-            )
-            .await
-            .unwrap();
-            while let Some(item) = replay.next().await {
-                item.unwrap();
-            }
-            assert!(matches!(replay.finish(), Err(Error::ReplayFailed)));
-
-            let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
-                context.child("oversized"),
-                cfg.clone(),
-                "completion-markers".into(),
-                ReadOptions::default(),
-            )
-            .await
-            .unwrap();
-            while let Some(item) = replay.next().await {
-                item.unwrap();
-            }
-            let journal = replay.finish_tracked().await.unwrap();
-            let mut replay = journal
-                .replay(0, 0, NZUsize!(1024), ReadOptions::default())
-                .await
-                .unwrap();
-            while let Some(item) = replay.next().await {
-                item.unwrap();
-            }
-            assert!(matches!(
-                replay.finish_tracked().await,
-                Err(Error::ReplayFailed)
-            ));
+            assert!(matches!(replay.finish().await, Err(Error::ReplayFailed)));
 
             // The synced entry reopens through its checkpoint, so the store can be destroyed.
             Oversized::<_, TestEntry, TestValue>::init_with_checkpoint(
@@ -2923,79 +2645,66 @@ mod tests {
         });
     }
 
-    /// Replay passes the caller's read options to every backing index read.
+    /// The tracked startup replay passes the caller's read options to every backing index read.
     #[test_traced]
     fn test_oversized_replay_propagates_read_options() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (context, recordings) = commonware_runtime::mocks::RecordingContext::new(context);
+            // Seed one durable entry and publish a marker covering it, so the replay reads no
+            // value.
             let cfg = entry_cfg();
             let page_cache = cfg.index_page_cache.clone();
-            let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init_with_checkpoint(context, cfg, (0, 0))
-                    .await
-                    .expect("Failed to init");
+            let mut oversized = open_tracked(context.child("seed"), cfg.clone())
+                .await
+                .expect("Failed to init");
             (oversized, _, _, _) = oversized
                 .append(1, TestEntry::new(1, 0, 0), &[1; 16])
                 .await
                 .expect("Failed to append");
             oversized = oversized.sync(1).await.expect("Failed to sync");
+            let mut tracking = oversized.tracking.take().unwrap();
+            assert!(tracking.stage_marker(1, 1));
+            tracking.metadata = tracking.metadata.sync().await.unwrap();
+            drop(tracking);
+            drop(oversized);
 
-            // Evict the index page so replay must exercise the backing journal read.
+            // Reopen and evict the index page so replay must exercise the backing journal read.
+            let (context, recordings) = commonware_runtime::mocks::RecordingContext::new(context);
+            let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
+                context.child("reopen"),
+                cfg,
+                MARKERS.into(),
+                ReadOptions::DONT_CACHE,
+            )
+            .await
+            .expect("Failed to replay");
             page_cache.clear();
-            let mut replay = oversized
-                .replay(1, 0, NZUsize!(1024), ReadOptions::DONT_CACHE)
-                .await
-                .expect("Failed to replay");
             recordings.clear();
 
-            // The adapter must preserve the caller's policy on the lazy refill.
+            // The replay must preserve the caller's policy on the lazy refill.
             let (section, position, entry) = replay
                 .next()
                 .await
                 .expect("missing replay item")
                 .expect("Failed to read replay item");
             assert_eq!((section, position, entry.id), (1, 0, 1));
-
             let reads = recordings.snapshot().reads;
-            assert!(!reads.is_empty());
+            assert!(!reads.is_empty(), "the replay must read the evicted page");
             assert!(
                 reads
                     .iter()
-                    .all(|options| *options == ReadOptions::DONT_CACHE)
+                    .all(|options| *options == ReadOptions::DONT_CACHE),
+                "every replay read must use the caller's options"
             );
 
             assert!(replay.next().await.is_none());
             replay
                 .finish()
+                .await
                 .expect("failed to finish replay")
                 .destroy()
                 .await
                 .expect("Failed to destroy");
-        });
-    }
-
-    /// Finishing a replay before it is drained fails.
-    #[test_traced]
-    fn test_oversized_replay_finish_before_drain_fails() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg();
-            let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init_with_checkpoint(context, cfg, (0, 0))
-                    .await
-                    .expect("Failed to init");
-            (oversized, _, _, _) = oversized
-                .append(1, TestEntry::new(1, 0, 0), &[1; 16])
-                .await
-                .expect("Failed to append");
-            oversized = oversized.sync(1).await.expect("Failed to sync");
-
-            let replay = oversized
-                .replay(0, 0, NZUsize!(1024), ReadOptions::default())
-                .await
-                .expect("Failed to replay");
-            assert!(matches!(replay.finish(), Err(Error::ReplayFailed)));
         });
     }
 
@@ -3024,10 +2733,13 @@ mod tests {
             // Prune sections < 3
             (oversized, _) = oversized.prune(3).await.expect("Failed to prune");
 
-            // The public accessor mirrors the guard
-            assert!(oversized.pruned(1));
-            assert!(oversized.pruned(2));
-            assert!(!oversized.pruned(3));
+            // Reads below the floor report the prune.
+            for section in 1..=2 {
+                assert!(matches!(
+                    oversized.get(section, 0).await,
+                    Err(Error::AlreadyPrunedToSection(3))
+                ));
+            }
 
             // Sections 1, 2 should be gone
             assert!(oversized.get(1, 0).await.is_err());
@@ -3200,7 +2912,7 @@ mod tests {
 
             // One sync of every section publishes no marker, so the damage below lies above every
             // floor.
-            oversized = oversized.sync_all().await.expect("Failed to sync");
+            oversized = oversized.sync([1, 2, 3]).await.expect("Failed to sync");
             drop(oversized);
 
             // Truncate section 1 glob to keep only first entry
@@ -3646,7 +3358,7 @@ mod tests {
 
             // One sync of every section publishes no marker, so the damage below lies above every
             // floor.
-            oversized = oversized.sync_all().await.expect("Failed to sync");
+            oversized = oversized.sync([1, 2, 3]).await.expect("Failed to sync");
             drop(oversized);
 
             // Remove section 1's values while its index remains.
@@ -3657,11 +3369,13 @@ mod tests {
                 codec_config: (),
                 write_buffer: cfg.value_write_buffer,
             };
-            let mut glob: Glob<_, TestValue> = Glob::init(context.child("glob"), glob_cfg)
-                .await
-                .expect("Failed to init glob");
+            let mut glob: Glob<_, TestValue> =
+                GlobRecovery::init(context.child("glob"), glob_cfg, u64::MAX)
+                    .await
+                    .expect("Failed to init glob")
+                    .into();
             (glob, _) = glob.prune(2).await.expect("Failed to prune glob");
-            glob = glob.sync_all().await.expect("Failed to sync glob");
+            glob = glob.sync([2, 3]).await.expect("Failed to sync glob");
             drop(glob);
 
             // Recovery truncates index section 1 to zero entries.
@@ -3706,7 +3420,7 @@ mod tests {
 
             // One sync of every section publishes no marker, so the damage below lies above every
             // floor.
-            oversized = oversized.sync_all().await.expect("Failed to sync");
+            oversized = oversized.sync([1, 2, 3]).await.expect("Failed to sync");
             drop(oversized);
 
             // Delete index blob for section 2 (simulate corruption/loss)
@@ -4338,9 +4052,11 @@ mod tests {
                 codec_config: (),
                 write_buffer: cfg.value_write_buffer,
             };
-            let mut glob: Glob<_, TestValue> = Glob::init(context.child("glob"), glob_cfg)
-                .await
-                .expect("Failed to init glob");
+            let mut glob: Glob<_, TestValue> =
+                GlobRecovery::init(context.child("glob"), glob_cfg, u64::MAX)
+                    .await
+                    .expect("Failed to init glob")
+                    .into();
             let orphan_value: TestValue = [99; 16];
             (glob, _, _) = glob
                 .append(3, &orphan_value)
@@ -4360,7 +4076,7 @@ mod tests {
             assert!(oversized.get(2, 0).await.is_ok());
 
             // Newest section should be 2 (orphan was removed)
-            assert_eq!(oversized.newest_section(), Some(2));
+            assert_eq!(oversized.index.newest_section(), Some(2));
 
             oversized.destroy().await.expect("Failed to destroy");
         });
@@ -4395,9 +4111,11 @@ mod tests {
                 codec_config: (),
                 write_buffer: cfg.value_write_buffer,
             };
-            let mut glob: Glob<_, TestValue> = Glob::init(context.child("glob"), glob_cfg)
-                .await
-                .expect("Failed to init glob");
+            let mut glob: Glob<_, TestValue> =
+                GlobRecovery::init(context.child("glob"), glob_cfg, u64::MAX)
+                    .await
+                    .expect("Failed to init glob")
+                    .into();
 
             for section in 2u64..=4 {
                 let orphan_value: TestValue = [section as u8; 16];
@@ -4419,7 +4137,7 @@ mod tests {
             assert!(oversized.get(1, 0).await.is_ok());
 
             // Newest section should be 1 (orphans removed)
-            assert_eq!(oversized.newest_section(), Some(1));
+            assert_eq!(oversized.index.newest_section(), Some(1));
 
             oversized.destroy().await.expect("Failed to destroy");
         });
@@ -4439,9 +4157,11 @@ mod tests {
                 codec_config: (),
                 write_buffer: cfg.value_write_buffer,
             };
-            let mut glob: Glob<_, TestValue> = Glob::init(context.child("glob"), glob_cfg)
-                .await
-                .expect("Failed to init glob");
+            let mut glob: Glob<_, TestValue> =
+                GlobRecovery::init(context.child("glob"), glob_cfg, u64::MAX)
+                    .await
+                    .expect("Failed to init glob")
+                    .into();
 
             for section in 1u64..=3 {
                 let orphan_value: TestValue = [section as u8; 16];
@@ -4460,8 +4180,8 @@ mod tests {
                     .expect("Failed to init");
 
             // No sections should exist
-            assert_eq!(oversized.newest_section(), None);
-            assert_eq!(oversized.oldest_section(), None);
+            assert_eq!(oversized.index.newest_section(), None);
+            assert_eq!(oversized.index.oldest_section(), None);
 
             oversized.destroy().await.expect("Failed to destroy");
         });
@@ -4497,9 +4217,11 @@ mod tests {
                 codec_config: (),
                 write_buffer: cfg.value_write_buffer,
             };
-            let mut glob: Glob<_, TestValue> = Glob::init(context.child("glob"), glob_cfg)
-                .await
-                .expect("Failed to init glob");
+            let mut glob: Glob<_, TestValue> =
+                GlobRecovery::init(context.child("glob"), glob_cfg, u64::MAX)
+                    .await
+                    .expect("Failed to init glob")
+                    .into();
 
             for section in 2u64..=3 {
                 let orphan_value: TestValue = [section as u8; 16];
@@ -4557,7 +4279,7 @@ mod tests {
             // Both sections should be valid
             assert!(oversized.get(1, 0).await.is_ok());
             assert!(oversized.get(2, 0).await.is_ok());
-            assert_eq!(oversized.newest_section(), Some(2));
+            assert_eq!(oversized.index.newest_section(), Some(2));
 
             oversized.destroy().await.expect("Failed to destroy");
         });
@@ -4602,7 +4324,7 @@ mod tests {
                 let entry = oversized.get(section, 0).await.expect("Failed to get");
                 assert_eq!(entry.id, section);
             }
-            assert_eq!(oversized.newest_section(), Some(3));
+            assert_eq!(oversized.index.newest_section(), Some(3));
 
             oversized.destroy().await.expect("Failed to destroy");
         });
@@ -4637,9 +4359,11 @@ mod tests {
                 codec_config: (),
                 write_buffer: cfg.value_write_buffer,
             };
-            let mut glob: Glob<_, TestValue> = Glob::init(context.child("glob"), glob_cfg)
-                .await
-                .expect("Failed to init glob");
+            let mut glob: Glob<_, TestValue> =
+                GlobRecovery::init(context.child("glob"), glob_cfg, u64::MAX)
+                    .await
+                    .expect("Failed to init glob")
+                    .into();
             let orphan_value: TestValue = [2; 16];
             (glob, _, _) = glob
                 .append(2, &orphan_value)
@@ -4667,7 +4391,7 @@ mod tests {
             assert!(oversized.get(1, 0).await.is_err());
 
             // Orphan section 2 should be removed
-            assert_eq!(oversized.newest_section(), Some(1));
+            assert_eq!(oversized.index.newest_section(), Some(1));
 
             oversized.destroy().await.expect("Failed to destroy");
         });
@@ -4707,9 +4431,11 @@ mod tests {
                 codec_config: (),
                 write_buffer: cfg.value_write_buffer,
             };
-            let mut glob: Glob<_, TestValue> = Glob::init(context.child("glob"), glob_cfg)
-                .await
-                .expect("Failed to init glob");
+            let mut glob: Glob<_, TestValue> =
+                GlobRecovery::init(context.child("glob"), glob_cfg, u64::MAX)
+                    .await
+                    .expect("Failed to init glob")
+                    .into();
 
             for section in [2u64, 4, 6] {
                 let orphan_value: TestValue = [section as u8; 16];
@@ -4734,8 +4460,8 @@ mod tests {
             }
 
             // Verify only sections 1, 3, 5 exist (orphans removed)
-            assert_eq!(oversized.oldest_section(), Some(1));
-            assert_eq!(oversized.newest_section(), Some(5));
+            assert_eq!(oversized.index.oldest_section(), Some(1));
+            assert_eq!(oversized.index.newest_section(), Some(5));
 
             oversized.destroy().await.expect("Failed to destroy");
         });
@@ -4762,7 +4488,7 @@ mod tests {
 
             // One sync of every section publishes no marker, so the damage below lies above every
             // floor.
-            oversized = oversized.sync_all().await.expect("Failed to sync");
+            oversized = oversized.sync([1, 2]).await.expect("Failed to sync");
             drop(oversized);
 
             // Keep both value blobs, but erase one index by truncation and the other by removal.
@@ -4822,7 +4548,10 @@ mod tests {
                     .expect("Failed to append after recovery");
                 assert_eq!(position, 0);
             }
-            oversized = oversized.sync_all().await.expect("Failed to sync sentinel");
+            oversized = oversized
+                .sync([1, 2])
+                .await
+                .expect("Failed to sync sentinel");
             drop(oversized);
 
             // The sentinel entries written after recovery survive a clean reopen.
@@ -5063,7 +4792,7 @@ mod tests {
 
             // One sync of every section publishes no marker, so the damage below lies above every
             // floor.
-            oversized = oversized.sync_all().await.expect("Failed to sync");
+            oversized = oversized.sync([1, 2]).await.expect("Failed to sync");
             drop(oversized);
 
             // Truncate section 1's index to 0 (making it empty)
@@ -5089,7 +4818,7 @@ mod tests {
             assert_eq!(entry.id, 10);
 
             // Section 1 should still be tracked (blob exists but is empty)
-            assert_eq!(oversized.oldest_section(), Some(1));
+            assert_eq!(oversized.index.oldest_section(), Some(1));
 
             // Values are reachable only through index entries, so recovery removes the orphaned
             // bytes before the section can be reused.
@@ -5227,7 +4956,10 @@ mod tests {
 
             // One sync of every section publishes no marker, so the damage below lies above every
             // floor.
-            oversized = oversized.sync_all().await.expect("Failed to sync");
+            oversized = oversized
+                .sync(large_sections)
+                .await
+                .expect("Failed to sync");
             drop(oversized);
 
             // Simulate crash: truncate glob for middle section
@@ -5402,9 +5134,11 @@ mod tests {
                 codec_config: (),
                 write_buffer: cfg.value_write_buffer,
             };
-            let mut glob: Glob<_, TestValue> = Glob::init(context.child("glob"), glob_cfg)
-                .await
-                .expect("Failed to init glob");
+            let mut glob: Glob<_, TestValue> =
+                GlobRecovery::init(context.child("glob"), glob_cfg, u64::MAX)
+                    .await
+                    .expect("Failed to init glob")
+                    .into();
 
             for section in 2u64..=4 {
                 let orphan_value: TestValue = [section as u8; 16];
@@ -5439,8 +5173,8 @@ mod tests {
             assert_eq!(value, [1; 16]);
 
             // No orphan sections should remain
-            assert_eq!(oversized.oldest_section(), Some(1));
-            assert_eq!(oversized.newest_section(), Some(1));
+            assert_eq!(oversized.index.oldest_section(), Some(1));
+            assert_eq!(oversized.index.newest_section(), Some(1));
 
             // Should be able to append to section 2 (now clean)
             let new_value: TestValue = [42; 16];
@@ -5451,40 +5185,6 @@ mod tests {
                 .await
                 .expect("Failed to append to section 2");
             assert_eq!(pos, 0); // First entry in new section
-
-            oversized.destroy().await.expect("Failed to destroy");
-        });
-    }
-
-    /// Reading the last entry of a pruned section reports the prune.
-    #[test_traced]
-    fn test_last_pruned_section_returns_error() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg();
-            let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init_with_checkpoint(context, cfg, (0, 0))
-                    .await
-                    .expect("Failed to init");
-
-            let value: TestValue = [1; 16];
-            (oversized, _, _, _) = oversized
-                .append(0, TestEntry::new(1, 0, 0), &value)
-                .await
-                .expect("Failed to append");
-            (oversized, _, _, _) = oversized
-                .append(1, TestEntry::new(2, 0, 0), &value)
-                .await
-                .expect("Failed to append");
-            oversized = oversized.sync_all().await.expect("Failed to sync");
-
-            (oversized, _) = oversized.prune(1).await.expect("Failed to prune");
-
-            assert!(matches!(
-                oversized.last(0).await,
-                Err(Error::AlreadyPrunedToSection(1))
-            ));
-            assert!(oversized.last(1).await.unwrap().is_some());
 
             oversized.destroy().await.expect("Failed to destroy");
         });
@@ -5575,7 +5275,7 @@ mod tests {
                     while let Some(item) = replay.next().await {
                         item.unwrap();
                     }
-                    let mut journal = replay.finish_tracked().await.unwrap();
+                    let mut journal = replay.finish().await.unwrap();
                     for section in 0..2u64 {
                         (journal, _, _, _) = journal
                             .append(section, TestEntry::new(section, 0, 0), &[section as u8; 16])
@@ -5585,7 +5285,7 @@ mod tests {
 
                     // Publish both markers, then prune section 0, which durably removes its
                     // marker as a newer generation before deleting its blobs.
-                    journal = journal.sync_all().await.unwrap();
+                    journal = journal.sync([0, 1]).await.unwrap();
                     journal = journal.sync(Vec::<u64>::new()).await.unwrap();
                     (journal, _) = journal.prune(1).await.unwrap();
 
@@ -5621,7 +5321,7 @@ mod tests {
             while let Some(item) = replay.next().await {
                 item.unwrap();
             }
-            let journal = replay.finish_tracked().await.unwrap();
+            let journal = replay.finish().await.unwrap();
             assert_eq!(journal.get(1, 0).await.unwrap().id, 1);
         });
     }
@@ -5650,7 +5350,7 @@ mod tests {
                     while let Some(item) = replay.next().await {
                         item.unwrap();
                     }
-                    let mut journal = replay.finish_tracked().await.unwrap();
+                    let mut journal = replay.finish().await.unwrap();
 
                     // Make every section durable and publish a marker for each.
                     for section in 0..SECTIONS {
@@ -5662,7 +5362,10 @@ mod tests {
                                 .unwrap();
                         }
                     }
-                    journal = journal.sync_all().await.unwrap();
+                    journal = journal
+                        .sync((0..SECTIONS).collect::<Vec<_>>())
+                        .await
+                        .unwrap();
                     journal = journal.sync(Vec::<u64>::new()).await.unwrap();
 
                     // Fail syncs and removals at random so the prune stops at different steps.
@@ -5693,7 +5396,7 @@ mod tests {
                 while let Some(item) = replay.next().await {
                     item.unwrap();
                 }
-                let journal = replay.finish_tracked().await.unwrap();
+                let journal = replay.finish().await.unwrap();
                 for section in 0..SECTIONS {
                     let retained = match journal.size(section) {
                         Ok(size) => size / TestEntry::SIZE as u64,
@@ -5741,7 +5444,7 @@ mod tests {
                     .await
                     .unwrap();
             }
-            journal = journal.sync_all().await.unwrap();
+            journal = journal.sync([0, 1, 2]).await.unwrap();
             let checkpoint = (2, journal.size(2).unwrap());
 
             // Prune the index below section 2 and stop before the values are pruned.
@@ -5755,7 +5458,7 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(journal.oldest_section(), Some(2));
+            assert_eq!(journal.index.oldest_section(), Some(2));
             assert_eq!(
                 context.scan("test-values").await.unwrap(),
                 vec![2u64.to_be_bytes().to_vec()]
@@ -5789,7 +5492,7 @@ mod tests {
                     .await
                     .unwrap();
             }
-            journal = journal.sync_all().await.unwrap();
+            journal = journal.sync([0, 1, 2]).await.unwrap();
             let checkpoint = (2, journal.size(2).unwrap());
             drop(journal);
 
@@ -5837,7 +5540,7 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(journal.oldest_section(), None);
+            assert_eq!(journal.index.oldest_section(), None);
             assert_eq!(pending.calls(), 0, "an empty restore must not sync");
             let observed = recordings.snapshot();
             assert!(observed.reads.is_empty(), "an empty restore must not read");
@@ -5907,7 +5610,7 @@ mod tests {
                     second_offset = offset;
                 }
             }
-            drop(journal.sync_all().await.unwrap());
+            drop(journal.sync(SECTION).await.unwrap());
 
             // Only the first entry is committed. The remaining values require verification.
             let mut markers: Metadata<_, SectionKey, u64> = Metadata::init(
@@ -5963,10 +5666,7 @@ mod tests {
                 assert!(replay.next().await.is_none());
                 assert!(replay.next().await.is_none());
             }
-            assert!(matches!(
-                replay.finish_tracked().await,
-                Err(Error::ReplayFailed)
-            ));
+            assert!(matches!(replay.finish().await, Err(Error::ReplayFailed)));
 
             let markers: Metadata<_, SectionKey, u64> = Metadata::init(
                 context.child("check_markers"),
@@ -5995,7 +5695,7 @@ mod tests {
                 assert_eq!((section, position, entry.id), (SECTION, id, id));
             }
             assert!(replay.next().await.is_none());
-            let journal = replay.finish_tracked().await.unwrap();
+            let journal = replay.finish().await.unwrap();
             assert_eq!(
                 journal.size(SECTION).unwrap(),
                 retained * TestEntry::SIZE as u64
@@ -6018,75 +5718,6 @@ mod tests {
                         .unwrap(),
                     [id as u8; 16]
                 );
-            }
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    /// Live replay has the same cancellation contract as tracked startup replay.
-    #[rstest::rstest]
-    #[case::finish(false)]
-    #[case::next(true)]
-    fn test_oversized_live_replay_dropped_during_read_fails_replay(#[case] resume: bool) {
-        deterministic::Runner::default().start(|context| async move {
-            const SECTION: u64 = 1;
-            let cfg = test_cfg();
-            let mut journal: Oversized<_, TestEntry, TestValue> =
-                Oversized::init_with_checkpoint(context.child("seed"), cfg.clone(), (0, 0))
-                    .await
-                    .unwrap();
-            for id in 0..4 {
-                (journal, _, _, _) = journal
-                    .append(SECTION, TestEntry::new(id, 0, 0), &[id as u8; 16])
-                    .await
-                    .unwrap();
-            }
-            drop(journal.sync_all().await.unwrap());
-
-            let (gated, gate) =
-                ReadGateContext::new(context.child("cancel"), cfg.index_partition.clone());
-            let journal: Oversized<_, TestEntry, TestValue> = Oversized::init_with_checkpoint(
-                gated,
-                cfg.clone(),
-                (1, 4 * TestEntry::SIZE as u64),
-            )
-            .await
-            .unwrap();
-            let mut replay = journal
-                .replay(SECTION, 0, NZUsize!(64), ReadOptions::default())
-                .await
-                .unwrap();
-
-            // Dropping a call before it is polled starts no read and leaves the replay usable.
-            drop(replay.next());
-            gate.arm();
-            {
-                let next = replay.next();
-                futures::pin_mut!(next);
-                assert!(futures::poll!(next.as_mut()).is_pending());
-                assert!(gate.blocked() > 0);
-            }
-            gate.disarm();
-            if resume {
-                assert!(matches!(
-                    replay.next().await,
-                    Some(Err(Error::ReplayInterrupted))
-                ));
-                assert!(replay.next().await.is_none());
-                assert!(replay.next().await.is_none());
-            }
-            assert!(matches!(replay.finish(), Err(Error::ReplayFailed)));
-
-            let journal: Oversized<_, TestEntry, TestValue> = Oversized::init_with_checkpoint(
-                context.child("reopen"),
-                cfg,
-                (1, 4 * TestEntry::SIZE as u64),
-            )
-            .await
-            .unwrap();
-            assert_eq!(journal.size(SECTION).unwrap(), 4 * TestEntry::SIZE as u64);
-            for id in 0..4 {
-                assert_eq!(journal.get(SECTION, id).await.unwrap().id, id);
             }
             journal.destroy().await.unwrap();
         });

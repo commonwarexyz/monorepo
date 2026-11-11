@@ -18,6 +18,7 @@ use commonware_utils::{NZU16, NZU64, NZUsize};
 use core::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 use oversized::Record;
 use rand::RngExt as _;
+use std::collections::BTreeMap;
 
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(1024);
 const REPLAY_BUFFER: NonZeroUsize = NZUsize!(1024);
@@ -180,8 +181,14 @@ impl StorageWorkload for SegmentedFixedWorkload {
             page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: WRITE_BUFFER,
         };
-        let mut journal =
-            segmented_fixed::Journal::<_, u64>::init(context.child("journal"), config).await?;
+        let mut journal = segmented_fixed::Journal::<_, u64>::preflight_floors(
+            context.child("journal"),
+            config,
+            &BTreeMap::new(),
+        )
+        .await?
+        .finish()
+        .await?;
 
         let items_count = context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4);
         let mut data_to_write = vec![0u64; items_count];
@@ -212,7 +219,10 @@ impl<const COMPRESSED: bool> StorageWorkload for SegmentedGlobWorkload<COMPRESSE
             codec_config: (RangeCfg::new(0..256), ()),
             write_buffer: WRITE_BUFFER,
         };
-        let mut journal = glob::Glob::<_, Vec<u8>>::init(context.child("journal"), config).await?;
+        let mut journal: glob::Glob<_, Vec<u8>> =
+            glob::Recovery::init(context.child("journal"), config, u64::MAX)
+                .await?
+                .into();
 
         let items_count = context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4);
         let mut data_to_write = vec![Vec::new(); items_count];
