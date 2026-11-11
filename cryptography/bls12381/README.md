@@ -3,7 +3,9 @@
 [![Crates.io](https://img.shields.io/crates/v/commonware-cryptography-bls12381.svg)](https://crates.io/crates/commonware-cryptography-bls12381)
 [![Docs.rs](https://docs.rs/commonware-cryptography-bls12381/badge.svg)](https://docs.rs/commonware-cryptography-bls12381)
 
-BLS12-381 cryptography.
+BLS12-381 cryptography: the groups G1 and G2, their scalar field, and the pairing into the target group GT, with SIMD arithmetic selected for the host CPU at run time.
+
+The groups and the scalar field implement the algebra traits of [commonware-math](https://docs.rs/commonware-math), so code written against those traits works with them. Operations over slices (sums, multiplications of many elements by their own scalars, multi-scalar multiplications, optionally in parallel, and pairings of many pairs) cost less per element than repeating the single operation, and a product of pairings shares one final exponentiation. Multiplication by a scalar runs in constant time; multi-scalar multiplication runs in variable time and takes public scalars only. See the [crate documentation](https://docs.rs/commonware-cryptography-bls12381) for usage and an example.
 
 ## Status
 
