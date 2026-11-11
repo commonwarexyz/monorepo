@@ -401,8 +401,9 @@ mod tests {
     use commonware_cryptography::{Signer as _, ed25519 as crypto_ed25519, sha256::Sha256};
     use commonware_math::algebra::Random as _;
     use commonware_resolver::Fetch;
-    use commonware_utils::{NZU64, sync::Mutex};
-    use std::{fmt::Debug, num::NonZeroU64, ops::RangeInclusive, sync::Arc};
+    use commonware_utils::{NZU64, Widen, sync::Mutex};
+    use rstest::rstest;
+    use std::{fmt::Debug, num::NonZeroU64, sync::Arc};
 
     type TestDigest = <Sha256 as commonware_cryptography::Hasher>::Digest;
     type TestScheme = simplex_ed25519::Scheme;
@@ -658,6 +659,10 @@ mod tests {
         fn bounds(&self, epoch: Epoch) -> Option<(Height, Height)> {
             self.0.get(usize::try_from(epoch.get()).ok()?).copied()
         }
+
+        fn epochs(&self) -> u64 {
+            Widen::widen(self.0.len())
+        }
     }
 
     impl Epocher for UnevenEpocher {
@@ -676,21 +681,20 @@ mod tests {
         }
     }
 
-    /// Checks that `retained_from` keeps every window in `windows` behind each view in `views` of
-    /// the first `epochs` epochs, and keeps no more earlier epochs than it needs.
-    fn assert_keeps_window<E: Epocher + Debug>(
-        epocher: &E,
-        epochs: u64,
-        windows: RangeInclusive<u64>,
-        views: RangeInclusive<u64>,
-    ) {
+    /// Checks that `retained_from` keeps the whole window and no extra earlier epoch, for rounds in
+    /// the first `epochs` epochs of `epocher`.
+    fn assert_keeps_window<E: Epocher + Debug>(epocher: &E, epochs: u64) {
         let heights = |epoch: u64| {
             let epoch = Epoch::new(epoch);
             epocher.last(epoch).unwrap().get() - epocher.first(epoch).unwrap().get() + 1
         };
-        for window in windows {
+
+        // The largest window reaches genesis from the start of every epoch checked, and views run
+        // up to it.
+        let largest = epocher.first(Epoch::new(epochs - 1)).unwrap().get() + 1;
+        for window in 1..=largest {
             for epoch in 0..epochs {
-                for view in views.clone() {
+                for view in 0..=largest {
                     let witnessed = Round::new(Epoch::new(epoch), View::new(view));
                     let retained = retained_from(epocher, witnessed, ViewDelta::new(window));
 
@@ -722,20 +726,22 @@ mod tests {
         }
     }
 
-    #[test]
-    fn retained_from_keeps_the_window_without_a_spare_epoch() {
-        for length in 2..=6 {
-            let epocher = FixedEpocher::new(NonZeroU64::new(length).unwrap());
-            assert_keeps_window(&epocher, 9, 1..=13, 0..=15);
-        }
+    #[rstest]
+    fn retained_from_keeps_the_window_without_a_spare_epoch(#[values(2, 3, 4, 5, 6)] length: u64) {
+        let epocher = FixedEpocher::new(NonZeroU64::new(length).unwrap());
+        assert_keeps_window(&epocher, 9);
     }
 
-    #[test]
-    fn retained_from_keeps_the_window_across_uneven_epochs() {
-        // Single-height epochs sit between longer ones, and epoch six holds more heights than the
-        // largest window.
-        let epocher = UnevenEpocher::new(&[3, 1, 6, 1, 1, 4, 14, 2, 5]);
-        assert_keeps_window(&epocher, 9, 1..=13, 0..=15);
+    #[rstest]
+    // Epochs of one height sit between longer ones. Epoch six holds 14 heights, so it can cover a
+    // whole window by itself.
+    #[case::mixed(&[3, 1, 6, 1, 1, 4, 14, 2, 5])]
+    // Every epoch after genesis holds one height, so each view the window lacks keeps one more
+    // earlier epoch, back to genesis.
+    #[case::one_height(&[2, 1, 1, 1, 1, 1, 1, 1, 1])]
+    fn retained_from_keeps_the_window_across_uneven_epochs(#[case] lengths: &[u64]) {
+        let epocher = UnevenEpocher::new(lengths);
+        assert_keeps_window(&epocher, epocher.epochs());
     }
 
     fn floor() -> State<TestScheme, TestDigest> {
