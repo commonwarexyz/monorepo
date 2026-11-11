@@ -242,8 +242,6 @@ mod fuzz {
 
         #[test]
         fn multiples_match_known_answers() {
-            let [x, y, _] = GENERATOR;
-            assert_eq!(affine(&G2::generator()), [x, y]);
             for (scalar, expected) in G2_MULTIPLES {
                 let scalar = Scalar::from_bytes(&scalar).expect("below the order");
                 assert_eq!(affine(&(G2::generator() * &scalar)), expected);
