@@ -2632,9 +2632,9 @@ where
             return self;
         }
 
-        // Keep cached data from the last `view_retention` views before the previous finalized
-        // round. Since views restart each epoch, any views we still need from earlier epochs are
-        // counted as one per block height.
+        // Keep cached data from the last `view_retention` views before the previously witnessed
+        // finalization round. Since views restart each epoch, any views we still need from earlier
+        // epochs are counted as one per block height.
         if let Some(previous) = self.floor.witness(round) {
             let retained = retained_from(&self.epocher, previous, self.view_retention);
             self.cache = self.cache.prune_by_view(retained).await;
