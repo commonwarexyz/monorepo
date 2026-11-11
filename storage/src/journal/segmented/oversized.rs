@@ -6650,6 +6650,104 @@ mod tests {
         });
     }
 
+    /// A tracked prune interrupted at any step reopens to every entry at or above the prune floor,
+    /// with each section below it retained whole or removed.
+    #[test_traced]
+    fn test_oversized_interrupted_prune_reopens_to_consistent_prefix() {
+        const MARKERS: &str = "prune-markers";
+        const SECTIONS: u64 = 3;
+        const ENTRIES: u64 = 2;
+        const FLOOR: u64 = 2;
+        let mut interrupted = 0;
+        for seed in 0..64u64 {
+            let (failed, checkpoint) =
+                deterministic::Runner::seeded(seed).start_and_recover(|context| async move {
+                    // Open an empty tracked journal.
+                    let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
+                        context.child("first"),
+                        test_cfg(),
+                        MARKERS.into(),
+                        ReadOptions::default(),
+                    )
+                    .await
+                    .unwrap();
+                    while let Some(item) = replay.next().await {
+                        item.unwrap();
+                    }
+                    let mut journal = replay.finish_tracked().await.unwrap();
+
+                    // Make every section durable and publish a marker for each.
+                    for section in 0..SECTIONS {
+                        for position in 0..ENTRIES {
+                            let id = section * ENTRIES + position;
+                            (journal, _, _, _) = journal
+                                .append(section, TestEntry::new(id, 0, 0), &[id as u8; 16])
+                                .await
+                                .unwrap();
+                        }
+                    }
+                    journal = journal.sync_all().await.unwrap();
+                    journal = journal.sync(Vec::<u64>::new()).await.unwrap();
+
+                    // Fail syncs and removals at random so the prune stops at different steps.
+                    *context.storage_fault_config().write() = deterministic::FaultConfig {
+                        sync_rate: Some(probability!(0.5)),
+                        remove_rate: Some(probability!(0.5)),
+                        ..Default::default()
+                    };
+                    let result = journal.prune(FLOOR).await;
+                    *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+                    result.is_err()
+                });
+            if !failed {
+                continue;
+            }
+            interrupted += 1;
+
+            // Sections at or above the floor are whole, and each earlier section is whole or gone.
+            deterministic::Runner::from(checkpoint).start(|context| async move {
+                let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
+                    context.child("second"),
+                    test_cfg(),
+                    MARKERS.into(),
+                    ReadOptions::default(),
+                )
+                .await
+                .expect("an interrupted prune must leave a reopenable image");
+                while let Some(item) = replay.next().await {
+                    item.unwrap();
+                }
+                let journal = replay.finish_tracked().await.unwrap();
+                for section in 0..SECTIONS {
+                    let retained = match journal.size(section) {
+                        Ok(size) => size / TestEntry::SIZE as u64,
+                        Err(Error::SectionOutOfRange(_)) => 0,
+                        Err(err) => panic!("section {section} must report its size: {err:?}"),
+                    };
+                    assert!(
+                        retained == ENTRIES || (section < FLOOR && retained == 0),
+                        "section {section} must be whole or pruned, retained {retained}"
+                    );
+                    for position in 0..retained {
+                        let entry = journal.get(section, position).await.unwrap();
+                        assert_eq!(
+                            entry.id,
+                            section * ENTRIES + position,
+                            "a retained entry must keep its position"
+                        );
+                        let (offset, size) = entry.value_location();
+                        assert_eq!(
+                            journal.get_value(section, offset, size).await.unwrap(),
+                            [entry.id as u8; 16],
+                            "a retained entry must read back its value"
+                        );
+                    }
+                }
+            });
+        }
+        assert!(interrupted > 0, "some seed must interrupt the prune");
+    }
+
     /// A tracked bounded open below a section's published marker lowers the marker before it
     /// shortens the index, so an interruption at any point leaves an image the unbounded open
     /// accepts.
