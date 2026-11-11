@@ -508,32 +508,6 @@ impl Random for Scalar {
     }
 }
 
-#[cfg(any(test, feature = "fuzz"))]
-impl<'a> arbitrary::Arbitrary<'a> for Scalar {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        // Bias towards the edges of the range, where carries and reductions happen, and towards
-        // runs of zero and one bits, which become runs of zero digits and of carries in the
-        // windows of a multiplication.
-        Ok(match u.int_in_range(0u8..=7)? {
-            0 => Self::from_u64(u.arbitrary()?),
-            1 => -Self::from_u64(u.arbitrary()?),
-            2 => {
-                let mut words = [0; WORDS];
-                for word in &mut words {
-                    *word = match u.int_in_range(0u8..=3)? {
-                        0 => 0,
-                        1 => u64::MAX,
-                        2 => 1 << u.int_in_range(0u8..=63)?,
-                        _ => u.arbitrary()?,
-                    };
-                }
-                Self::from_words_wide(&words)
-            }
-            _ => Self::from_bytes_wide(&u.arbitrary()?),
-        })
-    }
-}
-
 /// Fuzzing operations for the scalar field.
 #[cfg(any(test, feature = "fuzz"))]
 pub mod fuzz {
@@ -541,6 +515,31 @@ pub mod fuzz {
     use arbitrary::{Arbitrary, Unstructured};
     use commonware_math::algebra::test_suites;
     use std::vec::Vec;
+
+    impl<'a> Arbitrary<'a> for Scalar {
+        fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+            // Bias towards the edges of the range, where carries and reductions happen, and towards
+            // runs of zero and one bits, which become runs of zero digits and of carries in the
+            // windows of a multiplication.
+            Ok(match u.int_in_range(0u8..=7)? {
+                0 => Self::from_u64(u.arbitrary()?),
+                1 => -Self::from_u64(u.arbitrary()?),
+                2 => {
+                    let mut words = [0; WORDS];
+                    for word in &mut words {
+                        *word = match u.int_in_range(0u8..=3)? {
+                            0 => 0,
+                            1 => u64::MAX,
+                            2 => 1 << u.int_in_range(0u8..=63)?,
+                            _ => u.arbitrary()?,
+                        };
+                    }
+                    Self::from_words_wide(&words)
+                }
+                _ => Self::from_bytes_wide(&u.arbitrary()?),
+            })
+        }
+    }
 
     /// A scalar field fuzzing operation.
     #[derive(Clone, Copy, Debug, Arbitrary)]
