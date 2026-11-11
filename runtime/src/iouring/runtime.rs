@@ -1120,7 +1120,9 @@ pub struct Local {
     /// Only this worker registers, and it lowers the cache with every
     /// registration, so the cache is never later than the earliest firing
     /// time. Removals and peer expiry can leave it early, which costs
-    /// spurious expiry passes, never a late timer.
+    /// spurious expiry passes, never a late timer. The worker takes the
+    /// wheel's bound again before it parks, so that a dropped sleep costs an
+    /// idle worker no timed wake.
     pub timers_next: u64,
     /// Reject new registration and send wakes to the global queue, while
     /// allowing idempotent cancellation.
@@ -1353,6 +1355,19 @@ impl Local {
         .into_iter()
         .flatten()
         .min()
+    }
+
+    /// [`Self::next_deadline`] for an idle park, after taking the timers'
+    /// bound again. Drops and early completions leave the cached bound where
+    /// it was, so without this a dropped timeout would cost the idle worker
+    /// a timed wake at its firing time. Only a worker whose cache bounds some
+    /// registration takes the timers' lock for it.
+    fn park_deadline(&mut self) -> Option<Instant> {
+        if self.timers_next != u64::MAX {
+            self.timers_next = self.timers.refresh();
+        }
+
+        self.next_deadline()
     }
 }
 
@@ -2301,7 +2316,7 @@ impl Worker {
             // at this actual idle boundary after any elapsed callback time.
             // Waiting for an expired deadline would not block, so this ends a
             // search as well, and the catch-up's callbacks run user code.
-            let deadline = self.local.borrow().next_deadline();
+            let deadline = self.local.borrow_mut().park_deadline();
             let now = Instant::now();
             if deadline.is_some_and(|deadline| deadline <= now) {
                 if let Some(searcher) = &mut searcher {
