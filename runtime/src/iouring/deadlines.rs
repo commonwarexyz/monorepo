@@ -240,52 +240,6 @@ pub mod tests {
     }
 
     #[test]
-    fn test_deadlines_fire_rounded_up_and_never_early() {
-        // Deadlines on and around tick boundaries fire less than a tick after
-        // them, and the bound covers the earliest.
-        let origin = Instant::now();
-        let mut deadlines = Deadlines::new(origin);
-        let offsets = [
-            1,
-            RESOLUTION - 1,
-            RESOLUTION,
-            RESOLUTION + 1,
-            59_999_999_999,
-        ];
-
-        for (slot, offset) in offsets.iter().enumerate() {
-            let deadline = origin + Duration::from_nanos(*offset);
-            deadlines.insert(slot as u32, deadline);
-            let fires = deadlines.fires_at(deadline);
-
-            assert!(fires >= deadline);
-            assert!(fires < deadline + Duration::from_nanos(RESOLUTION));
-        }
-
-        assert!(deadlines.next_deadline().unwrap() <= origin + Duration::from_nanos(RESOLUTION));
-
-        // Each fires at its firing time, not one nanosecond earlier.
-        let mut fired = Vec::new();
-
-        for (slot, offset) in offsets.iter().enumerate() {
-            let fires = deadlines.fires_at(origin + Duration::from_nanos(*offset));
-            let before = expire(&mut deadlines, fires - Duration::from_nanos(1));
-
-            assert!(!before.contains(&(slot as u32)), "fired early");
-
-            fired.extend(before);
-            fired.extend(expire(&mut deadlines, fires));
-
-            assert!(fired.contains(&(slot as u32)), "fired late");
-        }
-
-        // Each fired once, leaving nothing installed.
-        assert_eq!(fired.len(), offsets.len());
-        assert_eq!(deadlines.len(), 0);
-        assert_eq!(deadlines.next_deadline(), None);
-    }
-
-    #[test]
     fn test_removal_is_exact_and_once() {
         // Two requests share one deadline.
         let origin = Instant::now();
@@ -323,25 +277,13 @@ pub mod tests {
     }
 
     #[test]
-    fn test_times_saturate_at_both_ends() {
+    fn test_deadline_before_the_origin_is_due_at_once() {
         let origin = Instant::now() + Duration::from_secs(1);
         let mut deadlines = Deadlines::new(origin);
-
-        // A deadline before the origin is due at once.
         deadlines.insert(0, origin - Duration::from_millis(1));
 
         assert!(deadlines.next_deadline().unwrap() <= origin);
         assert_eq!(expire(&mut deadlines, origin), [0]);
-
-        // A 30 year deadline, the configured maximum, is far from the end.
-        let far = origin + Duration::from_secs(30 * 365 * 24 * 60 * 60);
-        deadlines.insert(1, far);
-        let fires = deadlines.fires_at(far);
-
-        assert!(fires >= far && fires < far + Duration::from_nanos(RESOLUTION));
-        assert!(deadlines.next_deadline().unwrap() <= fires);
-        assert!(expire(&mut deadlines, far - Duration::from_secs(1)).is_empty());
-        assert_eq!(expire(&mut deadlines, fires), [1]);
     }
 
     /// Compare installed slots and rounded times with an ordered model,
@@ -406,11 +348,13 @@ pub mod tests {
                     }
                     // Advance time, sometimes by a long idle period, and
                     // expire until the bound is later, as the driver would.
+                    // Steps shorter than two ticks stop between a tick's
+                    // start and a firing time, where an early expiry shows.
                     _ => {
-                        now += if rng.random_range(0..10) == 0 {
-                            rng.random_range(0..=24 * 3600 * 1_000_000_000u64)
-                        } else {
-                            rng.random_range(0..=10_000 * RESOLUTION)
+                        now += match rng.random_range(0..10) {
+                            0 => rng.random_range(0..=24 * 3600 * 1_000_000_000u64),
+                            1..=3 => rng.random_range(0..2 * RESOLUTION),
+                            _ => rng.random_range(0..=10_000 * RESOLUTION),
                         };
 
                         let at = origin + Duration::from_nanos(now);

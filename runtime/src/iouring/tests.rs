@@ -4598,9 +4598,10 @@ fn test_task_completing_away_from_its_spawner_retires() {
 }
 
 /// Shutdown while a task's poll runs on another worker. That poll can still
-/// forward a sleep registered on worker zero, whose mailbox stays open until
-/// every pool worker has finished polling. Teardown leaves the future to the
-/// poller. The poller drops it on its own thread once the poll returns.
+/// forward a receive registered on worker zero, whose mailbox stays open until
+/// every pool worker has finished polling, and poll a sleep registered there,
+/// whose timers stay open as long. Teardown leaves the future to the poller.
+/// The poller drops it on its own thread once the poll returns.
 #[test]
 fn test_shutdown_while_a_task_is_mid_poll_on_another_worker() {
     struct Dropped(Arc<Mutex<Option<ThreadId>>>);
@@ -4613,14 +4614,25 @@ fn test_shutdown_while_a_task_is_mid_poll_on_another_worker() {
 
     let dropped = Arc::new(Mutex::new(None));
     let polled = Arc::new(Mutex::new(None));
-    let forwarded = Arc::new(Mutex::new(None::<String>));
+    let forwarded = Arc::new(Mutex::new(None::<(String, String)>));
+    let (socket, peer) = UnixStream::pair().unwrap();
     Runner::new(config().with_worker_threads(2)).start(|context| {
         let dropped = dropped.clone();
         let polled = polled.clone();
         let forwarded = forwarded.clone();
         async move {
-            // Registered on worker zero by this first poll.
+            // Registered on worker zero by these first polls. The silent peer
+            // keeps the receive pending.
+            let mut receive = Operation::register(Request::Recv(RecvRequest {
+                fd: Arc::new(socket.into()),
+                buf: IoBufMut::with_capacity(1),
+                offset: 0,
+                len: 1,
+                exact: true,
+                deadline: None,
+            }));
             let mut sleep = Box::pin(context.sleep(Duration::from_secs(3600)));
+            assert!(futures::poll!(&mut receive).is_pending());
             assert!(futures::poll!(&mut sleep).is_pending());
 
             // Registered without a handle, so no abort can end the task. Only
@@ -4645,17 +4657,27 @@ fn test_shutdown_while_a_task_is_mid_poll_on_another_worker() {
                     }
 
                     // Give worker zero time to reach its drain, then poll the
-                    // sleep. The sleep forwards from worker zero.
+                    // receive, which forwards through worker zero's mailbox,
+                    // and the sleep, which locks worker zero's timers.
                     thread::sleep(Duration::from_millis(20));
                     let waker = futures::task::noop_waker();
-                    let poll = catch_unwind(AssertUnwindSafe(|| {
-                        sleep.as_mut().poll(&mut TaskContext::from_waker(&waker))
-                    }));
-                    *forwarded.lock() = Some(match poll {
+                    let mut cx = TaskContext::from_waker(&waker);
+
+                    let received = match Pin::new(&mut receive).poll(&mut cx) {
+                        Poll::Pending => "pending".into(),
+                        Poll::Ready(Ok(_)) => "ready".into(),
+                        Poll::Ready(Err(error)) => format!("{error:?}"),
+                    };
+
+                    let slept = catch_unwind(AssertUnwindSafe(|| sleep.as_mut().poll(&mut cx)));
+
+                    let slept = match slept {
                         Ok(Poll::Pending) => "pending".into(),
                         Ok(Poll::Ready(())) => "ready".into(),
                         Err(panic) => extract_panic_message(&*panic),
-                    });
+                    };
+
+                    *forwarded.lock() = Some((received, slept));
 
                     // Return pending only once teardown has cleared the task
                     // during this poll.
@@ -4677,28 +4699,41 @@ fn test_shutdown_while_a_task_is_mid_poll_on_another_worker() {
             assert_ne!(other, thread::current().id());
         }
     });
-    assert_eq!(forwarded.lock().as_deref(), Some("pending"));
+    assert_eq!(
+        *forwarded.lock(),
+        Some(("pending".into(), "pending".into()))
+    );
     let poller = polled.lock().expect("the task must have polled");
     assert_eq!(
         *dropped.lock(),
         Some(poller),
         "the future must drop on its poller"
     );
+    drop(peer);
 }
 
 /// Shutdown while worker zero holds a forward it took from its mailbox but has
 /// not applied. A batch of root wakes ahead of the forward completes the root
 /// first. The task that sent the forward is still mid-poll on another worker,
-/// so its sleep stays pending until every pool worker has finished polling.
+/// so its receive stays pending until every pool worker has finished polling.
 #[test]
 fn test_shutdown_retains_a_taken_forward_until_polling_ends() {
     let forwarded = Arc::new(Mutex::new(None::<String>));
+    let (socket, peer) = UnixStream::pair().unwrap();
     Runner::new(config().with_worker_threads(2)).start(|context| {
         let forwarded = forwarded.clone();
         async move {
-            // Registered on worker zero by this first poll.
-            let mut sleep = Box::pin(context.sleep(Duration::from_secs(3600)));
-            assert!(futures::poll!(&mut sleep).is_pending());
+            // Registered on worker zero by this first poll. The silent peer
+            // keeps it pending.
+            let mut receive = Operation::register(Request::Recv(RecvRequest {
+                fd: Arc::new(socket.into()),
+                buf: IoBufMut::with_capacity(1),
+                offset: 0,
+                len: 1,
+                exact: true,
+                deadline: None,
+            }));
+            assert!(futures::poll!(&mut receive).is_pending());
             let root = poll_fn(|cx| Poll::Ready(cx.waker().clone())).await;
 
             // Registered without a handle, so no abort can end the task. Only
@@ -4714,26 +4749,30 @@ fn test_shutdown_retains_a_taken_forward_until_polling_ends() {
                     let mut cx = TaskContext::from_waker(&waker);
 
                     // Queue a full batch of root wakes on worker zero, then
-                    // the sleep's forward behind them.
+                    // the receive's forward behind them.
                     for _ in 0..BATCH_SIZE {
                         root.wake_by_ref();
                     }
-                    assert!(sleep.as_mut().poll(&mut cx).is_pending());
+
+                    assert!(Pin::new(&mut receive).poll(&mut cx).is_pending());
                     queued.store(true, Ordering::Release);
 
                     // Teardown clears this task once worker zero has begun
-                    // its cleanup. Poll the sleep again while still mid-poll.
+                    // its cleanup. Poll the receive again while still
+                    // mid-poll.
                     let deadline = Instant::now() + TEST_TIMEOUT;
+
                     while !cancelled(this.get().unwrap()) {
                         assert!(Instant::now() < deadline, "teardown must clear the task");
                         std::hint::spin_loop();
                     }
-                    let poll = catch_unwind(AssertUnwindSafe(|| sleep.as_mut().poll(&mut cx)));
-                    *forwarded.lock() = Some(match poll {
-                        Ok(Poll::Pending) => "pending".into(),
-                        Ok(Poll::Ready(())) => "ready".into(),
-                        Err(panic) => extract_panic_message(&*panic),
+
+                    *forwarded.lock() = Some(match Pin::new(&mut receive).poll(&mut cx) {
+                        Poll::Pending => "pending".into(),
+                        Poll::Ready(Ok(_)) => "ready".into(),
+                        Poll::Ready(Err(error)) => format!("{error:?}"),
                     });
+
                     Poll::<()>::Pending
                 })
             };
@@ -4765,6 +4804,7 @@ fn test_shutdown_retains_a_taken_forward_until_polling_ends() {
         }
     });
     assert_eq!(forwarded.lock().as_deref(), Some("pending"));
+    drop(peer);
 }
 
 /// Teardown clears two idle tasks whose destructors wake each other, so
