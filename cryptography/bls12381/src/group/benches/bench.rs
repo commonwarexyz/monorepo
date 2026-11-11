@@ -1,9 +1,13 @@
 //! Benchmarks of the group operations.
 //!
-//! # Priorities
+//! The benchmarks compare the public API with blst on the same inputs: addition, doubling,
+//! multiplication by a scalar, sums, and multi-scalar multiplications in G1 and G2, and single
+//! and multiple pairings.
 //!
-//! The benchmarks of interest are the primitives needed for threshold signatures,
-//! multisignatures, and batch verification:
+//! # Roadmap
+//!
+//! Benchmarks to add, many for operations the crate does not implement yet. The ones of interest
+//! are the primitives needed for threshold signatures, multisignatures, and batch verification:
 //!
 //! - Pairing-product checks: a multi-Miller loop followed by one final exponentiation,
 //!   especially for two terms (single-signature verification) and `n + 1` terms
