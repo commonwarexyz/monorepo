@@ -233,9 +233,12 @@ pub(crate) mod reference {
         bytes_from_words(&a)
     }
 
-    /// Draws a canonical integer, biased toward values near the modulus.
+    /// Draws a canonical integer: one below `2^381`, mapping integers at or above `p` to zero.
+    ///
+    /// Fails when the input holds fewer than [`BYTES`] bytes.
     pub(crate) fn canonical(u: &mut Unstructured<'_>) -> arbitrary::Result<Element> {
-        let mut words: Element = u.arbitrary()?;
+        let bytes = u.bytes(BYTES)?.try_into().expect("drew BYTES bytes");
+        let mut words = words_from_bytes(bytes);
         words[WORDS - 1] &= (1 << 61) - 1;
         Ok(if montgomery::is_below(&words, &MODULUS) {
             words
