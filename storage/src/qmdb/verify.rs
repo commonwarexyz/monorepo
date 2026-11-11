@@ -73,9 +73,9 @@ pub trait ProofExt<F: Family, D: Digest> {
     ///
     /// Operations must be in strictly ascending location order. Returns `false` if a location
     /// repeats or precedes the one before it, even if the operations are genuine.
-    fn verify_multi<H: Hasher<Digest = D>, O: Encode>(
+    fn verify_multi<'a, H: Hasher<Digest = D>, O: Encode + 'a>(
         &self,
-        ops: &[(Location<F>, O)],
+        ops: impl IntoIterator<Item = &'a (Location<F>, O)>,
         root: &D,
     ) -> bool;
 }
@@ -136,13 +136,13 @@ impl<F: Family, D: Digest> ProofExt<F, D> for Proof<F, D> {
         ProofStore::new(&qmdb::hasher::<H>(), self, start_loc, encode_ops(ops), root)
     }
 
-    fn verify_multi<H: Hasher<Digest = D>, O: Encode>(
+    fn verify_multi<'a, H: Hasher<Digest = D>, O: Encode + 'a>(
         &self,
-        ops: &[(Location<F>, O)],
+        ops: impl IntoIterator<Item = &'a (Location<F>, O)>,
         root: &D,
     ) -> bool {
         let elements = ops
-            .iter()
+            .into_iter()
             .map(|(loc, op)| (*loc, op.encode()))
             .collect::<Vec<_>>();
         self.verify_multi_inclusion(&qmdb::hasher::<H>(), &elements, root)

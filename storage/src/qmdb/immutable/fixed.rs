@@ -150,7 +150,6 @@ mod tests {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
-            commit_codec_config: (),
         };
         CompactDb::init(context, cfg, None).await.unwrap()
     }
@@ -631,7 +630,6 @@ mod tests {
             run_bounded_initialization_preserves_collision_bucket, open_with_max;
         test_fixed_get_many => run_get_many, open;
         test_fixed_get_many_duplicate_keys => run_get_many_duplicate_keys, open;
-        test_fixed_get_many_unexpected_data => run_get_many_unexpected_data, open;
         test_fixed_dropped_ancestor_reads => run_dropped_ancestor_reads, open;
         test_fixed_multi_key_batch_reads => run_multi_key_batch_reads, open;
         test_fixed_merkleize_across_prune => run_merkleize_across_prune, open;
