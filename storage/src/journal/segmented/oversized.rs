@@ -44,7 +44,7 @@
 //!
 //! ## Marker-tracked recovery
 //!
-//! [Oversized::init_with_metadata] persists a per-section committed item count. Entries below the
+//! [Oversized::init_with_markers] persists a per-section committed item count. Entries below the
 //! marker are adopted once their index/value boundary is proven, entries above it are
 //! value-verified in order, and the first invalid value truncates the section's remainder. Markers
 //! trail proven syncs, publishing once a section is durable and idle (or on an empty flush).
@@ -580,10 +580,10 @@ impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
     /// The caller must drain it and call [Recovery::finish]. Entries below each durable marker are
     /// retained after their cross-journal boundary is proven. Entries above it are value-validated
     /// in order and the first invalid entry truncates its section.
-    pub async fn init_with_metadata(
+    pub async fn init_with_markers(
         context: E,
         cfg: Config<V::Cfg>,
-        metadata_partition: String,
+        marker_partition: String,
         read_options: ReadOptions,
     ) -> Result<Recovery<E, I, V>, Error> {
         let replay_buffer = cfg.replay_buffer;
@@ -592,7 +592,7 @@ impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
         let metadata: Metadata<E, SectionKey, u64> = Metadata::init(
             context.child("metadata"),
             MetadataConfig {
-                partition: metadata_partition,
+                partition: marker_partition,
                 codec_config: (),
             },
         )
@@ -890,7 +890,7 @@ impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
     }
 }
 
-/// Validating startup recovery returned by [Oversized::init_with_metadata].
+/// Validating startup recovery returned by [Oversized::init_with_markers].
 ///
 /// Yields `(section, position, entry)` in order, verifying each value at or above its section's
 /// durable marker until the first invalid one. Dropping it before [Recovery::finish] destroys the
@@ -1266,7 +1266,7 @@ mod tests {
         cfg: Config<()>,
     ) -> Result<Oversized<E, TestEntry, TestValue>, Error> {
         let mut replay =
-            Oversized::init_with_metadata(context, cfg, MARKERS.into(), ReadOptions::default())
+            Oversized::init_with_markers(context, cfg, MARKERS.into(), ReadOptions::default())
                 .await?;
         while let Some(item) = replay.next().await {
             item?;
@@ -1299,7 +1299,7 @@ mod tests {
 
             // Reopening replays both entries without rewriting the marker generation.
             let (context, recordings) = commonware_runtime::mocks::RecordingContext::new(context);
-            let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
+            let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_markers(
                 context.child("reopen"),
                 cfg,
                 MARKERS.into(),
@@ -2640,7 +2640,7 @@ mod tests {
             _ = journal.sync_all().await.unwrap();
 
             // A replay that has not yielded its entry must not finish.
-            let replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
+            let replay = Oversized::<_, TestEntry, TestValue>::init_with_markers(
                 context.child("oversized"),
                 cfg.clone(),
                 MARKERS.into(),
@@ -2689,7 +2689,7 @@ mod tests {
 
             // Reopen and evict the index page so replay must exercise the backing journal read.
             let (context, recordings) = commonware_runtime::mocks::RecordingContext::new(context);
-            let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
+            let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_markers(
                 context.child("reopen"),
                 cfg,
                 MARKERS.into(),
@@ -5299,7 +5299,7 @@ mod tests {
         for seed in 0..64u64 {
             let (interrupted, checkpoint) =
                 deterministic::Runner::seeded(seed).start_and_recover(|context| async move {
-                    let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
+                    let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_markers(
                         context.child("first"),
                         test_cfg(),
                         MARKERS.into(),
@@ -5345,7 +5345,7 @@ mod tests {
         let checkpoint = found.expect("some seed interrupts destroy with one marker copy left");
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
-            let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
+            let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_markers(
                 context.child("second"),
                 test_cfg(),
                 MARKERS.into(),
@@ -5374,7 +5374,7 @@ mod tests {
             let (failed, checkpoint) =
                 deterministic::Runner::seeded(seed).start_and_recover(|context| async move {
                     // Open an empty tracked journal.
-                    let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
+                    let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_markers(
                         context.child("first"),
                         test_cfg(),
                         MARKERS.into(),
@@ -5417,7 +5417,7 @@ mod tests {
 
             // Sections at or above the floor are whole, and each earlier section is whole or gone.
             deterministic::Runner::from(checkpoint).start(|context| async move {
-                let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
+                let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_markers(
                     context.child("second"),
                     test_cfg(),
                     MARKERS.into(),
@@ -5668,7 +5668,7 @@ mod tests {
 
             let (gated, gate) =
                 ReadGateContext::new(context.child("cancel"), cfg.value_partition.clone());
-            let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
+            let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_markers(
                 gated,
                 cfg.clone(),
                 MARKERS.into(),
@@ -5713,7 +5713,7 @@ mod tests {
             drop(markers);
 
             // Recovery rechecks the interrupted entry and retains only the valid prefix.
-            let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
+            let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_markers(
                 context.child("reopen"),
                 cfg,
                 MARKERS.into(),

@@ -157,7 +157,7 @@ async fn init_tracked<E: Context>(
     context: E,
     cfg: Config<()>,
 ) -> Result<Oversized<E, TestEntry, TestValue>, JournalError> {
-    let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
+    let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_markers(
         context.child("oversized"),
         cfg,
         METADATA_PARTITION.into(),

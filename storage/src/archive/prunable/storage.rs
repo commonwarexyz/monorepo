@@ -381,7 +381,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             compression: cfg.compression,
             codec_config: cfg.codec_config,
         };
-        let mut replay = Oversized::<E, Record<K>, V>::init_with_metadata(
+        let mut replay = Oversized::<E, Record<K>, V>::init_with_markers(
             context.child("oversized"),
             oversized_cfg,
             cfg.metadata_partition,
