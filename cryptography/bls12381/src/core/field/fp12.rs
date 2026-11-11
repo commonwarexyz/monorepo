@@ -1,10 +1,9 @@
 //! The quadratic extension `Fp12 = Fp6[w] / (w^2 - v)`, which contains the target group of the
 //! pairing, over any base field representation.
 //!
-//! An [`Fp12`] holds two [`Fp6`] coefficients, so it holds as many elements as its base field values
-//! hold elements, one per lane. Besides multiplication and squaring, it provides the operations of
-//! the pairing: multiplication by sparse Miller loop lines, squaring in the cyclotomic subgroup,
-//! conjugation, the Frobenius map, and inversion.
+//! An [`Fp12`] holds one element per lane, as two [`Fp6`] coefficients. Besides multiplication and
+//! squaring, it provides the operations of the pairing: multiplication by sparse Miller loop lines,
+//! squaring in the cyclotomic subgroup, conjugation, the Frobenius map, and inversion.
 //!
 //! # Bounds
 //!
@@ -12,6 +11,8 @@
 //! bound at most [`BOUND`], as defined by the [base field arithmetic](super::arithmetic), and returns
 //! elements that satisfy the same, so elements chain through any number of operations. Loaded
 //! elements satisfy it.
+//!
+//! # How the operations keep their bounds
 //!
 //! Each operation forms its products lazily and finishes with one tight reduction of each output
 //! component, as for [`Field::reduce_tight`], so outputs are bounded however many products they
@@ -25,8 +26,6 @@
 //! products of the pairs of coefficients whose degrees add to its own, or to its own plus six,
 //! the latter with one factor first multiplied by `1 + i`. Every product accumulates into its
 //! output as it forms, so no sum is ever combined with another.
-//!
-//! Lines multiply with the same contract for their coefficients, but within [`LINE_BOUND`].
 //!
 //! # Kernels
 //!
@@ -243,14 +242,14 @@ impl<F> Fp12<F> {
         );
     }
 
-    /// Multiplies by `rhs` in place, with Karatsuba's three products over `Fp6`, eighteen
-    /// extension products in all, or every product of two coefficients for
-    /// [`Field::SCHOOLBOOK`].
+    /// Multiplies by `rhs` in place.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn mul<S: Simd>(&mut self, simd: S, rhs: &Self)
     where
         F: Field<S>,
     {
+        // Karatsuba's three products over Fp6, eighteen extension products in all, or every
+        // product of two coefficients for Field::SCHOOLBOOK.
         simd.execute(
             #[inline(always)]
             move |simd: S| {
@@ -300,13 +299,14 @@ impl<F> Fp12<F> {
         ))
     }
 
-    /// Squares in place: `c0^2 + v c1^2 + ((c0 + c1)^2 - c0^2 - c1^2) w`, with three squarings over
-    /// `Fp6`, or every product of two coefficients for [`Field::SCHOOLBOOK`].
+    /// Squares in place.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn square<S: Simd>(&mut self, simd: S)
     where
         F: Field<S>,
     {
+        // c0^2 + v c1^2 + ((c0 + c1)^2 - c0^2 - c1^2) w, with three squarings over Fp6, or every
+        // product of two coefficients for Field::SCHOOLBOOK.
         simd.execute(
             #[inline(always)]
             move |simd: S| {
@@ -383,14 +383,14 @@ impl<F> Fp12<F> {
 
     /// Multiplies in place by the line `l0 + l2 w^2 + l3 w^3`, given `[l0, l2, l3]`.
     ///
-    /// As an element, the line is `(l0 + l2 v) + l3 v w`, so Karatsuba's products over `Fp6` are
-    /// sparse: thirteen extension products in all, or eighteen for [`Field::SCHOOLBOOK`]. Every
-    /// line component must have limb bound `1` and integer bound at most [`LINE_BOUND`].
+    /// Every line component must have limb bound `1` and integer bound at most [`LINE_BOUND`].
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn mul_by_line<S: Simd>(&mut self, simd: S, line: &[Fp2<F>; 3])
     where
         F: Field<S>,
     {
+        // As an element, the line is (l0 + l2 v) + l3 v w, so Karatsuba's products over Fp6 are
+        // sparse: thirteen extension products in all, or eighteen for Field::SCHOOLBOOK.
         simd.execute(
             #[inline(always)]
             move |simd: S| {
@@ -441,17 +441,18 @@ impl<F> Fp12<F> {
 
     /// Squares in place an element of the cyclotomic subgroup, where `self^(p^6 + 1) = 1`.
     ///
-    /// This is the squaring of Granger and Scott, "Faster squaring in the cyclotomic subgroup of
-    /// sixth degree extensions" (2010), on the pairs of coefficients of `w^k` and `w^(k + 3)`,
-    /// elements `x + y s` of `Fp4 = Fp2[s] / (s^2 - (1 + i))` for `s = w^3`: each output is three
-    /// times a part of the square of such a pair, plus or minus twice an input coefficient. That
-    /// takes nine extension squarings, or six squarings and six products accumulated as they form
-    /// for [`Field::SCHOOLBOOK`]. The result is unspecified outside the subgroup.
+    /// The result is unspecified outside the subgroup.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn cyclotomic_square<S: Simd>(&mut self, simd: S)
     where
         F: Field<S>,
     {
+        // The squaring of Granger and Scott, "Faster squaring in the cyclotomic subgroup of sixth
+        // degree extensions" (2010), on the pairs of coefficients of w^k and w^(k + 3), elements
+        // x + y s of Fp4 = Fp2[s] / (s^2 - (1 + i)) for s = w^3: each output is three times a part
+        // of the square of such a pair, plus or minus twice an input coefficient. That takes nine
+        // extension squarings, or six squarings and six products accumulated as they form for
+        // Field::SCHOOLBOOK.
         simd.execute(
             #[inline(always)]
             move |simd: S| {
@@ -527,8 +528,6 @@ impl<F> Fp12<F> {
 
     /// Returns the conjugate `c0 - c1 w`, which is `self^(p^6)` and the inverse in the cyclotomic
     /// subgroup.
-    ///
-    /// Reduces the negated coefficient tightly, so the result stays within [`BOUND`].
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn conjugate<S: Simd>(&self, simd: S) -> Self
     where
@@ -537,6 +536,7 @@ impl<F> Fp12<F> {
         simd.execute(
             #[inline(always)]
             move |simd: S| {
+                // Reduce the negated coefficient tightly, so the result stays within BOUND.
                 let negated = self.c1.neg::<{ BOUND + 1 }, S>(simd);
                 Self {
                     c0: self.c0,
@@ -569,13 +569,13 @@ impl<F> Fp12<F> {
 
     /// Returns the Frobenius image `self^p`.
     ///
-    /// Conjugates every coefficient of `w^j` and multiplies it by `(1 + i)^(j (p - 1) / 6)`.
     /// Requires the factors returned by [`Self::frobenius_coefficients`].
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn frobenius<S: Simd>(&self, simd: S, coefficients: &[Fp2<F>; 5]) -> Self
     where
         F: Field<S>,
     {
+        // Conjugates every coefficient of w^j and multiplies it by (1 + i)^(j (p - 1) / 6).
         simd.execute(
             #[inline(always)]
             move |simd: S| {
@@ -594,8 +594,6 @@ impl<F> Fp12<F> {
     }
 
     /// Returns the inverse `(c0 - c1 w) / (c0^2 - v c1^2)`, or zero for zero.
-    ///
-    /// Inverts the norm in `Fp6` with [`Fp6::invert`].
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn invert<S: Simd>(&self, simd: S) -> Self
     where
@@ -620,9 +618,6 @@ impl<F> Fp12<F> {
     }
 
     /// Returns the product of every lane's element, in every lane.
-    ///
-    /// Multiplies halves of the lanes together until one remains, moving elements between lanes
-    /// through their encodings. A representation holding one element returns it as is.
     pub fn product_of_lanes<S: Simd>(self, simd: S) -> Self
     where
         F: Field<S>,
@@ -631,6 +626,8 @@ impl<F> Fp12<F> {
         if F::LANES == 1 {
             return self;
         }
+        // Multiply halves of the lanes together until one remains, moving elements between lanes
+        // through their encodings.
         simd.execute(
             #[inline(always)]
             move |simd: S| {
