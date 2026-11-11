@@ -18,7 +18,7 @@ fn bench_count_ones<const CHUNK_SIZE: usize>(c: &mut Criterion, size: u64) {
 }
 
 fn benchmark_count_ones(c: &mut Criterion) {
-    let sizes: &[u64] = if crate::smoke() {
+    let sizes: &[u64] = if commonware_bench::smoke() {
         &[64, 1 << 10]
     } else {
         &[64, 1 << 10, 1 << 14, 1 << 18, 1 << 22, 1 << 28]

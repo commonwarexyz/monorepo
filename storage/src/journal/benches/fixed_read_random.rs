@@ -24,7 +24,7 @@ const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000);
 const ITEMS_TO_WRITE: u64 = 5_000_000;
 
 fn items_to_write() -> u64 {
-    if crate::smoke() {
+    if commonware_bench::smoke() {
         10_000
     } else {
         ITEMS_TO_WRITE
@@ -42,8 +42,9 @@ async fn bench_run_serial(
 ) -> Journal<Context, FixedBytes<ITEM_SIZE>> {
     let (journal, reader) = journal.snapshot().await.unwrap();
     let mut rng = test_rng();
+    let items = items_to_write();
     for _ in 0..items_to_read {
-        let pos = rng.random_range(0..items_to_write());
+        let pos = rng.random_range(0..items);
         black_box(reader.read(pos).await.expect("failed to read data"));
     }
     journal
@@ -56,9 +57,10 @@ async fn bench_run_concurrent(
 ) -> Journal<Context, FixedBytes<ITEM_SIZE>> {
     let (journal, reader) = journal.snapshot().await.unwrap();
     let mut rng = test_rng();
+    let items = items_to_write();
     let mut futures = Vec::with_capacity(items_to_read);
     for _ in 0..items_to_read {
-        let pos = rng.random_range(0..items_to_write());
+        let pos = rng.random_range(0..items);
         futures.push(reader.read(pos));
     }
     try_join_all(futures).await.expect("failed to read data");
@@ -72,8 +74,9 @@ async fn bench_run_read_many(
 ) -> Journal<Context, FixedBytes<ITEM_SIZE>> {
     let (journal, reader) = journal.snapshot().await.unwrap();
     let mut rng = test_rng();
+    let items = items_to_write();
     let mut positions: Vec<u64> = (0..items_to_read)
-        .map(|_| rng.random_range(0..items_to_write()))
+        .map(|_| rng.random_range(0..items))
         .collect();
     positions.sort_unstable();
     positions.dedup();
@@ -91,7 +94,7 @@ fn bench_fixed_read_random(c: &mut Criterion) {
     let mut initialized = false;
     let runner = tokio::Runner::new(cfg.clone());
     for mode in ["serial", "concurrent", "read_many"] {
-        let reads: &[usize] = if crate::smoke() {
+        let reads: &[usize] = if commonware_bench::smoke() {
             &[100]
         } else {
             &[100, 1_000, 10_000, 100_000]

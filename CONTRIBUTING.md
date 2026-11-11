@@ -124,6 +124,18 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DE
 criterion_main!(operation_name::benches);
 ```
 
+### Inputs
+
+`cargo bench` measures each benchmark with the inputs it lists. `cargo test --benches`, which CI runs, executes each benchmark once without measuring it. When an input is slow to set up, use the smallest one in that mode by checking `commonware_bench::smoke()`, after adding `commonware-bench = { workspace = true }` to the crate's dev-dependencies:
+
+```rust
+let sizes: &[usize] = if commonware_bench::smoke() {
+    &[1_000]
+} else {
+    &[1_000, 100_000, 1_000_000]
+};
+```
+
 ### Naming
 
 CI enforces names with `.github/scripts/lint_benchmark_names.py`:

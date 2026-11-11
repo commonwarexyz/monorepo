@@ -74,8 +74,7 @@ test-benches crate test_flags='' lint_flags='':
     fi
     binaries=$(echo "$all" | python3 .github/scripts/hash_partition.py {{ partition }})
     for bench in $binaries; do
-        # Use the smallest benchmark inputs to check that every benchmark still runs.
-        COMMONWARE_BENCH_SMOKE=1 cargo test --bench "$bench" -p {{ crate }} {{ test_flags }} -- --verbose
+        cargo test --bench "$bench" -p {{ crate }} {{ test_flags }} -- --verbose
     done
 
 # Run the Gungraun benchmark tracking suite

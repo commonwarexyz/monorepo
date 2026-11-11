@@ -26,12 +26,20 @@ cfg_if::cfg_if! {
 /// Cached eVRF setup, sized for the largest configuration we benchmark.
 /// Building it is expensive, so we share one across all benches.
 static SETUP: LazyLock<Setup> = LazyLock::new(|| {
-    let max = if crate::smoke() { 5 } else { MAX_RECEIVERS };
+    let max = if commonware_bench::smoke() {
+        5
+    } else {
+        MAX_RECEIVERS
+    };
     Setup::new(NonZeroU32::new(max).unwrap())
 });
 
 fn receivers() -> &'static [u32] {
-    if crate::smoke() { &[5] } else { RECEIVERS }
+    if commonware_bench::smoke() {
+        &[5]
+    } else {
+        RECEIVERS
+    }
 }
 
 /// A Golden DKG scenario with one dealer and `n` receivers.

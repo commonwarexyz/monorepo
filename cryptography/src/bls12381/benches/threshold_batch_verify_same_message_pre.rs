@@ -16,7 +16,7 @@ fn bench_threshold_batch_verify_same_message_pre(c: &mut Criterion) {
     let namespace = b"benchmark";
     let msg = b"hello";
     for mode in [Mode::NonZeroCounter, Mode::RootsOfUnity] {
-        let sizes: &[u32] = if crate::smoke() {
+        let sizes: &[u32] = if commonware_bench::smoke() {
             &[5]
         } else {
             &[5, 10, 20, 50, 100, 250, 500]

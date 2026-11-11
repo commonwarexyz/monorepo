@@ -24,7 +24,11 @@ const READS: [usize; 1] = [1_000];
 const READS: [usize; 3] = [1_000, 10_000, 50_000];
 
 fn items() -> u64 {
-    if crate::smoke() { 1_000 } else { ITEMS }
+    if commonware_bench::smoke() {
+        1_000
+    } else {
+        ITEMS
+    }
 }
 
 fn select_keys(keys: &[Key], reads: usize) -> Vec<Key> {
@@ -79,7 +83,11 @@ fn bench_get(c: &mut Criterion) {
             let runner = tokio::Runner::new(cfg.clone());
             for mode in ["serial", "concurrent"] {
                 for pattern in ["key", "index"] {
-                    for &reads in if crate::smoke() { &[100][..] } else { &READS } {
+                    for &reads in if commonware_bench::smoke() {
+                        &[100][..]
+                    } else {
+                        &READS
+                    } {
                         c.bench_function(
                             &format!(
                                 "{}/variant={} mode={} pattern={} comp={} reads={}",

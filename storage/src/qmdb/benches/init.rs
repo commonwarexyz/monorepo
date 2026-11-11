@@ -38,7 +38,7 @@ cfg_if::cfg_if! {
 }
 
 fn cases() -> &'static [(u64, u64)] {
-    if crate::smoke() {
+    if commonware_bench::smoke() {
         &[(1_000, 10_000)]
     } else {
         &CASES
