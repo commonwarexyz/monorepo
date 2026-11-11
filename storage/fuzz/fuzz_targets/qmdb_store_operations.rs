@@ -121,9 +121,10 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 const PAGE_SIZE: NonZeroU16 = NZU16!(125);
 const PAGE_CACHE_SIZE: usize = 8;
 
-fn test_config(
-    test_name: &str,
-) -> Config<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ())), Sequential> {
+/// The configuration type of [StoreDb].
+type StoreConfig = Config<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ())), Sequential>;
+
+fn test_config(test_name: &str) -> StoreConfig {
     Config {
         log: VConfig {
             partition: format!("{test_name}-log"),

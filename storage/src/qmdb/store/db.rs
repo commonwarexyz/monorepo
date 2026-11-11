@@ -831,9 +831,11 @@ mod test {
     /// The type of the store used in tests.
     type TestStore = Db<deterministic::Context, Digest, Vec<u8>, TwoCap, Sequential>;
 
-    fn test_config()
-    -> Config<TwoCap, <Operation<crate::mmr::Family, Digest, Vec<u8>> as Read>::Cfg, Sequential>
-    {
+    /// The configuration type of [TestStore].
+    type TestConfig =
+        Config<TwoCap, <Operation<crate::mmr::Family, Digest, Vec<u8>> as Read>::Cfg, Sequential>;
+
+    fn test_config() -> TestConfig {
         Config {
             log: JournalConfig {
                 partition: "journal".into(),
@@ -1686,7 +1688,7 @@ mod test {
             // Half the keys share a translated key, and the values outgrow the page cache.
             let key = |i: u64| {
                 let mut bytes = [0u8; 32];
-                if i % 2 == 0 {
+                if i.is_multiple_of(2) {
                     bytes[..2].copy_from_slice(&[0xa5, 0x5a]);
                 } else {
                     bytes[..2].copy_from_slice(&(i as u16).to_be_bytes());
