@@ -263,6 +263,78 @@ pub mod fuzz {
         Endomorphism,
     }
 
+    /// Draws the point added into a lane, with scaled coordinates, given the lane's running
+    /// multiple and sum, then advances the multiple.
+    fn draw_addend<C: Curve>(
+        u: &mut Unstructured<'_>,
+        multiple: &mut Affine<C>,
+        sum: Affine<C>,
+    ) -> arbitrary::Result<(Affine<C>, [C::Encoded; 3])> {
+        let addend = match u.arbitrary()? {
+            Addend::Multiple => *multiple,
+            Addend::NegatedMultiple => affine_neg::<C>(*multiple),
+            Addend::Sum => sum,
+            Addend::NegatedSum => affine_neg::<C>(sum),
+            Addend::Identity => None,
+        };
+        let coordinates = coordinates::<C>(addend, scaling::<C>(u)?);
+        *multiple = match u.arbitrary()? {
+            Advance::AddGenerator => affine_add::<C>(*multiple, generator::<C>()),
+            Advance::Double => affine_add::<C>(*multiple, *multiple),
+            Advance::Keep => *multiple,
+        };
+        Ok((addend, coordinates))
+    }
+
+    /// Checks [`Step::Endomorphism`] on the points `sum` and `addend`, whose lanes hold `sums`
+    /// and `addends`.
+    fn check_endomorphism<C: Curve, S: Simd, F: Field<S>>(
+        simd: S,
+        round: usize,
+        sum: C::Point<S, F>,
+        addend: C::Point<S, F>,
+        sums: &[Affine<C>; MAX_LANES],
+        addends: &[Affine<C>; MAX_LANES],
+    ) {
+        let total = sum.add(simd, addend);
+        let images =
+            [sum, addend, total].map(|point| C::check_bound(simd, point.endomorphism(simd)));
+        let mut combined = [C::IDENTITY; MAX_LANES];
+        C::check_bound(simd, images[0].add(simd, images[1])).store(simd, &mut combined);
+        let images = images.map(|image| {
+            let mut stored = [C::IDENTITY; MAX_LANES];
+            image.store(simd, &mut stored);
+            stored
+        });
+        for lane in 0..F::LANES {
+            let label = format!("round {round}, lane {lane}");
+            let points = [
+                sums[lane],
+                addends[lane],
+                affine_add::<C>(sums[lane], addends[lane]),
+            ];
+            let mut mapped = [None; 3];
+            for (k, (image, point)) in images.iter().zip(points).enumerate() {
+                let image = affine::<C>(&image[lane], &format!("{label}: endomorphism image"));
+                let fixed = match point {
+                    None => image.is_none(),
+                    Some(_) => image.is_some() && image != point && image != affine_neg::<C>(point),
+                };
+                assert!(
+                    fixed,
+                    "{} {label}: endomorphism fixes only the identity, up to sign",
+                    C::NAME
+                );
+                mapped[k] = image;
+            }
+            assert_point::<C>(
+                &combined[lane],
+                mapped[2],
+                &format!("{label}: endomorphism is compatible with addition"),
+            );
+        }
+    }
+
     /// Adds random multiples of the generator into every lane through a chain of formulas,
     /// checking the results against the reference.
     ///
@@ -275,8 +347,7 @@ pub mod fuzz {
         let lanes = F::LANES;
         let used = lanes - u.int_in_range(0..=lanes - 1)?;
         let rounds = MAX_ROUNDS - u.int_in_range(0..=MAX_ROUNDS - 1)?;
-        let generator = generator::<C>();
-        let mut multiples = [generator; MAX_LANES];
+        let mut multiples = [generator::<C>(); MAX_LANES];
         let mut sums: [Affine<C>; MAX_LANES] = [None; MAX_LANES];
         let mut sum = C::Point::<S, F>::load(simd, &[], &C::IDENTITY);
         for round in 0..rounds {
@@ -284,20 +355,9 @@ pub mod fuzz {
             let mut addends: [Affine<C>; MAX_LANES] = [None; MAX_LANES];
             let mut inputs = Vec::with_capacity(used);
             for lane in 0..used {
-                let addend = match u.arbitrary()? {
-                    Addend::Multiple => multiples[lane],
-                    Addend::NegatedMultiple => affine_neg::<C>(multiples[lane]),
-                    Addend::Sum => sums[lane],
-                    Addend::NegatedSum => affine_neg::<C>(sums[lane]),
-                    Addend::Identity => None,
-                };
-                inputs.push(coordinates::<C>(addend, scaling::<C>(u)?));
+                let (addend, coordinates) = draw_addend::<C>(u, &mut multiples[lane], sums[lane])?;
+                inputs.push(coordinates);
                 addends[lane] = addend;
-                multiples[lane] = match u.arbitrary()? {
-                    Advance::AddGenerator => affine_add::<C>(multiples[lane], generator),
-                    Advance::Double => affine_add::<C>(multiples[lane], multiples[lane]),
-                    Advance::Keep => multiples[lane],
-                };
             }
             let mut addend = C::Point::<S, F>::load(simd, &inputs, &C::IDENTITY);
             if !u.arbitrary::<bool>()? {
@@ -307,7 +367,6 @@ pub mod fuzz {
             for (sum, addend) in sums.iter_mut().zip(addends) {
                 *sum = affine_add::<C>(*sum, addend);
             }
-            let mut stored = [C::IDENTITY; MAX_LANES];
             match u.arbitrary()? {
                 Step::Chain => {
                     let double = C::check_bound(simd, sum.double(simd));
@@ -320,6 +379,7 @@ pub mod fuzz {
                     }
                 }
                 Step::Bytes { widen } => {
+                    let mut stored = [C::IDENTITY; MAX_LANES];
                     sum.store(simd, &mut stored);
                     sum = C::Point::<S, F>::load(simd, &stored, &C::IDENTITY);
                     if widen {
@@ -332,8 +392,7 @@ pub mod fuzz {
                     let mut raw: [<C::Point<S, F> as Points<S>>::Raw; MAX_LANES] =
                         [Default::default(); MAX_LANES];
                     sum.store_raw(simd, &mut raw);
-                    let raw: Vec<_> = raw.iter().collect();
-                    sum = C::Point::<S, F>::load_raw(simd, &raw);
+                    sum = C::Point::<S, F>::load_raw(simd, &raw.each_ref());
                 }
                 Step::Lanes { select, negate } => {
                     sum = sum.select(simd, addend, select);
@@ -348,48 +407,7 @@ pub mod fuzz {
                     }
                 }
                 Step::Endomorphism => {
-                    let total = sum.add(simd, addend);
-                    let images = [sum, addend, total]
-                        .map(|point| C::check_bound(simd, point.endomorphism(simd)));
-                    let combined = C::check_bound(simd, images[0].add(simd, images[1]));
-                    combined.store(simd, &mut stored);
-                    let images = images.map(|image| {
-                        let mut stored = [C::IDENTITY; MAX_LANES];
-                        image.store(simd, &mut stored);
-                        stored
-                    });
-                    for lane in 0..lanes {
-                        let label = |what: &str| format!("round {round}, lane {lane}: {what}");
-                        let points = [
-                            sums[lane],
-                            addends[lane],
-                            affine_add::<C>(sums[lane], addends[lane]),
-                        ];
-                        let mut mapped = [None; 3];
-                        for (k, (image, point)) in images.iter().zip(points).enumerate() {
-                            let image = affine::<C>(&image[lane], &label("endomorphism image"));
-                            let fixed = match point {
-                                None => image.is_none(),
-                                Some(_) => {
-                                    image.is_some()
-                                        && image != point
-                                        && image != affine_neg::<C>(point)
-                                }
-                            };
-                            assert!(
-                                fixed,
-                                "{} {}",
-                                C::NAME,
-                                label("endomorphism fixes only the identity, up to sign")
-                            );
-                            mapped[k] = image;
-                        }
-                        assert_point::<C>(
-                            &stored[lane],
-                            mapped[2],
-                            &label("endomorphism is compatible with addition"),
-                        );
-                    }
+                    check_endomorphism::<C, S, F>(simd, round, sum, addend, &sums, &addends);
                 }
             }
         }
