@@ -168,8 +168,9 @@ const fn divide<const N: usize, const D: usize, const R: usize, const W: usize>(
 
 /// An element of the scalar field.
 ///
-/// Values are kept as canonical Montgomery representatives, and every operation runs in time
-/// independent of the operands.
+/// Arithmetic and encoding run in time independent of the operands' values. Decoding reveals
+/// only whether its input is canonical.
+// Holds the canonical Montgomery representative: the value times 2^256, reduced below r.
 #[derive(Clone, Copy)]
 pub struct Scalar([u64; WORDS]);
 

@@ -67,6 +67,9 @@ impl<'a> Mul<&'a Self> for GT {
 impl Multiplicative for GT {}
 
 /// Returns the pairing `e(p, q)`.
+///
+/// To check an equation between pairings, [`multi_pairing`] costs less than comparing
+/// separate pairings.
 pub fn pairing(p: &G1, q: &G2) -> GT {
     multi_pairing(&[(*p, *q)])
 }
@@ -74,8 +77,8 @@ pub fn pairing(p: &G1, q: &G2) -> GT {
 /// Computes the pairing of each pair into the output at the same index, as when verifying many
 /// signatures separately.
 ///
-/// Pairs one pair per lane. Outputs beyond the pairs are unchanged, and pairs beyond the outputs
-/// are ignored.
+/// Outputs beyond the pairs are unchanged, and pairs beyond the outputs are ignored. Costs less
+/// per pair than calling [`pairing`] for each.
 pub fn pairings(pairs: &[(G1, G2)], outputs: &mut [GT]) {
     Pairings(pairs, outputs).dispatch();
 }
