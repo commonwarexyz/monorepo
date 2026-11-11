@@ -397,7 +397,7 @@ impl Checksum {
     /// checksum of a prefix of the bytes `active` covers. Other content may be part of a checksum
     /// over later bytes of the page, and a torn write to the slot could complete it.
     fn other_slot_is_inert(buf: &[u8], active: &ActiveChecksum) -> bool {
-        let crc_start_idx = buf.len() - CHECKSUM_SIZE as usize;
+        let crc_start_idx = buf.len() - Self::SIZE;
         let mut crc_bytes = Copying(&buf[crc_start_idx..]);
         let crc_record = Self::read(&mut crc_bytes).expect("CRC record must decode");
         let slot = active.slot.other();

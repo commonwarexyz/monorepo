@@ -1028,7 +1028,7 @@ mod tests {
             drive_pending_syncs, next_pending_sync,
         },
     };
-    use commonware_utils::{NZU16, NZUsize, probability};
+    use commonware_utils::{NZU16, NZUsize, Widen, probability};
     use std::time::Duration;
 
     /// Convert offset + size to byte end position (for truncation tests).
@@ -1094,6 +1094,9 @@ mod tests {
     impl FixedSize for TestEntry {
         const SIZE: usize = u64::SIZE + u64::SIZE + u32::SIZE;
     }
+
+    /// Encoded size of one index entry.
+    const ENTRY_SIZE: u64 = TestEntry::SIZE as u64;
 
     impl Record for TestEntry {
         fn value_location(&self) -> (u64, u32) {
@@ -1174,10 +1177,7 @@ mod tests {
                 values,
             };
             for section in 1..=2 {
-                assert_eq!(
-                    recovery.index.size(section).unwrap(),
-                    TestEntry::SIZE as u64
-                );
+                assert_eq!(recovery.index.size(section).unwrap(), ENTRY_SIZE);
                 let entry = recovery.index.get(section, 0).await.unwrap();
                 let (offset, size) = entry.value_location();
                 assert!(recovery.values.size(section).unwrap() > offset + u64::from(size));
@@ -1217,7 +1217,7 @@ mod tests {
 
             // Each section keeps its entry, and its value tail ends at that entry.
             for section in 1..=2 {
-                assert_eq!(journal.size(section).unwrap(), TestEntry::SIZE as u64);
+                assert_eq!(journal.size(section).unwrap(), ENTRY_SIZE);
                 let entry = journal.get(section, 0).await.unwrap();
                 assert_eq!(entry.id, section);
                 let (offset, size) = entry.value_location();
@@ -1449,13 +1449,10 @@ mod tests {
             drop(oversized);
 
             // Restore at the synced boundary and verify.
-            let oversized: Oversized<_, TestEntry, TestValue> = Oversized::init_with_checkpoint(
-                context.child("second"),
-                cfg,
-                (1, TestEntry::SIZE as u64),
-            )
-            .await
-            .expect("reinitialization must succeed");
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init_with_checkpoint(context.child("second"), cfg, (1, ENTRY_SIZE))
+                    .await
+                    .expect("reinitialization must succeed");
 
             let retrieved_entry = oversized.get(1, position).await.expect("Failed to get");
             assert_eq!(retrieved_entry.id, 123);
@@ -1505,13 +1502,10 @@ mod tests {
             drop(oversized);
 
             // Only the synced sections survive the unclean drop, with both index and value durable.
-            let oversized: Oversized<_, TestEntry, TestValue> = Oversized::init_with_checkpoint(
-                context.child("second"),
-                cfg,
-                (3, TestEntry::SIZE as u64),
-            )
-            .await
-            .expect("reinitialization must succeed");
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init_with_checkpoint(context.child("second"), cfg, (3, ENTRY_SIZE))
+                    .await
+                    .expect("reinitialization must succeed");
             for &(section, position, offset, size, value) in &located {
                 let result = oversized.get(section, position).await;
                 if section == 2 {
@@ -1609,7 +1603,7 @@ mod tests {
             let journal = open_tracked(context.child("reopen"), cfg.clone())
                 .await
                 .unwrap();
-            assert_eq!(journal.size(1).unwrap(), TestEntry::SIZE as u64 * 2);
+            assert_eq!(journal.size(1).unwrap(), ENTRY_SIZE * 2);
             let entry = journal.get(1, 1).await.unwrap();
             let (value_offset, value_size) = entry.value_location();
             assert!(
@@ -1722,9 +1716,13 @@ mod tests {
                 .open(&cfg.value_partition, &1u64.to_be_bytes())
                 .await
                 .expect("Failed to open values blob");
-            blob.write_at(offset, vec![0xFF; size as usize], WriteOptions::SYNC)
-                .await
-                .expect("Failed to corrupt value");
+            blob.write_at(
+                offset,
+                vec![0xFF; Widen::<usize>::widen(size)],
+                WriteOptions::SYNC,
+            )
+            .await
+            .expect("Failed to corrupt value");
             drop(blob);
 
             // Boot 2: the glob cannot be synced, so initialization must fail rather than return
@@ -1747,7 +1745,7 @@ mod tests {
                 open_tracked(context.child("third"), test_cfg())
                     .await
                     .expect("reinitialization must succeed");
-            assert_eq!(oversized.size(1).expect("size"), TestEntry::SIZE as u64);
+            assert_eq!(oversized.size(1).expect("size"), ENTRY_SIZE);
             assert_adopted_entries_consistent(&oversized).await;
             oversized.destroy().await.expect("Failed to destroy");
         });
@@ -1887,7 +1885,7 @@ mod tests {
             let oversized: Oversized<_, TestEntry, TestValue> = Oversized::init_with_checkpoint(
                 context.child("second"),
                 test_cfg(),
-                (1, TestEntry::SIZE as u64),
+                (1, ENTRY_SIZE),
             )
             .await
             .expect("reinitialization must succeed");
@@ -2008,7 +2006,7 @@ mod tests {
             let oversized: Oversized<_, TestEntry, TestValue> = Oversized::init_with_checkpoint(
                 context.child("second"),
                 test_cfg(),
-                (1, TestEntry::SIZE as u64),
+                (1, ENTRY_SIZE),
             )
             .await
             .expect("reinitialization must succeed");
@@ -2098,7 +2096,7 @@ mod tests {
 
             // Corrupt the CRC record of the third entry's index page. Tail discovery stops at the
             // valid last page, so the torn page survives in bounds.
-            let physical_page = TestEntry::SIZE as u64 + 12;
+            let physical_page = ENTRY_SIZE + 12;
             let (index_blob, size) = context
                 .open(&cfg.index_partition, &1u64.to_be_bytes())
                 .await
@@ -2106,7 +2104,7 @@ mod tests {
             assert_eq!(size, 5 * physical_page);
             index_blob
                 .write_at(
-                    2 * physical_page + TestEntry::SIZE as u64,
+                    2 * physical_page + ENTRY_SIZE,
                     vec![0xFF; 12],
                     WriteOptions::SYNC,
                 )
@@ -2218,7 +2216,7 @@ mod tests {
                 &cfg.index_partition,
                 &2u64.to_be_bytes(),
                 1,
-                TestEntry::SIZE as u64,
+                ENTRY_SIZE,
             )
             .await;
             tear_index_tail(&context, &cfg, 3).await;
@@ -2239,7 +2237,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let chunk = TestEntry::SIZE as u64;
+            let chunk = ENTRY_SIZE;
             let oversized: Oversized<_, TestEntry, TestValue> = drive_pending_syncs(
                 &pending,
                 Oversized::init_with_checkpoint(delayed.child("restore"), cfg.clone(), (1, chunk)),
@@ -2295,7 +2293,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let chunk = TestEntry::SIZE as u64;
+            let chunk = ENTRY_SIZE;
             let journal = drive_pending_syncs(&pending, open_tracked(delayed.child("reopen"), cfg))
                 .await
                 .unwrap();
@@ -2356,10 +2354,7 @@ mod tests {
                     .unwrap();
             assert_eq!(journal.newest_section(), Some(kept));
             for section in 1..=kept {
-                assert_eq!(
-                    journal.size(section).unwrap(),
-                    ENTRIES * TestEntry::SIZE as u64
-                );
+                assert_eq!(journal.size(section).unwrap(), ENTRIES * ENTRY_SIZE);
                 for position in 0..ENTRIES {
                     let id = section * ENTRIES + position;
                     let entry = journal.get(section, position).await.unwrap();
@@ -2414,15 +2409,9 @@ mod tests {
                 open_tracked(context.child("reopen"), cfg).await.unwrap();
             assert_eq!(journal.newest_section(), Some(kept + 1));
             for section in 1..kept {
-                assert_eq!(
-                    journal.size(section).unwrap(),
-                    ENTRIES * TestEntry::SIZE as u64
-                );
+                assert_eq!(journal.size(section).unwrap(), ENTRIES * ENTRY_SIZE);
             }
-            assert_eq!(
-                journal.size(kept).unwrap(),
-                (ENTRIES + 1) * TestEntry::SIZE as u64
-            );
+            assert_eq!(journal.size(kept).unwrap(), (ENTRIES + 1) * ENTRY_SIZE);
             for (section, position, id) in [(kept, ENTRIES, 100), (kept + 1, 0, 101)] {
                 let entry = journal.get(section, position).await.unwrap();
                 assert_eq!(entry.id, id);
@@ -2497,13 +2486,13 @@ mod tests {
                     "checkpoint_section",
                     "seed_checkpoint_section",
                     "restore_checkpoint_section",
-                    (1, 3 * TestEntry::SIZE as u64),
+                    (1, 3 * ENTRY_SIZE),
                 ),
                 (
                     "earlier_section",
                     "seed_earlier_section",
                     "restore_earlier_section",
-                    (2, TestEntry::SIZE as u64),
+                    (2, ENTRY_SIZE),
                 ),
             ] {
                 let mut cfg = entry_cfg();
@@ -2536,7 +2525,7 @@ mod tests {
                     &cfg.index_partition,
                     &1u64.to_be_bytes(),
                     1,
-                    TestEntry::SIZE as u64,
+                    ENTRY_SIZE,
                 )
                 .await;
                 let (blob, expected_size) = context
@@ -2665,7 +2654,7 @@ mod tests {
             Oversized::<_, TestEntry, TestValue>::init_with_checkpoint(
                 context,
                 cfg,
-                (1, TestEntry::SIZE as u64),
+                (1, ENTRY_SIZE),
             )
             .await
             .unwrap()
@@ -2805,13 +2794,10 @@ mod tests {
             drop(oversized);
 
             // A restore at section 2's synced boundary needs no earlier section.
-            let oversized: Oversized<_, TestEntry, TestValue> = Oversized::init_with_checkpoint(
-                context.child("second"),
-                cfg,
-                (2, TestEntry::SIZE as u64),
-            )
-            .await
-            .expect("reinitialization must succeed");
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init_with_checkpoint(context.child("second"), cfg, (2, ENTRY_SIZE))
+                    .await
+                    .expect("reinitialization must succeed");
 
             // Section 2 entry should be valid
             let entry = oversized.get(2, 0).await.expect("Failed to get");
@@ -3100,13 +3086,10 @@ mod tests {
             drop(oversized);
 
             // Restore at the newest synced boundary.
-            let oversized: Oversized<_, TestEntry, TestValue> = Oversized::init_with_checkpoint(
-                context.child("second"),
-                cfg,
-                (3, 10 * TestEntry::SIZE as u64),
-            )
-            .await
-            .expect("reinitialization must succeed");
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init_with_checkpoint(context.child("second"), cfg, (3, 10 * ENTRY_SIZE))
+                    .await
+                    .expect("reinitialization must succeed");
 
             // All entries should be valid
             for section in 1u64..=3 {
@@ -4338,13 +4321,10 @@ mod tests {
             drop(oversized);
 
             // Restore at the newest synced boundary.
-            let oversized: Oversized<_, TestEntry, TestValue> = Oversized::init_with_checkpoint(
-                context.child("second"),
-                cfg,
-                (3, TestEntry::SIZE as u64),
-            )
-            .await
-            .expect("reinitialization must succeed");
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init_with_checkpoint(context.child("second"), cfg, (3, ENTRY_SIZE))
+                    .await
+                    .expect("reinitialization must succeed");
 
             // All sections should be valid
             for section in 1u64..=3 {
@@ -5289,7 +5269,7 @@ mod tests {
     /// entries the torn page hides.
     #[test_traced]
     fn test_oversized_tracked_open_keeps_synced_entries_below_torn_rewrite() {
-        let chunk = TestEntry::SIZE as u64;
+        let chunk = ENTRY_SIZE;
         let (_, checkpoint) =
             deterministic::Runner::default().start_and_recover(torn_rewrite_image);
         deterministic::Runner::from(checkpoint).start(move |context| async move {
@@ -5451,7 +5431,7 @@ mod tests {
                 let journal = replay.finish().await.unwrap();
                 for section in 0..SECTIONS {
                     let retained = match journal.size(section) {
-                        Ok(size) => size / TestEntry::SIZE as u64,
+                        Ok(size) => size / ENTRY_SIZE,
                         Err(Error::SectionOutOfRange(_)) => 0,
                         Err(err) => panic!("section {section} must report its size: {err:?}"),
                     };
@@ -5469,7 +5449,7 @@ mod tests {
                         let (offset, size) = entry.value_location();
                         assert_eq!(
                             journal.get_value(section, offset, size).await.unwrap(),
-                            [entry.id as u8; 16],
+                            [u8::try_from(entry.id).expect("id fits in a byte"); 16],
                             "a retained entry must read back its value"
                         );
                     }
@@ -5623,7 +5603,7 @@ mod tests {
             let journal = Oversized::<_, TestEntry, TestValue>::init_with_checkpoint(
                 context.child("reopen"),
                 cfg,
-                (1, TestEntry::SIZE as u64),
+                (1, ENTRY_SIZE),
             )
             .await
             .unwrap();
@@ -5748,10 +5728,7 @@ mod tests {
             }
             assert!(replay.next().await.is_none());
             let journal = replay.finish().await.unwrap();
-            assert_eq!(
-                journal.size(SECTION).unwrap(),
-                retained * TestEntry::SIZE as u64
-            );
+            assert_eq!(journal.size(SECTION).unwrap(), retained * ENTRY_SIZE);
             assert_eq!(
                 journal
                     .tracking

@@ -207,7 +207,7 @@ impl<B: Blob> Recovery<B> {
         // beyond the valid length, so that slot is zeroed before the page can be rewritten.
         if let Some((_, active, false)) = &partial_page_state {
             let slot_offset = pages * (page_size + CHECKSUM_SIZE) - CHECKSUM_SIZE
-                + active.slot.other().offset() as u64;
+                + Widen::<u64>::widen(active.slot.other().offset());
             warn!(
                 page = pages - 1,
                 "zeroing checksum slot left by a torn write"
@@ -4095,7 +4095,11 @@ mod tests {
                         continue;
                     }
                     self.inner
-                        .write_at(offset + kept.start as u64, bytes.slice(kept), options)
+                        .write_at(
+                            offset + Widen::<u64>::widen(kept.start),
+                            bytes.slice(kept),
+                            options,
+                        )
                         .await?;
                 }
                 if !options.contains(WriteOptions::SYNC) {
@@ -5914,8 +5918,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
-            let first_slot = PAGE_SIZE.get() as usize;
+            let first_slot: usize = PAGE_SIZE.widen();
+            let physical_page_size = first_slot + Checksum::SIZE;
             let first_slot_len = first_slot..first_slot + CHECKSUM_SLOT_LEN_SIZE;
             let data: Vec<u8> = (1u8..=80).collect();
 
@@ -5998,8 +6002,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
-            let second_slot = PAGE_SIZE.get() as usize + CHECKSUM_SLOT_SIZE;
+            let first_slot: usize = PAGE_SIZE.widen();
+            let physical_page_size = first_slot + Checksum::SIZE;
+            let second_slot = first_slot + CHECKSUM_SLOT_SIZE;
             let second_slot_len = second_slot..second_slot + CHECKSUM_SLOT_LEN_SIZE;
             let data: Vec<u8> = (1u8..=50).collect();
 
@@ -6043,7 +6048,7 @@ mod tests {
                 .open("test_partition", b"torn_append")
                 .await
                 .unwrap();
-            assert_eq!(size as usize, physical_page_size + 4);
+            assert_eq!(size, Widen::<u64>::widen(physical_page_size + 4));
             let writer = Recovery::open(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();

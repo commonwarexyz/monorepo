@@ -4499,7 +4499,8 @@ mod tests {
             if unchanged {
                 assert_eq!(journal.root(0).unwrap(), root, "seed {seed}");
                 for pos in bounds {
-                    assert_eq!(journal.read(pos).await.unwrap(), ops[pos as usize]);
+                    let index = usize::try_from(pos).expect("position fits in usize");
+                    assert_eq!(journal.read(pos).await.unwrap(), ops[index]);
                 }
             } else {
                 assert_eq!(journal.bounds(), 0..0, "seed {seed}");

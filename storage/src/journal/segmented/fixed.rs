@@ -1099,7 +1099,7 @@ mod tests {
             fail_pending_syncs, release_pending_syncs,
         },
     };
-    use commonware_utils::{NZU16, NZUsize};
+    use commonware_utils::{NZU16, NZUsize, Widen};
     use core::num::NonZeroU16;
     use std::{
         ops::RangeInclusive,
@@ -1730,7 +1730,7 @@ mod tests {
                 context.child("restore"),
                 cfg.clone(),
                 1,
-                16 * u64::SIZE as u64,
+                16 * Widen::<u64>::widen(u64::SIZE),
             )
             .await;
             assert!(matches!(result, Err(Error::Corruption(_))));

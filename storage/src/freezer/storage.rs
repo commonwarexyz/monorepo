@@ -1228,7 +1228,7 @@ mod tests {
         deterministic::Context,
     };
     use commonware_utils::{
-        NZU16, NZUsize,
+        NZU16, NZUsize, Widen,
         sequence::{FixedBytes, U64},
     };
 
@@ -1316,7 +1316,7 @@ mod tests {
             // Tear a write of the next epoch's entry into the empty slot so that everything lands
             // except its CRC.
             let torn = Entry::new(checkpoint.epoch + 1, 0, 1, 2).encode();
-            let offset = Entry::SIZE as u64;
+            let offset: u64 = Widen::widen(Entry::SIZE);
             blob.write_at(
                 offset,
                 torn.as_ref()[..Entry::SIZE - crc32::Digest::SIZE].to_vec(),
