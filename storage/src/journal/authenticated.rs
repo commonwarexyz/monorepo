@@ -1276,7 +1276,8 @@ mod tests {
         rayon::ThreadPoolBuilder,
     };
     use commonware_runtime::{
-        Runner as _, Spawner as _, Strategizer as _, Supervisor as _,
+        Error as RuntimeError, Runner as _, Spawner as _, Storage as _, Strategizer as _,
+        Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
         mocks::{
@@ -4433,10 +4434,40 @@ mod tests {
         }
     }
 
+    /// Where an interrupted destroy stopped, in the order destroy reaches each outcome.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Interrupted {
+        /// Destroy stopped before the operation journal's clear was staged, and the journal
+        /// reopens at its last commit.
+        Unchanged,
+        /// Destroy stopped while removing the operation journal, and the journal reopens empty.
+        InJournal,
+        /// Destroy stopped after removing the operation journal, while removing the Merkle
+        /// structure, and the journal reopens empty.
+        InMerkle,
+        /// Destroy completed despite the injected failures.
+        Completed,
+    }
+
+    /// Returns whether `partition` exists in `context`'s storage.
+    async fn partition_exists(context: &Context, partition: &str) -> bool {
+        match context.scan(partition).await {
+            Ok(_) => true,
+            Err(RuntimeError::PartitionMissing(_)) => false,
+            Err(err) => panic!("scan of {partition} failed: {err}"),
+        }
+    }
+
     /// Interrupt the destroy of a twice-committed, pruned journal with injected sync and removal
-    /// failures, then reopen it. Returns whether the reopened journal holds its last commit, or
-    /// `None` when the destroy completed.
-    fn interrupted_destroy_reopens<F, C>(seed: u64, journal_cfg: C::Config) -> Option<bool>
+    /// failures, then reopen it and report where destroy stopped.
+    ///
+    /// `journal_partitions` names every partition of the operation journal configured by
+    /// `journal_cfg`, which destroy removes before the Merkle structure.
+    fn interrupted_destroy_reopens<F, C>(
+        seed: u64,
+        journal_cfg: C::Config,
+        journal_partitions: &[String],
+    ) -> Interrupted
     where
         F: Family + PartialEq,
         C: Backing<Context, Item = TestOp<F>>,
@@ -4444,10 +4475,15 @@ mod tests {
         deterministic::Runner::seeded(seed).start(|context| async move {
             // Record the digest of empty storage. A completed destroy must restore it.
             let empty = context.storage_audit();
+
+            // The Merkle node journal keeps few blobs once pruned, so the injected failures
+            // reach past the operation journal's removal.
+            let mut merkle_cfg = merkle_config("interrupted-destroy");
+            merkle_cfg.items_per_blob = NZU64!(64);
             let open = |context| {
                 Journal::<F, Context, C, Sha256, Sequential>::new(
                     context,
-                    merkle_config("interrupted-destroy"),
+                    merkle_cfg.clone(),
                     journal_cfg.clone(),
                     |op: &TestOp<F>| op.is_commit(),
                     ForwardFold,
@@ -4480,27 +4516,38 @@ mod tests {
 
             // Fail a sample of syncs and removals so destroy stops at varying depths, from the
             // operation journal's staged clear through the Merkle node journal's checkpoint.
-            context.storage_fault_config().write().sync_rate = Some(probability!(0.3));
-            context.storage_fault_config().write().remove_rate = Some(probability!(0.1));
+            context.storage_fault_config().write().sync_rate = Some(probability!(0.2));
+            context.storage_fault_config().write().remove_rate = Some(probability!(0.05));
             let result = journal.destroy().await;
             context.storage_fault_config().write().sync_rate = None;
             context.storage_fault_config().write().remove_rate = None;
             if result.is_ok() {
                 assert_eq!(context.storage_audit(), empty, "seed {seed}");
-                return None;
+                return Interrupted::Completed;
+            }
+
+            // Removing its last partition is the last step of the operation journal's removal,
+            // so destroy finished it exactly when all its partitions are gone.
+            let mut journal_removed = true;
+            for partition in journal_partitions {
+                journal_removed &= !partition_exists(&context, partition).await;
             }
 
             // The reopened journal is exactly the last commit or empty.
             let mut journal = open(context.child("second"))
                 .await
                 .unwrap_or_else(|err| panic!("seed {seed} must reopen: {err}"));
-            let unchanged = journal.bounds() == bounds;
-            if unchanged {
+            let outcome = if journal.bounds() == bounds {
+                assert!(
+                    !journal_removed,
+                    "seed {seed} reopened at its last commit without its operation journal"
+                );
                 assert_eq!(journal.root(0).unwrap(), root, "seed {seed}");
                 for pos in bounds {
                     let index = usize::try_from(pos).expect("position fits in usize");
                     assert_eq!(journal.read(pos).await.unwrap(), ops[index]);
                 }
+                Interrupted::Unchanged
             } else {
                 assert_eq!(journal.bounds(), 0..0, "seed {seed}");
                 assert_eq!(journal.root(0).unwrap(), fresh_root, "seed {seed}");
@@ -4520,33 +4567,68 @@ mod tests {
                 journal = open(context.child("third")).await.unwrap();
                 assert_eq!(journal.bounds(), 0..41, "seed {seed}");
                 assert_eq!(journal.root(0).unwrap(), reused, "seed {seed}");
-            }
+                if journal_removed {
+                    Interrupted::InMerkle
+                } else {
+                    Interrupted::InJournal
+                }
+            };
 
             // A retried destroy completes and leaves no blob behind.
             journal.destroy().await.unwrap();
             assert_eq!(context.storage_audit(), empty, "seed {seed}");
-            Some(unchanged)
+            outcome
         })
     }
 
-    /// Sweep seeds until destroy has stopped both before and after its point of no return.
-    fn interrupted_destroy_reopens_all_seeds<F, C>(journal_cfg: C::Config)
-    where
+    /// Sweep seeds and require that destroy stopped at each of its outcomes.
+    fn interrupted_destroy_reopens_all_seeds<F, C>(
+        journal_cfg: C::Config,
+        journal_partitions: &[String],
+    ) where
         F: Family + PartialEq,
         C: Backing<Context, Item = TestOp<F>>,
     {
-        let (mut unchanged, mut emptied) = (0, 0);
-        for seed in 0..32u64 {
-            match interrupted_destroy_reopens::<F, C>(seed, journal_cfg.clone()) {
-                Some(true) => unchanged += 1,
-                Some(false) => emptied += 1,
-                None => {}
-            }
+        let outcomes: Vec<_> = (0..64u64)
+            .map(|seed| {
+                interrupted_destroy_reopens::<F, C>(seed, journal_cfg.clone(), journal_partitions)
+            })
+            .collect();
+
+        // A stage no seed interrupts is a stage whose recovery this sweep does not exercise.
+        for outcome in [
+            Interrupted::Unchanged,
+            Interrupted::InJournal,
+            Interrupted::InMerkle,
+            Interrupted::Completed,
+        ] {
+            assert!(outcomes.contains(&outcome), "no seed reached {outcome:?}");
         }
-        assert!(
-            unchanged > 0 && emptied > 0,
-            "both outcomes must occur: unchanged {unchanged} emptied {emptied}"
-        );
+    }
+
+    /// A fixed operation journal that keeps few blobs once pruned, and its partitions.
+    fn fixed_destroy_config() -> (JConfig, Vec<String>) {
+        let mut cfg = journal_config("interrupted-destroy");
+        cfg.items_per_blob = NZU64!(32);
+        let partition = &cfg.partition;
+        let partitions = vec![
+            format!("{partition}-blobs"),
+            format!("{partition}-metadata"),
+        ];
+        (cfg, partitions)
+    }
+
+    /// A variable operation journal that keeps few blobs once pruned, and its partitions.
+    fn variable_destroy_config() -> (VConfig<()>, Vec<String>) {
+        let mut cfg = variable_journal_config("interrupted-destroy");
+        cfg.items_per_section = NZU64!(32);
+        let partition = &cfg.partition;
+        let partitions = vec![
+            format!("{partition}_data"),
+            format!("{partition}_offsets-blobs"),
+            format!("{partition}_offsets-metadata"),
+        ];
+        (cfg, partitions)
     }
 
     /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
@@ -4555,10 +4637,11 @@ mod tests {
     /// reopens at its last commit or empty, and that a retried destroy removes.
     #[test]
     fn pr_5651_regression_interrupted_destroy_reopens_fixed_mmr() {
+        let (cfg, partitions) = fixed_destroy_config();
         interrupted_destroy_reopens_all_seeds::<
             mmr::Family,
             ContiguousJournal<Context, TestOp<mmr::Family>>,
-        >(journal_config("interrupted-destroy"));
+        >(cfg, &partitions);
     }
 
     /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
@@ -4567,10 +4650,11 @@ mod tests {
     /// reopens at its last commit or empty, and that a retried destroy removes.
     #[test]
     fn pr_5651_regression_interrupted_destroy_reopens_fixed_mmb() {
+        let (cfg, partitions) = fixed_destroy_config();
         interrupted_destroy_reopens_all_seeds::<
             mmb::Family,
             ContiguousJournal<Context, TestOp<mmb::Family>>,
-        >(journal_config("interrupted-destroy"));
+        >(cfg, &partitions);
     }
 
     /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
@@ -4579,10 +4663,11 @@ mod tests {
     /// reopens at its last commit or empty, and that a retried destroy removes.
     #[test]
     fn pr_5651_regression_interrupted_destroy_reopens_variable_mmr() {
+        let (cfg, partitions) = variable_destroy_config();
         interrupted_destroy_reopens_all_seeds::<
             mmr::Family,
             VariableJournal<Context, TestOp<mmr::Family>>,
-        >(variable_journal_config("interrupted-destroy"));
+        >(cfg, &partitions);
     }
 
     /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
@@ -4591,9 +4676,10 @@ mod tests {
     /// reopens at its last commit or empty, and that a retried destroy removes.
     #[test]
     fn pr_5651_regression_interrupted_destroy_reopens_variable_mmb() {
+        let (cfg, partitions) = variable_destroy_config();
         interrupted_destroy_reopens_all_seeds::<
             mmb::Family,
             VariableJournal<Context, TestOp<mmb::Family>>,
-        >(variable_journal_config("interrupted-destroy"));
+        >(cfg, &partitions);
     }
 }
