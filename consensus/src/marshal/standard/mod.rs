@@ -14263,6 +14263,8 @@ mod tests {
         watched: Epoch,
         blocks: u64,
     ) -> Option<Round> {
+        // Start a marshal that keeps `view_retention` views under `epocher`. Its application
+        // acknowledges each block only when the test asks, starting with genesis.
         let Fixture { schemes, .. } =
             bls12381_threshold_vrf::fixture::<V, _>(context, NAMESPACE, NUM_VALIDATORS);
         let (certificates, finalized) =
@@ -14289,6 +14291,8 @@ mod tests {
         let _handle = actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
         assert_eq!(application.acknowledged().await, Height::zero());
 
+        // Map each height to the round it is finalized in, and find the round of the watched
+        // epoch's last block.
         let layout = FixedEpocher::new(epoch_length);
         let round_of = |height: Height| {
             let info = layout
@@ -14306,14 +14310,21 @@ mod tests {
             .last(watched)
             .expect("the layout must cover the watched epoch");
         let boundary_round = round_of(boundary);
+
+        // Build the chain from genesis one height at a time, tracking whether the watched block is
+        // still cached.
         let mut parent = StandardHarness::genesis_block(NUM_VALIDATORS as u16).digest();
         let mut last_kept = None;
         let mut gone = false;
         for height in 1..=blocks {
+            // Mark the block verified at its round so the cache holds it before it is finalized.
             let block = make_raw_block(parent, Height::new(height), height * 100);
             parent = block.digest();
             let round = round_of(Height::new(height));
             assert!(mailbox.verified(round, ready(block.clone())).await);
+
+            // Finalize the block and wait until marshal processes it. Processing a finalization
+            // prunes the cache behind the previous one.
             let finalization = StandardHarness::make_finalization(
                 Proposal::new(
                     round,
@@ -14332,6 +14343,9 @@ mod tests {
                 mailbox.get_processed().await,
                 Some(Processed::Block(Height::new(height)))
             );
+
+            // Once the watched epoch has ended, record the last round after which its last block
+            // was still cached, and check that it never returns after it is pruned.
             if height < boundary.get() {
                 continue;
             }
