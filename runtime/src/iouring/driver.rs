@@ -385,18 +385,19 @@ impl Driver {
 
         // Keep the arm guard alive through the wait. A notification racing this
         // check either prevents sleeping or wakes the ring wait.
-        let arm = parker.arm(seen);
+        let arm = parker.arm_ring(seen);
         if !arm.still_idle() {
             return Ok(false);
         }
 
-        // A ring wait that an earlier park left queued serves this park. Its
+        // A ring wait that an earlier ring park left queued serves this park,
+        // even across thread parks since, whose wakes pass over it. Its
         // compare belonged to that park, so this arm alone guards the sequence
-        // since `seen`, and a later notification finds the waiter bit and
-        // wakes that wait.
+        // since `seen`, and a later notification finds the ring bit and wakes
+        // that wait.
         //
         // A transient enter can leave a new wait's SQE unsubmitted. Its
-        // snapshot carries the waiter bit, so a later enter queues it only
+        // snapshot carries the ring bit, so a later enter queues it only
         // inside a park armed with the same word and otherwise fails it with
         // EAGAIN.
         if self.state.ring_wait_needed {

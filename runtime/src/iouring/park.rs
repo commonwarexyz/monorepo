@@ -9,18 +9,20 @@
 //! notification. [`Idle`](super::idle::Idle) selects which pool worker to
 //! unpark. See [`super::idle`] for the parking sequence.
 //!
-//! Bit 0 of the word is the waiter bit, which the worker sets while it may
-//! block. Bits 1 to 31 hold the sequence, which each notification advances by
-//! two, so it wraps modulo 2^31 and never touches the waiter bit. The word
+//! Bits 0 and 1 of the word are the waiter bits, one per place the worker can
+//! block: the thread bit while it may block in a thread futex wait, and the
+//! ring bit while it may block in its ring. The worker sets at most one at a
+//! time. Bits 2 to 31 hold the sequence, which each notification advances by
+//! four, so it wraps modulo 2^30 and never touches the waiter bits. The word
 //! takes these atomic operations:
 //! - A notification does a release `fetch_add` of the increment and, if it
-//!   found the waiter bit set, a relaxed `fetch_and` that clears the bit. The
-//!   one whose clear takes the bit wakes the word, so concurrent notifications
-//!   share one wake.
-//! - The worker observes with an acquire load that masks the waiter bit, arms
-//!   with a relaxed `fetch_or` of the bit, and disarms with a relaxed
-//!   `fetch_and` that clears it, unless a relaxed load finds a notification
-//!   already cleared it.
+//!   found a waiter bit set, a relaxed `fetch_and` that clears both. The one
+//!   whose clear takes a bit wakes the waiter of that bit's kind, so
+//!   concurrent notifications share one wake.
+//! - The worker observes with an acquire load that masks the waiter bits, arms
+//!   with a relaxed `fetch_or` of the bit of the wait it is about to enter,
+//!   and disarms with a relaxed `fetch_and` that clears that bit, unless a
+//!   relaxed load finds a notification already cleared it.
 //!
 //! The release increment and the acquire observation make a notification's
 //! condition visible to the checks that follow the observation. The other
@@ -36,8 +38,8 @@
 //!   checking any source of work,
 //! - runs again if it found work, left a mailbox batch untaken, or the sequence
 //!   moved since that load,
-//! - arms with [`Parker::arm`], setting the waiter bit, and waits only while the
-//!   armed word still carries the observed sequence,
+//! - arms, setting the waiter bit of the wait it is about to enter, and waits
+//!   only while the armed word still carries the observed sequence,
 //! - disarms when the park returns.
 //!
 //! The worker waits on the word in two places: in the ring through a one-shot
@@ -60,20 +62,31 @@
 //!   refuses to block.
 //! - After the arm, it finds the waiter bit set, or finds it already taken by
 //!   an earlier notification of the same arm, whose wake has run or is still
-//!   to come. Either way a wake follows the clear and releases the waits
-//!   queued before it, and a wait the kernel queues after the clear fails its
-//!   compare, because the word changed.
+//!   to come. Either way a wake of that bit's kind follows the clear and
+//!   releases the wait queued before it, and a wait the kernel queues after
+//!   the clear fails its compare, because the word changed.
 //!
 //! A delayed wake syscall can also end a later park, so every return leads
 //! back to the source checks.
 //!
 //! A ring wait remains live until its completion is reaped and can remain
-//! queued after the park that installed it ends. A wake that releases it only
-//! posts a completion, which deferred task work delivers at the worker's next
-//! enter, so it cannot end a thread wait. A ring wait queued ahead of the
-//! thread's idle wait could therefore absorb a wake meant for it. The word has
-//! at most one ring wait and one thread wait queued, so a wake releases two
-//! waiters.
+//! queued after the park that installed it ends, for example when an I/O
+//! completion ended that park. A wake that releases it only posts a
+//! completion, which deferred task work delivers at the worker's next enter,
+//! so it cannot end a thread wait. Each wait therefore carries a futex bitset:
+//! the waiter bit of its kind. A notification wakes one waiter with the
+//! bitset of the bit its clear took, so a wake releases only a wait of the
+//! kind that bit armed. A thread wake passes over a ring wait queued ahead of
+//! the thread wait, and that ring wait stays queued for the next ring park to
+//! reuse. A ring wake whose syscall was delayed past the ring park that armed
+//! its bit passes over a thread wait that followed. The word has at most one
+//! ring wait and one thread wait queued, so one waiter per wake suffices.
+//!
+//! The wake's bitset must come from the clear, not from the increment that
+//! found a bit. A notifier can find the ring bit, stall while that ring park
+//! ends on an I/O completion and the worker arms the thread bit, and then
+//! clear the thread bit. A later notification finds no bit and skips its
+//! wake, so a ring wake from the stalled notifier would strand the thread.
 //!
 //! A later ring park reuses a wait that is still queued. That wait's compare
 //! belonged to the park that installed it, so the reusing park relies on its
@@ -81,9 +94,9 @@
 //! wake that follows a notification after it releases the queued wait.
 //!
 //! These checks compare sequences, so they could miss a notification only if
-//! the 31-bit sequence wrapped all the way around between the observation and
+//! the 30-bit sequence wrapped all the way around between the observation and
 //! the arm, or the kernel's compare of a newly queued wait. That takes about
-//! two billion notifications, and each one in the interval has its own cause. A
+//! one billion notifications, and each one in the interval has its own cause. A
 //! mailbox notifies once per empty-to-nonempty transition and keeps its batch
 //! until the worker takes it, at most once per turn. A pool claim answers one
 //! idle publication, and only a publication that no claim answered leads to
@@ -116,10 +129,11 @@
 //! producers, the larger models within a preemption bound. They model the
 //! kernel's futex queue as a list of waits under a mutex that stands in for its
 //! bucket lock, so a wait compares and queues atomically with respect to wakes,
-//! which release the oldest waits first. A modeled ring wait is a queued entry
-//! whose release posts a completion for the worker to reap. They do not model
-//! completion delivery, `io_uring_enter`, kernel timeouts, signals, or syscall
-//! errors, which the tests with a real ring and real futex calls cover.
+//! which release the oldest waits whose bitset matches first. A modeled ring
+//! wait is a queued entry whose release posts a completion for the worker to
+//! reap. They do not model completion delivery, `io_uring_enter`, kernel
+//! timeouts, signals, or syscall errors, which the tests with a real ring and
+//! real futex calls cover.
 
 use super::waiter::UserData;
 use crossbeam_utils::CachePadded;
@@ -150,14 +164,17 @@ cfg_if::cfg_if! {
 /// Reserved `user_data` value for ring futex wait completions.
 pub const RING_WAIT_USER_DATA: UserData = UserData::MAX;
 
-/// Bit the worker's arm sets while it may block on the word. The disarm, or
-/// the notification that wakes the word, clears it.
-const WAITER: u32 = 1;
-/// Word increment of one notification, above the waiter bit.
-const INCREMENT: u32 = 2;
-/// Waiters one wake releases: a ring wait an earlier park left queued, and the
-/// wait of the worker's current park.
-const WAKE_COUNT: u32 = 2;
+/// Waiter bit the worker's arm sets while it may block in a thread futex wait.
+/// The disarm, or the notification that wakes the word, clears it. Also the
+/// futex bitset of that wait and of the wake that releases it.
+const THREAD: u32 = 1;
+/// Waiter bit the worker's arm sets while it may block in its ring. Also the
+/// futex bitset of every ring wait and of the wake that releases one.
+const RING: u32 = 2;
+/// Both waiter bits.
+const WAITERS: u32 = THREAD | RING;
+/// Word increment of one notification, above the waiter bits.
+const INCREMENT: u32 = 4;
 /// futex2 flags of the ring and thread waits: a private 32-bit word.
 #[cfg(not(feature = "loom"))]
 const FUTEX2_PRIVATE_U32: u32 = 0x02 | libc::FUTEX_PRIVATE_FLAG as u32;
@@ -179,10 +196,13 @@ const _: () = assert!(
     "target's timespec must match the kernel's 64-bit timespec"
 );
 
-/// RAII guard returned by [`Parker::arm`], which disarms the word on drop.
+/// RAII guard of one arm, which disarms the word on drop. [`Parker::arm_ring`]
+/// returns one, and [`Parker::park`] holds one through its wait.
 pub struct ArmGuard<'a> {
     /// Owner of the word to disarm when the guard is dropped.
     parker: &'a Parker,
+    /// Waiter bit this arm set, [`THREAD`] or [`RING`].
+    waiter: u32,
     /// Whether the armed word still carries the observed sequence.
     still_idle: bool,
     /// Word produced by the arming transition.
@@ -204,9 +224,11 @@ impl ArmGuard<'_> {
     /// Queue a one-shot ring futex wait that compares against this guard's
     /// snapshot.
     ///
-    /// Call it only when [`Self::still_idle`] permits blocking. The caller
-    /// reserves the SQ slot before arming and installs again only after
-    /// reaping this wait's completion, so the ring holds at most one live wait.
+    /// Call it only on a ring arm, when [`Self::still_idle`] permits blocking.
+    /// The wait carries the ring bit as its futex bitset, so a wake of a
+    /// thread arm passes over it. The caller reserves the SQ slot before
+    /// arming and installs again only after reaping this wait's completion,
+    /// so the ring holds at most one live wait.
     /// The caller also keeps an [`Unparker`] of this word until the wait
     /// completes or is cancelled, so no wait stays queued at a freed word's
     /// address. A notification that changes the word before the kernel queues
@@ -223,10 +245,11 @@ impl ArmGuard<'_> {
             self.still_idle,
             "a ring wait must be installed only under an arm that permits blocking"
         );
+        assert_eq!(self.waiter, RING, "a ring wait needs a ring arm");
         let wait = FutexWait::new(
             self.parker.word.as_ptr(),
             self.snapshot.into(),
-            u32::MAX.into(),
+            RING.into(),
             FUTEX2_PRIVATE_U32,
         )
         .build()
@@ -256,17 +279,17 @@ impl ArmGuard<'_> {
 
 impl Drop for ArmGuard<'_> {
     fn drop(&mut self) {
-        // Only the worker sets the waiter bit, so a load that finds it clear,
+        // Only the worker sets a waiter bit, so a load that finds it clear,
         // as after the notification that woke this park, is final and leaves
         // nothing to disarm. The next observation acquires any notification,
         // so disarming needs no ordering of its own.
-        if self.parker.word.load(Ordering::Relaxed) & WAITER != 0 {
-            self.parker.word.fetch_and(!WAITER, Ordering::Relaxed);
+        if self.parker.word.load(Ordering::Relaxed) & self.waiter != 0 {
+            self.parker.word.fetch_and(!self.waiter, Ordering::Relaxed);
         }
     }
 }
 
-/// The futex word shared by the worker and its producers: a waiter bit and a
+/// The futex word shared by the worker and its producers: two waiter bits and a
 /// notification sequence.
 #[cfg(not(feature = "loom"))]
 type Word = AtomicU32;
@@ -282,7 +305,7 @@ type Word = AtomicU32;
 /// production word.
 #[cfg(feature = "loom")]
 struct Word {
-    /// Waiter bit and notification sequence.
+    /// Waiter bits and notification sequence.
     state: AtomicU32,
     /// Modeled futex queue, under a mutex standing in for the bucket lock.
     futex: Mutex<FutexQueue>,
@@ -295,12 +318,17 @@ struct Word {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Waiter {
     /// A ring wait, whose wake posts a completion that the driver reaps later.
-    /// Only the models of a ring wait reused across parks queue one.
+    /// Its bitset is the queue's `ring_bitset`. Only the models of a ring
+    /// wait reused across parks queue one.
     #[cfg_attr(not(test), allow(dead_code))]
     Ring,
-    /// A wait that blocks its caller until a wake releases it, identified by
-    /// its ticket.
-    Thread(u64),
+    /// A wait that blocks its caller until a wake releases it.
+    Thread {
+        /// Identity of the wait among those queued.
+        ticket: u64,
+        /// Futex bitset of the wait, which a wake must share a bit with.
+        bitset: u32,
+    },
 }
 
 /// The loom model of the kernel's futex queue for the word.
@@ -313,8 +341,9 @@ struct FutexQueue {
     /// Whether a ring wait was released or refused and its completion waits
     /// for the driver to reap it.
     ring_completed: bool,
-    /// Waits one wake releases. A negative control lowers it.
-    wake_count: u32,
+    /// Futex bitset of queued ring waits. A negative control widens it to
+    /// match every wake.
+    ring_bitset: u32,
     /// Wake calls so far.
     #[cfg_attr(not(test), allow(dead_code))]
     wakes: u32,
@@ -335,7 +364,7 @@ impl Word {
                 waiters: VecDeque::new(),
                 next_ticket: 0,
                 ring_completed: false,
-                wake_count: WAKE_COUNT,
+                ring_bitset: RING,
                 wakes: 0,
                 abandoned: false,
             }),
@@ -407,7 +436,7 @@ impl Parker {
     /// load makes the conditions of every notification it includes visible.
     #[inline]
     pub fn observe(&self) -> u32 {
-        self.word.load(Ordering::Acquire) & !WAITER
+        self.word.load(Ordering::Acquire) & !WAITERS
     }
 
     /// Whether a notification arrived since the worker observed `seen`.
@@ -416,21 +445,29 @@ impl Parker {
         self.observe() != seen
     }
 
-    /// Announce that the worker may block, comparing against `seen`.
+    /// Announce that the worker may block in its ring, comparing against
+    /// `seen`.
     ///
     /// Call [`ArmGuard::still_idle`] to decide whether the worker may block. A
     /// notification since `seen` rejects sleeping and requires the worker to
     /// check its sources again.
-    pub fn arm(&self, seen: u32) -> ArmGuard<'_> {
+    pub fn arm_ring(&self, seen: u32) -> ArmGuard<'_> {
+        self.arm_waiter(seen, RING)
+    }
+
+    /// Announce that the worker may block in the wait whose waiter bit is
+    /// `waiter`, comparing against `seen`.
+    fn arm_waiter(&self, seen: u32, waiter: u32) -> ArmGuard<'_> {
         // The word alone decides whether to block. Producers order their
         // conditions through the sequence, so arming needs no ordering.
-        let prev = self.word.fetch_or(WAITER, Ordering::Relaxed);
-        assert_eq!(prev & WAITER, 0, "iouring wait armed twice");
+        let prev = self.word.fetch_or(waiter, Ordering::Relaxed);
+        assert_eq!(prev & WAITERS, 0, "iouring wait armed twice");
 
         ArmGuard {
             parker: self,
+            waiter,
             still_idle: prev == seen,
-            snapshot: prev | WAITER,
+            snapshot: prev | waiter,
         }
     }
 
@@ -439,15 +476,15 @@ impl Parker {
     ///
     /// Returns how long the thread blocked when a wake ended the wait, which
     /// feeds adaptive spinning. The wake is usually this park's notification,
-    /// but a delayed wake syscall of an earlier park's notification also
-    /// counts. Returns `None` without blocking when a notification arrived
+    /// but a delayed wake syscall of an earlier thread park's notification
+    /// also counts. Returns `None` without blocking when a notification arrived
     /// since `seen` or the deadline has elapsed, and after an interruption or
     /// a timeout, so timer expiry does not count as a quick notification wake.
     /// The futex timeout is computed from the clock reading that also times the
     /// sleep, taken immediately before it. Every return disarms the word,
     /// including skipped sleeps.
     pub fn park(&self, seen: u32, deadline: Option<Instant>) -> Option<Duration> {
-        let arm = self.arm(seen);
+        let arm = self.arm_waiter(seen, THREAD);
         if !arm.still_idle() {
             return None;
         }
@@ -459,11 +496,13 @@ impl Parker {
     /// thread blocked when a wake ended the sleep.
     ///
     /// `snapshot` must be the exact post-arm word from the atomic transition
-    /// that set the waiter bit. The wait blocks only while the word still
+    /// that set the thread bit. The wait blocks only while the word still
     /// equals it, which closes the race between arming and a concurrent
-    /// notification. A stale snapshot, an elapsed deadline, `EINTR`, `EAGAIN`,
-    /// `ETIMEDOUT`, and an unexpected error all return `None`, and the caller
-    /// rechecks its sources with the deadline unchanged.
+    /// notification. Its futex bitset is the thread bit, so a ring wake whose
+    /// syscall was delayed past its park passes over it. A stale snapshot, an
+    /// elapsed deadline, `EINTR`, `EAGAIN`, `ETIMEDOUT`, and an unexpected error
+    /// all return `None`, and the caller rechecks its sources with the
+    /// deadline unchanged.
     #[cfg(not(feature = "loom"))]
     fn futex_wait(&self, snapshot: u32, deadline: Option<Instant>) -> Option<Duration> {
         // This is only a same-word equality check before entering the
@@ -527,7 +566,7 @@ impl Parker {
                 SYS_FUTEX_WAIT,
                 self.word.as_ptr(),
                 libc::c_ulong::from(snapshot),
-                libc::c_ulong::from(u32::MAX),
+                libc::c_ulong::from(THREAD),
                 FUTEX2_PRIVATE_U32,
                 timeout_ptr,
                 libc::CLOCK_MONOTONIC,
@@ -550,11 +589,14 @@ impl Parker {
         }
     }
 
-    /// Model `FUTEX_WAIT` on the futex word.
+    /// Model the thread wait on the futex word.
     ///
     /// The wait compares and queues under the modeled bucket lock, then blocks
     /// until a wake releases it, so loom can explore the same lost-wake
     /// boundary that the kernel's atomic futex wait protects in production.
+    /// Its futex bitset is the waiter bit `snapshot` carries: the thread bit
+    /// for a park, as in production, and the ring bit for the fresh ring waits
+    /// that the models block in the same way.
     #[cfg(feature = "loom")]
     fn futex_wait(&self, snapshot: u32, deadline: Option<Instant>) -> Option<Duration> {
         let now = Instant::now();
@@ -574,7 +616,10 @@ impl Parker {
             return None;
         }
 
-        let waiter = Waiter::Thread(queue.next_ticket);
+        let waiter = Waiter::Thread {
+            ticket: queue.next_ticket,
+            bitset: snapshot & WAITERS,
+        };
         queue.next_ticket += 1;
         queue.waiters.push_back(waiter);
         while queue.waiters.contains(&waiter) {
@@ -596,7 +641,7 @@ impl Unparker {
     /// [`Parker::observe`], so a worker that loads this notification's sequence
     /// sees the condition.
     ///
-    /// Notifications that find the waiter bit share one wake: the one whose
+    /// Notifications that find a waiter bit share one wake: the one whose
     /// clear takes the bit issues it, and later ones of the same park skip it.
     /// So a notifier stalled between its clear and its wake syscall delays
     /// every later notification of that park until the scheduler runs it
@@ -604,16 +649,21 @@ impl Unparker {
     pub fn unpark(&self) {
         let prev = self.word.fetch_add(INCREMENT, Ordering::Release);
 
-        // Every notification that finds the waiter bit tries to clear it, and
-        // only the one that clears it wakes, so concurrent notifications share
-        // one wake. A wait queued before the clear, including a ring wait an
-        // earlier park left queued, is released by the wake that follows it. A
-        // wait queued after the clear compares against the armed snapshot,
-        // which still has the bit, so it fails at once. The clear needs no
-        // ordering of its own: the increment already published the condition,
-        // and a read-modify-write continues its release sequence.
-        if prev & WAITER != 0 && self.word.fetch_and(!WAITER, Ordering::Relaxed) & WAITER != 0 {
-            self.futex_wake();
+        // Every notification that finds a waiter bit tries to clear both, and
+        // only the one whose clear takes a bit wakes, so concurrent
+        // notifications share one wake. The wake targets the kind of wait the
+        // cleared bit armed, never the bit the increment found, since the
+        // worker can switch arms between the two. The armed wait, queued before
+        // the clear, is released by the wake that follows it. A wait queued
+        // after the clear compares against the armed snapshot, which still has
+        // the bit, so it fails at once. The clear needs no ordering of its own:
+        // the increment already published the condition, and a
+        // read-modify-write continues its release sequence.
+        if prev & WAITERS != 0 {
+            let cleared = self.word.fetch_and(!WAITERS, Ordering::Relaxed) & WAITERS;
+            if cleared != 0 {
+                self.futex_wake(cleared);
+            }
         }
     }
 
@@ -622,23 +672,27 @@ impl Unparker {
         Arc::ptr_eq(&self.word, &parker.word)
     }
 
-    /// Wake the waiters on the futex word.
+    /// Wake one waiter on the futex word whose bitset matches `waiter`, the
+    /// waiter bit this notification cleared.
     ///
-    /// A ring wait that an earlier park left queued can absorb a wake meant
-    /// for the worker's current wait, so this releases up to two waiters. The
-    /// word has one parker, whose worker owns one driver, which keeps at most
-    /// one ring wait live.
+    /// A thread wake passes over a ring wait that an earlier park left
+    /// queued. The word has one parker, whose worker owns one driver, which
+    /// keeps at most one ring wait live, so one waiter per wake suffices.
     #[cfg(not(feature = "loom"))]
-    fn futex_wake(&self) {
+    fn futex_wake(&self, waiter: u32) {
         loop {
             // SAFETY: `word` is a valid aligned futex word for the duration of
-            // the syscall.
+            // the syscall. `FUTEX_WAKE_BITSET` ignores the timeout and second
+            // address arguments, which are null.
             let ret = unsafe {
                 libc::syscall(
                     libc::SYS_futex,
                     self.word.as_ptr(),
-                    libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG,
-                    WAKE_COUNT,
+                    libc::FUTEX_WAKE_BITSET | libc::FUTEX_PRIVATE_FLAG,
+                    1,
+                    std::ptr::null::<libc::timespec>(),
+                    std::ptr::null::<u32>(),
+                    waiter,
                 )
             };
             if ret >= 0 {
@@ -661,30 +715,30 @@ impl Unparker {
         }
     }
 
-    /// Model `FUTEX_WAKE` for the futex word.
+    /// Model `FUTEX_WAKE_BITSET` of one waiter for the futex word.
     ///
-    /// The modeled bucket lock serializes compare-and-queue against wake.
-    /// Releasing the oldest waits first exercises a stale ring wait absorbing
-    /// a wake before the thread wait. A released ring wait posts its completion.
-    /// A wake that releases no wait changes no waiter's condition, so it skips
-    /// the condvar, whose notification loom would otherwise interleave.
+    /// The modeled bucket lock serializes compare-and-queue against wake. The
+    /// wake releases the oldest wait whose bitset matches `waiter`, so a ring
+    /// wait queued ahead of the thread wait absorbs it only if their bitsets
+    /// match. A released ring wait posts its completion. A wake that releases
+    /// no wait changes no waiter's condition, so it skips the condvar, whose
+    /// notification loom would otherwise interleave.
     #[cfg(feature = "loom")]
-    fn futex_wake(&self) {
+    fn futex_wake(&self, waiter: u32) {
         let mut queue = self.word.futex.lock().unwrap();
         queue.wakes += 1;
-        let mut released = false;
-        for _ in 0..queue.wake_count {
-            match queue.waiters.pop_front() {
-                Some(Waiter::Ring) => queue.ring_completed = true,
-                Some(Waiter::Thread(_)) => {}
-                None => break,
-            }
-            released = true;
+        let ring_bitset = queue.ring_bitset;
+        let matched = queue.waiters.iter().position(|queued| match *queued {
+            Waiter::Ring => ring_bitset & waiter != 0,
+            Waiter::Thread { bitset, .. } => bitset & waiter != 0,
+        });
+        let Some(index) = matched else {
+            return;
+        };
+        if queue.waiters.remove(index) == Some(Waiter::Ring) {
+            queue.ring_completed = true;
         }
-
-        if released {
-            self.word.futex_waiters.notify_all();
-        }
+        self.word.futex_waiters.notify_all();
     }
 }
 
@@ -715,7 +769,7 @@ pub mod tests {
 
     /// Whether the owner is armed to block on the word.
     pub fn waiting(unparker: &Unparker) -> bool {
-        word(unparker) & WAITER != 0
+        word(unparker) & WAITERS != 0
     }
 
     /// Read the word without acquiring producer memory.
@@ -883,7 +937,7 @@ pub mod tests {
 
         // A notification while armed advances the sequence and clears the
         // bit, since it is the one that wakes the word.
-        let arm = parker.arm(parker.observe());
+        let arm = parker.arm_ring(parker.observe());
         assert!(arm.still_idle());
         unparker.unpark();
         assert_eq!(notifications(&unparker), 2);
@@ -901,7 +955,7 @@ pub mod tests {
         assert!(!waiting(&unparker));
 
         // Re-arming against a fresh observation permits blocking.
-        let arm = parker.arm(parker.observe());
+        let arm = parker.arm_ring(parker.observe());
         assert!(arm.still_idle());
         drop(arm);
     }
@@ -911,7 +965,7 @@ pub mod tests {
     #[commonware_macros::test_group("miri")]
     #[test]
     fn test_moved_tracks_notifications_across_wrap() {
-        for start in [0, u32::MAX - WAITER] {
+        for start in [0, !WAITERS] {
             // Start the sequence at zero or at its last value.
             let parker = Parker::new();
             let unparker = parker.unparker();
@@ -969,7 +1023,7 @@ pub mod tests {
 
         // An arm against the older observation refuses to block, and so the
         // park returns at once.
-        assert!(!parker.arm(seen).still_idle());
+        assert!(!parker.arm_ring(seen).still_idle());
         assert!(parker.park(seen, None).is_none());
 
         // The notification was counted and the park disarmed.
@@ -987,7 +1041,7 @@ pub mod tests {
         // lands exactly between them.
         let parker = Parker::new();
         let unparker = parker.unparker();
-        let arm = parker.arm(parker.observe());
+        let arm = parker.arm_waiter(parker.observe(), THREAD);
         assert!(arm.still_idle());
         unparker.unpark();
 
@@ -1027,7 +1081,7 @@ pub mod tests {
         /// then disarm, leaving the wait queued as a park that ends without its
         /// completion does.
         fn queue_ring_wait(parker: &Parker, ring: &mut IoUring) {
-            let arm = parker.arm(parker.observe());
+            let arm = parker.arm_ring(parker.observe());
             assert!(arm.still_idle());
             arm.install(&mut ring.submission());
             ring.submit().unwrap();
@@ -1035,6 +1089,41 @@ pub mod tests {
 
             // A wait whose compare failed would have completed during the submit.
             assert!(ring.completion().is_empty());
+        }
+
+        /// Queue a ring wait as [`queue_ring_wait`] does, but with a futex
+        /// bitset that matches every wake, as a ring wait without the ring
+        /// bit's tag would have.
+        fn queue_untagged_ring_wait(parker: &Parker, ring: &mut IoUring) {
+            let arm = parker.arm_ring(parker.observe());
+            assert!(arm.still_idle());
+            let wait = FutexWait::new(
+                parker.word.as_ptr(),
+                arm.snapshot().into(),
+                u64::from(u32::MAX),
+                FUTEX2_PRIVATE_U32,
+            )
+            .build()
+            .user_data(RING_WAIT_USER_DATA);
+
+            // SAFETY: The SQE carries only the word's address, which `parker`
+            // keeps alive past the ring wait, since every test drops its ring
+            // first or releases the wait before returning.
+            unsafe { ring.submission().push(&wait).unwrap() };
+            ring.submit().unwrap();
+            drop(arm);
+            assert!(ring.completion().is_empty());
+        }
+
+        /// Run deferred task work without waiting, which posts the completion
+        /// of a ring wait that a wake released.
+        fn run_task_work(ring: &mut IoUring) {
+            // SAFETY: No SQEs are submitted and no argument pointer is passed.
+            unsafe {
+                ring.submitter()
+                    .enter::<libc::sigset_t>(0, 0, io_uring::EnterFlags::GETEVENTS.bits(), None)
+                    .unwrap();
+            }
         }
 
         /// Submit queued SQEs and wait for the ring wait's completion, failing
@@ -1102,7 +1191,7 @@ pub mod tests {
             let unparker = parker.unparker();
             let mut ring = ring();
             let seen = parker.observe();
-            let arm = parker.arm(seen);
+            let arm = parker.arm_ring(seen);
             assert!(arm.still_idle());
 
             // Notify before the wait reaches the kernel, then submit it.
@@ -1133,12 +1222,12 @@ pub mod tests {
             // A notification while running only advances the sequence, so the
             // next arm against the older observation is refused.
             unparker.unpark();
-            assert!(!parker.arm(seen).still_idle());
+            assert!(!parker.arm_ring(seen).still_idle());
 
             // A fresh observation arms, and a producer finds the waiter bit and
             // wakes the queued wait while the owner waits in the ring.
             let seen = parker.observe();
-            let arm = parker.arm(seen);
+            let arm = parker.arm_ring(seen);
             assert!(arm.still_idle());
             let producer = std::thread::spawn(move || unparker.unpark());
             let cqe = ring_wait_completion(&mut ring);
@@ -1151,9 +1240,10 @@ pub mod tests {
         }
 
         /// A ring wait that an earlier park left queued sits ahead of the owner's
-        /// idle wait, and one notification releases both.
+        /// idle wait. A notification releases the idle wait and passes over the
+        /// ring wait, which the next ring park reuses.
         #[test]
-        fn test_stale_ring_wait_cannot_absorb_idle_wake() {
+        fn test_idle_wake_passes_over_a_queued_ring_wait() {
             // Leave a ring wait queued, as a park that ended without its
             // completion does.
             let parker = Parker::new();
@@ -1163,46 +1253,64 @@ pub mod tests {
 
             // Park idle, and notify once the owner sleeps behind the ring wait.
             let owner = current_task();
-            let producer = std::thread::spawn(move || {
-                wait_until_sleeping_on_word(&unparker, &owner);
-                unparker.unpark();
+            let producer = std::thread::spawn({
+                let unparker = unparker.clone();
+                move || {
+                    wait_until_sleeping_on_word(&unparker, &owner);
+                    unparker.unpark();
+                }
             });
             let deadline = Instant::now() + TEST_TIMEOUT;
             let woken = parker.park(0, Some(deadline));
             producer.join().unwrap();
+            assert!(woken.is_some(), "the ring wait absorbed the idle wake");
 
-            // The notification released the idle wait and the ring wait alike.
-            assert!(woken.is_some(), "stale ring wait absorbed the idle wake");
-            assert_eq!(ring_wait_completion(&mut ring).result(), 0);
+            // The ring wait is still queued, so running task work posts nothing.
+            run_task_work(&mut ring);
+            assert!(
+                ring.completion().is_empty(),
+                "the idle wake released the ring wait"
+            );
+
+            // A ring park reuses it, and a notification releases it.
+            let seen = parker.observe();
+            let arm = parker.arm_ring(seen);
+            assert!(arm.still_idle());
+            let producer = std::thread::spawn(move || unparker.unpark());
+            let cqe = ring_wait_completion(&mut ring);
+            producer.join().unwrap();
+            assert_eq!(cqe.result(), 0);
+            drop(arm);
+            assert!(parker.moved(seen));
         }
 
-        /// Waking one waiter releases only the ring wait queued ahead of the
-        /// owner's idle wait, which stays asleep. This is why a notification wakes
-        /// two, and it shows the test above would catch a notification that woke
-        /// one.
+        /// Negative control: a ring wait whose bitset matches every wake sits
+        /// ahead of the owner's idle wait and absorbs the notification's wake of
+        /// one, which leaves the owner asleep. This is why ring waits carry the
+        /// ring bit's bitset, and it shows the test above would catch a ring
+        /// wait without it.
         #[test]
-        fn test_waking_one_strands_idle_wait_behind_stale_ring_wait() {
-            // Leave a ring wait queued, as a park that ended without its
-            // completion does.
+        fn test_untagged_ring_wait_absorbs_the_idle_wake() {
+            // Leave an untagged ring wait queued, as a park that ended without
+            // its completion does.
             let parker = Parker::new();
             let unparker = parker.unparker();
             let mut ring = ring();
-            queue_ring_wait(&parker, &mut ring);
+            queue_untagged_ring_wait(&parker, &mut ring);
 
-            // Park idle. Once the owner sleeps behind the ring wait, wake one
-            // waiter, check that the owner still sleeps, then release it with a
-            // notification.
+            // Park idle. Once the owner sleeps behind the ring wait, notify,
+            // check that the owner still sleeps, then release it directly.
             let owner = current_task();
             let returned = Arc::new(AtomicBool::new(false));
             let producer = std::thread::spawn({
                 let returned = returned.clone();
                 move || {
                     wait_until_sleeping_on_word(&unparker, &owner);
-                    let woken = wake(&unparker, 1);
+                    unparker.unpark();
                     std::thread::sleep(STRANDED);
                     let stranded =
                         !returned.load(Ordering::Acquire) && sleeps_on_word(&unparker, &owner);
-                    unparker.unpark();
+                    let woken = wake(&unparker, 1);
                     (woken, stranded)
                 }
             });
@@ -1211,12 +1319,44 @@ pub mod tests {
             returned.store(true, Ordering::Release);
             let (woken, stranded) = producer.join().unwrap();
 
-            // The single wake took the ring wait and left the idle wait asleep
-            // until the notification.
+            // The notification's wake took the ring wait and left the idle wait
+            // asleep until the direct wake.
+            assert!(stranded, "the notification reached the idle wait");
             assert_eq!(woken, 1);
-            assert!(stranded, "a single wake reached the idle wait");
             assert!(released.is_some());
             assert_eq!(ring_wait_completion(&mut ring).result(), 0);
+        }
+
+        /// A ring wake whose syscall was delayed past the ring park that armed
+        /// its bit, until the owner sleeps in an idle wait, passes over that
+        /// wait, which the thread bit's bitset reserves for thread wakes.
+        #[test]
+        fn test_delayed_ring_wake_passes_over_the_idle_wait() {
+            // Park idle. Once the owner sleeps, issue the delayed ring wake,
+            // check that the owner still sleeps, then notify.
+            let parker = Parker::new();
+            let unparker = parker.unparker();
+            let owner = current_task();
+            let returned = Arc::new(AtomicBool::new(false));
+            let producer = std::thread::spawn({
+                let returned = returned.clone();
+                move || {
+                    wait_until_sleeping_on_word(&unparker, &owner);
+                    unparker.futex_wake(RING);
+                    std::thread::sleep(STRANDED);
+                    let asleep =
+                        !returned.load(Ordering::Acquire) && sleeps_on_word(&unparker, &owner);
+                    unparker.unpark();
+                    asleep
+                }
+            });
+            let deadline = Instant::now() + TEST_TIMEOUT;
+            let woken = parker.park(0, Some(deadline));
+            returned.store(true, Ordering::Release);
+
+            // Only the notification's thread wake ended the idle wait.
+            assert!(producer.join().unwrap(), "the ring wake ended the idle wait");
+            assert!(woken.is_some());
         }
     }
 }
@@ -1272,7 +1412,7 @@ mod loom_tests {
 
     /// Arm against `seen` and block in a new ring wait if that is still idle.
     fn ring_park(parker: &Parker, seen: u32) {
-        let guard = parker.arm(seen);
+        let guard = parker.arm_ring(seen);
         if guard.still_idle() {
             ring_wait(parker, &guard);
         }
@@ -1319,7 +1459,7 @@ mod loom_tests {
     /// installs a new wait, and otherwise leaves the live wait for the next
     /// park to reuse.
     fn persistent_ring_park(parker: &Parker, ring: &mut Ring, seen: u32, block: bool) {
-        let guard = parker.arm(seen);
+        let guard = parker.arm_ring(seen);
         if guard.still_idle() {
             if !ring.live {
                 install_ring_wait(parker, guard.snapshot());
@@ -1328,6 +1468,10 @@ mod loom_tests {
             if block {
                 let mut queue = parker.word.futex.lock().unwrap();
                 while !queue.ring_completed {
+                    assert!(
+                        !queue.abandoned,
+                        "a futex wait was stranded with no waker left"
+                    );
                     queue = parker.word.futex_waiters.wait(queue).unwrap();
                 }
             }
@@ -1362,7 +1506,7 @@ mod loom_tests {
         loop {
             let seen = parker.observe();
             if condition.load(Ordering::Relaxed) {
-                assert_eq!(parker.word.load(Ordering::Relaxed) & WAITER, 0);
+                assert_eq!(parker.word.load(Ordering::Relaxed) & WAITERS, 0);
                 return;
             }
             park(parker, seen);
@@ -1390,7 +1534,7 @@ mod loom_tests {
         loop {
             let seen = parker.observe();
             if seen.wrapping_sub(start) / INCREMENT >= count {
-                assert_eq!(parker.word.load(Ordering::Relaxed) & WAITER, 0);
+                assert_eq!(parker.word.load(Ordering::Relaxed) & WAITERS, 0);
                 return;
             }
             park(parker, seen);
@@ -1414,6 +1558,19 @@ mod loom_tests {
                 condition.load(Ordering::Relaxed),
                 "an observed condition was not visible"
             );
+        }
+    }
+
+    /// Publish as [`publish`] does, but wake with the waiter bits the
+    /// increment found instead of the bit the clear took, the defect a
+    /// negative control plants.
+    fn publish_with_found_bits(unparker: &Unparker, condition: &AtomicBool) {
+        condition.store(true, Ordering::Relaxed);
+        let prev = unparker.word.fetch_add(INCREMENT, Ordering::Release);
+        if prev & WAITERS != 0
+            && unparker.word.fetch_and(!WAITERS, Ordering::Relaxed) & WAITERS != 0
+        {
+            unparker.futex_wake(prev & WAITERS);
         }
     }
 
@@ -1441,16 +1598,16 @@ mod loom_tests {
         unparker.word.futex_waiters.notify_all();
     }
 
-    /// Run a worker that parks idle behind a stale ring wait while a producer
-    /// publishes one condition, with wakes that release `wake_count` waits. An
-    /// idle wait that the producer's wake missed fails the model once the
-    /// producer finishes.
-    fn idle_wait_behind_stale_ring_wait(wake_count: u32) {
+    /// Run a worker that parks idle behind a stale ring wait with futex bitset
+    /// `ring_bitset` while a producer publishes one condition. An idle wait
+    /// that the producer's wake missed fails the model once the producer
+    /// finishes.
+    fn idle_wait_behind_stale_ring_wait(ring_bitset: u32) {
         loom::model(move || {
             // Leave a ring wait queued ahead of every idle wait.
             let parker = Parker::new();
             let unparker = parker.unparker();
-            parker.word.futex.lock().unwrap().wake_count = wake_count;
+            parker.word.futex.lock().unwrap().ring_bitset = ring_bitset;
             let _ring = queued_ring_wait(&parker);
             let condition = Arc::new(AtomicBool::new(false));
 
@@ -1466,9 +1623,12 @@ mod loom_tests {
             simulate_until(&parker, &condition, idle_park);
             producer.join().unwrap();
 
-            // The worker saw the condition and disarmed.
+            // The worker saw the condition and disarmed, and the ring wait is
+            // still queued for the next ring park.
             assert_eq!(notifications(&unparker), 1);
             assert!(!waiting(&unparker));
+            let queue = parker.word.futex.lock().unwrap();
+            assert!(queue.waiters.contains(&Waiter::Ring) && !queue.ring_completed);
         });
     }
 
@@ -1481,28 +1641,36 @@ mod loom_tests {
         /// A ring wait queued before the producer starts and reused across
         /// parks until a wake completes it, as the driver keeps it.
         ReusedRing,
+        /// Ring parks and thread parks in turn, starting with a ring park on a
+        /// wait queued before the producer starts that ends without a wake, as
+        /// an I/O completion ends one. The ring wait stays queued across the
+        /// thread parks.
+        Alternating,
     }
 
     /// Explore a producer that publishes `ops` conditions alongside one
     /// modeled worker that parks through `path` until it has observed every
-    /// notification. Each notification publishes its own condition, which the
-    /// worker reads with a relaxed load only once an observation includes that
-    /// notification, so only the eventcount's release and acquire edges can
-    /// publish it and the read changes no step on the word.
+    /// notification, publishing through `publish`. Each notification
+    /// publishes its own condition, which the worker reads with a relaxed load
+    /// only once an observation includes that notification, so only the
+    /// eventcount's release and acquire edges can publish it and the read
+    /// changes no step on the word.
     ///
     /// A notification without a condition takes the same steps on the word,
     /// so it needs no program of its own. A later notification can end a park
     /// that an earlier one failed to end, so each shorter program checks that
     /// its last notification is not lost.
-    fn worker_program(ops: u32, path: ParkPath) {
+    fn worker_program(ops: u32, path: ParkPath, publish: fn(&Unparker, &AtomicBool)) {
         check_bounded(PREEMPTIONS, move || {
             // Run the program on a producer thread, with a ring wait already
-            // queued on the reused ring path.
+            // queued on the paths that park in the ring. The producer is the
+            // last thread able to wake the word, so a wait still queued once it
+            // finishes fails the model.
             let parker = Parker::new();
             let unparker = parker.unparker();
             let mut ring = match path {
                 ParkPath::Idle => None,
-                ParkPath::ReusedRing => Some(queued_ring_wait(&parker)),
+                ParkPath::ReusedRing | ParkPath::Alternating => Some(queued_ring_wait(&parker)),
             };
             let conditions = Arc::new((0..ops).map(|_| AtomicBool::new(false)).collect::<Vec<_>>());
             let producer = thread::spawn({
@@ -1512,6 +1680,7 @@ mod loom_tests {
                     for condition in conditions.iter() {
                         publish(&unparker, condition);
                     }
+                    abandon(&unparker);
                 }
             });
 
@@ -1519,6 +1688,7 @@ mod loom_tests {
             // observation must make visible the conditions of the
             // notifications it newly includes.
             let mut observed = 0;
+            let mut parks = 0;
             loop {
                 let seen = parker.observe();
                 let included = (seen / INCREMENT) as usize;
@@ -1527,10 +1697,17 @@ mod loom_tests {
                 if observed == conditions.len() {
                     break;
                 }
-                match &mut ring {
-                    None => idle_park(&parker, seen),
-                    Some(ring) => persistent_ring_park(&parker, ring, seen, true),
+                match (path, &mut ring) {
+                    (ParkPath::Alternating, Some(ring)) if parks % 2 == 0 => {
+                        persistent_ring_park(&parker, ring, seen, parks > 0);
+                    }
+                    (ParkPath::Alternating | ParkPath::Idle, _) => idle_park(&parker, seen),
+                    (ParkPath::ReusedRing, Some(ring)) => {
+                        persistent_ring_park(&parker, ring, seen, true);
+                    }
+                    (ParkPath::ReusedRing, None) => unreachable!(),
                 }
+                parks += 1;
             }
             producer.join().unwrap();
 
@@ -1686,7 +1863,7 @@ mod loom_tests {
             assert!(mailbox.has_mail());
             assert!(mailbox.take(&mut scratch));
             let first = scratch.remove(0);
-            let arm = parker.arm(parker.observe());
+            let arm = parker.arm_ring(parker.observe());
 
             // A producer sends while the worker closes the mailbox twice, as
             // the worker's close and its cleanup do.
@@ -1786,7 +1963,7 @@ mod loom_tests {
             // The worker arms against a fresh observation.
             let parker = Parker::new();
             let unparker = parker.unparker();
-            let guard = parker.arm(parker.observe());
+            let guard = parker.arm_ring(parker.observe());
             assert!(guard.still_idle());
 
             // Two producers notify concurrently.
@@ -1820,7 +1997,7 @@ mod loom_tests {
             // Start the sequence at its last value.
             let parker = Parker::new();
             let unparker = parker.unparker();
-            let start = u32::MAX - WAITER;
+            let start = !WAITERS;
             parker.word.store(start, Ordering::Relaxed);
             let conditions = Arc::new([AtomicBool::new(false), AtomicBool::new(false)]);
 
@@ -1873,24 +2050,24 @@ mod loom_tests {
     }
 
     /// A stale ring wait sits ahead of the worker's idle wait. The notification
-    /// releases two waits, so it reaches the idle wait.
+    /// wakes with the thread bit's bitset, so it passes over the ring wait,
+    /// which stays queued, and reaches the idle wait.
     #[test]
     fn test_idle_wait_behind_stale_ring_wait_is_woken() {
-        idle_wait_behind_stale_ring_wait(WAKE_COUNT);
+        idle_wait_behind_stale_ring_wait(RING);
     }
 
-    /// Negative control: a wake that releases one wait spends it on the stale
-    /// ring wait, so loom finds the idle wait stranded.
+    /// Negative control: a ring wait whose bitset matches every wake absorbs
+    /// the wake, so loom finds the idle wait stranded.
     #[test]
     #[should_panic(expected = "a futex wait was stranded with no waker left")]
-    fn test_waking_one_strands_idle_wait_behind_stale_ring_wait() {
-        idle_wait_behind_stale_ring_wait(1);
+    fn test_untagged_ring_wait_strands_idle_wait_behind_it() {
+        idle_wait_behind_stale_ring_wait(u32::MAX);
     }
 
     /// A ring wait left queued sits ahead of idle waits, and a wake that
-    /// releases an idle wait completes the ring wait as well. A ring park that
-    /// follows finds that completion still unreaped, returns at once, and the
-    /// park after it installs a new wait.
+    /// releases an idle wait passes over it. A ring park that follows reuses
+    /// it, and the next notification's ring wake releases it.
     #[test]
     fn test_stale_ring_wait_across_idle_and_ring_parks() {
         check_bounded(PREEMPTIONS, || {
@@ -1929,7 +2106,7 @@ mod loom_tests {
     /// them in parallel.
     #[rstest]
     fn test_worker_programs_on_idle_park(#[values(1, 2, 3)] ops: u32) {
-        worker_program(ops, ParkPath::Idle);
+        worker_program(ops, ParkPath::Idle, publish);
     }
 
     /// A producer of one to three published conditions alongside a worker
@@ -1939,7 +2116,73 @@ mod loom_tests {
     /// completion that the next park reaps before it installs another.
     #[rstest]
     fn test_worker_programs_on_reused_ring_wait(#[values(1, 2, 3)] ops: u32) {
-        worker_program(ops, ParkPath::ReusedRing);
+        worker_program(ops, ParkPath::ReusedRing, publish);
+    }
+
+    /// A producer of one to three published conditions alongside a worker
+    /// whose parks alternate between the ring and the thread, starting with a
+    /// ring park on a wait queued before the producer starts that ends without
+    /// a wake. A notification can find one waiter bit and clear the other, so
+    /// its wake must target the kind of wait whose bit it cleared.
+    #[rstest]
+    fn test_worker_programs_alternating_park_kinds(#[values(1, 2, 3)] ops: u32) {
+        worker_program(ops, ParkPath::Alternating, publish);
+    }
+
+    /// Negative control: a notification that wakes with the waiter bit its
+    /// increment found can find the ring bit, clear the thread bit of the
+    /// thread park that followed, and spend its wake on the ring wait. The
+    /// next notification finds no bit and skips its wake, so loom finds the
+    /// thread wait stranded.
+    #[test]
+    #[should_panic(expected = "a futex wait was stranded with no waker left")]
+    fn test_waking_with_the_found_bit_strands_a_switched_park() {
+        worker_program(2, ParkPath::Alternating, publish_with_found_bits);
+    }
+
+    /// Two producers notify while the worker's first park, on a ring wait
+    /// queued before they start, ends without a wake, and its later parks are
+    /// thread parks. A producer that found the ring bit can clear the thread
+    /// bit of the next park late, and the other producer, finding it already
+    /// taken, skips its wake. The late clear's thread wake must release the
+    /// thread wait and pass over the ring wait.
+    #[test]
+    fn test_late_clear_across_park_kinds_covers_a_skipped_wake() {
+        check_bounded(THREE_THREAD_PREEMPTIONS, || {
+            // Leave a ring wait queued, then two producers publish once each.
+            let parker = Parker::new();
+            let unparker = parker.unparker();
+            let mut ring = queued_ring_wait(&parker);
+            let conditions = Arc::new([AtomicBool::new(false), AtomicBool::new(false)]);
+            let a = thread::spawn({
+                let unparker = unparker.clone();
+                let conditions = conditions.clone();
+                move || publish(&unparker, &conditions[0])
+            });
+            let b = thread::spawn({
+                let unparker = unparker.clone();
+                let conditions = conditions.clone();
+                move || publish(&unparker, &conditions[1])
+            });
+
+            // The first park is a ring park that returns without blocking, and
+            // the later ones are thread parks.
+            let mut first = true;
+            park_until_observed(&parker, 0, 2, |parker, seen| {
+                if mem::take(&mut first) {
+                    persistent_ring_park(parker, &mut ring, seen, false);
+                } else {
+                    idle_park(parker, seen);
+                }
+            });
+            assert_visible(&conditions[..]);
+            a.join().unwrap();
+            b.join().unwrap();
+
+            // Both notifications arrived and the worker disarmed.
+            assert_eq!(notifications(&unparker), 2);
+            assert!(!waiting(&unparker));
+        });
     }
 
     /// Two producers notify concurrently while the worker parks in the ring on
