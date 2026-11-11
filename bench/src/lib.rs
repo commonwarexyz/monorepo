@@ -29,12 +29,13 @@ commonware_macros::stability_scope!(ALPHA {
         *FULL
     }
 
-    /// Returns whether Criterion runs each benchmark once instead of measuring it, as under
-    /// `cargo test --benches`.
+    /// Returns whether the benchmarks run under `cargo test` instead of `cargo bench`.
     ///
-    /// Benchmarks check this to use their smallest inputs when nothing is measured. Measuring
-    /// and listing (`--list`) return `false`, so both see the regular inputs. It also returns
-    /// `false` when [`full`] is set, so `cargo test --benches` then runs the large inputs once.
+    /// `cargo test` puts Criterion in test mode, where it runs each benchmark once without
+    /// measuring it, so benchmarks check this to set up their smallest inputs. Like Criterion, it
+    /// decides from the binary's arguments (`cargo bench` passes `--bench`), and it returns
+    /// `false` for `--list` so listings name the regular inputs. It also returns `false` when
+    /// [`full`] is set, so `cargo test` then runs the large inputs once.
     pub fn smoke() -> bool {
         static SMOKE: LazyLock<bool> =
             LazyLock::new(|| !full() && criterion_test_mode(std::env::args_os().skip(1)));
