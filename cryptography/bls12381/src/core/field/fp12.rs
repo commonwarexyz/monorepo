@@ -8,9 +8,9 @@
 //! # Bounds
 //!
 //! Every operation accepts elements whose components have positional limb bound `1` and integer
-//! bound at most [`BOUND`], as defined by the [base field arithmetic](super::arithmetic), and returns
-//! elements that satisfy the same, so elements chain through any number of operations. Loaded
-//! elements satisfy it.
+//! bound at most [`BOUND`], as defined by the [base field arithmetic](super::arithmetic), and
+//! returns elements that satisfy the same, so elements chain through any number of operations.
+//! Loaded elements satisfy it.
 //!
 //! # How the operations keep their bounds
 //!
@@ -823,8 +823,8 @@ const fn split(element: &[u8; BYTES]) -> [&[u8; FP6_BYTES]; 2] {
 
 /// Reference arithmetic on elements with canonical components, by definition, for testing.
 ///
-/// An element is the polynomial `c_0 + c_1 w + ... + c_5 w^5` over `Fp2`, where `w^6 = 1 + i`: since
-/// `v = w^2`, the coefficient of `v^i w^j` in the tower is that of `w^(2i + j)`.
+/// An element is the polynomial `c_0 + c_1 w + ... + c_5 w^5` over `Fp2`, where `w^6 = 1 + i`:
+/// since `v = w^2`, the coefficient of `v^i w^j` in the tower is that of `w^(2i + j)`.
 #[cfg(any(test, feature = "fuzz"))]
 pub(crate) mod reference {
     use super::{BYTES, FP2_BYTES};
@@ -844,8 +844,8 @@ pub(crate) mod reference {
         one
     };
 
-    /// Returns the degree in `w` of the extension coefficient at `index` of an encoding, which holds
-    /// `c1` then `c0`, each with the coefficients of `v^2, v, 1`.
+    /// Returns the degree in `w` of the extension coefficient at `index` of an encoding, which
+    /// holds `c1` then `c0`, each with the coefficients of `v^2, v, 1`.
     const fn degree(index: usize) -> usize {
         2 * (2 - index % 3) + (1 - index / 3)
     }

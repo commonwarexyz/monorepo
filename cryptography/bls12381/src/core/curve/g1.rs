@@ -263,7 +263,8 @@ impl<S: Simd, F: Field<S>> Points<S> for Point<F> {
     }
 }
 
-/// Reference arithmetic and coordinate bound hooks for the [curve formula checks](crate::core::curve::fuzz).
+/// Reference arithmetic and coordinate bound hooks for the
+/// [curve formula checks](crate::core::curve::fuzz).
 #[cfg(any(test, feature = "fuzz"))]
 pub(crate) mod fuzz {
     use super::*;
