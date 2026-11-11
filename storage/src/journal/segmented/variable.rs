@@ -83,13 +83,14 @@ use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::{
     Error,
     frame::{
-        Limited, UncompressedFrame, decode_item, decode_length_prefix,
-        encode_compressed_frame_into, read_frame_at,
+        FrameInfo, Limited, UncompressedFrame, decode_item, decode_length_prefix,
+        encode_compressed_frame_into, find_frame, read_frame_at,
     },
 };
-use commonware_codec::{Codec, CodecShared, Encode as _, varint::MAX_U32_VARINT_SIZE};
+use bytes::Bytes;
+use commonware_codec::{Codec, CodecShared, Copying, Encode as _, varint::MAX_U32_VARINT_SIZE};
 use commonware_runtime::{
-    Blob, Buf, Error as RError, IoBuf, Metrics, ReadOptions, Storage,
+    Blob, Buf, Error as RError, Handle, IoBuf, Metrics, ReadOptions, Storage,
     buffer::paged::{CacheRef, Recovery as PagedRecovery, Replay as BlobReplay},
 };
 use std::{
@@ -97,6 +98,9 @@ use std::{
     num::NonZeroUsize,
 };
 use tracing::{trace, warn};
+
+// Cap eager reservations from iterator hints. Larger batches grow as needed.
+const MAX_INITIAL_CAPACITY: usize = 16 * 1024;
 
 /// Configuration for `Journal` storage.
 #[derive(Clone)]
@@ -247,10 +251,103 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
         Ok(item)
     }
 
+    /// See [Journal::get_many].
+    async fn get_many(
+        &self,
+        section: u64,
+        offsets: impl IntoIterator<Item = u64, IntoIter: Send> + Send,
+    ) -> Result<Vec<V>, Error> {
+        let mut offsets = offsets.into_iter().peekable();
+        if offsets.peek().is_none() {
+            return Ok(Vec::new());
+        }
+        let blob = self
+            .manager
+            .get(section)?
+            .ok_or(Error::SectionOutOfRange(section))?;
+
+        let compressed = self.compression.is_some();
+        let cfg = &self.codec_config;
+        let mut items = Vec::with_capacity(offsets.size_hint().0.min(MAX_INITIAL_CAPACITY));
+        for offset in offsets {
+            let (_, _, item) = Self::read(compressed, cfg, blob, offset).await?;
+            items.push(item);
+        }
+        Ok(items)
+    }
+
+    /// See [Journal::try_get_sync].
+    fn try_get_sync(&self, section: u64, offset: u64) -> Option<V> {
+        let blob = self.manager.get(section).ok()??;
+        let remaining = blob.size().checked_sub(offset)?;
+        let header_len = usize::try_from(remaining.min(MAX_U32_VARINT_SIZE as u64)).ok()?;
+        if header_len == 0 {
+            return None;
+        }
+
+        // Read the varint header to determine item size.
+        let mut header = [0u8; MAX_U32_VARINT_SIZE];
+        if !blob.try_read_sync_into(&mut header[..header_len], offset) {
+            return None;
+        }
+        let (_, frame_info) = find_frame(&header[..header_len], offset).ok()?;
+        let (varint_len, data_len) = match frame_info {
+            FrameInfo::Complete {
+                varint_len,
+                data_len,
+            } => (varint_len, data_len),
+            FrameInfo::Incomplete {
+                varint_len,
+                total_len,
+                ..
+            } => (varint_len, total_len),
+        };
+        let item_len = varint_len.checked_add(data_len)?;
+        if item_len > usize::try_from(remaining).ok()? {
+            return None;
+        }
+
+        // If the full item fits in the header read, decode directly.
+        let compressed = self.compression.is_some();
+        if item_len <= header_len {
+            return decode_item::<V>(
+                Copying(&header[varint_len..varint_len + data_len]),
+                &self.codec_config,
+                compressed,
+            )
+            .ok();
+        }
+
+        // Otherwise try reading the full item from cache. The buffer holds exactly the frame, so
+        // skipping the varint leaves the item.
+        let mut buf = vec![0u8; item_len];
+        if !blob.try_read_sync_into(&mut buf, offset) {
+            return None;
+        }
+        let mut buf = Bytes::from(buf);
+        buf.advance(varint_len);
+        decode_item::<V>(buf, &self.codec_config, compressed).ok()
+    }
+
+    /// See [Journal::size].
+    fn size(&self, section: u64) -> Result<u64, Error> {
+        self.manager.size(section)
+    }
+
     /// See [Journal::sync].
     async fn sync(mut self: Box<Self>, sections: impl crate::Sections) -> Result<Box<Self>, Error> {
         self.manager = self.manager.sync(sections).await?;
         Ok(self)
+    }
+
+    /// See [Journal::start_sync].
+    async fn start_sync(
+        mut self: Box<Self>,
+        sections: impl crate::Sections,
+    ) -> Result<(Box<Self>, Handle<()>), Error> {
+        let (manager, handle) = self.manager.start_sync(sections).await?;
+        self.manager = manager;
+        Ok((self, handle))
     }
 
     /// See [Journal::sync_all].
@@ -269,9 +366,29 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
         Ok((self, pruned))
     }
 
+    /// See [Journal::pruned].
+    const fn pruned(&self, section: u64) -> bool {
+        self.manager.pruned(section)
+    }
+
+    /// See [Journal::oldest_section].
+    fn oldest_section(&self) -> Option<u64> {
+        self.manager.oldest_section()
+    }
+
+    /// See [Journal::newest_section].
+    fn newest_section(&self) -> Option<u64> {
+        self.manager.newest_section()
+    }
+
     /// See [Journal::is_empty].
     fn is_empty(&self) -> bool {
         self.manager.is_empty()
+    }
+
+    /// See [Journal::num_sections].
+    fn num_sections(&self) -> usize {
+        self.manager.num_sections()
     }
 
     /// See [Journal::destroy].
@@ -313,8 +430,8 @@ pub struct Journal<E: Storage + Metrics, V: Codec>(Box<Inner<E, V>>);
 impl<E: Storage + Metrics, V: CodecShared> std::fmt::Debug for Journal<E, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Journal")
-            .field("oldest_section", &self.0.manager.oldest_section())
-            .field("newest_section", &self.0.manager.newest_section())
+            .field("oldest_section", &self.oldest_section())
+            .field("newest_section", &self.newest_section())
             .finish_non_exhaustive()
     }
 }
@@ -425,6 +542,29 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         self.0.get(section, offset).await
     }
 
+    /// Read multiple items from the same section.
+    ///
+    /// Offsets should be sorted in ascending order.
+    pub async fn get_many(
+        &self,
+        section: u64,
+        offsets: impl IntoIterator<Item = u64, IntoIter: Send> + Send,
+    ) -> Result<Vec<V>, Error> {
+        self.0.get_many(section, offsets).await
+    }
+
+    /// Get an item if it can be done synchronously (e.g. without I/O), returning `None` otherwise.
+    pub fn try_get_sync(&self, section: u64, offset: u64) -> Option<V> {
+        self.0.try_get_sync(section, offset)
+    }
+
+    /// Gets the size of the journal for a specific section.
+    ///
+    /// Returns 0 if the section does not exist.
+    pub fn size(&self, section: u64) -> Result<u64, Error> {
+        self.0.size(section)
+    }
+
     /// Ensures the given `sections` are synced to the underlying store.
     ///
     /// If a selected section does not exist (and has not been pruned), no error will be
@@ -432,6 +572,19 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     pub async fn sync(mut self, sections: impl crate::Sections) -> Result<Self, Error> {
         self.0 = self.0.sync(sections).await?;
         Ok(self)
+    }
+
+    /// Start syncing the given `sections` to storage.
+    ///
+    /// An error reported by the returned [Handle] is fatal to the journal: the caller
+    /// must stop using the returned journal.
+    pub async fn start_sync(
+        mut self,
+        sections: impl crate::Sections,
+    ) -> Result<(Self, Handle<()>), Error> {
+        let (inner, handle) = self.0.start_sync(sections).await?;
+        self.0 = inner;
+        Ok((self, handle))
     }
 
     /// Syncs all open sections.
@@ -447,9 +600,32 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         Ok((self, pruned))
     }
 
+    /// Returns true when `section` is below the prune floor.
+    ///
+    /// The floor only tracks prunes from the current execution and resets at init, so a
+    /// section pruned in a previous execution reports false.
+    pub fn pruned(&self, section: u64) -> bool {
+        self.0.pruned(section)
+    }
+
+    /// Returns the number of the oldest section in the journal.
+    pub fn oldest_section(&self) -> Option<u64> {
+        self.0.oldest_section()
+    }
+
+    /// Returns the number of the newest section in the journal.
+    pub fn newest_section(&self) -> Option<u64> {
+        self.0.newest_section()
+    }
+
     /// Returns true if no sections exist.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    /// Returns the number of sections.
+    pub fn num_sections(&self) -> usize {
+        self.0.num_sections()
     }
 
     /// Removes any underlying blobs created by the journal.
@@ -1121,6 +1297,54 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_get_many() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "batch-reads".into(),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::<_, u64>::init(context, cfg).await.unwrap();
+            let mut offsets = Vec::new();
+            for value in 0..5u64 {
+                let offset;
+                (journal, offset, _) = journal.append(0, &value).await.unwrap();
+                offsets.push(offset);
+            }
+            assert_eq!(
+                journal
+                    .get_many(0, offsets.iter().copied().step_by(2))
+                    .await
+                    .unwrap(),
+                vec![0, 2, 4],
+            );
+            assert!(
+                journal
+                    .get_many(99, core::iter::empty::<u64>())
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(matches!(
+                journal.get_many(99, core::iter::once(0)).await,
+                Err(Error::SectionOutOfRange(99)),
+            ));
+            for count in [1, usize::MAX] {
+                assert!(
+                    journal
+                        .get_many(0, core::iter::repeat_n(u64::MAX, count))
+                        .await
+                        .is_err()
+                );
+            }
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_journal_prune_blobs() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
@@ -1248,9 +1472,9 @@ mod tests {
             (journal, _) = journal.prune(3).await.expect("Failed to prune");
 
             // The public accessor mirrors the guard
-            assert!(journal.0.manager.prune_guard(1).is_err());
-            assert!(journal.0.manager.prune_guard(2).is_err());
-            assert!(journal.0.manager.prune_guard(3).is_ok());
+            assert!(journal.pruned(1));
+            assert!(journal.pruned(2));
+            assert!(!journal.pruned(3));
 
             // Test that accessing pruned sections returns the correct error
 
@@ -1272,7 +1496,7 @@ mod tests {
             }
 
             // Test size on pruned section
-            match journal.0.manager.size(1) {
+            match journal.size(1) {
                 Err(Error::AlreadyPrunedToSection(3)) => {}
                 other => panic!("Expected AlreadyPrunedToSection(3), got {other:?}"),
             }
@@ -1281,7 +1505,7 @@ mod tests {
             assert!(journal.get(3, 0).await.is_ok());
             assert!(journal.get(4, 0).await.is_ok());
             assert!(journal.get(5, 0).await.is_ok());
-            assert!(journal.0.manager.size(3).is_ok());
+            assert!(journal.size(3).is_ok());
             journal = journal
                 .sync(4)
                 .await
@@ -1297,8 +1521,8 @@ mod tests {
             (journal, _) = journal.prune(5).await.expect("Failed to prune");
 
             // Verify sections 3 and 4 are now pruned
-            assert!(journal.0.manager.prune_guard(4).is_err());
-            assert!(journal.0.manager.prune_guard(5).is_ok());
+            assert!(journal.pruned(4));
+            assert!(!journal.pruned(5));
             match journal.get(3, 0).await {
                 Err(Error::AlreadyPrunedToSection(5)) => {}
                 other => panic!("Expected AlreadyPrunedToSection(5), got {other:?}"),
@@ -1356,8 +1580,8 @@ mod tests {
                     .expect("Failed to re-initialize journal");
 
                 // The floor is execution-scoped, so pruned reports false after restart
-                assert!(journal.0.manager.prune_guard(1).is_ok());
-                assert!(journal.0.manager.prune_guard(2).is_ok());
+                assert!(!journal.pruned(1));
+                assert!(!journal.pruned(2));
 
                 // But the actual sections 1 and 2 should be gone from storage
                 // so get should return SectionOutOfRange, not AlreadyPrunedToSection
@@ -1975,7 +2199,7 @@ mod tests {
             assert_eq!(values, (0..7).collect::<Vec<_>>());
 
             let journal = replay.finish().unwrap();
-            assert_eq!(journal.0.manager.size(TORN_SECTION).unwrap(), 63);
+            assert_eq!(journal.size(TORN_SECTION).unwrap(), 63);
             let (journal, offset, _) = journal.append(TORN_SECTION, &7).await.unwrap();
             assert_eq!(offset, 63);
             journal.destroy().await.unwrap();
@@ -2322,41 +2546,41 @@ mod tests {
             let mut journal = Journal::init(context, cfg).await.unwrap();
 
             // Check size of non-existent section
-            let size = journal.0.manager.size(1).unwrap();
+            let size = journal.size(1).unwrap();
             assert_eq!(size, 0);
 
             // Append data to section 1
             (journal, _, _) = journal.append(1, &42i32).await.unwrap();
 
             // Check size of section 1 - should be greater than 0
-            let size = journal.0.manager.size(1).unwrap();
+            let size = journal.size(1).unwrap();
             assert!(size > 0);
 
             // Append more data and verify size increases
             (journal, _, _) = journal.append(1, &43i32).await.unwrap();
-            let new_size = journal.0.manager.size(1).unwrap();
+            let new_size = journal.size(1).unwrap();
             assert!(new_size > size);
 
             // Check size of different section - should still be 0
-            let size = journal.0.manager.size(2).unwrap();
+            let size = journal.size(2).unwrap();
             assert_eq!(size, 0);
 
             // Append data to section 2
             (journal, _, _) = journal.append(2, &44i32).await.unwrap();
 
             // Check size of section 2 - should be greater than 0
-            let size = journal.0.manager.size(2).unwrap();
+            let size = journal.size(2).unwrap();
             assert!(size > 0);
 
             // Rollback everything in section 1
             journal = journal.test_reopen_section(1, 0).await.unwrap();
 
             // Check size of section 1 - should be 0
-            let size = journal.0.manager.size(1).unwrap();
+            let size = journal.size(1).unwrap();
             assert_eq!(size, 0);
 
             // Check size of section 2 - should be greater than 0
-            let size = journal.0.manager.size(2).unwrap();
+            let size = journal.size(2).unwrap();
             assert!(size > 0);
         });
     }
@@ -2444,7 +2668,7 @@ mod tests {
                 (journal, _, _) = journal.append(1, &i).await.unwrap();
             }
             journal = journal.sync(1).await.unwrap();
-            let valid_logical_size = journal.0.manager.size(1).unwrap();
+            let valid_logical_size = journal.size(1).unwrap();
             drop(journal);
 
             // Get the physical blob size before corruption
@@ -2870,9 +3094,9 @@ mod tests {
             journal = journal.sync_all().await.expect("Failed to sync");
 
             // Verify section sizes
-            assert!(journal.0.manager.size(1).unwrap() > 0);
-            assert_eq!(journal.0.manager.size(2).unwrap(), 0);
-            assert!(journal.0.manager.size(3).unwrap() > 0);
+            assert!(journal.size(1).unwrap() > 0);
+            assert_eq!(journal.size(2).unwrap(), 0);
+            assert!(journal.size(3).unwrap() > 0);
 
             // Drop and reopen to test replay
             drop(journal);
@@ -3202,6 +3426,47 @@ mod tests {
             ));
 
             journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_journal_try_get_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for (compression, partition) in [(None, "plain"), (Some(3), "compressed")] {
+                let cfg = Config {
+                    partition: partition.into(),
+                    compression,
+                    codec_config: (..).into(),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    write_buffer: NZUsize!(1024),
+                };
+                let journal = Journal::<_, Bytes>::init(context.child(partition), cfg)
+                    .await
+                    .expect("Failed to initialize journal");
+
+                // Uncompressed, the short frame fits the header read and is decoded from it.
+                // The long frame is read in full from the write buffer.
+                let short = Bytes::from(vec![1u8; 3]);
+                let (journal, short_offset, _) =
+                    journal.append(1, &short).await.expect("Failed to append");
+                let long = Bytes::from(vec![7u8; 32]);
+                let (journal, long_offset, _) =
+                    journal.append(1, &long).await.expect("Failed to append");
+                assert_eq!(journal.try_get_sync(1, short_offset), Some(short.clone()));
+                assert_eq!(journal.try_get_sync(1, long_offset), Some(long.clone()));
+
+                // Once synced and read back, the item is served from the page cache.
+                let journal = journal.sync(1).await.expect("Failed to sync");
+                journal.get(1, long_offset).await.expect("Failed to get");
+                assert_eq!(journal.try_get_sync(1, long_offset), Some(long.clone()));
+
+                // An offset at the end of the section is a miss.
+                let size = journal.size(1).expect("Failed to size");
+                assert!(journal.try_get_sync(1, size).is_none());
+
+                journal.destroy().await.expect("Failed to destroy");
+            }
         });
     }
 

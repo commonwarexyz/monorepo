@@ -234,9 +234,9 @@ impl Validation {
 /// Combines a fixed-size index journal with glob storage for variable-length values.
 /// Provides coordinated operations and crash recovery.
 ///
-/// Mutating functions consume the journal and return it only on success, so an error or a dropped
-/// future destroys the handle. Mutations on pruned sections fail with
-/// [Error::AlreadyPrunedToSection].
+/// Mutating functions consume the journal and return it only on success: an error (or a dropped
+/// future) destroys the handle. Mutations on pruned sections fail with
+/// [Error::AlreadyPrunedToSection]. Check [Oversized::pruned] first to keep the handle.
 pub struct Oversized<E: Context, I: Record, V: Codec> {
     index: FixedJournal<E, I>,
     values: Glob<E, V>,
@@ -256,8 +256,8 @@ struct Pending<E: Context, I: Record, V: Codec> {
 impl<E: Context, I: Record, V: CodecShared> std::fmt::Debug for Oversized<E, I, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Oversized")
-            .field("oldest_section", &self.index.oldest_section())
-            .field("newest_section", &self.index.newest_section())
+            .field("oldest_section", &self.oldest_section())
+            .field("newest_section", &self.newest_section())
             .finish_non_exhaustive()
     }
 }
@@ -657,6 +657,18 @@ impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
         self.index.get(section, position).await
     }
 
+    /// Get the last entry for a section, if any.
+    ///
+    /// Returns `Ok(None)` if the section is empty.
+    ///
+    /// # Errors
+    ///
+    /// - [Error::AlreadyPrunedToSection] if the section has been pruned.
+    /// - [Error::SectionOutOfRange] if the section doesn't exist.
+    pub async fn last(&self, section: u64) -> Result<Option<I>, Error> {
+        self.index.last(section).await
+    }
+
     /// Get value using offset/size from entry.
     ///
     /// The offset should be the byte offset from `append()` or from the entry's `value_location()`.
@@ -785,6 +797,16 @@ impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
         ))
     }
 
+    /// Sync all sections.
+    pub async fn sync_all(mut self) -> Result<Self, Error> {
+        if self.tracking.is_some() {
+            let sections = self.index.sections().collect::<BTreeSet<_>>();
+            return self.sync(sections).await;
+        }
+        (self.index, self.values) = try_join(self.index.sync_all(), self.values.sync_all()).await?;
+        Ok(self)
+    }
+
     /// Prune both journals. Returns true if any sections were pruned.
     ///
     /// Prunes index first, then glob. This order ensures crash safety:
@@ -834,6 +856,24 @@ impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
             Ok(None) | Err(Error::SectionOutOfRange(_)) => Ok(0),
             Err(e) => Err(e),
         }
+    }
+
+    /// Returns true when `section` is below the prune floor.
+    ///
+    /// The floor only tracks prunes from the current execution and resets at init, so a
+    /// section pruned in a previous execution reports false.
+    pub fn pruned(&self, section: u64) -> bool {
+        self.index.pruned(section)
+    }
+
+    /// Returns the oldest section number, if any exist.
+    pub fn oldest_section(&self) -> Option<u64> {
+        self.index.oldest_section()
+    }
+
+    /// Returns the newest section number, if any exist.
+    pub fn newest_section(&self) -> Option<u64> {
+        self.index.newest_section()
     }
 
     /// Destroy all underlying storage.
@@ -990,14 +1030,6 @@ mod tests {
     use commonware_utils::{NZU16, NZUsize, probability};
     use std::time::Duration;
 
-    /// Return the durable byte length of a section's value blob.
-    fn durable_value_size(context: &deterministic::Context, cfg: &Config<()>, section: u64) -> u64 {
-        context
-            .logical_blob(&cfg.value_partition, &section.to_be_bytes())
-            .expect("value blob must exist")
-            .len() as u64
-    }
-
     /// Convert offset + size to byte end position (for truncation tests).
     fn byte_end(offset: u64, size: u32) -> u64 {
         offset + u64::from(size)
@@ -1092,7 +1124,7 @@ mod tests {
                     .await
                     .unwrap();
             }
-            journal = journal.sync([1, 2]).await.unwrap();
+            journal = journal.sync_all().await.unwrap();
 
             // The value sync materializes a crash image with durable value tails and
             // index additions still confined to the larger index write buffers.
@@ -1106,7 +1138,7 @@ mod tests {
                     .await
                     .unwrap();
             }
-            journal.values = journal.values.sync([1, 2]).await.unwrap();
+            journal.values = journal.values.sync_all().await.unwrap();
             drop(journal);
 
             // Reopen and replay the index, leaving each section's value tail longer than its
@@ -1193,7 +1225,7 @@ mod tests {
                     [section as u8; 16],
                 );
                 assert_eq!(
-                    durable_value_size(&context, &cfg, section),
+                    journal.values.size(section).unwrap(),
                     offset + u64::from(size),
                 );
             }
@@ -1538,7 +1570,7 @@ mod tests {
                 .append(1, TestEntry::new(2, 0, 0), &[2; 16])
                 .await
                 .unwrap();
-            _ = journal.sync(1).await.unwrap();
+            _ = journal.sync_all().await.unwrap();
             let mut metadata = Metadata::<_, SectionKey, u64>::init(
                 context.child("markers"),
                 MetadataConfig {
@@ -1822,7 +1854,7 @@ mod tests {
             let entry = oversized.get(1, 0).await.expect("Failed to get");
             let (offset, size) = entry.value_location();
             assert_eq!(
-                durable_value_size(&context, &test_cfg(), 1),
+                oversized.values.size(1).expect("glob size"),
                 byte_end(offset, size),
                 "orphaned value bytes must be truncated"
             );
@@ -2092,7 +2124,7 @@ mod tests {
             assert_adopted_entries_consistent(&oversized).await;
             let last = oversized.get(1, 1).await.expect("Failed to get");
             assert_eq!(
-                durable_value_size(&context, &entry_cfg(), 1),
+                oversized.values.size(1).expect("glob size"),
                 byte_end(last.value_offset, last.value_size),
                 "values of dropped entries must be released"
             );
@@ -2140,7 +2172,7 @@ mod tests {
                     .await
                     .expect("reinitialization must succeed");
             assert_eq!(oversized.size(1).expect("size"), chunk);
-            assert_eq!(oversized.index.newest_section(), Some(1));
+            assert_eq!(oversized.newest_section(), Some(1));
             assert_adopted_entries_consistent(&oversized).await;
             oversized.destroy().await.expect("Failed to destroy");
         });
@@ -2174,7 +2206,7 @@ mod tests {
                 .append(3, TestEntry::new(4, 0, 0), &[4; 16])
                 .await
                 .expect("failed to append discardable entry");
-            oversized = oversized.sync([1, 2, 3]).await.expect("failed to sync");
+            oversized = oversized.sync_all().await.expect("failed to sync");
             drop(oversized);
 
             // Restore owns no bytes in sections 2 and 3. The valid final page hides section 2's
@@ -2244,7 +2276,7 @@ mod tests {
                     .await
                     .unwrap();
             }
-            journal = journal.sync(1).await.unwrap();
+            journal = journal.sync_all().await.unwrap();
             let mut tracking = journal.tracking.take().unwrap();
             assert!(tracking.stage_marker(1, 1));
             tracking.metadata = tracking.metadata.sync().await.unwrap();
@@ -2272,7 +2304,7 @@ mod tests {
             // matches the retained entry, so no marker generation is written.
             assert_eq!(pending.calls(), 2);
             assert_eq!(journal.size(1).unwrap(), chunk);
-            assert_eq!(journal.get(1, 0).await.unwrap().id, 0);
+            assert_eq!(journal.last(1).await.unwrap().unwrap().id, 0);
             journal.destroy().await.unwrap();
         });
     }
@@ -2305,10 +2337,7 @@ mod tests {
                         .unwrap();
                 }
             }
-            journal = journal
-                .sync((1..=SECTIONS).collect::<Vec<_>>())
-                .await
-                .unwrap();
+            journal = journal.sync_all().await.unwrap();
             drop(journal);
 
             // Remove every index section above `kept` and leave every value section.
@@ -2324,7 +2353,7 @@ mod tests {
                 open_tracked(context.child("restart"), cfg.clone())
                     .await
                     .unwrap();
-            assert_eq!(journal.index.newest_section(), Some(kept));
+            assert_eq!(journal.newest_section(), Some(kept));
             for section in 1..=kept {
                 assert_eq!(
                     journal.size(section).unwrap(),
@@ -2376,13 +2405,13 @@ mod tests {
                 .unwrap();
             assert_eq!(first, 0);
             assert_eq!(start, 0);
-            journal = journal.sync([kept, kept + 1]).await.unwrap();
+            journal = journal.sync_all().await.unwrap();
             drop(journal);
 
             // A clean reopen keeps the recovered prefix and both appended entries.
             let journal: Oversized<_, TestEntry, TestValue> =
                 open_tracked(context.child("reopen"), cfg).await.unwrap();
-            assert_eq!(journal.index.newest_section(), Some(kept + 1));
+            assert_eq!(journal.newest_section(), Some(kept + 1));
             for section in 1..kept {
                 assert_eq!(
                     journal.size(section).unwrap(),
@@ -2427,7 +2456,7 @@ mod tests {
                 .append(2, TestEntry::new(2, 0, 0), &[2; 16])
                 .await
                 .expect("Failed to append");
-            oversized = oversized.sync([1, 2]).await.expect("Failed to sync");
+            oversized = oversized.sync_all().await.expect("Failed to sync");
             drop(oversized);
 
             // Truncate section 1's values, simulating lost durable state below the
@@ -2496,7 +2525,7 @@ mod tests {
                     .append(2, TestEntry::new(3, 0, 0), &[3; 16])
                     .await
                     .expect("failed to append later section");
-                oversized = oversized.sync([1, 2]).await.expect("failed to sync");
+                oversized = oversized.sync_all().await.expect("failed to sync");
                 drop(oversized);
 
                 // Checkpoint recovery trusts the completed durability boundary and reads only its
@@ -2569,7 +2598,7 @@ mod tests {
                 .append(2, TestEntry::new(2, 0, 0), &[2; 16])
                 .await
                 .expect("Failed to append");
-            oversized = oversized.sync([1, 2]).await.expect("Failed to sync");
+            oversized = oversized.sync_all().await.expect("Failed to sync");
 
             // Corrupt entry 1's committed value in place (sizes unchanged)
             oversized
@@ -2618,7 +2647,7 @@ mod tests {
                 .append(1, TestEntry::new(1, 0, 0), &[1; 16])
                 .await
                 .unwrap();
-            _ = journal.sync(1).await.unwrap();
+            _ = journal.sync_all().await.unwrap();
 
             // A replay that has not yielded its entry must not finish.
             let replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
@@ -2733,13 +2762,10 @@ mod tests {
             // Prune sections < 3
             (oversized, _) = oversized.prune(3).await.expect("Failed to prune");
 
-            // Reads below the floor report the prune.
-            for section in 1..=2 {
-                assert!(matches!(
-                    oversized.get(section, 0).await,
-                    Err(Error::AlreadyPrunedToSection(3))
-                ));
-            }
+            // The public accessor mirrors the guard
+            assert!(oversized.pruned(1));
+            assert!(oversized.pruned(2));
+            assert!(!oversized.pruned(3));
 
             // Sections 1, 2 should be gone
             assert!(oversized.get(1, 0).await.is_err());
@@ -2912,7 +2938,7 @@ mod tests {
 
             // One sync of every section publishes no marker, so the damage below lies above every
             // floor.
-            oversized = oversized.sync([1, 2, 3]).await.expect("Failed to sync");
+            oversized = oversized.sync_all().await.expect("Failed to sync");
             drop(oversized);
 
             // Truncate section 1 glob to keep only first entry
@@ -3358,7 +3384,7 @@ mod tests {
 
             // One sync of every section publishes no marker, so the damage below lies above every
             // floor.
-            oversized = oversized.sync([1, 2, 3]).await.expect("Failed to sync");
+            oversized = oversized.sync_all().await.expect("Failed to sync");
             drop(oversized);
 
             // Remove section 1's values while its index remains.
@@ -3375,7 +3401,7 @@ mod tests {
                     .expect("Failed to init glob")
                     .into();
             (glob, _) = glob.prune(2).await.expect("Failed to prune glob");
-            glob = glob.sync([2, 3]).await.expect("Failed to sync glob");
+            glob = glob.sync_all().await.expect("Failed to sync glob");
             drop(glob);
 
             // Recovery truncates index section 1 to zero entries.
@@ -3420,7 +3446,7 @@ mod tests {
 
             // One sync of every section publishes no marker, so the damage below lies above every
             // floor.
-            oversized = oversized.sync([1, 2, 3]).await.expect("Failed to sync");
+            oversized = oversized.sync_all().await.expect("Failed to sync");
             drop(oversized);
 
             // Delete index blob for section 2 (simulate corruption/loss)
@@ -4076,7 +4102,7 @@ mod tests {
             assert!(oversized.get(2, 0).await.is_ok());
 
             // Newest section should be 2 (orphan was removed)
-            assert_eq!(oversized.index.newest_section(), Some(2));
+            assert_eq!(oversized.newest_section(), Some(2));
 
             oversized.destroy().await.expect("Failed to destroy");
         });
@@ -4137,7 +4163,7 @@ mod tests {
             assert!(oversized.get(1, 0).await.is_ok());
 
             // Newest section should be 1 (orphans removed)
-            assert_eq!(oversized.index.newest_section(), Some(1));
+            assert_eq!(oversized.newest_section(), Some(1));
 
             oversized.destroy().await.expect("Failed to destroy");
         });
@@ -4180,8 +4206,8 @@ mod tests {
                     .expect("Failed to init");
 
             // No sections should exist
-            assert_eq!(oversized.index.newest_section(), None);
-            assert_eq!(oversized.index.oldest_section(), None);
+            assert_eq!(oversized.newest_section(), None);
+            assert_eq!(oversized.oldest_section(), None);
 
             oversized.destroy().await.expect("Failed to destroy");
         });
@@ -4279,7 +4305,7 @@ mod tests {
             // Both sections should be valid
             assert!(oversized.get(1, 0).await.is_ok());
             assert!(oversized.get(2, 0).await.is_ok());
-            assert_eq!(oversized.index.newest_section(), Some(2));
+            assert_eq!(oversized.newest_section(), Some(2));
 
             oversized.destroy().await.expect("Failed to destroy");
         });
@@ -4324,7 +4350,7 @@ mod tests {
                 let entry = oversized.get(section, 0).await.expect("Failed to get");
                 assert_eq!(entry.id, section);
             }
-            assert_eq!(oversized.index.newest_section(), Some(3));
+            assert_eq!(oversized.newest_section(), Some(3));
 
             oversized.destroy().await.expect("Failed to destroy");
         });
@@ -4391,7 +4417,7 @@ mod tests {
             assert!(oversized.get(1, 0).await.is_err());
 
             // Orphan section 2 should be removed
-            assert_eq!(oversized.index.newest_section(), Some(1));
+            assert_eq!(oversized.newest_section(), Some(1));
 
             oversized.destroy().await.expect("Failed to destroy");
         });
@@ -4460,8 +4486,8 @@ mod tests {
             }
 
             // Verify only sections 1, 3, 5 exist (orphans removed)
-            assert_eq!(oversized.index.oldest_section(), Some(1));
-            assert_eq!(oversized.index.newest_section(), Some(5));
+            assert_eq!(oversized.oldest_section(), Some(1));
+            assert_eq!(oversized.newest_section(), Some(5));
 
             oversized.destroy().await.expect("Failed to destroy");
         });
@@ -4488,7 +4514,7 @@ mod tests {
 
             // One sync of every section publishes no marker, so the damage below lies above every
             // floor.
-            oversized = oversized.sync([1, 2]).await.expect("Failed to sync");
+            oversized = oversized.sync_all().await.expect("Failed to sync");
             drop(oversized);
 
             // Keep both value blobs, but erase one index by truncation and the other by removal.
@@ -4548,10 +4574,7 @@ mod tests {
                     .expect("Failed to append after recovery");
                 assert_eq!(position, 0);
             }
-            oversized = oversized
-                .sync([1, 2])
-                .await
-                .expect("Failed to sync sentinel");
+            oversized = oversized.sync_all().await.expect("Failed to sync sentinel");
             drop(oversized);
 
             // The sentinel entries written after recovery survive a clean reopen.
@@ -4792,7 +4815,7 @@ mod tests {
 
             // One sync of every section publishes no marker, so the damage below lies above every
             // floor.
-            oversized = oversized.sync([1, 2]).await.expect("Failed to sync");
+            oversized = oversized.sync_all().await.expect("Failed to sync");
             drop(oversized);
 
             // Truncate section 1's index to 0 (making it empty)
@@ -4818,7 +4841,7 @@ mod tests {
             assert_eq!(entry.id, 10);
 
             // Section 1 should still be tracked (blob exists but is empty)
-            assert_eq!(oversized.index.oldest_section(), Some(1));
+            assert_eq!(oversized.oldest_section(), Some(1));
 
             // Values are reachable only through index entries, so recovery removes the orphaned
             // bytes before the section can be reused.
@@ -4956,10 +4979,7 @@ mod tests {
 
             // One sync of every section publishes no marker, so the damage below lies above every
             // floor.
-            oversized = oversized
-                .sync(large_sections)
-                .await
-                .expect("Failed to sync");
+            oversized = oversized.sync_all().await.expect("Failed to sync");
             drop(oversized);
 
             // Simulate crash: truncate glob for middle section
@@ -5173,8 +5193,8 @@ mod tests {
             assert_eq!(value, [1; 16]);
 
             // No orphan sections should remain
-            assert_eq!(oversized.index.oldest_section(), Some(1));
-            assert_eq!(oversized.index.newest_section(), Some(1));
+            assert_eq!(oversized.oldest_section(), Some(1));
+            assert_eq!(oversized.newest_section(), Some(1));
 
             // Should be able to append to section 2 (now clean)
             let new_value: TestValue = [42; 16];
@@ -5185,6 +5205,40 @@ mod tests {
                 .await
                 .expect("Failed to append to section 2");
             assert_eq!(pos, 0); // First entry in new section
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    /// Reading the last entry of a pruned section reports the prune.
+    #[test_traced]
+    fn test_last_pruned_section_returns_error() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init_with_checkpoint(context, cfg, (0, 0))
+                    .await
+                    .expect("Failed to init");
+
+            let value: TestValue = [1; 16];
+            (oversized, _, _, _) = oversized
+                .append(0, TestEntry::new(1, 0, 0), &value)
+                .await
+                .expect("Failed to append");
+            (oversized, _, _, _) = oversized
+                .append(1, TestEntry::new(2, 0, 0), &value)
+                .await
+                .expect("Failed to append");
+            oversized = oversized.sync_all().await.expect("Failed to sync");
+
+            (oversized, _) = oversized.prune(1).await.expect("Failed to prune");
+
+            assert!(matches!(
+                oversized.last(0).await,
+                Err(Error::AlreadyPrunedToSection(1))
+            ));
+            assert!(oversized.last(1).await.unwrap().is_some());
 
             oversized.destroy().await.expect("Failed to destroy");
         });
@@ -5285,7 +5339,7 @@ mod tests {
 
                     // Publish both markers, then prune section 0, which durably removes its
                     // marker as a newer generation before deleting its blobs.
-                    journal = journal.sync([0, 1]).await.unwrap();
+                    journal = journal.sync_all().await.unwrap();
                     journal = journal.sync(Vec::<u64>::new()).await.unwrap();
                     (journal, _) = journal.prune(1).await.unwrap();
 
@@ -5362,10 +5416,7 @@ mod tests {
                                 .unwrap();
                         }
                     }
-                    journal = journal
-                        .sync((0..SECTIONS).collect::<Vec<_>>())
-                        .await
-                        .unwrap();
+                    journal = journal.sync_all().await.unwrap();
                     journal = journal.sync(Vec::<u64>::new()).await.unwrap();
 
                     // Fail syncs and removals at random so the prune stops at different steps.
@@ -5444,7 +5495,7 @@ mod tests {
                     .await
                     .unwrap();
             }
-            journal = journal.sync([0, 1, 2]).await.unwrap();
+            journal = journal.sync_all().await.unwrap();
             let checkpoint = (2, journal.size(2).unwrap());
 
             // Prune the index below section 2 and stop before the values are pruned.
@@ -5458,7 +5509,7 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(journal.index.oldest_section(), Some(2));
+            assert_eq!(journal.oldest_section(), Some(2));
             assert_eq!(
                 context.scan("test-values").await.unwrap(),
                 vec![2u64.to_be_bytes().to_vec()]
@@ -5492,7 +5543,7 @@ mod tests {
                     .await
                     .unwrap();
             }
-            journal = journal.sync([0, 1, 2]).await.unwrap();
+            journal = journal.sync_all().await.unwrap();
             let checkpoint = (2, journal.size(2).unwrap());
             drop(journal);
 
@@ -5540,7 +5591,7 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(journal.index.oldest_section(), None);
+            assert_eq!(journal.oldest_section(), None);
             assert_eq!(pending.calls(), 0, "an empty restore must not sync");
             let observed = recordings.snapshot();
             assert!(observed.reads.is_empty(), "an empty restore must not read");
@@ -5610,7 +5661,7 @@ mod tests {
                     second_offset = offset;
                 }
             }
-            drop(journal.sync(SECTION).await.unwrap());
+            drop(journal.sync_all().await.unwrap());
 
             // Only the first entry is committed. The remaining values require verification.
             let mut markers: Metadata<_, SectionKey, u64> = Metadata::init(

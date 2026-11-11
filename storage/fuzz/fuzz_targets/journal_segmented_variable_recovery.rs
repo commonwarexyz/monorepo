@@ -209,11 +209,16 @@ async fn assert_replay(journal: Journal, expected: &BTreeMap<u64, (u64, Vec<Vec<
         seen.entry(section).or_default().push(item);
     }
     let journal = replay.finish().expect("replay finish failed");
-    for (&section, (_, frames)) in expected {
+    for (&section, (size, frames)) in expected {
         assert_eq!(
             seen.get(&section).map(Vec::as_slice).unwrap_or(&[]),
             frames.as_slice(),
             "replayed items diverge from the crash image in section {section}"
+        );
+        assert_eq!(
+            journal.size(section).expect("size failed"),
+            *size,
+            "repair left the wrong logical size in section {section}"
         );
     }
     assert_eq!(

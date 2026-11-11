@@ -477,12 +477,11 @@ fn fuzz(input: FuzzInput) {
                         durable.insert(section, counts[&section]);
                     }
                     5 => {
-                        // Complete a blocking sync of every section, so everything appended so far
+                        // Complete a blocking sync of every section: everything appended so far
                         // becomes durable.
-                        let sections = counts.keys().copied().collect::<Vec<_>>();
-                        oversized = drive_pending_syncs(&pending, oversized.sync(sections))
+                        oversized = drive_pending_syncs(&pending, oversized.sync_all())
                             .await
-                            .expect("sync of every section failed");
+                            .expect("sync_all failed");
                         durable = counts.clone();
                     }
                     6 => {
@@ -574,13 +573,12 @@ fn fuzz(input: FuzzInput) {
                     // polling again instead completes the sync before the crash.
                     pending.arm();
                     let polls = usize::from(first_phase_input.final_op >> 2) % 2 + 1;
-                    let sections = counts.keys().copied().collect::<Vec<_>>();
                     if let Some(result) =
-                        poll_interrupted(&pending, oversized.sync(sections), polls).await
+                        poll_interrupted(&pending, oversized.sync_all(), polls).await
                     {
                         // A sync that ran to completion is an observed barrier: it must
                         // succeed and every appended entry becomes durable.
-                        drop(result.expect("interrupted sync of every section failed"));
+                        drop(result.expect("interrupted sync_all failed"));
                         durable = counts.clone();
                     }
                 }
@@ -775,10 +773,7 @@ fn fuzz(input: FuzzInput) {
             );
             sentinels.push((section, position, sentinel));
         }
-        oversized = oversized
-            .sync((0..SECTIONS).collect::<Vec<_>>())
-            .await
-            .expect("sentinel sync failed");
+        oversized = oversized.sync_all().await.expect("sentinel sync failed");
         drop(oversized);
 
         let reopened = init_tracked(context.child("sentinels"), cfg)

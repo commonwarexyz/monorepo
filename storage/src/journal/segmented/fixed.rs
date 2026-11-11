@@ -24,17 +24,21 @@ use super::manager::{
     AppendFactory, Config as ManagerConfig, Manager, section_from_name, stored_names,
 };
 use crate::journal::Error;
-use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
+use commonware_codec::{CodecFixed, CodecFixedShared, Copying, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
     Blob, Error as RError, Handle, Metrics, ReadOptions, Storage,
     buffer::paged::{CacheRef, Recovery as PagedRecovery, Replay as BlobReplay, Writer},
 };
+use commonware_utils::{Cached, NZUsize};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     marker::PhantomData,
     num::{NonZeroU16, NonZeroUsize},
 };
 use tracing::{trace, warn};
+
+// Reusable scratch for [`Inner::try_get_sync`], sized to one item
+commonware_utils::thread_local_cache!(static READ_SCRATCH: Vec<u8>);
 
 /// State for replaying a single section's blob.
 struct SectionReplay<B: Blob> {
@@ -70,8 +74,7 @@ struct Inner<E: Storage + Metrics, A: CodecFixed> {
     _array: PhantomData<A>,
 }
 
-/// Recovery work authorized at open. [Journal::init] uses `Floors` with no floors. Every other
-/// value follows a completed non-mutating preflight.
+/// Recovery work authorized at open. Every value follows a completed non-mutating preflight.
 enum PreflightMode {
     /// Preserve each durable validation floor while replay repairs its suffix.
     Floors {
@@ -288,7 +291,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         }
     }
 
-    /// See [Journal::init].
+    /// See [RecoveryPreflight::finish].
     async fn init(context: E, cfg: Config, mode: PreflightMode) -> Result<Self, Error> {
         // Restore never opens a section above its checkpoint. The truncation below removes those
         // sections unread.
@@ -397,6 +400,69 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         A::decode(buf.coalesce()).map_err(Error::Codec)
     }
 
+    /// See [Journal::get_many].
+    async fn get_many(
+        &self,
+        section: u64,
+        positions: &[u64],
+        buf: &mut [u8],
+    ) -> Result<(Vec<A>, usize), Error> {
+        assert!(
+            positions.is_sorted_by(|a, b| a < b),
+            "positions must be strictly increasing"
+        );
+        if positions.is_empty() {
+            return Ok((Vec::new(), 0));
+        }
+        assert!(
+            buf.len() >= positions.len() * Self::CHUNK_SIZE,
+            "get_many requires buf.len() >= positions.len() * CHUNK_SIZE"
+        );
+        let buf = &mut buf[..positions.len() * Self::CHUNK_SIZE];
+        let blob = self
+            .manager
+            .get(section)?
+            .ok_or(Error::SectionOutOfRange(section))?;
+
+        let mut offsets = positions.to_vec();
+        for offset in &mut offsets {
+            *offset = offset
+                .checked_mul(Self::CHUNK_SIZE_U64)
+                .ok_or(Error::ItemOutOfRange(*offset))?;
+        }
+
+        let hits = blob
+            .read_many_into(buf, &offsets, NZUsize!(Self::CHUNK_SIZE))
+            .await?;
+
+        let mut items = Vec::with_capacity(positions.len());
+        for i in 0..positions.len() {
+            let slice = &buf[i * Self::CHUNK_SIZE..(i + 1) * Self::CHUNK_SIZE];
+            items.push(A::decode(Copying(slice)).map_err(Error::Codec)?);
+        }
+        Ok((items, hits))
+    }
+
+    /// See [Journal::try_get_sync].
+    fn try_get_sync(&self, section: u64, position: u64) -> Option<A> {
+        let blob = self.manager.get(section).ok()??;
+        let offset = position.checked_mul(Self::CHUNK_SIZE_U64)?;
+        let remaining = blob.size().checked_sub(offset)?;
+        if remaining < Self::CHUNK_SIZE_U64 {
+            return None;
+        }
+        let mut scratch =
+            Cached::take(&READ_SCRATCH, || Ok::<_, ()>(Vec::new()), |_| Ok(())).unwrap();
+        if scratch.len() < Self::CHUNK_SIZE {
+            scratch.resize(Self::CHUNK_SIZE, 0);
+        }
+        let buf = &mut scratch[..Self::CHUNK_SIZE];
+        if !blob.try_read_sync_into(buf, offset) {
+            return None;
+        }
+        A::decode(Copying(buf)).ok()
+    }
+
     /// See [Journal::last].
     async fn last(&self, section: u64) -> Result<Option<A>, Error> {
         let blob = self
@@ -431,6 +497,12 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         Ok((self, handle))
     }
 
+    /// See [Journal::sync_all].
+    async fn sync_all(mut self: Box<Self>) -> Result<Box<Self>, Error> {
+        self.manager = self.manager.sync_all().await?;
+        Ok(self)
+    }
+
     /// See [Journal::prune].
     async fn prune(mut self: Box<Self>, min: u64) -> Result<(Box<Self>, bool), Error> {
         let (manager, pruned) = self.manager.prune(min).await?;
@@ -440,6 +512,11 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
             self.floors.retain(|section, _| *section >= min);
         }
         Ok((self, pruned))
+    }
+
+    /// See [Journal::pruned].
+    const fn pruned(&self, section: u64) -> bool {
+        self.manager.pruned(section)
     }
 
     /// See [Journal::oldest_section].
@@ -487,6 +564,14 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
     /// See [Journal::destroy].
     async fn destroy(self) -> Result<(), Error> {
         self.manager.destroy().await
+    }
+
+    /// See [Journal::clear].
+    async fn clear(mut self: Box<Self>) -> Result<Box<Self>, Error> {
+        self.manager = self.manager.clear().await?;
+        self.unrecovered.clear();
+        self.floors.clear();
+        Ok(self)
     }
 }
 
@@ -566,6 +651,27 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// - [Error::ItemOutOfRange] if the position is beyond the blob size.
     pub async fn get(&self, section: u64, position: u64) -> Result<A, Error> {
         self.0.get(section, position).await
+    }
+
+    /// Read multiple items from the same section into a caller buffer.
+    ///
+    /// `buf` must be at least `positions.len() * CHUNK_SIZE` bytes. All positions must be
+    /// strictly increasing and within the section's bounds.
+    ///
+    /// Returns the decoded items and the number served without a blob read (page cache or tip
+    /// buffer hits).
+    pub async fn get_many(
+        &self,
+        section: u64,
+        positions: &[u64],
+        buf: &mut [u8],
+    ) -> Result<(Vec<A>, usize), Error> {
+        self.0.get_many(section, positions, buf).await
+    }
+
+    /// Get an item if it can be done synchronously (e.g. without I/O), returning `None` otherwise.
+    pub fn try_get_sync(&self, section: u64, position: u64) -> Option<A> {
+        self.0.try_get_sync(section, position)
     }
 
     /// Read the last item in a section, if any.
@@ -663,11 +769,25 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         Ok((self, handle))
     }
 
+    /// Sync all sections to storage.
+    pub async fn sync_all(mut self) -> Result<Self, Error> {
+        self.0 = self.0.sync_all().await?;
+        Ok(self)
+    }
+
     /// Prune all sections less than `min`. Returns true if any were pruned.
     pub async fn prune(mut self, min: u64) -> Result<(Self, bool), Error> {
         let (inner, pruned) = self.0.prune(min).await?;
         self.0 = inner;
         Ok((self, pruned))
+    }
+
+    /// Returns true when `section` is below the prune floor.
+    ///
+    /// The floor only tracks prunes from the current execution and resets at init, so a
+    /// section pruned in a previous execution reports false.
+    pub fn pruned(&self, section: u64) -> bool {
+        self.0.pruned(section)
     }
 
     /// Returns the oldest section number, if any blobs exist.
@@ -710,6 +830,14 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Remove all underlying blobs.
     pub async fn destroy(self) -> Result<(), Error> {
         self.0.destroy().await
+    }
+
+    /// Clear all data, resetting the journal to an empty state.
+    ///
+    /// Unlike `destroy`, this keeps the journal alive so it can be reused.
+    pub async fn clear(mut self) -> Result<Self, Error> {
+        self.0 = self.0.clear().await?;
+        Ok(self)
     }
 }
 
@@ -958,6 +1086,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::codec::View;
     use commonware_codec::FixedSize;
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
@@ -979,14 +1108,6 @@ mod tests {
             atomic::{AtomicUsize, Ordering},
         },
     };
-
-    /// Sync every section the journal holds.
-    async fn sync_sections<E: Storage + Metrics, A: CodecFixedShared>(
-        journal: Journal<E, A>,
-    ) -> Result<Journal<E, A>, Error> {
-        let sections = journal.sections().collect::<Vec<_>>();
-        journal.sync(sections).await
-    }
 
     /// Open a journal with no validation floors through the crate-internal open path.
     async fn init_journal<E: Storage + Metrics, A: CodecFixedShared>(
@@ -1012,7 +1133,7 @@ mod tests {
                 write_buffer: replay_buffer,
                 page_cache: factory.page_cache_ref,
             };
-            _ = sync_sections(self).await?;
+            _ = self.sync_all().await?;
             let mut journal = init_journal(context, cfg).await?;
             journal.0.manager = journal
                 .0
@@ -1052,6 +1173,18 @@ mod tests {
         }
     }
 
+    #[test_traced]
+    fn test_fixed_cached_get_preserves_owned_byte_fields() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = test_cfg();
+            let mut journal = init_journal(context, cfg).await.unwrap();
+            (journal, _) = journal.append(1, &View::new(7)).await.unwrap();
+            let decoded = journal.try_get_sync(1, 0).unwrap();
+            journal.destroy().await.unwrap();
+            assert_eq!(decoded.bytes.as_ref(), &7u64.to_be_bytes());
+        });
+    }
+
     fn lazy_recovery_cfg(partition: &str) -> Config {
         Config {
             partition: partition.into(),
@@ -1088,7 +1221,7 @@ mod tests {
                     .expect("failed to append");
             }
         }
-        sync_sections(journal).await.expect("failed to sync");
+        journal.sync_all().await.expect("failed to sync");
     }
 
     #[test_traced]
@@ -1165,7 +1298,7 @@ mod tests {
                 for value in 0..items {
                     (journal, _) = journal.append(section, &value).await.unwrap();
                 }
-                journal = sync_sections(journal).await.unwrap();
+                journal = journal.sync_all().await.unwrap();
             }
 
             for section in 0..SECTIONS {
@@ -1173,7 +1306,7 @@ mod tests {
                 assert_eq!(journal.get(section, items - 1).await.unwrap(), items - 1);
                 (journal, _) = journal.append(section, &items).await.unwrap();
             }
-            journal = sync_sections(journal).await.unwrap();
+            journal = journal.sync_all().await.unwrap();
             for section in 0..SECTIONS {
                 assert_eq!(journal.get(section, items).await.unwrap(), items);
             }
@@ -1204,7 +1337,7 @@ mod tests {
                         assert_eq!(journal.get(section, position).await.unwrap(), item);
                     }
                 }
-                journal = sync_sections(journal).await.unwrap();
+                journal = journal.sync_all().await.unwrap();
                 drop(journal);
 
                 let journal = init_journal::<_, Digest>(context, cfg).await.unwrap();
@@ -1339,18 +1472,14 @@ mod tests {
             }
             assert!(replay.next().await.is_none());
             let journal = replay.finish().unwrap();
-
-            // Each page is read from storage on first access, since the replay cached nothing.
-            for value in 0..2 {
-                recordings.clear();
-                assert_eq!(journal.get(1, u64::from(value)).await.unwrap(), [value; 16]);
-                assert!(
-                    !recordings.snapshot().reads.is_empty(),
-                    "a page the replay read must not be cached"
-                );
+            for position in 0..2 {
+                assert!(journal.try_get_sync(1, position).is_none());
             }
 
-            // A second read of a page is served from the cache.
+            recordings.clear();
+            assert_eq!(journal.get(1, 0).await.unwrap(), [0; 16]);
+            assert!(!recordings.snapshot().reads.is_empty());
+            assert_eq!(journal.try_get_sync(1, 0), Some([0; 16]));
             recordings.clear();
             assert_eq!(journal.get(1, 0).await.unwrap(), [0; 16]);
             assert!(recordings.snapshot().reads.is_empty());
@@ -1408,7 +1537,7 @@ mod tests {
                 .append(1, &test_digest(0))
                 .await
                 .expect("failed to append");
-            journal = sync_sections(journal).await.expect("failed to sync");
+            journal = journal.sync_all().await.expect("failed to sync");
             drop(journal);
 
             // A tail page can hide an earlier torn page. Reopened sections remain append-locked
@@ -1508,7 +1637,7 @@ mod tests {
                     .await
                     .expect("failed to append");
             }
-            journal = sync_sections(journal).await.expect("failed to sync");
+            journal = journal.sync_all().await.expect("failed to sync");
             journal = journal
                 .test_reopen_section(1, 0)
                 .await
@@ -1626,7 +1755,7 @@ mod tests {
                 .append(1, &test_digest(0))
                 .await
                 .expect("failed to append");
-            journal = sync_sections(journal).await.expect("failed to sync");
+            journal = journal.sync_all().await.expect("failed to sync");
 
             let replay = journal
                 .replay(0, 0, NZUsize!(1024), ReadOptions::default())
@@ -1658,7 +1787,7 @@ mod tests {
                     .expect("failed to append");
             }
 
-            journal = sync_sections(journal).await.expect("failed to sync");
+            journal = journal.sync_all().await.expect("failed to sync");
             drop(journal);
 
             let mut journal = init_journal::<_, Digest>(context.child("second"), cfg.clone())
@@ -1722,7 +1851,7 @@ mod tests {
                     .await
                     .expect("failed to append");
             }
-            journal = sync_sections(journal).await.expect("failed to sync");
+            journal = journal.sync_all().await.expect("failed to sync");
             drop(journal);
 
             let mut journal = init_journal::<_, Digest>(context.child("second"), cfg.clone())
@@ -1847,7 +1976,7 @@ mod tests {
                     .await
                     .expect("failed to append");
             }
-            journal = sync_sections(journal).await.expect("failed to sync");
+            journal = journal.sync_all().await.expect("failed to sync");
 
             (journal, _) = journal.prune(3).await.expect("failed to prune");
 
@@ -1881,13 +2010,13 @@ mod tests {
                     .await
                     .expect("failed to append");
             }
-            journal = sync_sections(journal).await.expect("failed to sync");
+            journal = journal.sync_all().await.expect("failed to sync");
 
             (journal, _) = journal.prune(10).await.expect("failed to prune");
             assert_eq!(journal.oldest_section(), None);
-            assert!(journal.0.manager.prune_guard(3).is_err());
-            assert!(journal.0.manager.prune_guard(9).is_err());
-            assert!(journal.0.manager.prune_guard(10).is_ok());
+            assert!(journal.pruned(3));
+            assert!(journal.pruned(9));
+            assert!(!journal.pruned(10));
 
             journal.destroy().await.expect("failed to destroy");
         });
@@ -1908,7 +2037,7 @@ mod tests {
                     .await
                     .expect("failed to append");
             }
-            journal = sync_sections(journal).await.expect("failed to sync");
+            journal = journal.sync_all().await.expect("failed to sync");
             drop(journal);
 
             let (blob, size) = context
@@ -1960,7 +2089,7 @@ mod tests {
                     .await
                     .expect("failed to append");
             }
-            journal = sync_sections(journal).await.expect("failed to sync");
+            journal = journal.sync_all().await.expect("failed to sync");
             drop(journal);
 
             // Reopen and verify data persisted
@@ -2070,7 +2199,7 @@ mod tests {
                 .append(10, &test_digest(1000))
                 .await
                 .expect("failed to append");
-            journal = sync_sections(journal).await.expect("failed to sync");
+            journal = journal.sync_all().await.expect("failed to sync");
 
             // Verify random access to each section
             assert_eq!(journal.get(1, 0).await.unwrap(), test_digest(100));
@@ -2171,7 +2300,7 @@ mod tests {
                 .await
                 .expect("failed to append");
 
-            journal = sync_sections(journal).await.expect("failed to sync");
+            journal = journal.sync_all().await.expect("failed to sync");
 
             // Verify section lengths
             assert_eq!(journal.section_len(1).unwrap(), 1);
@@ -2247,7 +2376,7 @@ mod tests {
             for value in [11u64, 22, 33, 44] {
                 (journal, _) = journal.append(SECTION, &value).await.unwrap();
             }
-            journal = sync_sections(journal).await.unwrap();
+            journal = journal.sync_all().await.unwrap();
             drop(journal);
 
             let (blob, size) = context
@@ -2307,7 +2436,7 @@ mod tests {
             for value in 0..6 {
                 (journal, _) = journal.append(SECTION, &value).await.unwrap();
             }
-            journal = sync_sections(journal).await.unwrap();
+            journal = journal.sync_all().await.unwrap();
             drop(journal);
 
             // The three 16-byte logical pages each contain two complete u64 items. Tear the
@@ -2338,7 +2467,7 @@ mod tests {
             let position;
             (journal, position) = journal.append(SECTION, &99).await.unwrap();
             assert_eq!(position, 2);
-            sync_sections(journal).await.unwrap();
+            journal.sync_all().await.unwrap();
 
             let journal = init_journal::<_, u64>(context.child("reopen"), cfg)
                 .await
@@ -2369,7 +2498,7 @@ mod tests {
             for value in 0..6 {
                 (journal, _) = journal.append(SECTION, &value).await.unwrap();
             }
-            journal = sync_sections(journal).await.unwrap();
+            journal = journal.sync_all().await.unwrap();
             drop(journal);
 
             // Tearing interior page 1 leaves items 0-1, and replay repairs it on the first read.
@@ -2468,7 +2597,7 @@ mod tests {
                     .await
                     .expect("failed to append");
             }
-            journal = sync_sections(journal).await.expect("failed to sync");
+            journal = journal.sync_all().await.expect("failed to sync");
 
             // Verify all 3 items are readable
             for i in 0u64..3 {
@@ -2515,6 +2644,69 @@ mod tests {
             );
 
             journal.destroy().await.expect("failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_journal_clear() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "clear-test".into(),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut journal: Journal<_, Digest> =
+                init_journal(context.child("journal"), cfg.clone())
+                    .await
+                    .expect("Failed to initialize journal");
+
+            // Append items across multiple sections
+            for section in 0..5u64 {
+                for i in 0..10u64 {
+                    (journal, _) = journal
+                        .append(section, &test_digest(section * 1000 + i))
+                        .await
+                        .expect("Failed to append");
+                }
+                journal = journal.sync(section).await.expect("Failed to sync");
+            }
+
+            // Verify we have data
+            assert_eq!(journal.get(0, 0).await.unwrap(), test_digest(0));
+            assert_eq!(journal.get(4, 0).await.unwrap(), test_digest(4000));
+
+            // Clear the journal
+            journal = journal.clear().await.expect("Failed to clear");
+
+            // After clear, all reads should fail
+            for section in 0..5u64 {
+                assert!(matches!(
+                    journal.get(section, 0).await,
+                    Err(Error::SectionOutOfRange(s)) if s == section
+                ));
+            }
+
+            // Append new data after clear
+            for i in 0..5u64 {
+                (journal, _) = journal
+                    .append(10, &test_digest(i * 100))
+                    .await
+                    .expect("Failed to append after clear");
+            }
+            journal = journal.sync(10).await.expect("Failed to sync after clear");
+
+            // New data should be readable
+            assert_eq!(journal.get(10, 0).await.unwrap(), test_digest(0));
+
+            // Old sections should still be missing
+            assert!(matches!(
+                journal.get(0, 0).await,
+                Err(Error::SectionOutOfRange(0))
+            ));
+
+            journal.destroy().await.unwrap();
         });
     }
 
@@ -2575,7 +2767,7 @@ mod tests {
 
             (journal, _) = journal.append(0, &test_digest(0)).await.unwrap();
             (journal, _) = journal.append(1, &test_digest(1)).await.unwrap();
-            journal = sync_sections(journal).await.unwrap();
+            journal = journal.sync_all().await.unwrap();
 
             (journal, _) = journal.prune(1).await.unwrap();
 
@@ -2584,6 +2776,124 @@ mod tests {
                 Err(Error::AlreadyPrunedToSection(1))
             ));
             assert!(journal.last(1).await.unwrap().is_some());
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_get_many_empty() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+            let mut journal = init_journal(context.child("storage"), cfg).await.unwrap();
+            (journal, _) = journal.append(0, &test_digest(0)).await.unwrap();
+            assert_eq!(journal.section_len(0).unwrap(), 1);
+
+            let mut buf = [];
+            let (items, hits) = journal.get_many(0, &[], &mut buf).await.unwrap();
+            assert!(items.is_empty());
+            assert_eq!(hits, 0);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_get_many_single_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+            let mut journal = init_journal(context.child("storage"), cfg).await.unwrap();
+
+            for i in 0..5 {
+                (journal, _) = journal.append(0, &test_digest(i)).await.unwrap();
+            }
+            assert_eq!(journal.section_len(0).unwrap(), 5);
+
+            // Read all 5 items in one call. The reusable buffer is intentionally oversized:
+            // get_many slices it to the exact length the batch needs.
+            let chunk = Journal::<deterministic::Context, Digest>::CHUNK_SIZE;
+            let mut buf = vec![0u8; 6 * chunk];
+            let (items, _) = journal
+                .get_many(0, &[0, 1, 2, 3, 4], &mut buf)
+                .await
+                .unwrap();
+
+            for (i, item) in items.iter().enumerate() {
+                assert_eq!(*item, test_digest(i as u64));
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_get_many_subset() {
+        // Read a sparse subset of positions.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+            let mut journal = init_journal(context.child("storage"), cfg).await.unwrap();
+
+            for i in 0..10 {
+                (journal, _) = journal.append(0, &test_digest(i)).await.unwrap();
+            }
+            assert_eq!(journal.section_len(0).unwrap(), 10);
+
+            let chunk = Journal::<deterministic::Context, Digest>::CHUNK_SIZE;
+            let positions = [1, 4, 7, 9];
+            let mut buf = vec![0u8; positions.len() * chunk];
+            let (items, _) = journal.get_many(0, &positions, &mut buf).await.unwrap();
+
+            for (i, &pos) in positions.iter().enumerate() {
+                assert_eq!(items[i], test_digest(pos));
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_get_many_bad_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+            let journal = init_journal::<_, Digest>(context.child("storage"), cfg)
+                .await
+                .unwrap();
+
+            let mut buf = vec![0u8; 64];
+            let err = journal.get_many(99, &[0], &mut buf).await.unwrap_err();
+            assert!(matches!(err, Error::SectionOutOfRange(99)));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_get_many_matches_get() {
+        // Verify batch read matches individual reads.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg();
+            let mut journal = init_journal(context.child("storage"), cfg).await.unwrap();
+
+            for i in 0..8 {
+                (journal, _) = journal.append(0, &test_digest(i)).await.unwrap();
+            }
+            assert_eq!(journal.section_len(0).unwrap(), 8);
+            journal = journal.sync_all().await.unwrap();
+
+            let chunk = Journal::<deterministic::Context, Digest>::CHUNK_SIZE;
+            let positions: Vec<u64> = (0..8).collect();
+            let mut buf = vec![0u8; positions.len() * chunk];
+            let (batch, _) = journal.get_many(0, &positions, &mut buf).await.unwrap();
+
+            for pos in &positions {
+                let single = journal.get(0, *pos).await.unwrap();
+                assert_eq!(batch[*pos as usize], single);
+            }
 
             journal.destroy().await.unwrap();
         });
@@ -2699,6 +3009,70 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_segmented_fixed_clear_waits_for_in_flight_start_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = test_cfg();
+            let mut journal = init_journal(context.child("storage"), cfg)
+                .await
+                .expect("failed to init");
+
+            (journal, _) = journal
+                .append(1, &test_digest(0))
+                .await
+                .expect("failed to append");
+            let handle;
+            (journal, handle) = journal.start_sync(1).await.expect("failed to start sync");
+            assert!(!pending.lock().is_empty());
+
+            let started = Arc::new(AtomicUsize::new(0));
+            let completed = Arc::new(AtomicUsize::new(0));
+            let started_clone = started.clone();
+            let completed_clone = completed.clone();
+            let waiter = context.inner.child("clear").spawn(|_| async move {
+                started_clone.fetch_add(1, Ordering::Relaxed);
+                journal = journal.clear().await.expect("failed to clear");
+                completed_clone.fetch_add(1, Ordering::Relaxed);
+                journal
+            });
+
+            while started.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            commonware_runtime::reschedule().await;
+            assert_eq!(
+                completed.load(Ordering::Relaxed),
+                0,
+                "clear must wait for in-flight syncs"
+            );
+
+            release_pending_syncs(&pending);
+            handle
+                .await
+                .expect("sync handle should complete despite clearing");
+            while completed.load(Ordering::Relaxed) == 0 {
+                commonware_runtime::reschedule().await;
+            }
+            let mut journal = waiter.await.expect("clear task failed");
+
+            // The journal must remain usable after clear.
+            assert_eq!(journal.oldest_section(), None);
+            let position;
+            (journal, position) = journal
+                .append(1, &test_digest(1))
+                .await
+                .expect("failed to append after clear");
+            assert_eq!(position, 0);
+            journal.destroy().await.expect("failed to destroy");
+        });
+    }
+
+    #[test_traced]
     fn test_segmented_fixed_prune_surfaces_failed_in_flight_start_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -2745,7 +3119,7 @@ mod tests {
             for value in 0..6 {
                 (journal, _) = journal.append(SECTION, &value).await.unwrap();
             }
-            drop(sync_sections(journal).await.unwrap());
+            drop(journal.sync_all().await.unwrap());
 
             let (gated, gate) =
                 ReadGateContext::new(context.child("cancel"), cfg.partition.clone());

@@ -34,7 +34,7 @@ use crate::{
 use bytes::Bytes;
 use commonware_codec::{Codec, CodecShared, FixedSize};
 use commonware_cryptography::{Crc32, crc32};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 use commonware_runtime::{Blob as _, ReadOptions, Storage, WriteOptions};
 use commonware_runtime::{BufMut, Error as RError, Handle};
 use std::{collections::BTreeMap, num::NonZeroUsize};
@@ -74,7 +74,7 @@ struct Inner<E: Context, V: Codec> {
 }
 
 impl<E: Context, V: CodecShared> Inner<E, V> {
-    /// See [Glob::init].
+    /// See [Recovery::init].
     async fn init(context: E, cfg: Config<V::Cfg>, ceiling: u64) -> Result<Self, Error> {
         let manager_cfg = ManagerConfig {
             partition: cfg.partition,
@@ -217,6 +217,12 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         Ok((self, handle))
     }
 
+    /// See [Glob::sync_all].
+    async fn sync_all(mut self: Box<Self>) -> Result<Box<Self>, Error> {
+        self.manager = self.manager.sync_all().await?;
+        Ok(self)
+    }
+
     /// See [Glob::size].
     fn size(&self, section: u64) -> Result<u64, Error> {
         self.manager.size(section)
@@ -237,6 +243,11 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let (manager, pruned) = self.manager.prune(min).await?;
         self.manager = manager;
         Ok((self, pruned))
+    }
+
+    /// See [Glob::pruned].
+    const fn pruned(&self, section: u64) -> bool {
+        self.manager.pruned(section)
     }
 
     /// See [Glob::oldest_section].
@@ -337,11 +348,30 @@ impl<E: Context, V: CodecShared> Glob<E, V> {
         Ok((self, handle))
     }
 
+    /// Sync all sections to disk.
+    pub async fn sync_all(mut self) -> Result<Self, Error> {
+        self.0 = self.0.sync_all().await?;
+        Ok(self)
+    }
+
+    /// Get the current size of a section (including buffered data).
+    pub fn size(&self, section: u64) -> Result<u64, Error> {
+        self.0.size(section)
+    }
+
     /// Prune sections before min.
     pub async fn prune(mut self, min: u64) -> Result<(Self, bool), Error> {
         let (inner, pruned) = self.0.prune(min).await?;
         self.0 = inner;
         Ok((self, pruned))
+    }
+
+    /// Returns true when `section` is below the prune floor.
+    ///
+    /// The floor only tracks prunes from the current execution and resets at init, so a
+    /// section pruned in a previous execution reports false.
+    pub fn pruned(&self, section: u64) -> bool {
+        self.0.pruned(section)
     }
 
     /// Returns the number of the oldest section.
@@ -352,6 +382,18 @@ impl<E: Context, V: CodecShared> Glob<E, V> {
     /// Returns the number of the newest section.
     pub fn newest_section(&self) -> Option<u64> {
         self.0.newest_section()
+    }
+
+    /// Returns an iterator over all section numbers.
+    pub fn sections(&self) -> impl Iterator<Item = u64> + '_ {
+        self.0.sections()
+    }
+
+    /// Remove a specific section. Returns true if the section existed and was removed.
+    pub async fn remove_section(mut self, section: u64) -> Result<(Self, bool), Error> {
+        let (inner, removed) = self.0.remove_section(section).await?;
+        self.0 = inner;
+        Ok((self, removed))
     }
 
     /// Destroy all blobs.
@@ -444,7 +486,7 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
 /// while leaving every other frame valid. Models a value torn by a crash after its index entry
 /// became durable. Addresses uncompressed fixed-size frames: `frame_size` is the encoded value
 /// size plus its CRC32.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 pub async fn corrupt_frame(
     storage: &impl Storage,
     partition: &str,
@@ -491,8 +533,7 @@ mod tests {
                 compression: self.0.compression,
                 codec_config: self.0.codec_config.clone(),
             };
-            let sections = self.0.sections().collect::<Vec<_>>();
-            _ = self.sync(sections).await?;
+            _ = self.sync_all().await?;
             let pending = Recovery::init(context, cfg, u64::MAX).await?;
             let pending = pending.truncate_section(section, end).await?;
             Ok(pending.into())
@@ -699,10 +740,10 @@ mod tests {
             // Prune sections < 3
             let (glob, _) = glob.prune(3).await.expect("Failed to prune");
 
-            // The manager guards every section below the floor.
-            assert!(glob.0.manager.prune_guard(1).is_err());
-            assert!(glob.0.manager.prune_guard(2).is_err());
-            assert!(glob.0.manager.prune_guard(3).is_ok());
+            // The public accessor mirrors the guard
+            assert!(glob.pruned(1));
+            assert!(glob.pruned(2));
+            assert!(!glob.pruned(3));
 
             // Sections 1 and 2 should be gone
             assert!(glob.get(1, 0, 8).await.is_err());
@@ -835,7 +876,7 @@ mod tests {
                         deterministic::FaultConfig::default()
                     };
                     let glob = glob.test_reopen_section(1, kept).await.unwrap();
-                    assert_eq!(glob.0.size(1).unwrap(), kept);
+                    assert_eq!(glob.size(1).unwrap(), kept);
                     let (glob, offset, size) = glob.append(1, &4).await.unwrap();
                     assert_eq!(offset, kept);
                     drop(glob);
@@ -851,7 +892,7 @@ mod tests {
                 } else {
                     kept
                 };
-                let recovered = glob.0.size(1).unwrap();
+                let recovered = glob.size(1).unwrap();
                 assert_eq!(
                     recovered, end,
                     "recovered {recovered} bytes, not the {end} byte prefix of the new history"
