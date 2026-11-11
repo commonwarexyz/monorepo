@@ -587,8 +587,10 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
 /// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
 /// the first invalid data read will be considered the new end of the journal (and the
 /// underlying [Blob] will be truncated to the last valid item). Repair occurs during
-/// replay so clean initialization reads only each blob's terminal page. A nonempty section opened
-/// during initialization must be replayed from position zero before it accepts new appends.
+/// replay so clean initialization reads only each blob's terminal page. A section that retains
+/// data above its validation floor must be replayed from position zero before it accepts new
+/// appends. A section restored from a checkpoint, or one that ends at its floor, accepts them at
+/// once.
 ///
 /// Mutating functions consume the journal and return it only on success: an error (or a dropped
 /// future) destroys the handle. [Journal::replay] consumes the journal into an owned [Replay]
@@ -619,7 +621,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         Inner::preflight_floors(context, cfg, minimum_items).await
     }
 
-    /// Prove every checkpoint-covered index byte without mutating damage.
+    /// Validate the terminal boundary of every checkpoint-covered section without mutating
+    /// damage. Interior pages are not read.
     pub async fn preflight_restore(
         context: E,
         cfg: Config,
