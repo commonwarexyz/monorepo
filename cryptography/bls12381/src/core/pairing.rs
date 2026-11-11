@@ -6,14 +6,6 @@
 //! pairing check asks whether such a product is one. A lane's Miller loop over several pairs
 //! shares its squarings among them, and [`Fp12::product_of_lanes`] multiplies the lanes.
 //!
-//! The Miller loop runs on the twist `y^2 = x^3 + 4 (1 + i)` of G2 in the projective coordinates of
-//! [`Point`], with affine inputs, and evaluates each line as the sparse element
-//! `l0 + l2 w^2 + l3 w^3` of `Fp12`. Lines are scaled by factors in `Fp2` that the final exponentiation
-//! removes. The final exponentiation splits into the easy part `(p^6 - 1) (p^2 + 1)`, which lands in
-//! the cyclotomic subgroup, and the hard part, an addition chain over the curve parameter
-//! `z = -0xd201000000010000` (see "Faster Squaring in the Cyclotomic Subgroup of Sixth Degree
-//! Extensions", Granger and Scott, 2010, and the chain of the zkcrypto `pairing` crate).
-//!
 //! # Inputs
 //!
 //! Points are affine and must lie in the prime-order subgroups, other than the identity, which has
@@ -22,6 +14,16 @@
 //! Miller loop is an element of `Fp2`, which the final exponentiation maps to one. Such a pair fills
 //! a lane's unused slots, given a G2 point, such as the generator, whose lines have nonzero
 //! constant terms.
+//!
+//! # How it works
+//!
+//! The Miller loop runs on the twist `y^2 = x^3 + 4 (1 + i)` of G2 in the projective coordinates of
+//! [`Point`], with affine inputs, and evaluates each line as the sparse element
+//! `l0 + l2 w^2 + l3 w^3` of `Fp12`. Lines are scaled by factors in `Fp2` that the final exponentiation
+//! removes. The final exponentiation splits into the easy part `(p^6 - 1) (p^2 + 1)`, which lands in
+//! the cyclotomic subgroup, and the hard part, an addition chain over the curve parameter
+//! `z = -0xd201000000010000` (see "Faster Squaring in the Cyclotomic Subgroup of Sixth Degree
+//! Extensions", Granger and Scott, 2010, and the chain of the zkcrypto `pairing` crate).
 //!
 //! # Bounds
 //!
@@ -160,12 +162,13 @@ fn shared_miller_loop<S: Simd, F: Field<S>>(simd: S, pairs: &[Pair<F>]) -> Fp12<
 
 /// Doubles `t` in place and returns the line tangent at it, evaluated at the pair's G1 point.
 ///
-/// With the curve equation, `3 x^3 - 2 y^2 z` becomes `z (y^2 - 3b z^2)`, and scaling the tangent by
-/// `-2 y z^2 / z` leaves `[3b z^2 - y^2, 3 x^2 xp, -2 y z yp]`. The point is
-/// [`Points::double`](crate::core::curve::Points::double)'s, whose stages the line's values join:
-/// `x^2` reduces with the first stage and the last two coefficients with the coordinates.
+/// The line is `[3b z^2 - y^2, 3 x^2 xp, -2 y z yp]` and the point is
+/// [`Points::double`](crate::core::curve::Points::double)'s.
 #[cfg_attr(not(debug_assertions), inline(always))]
 fn double_step<S: Simd, F: Field<S>>(simd: S, t: &mut Point<F>, pair: &Pair<F>) -> [Fp2<F>; 3] {
+    // With the curve equation, 3 x^3 - 2 y^2 z becomes z (y^2 - 3b z^2), and scaling the tangent
+    // by -2 y z^2 / z leaves the line above. Its values join the stages of the doubling: x^2
+    // reduces with the first stage and the last two coefficients with the coordinates.
     simd.execute(
         #[inline(always)]
         move |simd: S| {
@@ -208,10 +211,10 @@ fn double_step<S: Simd, F: Field<S>>(simd: S, t: &mut Point<F>, pair: &Pair<F>) 
 /// pair's G1 point.
 ///
 /// The line is `[qx y - qy x, (qy z - y) xp, -(qx z - x) yp]` and the point is
-/// [`Points::add`](crate::core::curve::Points::add)'s, whose second stage the line's first products
-/// join.
+/// [`Points::add`](crate::core::curve::Points::add)'s.
 #[cfg_attr(not(debug_assertions), inline(always))]
 fn add_step<S: Simd, F: Field<S>>(simd: S, t: &mut Point<F>, pair: &Pair<F>) -> [Fp2<F>; 3] {
+    // The line's first products join the second stage of the addition.
     simd.execute(
         #[inline(always)]
         move |simd: S| {
@@ -265,11 +268,8 @@ fn add_step<S: Simd, F: Field<S>>(simd: S, t: &mut Point<F>, pair: &Pair<F>) -> 
 
 /// Returns `f^(3 (p^12 - 1) / r)` in each lane, or zero for zero.
 ///
-/// The addition chain of the hard part computes the cube of `f^((p^12 - 1) / r)`, which keeps the
-/// pairing bilinear and nondegenerate, since `3` does not divide `r`.
-///
-/// This is the second half of a pairing: the final exponentiation of [`miller_loop`] of one pair is
-/// its pairing.
+/// The cube of `f^((p^12 - 1) / r)` keeps the pairing bilinear and nondegenerate, since `3` does
+/// not divide `r`. The final exponentiation of [`miller_loop`] of one pair is its pairing.
 pub fn final_exponentiation<S: Simd, F: Field<S>>(simd: S, f: Fp12<F>) -> Fp12<F> {
     let coefficients = Fp12::<F>::frobenius_coefficients(simd);
     // The easy part: f^((p^6 - 1) (p^2 + 1)) lies in the cyclotomic subgroup.
@@ -280,6 +280,8 @@ pub fn final_exponentiation<S: Simd, F: Field<S>>(simd: S, f: Fp12<F>) -> Fp12<F
         .frobenius(simd, &coefficients);
     easy.mul(simd, &inverse);
 
+    // The hard part: an addition chain over z that computes the cube of
+    // easy^((p^4 - p^2 + 1) / r).
     let mut y0 = easy;
     y0.cyclotomic_square(simd);
     let mut y1 = raise_to_z(simd, y0);
