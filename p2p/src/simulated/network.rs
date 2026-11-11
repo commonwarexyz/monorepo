@@ -300,10 +300,8 @@ pub struct Config {
 
     /// Maximum number of distinct identities at one peer-set index.
     ///
-    /// This applies to the deduplicated union of a peer set's primary and secondary identities.
-    /// Sets that a peer tracks through [`ingress::Control::manager`] or
-    /// [`ingress::Control::socket_manager`] also count that peer when they omit it. The simulator
-    /// panics when it processes an oversized registration.
+    /// A peer listed as both primary and secondary counts once. A peer that tracks a set through
+    /// its own manager counts itself. The simulator panics if a set goes over the limit.
     pub max_peers_per_set: NonZeroUsize,
 
     /// True if peers should disconnect upon being blocked. While production networking would
