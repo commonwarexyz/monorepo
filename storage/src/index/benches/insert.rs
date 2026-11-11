@@ -9,10 +9,13 @@ use criterion::{Criterion, criterion_group};
 use rand::seq::SliceRandom;
 use std::time::{Duration, Instant};
 
-#[cfg(not(full_bench))]
-const N_ITEMS: [usize; 2] = [10_000, 50_000];
-#[cfg(full_bench)]
-const N_ITEMS: [usize; 5] = [10_000, 50_000, 100_000, 500_000, 1_000_000];
+fn n_items() -> &'static [usize] {
+    if commonware_bench::full() {
+        &[10_000, 50_000, 100_000, 500_000, 1_000_000]
+    } else {
+        &[10_000, 50_000]
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 enum Variant {
@@ -56,7 +59,7 @@ const VARIANTS: [Variant; 9] = [
 ];
 
 fn bench_insert(c: &mut Criterion) {
-    for items in N_ITEMS {
+    for &items in n_items() {
         // Setup items
         let mut rng = test_rng();
         let mut kvs = Vec::with_capacity(items);

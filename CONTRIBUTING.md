@@ -126,14 +126,18 @@ criterion_main!(operation_name::benches);
 
 ### Inputs
 
-`cargo bench` measures each benchmark with the inputs it lists. `cargo test --benches`, which CI runs, executes each benchmark once without measuring it. When an input is slow to set up, use the smallest one in that mode by checking `commonware_bench::smoke()`, after adding `commonware-bench = { workspace = true }` to the crate's dev-dependencies:
+`cargo bench` measures each benchmark with the inputs it lists. `just bench-full` (`COMMONWARE_BENCH_FULL=1 cargo bench`) adds the large inputs that a benchmark selects with `commonware_bench::full()`. `cargo test --benches`, which CI runs, executes each benchmark once without measuring it. When an input is slow to set up, use the smallest one in that mode by checking `commonware_bench::smoke()`. Both helpers need `commonware-bench = { workspace = true }` in the crate's dev-dependencies. Put every input that varies in the benchmark name.
 
 ```rust
-let sizes: &[usize] = if commonware_bench::smoke() {
-    &[1_000]
-} else {
-    &[1_000, 100_000, 1_000_000]
-};
+fn sizes() -> &'static [usize] {
+    if commonware_bench::smoke() {
+        &[1_000]
+    } else if commonware_bench::full() {
+        &[1_000, 100_000, 10_000_000]
+    } else {
+        &[1_000, 100_000]
+    }
+}
 ```
 
 ### Naming

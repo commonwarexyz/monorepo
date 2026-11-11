@@ -13,21 +13,23 @@ use rand::RngExt as _;
 use std::{hint::black_box, time::Instant};
 
 /// Items pre-loaded into the archive.
-#[cfg(not(full_bench))]
-const ITEMS: u64 = 10_000;
-#[cfg(full_bench)]
-const ITEMS: u64 = 250_000;
-
-#[cfg(not(full_bench))]
-const READS: [usize; 1] = [1_000];
-#[cfg(full_bench)]
-const READS: [usize; 3] = [1_000, 10_000, 50_000];
-
 fn items() -> u64 {
     if commonware_bench::smoke() {
         1_000
+    } else if commonware_bench::full() {
+        250_000
     } else {
-        ITEMS
+        10_000
+    }
+}
+
+fn read_counts() -> &'static [usize] {
+    if commonware_bench::smoke() {
+        &[100]
+    } else if commonware_bench::full() {
+        &[1_000, 10_000, 50_000]
+    } else {
+        &[1_000]
     }
 }
 
@@ -83,14 +85,10 @@ fn bench_get(c: &mut Criterion) {
             let runner = tokio::Runner::new(cfg.clone());
             for mode in ["serial", "concurrent"] {
                 for pattern in ["key", "index"] {
-                    for &reads in if commonware_bench::smoke() {
-                        &[100][..]
-                    } else {
-                        &READS
-                    } {
+                    for &reads in read_counts() {
                         c.bench_function(
                             &format!(
-                                "{}/variant={} mode={} pattern={} comp={} reads={}",
+                                "{}/variant={} mode={} pattern={} comp={} items={} reads={}",
                                 module_path!(),
                                 variant.name(),
                                 mode,
@@ -98,6 +96,7 @@ fn bench_get(c: &mut Criterion) {
                                 compression
                                     .map(|l| l.to_string())
                                     .unwrap_or_else(|| "off".into()),
+                                items(),
                                 reads
                             ),
                             |b| {

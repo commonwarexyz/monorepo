@@ -7,20 +7,21 @@ use commonware_storage::archive::Archive as _;
 use criterion::{Criterion, criterion_group};
 use std::time::{Duration, Instant};
 
-#[cfg(not(full_bench))]
-const ITEMS: [u64; 1] = [10_000];
-#[cfg(full_bench)]
-const ITEMS: [u64; 3] = [10_000, 50_000, 100_000];
+fn item_counts() -> &'static [u64] {
+    if commonware_bench::smoke() {
+        &[1_000]
+    } else if commonware_bench::full() {
+        &[10_000, 50_000, 100_000]
+    } else {
+        &[10_000]
+    }
+}
 
 fn bench_put(c: &mut Criterion) {
     let runner = tokio::Runner::default();
     for variant in [Variant::Prunable, Variant::Immutable] {
         for compression in [None, Some(3)] {
-            for &items in if commonware_bench::smoke() {
-                &[1_000][..]
-            } else {
-                &ITEMS
-            } {
+            for &items in item_counts() {
                 let label = format!(
                     "{}/variant={} items={} comp={}",
                     module_path!(),

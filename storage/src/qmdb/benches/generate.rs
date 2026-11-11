@@ -27,16 +27,16 @@ const NUM_OPERATIONS: u64 = 10_000;
 const COMMITS_PER_ITERATION: u64 = 100;
 const CASES: [(u64, u64); 1] = [(NUM_ELEMENTS, NUM_OPERATIONS)];
 
-cfg_if::cfg_if! {
-    if #[cfg(not(full_bench))] {
-        const STORE_CASES: [(u64, u64); 1] = [(NUM_ELEMENTS, NUM_OPERATIONS)];
-    } else {
-        /// The full run also measures the store at the init bench's population size, where the
-        /// log outgrows the page cache.
-        const STORE_CASES: [(u64, u64); 2] = [
+/// The full run also measures the store at the init bench's population size, where the log
+/// outgrows the page cache.
+fn store_cases() -> &'static [(u64, u64)] {
+    if commonware_bench::full() {
+        &[
             (NUM_ELEMENTS, NUM_OPERATIONS),
             (NUM_ELEMENTS * 100, NUM_OPERATIONS * 100),
-        ];
+        ]
+    } else {
+        &[(NUM_ELEMENTS, NUM_OPERATIONS)]
     }
 }
 
@@ -144,10 +144,10 @@ fn bench_var_value_generate(c: &mut Criterion) {
 }
 
 /// Benchmark seeding and churning an unauthenticated store, then pruning and syncing it, for each
-/// of [`STORE_CASES`].
+/// of [`store_cases`].
 fn bench_store_generate(c: &mut Criterion) {
     let runner = tokio::Runner::new(Config::default());
-    for (elements, operations) in STORE_CASES {
+    for &(elements, operations) in store_cases() {
         c.bench_function(
             &format!(
                 "{}/variant=store::variable elements={elements} operations={operations}",

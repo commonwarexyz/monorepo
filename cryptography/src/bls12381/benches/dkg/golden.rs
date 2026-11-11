@@ -13,34 +13,22 @@ const BENCH_NAMESPACE: &[u8] = b"bench";
 
 // One dealer is enough: Golden DKG cost scales with the number of receivers,
 // not the number of dealers.
-cfg_if::cfg_if! {
-    if #[cfg(full_bench)] {
-        const RECEIVERS: &[u32] = &[5, 10, 15, 20, 25];
-        const MAX_RECEIVERS: u32 = 25;
+fn receivers() -> &'static [u32] {
+    if commonware_bench::smoke() {
+        &[5]
+    } else if commonware_bench::full() {
+        &[5, 10, 15, 20, 25]
     } else {
-        const RECEIVERS: &[u32] = &[5, 10, 25];
-        const MAX_RECEIVERS: u32 = 25;
+        &[5, 10, 25]
     }
 }
 
 /// Cached eVRF setup, sized for the largest configuration we benchmark.
 /// Building it is expensive, so we share one across all benches.
 static SETUP: LazyLock<Setup> = LazyLock::new(|| {
-    let max = if commonware_bench::smoke() {
-        5
-    } else {
-        MAX_RECEIVERS
-    };
+    let max = *receivers().iter().max().unwrap();
     Setup::new(NonZeroU32::new(max).unwrap())
 });
-
-fn receivers() -> &'static [u32] {
-    if commonware_bench::smoke() {
-        &[5]
-    } else {
-        RECEIVERS
-    }
-}
 
 /// A Golden DKG scenario with one dealer and `n` receivers.
 struct Bench {

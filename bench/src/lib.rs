@@ -19,14 +19,25 @@ commonware_macros::stability_scope!(ALPHA {
     /// Environment variable containing a JSONL file for custom benchmark metrics.
     pub const METRICS_PATH_ENV: &str = "COMMONWARE_BENCH_METRICS_PATH";
 
+    /// Environment variable that adds the large benchmark inputs when set to `1`.
+    pub const FULL_ENV: &str = "COMMONWARE_BENCH_FULL";
+
+    /// Returns whether [`FULL_ENV`] is set to `1`, so benchmarks add their large inputs.
+    pub fn full() -> bool {
+        static FULL: LazyLock<bool> =
+            LazyLock::new(|| std::env::var_os(FULL_ENV).is_some_and(|value| value == "1"));
+        *FULL
+    }
+
     /// Returns whether Criterion runs each benchmark once instead of measuring it, as under
     /// `cargo test --benches`.
     ///
     /// Benchmarks check this to use their smallest inputs when nothing is measured. Measuring
-    /// and listing (`--list`) return `false`, so both see the regular inputs.
+    /// and listing (`--list`) return `false`, so both see the regular inputs. It also returns
+    /// `false` when [`full`] is set, so `cargo test --benches` then runs the large inputs once.
     pub fn smoke() -> bool {
         static SMOKE: LazyLock<bool> =
-            LazyLock::new(|| criterion_test_mode(std::env::args_os().skip(1)));
+            LazyLock::new(|| !full() && criterion_test_mode(std::env::args_os().skip(1)));
         *SMOKE
     }
 

@@ -12,10 +12,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(not(full_bench))]
-const N_ITEMS: [usize; 2] = [10_000, 50_000];
-#[cfg(full_bench)]
-const N_ITEMS: [usize; 5] = [10_000, 50_000, 100_000, 500_000, 1_000_000];
+fn n_items() -> &'static [usize] {
+    if commonware_bench::full() {
+        &[10_000, 50_000, 100_000, 500_000, 1_000_000]
+    } else {
+        &[10_000, 50_000]
+    }
+}
 
 fn run_lookup<T: Translator>(
     c: &mut Criterion,
@@ -84,12 +87,12 @@ fn run_lookup_prebuilt<I: Unordered<Value = u64>>(
 }
 
 fn bench_lookup(c: &mut Criterion) {
-    let max_items = *N_ITEMS.last().unwrap();
+    let max_items = *n_items().last().unwrap();
     let keys: Vec<_> = (0..max_items)
         .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
         .collect();
 
-    for items in N_ITEMS {
+    for &items in n_items() {
         // Sweep translators and benchmark both partitioned variants at P=2. The P=3 / huge-scale
         // lookup characterization lives in the standalone `index_scale` bench.
         run_lookup(c, OneCap, "one_cap", items, &keys);

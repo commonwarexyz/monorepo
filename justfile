@@ -55,18 +55,12 @@ fix: fix-clippy fix-fmt fix-toml-fmt fix-features
 # Tests benchmarks in a given crate.
 #
 # `partition` is "N/M", run partition N of M, where bench binaries are hash-distributed across M jobs.
-test-benches crate test_flags='' lint_flags='':
+test-benches crate test_flags='':
     #!/usr/bin/env bash
     set -euo pipefail
-    # The name lint needs lint_flags, which make listing the benchmarks its own build, so only the
-    # first partition lints. The others list with the run's flags, a build the benchmarks reuse.
     # Color codes would split the `Running` lines parsed below.
-    if [[ "{{ partition }}" == 1/* ]]; then
-        list=$(RUSTFLAGS="{{ lint_flags }}" cargo test --color never --benches -p {{ crate }} {{ test_flags }} -- --list 2>&1)
-        echo "$list" | python3 .github/scripts/lint_benchmark_names.py -
-    else
-        list=$(cargo test --color never --benches -p {{ crate }} {{ test_flags }} -- --list 2>&1)
-    fi
+    list=$(cargo test --color never --benches -p {{ crate }} {{ test_flags }} -- --list 2>&1)
+    echo "$list" | python3 .github/scripts/lint_benchmark_names.py -
     all=$(echo "$list" | sed -n 's|.*Running .*/deps/\(.*\)-[a-f0-9]*).*|\1|p')
     if [ -z "$all" ]; then
         echo "error: no benchmark binaries found for {{ crate }}" >&2
@@ -76,6 +70,10 @@ test-benches crate test_flags='' lint_flags='':
     for bench in $binaries; do
         cargo test --bench "$bench" -p {{ crate }} {{ test_flags }} -- --verbose
     done
+
+# Run benchmarks with their large inputs (e.g. just bench-full -p commonware-storage --bench index)
+bench-full *args='':
+    COMMONWARE_BENCH_FULL=1 cargo bench $@
 
 # Run the Gungraun benchmark tracking suite
 benchmark-tracking mode='generate' *args='':

@@ -38,10 +38,13 @@ const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
 /// disk over a run (~32 bytes/node, so the live journal stays around 64 MiB).
 const REBUILD_NODE_BUDGET: usize = 2_000_000;
 
-#[cfg(not(full_bench))]
-const N_LEAVES: [usize; 2] = [10_000, 100_000];
-#[cfg(full_bench)]
-const N_LEAVES: [usize; 3] = [10_000, 100_000, 1_000_000];
+fn n_leaves() -> &'static [usize] {
+    if commonware_bench::full() {
+        &[10_000, 100_000, 1_000_000]
+    } else {
+        &[10_000, 100_000]
+    }
+}
 
 fn merkle_cfg(family: &str) -> full::Config<Sequential> {
     full::Config {
@@ -57,7 +60,7 @@ fn merkle_cfg(family: &str) -> full::Config<Sequential> {
 
 fn bench_flush_family<F: Family>(c: &mut Criterion, family: &'static str) {
     let runner = tokio::Runner::new(Config::default());
-    for n in N_LEAVES {
+    for &n in n_leaves() {
         // Flush moves ~2n nodes; rebuild every `cycles` flushes to cap the journal's on-disk size.
         let cycles = (REBUILD_NODE_BUDGET / (2 * n)).max(1);
         c.bench_function(&format!("{}/n={n} family={family}", module_path!()), |b| {

@@ -3,10 +3,13 @@ use criterion::{BatchSize, Criterion, criterion_group};
 use rand::RngExt as _;
 use std::collections::HashMap;
 
-#[cfg(not(full_bench))]
-const N_ITEMS: [usize; 1] = [100_000];
-#[cfg(full_bench)]
-const N_ITEMS: [usize; 3] = [100_000, 1_000_000, 10_000_000];
+fn n_items() -> &'static [usize] {
+    if commonware_bench::full() {
+        &[100_000, 1_000_000, 10_000_000]
+    } else {
+        &[100_000]
+    }
+}
 
 struct MockIndex {
     _section: u64,
@@ -15,7 +18,7 @@ struct MockIndex {
 }
 
 fn bench_hashmap_insert_fixed(c: &mut Criterion) {
-    for n in N_ITEMS {
+    for &n in n_items() {
         c.bench_function(&format!("{}/n={} k={}", module_path!(), n, 4), |b| {
             b.iter_batched(
                 || {

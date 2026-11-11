@@ -846,20 +846,20 @@ variants! {
     }
 }
 
-cfg_if::cfg_if! {
-    if #[cfg(not(full_bench))] {
-        const NUM_KEYS: &[u64] = &[10_000];
-        const SYNC_NUM_KEYS: &[u64] = NUM_KEYS;
-        const CHURNED_NUM_KEYS: &[u64] = NUM_KEYS;
-    } else {
-        const NUM_KEYS: &[u64] = &[10_000, 100_000, 1_000_000];
-        const SYNC_NUM_KEYS: &[u64] = &[10_000, 100_000];
-        const CHURNED_NUM_KEYS: &[u64] = &[10_000, 100_000];
+fn main_num_keys(seed_sync: bool) -> &'static [u64] {
+    match (commonware_bench::full(), seed_sync) {
+        (false, _) => &[10_000],
+        (true, false) => &[10_000, 100_000, 1_000_000],
+        (true, true) => &[10_000, 100_000],
     }
 }
 
-const fn main_num_keys(seed_sync: bool) -> &'static [u64] {
-    if seed_sync { SYNC_NUM_KEYS } else { NUM_KEYS }
+fn churned_num_keys() -> &'static [u64] {
+    if commonware_bench::full() {
+        &[10_000, 100_000]
+    } else {
+        &[10_000]
+    }
 }
 
 fn bench_merkleize(c: &mut Criterion) {
@@ -927,7 +927,7 @@ const CHURN_BATCHES: u64 = 50;
 fn bench_merkleize_churned(c: &mut Criterion) {
     let runner = tokio::Runner::new(Config::default());
     let cache_pages = SMALL_PAGE_CACHE_SIZE.get();
-    for &num_keys in CHURNED_NUM_KEYS {
+    for &num_keys in churned_num_keys() {
         // `current::*` already used a bitmap; only `any::*` exercises the new scan path.
         for variant in VARIANTS.iter().copied().filter(Variant::is_any) {
             c.bench_function(

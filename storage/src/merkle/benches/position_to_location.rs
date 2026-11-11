@@ -4,10 +4,13 @@ use criterion::{Criterion, criterion_group};
 use rand::RngExt as _;
 use std::hint::black_box;
 
-#[cfg(not(full_bench))]
-const N_LEAVES: [u64; 2] = [1_000_000, 1_000_000_000_000];
-#[cfg(full_bench)]
-const N_LEAVES: [u64; 3] = [1_000_000, 1_000_000_000_000, 1 << 62];
+fn n_leaves() -> &'static [u64] {
+    if commonware_bench::full() {
+        &[1_000_000, 1_000_000_000_000, 1 << 62]
+    } else {
+        &[1_000_000, 1_000_000_000_000]
+    }
+}
 
 /// Positions evaluated per measured iteration. Amortizes timer overhead and exercises a spread of
 /// bit patterns (the cost varies with the popcount structure near the target).
@@ -24,7 +27,7 @@ fn sample_positions<F: Family>(max_leaves: u64) -> Vec<Position<F>> {
 }
 
 fn bench_position_to_location_family<F: Family>(c: &mut Criterion, family: &str) {
-    for n in N_LEAVES {
+    for &n in n_leaves() {
         let positions = sample_positions::<F>(n);
         c.bench_function(&format!("{}/n={n} family={family}", module_path!()), |b| {
             b.iter(|| {

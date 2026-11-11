@@ -26,22 +26,16 @@ const COMMIT_FREQUENCY: u32 = 10_000;
 /// baseline), and a reasonably sized cache that covers the bench's working set.
 const CACHE_SIZES: [Option<NonZeroUsize>; 2] = [None, Some(NZUsize!(1 << 18))];
 
-cfg_if::cfg_if! {
-    if #[cfg(not(full_bench))] {
-        const CASES: [(u64, u64); 1] = [(NUM_ELEMENTS, NUM_OPERATIONS)];
-    } else {
-        const CASES: [(u64, u64); 2] = [
-            (NUM_ELEMENTS, NUM_OPERATIONS),
-            (NUM_ELEMENTS * 3, NUM_OPERATIONS * 3),
-        ];
-    }
-}
-
 fn cases() -> &'static [(u64, u64)] {
     if commonware_bench::smoke() {
         &[(1_000, 10_000)]
+    } else if commonware_bench::full() {
+        &[
+            (NUM_ELEMENTS, NUM_OPERATIONS),
+            (NUM_ELEMENTS * 3, NUM_OPERATIONS * 3),
+        ]
     } else {
-        &CASES
+        &[(NUM_ELEMENTS, NUM_OPERATIONS)]
     }
 }
 

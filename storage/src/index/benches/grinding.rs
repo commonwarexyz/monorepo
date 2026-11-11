@@ -22,10 +22,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(not(full_bench))]
-const N_ITEMS: [usize; 2] = [10_000, 50_000];
-#[cfg(full_bench)]
-const N_ITEMS: [usize; 3] = [10_000, 50_000, 200_000];
+fn n_items() -> &'static [usize] {
+    if commonware_bench::full() {
+        &[10_000, 50_000, 200_000]
+    } else {
+        &[10_000, 50_000]
+    }
+}
 
 /// 8-byte keys. With P=2 the first two bytes select the partition. `grinding` uses the big-endian
 /// index, whose top two bytes are zero, so every key lands in partition 0 with a distinct
@@ -58,7 +61,7 @@ fn run_insert(keys: &[[u8; 8]]) -> Duration {
 }
 
 fn bench_grinding(c: &mut Criterion) {
-    for items in N_ITEMS {
+    for &items in n_items() {
         for grinding in [false, true] {
             let dist = if grinding { "grinding" } else { "uniform" };
             let ks = keys(items, grinding);

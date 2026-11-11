@@ -136,8 +136,7 @@ fn measure<I: Unordered<Value = u64>>(
 
 fn main() {
     // Sizes come from numeric CLI args (e.g. `-- 500000000`). With none, use the default tier when
-    // built with `--cfg huge_bench`; otherwise no-op, so a bare `cargo bench` (including CI's
-    // full-suite run, which uses `--cfg full_bench`) does nothing.
+    // built with `--cfg huge_bench`; otherwise no-op, so a bare `cargo bench` does nothing.
     // Numeric args are sizes; other args name the variants to run (default: all). Flag-style args
     // (e.g. the `--bench` that `cargo bench` injects into the harness) are ignored.
     let argv: Vec<String> = std::env::args().skip(1).collect();
