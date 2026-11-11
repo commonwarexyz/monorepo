@@ -8,7 +8,7 @@
 //!
 //! Sizes are taken from numeric CLI args, e.g.
 //! `cargo bench -p commonware-storage --bench index_scale -- 500000000`. With no args it runs the
-//! default 20M/100M tier, but only with `COMMONWARE_BENCH_FULL=1` (`just bench-full`) -- so a bare
+//! default 20M/100M tier, but only with `COMMONWARE_BENCH_FULL=1` (`just bench-full`), so a bare
 //! `cargo bench` does nothing. Non-numeric args restrict which variants run by name, e.g.
 //! `-- 1000000000 partitioned_ordered_3` runs only the SoA index at 1B (the heavy flat baselines
 //! would need ~40+ GB at that size).
@@ -136,10 +136,14 @@ fn measure<I: Unordered<Value = u64>>(
 
 fn main() {
     // Sizes come from numeric CLI args (e.g. `-- 500000000`). With none, use the default tier when
-    // `COMMONWARE_BENCH_FULL=1` is set; otherwise no-op, so a bare `cargo bench` does nothing.
+    // `COMMONWARE_BENCH_FULL=1` is set. Otherwise a bare `cargo bench` does nothing.
     // Numeric args are sizes; other args name the variants to run (default: all). Flag-style args
     // (e.g. the `--bench` that `cargo bench` injects into the harness) are ignored.
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    // There are no Criterion benchmarks to list.
+    if argv.iter().any(|a| a == "--list") {
+        return;
+    }
     let args: Vec<u64> = argv.iter().filter_map(|a| a.parse().ok()).collect();
     let batch =
         argv.iter()

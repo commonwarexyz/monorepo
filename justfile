@@ -76,8 +76,8 @@ test-benches crate test_flags='':
     fi
 
 # Run benchmarks with their large inputs (e.g. just bench-full -p commonware-storage --bench index)
-bench-full *args='':
-    COMMONWARE_BENCH_FULL=1 cargo bench $@
+bench-full *args:
+    COMMONWARE_BENCH_FULL=1 cargo bench "$@"
 
 # Run the Gungraun benchmark tracking suite
 benchmark-tracking mode='generate' *args='':
