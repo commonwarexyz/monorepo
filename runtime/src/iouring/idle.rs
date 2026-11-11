@@ -94,9 +94,10 @@
 //!   reserve a count                          run
 //!     kick: only if still zero             a count held: wait
 //!   claim lowest bit                       stealable backlog: take the count
-//!     success: unpark its worker             if zero, withdraw, search
-//!     failure: return the reserved count   otherwise: wait
-//!       last return: fence and retry       wait: spin, or arm and attempt a wait,
+//!     success: unpark its worker             if zero, withdraw
+//!     failure: return the reserved count       claimed: run, otherwise search
+//!       last return: fence and retry       otherwise: wait
+//!                                          wait: spin, or arm and attempt a wait,
 //!                                            then withdraw, keeping a claim's count
 //! ```
 //!
@@ -371,11 +372,13 @@ pub enum Park {
     /// No work was observed or an existing count covers it, including a thief
     /// holding the slots this worker needs. Wait for a wake.
     Wait,
-    /// The global queue's mirror was nonzero, so run again and try to take
+    /// The global queue's mirror was nonzero, or a push into it claimed this
+    /// worker after it took a count to search, so run again and try to take
     /// work. A last count returned in the park was handed on, unless a claim
     /// brought one.
     Run,
-    /// A stealable backlog was observed and this worker holds a count to search.
+    /// A stealable backlog was observed, this worker holds a count to search,
+    /// and no wake claimed its publication.
     Search,
 }
 
@@ -598,9 +601,15 @@ impl<'a> Searcher<'a> {
         // A push into the global queue may have claimed this worker meanwhile,
         // bringing a count of its own. That one is returned here, and is never
         // the last, since this worker holds the count it just took and the
-        // withdrawal acquired the claim's reservation.
+        // withdrawal acquired the claim's reservation. The claim notifies this
+        // worker, possibly later, since the withdrawal can acquire the claim
+        // before its unpark runs. The worker runs again with the count it keeps
+        // instead of searching and publishing again under the same observation.
+        // Only a publication that no wake claimed leads to a search, so the
+        // last looks of a turn collect at most one claim.
         if self.withdraw() {
             pool.idle().searching.fetch_sub(1, Ordering::Relaxed);
+            return Park::Run;
         }
 
         // Search with the count taken above.
@@ -620,7 +629,9 @@ impl<'a> Searcher<'a> {
         // A search that finds nothing keeps its count, and the next publication
         // returns it. Another worker can pop or claim the backlog between the
         // look and the steal, so a failed scan must publish and look again.
-        // Concurrent progress can require more than one retry.
+        // Concurrent progress can require more than one retry. Each retry
+        // follows a publication that no wake claimed, so only the last
+        // publication of a call can bring a claim's notification.
         loop {
             match self.prepare_park(ready) {
                 Park::Wait => return false,
@@ -1353,8 +1364,8 @@ pub mod tests {
     }
 
     /// A push into the global queue that claims a parking worker after it took
-    /// a count to search brings a second count. The worker returns that count
-    /// and keeps its own.
+    /// a count to search brings a second count. The worker returns that count,
+    /// keeps its own, and runs again.
     #[test]
     fn test_global_claim_of_a_worker_about_to_search_leaves_one_count() {
         let (pool, parts) = leaked(2);
@@ -1375,9 +1386,9 @@ pub mod tests {
             assert!(pool.push(runnable).is_ok());
         });
 
-        // Worker zero searches and returns the claim's count, keeping its own.
+        // Worker zero returns the claim's count, keeping its own, and runs again.
         let (searcher, ready, _) = &mut *parts[0].borrow_mut();
-        assert_eq!(searcher.prepare_park(ready), Park::Search);
+        assert_eq!(searcher.prepare_park(ready), Park::Run);
         assert!(notified(pool, 0));
         assert_eq!(pool.idle().search_count(), 1);
 
@@ -1389,6 +1400,52 @@ pub mod tests {
 
         tasks.push(pushed);
         release(pool, &mut [ready, &mut parts[1].borrow_mut().1], tasks);
+    }
+
+    /// A push into the global queue that claims a parking worker after it took
+    /// a count to search sends it back to run, even though the backlog is gone.
+    /// The worker does not search or publish again under the observation the
+    /// claim moved, so one last look collects at most one claim.
+    #[test]
+    fn test_claim_of_a_worker_about_to_search_ends_its_last_look() {
+        let (pool, parts) = leaked(2);
+        let set = Tasks::new(1);
+
+        // Worker zero holds a stealable backlog queued without a kick.
+        let mut tasks = Vec::new();
+        for _ in 0..STEALABLE {
+            let (task, runnable) = task(&set);
+            queue(&mut parts[0].borrow_mut().1, runnable);
+            tasks.push(task);
+        }
+
+        // Once worker one takes a count to search, a push claims it, another
+        // worker takes the pushed runnable, and worker zero drains its backlog.
+        let (pushed, runnable) = task(&set);
+        tasks.push(pushed);
+        on_wake_point(WakePoint::BeforeParkSearch, {
+            let victim = parts[0].clone();
+            move || {
+                assert!(pool.push(runnable).is_ok());
+                pool.pop().unwrap().discard();
+                victim.borrow_mut().1.discard();
+            }
+        });
+
+        // The claim ends the last look: worker one is unpublished, notified,
+        // and holds one count.
+        let (searcher, ready, _) = &mut *parts[1].borrow_mut();
+        assert!(searcher.publish_and_look(ready));
+        assert!(notified(pool, 1));
+        assert!(!pool.idle().is_idle(1));
+        assert_eq!(pool.idle().search_count(), 1);
+
+        // Returning that count leaves a clean idle state.
+        searcher.leave_search();
+        assert_eq!(pool.idle().search_count(), 0);
+        assert!((0..2).all(|index| !pool.idle().is_idle(index)));
+
+        release(pool, &mut [ready, &mut parts[0].borrow_mut().1], tasks);
     }
 
     /// A worker a push claimed can resume on an independent wake before the

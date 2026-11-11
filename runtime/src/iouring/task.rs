@@ -2003,9 +2003,13 @@ pub mod tests {
 mod loom_tests {
     use super::{
         AfterPending, AfterPoll, Panics, Pool, REF_ONE, REFS, Ready, Runnable, State, Task, Tasks,
+        tests::queue,
     };
     use crate::iouring::{
-        idle::{Park, Searcher},
+        idle::{
+            Park, Searcher,
+            tests::{WakePoint, on_wake_point},
+        },
         park::Parker,
         queue::{CAPACITY, STEALABLE},
     };
@@ -2433,6 +2437,148 @@ mod loom_tests {
                 assert_eq!(refs(&task.state), 1);
             }
         });
+    }
+
+    /// A push that claims a parking worker after it took a count to search
+    /// ends its last look without a steal. The worker returns its kept count
+    /// before a blocking poll, and that last return hands a kick the counts
+    /// suppressed to a parked peer. The claim's notification may also arrive
+    /// only after the worker ran on, and dropping the searcher returns the
+    /// count as an unwind does.
+    #[test]
+    fn test_claim_after_search_cas_hands_on_before_a_blocking_poll() {
+        const TASKS: usize = STEALABLE + 1;
+        for delayed in [false, true] {
+            for dropping in [false, true] {
+                let mut builder = loom::model::Builder::new();
+                builder.preemption_bound = Some(2);
+                builder.check(move || {
+                    let (pool, parkers) = pool(4);
+                    let [p0, p1, _p2, p3] = parker_array(parkers);
+                    let set = Arc::new(Tasks::new(4));
+                    let completed = Arc::new(AtomicUsize::new(0));
+                    let ran: Ran = Arc::new((Mutex::new(false), Condvar::new()));
+                    let gate: Gate = Arc::new((Mutex::new(0), Condvar::new()));
+
+                    // Worker three parks before any backlog exists.
+                    let peer = thread::spawn({
+                        let pool = pool.clone();
+                        let set = set.clone();
+                        let completed = completed.clone();
+                        let gate = gate.clone();
+                        move || {
+                            let mut ready = pool.queue(3).owner();
+                            {
+                                let mut searcher = Searcher::new(&pool, 3);
+                                let seen = p3.observe();
+                                assert_eq!(searcher.prepare_park(&ready), Park::Wait);
+                                reach(&gate, 1);
+                                p3.park(seen, None);
+                                searcher.finish_park();
+                                searcher.leave_search();
+                            }
+                            work(&pool, &set, &mut ready, &p3, 3, &completed, TASKS, false);
+                        }
+                    });
+                    await_stage(&gate, 1);
+
+                    // Worker zero cannot drain this backlog until the blocking
+                    // poll below returns. Worker two is unavailable, with no
+                    // publication or count.
+                    let mut r0 = pool.queue(0).owner();
+                    for _ in 0..STEALABLE {
+                        let (task, runnable) =
+                            Task::new(raising(&ran), &set, std::sync::Arc::downgrade(&pool));
+                        assert!(set.insert(task).is_ok());
+                        queue(&mut r0, runnable);
+                    }
+
+                    // The pushed task blocks in its poll until a stolen task
+                    // runs. With `delayed`, the push claims worker one and
+                    // holds its notification until the worker ran on.
+                    let wait = ran;
+                    let (task, runnable) = Task::new(
+                        poll_fn(move |_| {
+                            wait_ran(&wait);
+                            Poll::Ready(())
+                        }),
+                        &set,
+                        std::sync::Arc::downgrade(&pool),
+                    );
+                    assert!(set.insert(task).is_ok());
+                    let pushing = thread::spawn({
+                        let pool = pool.clone();
+                        let gate = gate.clone();
+                        move || {
+                            await_stage(&gate, 2);
+                            if delayed {
+                                on_wake_point(WakePoint::AfterClaim, {
+                                    let gate = gate.clone();
+                                    move || {
+                                        reach(&gate, 3);
+                                        await_stage(&gate, 4);
+                                    }
+                                });
+                            }
+                            assert!(pool.push(runnable).is_ok());
+                            if !delayed {
+                                reach(&gate, 3);
+                            }
+                        }
+                    });
+
+                    // Once worker one takes its count, the push claims it, and
+                    // a kick finds a count held and leaves worker three parked.
+                    on_wake_point(WakePoint::BeforeParkSearch, {
+                        let pool = pool.clone();
+                        let gate = gate.clone();
+                        move || {
+                            reach(&gate, 2);
+                            await_stage(&gate, 3);
+                            assert_eq!(pool.idle().search_count(), 2);
+                            pool.kick();
+                            assert!(pool.idle().is_idle(3));
+                        }
+                    });
+
+                    // The claim ends worker one's last look before a steal,
+                    // leaving it one count.
+                    let mut r1 = pool.queue(1).owner();
+                    let mut searcher = Searcher::new(&pool, 1);
+                    let seen = p1.observe();
+                    assert!(searcher.publish_and_look(&mut r1));
+                    assert!(r1.is_empty(), "the claimed lap must not steal");
+                    assert!(!pool.idle().is_idle(1));
+                    assert!(pool.idle().is_idle(3));
+                    assert_eq!(pool.idle().search_count(), 1);
+                    assert_eq!(p1.moved(seen), !delayed);
+
+                    // Return the count before polling, as the drive loop does,
+                    // or through the destructor an unwind runs.
+                    if dropping {
+                        drop(searcher);
+                    } else {
+                        searcher.leave_search();
+                    }
+                    reach(&gate, 4);
+                    pushing.join().unwrap();
+
+                    // The blocking poll returns only once worker three, woken by
+                    // that return, ran a stolen task. Worker three can also take
+                    // the pushed task first and block in its poll instead, until
+                    // worker zero drains the backlog.
+                    if let Some(blocking) = pool.take(&mut r1) {
+                        assert!(r1.is_empty());
+                        complete(&pool, &set, blocking, &completed, TASKS);
+                    }
+                    work(&pool, &set, &mut r0, &p0, 0, &completed, TASKS, false);
+                    peer.join().unwrap();
+                    assert_eq!(completed.load(Ordering::Acquire), TASKS);
+                    assert_eq!(pool.idle().search_count(), 0);
+                    assert!((0..4).all(|index| !pool.idle().is_idle(index)));
+                });
+            }
+        }
     }
 
     /// A parker that returns the last search count and runs because the

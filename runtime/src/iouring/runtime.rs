@@ -1980,10 +1980,12 @@ impl Worker {
     }
 
     /// Try to steal from the other run queues, then publish this worker idle
-    /// and look once more. Returns whether the search found work. `searcher`
-    /// must be this worker's, with its run queue empty and Local unborrowed. A
-    /// true result leaves no publication but may hold a search count. A false
-    /// result leaves a live publication for the caller to end through
+    /// and look once more. Returns whether to run again instead of waiting,
+    /// because the search stole or observed work or a claim answered the last
+    /// look, even if that work is gone by the next turn. `searcher` must be
+    /// this worker's, with its run queue empty and Local unborrowed. A true
+    /// result leaves no publication but may hold a search count. A false result
+    /// leaves a live publication for the caller to end through
     /// [`Searcher::finish_park`] once its wait or spin returns.
     fn search_before_park(&self, searcher: &mut Searcher<'_>) -> bool {
         if searcher.search(self.local.borrow_mut().ready_mut()) {
