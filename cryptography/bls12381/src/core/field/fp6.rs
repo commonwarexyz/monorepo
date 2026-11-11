@@ -1,24 +1,14 @@
 //! The cubic extension `Fp6 = Fp2[v] / (v^3 - (1 + i))`, over any base field representation.
 //!
-//! An [`Fp6`] holds three [`Fp2`] coefficients, so it holds as many extension elements as its base
-//! field values hold elements, one per lane. A [`Product`] holds an [extension product](fp2::Product)
-//! in each coefficient, so sums and differences of products share reductions, and multiplying a
-//! product by `v` only rearranges its signed sums.
+//! An [`Fp6`] holds one element per lane, as three [`Fp2`] coefficients. Products return a
+//! [`Product`], an [extension product](fp2::Product) in each coefficient: callers add, subtract,
+//! and multiply products by `v` without a bias, then reduce the result once with
+//! [`reduce_tight`](Fp6::reduce_tight).
 //!
 //! # Bounds
 //!
-//! Value operations apply the [`Fp2`] rule to each coefficient. Products take no subtraction bias:
-//!
-//! - [`product`](Fp6::product) forms Karatsuba's six extension products: those of the
-//!   coefficients, and those of the three sums of two coefficients, which it carries. Every
-//!   component of both factors must have limb bound `1`, and sums of two components must fit the
-//!   value limits.
-//! - [`square_product`](Fp6::square_product) forms the same six products with
-//!   [`Fp2::square_product`]. Every component must have limb bound `1` and integer bound at most
-//!   [`SQUARE_BOUND`].
-//! - [`product_by_01`](Fp6::product_by_01) and [`product_by_1`](Fp6::product_by_1) multiply by
-//!   sparse elements, with five and three extension products, under the requirements of
-//!   [`product`](Fp6::product).
+//! Value operations apply the [`Fp2`] rule to each coefficient. Products take no subtraction bias,
+//! and each states what it requires of its factors.
 //!
 //! Every coefficient of a product is a signed sum of at most nine extension products' sums, so
 //! for eager representations each positive and each negative sum has limb bound at most `9`.
@@ -26,8 +16,6 @@
 //! would exceed the limb limits. [`reduce_tight::<K>`](Fp6::reduce_tight) reduces each
 //! coefficient as [`Fp2::reduce_tight`] does, under the same requirements on each component's
 //! sums.
-//! [`invert`](Fp6::invert) accepts components with limb bound `1` and integer bound at most
-//! [`TIGHT`] and returns tight components.
 //!
 //! # Kernels
 //!
@@ -159,14 +147,17 @@ impl<F> Fp6<F> {
         }
     }
 
-    /// Forms the product `self * rhs` with Karatsuba's six extension products.
+    /// Forms the product `self * rhs` with six extension products.
     ///
-    /// Every component of both factors must have limb bound `1`.
+    /// Every component of both factors must have limb bound `1`, and sums of two components must
+    /// fit the value limits.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn product<S: Simd>(&self, simd: S, rhs: &Self) -> Product<F, S>
     where
         F: Field<S>,
     {
+        // Karatsuba: the products of the coefficients, and those of the three carried sums of two
+        // coefficients.
         F::kernel(
             simd,
             #[inline(always)]
@@ -199,7 +190,8 @@ impl<F> Fp6<F> {
             simd,
             #[inline(always)]
             move |simd: S| {
-                // Components within SQUARE_BOUND, and sums of two of them.
+                // Karatsuba's products, as for product, with Fp2::square_product. The biases cover
+                // components within SQUARE_BOUND and sums of two of them.
                 const K: u64 = SQUARE_BOUND + 1;
                 const SUM_K: u64 = 2 * SQUARE_BOUND + 1;
                 let a = self;
@@ -221,7 +213,7 @@ impl<F> Fp6<F> {
     /// Forms the product of `self` and the sparse element `y0 + y1 * v` with five extension
     /// products.
     ///
-    /// Every component of the factors must have limb bound `1`.
+    /// Requires what [`Self::product`] does of its factors.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn product_by_01<S: Simd>(self, simd: S, y0: Fp2<F>, y1: Fp2<F>) -> Product<F, S>
     where
@@ -245,7 +237,7 @@ impl<F> Fp6<F> {
 
     /// Forms the product of `self` and the sparse element `y1 * v` with three extension products.
     ///
-    /// Every component of the factors must have limb bound `1`.
+    /// Requires what [`Self::product`] does of its factors.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn product_by_1<S: Simd>(self, simd: S, y1: Fp2<F>) -> Product<F, S>
     where
@@ -297,13 +289,13 @@ impl<F> Fp6<F> {
         }
     }
 
-    /// Returns `product * v`, without a bias: `v^3 = 1 + i` moves the coefficient of `v^2` to `1`
-    /// through [`Fp2::product_mul_by_nonresidue`].
+    /// Returns `product * v`, without a bias.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn product_mul_by_nonresidue<S: Simd>(simd: S, product: Product<F, S>) -> Product<F, S>
     where
         F: Field<S>,
     {
+        // v^3 = 1 + i moves the coefficient of v^2 to 1.
         Fp6 {
             c0: Fp2::<F>::product_mul_by_nonresidue(simd, product.c2),
             c1: product.c0,
@@ -342,7 +334,6 @@ impl<F> Fp6<F> {
 
     /// Returns the inverse, or zero for zero.
     ///
-    /// The adjugate `c` satisfies `self * c = d` for `d` in `Fp2`, which [`Fp2::invert`] inverts.
     /// Every component must have limb bound `1` and integer bound at most [`TIGHT`]; so does every
     /// component of the result.
     #[cfg_attr(not(debug_assertions), inline(always))]
@@ -350,6 +341,8 @@ impl<F> Fp6<F> {
     where
         F: Field<S>,
     {
+        // The adjugate a = a0 + a1 v + a2 v^2 satisfies self * a = d for d in Fp2, so the inverse
+        // is a / d.
         simd.execute(
             #[inline(always)]
             move |simd: S| {
