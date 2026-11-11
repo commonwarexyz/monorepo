@@ -25,7 +25,7 @@ use commonware_clearing::bajillion::{
 use commonware_codec::Encode;
 use commonware_cryptography::{
     Digestible, Hasher as _, Sha256, Signer, certificate,
-    ed25519::{PrivateKey, PublicKey, certificate::mocks},
+    ed25519::{PrivateKey, PublicKey},
     sha256::Digest,
 };
 use commonware_parallel::Sequential;
@@ -56,8 +56,6 @@ const LIMITS: Limits = Limits {
 };
 
 /// Ed25519 certificates over summaries from at least `2f + 1` of `3f + 1` validators.
-// The macro gates its fixture on a `mocks` feature that this crate does not define.
-#[allow(unexpected_cfgs)]
 mod scheme {
     use commonware_clearing::bajillion::{Namespace, Summary};
     use commonware_cryptography::{Sha256, impl_certificate_ed25519};
@@ -327,13 +325,7 @@ struct Deployment<
 /// Returns the signing schemes of `validators` validators and the verifier of their
 /// certificates. Every call returns the same keys.
 fn committee(validators: u32) -> (Vec<scheme::Scheme>, scheme::Scheme) {
-    let fixture = mocks::fixture(
-        &mut test_rng(),
-        NAMESPACE,
-        validators,
-        scheme::Scheme::signer,
-        scheme::Scheme::verifier,
-    );
+    let fixture = scheme::fixture(&mut test_rng(), NAMESPACE, validators);
     (fixture.schemes, fixture.verifier)
 }
 

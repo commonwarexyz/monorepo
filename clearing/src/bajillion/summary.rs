@@ -332,11 +332,7 @@ mod tests {
         tests::{NAMESPACE, account, certify, chain, scheme},
     };
     use commonware_codec::DecodeExt as _;
-    use commonware_cryptography::{
-        Digest as _, Sha256,
-        ed25519::{self, PublicKey},
-        sha256::Digest,
-    };
+    use commonware_cryptography::{Digest as _, Sha256, ed25519::PublicKey, sha256::Digest};
     use commonware_parallel::Sequential;
     use commonware_storage::merkle::Family as _;
     use commonware_utils::test_rng;
@@ -521,13 +517,7 @@ mod tests {
     #[test]
     fn test_verify_checks_every_field_before_the_certificate() {
         let mut rng = test_rng();
-        let fixture = ed25519::certificate::mocks::fixture(
-            &mut rng,
-            NAMESPACE,
-            4,
-            scheme::Scheme::signer,
-            scheme::Scheme::verifier,
-        );
+        let fixture = scheme::fixture(&mut rng, NAMESPACE, 4);
         let genesis = genesis();
         let parent = genesis.digest();
         let summary = Summary {

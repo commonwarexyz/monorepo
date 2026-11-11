@@ -415,14 +415,9 @@ mod schemes {
     use super::*;
     use commonware_clearing::bajillion::BalanceProof;
     use commonware_codec::{DecodeExt as _, U256};
-    use commonware_cryptography::{
-        bls12381,
-        secp256r1::{self, standard},
-    };
+    use commonware_cryptography::{bls12381, secp256r1::standard};
 
     /// secp256r1 certificates over summaries from at least `2f + 1` of `3f + 1` validators.
-    // The macro gates its fixture on a `mocks` feature that this crate does not define.
-    #[allow(unexpected_cfgs)]
     mod scheme {
         use commonware_clearing::bajillion::{Namespace, Summary};
         use commonware_cryptography::{Sha256, impl_certificate_secp256r1};
@@ -432,7 +427,6 @@ mod schemes {
     }
 
     type User = standard::PublicKey;
-    type Scheme = scheme::Scheme<PublicKey>;
 
     /// One more than `u128::MAX`.
     const UNIT: U256 = U256::from_limbs([0, 0, 1, 0]);
@@ -463,13 +457,7 @@ mod schemes {
         deterministic::Runner::default().start(|mut context| async move {
             let users: Vec<_> = (0..3).map(standard::PrivateKey::from_seed).collect();
             let key = bls12381::PrivateKey::from_seed(0);
-            let fixture = secp256r1::certificate::mocks::fixture(
-                &mut test_rng(),
-                NAMESPACE,
-                4,
-                Scheme::signer,
-                Scheme::verifier,
-            );
+            let fixture = scheme::fixture(&mut test_rng(), NAMESPACE, 4);
             let mut deployment = Deployment::<User, _, _, U256>::start(
                 &context,
                 "schemes",

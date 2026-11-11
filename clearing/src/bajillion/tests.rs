@@ -28,8 +28,6 @@ use commonware_utils::{NZU16, NZU64, NZUsize, non_empty};
 pub(crate) const NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_BAJILLION_TEST";
 
 /// Ed25519 certificates over summaries from at least `2f + 1` of `3f + 1` validators.
-// The macro gates its fixture on a `mocks` feature that this crate does not define.
-#[allow(unexpected_cfgs)]
 pub(crate) mod scheme {
     use crate::bajillion::{Namespace, Summary};
     use commonware_cryptography::{Sha256, impl_certificate_ed25519};
