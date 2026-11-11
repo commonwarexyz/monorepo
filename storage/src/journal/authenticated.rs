@@ -772,16 +772,19 @@ where
     /// Destroy the authenticated journal, removing all data from disk.
     #[boxed]
     pub async fn destroy(self) -> Result<(), Error<F>> {
-        // `try_join!` contains an await boundary, so destructure first to avoid
-        // stack growth from retaining the entire `self` in the future.
+        // Destructure before the first await boundary to avoid stack growth from retaining the
+        // entire `self` in the future.
         let Self {
             journal, merkle, ..
         } = self;
-        try_join!(
-            journal.destroy().map_err(Error::Journal),
-            merkle.destroy().map_err(Error::Merkle),
-        )?;
 
+        // Surface a failed Merkle sync before anything is removed.
+        let merkle = merkle.wait_for_sync().await?;
+
+        // The journal is the source of truth, so it goes first. Reopening an empty journal
+        // discards whatever Merkle state remains beside it.
+        journal.destroy().await?;
+        merkle.destroy().await?;
         Ok(())
     }
 
@@ -945,13 +948,15 @@ where
         };
 
         // Recover Merkle at the selected operation end and require it to cover retained
-        // operations.
+        // operations. A journal that is empty at position zero leaves the Merkle structure
+        // nothing to authenticate, so Merkle state beside it is discarded.
         let hasher = StandardHasher::<H>::new(bagging);
         let merkle = Merkle::prepare(
             context.child("merkle"),
             &hasher,
             merkle_cfg,
             Some(Location::new(selected_end)),
+            bounds == (0..0),
         )
         .await?;
         if *merkle.leaves() < bounds.start {
@@ -1248,6 +1253,7 @@ mod tests {
         journal::contiguous::{
             fixed::{Config as JConfig, Journal as ContiguousJournal},
             tests::replay_items,
+            variable::{Config as VConfig, Journal as VariableJournal},
         },
         merkle::{
             Bagging::{BackwardFold, ForwardFold},
@@ -1365,6 +1371,7 @@ mod tests {
                 &hasher,
                 cfg,
                 Some(Location::new(0)),
+                false,
             )
             .await
             .unwrap();
@@ -4283,5 +4290,310 @@ mod tests {
     #[test]
     fn test_fully_pruned_authenticated_reopens_mmb() {
         deterministic::Runner::default().start(fully_pruned_authenticated_reopens::<mmb::Family>);
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+    ///
+    /// A failed Merkle sync that nobody observed surfaces at destroy before anything is removed, so
+    /// the journal reopens at its last commit.
+    #[test_traced("INFO")]
+    fn pr_5651_regression_destroy_observes_failed_merkle_sync_before_removal() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Commit and prune, so the Merkle metadata holds a boundary and pins. Commit again,
+            // which syncs the operation log but merely flushes Merkle nodes.
+            let pending = PendingSyncs::default();
+            let setup = async {
+                let mut journal =
+                    open_delayed_journal(&context, "first", "destroy_merkle_fail", &pending)
+                        .await
+                        .unwrap();
+                for i in 0..30 {
+                    (journal, _) = journal
+                        .append(&create_operation::<mmr::Family>(i))
+                        .await
+                        .unwrap();
+                }
+                (journal, _) = journal
+                    .append(&TestOp::<mmr::Family>::Commit(None, Location::new(0)))
+                    .await
+                    .unwrap();
+                journal = journal.sync().await.unwrap();
+                (journal, _) = journal.prune(Location::new(20)).await.unwrap();
+                for i in 30..36 {
+                    (journal, _) = journal
+                        .append(&create_operation::<mmr::Family>(i))
+                        .await
+                        .unwrap();
+                }
+                (journal, _) = journal
+                    .append(&TestOp::<mmr::Family>::Commit(None, Location::new(20)))
+                    .await
+                    .unwrap();
+                journal.commit().await.unwrap()
+            };
+            let journal = drive_pending_syncs(&pending, setup).await;
+            let bounds = journal.bounds();
+            let root = journal.root(0).unwrap();
+            assert!(bounds.start > 0);
+
+            // Start a sync and drop its handle. The operation log's only parked sync is its
+            // watermark advance. It lands, and every Merkle journal sync fails.
+            let (journal, handle) = journal.start_sync().await.unwrap();
+            drop(handle);
+            assert!(pending.lock().len() > 1);
+            next_pending_sync(&pending).release.send(Ok(())).unwrap();
+            fail_pending_syncs(&pending);
+            pending.unblock();
+
+            // Destroy returns the failure and the last commit survives it.
+            assert!(journal.destroy().await.is_err());
+            let journal = TestJournal::<mmr::Family>::new(
+                context.child("second"),
+                merkle_config("destroy_merkle_fail"),
+                journal_config("destroy_merkle_fail"),
+                |op: &TestOp<mmr::Family>| op.is_commit(),
+                ForwardFold,
+            )
+            .await
+            .expect("a destroy that removed nothing must reopen");
+            assert_eq!(journal.bounds(), bounds);
+            assert_eq!(journal.root(0).unwrap(), root);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+    ///
+    /// A destroy dropped while the operation journal's clear is still being staged has removed
+    /// nothing, so the pruned journal reopens at its last commit.
+    #[test_traced("INFO")]
+    fn pr_5651_regression_destroy_stages_journal_clear_before_removal() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Commit and prune, so the retained operations cannot rebuild the Merkle structure.
+            let pending = PendingSyncs::default();
+            let setup = async {
+                let mut journal =
+                    open_delayed_journal(&context, "first", "destroy_staged", &pending)
+                        .await
+                        .unwrap();
+                for i in 0..30 {
+                    (journal, _) = journal
+                        .append(&create_operation::<mmr::Family>(i))
+                        .await
+                        .unwrap();
+                }
+                (journal, _) = journal
+                    .append(&TestOp::<mmr::Family>::Commit(None, Location::new(0)))
+                    .await
+                    .unwrap();
+                journal = journal.sync().await.unwrap();
+                (journal, _) = journal.prune(Location::new(20)).await.unwrap();
+                journal.sync().await.unwrap()
+            };
+            let journal = drive_pending_syncs(&pending, setup).await;
+            let bounds = journal.bounds();
+            let root = journal.root(0).unwrap();
+            assert!(bounds.start > 0);
+
+            // Park the first durability operation of destroy and drop the destroy there.
+            pending.arm();
+            {
+                let destroy = journal.destroy();
+                futures::pin_mut!(destroy);
+                assert!(futures::poll!(destroy.as_mut()).is_pending());
+            }
+
+            // The unfinished clear is not durable, so the last commit must reopen.
+            let journal = TestJournal::<mmr::Family>::new(
+                context.child("second"),
+                merkle_config("destroy_staged"),
+                journal_config("destroy_staged"),
+                |op: &TestOp<mmr::Family>| op.is_commit(),
+                ForwardFold,
+            )
+            .await
+            .expect("a destroy that staged nothing must reopen");
+            assert_eq!(journal.bounds(), bounds);
+            assert_eq!(journal.root(0).unwrap(), root);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Create variable journal configuration for tests.
+    fn variable_journal_config(suffix: &str) -> VConfig<()> {
+        VConfig {
+            partition: format!("journal-{suffix}"),
+            items_per_section: NZU64!(7),
+            compression: None,
+            codec_config: (),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            write_buffer: NZUsize!(1024),
+            replay_buffer: NZUsize!(1024),
+        }
+    }
+
+    /// Interrupt the destroy of a twice-committed, pruned journal with injected sync and removal
+    /// failures, then reopen it. Returns whether the reopened journal holds its last commit, or
+    /// `None` when the destroy completed.
+    fn interrupted_destroy_reopens<F, C>(seed: u64, journal_cfg: C::Config) -> Option<bool>
+    where
+        F: Family + PartialEq,
+        C: Backing<Context, Item = TestOp<F>>,
+    {
+        deterministic::Runner::seeded(seed).start(|context| async move {
+            // Record the digest of empty storage. A completed destroy must restore it.
+            let empty = context.storage_audit();
+            let open = |context| {
+                Journal::<F, Context, C, Sha256, Sequential>::new(
+                    context,
+                    merkle_config("interrupted-destroy"),
+                    journal_cfg.clone(),
+                    |op: &TestOp<F>| op.is_commit(),
+                    ForwardFold,
+                )
+            };
+
+            // Commit twice around a prune, so the Merkle metadata holds a boundary and pins
+            // that the retained operations cannot rebuild.
+            let ops: Vec<TestOp<F>> = (0..102u8)
+                .map(|i| match i {
+                    50 => TestOp::<F>::Commit(None, Location::new(0)),
+                    101 => TestOp::<F>::Commit(None, Location::new(40)),
+                    _ => create_operation::<F>(i),
+                })
+                .collect();
+            let mut journal = open(context.child("first")).await.unwrap();
+            let fresh_root = journal.root(0).unwrap();
+            for op in &ops[..51] {
+                (journal, _) = journal.append(op).await.unwrap();
+            }
+            journal = journal.sync().await.unwrap();
+            (journal, _) = journal.prune(Location::new(40)).await.unwrap();
+            for op in &ops[51..] {
+                (journal, _) = journal.append(op).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+            let bounds = journal.bounds();
+            let root = journal.root(0).unwrap();
+            assert!(bounds.start > 0 && bounds.end == 102);
+
+            // Fail a sample of syncs and removals so destroy stops at varying depths, from the
+            // operation journal's staged clear through the Merkle node journal's checkpoint.
+            context.storage_fault_config().write().sync_rate = Some(probability!(0.3));
+            context.storage_fault_config().write().remove_rate = Some(probability!(0.1));
+            let result = journal.destroy().await;
+            context.storage_fault_config().write().sync_rate = None;
+            context.storage_fault_config().write().remove_rate = None;
+            if result.is_ok() {
+                assert_eq!(context.storage_audit(), empty, "seed {seed}");
+                return None;
+            }
+
+            // The reopened journal is exactly the last commit or empty.
+            let mut journal = open(context.child("second"))
+                .await
+                .unwrap_or_else(|err| panic!("seed {seed} must reopen: {err}"));
+            let unchanged = journal.bounds() == bounds;
+            if unchanged {
+                assert_eq!(journal.root(0).unwrap(), root, "seed {seed}");
+                for pos in bounds {
+                    assert_eq!(journal.read(pos).await.unwrap(), ops[pos as usize]);
+                }
+            } else {
+                assert_eq!(journal.bounds(), 0..0, "seed {seed}");
+                assert_eq!(journal.root(0).unwrap(), fresh_root, "seed {seed}");
+
+                // An emptied journal keeps nothing of its past, so other operations committed
+                // to it reopen under their own root.
+                for i in 150..190u8 {
+                    (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
+                }
+                (journal, _) = journal
+                    .append(&TestOp::<F>::Commit(None, Location::new(0)))
+                    .await
+                    .unwrap();
+                journal = journal.sync().await.unwrap();
+                let reused = journal.root(0).unwrap();
+                drop(journal);
+                journal = open(context.child("third")).await.unwrap();
+                assert_eq!(journal.bounds(), 0..41, "seed {seed}");
+                assert_eq!(journal.root(0).unwrap(), reused, "seed {seed}");
+            }
+
+            // A retried destroy completes and leaves no blob behind.
+            journal.destroy().await.unwrap();
+            assert_eq!(context.storage_audit(), empty, "seed {seed}");
+            Some(unchanged)
+        })
+    }
+
+    /// Sweep seeds until destroy has stopped both before and after its point of no return.
+    fn interrupted_destroy_reopens_all_seeds<F, C>(journal_cfg: C::Config)
+    where
+        F: Family + PartialEq,
+        C: Backing<Context, Item = TestOp<F>>,
+    {
+        let (mut unchanged, mut emptied) = (0, 0);
+        for seed in 0..32u64 {
+            match interrupted_destroy_reopens::<F, C>(seed, journal_cfg.clone()) {
+                Some(true) => unchanged += 1,
+                Some(false) => emptied += 1,
+                None => {}
+            }
+        }
+        assert!(
+            unchanged > 0 && emptied > 0,
+            "both outcomes must occur: unchanged {unchanged} emptied {emptied}"
+        );
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+    ///
+    /// A destroy interrupted at any point leaves a journal over a fixed operation journal that
+    /// reopens at its last commit or empty, and that a retried destroy removes.
+    #[test]
+    fn pr_5651_regression_interrupted_destroy_reopens_fixed_mmr() {
+        interrupted_destroy_reopens_all_seeds::<
+            mmr::Family,
+            ContiguousJournal<Context, TestOp<mmr::Family>>,
+        >(journal_config("interrupted-destroy"));
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+    ///
+    /// A destroy interrupted at any point leaves a journal over a fixed operation journal that
+    /// reopens at its last commit or empty, and that a retried destroy removes.
+    #[test]
+    fn pr_5651_regression_interrupted_destroy_reopens_fixed_mmb() {
+        interrupted_destroy_reopens_all_seeds::<
+            mmb::Family,
+            ContiguousJournal<Context, TestOp<mmb::Family>>,
+        >(journal_config("interrupted-destroy"));
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+    ///
+    /// A destroy interrupted at any point leaves a journal over a variable operation journal that
+    /// reopens at its last commit or empty, and that a retried destroy removes.
+    #[test]
+    fn pr_5651_regression_interrupted_destroy_reopens_variable_mmr() {
+        interrupted_destroy_reopens_all_seeds::<
+            mmr::Family,
+            VariableJournal<Context, TestOp<mmr::Family>>,
+        >(variable_journal_config("interrupted-destroy"));
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+    ///
+    /// A destroy interrupted at any point leaves a journal over a variable operation journal that
+    /// reopens at its last commit or empty, and that a retried destroy removes.
+    #[test]
+    fn pr_5651_regression_interrupted_destroy_reopens_variable_mmb() {
+        interrupted_destroy_reopens_all_seeds::<
+            mmb::Family,
+            VariableJournal<Context, TestOp<mmb::Family>>,
+        >(variable_journal_config("interrupted-destroy"));
     }
 }

@@ -731,8 +731,12 @@ where
         // Destructure before the await boundary to avoid stack growth from
         // retaining the entire `self` in the future.
         let Self { any, metadata, .. } = self;
+
+        // The log decides the outcome, so the any database goes first. Its grafted metadata is
+        // needed to reopen a pruned database until then, and reopening discards it afterwards.
+        any.destroy().await?;
         metadata.destroy().await?;
-        any.destroy().await
+        Ok(())
     }
 
     /// Check that `batch` can be applied to the database in its current state, without
@@ -1259,7 +1263,11 @@ mod tests {
                 test::{Choice, Inspect as _, Script, test_any_db_start_sync_recovery},
                 traits::{DbAny, UnmerkleizedBatch as _},
             },
-            current::{tests::fixed_config, unordered::fixed},
+            current::{
+                BitmapPrunedBits,
+                tests::{fixed_config, variable_config},
+                unordered::{fixed, variable},
+            },
         },
         translator::OneCap,
     };
@@ -1267,7 +1275,8 @@ mod tests {
     use commonware_cryptography::{Sha256, sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
-    use commonware_utils::bitmap::Prunable as PrunableBitMap;
+    use commonware_utils::{bitmap::Prunable as PrunableBitMap, probability};
+    use std::future::Future;
 
     const N: usize = sha256::Digest::SIZE;
 
@@ -2117,6 +2126,153 @@ mod tests {
             let canonical_root = db.root();
 
             assert!(witness.verify::<Sha256>(&ops_root, &canonical_root));
+        });
+    }
+
+    type VariableDb<F> = variable::Db<
+        F,
+        deterministic::Context,
+        sha256::Digest,
+        sha256::Digest,
+        Sha256,
+        OneCap,
+        32,
+        commonware_parallel::Sequential,
+    >;
+
+    /// Interrupt the destroy of a pruned database holding several commits with injected sync
+    /// and removal failures, then reopen it. Returns whether the reopened database holds its
+    /// last commit, or `None` when the destroy completed.
+    fn interrupted_destroy_reopens<F, DB, Fut>(
+        seed: u64,
+        open: impl Fn(deterministic::Context) -> Fut,
+    ) -> Option<bool>
+    where
+        F: merkle::Graftable,
+        DB: DbAny<Family = F, Key = sha256::Digest, Value = sha256::Digest, Digest = sha256::Digest>
+            + BitmapPrunedBits,
+        Fut: Future<Output = Result<DB, Error<F>>>,
+    {
+        deterministic::Runner::seeded(seed).start(|ctx| async move {
+            // Record the digest of empty storage and the state of a new database. A completed
+            // destroy must restore the former.
+            let empty = ctx.storage_audit();
+            let db = open(ctx.child("first")).await.unwrap();
+            let fresh = (db.bounds(), db.root());
+
+            // Commit twice and prune to the sync boundary, so the grafted metadata records
+            // pruned chunks above a pruned log and Merkle structure.
+            let db = populate_fixed_db::<F, _>(db, 0, 384).await;
+            let db = populate_fixed_db::<F, _>(db, 0, 384).await;
+            let boundary = db.sync_boundary();
+            let db = db.prune(boundary).await.unwrap();
+            let db = db.sync().await.unwrap();
+            let committed = (db.bounds(), db.root());
+            assert!(db.pruned_bits() > 0 && committed.0.start > 0);
+
+            // Fail a sample of syncs and removals so destroy stops at varying depths, from the
+            // log's staged clear through the grafted metadata.
+            ctx.storage_fault_config().write().sync_rate = Some(probability!(0.3));
+            ctx.storage_fault_config().write().remove_rate = Some(probability!(0.1));
+            let result = db.destroy().await;
+            ctx.storage_fault_config().write().sync_rate = None;
+            ctx.storage_fault_config().write().remove_rate = None;
+            if result.is_ok() {
+                assert_eq!(ctx.storage_audit(), empty, "seed {seed}");
+                return None;
+            }
+
+            // The reopened database is exactly the last commit or a new database.
+            let db = open(ctx.child("second"))
+                .await
+                .unwrap_or_else(|err| panic!("seed {seed} must reopen: {err}"));
+            let reopened = (db.bounds(), db.root());
+            let unchanged = reopened == committed;
+            assert!(
+                unchanged || reopened == fresh,
+                "seed {seed} must reopen at its last commit or new, not with bounds {:?}",
+                reopened.0
+            );
+
+            // A retried destroy completes and leaves no blob behind.
+            db.destroy().await.unwrap();
+            assert_eq!(ctx.storage_audit(), empty, "seed {seed}");
+            Some(unchanged)
+        })
+    }
+
+    /// Sweep seeds until destroy has stopped both before and after its point of no return.
+    fn interrupted_destroy_reopens_all_seeds<F, DB, Fut>(
+        open: impl Fn(deterministic::Context) -> Fut,
+    ) where
+        F: merkle::Graftable,
+        DB: DbAny<Family = F, Key = sha256::Digest, Value = sha256::Digest, Digest = sha256::Digest>
+            + BitmapPrunedBits,
+        Fut: Future<Output = Result<DB, Error<F>>>,
+    {
+        let (mut unchanged, mut emptied) = (0, 0);
+        for seed in 0..32u64 {
+            match interrupted_destroy_reopens(seed, &open) {
+                Some(true) => unchanged += 1,
+                Some(false) => emptied += 1,
+                None => {}
+            }
+        }
+        assert!(
+            unchanged > 0 && emptied > 0,
+            "both outcomes must occur: unchanged {unchanged} emptied {emptied}"
+        );
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+    ///
+    /// A destroy interrupted at any point leaves a database over a fixed log that reopens at its
+    /// last commit or as a new database, and that a retried destroy removes.
+    #[test]
+    fn pr_5651_regression_interrupted_destroy_reopens_fixed_mmr() {
+        interrupted_destroy_reopens_all_seeds(|ctx| {
+            MmrDb::init(ctx, fixed_config::<OneCap>("interrupted-destroy"), None)
+        });
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+    ///
+    /// A destroy interrupted at any point leaves a database over a fixed log that reopens at its
+    /// last commit or as a new database, and that a retried destroy removes.
+    #[test]
+    fn pr_5651_regression_interrupted_destroy_reopens_fixed_mmb() {
+        interrupted_destroy_reopens_all_seeds(|ctx| {
+            MmbDb::init(ctx, fixed_config::<OneCap>("interrupted-destroy"), None)
+        });
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+    ///
+    /// A destroy interrupted at any point leaves a database over a variable log that reopens at its
+    /// last commit or as a new database, and that a retried destroy removes.
+    #[test]
+    fn pr_5651_regression_interrupted_destroy_reopens_variable_mmr() {
+        interrupted_destroy_reopens_all_seeds(|ctx| {
+            VariableDb::<mmr::Family>::init(
+                ctx,
+                variable_config::<OneCap>("interrupted-destroy"),
+                None,
+            )
+        });
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+    ///
+    /// A destroy interrupted at any point leaves a database over a variable log that reopens at its
+    /// last commit or as a new database, and that a retried destroy removes.
+    #[test]
+    fn pr_5651_regression_interrupted_destroy_reopens_variable_mmb() {
+        interrupted_destroy_reopens_all_seeds(|ctx| {
+            VariableDb::<mmb::Family>::init(
+                ctx,
+                variable_config::<OneCap>("interrupted-destroy"),
+                None,
+            )
         });
     }
 }

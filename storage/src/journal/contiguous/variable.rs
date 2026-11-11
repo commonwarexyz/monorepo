@@ -1979,11 +1979,12 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 
     /// See [Journal::destroy].
     pub(crate) async fn destroy(self) -> Result<(), Error> {
-        // A failed offsets sync must surface before any data is removed, since the surviving
-        // offsets journal would otherwise acknowledge items the removed blobs no longer back.
-        let offsets = self.offsets.wait_for_sync().await?;
-        self.blobs.destroy().await?;
-        offsets.destroy().await
+        // Surface a failed data sync before the offsets journal stages its clear.
+        let blobs = self.blobs.wait_for_sync().await?;
+
+        // Remove the data blobs under the clear the offsets journal stages. Recovery finishes a
+        // staged clear, data partition included, so an interrupted destroy reopens fresh.
+        self.offsets.destroy_cleared(|| blobs.destroy()).await
     }
 
     /// Clear all data and advance the journal to a new starting position.
@@ -2540,9 +2541,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// # Crash Safety
     ///
-    /// This operation is intended for final teardown and is not crash-safe. If interrupted,
-    /// reopening the same partitions may observe partially removed state. Use [Self::init_at_size]
-    /// for a recoverable reset.
+    /// An interrupted destroy leaves a journal that reopens either as a crash would recover it or
+    /// as a fresh journal at position zero, and that a retried destroy removes.
     pub async fn destroy(self) -> Result<(), Error> {
         self.0.destroy().await
     }
@@ -11231,6 +11231,126 @@ mod tests {
             assert_eq!(journal.bounds(), 0..4);
             journal.destroy().await.unwrap();
         });
+    }
+
+    /// A failed data tail sync that nobody observed surfaces at destroy before anything is
+    /// removed or staged, so the journal reopens with every durable item.
+    #[test_traced]
+    fn test_variable_destroy_observes_failed_data_sync_before_removal() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Make three items durable.
+            let pending = PendingSyncs::default();
+            let cfg = initialization_cfg("destroy-failed-data", 100);
+            let mut journal = Journal::<_, u64>::init(
+                DelayedSyncContext {
+                    inner: context.child("journal"),
+                    pending: pending.clone(),
+                },
+                cfg.clone(),
+            )
+            .await
+            .unwrap();
+            for item in 1..=3u64 {
+                (journal, _) = journal.append(&item).await.unwrap();
+            }
+            journal = drive_pending_syncs(&pending, journal.sync()).await.unwrap();
+
+            // Start a sync of item 4 and drop its handle. The data tail sync starts first. Fail
+            // it and let every offsets sync land.
+            (journal, _) = journal.append(&4).await.unwrap();
+            let (journal, handle) = journal.start_sync().await.unwrap();
+            drop(handle);
+            next_pending_sync(&pending)
+                .release
+                .send(Err(commonware_runtime::Error::Io(
+                    std::io::Error::other("injected sync failure").into(),
+                )))
+                .unwrap();
+            pending.unblock();
+
+            // Destroy returns the failure and the synced items survive it.
+            assert!(journal.destroy().await.is_err());
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..3);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+    ///
+    /// A destroy interrupted at any point leaves a journal that reopens as a crash would recover it
+    /// or as a fresh journal, and that a retried destroy removes.
+    #[test_traced]
+    fn pr_5651_regression_variable_interrupted_destroy_reopens() {
+        let (mut unchanged, mut emptied) = (0, 0);
+        for seed in 0..32u64 {
+            let executor = deterministic::Runner::seeded(seed);
+            let outcome = executor.start(|context| async move {
+                // Record the digest of empty storage. A completed destroy must restore it.
+                let empty = context.storage_audit();
+
+                // Sync twice around a prune, leaving seven items in four sections above a
+                // pruned boundary.
+                let cfg = initialization_cfg("interrupted-destroy", 2);
+                let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+                for item in 0..7u64 {
+                    (journal, _) = journal.append(&item).await.unwrap();
+                }
+                journal = journal.sync().await.unwrap();
+                (journal, _) = journal.prune(4).await.unwrap();
+                for item in 7..11u64 {
+                    (journal, _) = journal.append(&item).await.unwrap();
+                }
+                let journal = journal.sync().await.unwrap();
+                assert_eq!(journal.bounds(), 4..11);
+
+                // Fail a sample of syncs and removals so destroy stops at varying depths, from
+                // the staged clear through the offsets checkpoint.
+                context.storage_fault_config().write().sync_rate = Some(probability!(0.3));
+                context.storage_fault_config().write().remove_rate = Some(probability!(0.1));
+                let result = journal.destroy().await;
+                context.storage_fault_config().write().sync_rate = None;
+                context.storage_fault_config().write().remove_rate = None;
+                if result.is_ok() {
+                    assert_eq!(context.storage_audit(), empty, "seed {seed}");
+                    return 0;
+                }
+
+                // The reopened journal is the synced one or a fresh one.
+                let journal = Journal::<_, u64>::init(context.child("second"), cfg)
+                    .await
+                    .unwrap_or_else(|err| panic!("seed {seed} must reopen: {err}"));
+                let bounds = journal.bounds();
+                let outcome = if bounds == (4..11) {
+                    for pos in bounds {
+                        assert_eq!(journal.read(pos).await.unwrap(), pos);
+                    }
+                    1
+                } else {
+                    assert_eq!(bounds, 0..0, "seed {seed} must reopen unchanged or empty");
+                    2
+                };
+
+                // A retried destroy completes and leaves no blob behind.
+                journal.destroy().await.unwrap();
+                assert_eq!(context.storage_audit(), empty, "seed {seed}");
+                outcome
+            });
+            match outcome {
+                1 => unchanged += 1,
+                2 => emptied += 1,
+                _ => {}
+            }
+        }
+        assert!(
+            unchanged > 0 && emptied > 0,
+            "both outcomes must occur: unchanged {unchanged} emptied {emptied}"
+        );
     }
 
     /// A bounded open whose cap lies in a page below the watermark's page truncates the torn

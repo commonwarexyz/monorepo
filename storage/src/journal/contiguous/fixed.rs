@@ -1512,6 +1512,16 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
 
     /// See [Journal::destroy].
     pub(crate) async fn destroy(self) -> Result<(), Error> {
+        self.destroy_cleared(|| async { Ok(()) }).await
+    }
+
+    /// Destroy the journal, awaiting `clear_dependents` under the staged clear before any blob
+    /// is removed. A crash after staging leaves an intent that the next open completes.
+    pub(super) async fn destroy_cleared<F, Fut>(self, clear_dependents: F) -> Result<(), Error>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<(), Error>>,
+    {
         // A failed checkpoint sync must surface before any data is removed, since the surviving
         // checkpoint would otherwise acknowledge items the removed blobs no longer back.
         let mut journal = self.wait_for_sync().await?;
@@ -1520,6 +1530,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         // durable reopens as a fresh journal, and one interrupted before it reopens as a crash
         // would recover it.
         journal.checkpoint = journal.checkpoint.stage_clear(0).await?;
+        clear_dependents().await?;
         journal.blobs.destroy().await?;
         journal.checkpoint.destroy().await
     }
@@ -1663,6 +1674,12 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     pub(crate) async fn clear_to_size(mut self, new_size: u64) -> Result<Self, Error> {
         self.0 = self.0.clear_to_size(new_size).await?;
         Ok(self)
+    }
+
+    /// Wait for every started sync to complete, surfacing a failure without changing storage.
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) async fn wait_for_sync(self) -> Result<Self, Error> {
+        Ok(Self(Box::new(self.0.wait_for_sync().await?)))
     }
 
     /// Durably persists the current state of the structure.

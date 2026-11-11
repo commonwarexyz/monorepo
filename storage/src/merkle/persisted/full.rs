@@ -271,7 +271,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         hasher: &impl Hasher<F, Digest = D>,
         cfg: Config<S>,
     ) -> Result<Self, Error<F>> {
-        Self::prepare(context, hasher, cfg, None)
+        Self::prepare(context, hasher, cfg, None, false)
             .await?
             .finish()
             .await
@@ -287,7 +287,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         cfg: Config<S>,
         max_leaves: Location<F>,
     ) -> Result<Self, Error<F>> {
-        Self::prepare(context, hasher, cfg, Some(max_leaves))
+        Self::prepare(context, hasher, cfg, Some(max_leaves), false)
             .await?
             .finish()
             .await
@@ -299,15 +299,17 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// An interrupted [Self::init_sync] can leave this state until its retry completes the reset.
     /// A pruned journal with no persisted boundary is the remnant of an interrupted
     /// [Self::destroy] and is cleared before any leaf cap applies, so the store reopens empty.
+    ///
+    /// `discard` clears the persisted boundary and pins first, for a caller whose leaf source is
+    /// empty at position zero.
     pub(crate) async fn prepare(
         context: E,
         hasher: &impl Hasher<F, Digest = D>,
         cfg: Config<S>,
         max_leaves: Option<Location<F>>,
+        discard: bool,
     ) -> Result<Recovery<F, E, D, S>, Error<F>> {
-        // Metadata records a leaf pruning boundary. Reject caps that cannot retain it before
-        // opening the node journal.
-        let metadata = Metadata::<_, U64, Vec<u8>>::init(
+        let mut metadata = Metadata::<_, U64, Vec<u8>>::init(
             context.child("metadata"),
             MConfig {
                 partition: cfg.metadata_partition,
@@ -315,6 +317,16 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             },
         )
         .await?;
+
+        // One metadata commit drops the boundary together with its pins.
+        if discard && metadata.keys().next().is_some() {
+            warn!("crash repair: discarding Merkle metadata without a leaf source");
+            metadata.clear();
+            metadata = metadata.sync().await?;
+        }
+
+        // Metadata records a leaf pruning boundary. Reject caps that cannot retain it before
+        // opening the node journal.
         let key = U64::new(PRUNED_TO_PREFIX, 0);
         let persisted_pruned_to = match metadata.get(&key) {
             Some(bytes) => Some(Location::<F>::new(u64::from_be_bytes(
@@ -832,16 +844,25 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         Ok(self)
     }
 
+    /// Wait for every started sync to complete, surfacing a failure without changing storage.
+    pub(crate) async fn wait_for_sync(mut self) -> Result<Self, Error<F>> {
+        self.journal = self.journal.wait_for_sync().await?;
+        Ok(self)
+    }
+
     /// Close and permanently remove any disk resources.
     ///
     /// An interrupted destroy leaves a store that reopens as the tree a crash would recover or
     /// empty, and that a retried destroy empties.
     pub async fn destroy(self) -> Result<(), Error<F>> {
+        // A failed node journal sync must surface before the metadata is removed.
+        let merkle = self.wait_for_sync().await?;
+
         // Remove the metadata first. A journal that outlives the interruption reopens whole while
         // its start is still zero and is discarded by prepare once pruned, since its pins went with
         // the metadata; either way a retried destroy empties the store.
-        self.metadata.destroy().await?;
-        self.journal.destroy().await?;
+        merkle.metadata.destroy().await?;
+        merkle.journal.destroy().await?;
         Ok(())
     }
 
@@ -1308,6 +1329,74 @@ mod tests {
     #[test]
     fn test_interrupted_destroy_reopens_mmb() {
         interrupted_destroy_reopens_all_seeds::<mmb::Family>();
+    }
+
+    /// A failed sync that nobody observed surfaces at destroy before the metadata is removed, so
+    /// the pruned tree reopens whole.
+    async fn destroy_observes_failed_sync_before_removal<F: Family>(
+        context: deterministic::Context,
+    ) {
+        // Prune a tree of 100 leaves to 60, so the metadata holds the boundary and the pins for
+        // nodes the journal has pruned.
+        let pending = PendingSyncs::default();
+        let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+        let cfg = test_config();
+        let delayed = DelayedSyncContext {
+            inner: context.child("first"),
+            pending: pending.clone(),
+        };
+        let init = Merkle::<F, _, Digest, Sequential>::init(delayed, &hasher, cfg.clone());
+        let mut merkle = drive_pending_syncs(&pending, init).await.unwrap();
+        let mut batch = merkle.new_batch();
+        for i in 0..100 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = batch.merkleize(merkle.mem(), &hasher);
+        merkle = merkle.apply_batch(&batch).unwrap();
+        let merkle = drive_pending_syncs(&pending, merkle.prune(Location::new(60)))
+            .await
+            .unwrap();
+        let root = merkle.root(&hasher, 0).unwrap();
+
+        // Start a sync of one more leaf, drop its handle, and fail it.
+        let batch = merkle.new_batch().add(&hasher, &test_digest(100));
+        let batch = batch.merkleize(merkle.mem(), &hasher);
+        let merkle = merkle.apply_batch(&batch).unwrap();
+        let (merkle, handle) = merkle.start_sync().await.unwrap();
+        drop(handle);
+        assert!(!pending.lock().is_empty());
+        fail_pending_syncs(&pending);
+        pending.unblock();
+
+        // Destroy returns the failure and the synced tree survives it.
+        assert!(merkle.destroy().await.is_err());
+        let merkle =
+            Merkle::<F, _, Digest, Sequential>::init(context.child("second"), &hasher, cfg)
+                .await
+                .unwrap();
+        assert_eq!(*merkle.leaves(), 100);
+        assert_eq!(merkle.root(&hasher, 0).unwrap(), root);
+        merkle.destroy().await.unwrap();
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+    ///
+    /// A failed sync that nobody observed surfaces at destroy before the metadata of an MMR is
+    /// removed.
+    #[test]
+    fn pr_5651_regression_destroy_observes_failed_sync_before_removal_mmr() {
+        deterministic::Runner::default()
+            .start(destroy_observes_failed_sync_before_removal::<mmr::Family>);
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+    ///
+    /// A failed sync that nobody observed surfaces at destroy before the metadata of an MMB is
+    /// removed.
+    #[test]
+    fn pr_5651_regression_destroy_observes_failed_sync_before_removal_mmb() {
+        deterministic::Runner::default()
+            .start(destroy_observes_failed_sync_before_removal::<mmb::Family>);
     }
 
     async fn full_empty_inner<F: Family>(context: deterministic::Context) {
@@ -3714,6 +3803,7 @@ mod tests {
                             &hasher,
                             cfg.clone(),
                             Some(Location::new(8)),
+                            false,
                         )
                         .await
                         .unwrap();
@@ -3732,6 +3822,7 @@ mod tests {
                                 &hasher,
                                 cfg,
                                 None,
+                                false,
                             )
                             .await
                             .unwrap();

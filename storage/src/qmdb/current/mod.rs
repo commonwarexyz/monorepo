@@ -352,6 +352,7 @@ use commonware_runtime::Spawner;
 use commonware_utils::bitmap::Prunable as BitMap;
 use core::num::NonZeroUsize;
 use std::sync::Arc;
+use tracing::warn;
 
 pub mod batch;
 mod db;
@@ -504,8 +505,18 @@ where
     let metadata_partition = cfg.grafted_metadata_partition.clone();
 
     // Load bitmap metadata (pruned_chunks + pinned nodes for the grafted tree).
-    let (metadata, pruned_chunks, pinned_nodes) =
+    let (mut metadata, mut pruned_chunks, mut pinned_nodes) =
         db::init_metadata(context.child("metadata"), &metadata_partition).await?;
+
+    // Pruned chunks are recorded only once the log holds the operations above them, so beside a
+    // log holding no positions they are stale. Clear them before the any database opens the log.
+    if pruned_chunks > 0 && J::span(context.child("span"), &cfg.log).await? == (0..0) {
+        warn!("crash repair: discarding grafted metadata beside an empty log");
+        metadata.clear();
+        metadata = metadata.sync().await?;
+        pruned_chunks = 0;
+        pinned_nodes.clear();
+    }
 
     // Pre-build the activity-status bitmap with the known pruned-chunk count from grafted metadata.
     let bitmap = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
