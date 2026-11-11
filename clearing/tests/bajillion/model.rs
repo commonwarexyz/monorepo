@@ -12,10 +12,11 @@
 //! step, the model reads a role only for the epoch it is in and the queues the ledger holds, and
 //! its record determines both.
 //!
-//! The model explores every order of sends, deliveries, replies, lost replies, duplicated
-//! requests, closes with every count the queues allow, posts, resolutions, challenges, payout
-//! withdrawals, halts, and claims, within the schedule below, and checks the invariants in every
-//! reachable state. Witnesses record that the explored paths reach the flows the crate documents.
+//! The model explores every order of sends, deliveries, replies, lost replies, duplicated requests,
+//! copies put in flight again after their sender stopped awaiting them, closes with every count the
+//! queues allow, posts, resolutions, challenges, payout withdrawals, halts, and claims, within the
+//! schedule below, and checks the invariants in every reachable state. Witnesses record that the
+//! explored paths reach the flows the crate documents.
 //!
 //! The schedule has four restrictions. A receiver receives the receipts of an acknowledgement
 //! when the sender issues them, so receipts arrive in acknowledgement order, and after the post
@@ -28,8 +29,8 @@
 //! `payments.rs`, `operator.rs`, and `validator.rs` cover crashes at chosen points.
 //!
 //! ```text
-//!   Workload   sends, resends, lost replies, deposits, soft and forced withdrawals, forgotten
-//!              admissions, and halts, each spent in every order the budget allows
+//!   Workload   sends, resends, lost replies, replays, deposits, soft and forced withdrawals,
+//!              forgotten admissions, and halts, each spent in every order the budget allows
 //!                                              |
 //!   +------------------------------------ World -------------------------------------+
 //!   |                                                                                |
@@ -65,8 +66,9 @@
 //! own and its copy refused after its own epoch settled it, a retry acknowledged, a post settling
 //! an unacknowledged request, a post dropping a request whose next state builds on another row, a
 //! post omitting a map its sender recorded, an acknowledgement refused after the sender resolved
-//! its epoch, a payout capped by the balance, a repeated payout or claim refused, an omitted row
-//! challenged, and claims draining the custody.
+//! its epoch, a request admitted after its sender stopped awaiting it, a post settling a map its
+//! sender did not record, a payout capped by the balance, a repeated payout or claim refused, an
+//! omitted row challenged, and claims draining the custody.
 //!
 //! The workloads reach these parts of the users' and the operator's obligations. The model checks
 //! every request's roots and map (S1). The sender verifies acknowledgements and refuses one for an
@@ -129,6 +131,11 @@ struct Budget {
     duplicates: usize,
     /// Replies the network may still lose.
     losses: usize,
+    /// Copies the network may still put back in flight, each of a request its sender does not
+    /// await. A second request of the same sender can sign the same state as such a copy. The model
+    /// would then mispredict the copy's reply, so a budget with replays must allow at most one
+    /// send.
+    replays: usize,
     /// Deposits the users may still make.
     deposits: usize,
     /// Soft withdrawals the users may still ask the operator for.
@@ -363,6 +370,8 @@ enum Action {
     },
     /// A sender sends another copy of its pending request.
     Resend { user: usize },
+    /// The network puts in flight again a copy of a request its sender does not await.
+    Replay { request: usize },
     /// The operator receives a copy of a request.
     Deliver { request: usize },
     /// A sender receives the reply at `index`.
@@ -1019,6 +1028,13 @@ impl Model for Workload {
                     }
                 }
             }
+            if budget.replays > 0 {
+                for (request, sent) in world.sent.iter().enumerate() {
+                    if world.pending[sent.user] != Some(request) {
+                        actions.push(Action::Replay { request });
+                    }
+                }
+            }
             if world.candidate.is_none()
                 && world.operator.epoch() == world.ledger.epoch()
                 && world.last_posted() < self.epochs
@@ -1168,6 +1184,13 @@ impl Model for Workload {
                 world.requests.push(index);
                 world.requests.sort_unstable();
             }
+            Action::Replay { request } => {
+                // A replay is the network's copy, so the count of copies the sender sent stays the
+                // same.
+                world.budget.replays -= 1;
+                world.requests.push(request);
+                world.requests.sort_unstable();
+            }
             Action::Deliver { request } => {
                 let position = world
                     .requests
@@ -1219,6 +1242,9 @@ impl Model for Workload {
                         }
                         if world.omitted.contains(&(epoch - 1, sent.user)) {
                             self.witness("a payment builds on a row the close omitted");
+                        }
+                        if world.pending[sent.user] != Some(request) {
+                            self.witness("a request its sender no longer awaits is admitted");
                         }
                         world.admitted.insert((request, epoch));
                     }
@@ -1751,6 +1777,7 @@ const NOTHING: Budget = Budget {
     sends: 0,
     duplicates: 0,
     losses: 0,
+    replays: 0,
     deposits: 0,
     soft: 0,
     forced: 0,
@@ -1862,6 +1889,30 @@ fn test_model_rebuilds_on_the_posted_row() {
             "a post drops a request whose next state builds on another row",
             "a post omits a map its sender recorded",
             "an acknowledgement of a resolved epoch is refused",
+        ],
+    );
+}
+
+/// A copy of a refused request, delivered again after its sender stopped awaiting it, is admitted
+/// and settles within two epochs. The post of the epoch it settles in tells its sender that the
+/// close settled a map it did not record.
+#[test_group("slow")]
+#[test]
+fn test_model_replays_a_dropped_request() {
+    check(
+        workload(
+            2,
+            Budget {
+                sends: 1,
+                replays: 1,
+                ..NOTHING
+            },
+        ),
+        &[
+            "every epoch posts",
+            "a request refused once is dropped",
+            "a request its sender no longer awaits is admitted",
+            "a post settles a map its sender did not record",
         ],
     );
 }
