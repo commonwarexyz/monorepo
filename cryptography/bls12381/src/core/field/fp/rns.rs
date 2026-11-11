@@ -1566,7 +1566,7 @@ pub mod fuzz {
     fn assert_reduced<S: X86V4C>(simd: S, value: Rns<S>, expected: Element) {
         value.bound.assert_le(REDUCED);
         assert_residues(simd, value);
-        assert_eq!(stored(simd, value), reference::to_bytes(expected));
+        assert_eq!(stored(simd, value), reference::encode(expected));
     }
 
     /// Draws an element, biased toward zero, one, minus one, and the largest representative.
@@ -1579,7 +1579,7 @@ pub mod fuzz {
             7 => reference::ONE,
             8 => reference::neg(reference::ONE),
             9 => largest,
-            _ => reference::canonical(&mut Unstructured::new(u.bytes(BYTES)?))?,
+            _ => reference::canonical(u)?,
         })
     }
 
@@ -1691,7 +1691,7 @@ pub mod fuzz {
         assert_residues(simd, value);
         assert_eq!(
             stored(simd, value),
-            reference::to_bytes(formula.scalar(a, b)),
+            reference::encode(formula.scalar(a, b)),
             "{formula:?} of {a:x?} and {b:x?} with mode {mode}"
         );
         Ok(())
@@ -1705,7 +1705,7 @@ pub mod fuzz {
         for value in &mut expected {
             *value = element(u, largest)?;
         }
-        let load = |a: Element| Rns::load(simd, &[reference::to_bytes(a)], &[0; BYTES]);
+        let load = |a: Element| Rns::load(simd, &[reference::encode(a)], &[0; BYTES]);
         let mut values = expected.map(load);
         let mut bounds = [2u64; 4];
         for _ in 0..u.int_in_range(1..=64)? {
@@ -1742,7 +1742,7 @@ pub mod fuzz {
                 ),
             };
             assert_residues(simd, value);
-            assert_eq!(stored(simd, value), reference::to_bytes(scalar));
+            assert_eq!(stored(simd, value), reference::encode(scalar));
             values[k] = value;
             expected[k] = scalar;
             bounds[k] = bound;
@@ -1766,11 +1766,7 @@ pub mod fuzz {
             [expected; MODULI],
             "{context}"
         );
-        assert_eq!(
-            stored(simd, value),
-            reference::to_bytes(element),
-            "{context}"
-        );
+        assert_eq!(stored(simd, value), reference::encode(element), "{context}");
         Ok(())
     }
 
@@ -1780,13 +1776,13 @@ pub mod fuzz {
         let bytes = match u.int_in_range(0..=3)? {
             0 => u.bytes(BYTES)?.try_into().expect("drew BYTES bytes"),
             1 => [0xff; BYTES],
-            _ => reference::to_bytes(element(u, largest())?),
+            _ => reference::encode(element(u, largest())?),
         };
         let value = Rns::load(simd, &[bytes], &[0; BYTES]);
         assert_residues(simd, value);
         assert_eq!(
             stored(simd, value),
-            reference::to_bytes(reference::reduce(&bytes)),
+            reference::encode(reference::decode(&bytes)),
             "{bytes:x?}"
         );
         Ok(())
@@ -1916,6 +1912,7 @@ pub mod fuzz {
     mod tests {
         use super::*;
         use commonware_invariants::minifuzz;
+        #[cfg(debug_assertions)]
         use std::panic::catch_unwind;
 
         /// Largest factor bound whose square is within the integer budget.
@@ -1972,10 +1969,8 @@ pub mod fuzz {
         }
 
         #[test]
+        #[cfg(debug_assertions)]
         fn rejects_values_beyond_the_limits() {
-            if !DebugCounter::live() {
-                return;
-            }
             let simd = EmulatedX86V4C;
             let largest = largest();
             let at = |bound| loose(simd, largest, bound, 0);
@@ -2058,10 +2053,8 @@ pub mod fuzz {
         }
 
         #[test]
+        #[cfg(debug_assertions)]
         fn lazy_products_reject_budget_violations() {
-            if !DebugCounter::live() {
-                return;
-            }
             let simd = EmulatedX86V4C;
             let largest = largest();
             let at = |bound| loose(simd, largest, bound, 0);
@@ -2101,7 +2094,7 @@ pub mod fuzz {
         #[test]
         fn one_is_the_loaded_one() {
             let simd = EmulatedX86V4C;
-            let one = Rns::load(simd, &[reference::to_bytes(reference::ONE)], &[0; BYTES]);
+            let one = Rns::load(simd, &[reference::encode(reference::ONE)], &[0; BYTES]);
             for ((residue, expected), q) in one.to_residues(simd, 2).iter().zip(ONE).zip(MODULI_ALL)
             {
                 assert_eq!(residue % q, expected);
