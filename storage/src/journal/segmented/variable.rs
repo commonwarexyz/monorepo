@@ -39,10 +39,10 @@
 //!
 //! # Replay
 //!
-//! Opening a `Journal` requires replaying all of its data, which applications commonly use to
-//! recover some in-memory state. `Journal` is heavily optimized for this pattern: [Journal::init]
-//! returns a [Recovery] yielding all items in order of their `section` and `offset`, and
-//! [Recovery::finish] returns the journal once the recovery is exhausted.
+//! Opening a `Journal` requires replaying all of its data. Applications commonly use the replay
+//! to recover some in-memory state, and `Journal` is heavily optimized for this pattern.
+//! [Journal::init] returns a [Recovery] yielding all items in order of their `section` and
+//! `offset`, and [Recovery::finish] returns the journal once the recovery is exhausted.
 //!
 //! # Compression
 //!
@@ -135,7 +135,7 @@ struct SectionReplay<B: Blob> {
     section: u64,
     reader: BlobReplay<B>,
 
-    /// End of the last decoded item, which is where the next item starts.
+    /// End of the last decoded item, where the next item starts.
     offset: u64,
 }
 

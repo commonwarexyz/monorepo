@@ -1515,8 +1515,8 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         self.destroy_cleared(|| async { Ok(()) }).await
     }
 
-    /// Destroy the journal, awaiting `clear_dependents` under the staged clear before any blob
-    /// is removed. A crash after staging leaves an intent that the next open completes.
+    /// Stage a clear to zero, await `clear_dependents`, then remove this journal's blobs and
+    /// checkpoint. A crash after staging leaves an intent that the next open completes.
     pub(super) async fn destroy_cleared<F, Fut>(self, clear_dependents: F) -> Result<(), Error>
     where
         F: FnOnce() -> Fut,
@@ -1526,10 +1526,12 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         // checkpoint would otherwise acknowledge items the removed blobs no longer back.
         let mut journal = self.wait_for_sync().await?;
 
-        // Stage a clear to zero before removing anything: a destroy interrupted after the intent is
-        // durable reopens as a fresh journal, and one interrupted before it reopens as a crash
-        // would recover it.
+        // A destroy interrupted after the staged clear is durable reopens as a fresh journal, and
+        // one interrupted before it reopens as a crash would recover it.
         journal.checkpoint = journal.checkpoint.stage_clear(0).await?;
+
+        // Dependent state is removed under the same intent before this journal's own blobs, and
+        // the checkpoint holding the intent goes last.
         clear_dependents().await?;
         journal.blobs.destroy().await?;
         journal.checkpoint.destroy().await
