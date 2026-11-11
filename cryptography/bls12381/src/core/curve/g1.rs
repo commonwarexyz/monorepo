@@ -1,26 +1,25 @@
 //! Arithmetic on points of G1, the curve `y^2 = x^3 + 4` over the base field.
 //!
-//! A [`Point`] holds as many projective points as its field values hold elements, one per lane,
-//! and its formulas run once over every base field representation.
+//! A [`Point`] holds one projective point per lane, in any base field representation.
 //!
 //! # Coordinate bounds
 //!
 //! Every coordinate a formula accepts or returns has positional limb bound `1` and integer bound at
-//! most [`BOUND`], as defined by the [base field arithmetic](crate::core::field::arithmetic): the
-//! positional representations return at most `73` from the subtraction in [`Point::add`]'s `X`
-//! coordinate, and residues reduce to at most `17`. Loaded coordinates and every formula's outputs
-//! satisfy this, so points chain through any number of operations without carrying or
-//! canonicalizing between them.
+//! most [`BOUND`], as defined by the [base field arithmetic](crate::core::field::arithmetic).
+//! Loaded coordinates and every formula's outputs satisfy this, so points chain through any number
+//! of operations without carrying or canonicalizing between them.
 //!
 //! Raw coordinates hold each lane of a point in the representation's own form, through
 //! [`Field::store_raw`] with bound [`BOUND`], so storing and loading them costs no conversion and
 //! loaded raw coordinates satisfy the coordinate bounds.
 //!
+//! # How the formulas keep their bounds
+//!
 //! Subtractions remove small multiples of reduced products of coordinates. Such a product is
 //! bounded by `4p` in the positional representations and by `17p` in residues, so a multiple
-//! `C` of it is covered by a bias of `17C` in every representation. Inside a
-//! formula, the positional representations reach integer bounds of at most `912` and limb bounds
-//! of at most `12`; residues reach integer bounds of at most `629`.
+//! `C` of it is covered by a bias of `17C` in every representation. Inside a formula, the
+//! positional representations reach integer bounds of at most `912` and limb bounds of at most
+//! `12`; residues reach integer bounds of at most `629`.
 
 use crate::core::{
     curve::Points,
@@ -38,6 +37,9 @@ use commonware_simd::Simd;
 pub type Coordinates = [[u8; BYTES]; 3];
 
 /// Largest integer bound of a coordinate, in units of `p`.
+///
+/// The positional representations return at most `73` from the subtraction in [`Point::add`]'s
+/// `X` coordinate, and residues reduce to at most `17`.
 pub const BOUND: u64 = 73;
 
 /// The identity `(0 : 1 : 0)` as projective coordinates.
@@ -55,9 +57,6 @@ pub const GENERATOR: Coordinates = [
 ];
 
 /// Largest integer bound of a reduced value in residues, in units of `p`.
-///
-/// Positional products of coordinates are bounded by `4p`, so multiples of this cover a
-/// subtrahend in every representation.
 const REDUCED: u64 = 17;
 
 /// Positional bias of every subtraction of products, in units of `p`.
@@ -157,11 +156,9 @@ impl<S: Simd, F: Field<S>> Points<S> for Point<F> {
         }
     }
 
-    /// Returns `-self`.
-    ///
-    /// Multiplies `Y` by `-1` rather than subtracting it, so the coordinates keep their bounds.
     #[inline(always)]
     fn negate(self, simd: S) -> Self {
+        // Multiply Y by -1 rather than subtracting it, so the coordinates keep their bounds.
         let minus_one = F::load(simd, &[], &MINUS_ONE);
         Self {
             y: self.y.ready::<1>(simd).mul(simd, minus_one),
@@ -169,11 +166,9 @@ impl<S: Simd, F: Field<S>> Points<S> for Point<F> {
         }
     }
 
-    /// Returns `-self` in every lane whose bit is set in `lanes`, and `self` in the others.
-    ///
-    /// Multiplies `Y` by `1` or `-1`, selected without branching on `lanes`.
     #[inline(always)]
     fn negate_lanes(self, simd: S, lanes: u64) -> Self {
+        // Multiply Y by 1 or -1, selected without branching on lanes.
         let sign = F::load(simd, &[], &ONE).select(simd, F::load(simd, &[], &MINUS_ONE), lanes);
         Self {
             y: self.y.ready::<1>(simd).mul(simd, sign),
@@ -192,17 +187,13 @@ impl<S: Simd, F: Field<S>> Points<S> for Point<F> {
         }
     }
 
-    /// Returns `self + rhs`.
-    ///
-    /// This is Algorithm 7 of Renes, Costello, and Batina, "Complete addition formulas for prime
-    /// order elliptic curves" (2016), which accepts any pair of points, including the identity and
-    /// equal points. Each output coordinate is a sum of two products with a single reduction, and
-    /// each cross term reuses the two known products through [`Field::cross`]. Multiplications by
-    /// `3b = 12` use [`Field::mul_small`], leaving twelve products.
-    ///
-    /// Debug builds keep this a call so that chained formulas fit in a stack frame.
+    // Debug builds keep this a call so that chained formulas fit in a stack frame.
     #[cfg_attr(not(debug_assertions), inline(always))]
     fn add(self, simd: S, rhs: Self) -> Self {
+        // Algorithm 7 of Renes, Costello, and Batina, "Complete addition formulas for prime order
+        // elliptic curves" (2016). Each output coordinate is a sum of two products with a single
+        // reduction, and each cross term reuses the two known products through Field::cross.
+        // Multiplications by 3b = 12 use Field::mul_small, leaving twelve products.
         let (x1, y1, z1) = (
             self.x.ready::<1>(simd),
             self.y.ready::<1>(simd),
@@ -242,15 +233,11 @@ impl<S: Simd, F: Field<S>> Points<S> for Point<F> {
         }
     }
 
-    /// Returns `2 * self`.
-    ///
-    /// This is Algorithm 9 of Renes, Costello, and Batina, which accepts any point, including the
-    /// identity. It returns the same point as [`Self::add`] of `self` with itself, with eight
-    /// products.
-    ///
-    /// Debug builds keep this a call so that chained formulas fit in a stack frame.
+    // Debug builds keep this a call so that chained formulas fit in a stack frame.
     #[cfg_attr(not(debug_assertions), inline(always))]
     fn double(self, simd: S) -> Self {
+        // Algorithm 9 of Renes, Costello, and Batina, with eight products. It returns the same
+        // point as add of self with itself.
         let (x, y, z) = (
             self.x.ready::<1>(simd),
             self.y.ready::<1>(simd),
