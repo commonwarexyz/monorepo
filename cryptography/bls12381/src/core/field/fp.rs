@@ -349,8 +349,97 @@ pub(crate) mod testing {
         }
     }
 
+    /// A computation written once over every representation and backend.
+    pub(crate) trait Kernel {
+        /// The result of the computation.
+        type Output;
+
+        /// Runs the computation in the representation `F`.
+        fn run<S: Simd, F: Field<S>>(self, simd: S) -> Self::Output;
+    }
+
+    /// A base field representation.
+    #[derive(Clone, Copy, Debug)]
+    enum Representation {
+        Unsat49,
+        Unsat28,
+        Rns,
+    }
+
+    /// A representation and an emulated backend that supports it: residues require x86v4c.
+    #[derive(Clone, Copy, Debug)]
+    pub(crate) struct Target {
+        representation: Representation,
+        backend: Backend,
+    }
+
+    /// Runs a kernel in a representation, as an operation of any backend.
+    struct Execute<K>(K, Representation);
+
+    impl<S: Simd, K: Kernel> Operation<S> for Execute<K> {
+        type Output = K::Output;
+
+        fn portable(self, simd: S) -> K::Output {
+            match self.1 {
+                Representation::Unsat49 => self.0.run::<S, Unsat49<S>>(simd),
+                Representation::Unsat28 => self.0.run::<S, Unsat28<S>>(simd),
+                Representation::Rns => unreachable!("residues require x86v4c"),
+            }
+        }
+
+        fn x86_v4c(self, simd: S) -> K::Output
+        where
+            S: X86V4C,
+        {
+            match self.1 {
+                Representation::Rns => self.0.run::<S, Rns<S>>(simd),
+                _ => self.portable(simd),
+            }
+        }
+    }
+
+    /// Returns the lane count of a representation.
+    struct Lanes;
+
+    impl Kernel for Lanes {
+        type Output = usize;
+
+        fn run<S: Simd, F: Field<S>>(self, _: S) -> usize {
+            F::LANES
+        }
+    }
+
+    impl Target {
+        /// Draws a target, every representation equally often, then any backend that supports it.
+        pub(crate) fn draw(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
+            let representation = match u.int_in_range(0..=2)? {
+                0 => Representation::Unsat49,
+                1 => Representation::Unsat28,
+                _ => Representation::Rns,
+            };
+            let backend = match representation {
+                Representation::Rns => Backend::X86V4C,
+                _ => Backend::draw(u)?,
+            };
+            Ok(Self {
+                representation,
+                backend,
+            })
+        }
+
+        /// Runs a kernel on this target.
+        pub(crate) fn run<K: Kernel>(self, kernel: K) -> K::Output {
+            self.backend.execute(Execute(kernel, self.representation))
+        }
+
+        /// Returns the number of elements a value holds on this target.
+        pub(crate) fn lanes(self) -> usize {
+            self.run(Lanes)
+        }
+    }
+
     /// A check of any representation on any backend.
-    pub(crate) trait Check: Copy {
+    pub(crate) trait Check {
         /// Runs the check on `F`, drawing its inputs from `u`.
         fn check<S: Simd, F: Field<S>>(
             self,
@@ -359,59 +448,20 @@ pub(crate) mod testing {
         ) -> arbitrary::Result<()>;
     }
 
-    /// Runs a check on a representation and backend drawn from `u`: [`Unsat49`] or [`Unsat28`]
-    /// on any emulated backend, or [`Rns`], which requires x86v4c.
+    /// Runs a check on a [`Target`] drawn from `u`.
     pub(crate) fn check_any<C: Check>(u: &mut Unstructured<'_>, check: C) -> arbitrary::Result<()> {
-        #[derive(Clone, Copy, PartialEq, Eq)]
-        enum Representation {
-            Unsat49,
-            Unsat28,
-            Rns,
-        }
+        /// Runs a check as a kernel, drawing its inputs from the same input.
+        struct Checked<'a, 'b, C>(C, &'a mut Unstructured<'b>);
 
-        struct Run<'a, 'b, C> {
-            representation: Representation,
-            check: C,
-            u: &'a mut Unstructured<'b>,
-        }
-
-        impl<S: Simd, C: Check> Operation<S> for Run<'_, '_, C> {
+        impl<C: Check> Kernel for Checked<'_, '_, C> {
             type Output = arbitrary::Result<()>;
 
-            fn portable(self, simd: S) -> Self::Output {
-                match self.representation {
-                    Representation::Unsat49 => self.check.check::<S, Unsat49<S>>(simd, self.u),
-                    Representation::Unsat28 => self.check.check::<S, Unsat28<S>>(simd, self.u),
-                    Representation::Rns => unreachable!("residues run only on x86v4c"),
-                }
-            }
-
-            fn x86_v4c(self, simd: S) -> Self::Output
-            where
-                S: X86V4C,
-            {
-                if self.representation == Representation::Rns {
-                    self.check.check::<S, Rns<S>>(simd, self.u)
-                } else {
-                    self.portable(simd)
-                }
+            fn run<S: Simd, F: Field<S>>(self, simd: S) -> Self::Output {
+                self.0.check::<S, F>(simd, self.1)
             }
         }
 
-        let representation = match u.int_in_range(0..=2)? {
-            0 => Representation::Unsat49,
-            1 => Representation::Unsat28,
-            _ => Representation::Rns,
-        };
-        let backend = match representation {
-            Representation::Rns => Backend::X86V4C,
-            _ => Backend::draw(u)?,
-        };
-        backend.execute(Run {
-            representation,
-            check,
-            u,
-        })
+        Target::draw(u)?.run(Checked(check, u))
     }
 
     /// A positional representation: carried limbs of radix `2^BITS` in Montgomery form with

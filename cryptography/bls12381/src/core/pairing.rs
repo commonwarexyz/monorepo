@@ -327,10 +327,13 @@ fn raise_to_z<S: Simd, F: Field<S>>(simd: S, a: Fp12<F>) -> Fp12<F> {
 #[cfg(any(test, feature = "fuzz"))]
 pub mod fuzz {
     use super::*;
-    use crate::core::field::fp12::{
-        BYTES, ONE,
-        fuzz::{Kernel, Target, element},
-        reference::{self, Element},
+    use crate::core::field::{
+        fp::testing::{Kernel, Target},
+        fp12::{
+            BYTES, ONE,
+            fuzz::element,
+            reference::{self, Element},
+        },
     };
     use arbitrary::{Arbitrary, Unstructured};
     use std::{vec, vec::Vec};
@@ -360,7 +363,7 @@ pub mod fuzz {
     impl Kernel for Exponentiate<'_> {
         type Output = Vec<[u8; BYTES]>;
 
-        fn run<S: Simd, F: Field<S>>(&self, simd: S) -> Self::Output {
+        fn run<S: Simd, F: Field<S>>(self, simd: S) -> Self::Output {
             let mut output = vec![[0; BYTES]; self.0.len()];
             for (elements, output) in self.0.chunks(F::LANES).zip(output.chunks_mut(F::LANES)) {
                 let f = Fp12::<F>::load(simd, elements, &ONE);
@@ -392,7 +395,7 @@ pub mod fuzz {
         for (k, x) in a.iter().enumerate() {
             elements.push(reference::encode(&reference::mul(x, &a[(k + 1) % count])));
         }
-        let outputs = target.run(&Exponentiate(&elements));
+        let outputs = target.run(Exponentiate(&elements));
         let (images, products) = outputs.split_at(count);
         for lane in 0..count {
             let label = std::format!("{target:?}, element {lane} of {count}");
