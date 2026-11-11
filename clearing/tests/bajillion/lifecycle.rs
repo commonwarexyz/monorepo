@@ -3,6 +3,7 @@
 use super::*;
 use crate::roles::{
     ledger::{Halt, Refusal},
+    sender::Outcome,
     validator::Refusal as Verifying,
 };
 use commonware_clearing::bajillion::{Challenge, ChallengeError, CheckError};
@@ -104,7 +105,14 @@ fn test_epochs_settle_payments_and_withdrawals() {
                 }
                 receiver.prune(epoch);
             }
-            for sender in &mut senders {
+
+            // Every sender resolves the post, and the close settled the map it recorded (S5).
+            for (index, sender) in (0..USERS).zip(&mut senders) {
+                let opening = matrix.open(&account(index), &account(index));
+                assert_eq!(
+                    sender.posted(epoch, &summary.matrix, &opening).unwrap(),
+                    Outcome::Match
+                );
                 sender.prune(epoch);
             }
             deployment.check_balances(&held(&expected)).await;
@@ -369,7 +377,10 @@ fn test_sender_keeps_its_epoch_anchor_after_a_conflicting_post() {
         let opening = current
             .matrix::<Sha256>(&Sequential)
             .open(&account(0), &account(0));
-        assert_eq!(alice.posted(2, &summary.matrix, &opening).unwrap(), None);
+        assert_eq!(
+            alice.posted(2, &summary.matrix, &opening).unwrap(),
+            Outcome::Conflict
+        );
 
         // A new payment to carol must not make bob's payment settle again in epoch 3.
         let successor = alice.send(3, amounts(&[(2, 1)])).unwrap();

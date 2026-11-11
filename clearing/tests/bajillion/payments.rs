@@ -18,6 +18,38 @@ fn open_row(close: &TestClose, sender: u64) -> (Digest, Opening<PublicKey, Diges
     )
 }
 
+/// Returns an operator in epoch 3, alice, her request of epoch 2 to pay carol 5, and the close of
+/// epoch 2. The operator refused the request because alice had paid bob her whole balance of 10,
+/// and she dropped it. The close settles her payment to bob and processes a deposit of 5 to her.
+fn dropped_request() -> (
+    TestOperator,
+    TestSender,
+    Request<PublicKey, Digest, u64>,
+    TestClose,
+) {
+    let mut operator = operator();
+    fund(&mut operator, &[(0, 10)]);
+    let mut alice = sender(0);
+
+    // Alice pays bob her whole balance, then asks to pay carol 5. The operator refuses the request.
+    // It was delivered only once, so alice drops it.
+    let paid = alice.send(2, amounts(&[(1, 10)])).unwrap();
+    alice
+        .acknowledged(&operator.accept(&paid).unwrap())
+        .unwrap();
+    let refused = alice.send(2, amounts(&[(2, 5)])).unwrap();
+    assert!(matches!(
+        operator.accept(&refused),
+        Err(Admitting::InsufficientBalance)
+    ));
+    alice.refused().unwrap();
+
+    // The close of epoch 2 settles her payment to bob and processes a deposit of 5 to her.
+    let posted = close_epoch(&mut operator, &deposits(2, &[(0, 5)]), 1, 0);
+    assert_eq!(operator.balance(&account(0)), 5);
+    (operator, alice, refused, posted)
+}
+
 /// One request pays several receivers, each receipt carries the cumulative amount paid, and the
 /// operator's record matches the sender's.
 #[test]
@@ -348,29 +380,21 @@ fn test_posted_close_resolves_pending_requests() {
     operator.accept(&request).unwrap();
     let posted = close(&mut operator);
     let (root, opening) = open_row(&posted, 0);
-    assert_eq!(
-        alice.posted(2, &root, &opening).unwrap(),
-        Some(Outcome::Settled)
-    );
+    assert_eq!(alice.posted(2, &root, &opening).unwrap(), Outcome::Settled);
     assert!(alice.pending().is_none());
     assert_eq!(alice.payments(2), Some(&amounts(&[(1, 10)])));
 
-    // A request the close of its epoch did not settle stays pending, because its state for the
-    // next epoch may still settle. It is dropped once that epoch's close did not settle it either.
+    // A request the close of its epoch did not settle stays pending, because its state for the next
+    // epoch may still settle. It is dropped once that epoch's close did not settle it either.
+    // Neither close has a row of hers, and she recorded no map of either epoch.
     let request = alice.send(3, amounts(&[(1, 10)])).unwrap();
     let posted = close(&mut operator);
     let (root, opening) = open_row(&posted, 0);
-    assert_eq!(
-        alice.posted(3, &root, &opening).unwrap(),
-        Some(Outcome::Pending)
-    );
+    assert_eq!(alice.posted(3, &root, &opening).unwrap(), Outcome::Match);
     assert_eq!(alice.pending(), Some(&request));
     let posted = close(&mut operator);
     let (root, opening) = open_row(&posted, 0);
-    assert_eq!(
-        alice.posted(4, &root, &opening).unwrap(),
-        Some(Outcome::Dropped)
-    );
+    assert_eq!(alice.posted(4, &root, &opening).unwrap(), Outcome::Match);
     assert!(alice.pending().is_none());
     assert_eq!(alice.payments(3), None);
     assert_eq!(alice.payments(4), None);
@@ -380,10 +404,8 @@ fn test_posted_close_resolves_pending_requests() {
     let request = alice.send(5, amounts(&[(1, 10)])).unwrap();
     let posted = close(&mut operator);
     let (root, opening) = open_row(&posted, 0);
-    assert_eq!(
-        alice.posted(5, &root, &opening).unwrap(),
-        Some(Outcome::Pending)
-    );
+    assert_eq!(alice.posted(5, &root, &opening).unwrap(), Outcome::Match);
+    assert_eq!(alice.pending(), Some(&request));
     operator.accept(&request).unwrap();
     let posted = close(&mut operator);
     let (root, opening) = open_row(&posted, 0);
@@ -392,16 +414,14 @@ fn test_posted_close_resolves_pending_requests() {
         alice.posted(6, &other, &opening),
         Err(Sending::InvalidOpening)
     ));
-    assert_eq!(
-        alice.posted(6, &root, &opening).unwrap(),
-        Some(Outcome::Settled)
-    );
+    assert_eq!(alice.posted(6, &root, &opening).unwrap(), Outcome::Settled);
     assert_eq!(alice.payments(6), Some(&amounts(&[(1, 10)])));
 }
 
 /// A post drops a pending request once neither of its states can settle. When the close of the
 /// request's epoch settles a row other than the map its state for the next epoch builds on, the
-/// sender pays again in the next epoch without waiting for that epoch's close.
+/// sender pays again in the next epoch without waiting for that epoch's close. The post also tells
+/// her that the close did not settle the map she recorded.
 #[test]
 fn test_posted_other_row_drops_request() {
     let mut operator = operator();
@@ -413,15 +433,13 @@ fn test_posted_other_row_drops_request() {
         .unwrap();
 
     // The operator forgets her countersigned map, so the close of epoch 2 has no row of hers. Her
-    // pending request extends that map in epoch 2 and builds on it in epoch 3.
+    // pending request extends that map in epoch 2 and builds on it in epoch 3, so neither of its
+    // states can settle. The map she recorded did not settle either.
     alice.send(2, amounts(&[(1, 5)])).unwrap();
     operator.forget(&account(0));
     let posted = close(&mut operator);
     let (root, opening) = open_row(&posted, 0);
-    assert_eq!(
-        alice.posted(2, &root, &opening).unwrap(),
-        Some(Outcome::Dropped)
-    );
+    assert_eq!(alice.posted(2, &root, &opening).unwrap(), Outcome::Conflict);
     assert!(alice.pending().is_none());
 
     // Her next request builds on the posted row, and the operator admits it.
@@ -451,16 +469,14 @@ fn test_post_before_request_epoch_keeps_it_pending() {
     }
     let request = alice.send(3, amounts(&[(1, 1)])).unwrap();
 
-    // The posted close of epoch 2 settles her first map, so her state of epoch 3 cannot settle.
-    // Her state of epoch 4 builds on her row of epoch 3, and that row has not posted.
+    // The posted close of epoch 2 settles her first map, so her state of epoch 3 cannot settle. Her
+    // state of epoch 4 builds on her row of epoch 3, and that row has not posted. She recorded a
+    // second map for epoch 2, and the close did not settle that map.
     let first = row(2, 0, amounts(&[(1, 1)]), &Amounts::empty());
     let queue = deposits(2, &[]);
     let posted = forge(&operator_key(), &queue, vec![first], Vec::new(), 0, 0);
     let (root, opening) = open_row(&posted, 0);
-    assert_eq!(
-        alice.posted(2, &root, &opening).unwrap(),
-        Some(Outcome::Pending)
-    );
+    assert_eq!(alice.posted(2, &root, &opening).unwrap(), Outcome::Conflict);
     assert_eq!(alice.pending(), Some(&request));
 }
 
@@ -470,26 +486,12 @@ fn test_post_before_request_epoch_keeps_it_pending() {
 /// admitted state, so the batch pays once.
 #[test]
 fn test_replayed_request_settles_at_most_once() {
-    let mut operator = operator();
-    fund(&mut operator, &[(0, 10)]);
-    let mut alice = sender(0);
+    let (mut operator, mut alice, refused, posted) = dropped_request();
 
-    // Alice pays bob her whole balance, then asks to pay carol 5. The operator refuses the
-    // request, and alice drops it as if it had been delivered once.
-    let paid = alice.send(2, amounts(&[(1, 10)])).unwrap();
-    alice
-        .acknowledged(&operator.accept(&paid).unwrap())
-        .unwrap();
-    let refused = alice.send(2, amounts(&[(2, 5)])).unwrap();
-    assert!(matches!(
-        operator.accept(&refused),
-        Err(Admitting::InsufficientBalance)
-    ));
-    alice.refused().unwrap();
-
-    // The close of epoch 2 settles her payment to bob and processes a deposit of 5 to her.
-    operator.close(&deposits(2, &[(0, 5)]), 1, 0).unwrap();
-    assert_eq!(operator.balance(&account(0)), 5);
+    // Alice resolves the post of epoch 2 before a new request of epoch 3 pays the dropped batch
+    // again. The close settled the map she recorded.
+    let (root, opening) = open_row(&posted, 0);
+    assert_eq!(alice.posted(2, &root, &opening).unwrap(), Outcome::Match);
 
     // A replayed copy reaches the operator in epoch 3. Its state for epoch 3 builds on the row
     // the close settled and its batch fits her balance, so the operator admits it. Alice has no
@@ -524,6 +526,41 @@ fn test_replayed_request_settles_at_most_once() {
     assert_eq!(operator.balance(&account(2)), 5);
 }
 
+/// A dropped request can still settle, and the post of that epoch tells its sender (S4, S5). A copy
+/// of alice's dropped request reaches the operator in the next epoch, and that epoch's close
+/// settles it while she signs nothing. She recorded no map of that epoch, so the post reports a
+/// conflict, and an opening of the row shows that carol was paid.
+#[test]
+fn test_post_reports_a_dropped_request_that_settled() {
+    let (mut operator, mut alice, refused, posted) = dropped_request();
+
+    // The close of epoch 2 settled the map alice recorded.
+    let (root, opening) = open_row(&posted, 0);
+    assert_eq!(alice.posted(2, &root, &opening).unwrap(), Outcome::Match);
+
+    // A copy of the dropped request reaches the operator in epoch 3 and is admitted. Alice signs
+    // nothing in epoch 3, and the close of epoch 3 settles the batch she dropped.
+    operator.accept(&refused).unwrap();
+    let posted = close(&mut operator);
+    assert_eq!(posted.rows().len(), 1);
+    assert_eq!(posted.rows()[0].payments, amounts(&[(2, 5)]));
+    assert_eq!(alice.payments(3), None);
+
+    // The post of epoch 3 proves a row she recorded no map for. An opening of carol's entry shows
+    // the payment a new request must not make again.
+    let (root, opening) = open_row(&posted, 0);
+    assert_eq!(alice.posted(3, &root, &opening).unwrap(), Outcome::Conflict);
+    let entry = posted
+        .matrix::<Sha256>(&Sequential)
+        .open(&account(0), &account(2));
+    assert_eq!(
+        entry
+            .verify::<Sha256>(&root, &account(0), &account(2))
+            .unwrap(),
+        5
+    );
+}
+
 /// A posted row settles a request only if it matches the request's state for the row's epoch. The
 /// state for the next epoch pays only the batch, so a close of the request's own epoch that settles
 /// an earlier map equal to the batch leaves it pending, and the next close settles it.
@@ -542,10 +579,7 @@ fn test_state_settles_only_in_its_own_epoch() {
     let request = alice.send(2, amounts(&[(1, 10)])).unwrap();
     let posted = close(&mut operator);
     let (root, opening) = open_row(&posted, 0);
-    assert_eq!(
-        alice.posted(2, &root, &opening).unwrap(),
-        Some(Outcome::Pending)
-    );
+    assert_eq!(alice.posted(2, &root, &opening).unwrap(), Outcome::Match);
     assert_eq!(alice.pending(), Some(&request));
     assert_eq!(alice.payments(2), Some(&amounts(&[(1, 10)])));
 
@@ -553,10 +587,7 @@ fn test_state_settles_only_in_its_own_epoch() {
     operator.accept(&request).unwrap();
     let posted = close(&mut operator);
     let (root, opening) = open_row(&posted, 0);
-    assert_eq!(
-        alice.posted(3, &root, &opening).unwrap(),
-        Some(Outcome::Settled)
-    );
+    assert_eq!(alice.posted(3, &root, &opening).unwrap(), Outcome::Settled);
     assert_eq!(alice.payments(3), Some(&amounts(&[(1, 10)])));
 }
 

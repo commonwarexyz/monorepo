@@ -1,5 +1,5 @@
-//! A reference sender that pays through the operator and resolves its requests against posted
-//! closes.
+//! A reference sender that pays through the operator and resolves its requests and its recorded
+//! maps against posted closes.
 
 use commonware_clearing::bajillion::{
     Amount, Amounts, Epoch, InvalidOpening, Namespace, Opening, Receipt, Request, RequestError,
@@ -45,15 +45,18 @@ impl From<InvalidOpening> for Refusal {
     }
 }
 
-/// What a posted close did with the pending request.
+/// What a posted close settled for the sender (S5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Outcome {
-    /// The close settled one of its states.
+    /// The close settled the map the sender recorded for the epoch, or it has no row of the sender
+    /// and the sender recorded no map.
+    Match,
+    /// The close settled a state of the pending request. The sender records that state's map and
+    /// clears the request.
     Settled,
-    /// The close settled none of its states, and none can settle in a later epoch.
-    Dropped,
-    /// Its state for a later epoch can still settle.
-    Pending,
+    /// The close settled another map, such as a dropped request's, or it has no row of the sender
+    /// where the sender recorded a map. Openings of the row show its payments.
+    Conflict,
 }
 
 /// A countersigned state with the sender's signature, the operator's acknowledgement if the
@@ -76,7 +79,8 @@ pub type Pending<P, D, A> = (Request<P, D, A>, States<P, D, A>);
 /// What the sender persists. A restart resumes from it alone.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Persisted<P: PublicKey, O: PublicKey, D: Digest, A: Amount> {
-    /// The latest countersigned state of each epoch the sender paid in.
+    /// The latest countersigned state of each epoch the sender paid in, or the state the post of
+    /// that epoch settled.
     pub countersigned: BTreeMap<Epoch, Countersigned<P, O, D, A>>,
     /// The sender's row root in each posted close (S5).
     pub posted: BTreeMap<Epoch, D>,
@@ -349,26 +353,26 @@ impl<S: Signer, O: PublicKey, H: Hasher, A: Amount> Sender<S, O, H, A> {
     }
 
     /// Records the final post of `epoch` with matrix root `root` from an opening of this sender's
-    /// row, and resolves the pending request against it (S5). Posts must arrive in epoch order.
-    /// Returns `None` if no request is pending.
+    /// row, resolves the pending request against it, and returns what the close settled (S5). A
+    /// request the close did not settle stays pending while one of its states can still settle in a
+    /// later epoch. Otherwise it is dropped. [Self::pending] shows which. Posts must arrive in
+    /// epoch order.
     pub fn posted(
         &mut self,
         epoch: Epoch,
         root: &H::Digest,
         opening: &Opening<S::PublicKey, H::Digest, A>,
-    ) -> Result<Option<Outcome>, Refusal> {
+    ) -> Result<Outcome, Refusal> {
         // The opening proves this sender's row root, and the empty map's root stands for a close
         // without its row.
         let row = opening.verify_row::<H>(root, &self.account)?;
-        let posted = row.unwrap_or_else(|| Amounts::<S::PublicKey, A>::empty().root::<H>());
+        let empty = Amounts::<S::PublicKey, A>::empty().root::<H>();
+        let posted = row.unwrap_or(empty);
         self.persisted.posted.insert(epoch, posted);
-        if self.persisted.pending.is_none() {
-            return Ok(None);
-        }
 
         // A state of this epoch with the posted row root settles the request. A state of the next
         // epoch can still settle only if it builds on that root, and the request is dropped once
-        // none of its states can settle (S5).
+        // none of its states can settle (S5). No state is proposed when no request is pending.
         let proposed = self.proposed();
         let settled = proposed
             .iter()
@@ -381,13 +385,24 @@ impl<S: Signer, O: PublicKey, H: Hasher, A: Amount> Sender<S, O, H, A> {
         if let Some(countersigned) = settled {
             self.persisted.countersigned.insert(epoch, countersigned);
             self.persisted.pending = None;
-            return Ok(Some(Outcome::Settled));
+            return Ok(Outcome::Settled);
         }
         if !live {
             self.persisted.pending = None;
-            return Ok(Some(Outcome::Dropped));
         }
-        Ok(Some(Outcome::Pending))
+
+        // The post matches the sender's record when the row root is the root of its countersigned
+        // map, or the empty map's root when it holds none. Any other row root is a conflict (S5).
+        let record = self
+            .persisted
+            .countersigned
+            .get(&epoch)
+            .map_or(empty, |countersigned| countersigned.state.payments);
+        Ok(if record == posted {
+            Outcome::Match
+        } else {
+            Outcome::Conflict
+        })
     }
 
     /// Forgets the countersigned states and posted roots of epochs before `epoch`. The next request

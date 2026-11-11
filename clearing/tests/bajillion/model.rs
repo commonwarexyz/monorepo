@@ -64,13 +64,13 @@
 //! a state built on a map whose close awaits its post, a request admitted in the epoch after its
 //! own and its copy refused after its own epoch settled it, a retry acknowledged, a post settling
 //! an unacknowledged request, a post dropping a request whose next state builds on another row, a
-//! payout capped by the balance, a repeated payout or claim refused, an omitted row challenged, and
-//! claims draining the custody.
+//! post omitting a map its sender recorded, a payout capped by the balance, a repeated payout or
+//! claim refused, an omitted row challenged, and claims draining the custody.
 //!
 //! The workloads reach these parts of the users' and the operator's obligations. The model checks
-//! every request's roots and map (S1), the sender verifies acknowledgements (S2), the model
-//! decides when a refusal is final from the copies it sent (S4), and senders resolve posts in
-//! order (S5).
+//! every request's roots and map (S1). The sender verifies acknowledgements (S2). The model decides
+//! from the copies it sent when a sender drops a refused request (S4). Senders resolve posts in
+//! order, and the model predicts what each post settled for the sender (S5).
 //!
 //! The operator admits on both sides of a cut (O2, O4, O6), checks spendable balances (O3), and
 //! applies one close per epoch at its cut (O8). Receivers take receipts in acknowledgement order
@@ -549,8 +549,16 @@ enum Verdict {
     Insufficient,
 }
 
-/// What a sender's pending request becomes at a post, or `None` with no pending request.
-type Resolution = Option<Outcome>;
+/// What a sender's pending request becomes at a post.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Resolution {
+    /// The close settled one of its states.
+    Settled,
+    /// The close settled none of its states, and none can settle in a later epoch.
+    Dropped,
+    /// Its state for a later epoch can still settle.
+    Pending,
+}
 
 impl Workload {
     /// Records that the explored paths reached `flow`.
@@ -690,18 +698,18 @@ impl Workload {
             .unwrap_or_else(|| Amounts::<PublicKey, u64>::empty().root::<Sha256>())
     }
 
-    /// Predicts what the post of `epoch` does with `user`'s pending request (S5).
-    fn resolution(&self, world: &World, epoch: Epoch, user: usize) -> Resolution {
+    /// Predicts what the post of `epoch` does with `user`'s pending request, if it has one (S5).
+    fn resolution(&self, world: &World, epoch: Epoch, user: usize) -> Option<Resolution> {
         let index = world.pending[user]?;
         let request = &world.sent[index].request.0;
         let epochs = request.epoch..=request.epoch + 1;
         let posted = self.row_root_of(world, epoch, user);
         if epochs.contains(&epoch) && self.state_of(world, index, epoch).0 == posted {
-            Some(Outcome::Settled)
+            Some(Resolution::Settled)
         } else if *epochs.end() <= epoch || (request.epoch == epoch && request.latest != posted) {
-            Some(Outcome::Dropped)
+            Some(Resolution::Dropped)
         } else {
-            Some(Outcome::Pending)
+            Some(Resolution::Pending)
         }
     }
 
@@ -1269,13 +1277,13 @@ impl Model for Workload {
                         }
                     }
 
-                    // A refusal is final only for a request sent once (S4).
+                    // The sender drops a refused request only if it sent it once (S4).
                     None if current && sent.copies == 1 => {
                         if let Err(refusal) = world.senders[user].refused() {
                             world.fail(format!("refusal: {refusal}"));
                         }
                         world.pending[user] = None;
-                        self.witness("a refusal of a request sent once is final");
+                        self.witness("a request refused once is dropped");
                     }
                     None => {}
                 }
@@ -1439,16 +1447,32 @@ impl Model for Workload {
                     .summary
                     .matrix;
                 let resolution = self.resolution(&world, epoch, user);
+
+                // A post that settles the pending request settles the map the sender then records.
+                // Any other post matches the sender's record when the sender's row is the map built
+                // from the requests the model holds as countersigned in the epoch. Otherwise the
+                // post conflicts with the record (S5).
+                let predicted = if resolution == Some(Resolution::Settled) {
+                    Outcome::Settled
+                } else if self
+                    .map_of(&world, &world.countersigned, epoch, user)
+                    .root::<Sha256>()
+                    == self.row_root_of(&world, epoch, user)
+                {
+                    Outcome::Match
+                } else {
+                    Outcome::Conflict
+                };
                 match world.senders[user].posted(epoch, &root, opening) {
-                    Ok(outcome) if outcome == resolution => match outcome {
-                        Some(Outcome::Settled) => {
+                    Ok(outcome) if outcome == predicted => match resolution {
+                        Some(Resolution::Settled) => {
                             let index = world.pending[user].take().unwrap();
                             world.countersigned.insert((index, epoch));
                             self.witness(
                                 "a post settles a request before its acknowledgement arrives",
                             );
                         }
-                        Some(Outcome::Dropped) => {
+                        Some(Resolution::Dropped) => {
                             let index = world.pending[user].take().unwrap();
                             self.witness("a post drops a request");
                             if world.sent[index].request.0.epoch == epoch {
@@ -1457,14 +1481,21 @@ impl Model for Workload {
                                 );
                             }
                         }
-                        Some(Outcome::Pending) => {
+                        Some(Resolution::Pending) => {
                             self.witness("a post keeps a request pending");
                         }
                         None => {}
                     },
                     outcome => world.fail(format!(
-                        "resolve: {outcome:?} where {resolution:?} was predicted"
+                        "resolve: {outcome:?} where {predicted:?} was predicted"
                     )),
+                }
+                if predicted == Outcome::Conflict {
+                    self.witness(if world.omitted.contains(&(epoch, user)) {
+                        "a post omits a map its sender recorded"
+                    } else {
+                        "a post settles a map its sender did not record"
+                    });
                 }
                 world.resolved[user] = epoch;
                 self.check_pending(&mut world, user);
@@ -1735,7 +1766,7 @@ fn test_model_admits_one_payment() {
             "a request is admitted in the epoch after its own",
             "a next state is admitted while the preceding close awaits its post",
             "a post keeps a request pending",
-            "a refusal of a request sent once is final",
+            "a request refused once is dropped",
         ],
     );
 }
@@ -1765,7 +1796,7 @@ fn test_model_retries_payments() {
             "a post settles a request before its acknowledgement arrives",
             "a post drops a request",
             "a retried request is acknowledged again",
-            "a refusal of a request sent once is final",
+            "a request refused once is dropped",
             "a close defers a queued request",
         ],
     );
@@ -1820,6 +1851,7 @@ fn test_model_rebuilds_on_the_posted_row() {
             "a payment builds on a row the close omitted",
             "a state builds on a map whose close awaits its post",
             "a post drops a request whose next state builds on another row",
+            "a post omits a map its sender recorded",
         ],
     );
 }

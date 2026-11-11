@@ -98,7 +98,7 @@
 //!   ---------------------------------------------------------------------------------------------
 //!   sender      any store             Request::states, States::sign, States::request,
 //!                                     State::verify_acknowledgement, Receipt::issue,
-//!                                     Opening::verify_row, Withdrawal::sign
+//!                                     Opening::verify_row, Opening::verify, Withdrawal::sign
 //!   operator    any store             Request::verify, Verified::admit, State::acknowledge,
 //!                                     Withdrawal::verify, Close::assemble, Flow::settle
 //!   receiver    any store             Receipt::verify, Opening::verify
@@ -145,11 +145,11 @@
 //! receiver can halt the ledger.
 //!
 //! A request also signs a state for the next epoch that pays only the batch, on top of the map
-//! without it. A payment refused because its epoch just closed then settles in the next epoch
-//! without a new request. Each state commits to the root it builds on, so the sender's row in the
-//! close of the request's epoch decides which of the two can settle. Sending a request therefore
-//! authorizes the batch in the next epoch as well, and the operator needs no copy of the request
-//! to settle that state.
+//! without the batch. A payment that reaches the operator just after its epoch closed then settles
+//! in the next epoch without a new request. Each state commits to the root it builds on, so the
+//! sender's row in the close of the request's epoch decides which of the two can settle. Sending a
+//! request therefore authorizes the batch in the next epoch as well, and the operator needs no
+//! further copy of the request to settle that state.
 //!
 //! ```text
 //!              close(e-1)               close(e)                 close(e+1)
@@ -170,8 +170,8 @@
 //!   that state's `previous` root. When starting an epoch's map, use the row root the post of the
 //!   epoch before proves (S5), if recorded, or the root of its latest countersigned map otherwise.
 //!   Use the empty map's root when there is none. Changing the predecessor of an existing map can
-//!   authorize its payments again after a conflicting post. Sign no request while another may
-//!   still be countersigned, and none for an epoch before one with a countersigned map. Otherwise
+//!   authorize its payments again after a conflicting post. Sign no request while another is
+//!   pending, and none for an epoch before one with a countersigned map. Otherwise
 //!   [Verified::admit] refuses the state, and the sender's requests fail until a post shows which
 //!   map settled.
 //!
@@ -184,18 +184,21 @@
 //!   releasing any receipt. Otherwise a crash leaves the sender unable to issue receipts the close
 //!   still settles, or to extend its map until a post resolves the epoch.
 //!
-//! - **S4.** Treat a refusal as final only for a request delivered once, with no copy in flight.
-//!   Otherwise an earlier copy may have been admitted, and the record diverges as in S1. A refused
-//!   request's state for the next epoch can still settle, with or without a replayed copy, until
-//!   the post of the request's epoch settles a map other than the one that state builds on, with
-//!   the same outcome.
+//! - **S4.** Drop a refused request only if it was delivered once, with no copy in flight.
+//!   Otherwise an earlier copy may have been admitted, and the record diverges as in S1. A refusal
+//!   revokes neither state, so a replayed copy or a faulty operator can still settle a dropped
+//!   request in its epoch or the next, and only the posts of those epochs show it (S5).
 //!
-//! - **S5.** Resolve a pending request against each post from its epoch on, in epoch order, before
-//!   dropping it or building on a posted row root. The request settled in epoch `e` if it has a
-//!   state of `e` whose root equals the row root the post of `e` proves. Its state of `e + 1` can
-//!   still settle only if it builds on that row root, and the request is dropped once none of its
-//!   states can settle. Otherwise the sender drops a request a close settled, or builds on the
-//!   wrong root.
+//! - **S5.** Resolve the post of every epoch the sender signed a state for, in epoch order. Resolve
+//!   a pending request against each post from its epoch on before dropping it or building on a
+//!   posted row root. The request settled in epoch `e` if it has a state of `e` whose root equals
+//!   the row root the post of `e` proves, and that state's map becomes the map recorded for `e`.
+//!   Its state of `e + 1` can still settle only if it builds on that row root, and the request is
+//!   dropped once none of its states can settle. Then compare the row root with the root of the map
+//!   recorded for `e`, or with the empty map's root when none is recorded. A different root shows
+//!   that the close settled another map, such as a dropped request's, and openings of the row show
+//!   its payments (V6). Otherwise the sender drops a request a close settled, builds on the wrong
+//!   root, or never learns that a close settled a map it did not record.
 //!
 //! # Operator
 //!
@@ -485,12 +488,13 @@
 //!   [ApplyError::InvalidCheckpoint] until it recovers by reopening at a retained posted commit, by
 //!   replaying persisted posted closes, or by state sync to a posted root.
 //!
-//! - **V6.** Keep each posted matrix while receivers may still audit it, and serve openings
-//!   ([Matrix::open]). Serve each close and the requests it processes to validators that did not
-//!   check it. Keep the whole payout log, and serve payout proofs ([PayoutProof]) under the payouts
-//!   root of the last close applied, with its epoch (L6), before and after a halt. After a halt,
-//!   also serve balance proofs under the last posted balances root. Otherwise receivers cannot
-//!   challenge, peers cannot apply the close, and accounts cannot withdraw their payouts or claim.
+//! - **V6.** Keep each posted matrix while receivers may still audit it or senders resolve it (S5),
+//!   and serve openings ([Matrix::open]). Serve each close and the requests it processes to
+//!   validators that did not check it. Keep the whole payout log, and serve payout proofs
+//!   ([PayoutProof]) under the payouts root of the last close applied, with its epoch (L6), before
+//!   and after a halt. After a halt, also serve balance proofs under the last posted balances root.
+//!   Otherwise receivers cannot challenge, senders cannot resolve posts, peers cannot apply the
+//!   close, and accounts cannot withdraw their payouts or claim.
 //!
 //! - **V7.** Decode closes with the deployment's [Limits]. Otherwise the validator rejects valid
 //!   closes or attests closes beyond the agreed limits.
