@@ -1,8 +1,9 @@
 //! Database batch lifecycle and state sync for [`Stateful`](super::Stateful).
 //!
 //! `db` defines the traits a storage backend implements to be driven by
-//! [`Stateful`](super::Stateful) and implements them for QMDB databases ([`any`], [`current`],
-//! [`immutable`], [`keyless`]). [`p2p`] fetches and serves state sync data over the network.
+//! [`Stateful`](super::Stateful) and implements them for QMDB databases ([`any`], [`compact`],
+//! [`current`], [`immutable`], [`keyless`]). [`p2p`] fetches and serves state sync data over the
+//! network.
 //!
 //! # Batch Lifecycle
 //!
@@ -115,6 +116,7 @@ use std::{
 use tracing::debug;
 
 pub mod any;
+pub mod compact;
 pub mod current;
 pub mod immutable;
 pub mod keyless;
@@ -2284,7 +2286,6 @@ mod tests {
             storage_immutable::CompactConfig {
                 strategy: Sequential,
                 witness: variable_journal_config(suffix, ()),
-                commit_codec_config: (),
             }
         }
 
@@ -2293,8 +2294,7 @@ mod tests {
         ) -> storage_immutable::variable::CompactConfig<((), ()), Sequential> {
             storage_immutable::CompactConfig {
                 strategy: Sequential,
-                witness: variable_journal_config(suffix, ()),
-                commit_codec_config: ((), ()),
+                witness: variable_journal_config(suffix, ((), ())),
             }
         }
 
@@ -2304,7 +2304,6 @@ mod tests {
             storage_keyless::CompactConfig {
                 strategy: Sequential,
                 witness: variable_journal_config(suffix, ()),
-                commit_codec_config: (),
             }
         }
 
@@ -2314,7 +2313,6 @@ mod tests {
             storage_keyless::CompactConfig {
                 strategy: Sequential,
                 witness: variable_journal_config(suffix, ()),
-                commit_codec_config: (),
             }
         }
 

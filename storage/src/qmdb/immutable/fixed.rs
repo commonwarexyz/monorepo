@@ -150,7 +150,6 @@ mod tests {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
-            commit_codec_config: (),
         };
         CompactDb::init(context, cfg, None).await.unwrap()
     }
