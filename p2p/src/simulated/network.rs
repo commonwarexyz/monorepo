@@ -35,7 +35,7 @@ use futures::future;
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, VecDeque, btree_map},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     fmt::Debug,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroUsize,
@@ -120,8 +120,7 @@ struct PeerRefCounts {
     secondary: usize,
 }
 
-/// The most recent peer sets tracked either through the network-wide manager or through the
-/// managers of one peer.
+/// The most recent peer sets tracked by one peer, or through the network-wide manager.
 struct Tracker<P: PublicKey> {
     // Primary and secondary peer sets indexed by peer set ID.
     sets: BTreeMap<u64, PeerSetsAtIndex<P>>,
@@ -134,10 +133,20 @@ struct Tracker<P: PublicKey> {
 }
 
 impl<P: PublicKey> Tracker<P> {
+    /// Returns a tracker with no peer sets and no subscribers.
     const fn new() -> Self {
         Self {
             sets: BTreeMap::new(),
             counts: BTreeMap::new(),
+            subscribers: Vec::new(),
+        }
+    }
+
+    /// Returns a tracker that starts with the same peer sets and has no subscribers.
+    fn fork(&self) -> Self {
+        Self {
+            sets: self.sets.clone(),
+            counts: self.counts.clone(),
             subscribers: Vec::new(),
         }
     }
@@ -161,24 +170,9 @@ impl<P: PublicKey> Tracker<P> {
 
     /// Returns whether `id` is newer than every tracked peer set.
     fn accepts(&self, id: u64) -> bool {
-        // Check if peer set already exists
-        if self.sets.contains_key(&id) {
-            warn!(id, "peer set already exists");
-            return false;
-        }
-
-        // Ensure that peer set is monotonically increasing
-        if let Some((last, _)) = self.sets.last_key_value()
-            && id <= *last
-        {
-            warn!(
-                new_id = id,
-                old_id = last,
-                "attempted to register peer set with non-monotonically increasing ID"
-            );
-            return false;
-        }
-        true
+        self.sets
+            .last_key_value()
+            .is_none_or(|(newest, _)| id > *newest)
     }
 
     /// Track `peers` at an accepted `id`, evicting the oldest sets beyond `limit`, and send the
@@ -317,12 +311,9 @@ pub struct Config {
     /// allowing byzantine actors the ability to continue sending messages.
     pub disconnect_on_block: bool,
 
-    /// The maximum number of peer sets to track (`tracked_peer_sets`). When a new peer set is
-    /// tracked and this limit is exceeded, the oldest peer set is removed. Messages between peers
-    /// that do not each track the other are dropped.
-    ///
-    /// The limit applies separately to the network-wide peer sets and to each peer's own (see
-    /// [`ingress::Control::manager`]).
+    /// The maximum number of peer sets each peer tracks (`tracked_peer_sets`). When a peer tracks
+    /// a new peer set and this limit is exceeded, its oldest peer set is removed. Messages between
+    /// peers that do not each track the other are dropped.
     pub tracked_peer_sets: NonZeroUsize,
 }
 
@@ -360,11 +351,8 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     // A map from a public key to a peer
     peers: BTreeMap<P, Peer<P>>,
 
-    // Peer sets tracked through the network-wide manager, used by peers without their own.
+    // Peer sets tracked through the network-wide manager. A new peer starts with a copy.
     network_tracker: Tracker<P>,
-
-    // Peer sets tracked through each peer's own managers.
-    own_trackers: BTreeMap<P, Tracker<P>>,
 
     // Maximum number of peer sets each tracker keeps.
     tracked_peer_sets: NonZeroUsize,
@@ -428,7 +416,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 links: HashMap::new(),
                 peers: BTreeMap::new(),
                 network_tracker: Tracker::new(),
-                own_trackers: BTreeMap::new(),
                 blocks: BTreeSet::new(),
                 transmitter: transmitter::State::new(),
                 peer_subscribers: Vec::new(),
@@ -479,14 +466,19 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         (network, oracle)
     }
 
-    /// Apply a tracked peer set to the network-wide tracker, or to `owner`'s own tracker.
+    /// Track `peers` at `id` for `owner` alone, or through the network-wide manager when there is
+    /// no owner. A network-wide set also reaches every peer whose sets are all older than `id`.
+    ///
+    /// Returns whether the set was tracked. A set is rejected unless `id` is newer than every set
+    /// already tracked for `owner`, or through the network-wide manager when there is no owner.
     async fn register_tracked_peer_set(
         &mut self,
         owner: Option<&P>,
         id: u64,
         peers: TrackedPeers<P>,
     ) -> bool {
-        if !self.tracker_mut(owner).accepts(id) {
+        // Reject an id that is not newer than every set already tracked.
+        if !self.tracker_mut(owner).await.accepts(id) {
             return false;
         }
 
@@ -496,44 +488,39 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             self.ensure_peer_exists(public_key).await;
         }
 
+        // Track the set for its owner. Without an owner, track it through the network-wide
+        // manager and for every peer whose sets are all older than `id`.
         let limit = self.tracked_peer_sets;
-        self.tracker_mut(owner).track(id, peers, limit);
+        if owner.is_none() {
+            for peer in self.peers.values_mut() {
+                if peer.tracker.accepts(id) {
+                    peer.tracker.track(id, peers.clone(), limit);
+                }
+            }
+        }
+        self.tracker_mut(owner).await.track(id, peers, limit);
         true
     }
 
-    /// The network-wide tracker, or `owner`'s own tracker.
-    ///
-    /// Panics if `owner` has no tracker. [`ingress::Control`] enqueues
-    /// [`ingress::Message::OwnPeerSets`] before it returns a manager for `owner`, so the tracker
-    /// exists before any of that manager's messages arrive.
-    fn tracker(&self, owner: Option<&P>) -> &Tracker<P> {
-        owner.map_or(&self.network_tracker, |owner| {
-            self.own_trackers
-                .get(owner)
-                .expect("own peer sets must be created before use")
-        })
-    }
-
-    /// Mutable form of [`Self::tracker`].
-    fn tracker_mut(&mut self, owner: Option<&P>) -> &mut Tracker<P> {
-        match owner {
-            Some(owner) => self
-                .own_trackers
-                .get_mut(owner)
-                .expect("own peer sets must be created before use"),
-            None => &mut self.network_tracker,
-        }
-    }
-
-    /// The peer sets `peer` follows. These are its own once [`ingress::Control`] has given it
-    /// some, and the network-wide ones otherwise.
-    fn tracked_by(&self, peer: &P) -> &Tracker<P> {
-        self.own_trackers.get(peer).unwrap_or(&self.network_tracker)
+    /// The tracker of `owner`, or of the network-wide manager when there is no owner. Creates
+    /// `owner` if it does not exist.
+    async fn tracker_mut(&mut self, owner: Option<&P>) -> &mut Tracker<P> {
+        let Some(owner) = owner else {
+            return &mut self.network_tracker;
+        };
+        self.ensure_peer_exists(owner).await;
+        &mut self
+            .peers
+            .get_mut(owner)
+            .expect("peer must exist after it is ensured")
+            .tracker
     }
 
     /// Returns whether `peer` tracks `other`.
     fn tracks(&self, peer: &P, other: &P) -> bool {
-        self.tracked_by(peer).contains(other)
+        self.peers
+            .get(peer)
+            .is_some_and(|peer| peer.tracker.contains(other))
     }
 
     /// Returns whether `origin` and `recipient` each track the other, as an authenticated network
@@ -615,14 +602,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     self.broadcast_peer_list();
                 }
             }
-            ingress::Message::OwnPeerSets { owner } => {
-                if let btree_map::Entry::Vacant(entry) = self.own_trackers.entry(owner) {
-                    entry.insert(Tracker::new());
-                    self.broadcast_peer_list();
-                }
-            }
             ingress::Message::ResetPeerSets { owner } => {
-                self.own_trackers.insert(owner, Tracker::new());
+                // Dropping the peer's tracker ends its subscriptions. Broadcast updated tracked
+                // membership to SubscribePeers subscribers.
+                *self.tracker_mut(Some(&owner)).await = Tracker::new();
                 self.broadcast_peer_list();
             }
             ingress::Message::Register {
@@ -674,10 +657,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 id,
                 response,
             } => {
-                let _ = response.send(self.tracker(owner.as_ref()).peer_set(id));
+                let _ = response.send(self.tracker_mut(owner.as_ref()).await.peer_set(id));
             }
             ingress::Message::Subscribe { owner, response } => {
-                let _ = response.send(self.tracker_mut(owner.as_ref()).subscribe());
+                let _ = response.send(self.tracker_mut(owner.as_ref()).await.subscribe());
             }
             ingress::Message::SubscribePeers { exclude, sender } => {
                 self.subscribe_connected(exclude, sender);
@@ -764,7 +747,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         }
     }
 
-    /// Ensure a peer exists, creating it if necessary.
+    /// Ensure a peer exists, creating it if necessary. A new peer starts with the peer sets
+    /// tracked through the network-wide manager.
     ///
     /// Returns the socket address of the peer.
     async fn ensure_peer_exists(&mut self, public_key: &P) -> SocketAddr {
@@ -776,6 +760,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 public_key.clone(),
                 socket,
                 self.max_frame_size,
+                self.network_tracker.fork(),
             )
             .await;
 
@@ -816,9 +801,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
     /// Broadcast updated peer list to all connected peer subscribers.
     ///
-    /// This runs when tracked membership changes ([`ingress::Message::Track`],
-    /// [`ingress::Message::OwnPeerSets`] or [`ingress::Message::ResetPeerSets`]), not when peers
-    /// are first discovered via register, links, or bandwidth limits.
+    /// This runs when tracked membership changes ([`ingress::Message::Track`] or
+    /// [`ingress::Message::ResetPeerSets`]), not when peers are first discovered via register,
+    /// links, or bandwidth limits.
     ///
     /// Subscribers whose receivers have been dropped are removed to prevent
     /// memory leaks.
@@ -832,8 +817,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
     /// Peers used when expanding [`Recipients::All`] for a sender.
     fn connected_peers_for(&self, sender: &P) -> Vec<P> {
-        self.tracked_by(sender)
-            .peers()
+        self.peers
+            .get(sender)
+            .into_iter()
+            .flat_map(|peer| peer.tracker.peers())
             .filter(|peer| *peer != sender && self.tracks(peer, sender))
             .cloned()
             .collect()
@@ -1402,6 +1389,9 @@ struct Peer<P: PublicKey> {
 
     // Control to register new channels
     control: mpsc::UnboundedSender<ChannelRegistration<P>>,
+
+    // Peer sets that the peer tracks
+    tracker: Tracker<P>,
 }
 
 impl<P: PublicKey> Peer<P> {
@@ -1409,11 +1399,13 @@ impl<P: PublicKey> Peer<P> {
     ///
     /// The peer will listen for incoming connections on the given `socket` address.
     /// `max_frame_size` is the maximum size of an internal framed message.
+    /// `tracker` holds the peer sets that the peer starts with.
     async fn new<E: Spawner + RNetwork + Metrics + Clock>(
         context: E,
         public_key: P,
         socket: SocketAddr,
         max_frame_size: u32,
+        tracker: Tracker<P>,
     ) -> Self {
         // The control is used to register channels.
         let (control_sender, mut control_receiver): (
@@ -1518,6 +1510,7 @@ impl<P: PublicKey> Peer<P> {
         Self {
             socket,
             control: control_sender,
+            tracker,
         }
     }
 
@@ -1916,7 +1909,7 @@ mod tests {
     fn test_max_peers_per_set_counts_listed_owner_once() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Limit each peer set to two identities and give peer 1 its own peer sets
+            // Limit each peer set to two identities
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
                 max_peers_per_set: NZUsize!(2),
@@ -1926,7 +1919,6 @@ mod tests {
             let (mut network, _oracle) = Network::new(context.child("network"), cfg);
             let peer_1 = ed25519::PrivateKey::from_seed(1).public_key();
             let peer_2 = ed25519::PrivateKey::from_seed(2).public_key();
-            network.own_trackers.insert(peer_1.clone(), Tracker::new());
 
             // The owner and one other peer fill the limit, so the set is accepted
             assert!(
@@ -1950,7 +1942,7 @@ mod tests {
     fn test_max_peers_per_set_counts_omitted_owner() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Limit each peer set to two identities and give peer 1 its own peer sets
+            // Limit each peer set to two identities
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
                 max_peers_per_set: NZUsize!(2),
@@ -1961,7 +1953,6 @@ mod tests {
             let peer_1 = ed25519::PrivateKey::from_seed(1).public_key();
             let peer_2 = ed25519::PrivateKey::from_seed(2).public_key();
             let peer_3 = ed25519::PrivateKey::from_seed(3).public_key();
-            network.own_trackers.insert(peer_1.clone(), Tracker::new());
 
             // Two other peers and the omitted owner exceed the limit
             network
@@ -2319,9 +2310,10 @@ mod tests {
             assert_eq!(update.all.primary.len(), 2);
             assert!(update.all.secondary.is_empty());
 
-            // Register old peer sets (ignored)
+            // Register old and repeated peer sets (ignored)
             let pk3 = ed25519::PrivateKey::from_seed(3).public_key();
             manager.track(9, Set::try_from([pk3.clone()]).unwrap());
+            manager.track(10, Set::try_from([pk3]).unwrap());
 
             // Add new peer set
             let pk4 = ed25519::PrivateKey::from_seed(4).public_key();
