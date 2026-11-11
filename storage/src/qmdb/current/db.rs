@@ -1260,14 +1260,20 @@ mod tests {
                 traits::{DbAny, UnmerkleizedBatch as _},
             },
             current::{tests::fixed_config, unordered::fixed},
+            floor::Hold,
         },
-        translator::OneCap,
+        translator::{OneCap, TwoCap},
     };
-    use commonware_codec::FixedSize;
+    use bytes::BufMut;
+    use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, ReadExt, Write};
     use commonware_cryptography::{Sha256, sha256};
     use commonware_macros::test_traced;
+    use commonware_math::algebra::Random;
+    use commonware_parallel::Sequential;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
-    use commonware_utils::bitmap::Prunable as PrunableBitMap;
+    use commonware_utils::{Array, Span, bitmap::Prunable as PrunableBitMap};
+    use core::{fmt, ops::Deref};
+    use rand::CryptoRng;
 
     const N: usize = sha256::Digest::SIZE;
 
@@ -2124,27 +2130,6 @@ mod tests {
             assert!(witness.verify::<Sha256>(&ops_root, &canonical_root));
         });
     }
-}
-
-#[cfg(test)]
-mod graft_height_tests {
-    use crate::{
-        mmr,
-        qmdb::{
-            current::{tests::fixed_config, unordered::fixed::Db},
-            floor::Hold,
-        },
-        translator::TwoCap,
-    };
-    use bytes::BufMut;
-    use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, ReadExt, Write};
-    use commonware_cryptography::{Hasher, Sha256, sha256};
-    use commonware_math::algebra::Random;
-    use commonware_parallel::{Sequential, Strategy};
-    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
-    use commonware_utils::{Array, Span};
-    use core::{fmt, ops::Deref};
-    use rand::CryptoRng;
 
     /// A 16-byte digest. Bitmap chunks must be a multiple of the digest size, so this digest
     /// admits 16-byte chunks. Their graft height of 7 lies below the maximum resident height of 8.
@@ -2226,7 +2211,7 @@ mod graft_height_tests {
         writes: u16,
         descendant: bool,
     ) -> D16 {
-        type TestDb<F> = Db<
+        type TestDb<F> = fixed::Db<
             F,
             deterministic::Context,
             sha256::Digest,

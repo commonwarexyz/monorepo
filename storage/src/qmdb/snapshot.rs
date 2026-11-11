@@ -343,6 +343,7 @@ trait Scan<F: Family, Item>: Send + Sync {
     /// The chunks to decode, in position order, for a build from `floor` to `end`.
     fn chunks(&self, floor: u64, end: u64) -> impl Iterator<Item = Range<u64>> + Send + 'static;
 
+    /// The visitor of `chunk`, one of [Self::chunks], that its decode task calls.
     fn visitor(&self, chunk: Range<u64>) -> Self::Visitor;
 
     /// Pass a routed chunk's result on. Returns false to stop the build.

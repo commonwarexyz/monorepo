@@ -177,22 +177,14 @@ pub(crate) mod test {
         Sequential,
     >;
 
-    /// Open a [DelayedTest] whose blob syncs park on `pending`.
+    /// Open a [DelayedTest] with `items_per_blob` operations per blob, whose blob syncs park on
+    /// `pending`.
     ///
     /// Init durably persists the recovered database, so while syncs park the returned future
-    /// must be driven with [drive_pending_syncs] (or the mock unblocked first). The journal
-    /// uses large pages and blobs: an apply that fills the write buffer or rolls the blob over
-    /// waits for the in-flight sync, so mid-sync applies must stay clear of both.
+    /// must be driven with [drive_pending_syncs] (or the mock unblocked first). An apply that fills
+    /// the journal's write buffer or rolls a blob over waits for the in-flight sync, so mid-sync
+    /// applies must stay clear of both.
     fn open_delayed_db(
-        context: Context,
-        suffix: &str,
-        pending: &PendingSyncs,
-    ) -> impl Future<Output = Result<DelayedTest, crate::qmdb::Error<mmr::Family>>> {
-        open_delayed_db_with_blobs(context, suffix, pending, NZU64!(1000))
-    }
-
-    /// [open_delayed_db] with `items_per_blob` operations per blob.
-    fn open_delayed_db_with_blobs(
         context: Context,
         suffix: &str,
         pending: &PendingSyncs,
@@ -297,7 +289,12 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(context.child("delayed"), "start_sync_overlap", &pending);
+            let open = open_delayed_db(
+                context.child("delayed"),
+                "start_sync_overlap",
+                &pending,
+                NZU64!(1000),
+            );
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             let key0 = Sha256::hash(&[&0u64.to_be_bytes()]);
             let value0 = Sha256::hash(&[&100u64.to_be_bytes()]);
@@ -341,9 +338,14 @@ pub(crate) mod test {
             let size = db.bounds().end;
             drop(db);
 
-            let db = open_delayed_db(context.child("reopen"), "start_sync_overlap", &pending)
-                .await
-                .unwrap();
+            let db = open_delayed_db(
+                context.child("reopen"),
+                "start_sync_overlap",
+                &pending,
+                NZU64!(1000),
+            )
+            .await
+            .unwrap();
             assert_eq!(db.root(), root);
             assert_eq!(db.bounds().end, size);
             assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
@@ -360,9 +362,14 @@ pub(crate) mod test {
             // Pass syncs through so opening the database doesn't park.
             let pending = PendingSyncs::default();
             pending.unblock();
-            let mut db = open_delayed_db(context.child("delayed"), "start_sync_fail", &pending)
-                .await
-                .unwrap();
+            let mut db = open_delayed_db(
+                context.child("delayed"),
+                "start_sync_fail",
+                &pending,
+                NZU64!(1000),
+            )
+            .await
+            .unwrap();
             let key0 = Sha256::hash(&[&0u64.to_be_bytes()]);
             let value0 = Sha256::hash(&[&100u64.to_be_bytes()]);
             db = apply_write(db, key0, value0).await;
@@ -401,13 +408,14 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let pending = PendingSyncs::default();
-            let open = open_delayed_db_with_blobs(
+            let open = open_delayed_db(
                 context.child("delayed"),
                 "start_sync_prune",
                 &pending,
                 NZU64!(7),
             );
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
+
             // Overwriting one key moves the floor up with each commit, so the prune below crosses
             // a blob.
             let key = Sha256::hash(&[&0u64.to_be_bytes()]);

@@ -11,8 +11,18 @@
 //! the pruning boundary and the digests pinned there. Startup replays the retained operations to
 //! rebuild the Merkle digests kept in memory.
 //!
-//! The frontier's boundary is also the earliest readable item. Older bytes retained in a backing
-//! blob are outside the authenticated journal's range.
+//! ```text
+//!             pins     resident nodes, at or above the resident height
+//! memory:     P   P    R       R       R       R       R       R
+//!                     / \     / \     / \     / \     / \     / \
+//!                     lower nodes, rebuilt from their region when needed
+//! disk:       pruned | o o o o o o o o o o o o o o o o o o o o o o o o |
+//!                    ^ boundary                                       ^ end
+//! frontier:   the boundary and the pins P
+//! ```
+//!
+//! Items before the Merkle structure's start are not readable, even when a backing blob still
+//! holds them.
 //!
 //! Nodes at or above [`CacheConfig::resident_height`] stay in memory. A lower node is rebuilt when
 //! needed from the operations in its aligned region of leaves.
@@ -508,6 +518,9 @@ where
     }
 
     /// Return the digests [`Family::nodes_to_pin`] lists for `location`, in that order.
+    ///
+    /// Returns [`merkle::Error::ElementPruned`] if one of them is pruned, and
+    /// [`merkle::Error::RangeOutOfBounds`] if `location` is past the end.
     pub async fn pinned_nodes_at(
         &self,
         location: Location<F>,
@@ -515,7 +528,7 @@ where
         if !location.is_valid() {
             return Err(merkle::Error::LocationOverflow(location));
         }
-        if location < self.merkle.bounds().start || location > self.size() {
+        if location > self.size() {
             return Err(merkle::Error::RangeOutOfBounds(location));
         }
         self.merkle
@@ -783,9 +796,9 @@ where
         let old = self.merkle.bounds().start;
         let boundary = Location::new(self.prune_target(*prune_loc));
         if boundary > old {
-            let pins = self.pinned_nodes_at(boundary).await?;
             // The frontier must never get ahead of durable operations, and the new boundary may be
             // justified by a buffered append (e.g. a commit operation), so commit first.
+            let pins = self.pinned_nodes_at(boundary).await?;
             self.journal = self.journal.commit().await?;
             self.frontier = self.frontier.set(boundary, pins.clone()).await?;
             self.merkle.prune(boundary, pins);
@@ -831,6 +844,8 @@ where
     H: Hasher,
     S: Strategy,
 {
+    /// Context of the tasks spawned by [Self::finish_with] and [Self::finish_hashing].
+    context: E,
     /// Operation journal awaiting finalization at `selected_end`.
     journal: C::Recovery,
     /// Durable frontier.
@@ -841,8 +856,6 @@ where
     hasher: StandardHasher<H>,
     /// Exclusive operation end chosen for publication.
     selected_end: u64,
-    /// Context of the replay task spawned by [Self::finish_with].
-    context: E,
 }
 
 impl<F, E, C, H, S> Recovery<F, E, C, H, S>
@@ -953,6 +966,9 @@ where
     {
         let journal = Arc::new(Self::persist(self.journal, self.selected_end).await?);
         let end = Location::new(journal.bounds().end);
+        self.merkle
+            .check_replay_end(journal.as_ref(), end)
+            .map_err(Error::from)?;
         let (tx, mut rx) = mpsc::channel(BUFFERED_CHUNKS);
         let sink = LeafSink {
             plan: self.merkle.chunk_plan(end, SUBTREE_HEIGHT),
@@ -1170,12 +1186,12 @@ where
             selected_end
         };
         Ok(Recovery {
+            context: context.child("replay"),
             journal,
             frontier,
             merkle,
             hasher: StandardHasher::<H>::new(bagging),
             selected_end,
-            context: context.child("replay"),
         })
     }
 }
@@ -2907,6 +2923,32 @@ mod tests {
     #[test]
     fn test_frontier_before_deletion_mmb() {
         deterministic::Runner::default().start(frontier_before_deletion::<mmb::Family>);
+    }
+
+    /// Pins at a location whose digests are pruned are [`merkle::Error::ElementPruned`], and pins
+    /// past the end are [`merkle::Error::RangeOutOfBounds`].
+    async fn pinned_nodes_at_errors<F: Family + PartialEq>(context: Context) {
+        let journal = create_journal_with_ops::<F>(context.child("initial"), "pins", 100).await;
+        let (journal, boundary) = journal.prune(Location::new(45)).await.unwrap();
+        assert!(*boundary > 1);
+        journal.pinned_nodes_at(boundary).await.unwrap();
+        assert!(matches!(
+            journal.pinned_nodes_at(Location::new(1)).await,
+            Err(merkle::Error::ElementPruned(_))
+        ));
+        assert!(matches!(
+            journal.pinned_nodes_at(Location::new(101)).await,
+            Err(merkle::Error::RangeOutOfBounds(_))
+        ));
+    }
+
+    #[test]
+    fn test_pinned_nodes_at_errors_mmr() {
+        deterministic::Runner::default().start(pinned_nodes_at_errors::<mmr::Family>);
+    }
+    #[test]
+    fn test_pinned_nodes_at_errors_mmb() {
+        deterministic::Runner::default().start(pinned_nodes_at_errors::<mmb::Family>);
     }
 
     /// A frontier whose pins don't match its boundary, or whose boundary is not a valid location,

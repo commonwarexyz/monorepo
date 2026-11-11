@@ -226,7 +226,9 @@ impl<F: Family> Encoded<F> {
 /// `2^height` leaves, with partial chunks before the first and after the last.
 #[derive(Clone)]
 pub(crate) struct ChunkPlan {
+    /// The leaves to replay.
     range: Range<u64>,
+    /// The height of a whole subtree chunk.
     height: u32,
     /// The lowest height of a subtree's nodes that appending it reads. It is the resident height,
     /// or the subtree root's if lower.
@@ -268,12 +270,17 @@ impl ChunkPlan {
 
 /// Hashes the operations of one replay chunk, given in position order.
 pub(crate) struct ChunkHasher<F: Family, H: Hasher<F>> {
+    /// The leaves of the chunk.
     chunk: Range<u64>,
     /// Whether the chunk is a whole aligned subtree.
     is_subtree: bool,
+    /// See [ChunkPlan::height].
     height: u32,
+    /// See [ChunkPlan::min_height].
     min_height: u32,
+    /// Hashes the leaves and, for a subtree, the nodes above them.
     hasher: H,
+    /// The digests of the operations pushed so far.
     leaves: Vec<H::Digest>,
     /// Scratch for each operation's encoding.
     encoded: Vec<u8>,
@@ -436,16 +443,24 @@ struct TaskJournal<C> {
 
 /// The Merkle digests of an authenticated journal. Only `mem` is shared with batches.
 pub(crate) struct Tree<F: Family, D: Digest, S: Strategy> {
+    /// Nodes added since the last [Self::flush], plus the peaks and pins it keeps.
     mem: Arc<Mem<F, D>>,
+    /// Boxed to keep the database handles that move this tree by value small enough for
+    /// debug-build test stacks.
     metrics: Box<Metrics>,
     /// First retained leaf.
     boundary: Location<F>,
     /// Digests pinned at the boundary, which [Self::flush] keeps pinned in `mem`.
     pins: BTreeMap<Position<F>, D>,
+    /// Nodes at or above the resident height.
     resident: Resident<D>,
+    /// The regions below the resident height that requests rebuild.
     regions: Regions,
+    /// Hashes batches and region fills.
     strategy: S,
+    /// Read buffer for a replay.
     replay_buffer: NonZeroUsize,
+    /// Chunks a startup replay hashes at once.
     replay_concurrency: NonZeroUsize,
 }
 
@@ -488,6 +503,24 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         let _ = self.metrics.resident_bytes.try_set(bytes);
     }
 
+    /// Check that `journal` holds every operation from the current size to `end`, so a replay to
+    /// `end` can read them.
+    pub(crate) fn check_replay_end<C: Contiguous>(
+        &self,
+        journal: &C,
+        end: Location<F>,
+    ) -> Result<(), merkle::Error<F>> {
+        let bounds = journal.bounds();
+        if !end.is_valid()
+            || end < self.leaves()
+            || *end > bounds.end
+            || *self.leaves() < bounds.start
+        {
+            return Err(merkle::Error::RangeOutOfBounds(end));
+        }
+        Ok(())
+    }
+
     /// Append the digests of the operations from the current size to `end`.
     pub(crate) async fn replay<C, H>(
         mut self,
@@ -500,13 +533,8 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         C: Contiguous<Item: EncodeShared>,
         H: Hasher<F, Digest = D> + 'static,
     {
-        if !end.is_valid()
-            || end < self.leaves()
-            || *end > journal.bounds().end
-            || *self.leaves() < journal.bounds().start
-        {
-            return Err(merkle::Error::RangeOutOfBounds(end).into());
-        }
+        self.check_replay_end(journal, end)?;
+
         // Each operation is read once, so its pages are not kept in the OS page cache.
         let stream = journal
             .replay(
@@ -521,6 +549,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         let mut loc = self.leaves();
         let mut pending = Vec::new().into_iter();
         let mut next = Self::read_encoded(&mut stream, &mut pending, loc, max_items).await?;
+
         // Read each batch while the previous one hashes.
         while !next.leaves.is_empty() {
             loc += next.leaves.len() as u64;
@@ -655,13 +684,10 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         C: Contiguous<Item: EncodeShared> + 'static,
         H: Hasher<F, Digest = D> + 'static,
     {
-        if !end.is_valid()
-            || end < self.leaves()
-            || *end > journal.bounds().end
-            || *self.leaves() < journal.bounds().start
-        {
-            return Err(merkle::Error::RangeOutOfBounds(end).into());
-        }
+        self.check_replay_end(journal.as_ref(), end)?;
+
+        // Each spawned task reads and hashes one chunk. It holds the journal and a `released`
+        // sender, and returns the chunk's digests. Returns false once every chunk is spawned.
         let plan = self.chunk_plan(end, height);
         let buffer = self.replay_buffer;
         let mut chunks = plan.chunks();
@@ -682,13 +708,16 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
             true
         };
 
-        // Hash chunks ahead of appending them, and append them in order.
+        // Start up to `replay_concurrency` chunks. `pending` holds them in position order.
         let mut pending = VecDeque::new();
         for _ in 0..self.replay_concurrency.get() {
             if !spawn_next(&mut pending) {
                 break;
             }
         }
+
+        // Append the oldest chunk once its task finishes, and start the next chunk in its place,
+        // so the tree grows in order while later chunks hash.
         while let Some(task) = pending.pop_front() {
             let appended = match task.join().await {
                 Ok(Ok(chunk)) => {
@@ -754,14 +783,22 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
                 "chunk does not start at the end",
             ));
         }
+
+        // The tree grows by the subtree's leaves. `initial` is its size before.
         let width = 1u64 << subtree.height;
         let initial = self.size();
         let leaves = Location::new(subtree.start + width);
+
+        // Record every resident node born by the new end. A node in the subtree is read from it,
+        // and a node above its root is hashed from its children. `computed` holds those hashes.
         let mut computed = BTreeMap::new();
         let Self { mem, resident, .. } = &mut self;
         resident.extend_with(F::location_to_position(leaves), |h, ordinal| {
             subtree.node(mem, hasher, &mut computed, ordinal << h, h)
         })?;
+
+        // Move `mem` to the new end without its leaves. It needs only the peaks there, and those
+        // born before `initial` are already in it.
         let peaks = F::nodes_to_pin(leaves)
             .filter(|&pos| pos >= initial)
             .map(|pos| {
@@ -771,6 +808,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
             })
             .collect::<Result<Vec<_>, merkle::Error<F>>>()?;
         Arc::make_mut(mem).skip_to(leaves, peaks)?;
+
         self.metrics.replayed_leaves.inc_by(width);
         self.flush();
         Ok(self)
@@ -887,6 +925,8 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         C: Contiguous<Item: EncodeShared>,
         H: Hasher<F, Digest = D> + 'static,
     {
+        // Serve each node held in memory. Group the rest by the region that rebuilds them, as
+        // `(index in result, slot in region)` pairs, so each region is filled once.
         let mut result = vec![D::EMPTY; positions.len()];
         let mut fills = BTreeMap::<u64, Vec<(usize, usize)>>::new();
         let mut resident_hits = 0;
@@ -910,6 +950,8 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         if fills.is_empty() {
             return Ok(result);
         }
+
+        // Rebuild up to `CONCURRENT_FILLS` regions at once, copying the wanted nodes out of each.
         let mut fills = stream::iter(fills)
             .map(|(region, wanted)| async move {
                 let filled = self.fill_region(journal, hasher, region).await?;
@@ -1329,6 +1371,8 @@ mod tests {
                             "subtree {subtree}, concurrency {concurrency}, resident {resident}, \
                              boundary {boundary}, end {end}"
                         );
+
+                        // Open two trees at the boundary, pinned with the oracle's digests.
                         let pins: Vec<_> = F::nodes_to_pin(Location::new(boundary))
                             .map(|p| expected.get_node(p).unwrap())
                             .collect();
@@ -1346,6 +1390,8 @@ mod tests {
                             )
                             .unwrap()
                         };
+
+                        // Replay one in batches and the other in subtrees.
                         let batched = open()
                             .replay(&*ops, &hasher, Location::new(end), NZU64!(7))
                             .await
@@ -1362,6 +1408,8 @@ mod tests {
                             )
                             .await
                             .unwrap();
+
+                        // Both hold the same size, root, pins and resident nodes.
                         assert_eq!(subtrees.size(), batched.size(), "{case}");
                         assert_eq!(
                             subtrees.root(&hasher, 0).unwrap(),
@@ -1378,6 +1426,8 @@ mod tests {
                             resident_len(&batched.resident),
                             "{case}"
                         );
+
+                        // Every node from the boundary on, rebuilt or resident, matches the oracle.
                         let first = *F::location_to_position(Location::new(boundary));
                         let positions: Vec<_> =
                             (first..*subtrees.size()).map(Position::new).collect();

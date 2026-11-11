@@ -277,8 +277,8 @@ impl Graftable for Family {
             return *Self::leftmost_leaf(pos, 0) + 1;
         }
 
-        let width = 1u64.checked_shl(height).expect("height excessively large");
         // `base` is the leaf count at which all leaves in the subtree have been appended.
+        let width = 1u64.checked_shl(height).expect("height excessively large");
         let base = Self::leftmost_leaf(pos, height)
             .checked_add(width)
             .expect("birth size overflow");

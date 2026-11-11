@@ -403,22 +403,14 @@ mod tests {
         Sequential,
     >;
 
-    /// Open a [DelayedDb] whose blob syncs park on `pending`.
+    /// Open a [DelayedDb] with `items_per_blob` operations per blob, whose blob syncs park on
+    /// `pending`.
     ///
     /// Init durably persists the recovered database, so while syncs park the returned future
-    /// must be driven with [drive_pending_syncs] (or the mock unblocked first). The journal
-    /// uses large pages and blobs: an apply that fills the write buffer or rolls the blob over
-    /// waits for the in-flight sync, so mid-sync applies must stay clear of both.
+    /// must be driven with [drive_pending_syncs] (or the mock unblocked first). An apply that fills
+    /// the journal's write buffer or rolls a blob over waits for the in-flight sync, so mid-sync
+    /// applies must stay clear of both.
     fn open_delayed_db(
-        context: deterministic::Context,
-        suffix: &str,
-        pending: &PendingSyncs,
-    ) -> impl Future<Output = Result<DelayedDb, Error<mmr::Family>>> {
-        open_delayed_db_with_blobs(context, suffix, pending, NZU64!(1000))
-    }
-
-    /// [open_delayed_db] with `items_per_blob` operations per blob.
-    fn open_delayed_db_with_blobs(
         context: deterministic::Context,
         suffix: &str,
         pending: &PendingSyncs,
@@ -460,7 +452,12 @@ mod tests {
     fn test_fixed_start_sync_overlaps_work() {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(ctx.child("delayed"), "start-sync-overlap", &pending);
+            let open = open_delayed_db(
+                ctx.child("delayed"),
+                "start-sync-overlap",
+                &pending,
+                NZU64!(1000),
+            );
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             let key0 = Sha256::fill(1u8);
             let value0 = Sha256::fill(2u8);
@@ -505,9 +502,14 @@ mod tests {
             let root = db.root();
             drop(db);
 
-            let db = open_delayed_db(ctx.child("reopen"), "start-sync-overlap", &pending)
-                .await
-                .unwrap();
+            let db = open_delayed_db(
+                ctx.child("reopen"),
+                "start-sync-overlap",
+                &pending,
+                NZU64!(1000),
+            )
+            .await
+            .unwrap();
             assert_eq!(db.root(), root);
             assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
             db.destroy().await.unwrap();
@@ -518,7 +520,12 @@ mod tests {
     fn test_fixed_apply_indexes_while_journal_waits() {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|ctx| async move {
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(ctx.child("delayed"), "apply-overlap", &pending);
+            let open = open_delayed_db(
+                ctx.child("delayed"),
+                "apply-overlap",
+                &pending,
+                NZU64!(1000),
+            );
             let db = drive_pending_syncs(&pending, open).await.unwrap();
             let db = apply_set(db, Sha256::fill(1u8), Sha256::fill(101u8), Location::new(0)).await;
             let (db, handle) = db.start_sync().await.unwrap();
@@ -555,7 +562,7 @@ mod tests {
             let db = db.sync().await.unwrap();
             drop(db);
 
-            let db = open_delayed_db(ctx.child("reopen"), "apply-overlap", &pending)
+            let db = open_delayed_db(ctx.child("reopen"), "apply-overlap", &pending, NZU64!(1000))
                 .await
                 .unwrap();
             assert_eq!(db.root(), root);
@@ -577,9 +584,14 @@ mod tests {
             // Pass syncs through so opening the database doesn't park.
             let pending = PendingSyncs::default();
             pending.unblock();
-            let mut db = open_delayed_db(ctx.child("delayed"), "start-sync-fail", &pending)
-                .await
-                .unwrap();
+            let mut db = open_delayed_db(
+                ctx.child("delayed"),
+                "start-sync-fail",
+                &pending,
+                NZU64!(1000),
+            )
+            .await
+            .unwrap();
             let floor = db.inactivity_floor();
             db = apply_set(db, Sha256::fill(1u8), Sha256::fill(2u8), floor).await;
 
@@ -612,9 +624,14 @@ mod tests {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
             pending.unblock();
-            let mut db = open_delayed_db(ctx.child("delayed"), "start-sync-recovery", &pending)
-                .await
-                .unwrap();
+            let mut db = open_delayed_db(
+                ctx.child("delayed"),
+                "start-sync-recovery",
+                &pending,
+                NZU64!(1000),
+            )
+            .await
+            .unwrap();
             let key = Sha256::fill(1u8);
             let value = Sha256::fill(2u8);
             let floor = db.inactivity_floor();
@@ -626,9 +643,14 @@ mod tests {
             let root = db.root();
             drop(db);
 
-            let db = open_delayed_db(ctx.child("reopen"), "start-sync-recovery", &pending)
-                .await
-                .unwrap();
+            let db = open_delayed_db(
+                ctx.child("reopen"),
+                "start-sync-recovery",
+                &pending,
+                NZU64!(1000),
+            )
+            .await
+            .unwrap();
             assert_eq!(db.root(), root);
             assert_eq!(db.get(&key).await.unwrap(), Some(value));
             db.destroy().await.unwrap();
@@ -640,7 +662,7 @@ mod tests {
     fn test_fixed_start_sync_prune_waits() {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
-            let open = open_delayed_db_with_blobs(
+            let open = open_delayed_db(
                 ctx.child("delayed"),
                 "start-sync-prune",
                 &pending,

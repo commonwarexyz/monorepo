@@ -39,8 +39,6 @@ where
 
     /// Returns a [Db](immutable::Db) initialized from data collected in the sync process.
     ///
-    /// # Behavior
-    ///
     /// The range start becomes the pruning boundary, with `pinned_nodes` as its pinned digests,
     /// and the Merkle digests are rebuilt by replaying the log from there.
     ///

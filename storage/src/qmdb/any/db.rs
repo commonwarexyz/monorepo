@@ -628,9 +628,9 @@ where
         // Extend the bitmap up to the inactivity floor (zero-fill), then append the replayed
         // suffix, all under a single lock acquisition.
         {
-            let mut guard = bitmap.write();
             // A caller-supplied bitmap must be pruned to a chunk boundary at or below the
             // inactivity floor. Anything past it would make `extend_to` silently leave gaps.
+            let mut guard = bitmap.write();
             assert!(
                 guard.pruned_bits() <= *inactivity_floor_loc,
                 "shared_bitmap pruned_bits {} exceeds inactivity_floor_loc {}",

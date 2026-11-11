@@ -168,8 +168,7 @@ pub trait Family: Copy + Debug + Default + Send + Sync + 'static {
     ///
     /// # Panics
     ///
-    /// Panics if `height` is excessively large (e.g., `>= 63`), or if the resulting position
-    /// computation overflows the bounds of the underlying numeric types.
+    /// Panics if `height` is too large, or if the position overflows a `u64`.
     fn subtree_root_position(leaf_start: Location<Self>, height: u32) -> Position<Self>;
 
     /// Return the location of the leftmost leaf covered by the node at `pos` with `height`. For a
@@ -177,8 +176,8 @@ pub trait Family: Copy + Debug + Default + Send + Sync + 'static {
     ///
     /// # Panics
     ///
-    /// Panics if `height` is excessively large (e.g., `>= 63`), or if an invalid combination of
-    /// `pos` and `height` results in arithmetic underflow/overflow.
+    /// Panics if `height` is too large, or if `pos` is not a node at `height` and computing its
+    /// leaf underflows or overflows a `u64`.
     fn leftmost_leaf(pos: Position<Self>, height: u32) -> Location<Self>;
 
     /// Return the height of the node at `pos`.
