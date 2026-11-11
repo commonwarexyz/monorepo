@@ -103,7 +103,7 @@ pub mod any;
 pub(crate) mod bitmap;
 mod cache;
 pub mod chain;
-pub(crate) mod compact;
+pub mod compact;
 #[cfg(test)]
 mod conformance;
 pub mod current;
@@ -358,8 +358,8 @@ pub enum Error<F: Family> {
     #[error("key exists")]
     KeyExists,
 
-    /// A snapshot location does not hold a set, or a compact sync result is not exactly one
-    /// commit at the expected location. The payload is that location.
+    /// A compact sync result is not exactly one commit at the expected location. The payload is
+    /// that location.
     #[error("unexpected data at location: {0}")]
     UnexpectedData(Location<F>),
 

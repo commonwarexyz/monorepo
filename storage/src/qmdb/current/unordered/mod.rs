@@ -7,7 +7,7 @@
 //! - [fixed]: Variant optimized for values of fixed size.
 //! - [variable]: Variant for values of variable size.
 
-pub mod db;
+pub(crate) mod db;
 pub mod fixed;
 pub mod proof;
 pub mod variable;

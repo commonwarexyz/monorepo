@@ -336,7 +336,10 @@ where
 
         for (op, group) in ops.into_iter().zip(candidates.chunk_by(same_pos)) {
             let Operation::Set(k, v) = op else {
-                return Err(Error::UnexpectedData(Location::new(group[0].1)));
+                unreachable!(
+                    "location does not reference set operation. loc={}",
+                    group[0].1
+                );
             };
             let mut pending = None;
             for &(key_idx, _) in group {
@@ -368,7 +371,7 @@ where
         }
 
         let Operation::Set(k, v) = reader.read(*loc).await? else {
-            return Err(Error::UnexpectedData(loc));
+            unreachable!("location does not reference set operation. loc={loc}");
         };
 
         if k != *key { Ok(None) } else { Ok(Some(v)) }

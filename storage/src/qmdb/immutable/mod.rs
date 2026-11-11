@@ -3572,37 +3572,4 @@ pub(super) mod tests {
 
         db.destroy().await.unwrap();
     }
-
-    /// `get_many` reports unexpected data when the snapshot points at a non-`Set` operation.
-    #[boxed]
-    pub(crate) async fn run_get_many_unexpected_data<F: Family, V, C>(
-        context: deterministic::Context,
-        open_db: impl Fn(
-            deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
-    ) where
-        V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
-        C::Item: EncodeShared,
-    {
-        let db = open_db(context.child("db")).await;
-
-        let key = Sha256::fill(1u8);
-        let value = Sha256::fill(11u8);
-        let merkleized = db.new_batch().set(key, value).merkleize(&db).await.unwrap();
-        let db = db.apply_batch(merkleized).await.unwrap();
-        let mut db = db.commit().await.unwrap();
-
-        let bad_key = Sha256::fill(99u8);
-        let bad_loc = db.bounds().end - 1;
-        db.snapshot.insert(&bad_key, *bad_loc);
-
-        let err = db.get(&bad_key).await.unwrap_err();
-        assert!(matches!(err, Error::UnexpectedData(loc) if loc == bad_loc));
-
-        let err = db.get_many(&[&bad_key]).await.unwrap_err();
-        assert!(matches!(err, Error::UnexpectedData(loc) if loc == bad_loc));
-
-        db.destroy().await.unwrap();
-    }
 }
