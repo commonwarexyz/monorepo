@@ -291,16 +291,6 @@ impl Scalar {
         Self(montgomery::add(&self.0, &rhs.0, &MODULUS))
     }
 
-    /// Returns `self - rhs`.
-    const fn sub_inner(self, rhs: Self) -> Self {
-        self.add_inner(rhs.neg_inner())
-    }
-
-    /// Returns `-self`.
-    const fn neg_inner(self) -> Self {
-        Self(montgomery::neg(&self.0, &MODULUS))
-    }
-
     /// Returns `self * rhs`.
     const fn mul_inner(self, rhs: Self) -> Self {
         Self(montgomery::mul(&self.0, &rhs.0, &MODULUS, INV))
@@ -317,31 +307,6 @@ impl Scalar {
         let mut exponent = MODULUS;
         exponent[0] -= 2;
         self.pow(exponent)
-    }
-
-    /// Returns `self / 2`.
-    const fn div_2_inner(self) -> Self {
-        // Halving commutes with the Montgomery factor: add r when the representative is odd,
-        // then shift. The sum is below 2r < 2^256, so it fits in four words.
-        let mask = (self.0[0] & 1).wrapping_neg();
-        let mut sum = [0u64; WORDS];
-        let mut carry = 0u64;
-        let mut i = 0;
-        while i < WORDS {
-            let wide = self.0[i] as u128 + (MODULUS[i] & mask) as u128 + carry as u128;
-            sum[i] = wide as u64;
-            carry = (wide >> 64) as u64;
-            i += 1;
-        }
-        let mut i = 0;
-        while i < WORDS {
-            sum[i] >>= 1;
-            if i + 1 < WORDS {
-                sum[i] |= sum[i + 1] << 63;
-            }
-            i += 1;
-        }
-        Self(sum)
     }
 
     /// Returns `self^exponent` for a little-endian exponent.
@@ -414,7 +379,7 @@ impl<'a> Add<&'a Self> for Scalar {
 
 impl<'a> SubAssign<&'a Self> for Scalar {
     fn sub_assign(&mut self, rhs: &'a Self) {
-        *self = self.sub_inner(*rhs);
+        *self = *self - rhs;
     }
 }
 
@@ -422,7 +387,7 @@ impl<'a> Sub<&'a Self> for Scalar {
     type Output = Self;
 
     fn sub(self, rhs: &'a Self) -> Self {
-        self.sub_inner(*rhs)
+        self.add_inner(-*rhs)
     }
 }
 
@@ -430,7 +395,7 @@ impl Neg for Scalar {
     type Output = Self;
 
     fn neg(self) -> Self {
-        self.neg_inner()
+        Self(montgomery::neg(&self.0, &MODULUS))
     }
 }
 
@@ -495,7 +460,27 @@ impl FieldNTT for Scalar {
     }
 
     fn div_2(&self) -> Self {
-        self.div_2_inner()
+        // Halving commutes with the Montgomery factor: add r when the representative is odd,
+        // then shift. The sum is below 2r < 2^256, so it fits in four words.
+        let mask = (self.0[0] & 1).wrapping_neg();
+        let mut sum = [0u64; WORDS];
+        let mut carry = 0u64;
+        let mut i = 0;
+        while i < WORDS {
+            let wide = self.0[i] as u128 + (MODULUS[i] & mask) as u128 + carry as u128;
+            sum[i] = wide as u64;
+            carry = (wide >> 64) as u64;
+            i += 1;
+        }
+        let mut i = 0;
+        while i < WORDS {
+            sum[i] >>= 1;
+            if i + 1 < WORDS {
+                sum[i] |= sum[i + 1] << 63;
+            }
+            i += 1;
+        }
+        Self(sum)
     }
 }
 
