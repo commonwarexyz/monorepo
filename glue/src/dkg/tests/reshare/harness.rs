@@ -71,8 +71,9 @@ use commonware_p2p::{
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    BufMut, Clock, Handle, IoBuf, Metrics, Quota, Spawner, Storage, Supervisor as _,
-    buffer::paged::CacheRef, deterministic::Context as DeterministicContext,
+    BufMut, Clock, Handle, IoBuf, Metrics, Quota, Runner as _, Spawner, Storage, Supervisor as _,
+    buffer::paged::CacheRef,
+    deterministic::{self, Context as DeterministicContext},
 };
 use commonware_storage::{
     archive::prunable,
@@ -1472,6 +1473,63 @@ fn restart_after_epoch_zero_pruning_does_not_reseed_share() {
             .expect("key must be an epoch-zero player");
         assert_eq!(membership, Some(Membership::Member(index)));
     });
+}
+
+/// A node's manager holds no peer sets when the node starts or restarts. It tracks sets for that
+/// node alone.
+#[test]
+fn manager_starts_node_with_empty_peer_sets() {
+    for network in [Network::Discovery, Network::Lookup] {
+        deterministic::Runner::default().start(|context| async move {
+            // Imitate the simulation plan by tracking both participants for every peer.
+            let (simulated_network, oracle) = simulated::Network::new(
+                context.child("network"),
+                simulated::Config {
+                    max_size: 1024,
+                    max_peers_per_set: NZUsize!(2),
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+            );
+            simulated_network.start();
+            let mut rng = test_rng();
+            let node = ed25519::PrivateKey::random(&mut rng).public_key();
+            let other = ed25519::PrivateKey::random(&mut rng).public_key();
+            let participants = Set::from_iter_dedup([node.clone(), other.clone()]);
+            let mut plan = oracle.manager();
+            DkgManager::track(
+                &mut plan,
+                Epoch::zero(),
+                TrackedPeers::primary(participants.clone()),
+                &Unit,
+            )
+            .expect("key-only tracking must not fail");
+            assert!(plan.peer_set(0).await.is_some());
+
+            // A starting node's manager holds no peer sets.
+            let mut manager = network.manager(&oracle, &node);
+            assert!(manager.peer_set(0).await.is_none());
+
+            // The node tracks its own set 0 and leaves the network-wide set unchanged.
+            let peers = Set::from_iter_dedup([other.clone()]);
+            let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 10_000);
+            let addresses = Map::from_iter_dedup([(other, Address::Symmetric(socket))]);
+            let directory = network.directory(&peers, &addresses);
+            DkgManager::track(
+                &mut manager,
+                Epoch::zero(),
+                TrackedPeers::primary(peers.clone()),
+                &directory,
+            )
+            .expect("tracked peer must have an address");
+            assert_eq!(manager.peer_set(0).await.unwrap().primary, peers);
+            assert_eq!(plan.peer_set(0).await.unwrap().primary, participants);
+
+            // A restarted node's manager holds no peer sets.
+            let mut restarted = network.manager(&oracle, &node);
+            assert!(restarted.peer_set(0).await.is_none());
+        });
+    }
 }
 
 /// A player whose epoch-zero share is gone before its actor starts registers a member scheme at
