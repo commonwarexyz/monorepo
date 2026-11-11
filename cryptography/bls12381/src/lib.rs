@@ -29,7 +29,7 @@ commonware_macros::stability_mod!(ALPHA, mod group);
 commonware_macros::stability_mod!(ALPHA, mod montgomery);
 
 commonware_macros::stability_scope!(ALPHA {
-    #[cfg(any(test, feature = "fuzz"))]
+    #[cfg(feature = "fuzz")]
     pub mod fuzz;
 });
 
