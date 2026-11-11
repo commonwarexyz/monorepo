@@ -654,60 +654,6 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
     });
 }
 
-/// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
-///
-/// A plain open after a stopped sync recovers the target's roots when the client pruned bitmap
-/// chunks of operations that a stopped sync then rewound out of its log.
-#[test_traced("WARN")]
-fn pr_5651_regression_open_after_rewind_below_pruned_chunks_mmr() {
-    crate::qmdb::sync::engine::tests::pr_5651_regression_open_after_rewind_below_pruned_chunks::<
-        harnesses::UnorderedVariableMmrHarness,
-    >(long_section_config("rewind-below-pruned-chunks"));
-}
-
-/// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
-///
-/// A plain open after a stopped sync recovers the target's roots when the client pruned bitmap
-/// chunks of operations that a stopped sync then rewound out of its log.
-#[test_traced("WARN")]
-fn pr_5651_regression_open_after_rewind_below_pruned_chunks_mmb() {
-    crate::qmdb::sync::engine::tests::pr_5651_regression_open_after_rewind_below_pruned_chunks::<
-        harnesses::UnorderedVariableMmbHarness,
-    >(long_section_config("rewind-below-pruned-chunks"));
-}
-
-/// A database synced to a newer target and then synced to an older one that ends before the
-/// newer range starts holds the older state.
-#[test_traced("WARN")]
-fn test_current_sync_rewinds_below_newer_start_mmr() {
-    crate::qmdb::sync::harness::test_sync_rewinds_below_newer_start::<
-        harnesses::UnorderedVariableMmrHarness,
-    >(long_section_config("rewind-below-newer-start"));
-}
-
-/// A database synced to a newer target and then synced to an older one that ends before the
-/// newer range starts holds the older state.
-#[test_traced("WARN")]
-fn test_current_sync_rewinds_below_newer_start_mmb() {
-    crate::qmdb::sync::harness::test_sync_rewinds_below_newer_start::<
-        harnesses::UnorderedVariableMmbHarness,
-    >(long_section_config("rewind-below-newer-start"));
-}
-
-/// Returns a configuration whose log sections are longer than a bitmap chunk, so a client's log
-/// keeps operations of the chunks it prunes.
-fn long_section_config(
-    suffix: &str,
-) -> crate::qmdb::current::Config<
-    crate::translator::TwoCap,
-    crate::journal::contiguous::variable::Config<((), ())>,
-    Sequential,
-> {
-    let mut config = variable_config::<crate::translator::TwoCap>(suffix);
-    config.log.items_per_section = NZU64!(4096);
-    config
-}
-
 /// Emits the `any`-specific sync tests that also run against `current` databases for `$harness`.
 macro_rules! current_sync_tests {
     ($harness:ty) => {

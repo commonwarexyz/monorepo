@@ -277,16 +277,16 @@ where
         .await?;
         let journal_size = journal.size();
 
-        // Persisted local state is valid only for operations the journal holds. The rest is
-        // discarded before any fetched operation is appended, so it cannot be read as describing
-        // the operations fetched at those locations. A journal that resumes nothing backs none
-        // of it.
-        DB::discard_local_state(
-            config.context.child("discard_local_state"),
-            &config.db_config,
-            config.target.range.start()..journal_size,
-        )
-        .await?;
+        // A journal that resumes nothing holds none of the operations that persisted local
+        // state was derived from. That state is discarded before any fetched operation is
+        // appended, so it cannot be read as describing the operations fetched in their place.
+        if journal_size == config.target.range.start() {
+            DB::discard_local_state(
+                config.context.child("discard_local_state"),
+                &config.db_config,
+            )
+            .await?;
+        }
 
         // The sync journal is the source of truth for resume. If it already
         // reaches the target, try to recover the target's pinned nodes from local
@@ -781,19 +781,18 @@ pub(crate) mod tests {
         merkle::{Proof, mmr::Family as MmrFamily},
         qmdb::sync::{
             harness::{
-                ConfigOf, DbOf, INTERRUPTED_DESTROY_OPS, InterruptedDestroy, InterruptedRewind,
-                OpOf, SyncTestHarness, interrupt_destroy, prune_to_sync_boundary,
+                DbOf, INTERRUPTED_DESTROY_OPS, InterruptedDestroy, OpOf, SyncTestHarness,
+                interrupt_destroy, prune_to_sync_boundary,
             },
             source::{self, tests::FailSource},
         },
     };
     use commonware_cryptography::{Sha256, sha256};
     use commonware_runtime::{Runner as _, deterministic};
-    use commonware_utils::{NZU64, NZUsize, non_empty_range, sync::Mutex};
+    use commonware_utils::{NZU64, NZUsize, non_empty_range};
     use rand::Rng as _;
     use std::{
         convert::Infallible,
-        ops::Range,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
@@ -803,7 +802,7 @@ pub(crate) mod tests {
     #[derive(Clone)]
     struct TestConfig {
         journal_size: u64,
-        local_state_discards: Arc<Mutex<Vec<Range<Location<MmrFamily>>>>>,
+        local_state_discards: Arc<AtomicUsize>,
         pinned_node_probes: Arc<AtomicUsize>,
     }
 
@@ -881,9 +880,8 @@ pub(crate) mod tests {
         async fn discard_local_state(
             _context: Self::Context,
             config: &Self::Config,
-            resumed: Range<Location<Self::Family>>,
         ) -> Result<(), qmdb::Error<Self::Family>> {
-            config.local_state_discards.lock().push(resumed);
+            config.local_state_discards.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
 
@@ -943,7 +941,7 @@ pub(crate) mod tests {
             apply_batch_size: NZU64!(1),
             db_config: TestConfig {
                 journal_size,
-                local_state_discards: Arc::new(Mutex::new(Vec::new())),
+                local_state_discards: Arc::new(AtomicUsize::new(0)),
                 pinned_node_probes,
             },
             update_rx: None,
@@ -1006,26 +1004,6 @@ pub(crate) mod tests {
                 operations: vec![operation],
             })),
         }
-    }
-
-    /// Runs a sync of `config` until its journal holds `stop` operations and stops it before it
-    /// builds the database, with its journal durable. Returns the size of that journal.
-    async fn stop_sync<H: SyncTestHarness>(
-        config: Config<DbOf<H>, Arc<DbOf<H>>>,
-        stop: Location<H::Family>,
-    ) -> Location<H::Family>
-    where
-        Arc<DbOf<H>>: SourceFor<DbOf<H>>,
-    {
-        let mut engine: Engine<DbOf<H>, _> = Engine::new(config).await.unwrap();
-        while engine.journal.size() < stop {
-            engine = match engine.step().await.unwrap() {
-                NextStep::Continue(engine) => engine,
-                NextStep::Complete(_) => panic!("the sync must stop before it completes"),
-            };
-        }
-        engine.journal = engine.journal.sync().await.unwrap();
-        engine.journal.size()
     }
 
     /// A boundary response keeps a fetched batch that starts at the lower bound.
@@ -1311,7 +1289,16 @@ pub(crate) mod tests {
             } else {
                 target.range.start() + 1
             };
-            stop_sync::<H>(config(context.child("first")), stop).await;
+            let mut engine: Engine<DbOf<H>, _> =
+                Engine::new(config(context.child("first"))).await.unwrap();
+            while engine.journal.size() < stop {
+                engine = match engine.step().await.unwrap() {
+                    NextStep::Continue(engine) => engine,
+                    NextStep::Complete(_) => panic!("sync completed before it was stopped"),
+                };
+            }
+            engine.journal = engine.journal.sync().await.unwrap();
+            drop(engine);
 
             // The restarted sync resumes the journal and reaches the target.
             let synced_db: DbOf<H> = crate::qmdb::sync::sync(config(context.child("second")))
@@ -1323,8 +1310,7 @@ pub(crate) mod tests {
 
             H::destroy(synced_db).await;
             H::destroy(
-                Arc::try_unwrap(target_db)
-                    .unwrap_or_else(|_| panic!("the target must have no other owner")),
+                Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc")),
             )
             .await;
         });
@@ -1382,8 +1368,16 @@ pub(crate) mod tests {
                 finish_rx: None,
                 reached_target_tx: None,
             };
-            let stopped = stop_sync::<H>(config, first_commit_end).await;
-            assert!(stopped < target.range.end());
+            let mut engine: Engine<DbOf<H>, _> = Engine::new(config).await.unwrap();
+            while engine.journal.size() < first_commit_end {
+                engine = match engine.step().await.unwrap() {
+                    NextStep::Continue(engine) => engine,
+                    NextStep::Complete(_) => panic!("sync completed before it was stopped"),
+                };
+            }
+            assert!(engine.journal.size() < target.range.end());
+            engine.journal = engine.journal.sync().await.unwrap();
+            drop(engine);
 
             // The reopened database holds the first commit under the target's roots.
             let reopened_db = H::init_db_with_config(context.child("reopened"), db_config).await;
@@ -1393,93 +1387,10 @@ pub(crate) mod tests {
 
             H::destroy(reopened_db).await;
             H::destroy(
-                Arc::try_unwrap(target_db)
-                    .unwrap_or_else(|_| panic!("the target must have no other owner")),
+                Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc")),
             )
             .await;
         });
-    }
-
-    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
-    ///
-    /// A sync into storage whose log a stopped sync rewound below the end of its Merkle structure
-    /// is itself stopped once the target's range is durable in its journal. A sync restarted over
-    /// that journal recovers the target's roots, and so does a plain open of the database.
-    pub(crate) fn pr_5651_regression_sync_stopped_after_rewind<H: SyncTestHarness>(restart: bool)
-    where
-        Arc<DbOf<H>>: SourceFor<DbOf<H>>,
-    {
-        deterministic::Runner::default().start(|mut context| async move {
-            let rewind = InterruptedRewind::<H>::new(&mut context, true).await;
-            stop_sync_after_rewind(context, rewind, restart).await;
-        });
-    }
-
-    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
-    ///
-    /// `db_config` keeps the client's log in sections longer than a bitmap chunk. The client
-    /// prunes chunks of operations that a stopped sync then rewinds out of its log. A sync into
-    /// that storage is itself stopped once the target's range is durable in its journal, and a
-    /// plain open of the database recovers the target's roots.
-    pub(crate) fn pr_5651_regression_open_after_rewind_below_pruned_chunks<H: SyncTestHarness>(
-        db_config: ConfigOf<H>,
-    ) where
-        Arc<DbOf<H>>: SourceFor<DbOf<H>>,
-    {
-        deterministic::Runner::default().start(|context| async move {
-            let rewind = InterruptedRewind::<H>::below_pruned_chunks(&context, db_config).await;
-            stop_sync_after_rewind(context, rewind, false).await;
-        });
-    }
-
-    /// Stops a sync into the client storage of `rewind` once the target's range is durable in
-    /// its journal. A restarted sync, or a plain open unless `restart`, then builds the database
-    /// from that journal and must hold the target's roots and end.
-    async fn stop_sync_after_rewind<H: SyncTestHarness>(
-        context: deterministic::Context,
-        rewind: InterruptedRewind<H>,
-        restart: bool,
-    ) where
-        Arc<DbOf<H>>: SourceFor<DbOf<H>>,
-    {
-        let InterruptedRewind {
-            target_db,
-            target,
-            canonical_root,
-            db_config,
-        } = rewind;
-        let config = |context: deterministic::Context| Config {
-            db_config: db_config.clone(),
-            fetch_batch_size: NZU64!(10),
-            target: target.clone(),
-            context,
-            source: target_db.clone(),
-            apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: NZUsize!(1),
-            update_rx: None,
-            finish_rx: None,
-            reached_target_tx: None,
-        };
-
-        // Stop the first sync before it builds the database, with its journal durable.
-        stop_sync::<H>(config(context.child("first")), target.range.end()).await;
-
-        // A restarted sync and a plain open both build the database from that journal.
-        let db: DbOf<H> = if restart {
-            crate::qmdb::sync::sync(config(context.child("second")))
-                .await
-                .unwrap()
-        } else {
-            H::init_db_with_config(context.child("reopened"), db_config.clone()).await
-        };
-        assert_eq!(H::ops_root(&db), target.root);
-        assert_eq!(H::canonical_root(&db), canonical_root);
-        assert_eq!(H::bounds(&db).end, target.range.end());
-
-        H::destroy(db).await;
-        let target_db = Arc::try_unwrap(target_db)
-            .unwrap_or_else(|_| panic!("the target must have no other owner"));
-        H::destroy(target_db).await;
     }
 
     /// Target updates keep fetched operations and keep pinned nodes only while the lower bound is
@@ -1563,16 +1474,13 @@ pub(crate) mod tests {
             let local_state_discards = config.db_config.local_state_discards.clone();
             Engine::new(config).await.unwrap();
 
-            assert_eq!(
-                *local_state_discards.lock(),
-                vec![Location::new(5)..Location::new(5)]
-            );
+            assert_eq!(local_state_discards.load(Ordering::SeqCst), 1);
             assert_eq!(pinned_node_probes.load(Ordering::SeqCst), 0);
         });
     }
 
     #[test]
-    fn new_discards_local_state_past_resumed_operations() {
+    fn new_keeps_local_state_when_journal_resumes() {
         deterministic::Runner::default().start(|context| async move {
             // A journal that holds part of the range or all of it resumes operations.
             for (label, journal_size) in [("partial", 6), ("complete", 10)] {
@@ -1584,10 +1492,7 @@ pub(crate) mod tests {
                 let local_state_discards = config.db_config.local_state_discards.clone();
                 Engine::new(config).await.unwrap();
 
-                assert_eq!(
-                    *local_state_discards.lock(),
-                    vec![Location::new(5)..Location::new(journal_size)]
-                );
+                assert_eq!(local_state_discards.load(Ordering::SeqCst), 0);
             }
         });
     }

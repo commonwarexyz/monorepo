@@ -18,8 +18,7 @@ use commonware_macros::boxed;
 use commonware_parallel::Sequential;
 use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
 use commonware_utils::{
-    NZU16, NZU64, NZUsize, channel::ring, non_empty_range, probability, range::NonEmptyRange,
-    sync::AsyncRwLock,
+    NZU16, NZU64, NZUsize, channel::ring, non_empty_range, probability, sync::AsyncRwLock,
 };
 use rand::Rng as _;
 use std::{
@@ -440,91 +439,6 @@ where
         )
         .await;
         H::destroy(reopened_db).await;
-    });
-}
-
-/// A database synced to a newer target and then synced to an older one that ends before the
-/// newer range starts holds the older state and keeps it across a reopen. `db_config` must keep
-/// the older operations in the client's log across the first sync.
-pub(crate) fn test_sync_rewinds_below_newer_start<H: SyncTestHarness>(db_config: ConfigOf<H>)
-where
-    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
-{
-    let executor = deterministic::Runner::default();
-    executor.start(|mut context| async move {
-        // The older target covers the shared base operations.
-        let older_source_config = H::config(&context.next_u64().to_string());
-        let older_source =
-            H::init_db_with_config(context.child("older_source"), older_source_config).await;
-        let older_source = H::apply_ops(older_source, H::create_ops(50), None).await;
-        let older_target = Target {
-            root: H::ops_root(&older_source),
-            range: non_empty_range!(Location::new(0), H::bounds(&older_source).end),
-        };
-        let older_root = H::canonical_root(&older_source);
-
-        // The newer source and the client extend that base alike until their sync boundary
-        // passes the older target.
-        let newer_source_config = H::config(&context.next_u64().to_string());
-        let newer_source =
-            H::init_db_with_config(context.child("newer_source"), newer_source_config).await;
-        let newer_source = H::apply_ops(newer_source, H::create_ops(50), None).await;
-        let newer_source = prune_to_sync_boundary::<H>(newer_source, 1).await;
-        let local_db = H::init_db_with_config(context.child("local"), db_config.clone()).await;
-        let local_db = H::apply_ops(local_db, H::create_ops(50), None).await;
-        let local_db = prune_to_sync_boundary::<H>(local_db, 1).await;
-        let start = H::sync_boundary(&newer_source);
-        assert!(
-            start > older_target.range.end(),
-            "the newer range must start past the older target"
-        );
-        assert_eq!(
-            H::bounds(&local_db).start,
-            Location::new(0),
-            "the client's log must keep the older operations"
-        );
-        drop(H::db_sync(local_db).await);
-
-        // The newer source then moves ahead of the client.
-        let newer_source = H::apply_ops(newer_source, H::create_ops_seeded(100, 2), None).await;
-        let newer_target = Target {
-            root: H::ops_root(&newer_source),
-            range: non_empty_range!(start, H::bounds(&newer_source).end),
-        };
-        let newer_root = H::canonical_root(&newer_source);
-
-        // Sync the client to the newer target. The start of its range becomes the pruning
-        // boundary of the client's Merkle structure.
-        let newer_source = Arc::new(newer_source);
-        let synced_db: DbOf<H> = sync::sync(Config {
-            db_config: db_config.clone(),
-            fetch_batch_size: NZU64!(10),
-            target: newer_target,
-            context: context.child("newer"),
-            source: newer_source.clone(),
-            apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: NZUsize!(1),
-            update_rx: None,
-            finish_rx: None,
-            reached_target_tx: None,
-        })
-        .await
-        .unwrap();
-        assert_eq!(H::canonical_root(&synced_db), newer_root);
-        drop(synced_db);
-
-        // Syncing the same storage to the older target must rewind it to the older state.
-        sync_and_reopen::<H>(
-            context.child("older"),
-            Arc::new(older_source),
-            older_target,
-            older_root,
-            db_config,
-        )
-        .await;
-        let newer_source = Arc::try_unwrap(newer_source)
-            .unwrap_or_else(|_| panic!("the newer source must have no other owner"));
-        H::destroy(newer_source).await;
     });
 }
 
@@ -1201,7 +1115,7 @@ impl<H: SyncTestHarness> InterruptedDestroy<H> {
         } else {
             (*start + 3 * *end) / 4
         };
-        let local_ops = usize::try_from(local_ops).expect("operation count must fit in usize");
+        let local_ops = usize::try_from(local_ops).expect("operation count fits in usize");
         let db_config = H::config(&context.next_u64().to_string());
         let local_db = H::init_db_with_config(context.child("local"), db_config.clone()).await;
         let local_db = H::apply_ops(local_db, H::create_ops_seeded(local_ops, 1), None).await;
@@ -1227,47 +1141,6 @@ impl<H: SyncTestHarness> InterruptedDestroy<H> {
     }
 }
 
-/// Syncs the client storage that `db_config` names to `target` from `target_db`. The synced
-/// database and a reopen of it must both hold the target's roots and end.
-async fn sync_and_reopen<H: SyncTestHarness>(
-    context: deterministic::Context,
-    target_db: Arc<DbOf<H>>,
-    target: Target<H::Family, sha256::Digest>,
-    canonical_root: sha256::Digest,
-    db_config: ConfigOf<H>,
-) where
-    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
-{
-    let config = Config {
-        db_config: db_config.clone(),
-        fetch_batch_size: NZU64!(10),
-        target: target.clone(),
-        context: context.child("client"),
-        source: target_db.clone(),
-        apply_batch_size: NZU64!(1024),
-        max_outstanding_requests: NZUsize!(1),
-        update_rx: None,
-        finish_rx: None,
-        reached_target_tx: None,
-    };
-    let synced_db: DbOf<H> = sync::sync(config).await.unwrap();
-    assert_eq!(H::ops_root(&synced_db), target.root);
-    assert_eq!(H::canonical_root(&synced_db), canonical_root);
-    assert_eq!(H::bounds(&synced_db).end, target.range.end());
-    drop(synced_db);
-
-    // A reopen recovers the target's state from storage alone.
-    let reopened_db = H::init_db_with_config(context.child("reopened"), db_config).await;
-    assert_eq!(H::ops_root(&reopened_db), target.root);
-    assert_eq!(H::canonical_root(&reopened_db), canonical_root);
-    assert_eq!(H::bounds(&reopened_db).end, target.range.end());
-
-    H::destroy(reopened_db).await;
-    let target_db = Arc::try_unwrap(target_db)
-        .unwrap_or_else(|_| panic!("the target must have no other owner"));
-    H::destroy(target_db).await;
-}
-
 /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
 ///
 /// A sync into storage whose destroy stopped after emptying the log completes with the target's
@@ -1287,174 +1160,34 @@ pub(crate) fn pr_5651_regression_sync_after_interrupted_destroy<H: SyncTestHarne
             canonical_root,
             db_config,
         } = InterruptedDestroy::<H>::new(&mut context, pruned, ahead).await;
-        sync_and_reopen::<H>(context, target_db, target, canonical_root, db_config).await;
-    });
-}
 
-/// Client storage whose log a stopped sync rewound below the end of its Merkle structure, beside
-/// a target that continues the rewound log with operations that storage never held.
-pub(crate) struct InterruptedRewind<H: SyncTestHarness> {
-    /// Source of the target's operations.
-    pub(crate) target_db: Arc<DbOf<H>>,
-    /// Target to sync the client storage to.
-    pub(crate) target: Target<H::Family, sha256::Digest>,
-    /// Canonical root of the target.
-    pub(crate) canonical_root: sha256::Digest,
-    /// Configuration naming the client storage.
-    pub(crate) db_config: ConfigOf<H>,
-}
-
-impl<H: SyncTestHarness> InterruptedRewind<H> {
-    /// Builds a client database and a target that share their first operations and then differ,
-    /// and rewinds the client's log to the shared operations as a sync to that older state does
-    /// when it opens its journal.
-    ///
-    /// Both databases prune the shared operations to their sync boundary when `pruned`, and the
-    /// target's range starts there. It starts at zero otherwise.
-    pub(crate) async fn new(context: &mut deterministic::Context, pruned: bool) -> Self {
-        // The client and the target apply the same operations, so their logs match.
-        let db_config = H::config(&context.next_u64().to_string());
-        let mut local_db = H::init_db_with_config(context.child("local"), db_config.clone()).await;
-        let mut target_db = H::init_db(context.child("target")).await;
-        local_db = H::apply_ops(local_db, H::create_ops(200), None).await;
-        target_db = H::apply_ops(target_db, H::create_ops(200), None).await;
-        let mut start = Location::new(0);
-        if pruned {
-            local_db = prune_to_sync_boundary::<H>(local_db, 0).await;
-            target_db = prune_to_sync_boundary::<H>(target_db, 0).await;
-            start = H::sync_boundary(&target_db);
-        }
-        let shared = non_empty_range!(start, H::bounds(&target_db).end);
-        assert_eq!(
-            H::ops_root(&local_db),
-            H::ops_root(&target_db),
-            "the client and the target must share their first operations"
-        );
-
-        // Each then applies operations that the other never holds.
-        let local_db = H::apply_ops(local_db, H::create_ops_seeded(100, 1), None).await;
-        let target_db = H::apply_ops(target_db, H::create_ops_seeded(200, 2), None).await;
-        Self::rewind(context, local_db, target_db, shared, db_config).await
-    }
-
-    /// Builds a client database and a target that share their first operations and then differ,
-    /// where the client prunes bitmap chunks that reach past the shared operations, and rewinds
-    /// the client's log to the shared operations.
-    ///
-    /// `db_config` must keep the shared operations in the client's log across that prune.
-    pub(crate) async fn below_pruned_chunks(
-        context: &deterministic::Context,
-        db_config: ConfigOf<H>,
-    ) -> Self {
-        // The client and the target apply the same operations, so their logs match.
-        let mut local_db = H::init_db_with_config(context.child("local"), db_config.clone()).await;
-        let mut target_db = H::init_db(context.child("target")).await;
-        local_db = H::apply_ops(local_db, H::create_ops(50), None).await;
-        target_db = H::apply_ops(target_db, H::create_ops(50), None).await;
-        let shared = non_empty_range!(Location::new(0), H::bounds(&target_db).end);
-        assert_eq!(
-            H::ops_root(&local_db),
-            H::ops_root(&target_db),
-            "the client and the target must share their first operations"
-        );
-
-        // The client prunes to a sync boundary past the shared operations.
-        let local_db = prune_to_sync_boundary::<H>(local_db, 1).await;
-        let boundary = H::sync_boundary(&local_db);
-        assert!(
-            boundary > shared.end(),
-            "the client must prune past the shared operations"
-        );
-        assert_eq!(
-            H::bounds(&local_db).start,
-            shared.start(),
-            "the client's log must keep the shared operations"
-        );
-
-        // The target's operations raise its inactivity floor past every chunk the client pruned,
-        // so its last commit is recoverable beside a record of those chunks.
-        while H::inactivity_floor(&target_db) < boundary {
-            target_db = H::apply_ops(target_db, H::create_ops_seeded(300, 2), None).await;
-        }
-        Self::rewind(context, local_db, target_db, shared, db_config).await
-    }
-
-    /// Makes the client database `local_db` that `db_config` names durable, then rewinds its log
-    /// to the `shared` operations as a sync to that older state does when it opens its journal.
-    /// The target is `target_db` from the start of `shared`.
-    async fn rewind(
-        context: &deterministic::Context,
-        local_db: DbOf<H>,
-        target_db: DbOf<H>,
-        shared: NonEmptyRange<Location<H::Family>>,
-        db_config: ConfigOf<H>,
-    ) -> Self {
-        // The client's own operations are durable in its log and Merkle structure.
-        let local_db = H::db_sync(local_db).await;
-        let local_end = H::bounds(&local_db).end;
-        assert!(
-            local_end > shared.end(),
-            "the client must hold operations past the shared ones"
-        );
-        drop(local_db);
-
-        // The target's range continues the shared operations with the target's own.
-        let target = Target {
-            root: H::ops_root(&target_db),
-            range: non_empty_range!(shared.start(), H::bounds(&target_db).end),
+        let config = Config {
+            db_config: db_config.clone(),
+            fetch_batch_size: NZU64!(10),
+            target: target.clone(),
+            context: context.child("client"),
+            source: target_db.clone(),
+            apply_batch_size: NZU64!(1024),
+            max_outstanding_requests: NZUsize!(1),
+            update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
         };
-        let canonical_root = H::canonical_root(&target_db);
+        let synced_db: DbOf<H> = sync::sync(config).await.unwrap();
+        assert_eq!(H::ops_root(&synced_db), target.root);
+        assert_eq!(H::canonical_root(&synced_db), canonical_root);
+        assert_eq!(H::bounds(&synced_db).end, target.range.end());
+        drop(synced_db);
 
-        // Opening the journal of a sync to the shared operations makes the rewind of the log
-        // durable, and the sync stops there.
-        let log = <JournalOf<H> as sync::Journal<H::Family>>::new(
-            context.child("rewound_log"),
-            sync::DatabaseConfig::journal_config(&db_config),
-            shared.clone(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(log.size(), shared.end());
-        drop(log);
+        // A reopen recovers the target's state from storage alone.
+        let reopened_db = H::init_db_with_config(context.child("reopened"), db_config).await;
+        assert_eq!(H::ops_root(&reopened_db), target.root);
+        assert_eq!(H::canonical_root(&reopened_db), canonical_root);
+        assert_eq!(H::bounds(&reopened_db).end, target.range.end());
 
-        // The Merkle structure keeps a leaf for every operation the log held before the rewind.
-        let hasher = qmdb::hasher::<<DbOf<H> as sync::Database>::Hasher>();
-        let merkle = merkle::full::Merkle::<H::Family, _, sha256::Digest, Sequential>::init(
-            context.child("stale_merkle"),
-            &hasher,
-            H::merkle_config(&db_config),
-        )
-        .await
-        .unwrap();
-        assert_eq!(merkle.leaves(), local_end);
-
-        Self {
-            target_db: Arc::new(target_db),
-            target,
-            canonical_root,
-            db_config,
-        }
-    }
-}
-
-/// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
-///
-/// A sync into storage whose log a stopped sync rewound below the end of its Merkle structure
-/// completes with the target's roots, and the synced state survives a reopen. The cases vary
-/// whether the target's range starts at zero.
-pub(crate) fn pr_5651_regression_sync_after_interrupted_rewind<H: SyncTestHarness>(pruned: bool)
-where
-    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
-{
-    let executor = deterministic::Runner::default();
-    executor.start(|mut context| async move {
-        let InterruptedRewind {
-            target_db,
-            target,
-            canonical_root,
-            db_config,
-        } = InterruptedRewind::<H>::new(&mut context, pruned).await;
-        sync_and_reopen::<H>(context, target_db, target, canonical_root, db_config).await;
+        H::destroy(reopened_db).await;
+        H::destroy(Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc")))
+            .await;
     });
 }
 
@@ -1659,26 +1392,6 @@ macro_rules! sync_tests {
                 crate::qmdb::sync::engine::tests::pr_5651_regression_open_after_stopped_sync::<
                     $harness,
                 >();
-            }
-
-            /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
-            #[rstest]
-            #[case::genesis(false)]
-            #[case::pruned(true)]
-            fn pr_5651_regression_sync_after_interrupted_rewind(#[case] pruned: bool) {
-                crate::qmdb::sync::harness::pr_5651_regression_sync_after_interrupted_rewind::<
-                    $harness,
-                >(pruned);
-            }
-
-            /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
-            #[rstest]
-            #[case::restarted(true)]
-            #[case::reopened(false)]
-            fn pr_5651_regression_sync_stopped_after_rewind(#[case] restart: bool) {
-                crate::qmdb::sync::engine::tests::pr_5651_regression_sync_stopped_after_rewind::<
-                    $harness,
-                >(restart);
             }
 
             $( $extra!($harness); )?

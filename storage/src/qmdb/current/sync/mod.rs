@@ -50,8 +50,8 @@ use commonware_codec::Codec;
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
-use commonware_utils::{Widen, bitmap::Prunable as BitMap, range::NonEmptyRange};
-use core::{num::NonZeroUsize, ops::Range};
+use commonware_utils::{bitmap::Prunable as BitMap, range::NonEmptyRange};
+use core::num::NonZeroUsize;
 use std::{num::NonZeroU64, sync::Arc};
 
 #[cfg(test)]
@@ -265,26 +265,21 @@ where
     async fn discard_local_state(
         context: Self::Context,
         config: &Self::Config,
-        resumed: Range<Location<F>>,
     ) -> Result<(), qmdb::Error<F>> {
         qmdb::sync::discard_local_state::<F, _, H, S>(
             context.child("merkle"),
             config.merkle.clone(),
-            resumed.clone(),
         )
         .await?;
 
-        // Grafted metadata records chunks pruned from operations the log held. It is discarded
-        // when the journal resumes nothing and when a chunk it records reaches past the
-        // journal's end.
+        // Grafted metadata records chunks pruned from operations the log held, so it is
+        // discarded with the Merkle structure of those operations.
         let (mut metadata, pruned_chunks, _) = db::init_metadata::<F, E, DigestOf<H>>(
             context.child("metadata"),
             &config.grafted_metadata_partition,
         )
         .await?;
-        let pruned_bits =
-            Widen::<u64>::widen(pruned_chunks).saturating_mul(BitMap::<N>::CHUNK_SIZE_BITS);
-        if pruned_chunks > 0 && (resumed.is_empty() || pruned_bits > *resumed.end) {
+        if pruned_chunks > 0 {
             metadata.clear();
             metadata.sync().await?;
         }
