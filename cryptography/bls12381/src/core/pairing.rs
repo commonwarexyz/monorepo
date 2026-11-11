@@ -27,8 +27,8 @@
 //!
 //! The points of the Miller loop satisfy the [coordinate bounds of G2](crate::core::curve::g2), and its
 //! lines the bounds of [`Fp12::mul_by_line`]: every line component has limb bound `1` and integer
-//! bound at most `61`, below [`LINE_BOUND`](crate::core::field::fp12::LINE_BOUND). Every element of
-//! `Fp12` satisfies the [element bounds](crate::core::field::fp12).
+//! bound at most [`LINE_COMPONENT_BOUND`], below [`LINE_BOUND`]. Every element of `Fp12` satisfies
+//! the [element bounds](crate::core::field::fp12).
 //!
 //! # Kernels
 //!
@@ -42,7 +42,7 @@ use crate::core::{
         arithmetic::Field,
         fp::BYTES as FP_BYTES,
         fp2::{self, BYTES as FP2_BYTES, Fp2},
-        fp12::Fp12,
+        fp12::{Fp12, LINE_BOUND},
         gather,
     },
 };
@@ -62,6 +62,10 @@ const HALF_Z: u64 = Z / 2;
 
 /// Most pairs whose Miller loops share squarings, which bounds the points held at once.
 pub const SHARED: usize = 8;
+
+/// Largest integer bound of a component of a line of the Miller loop, in units of `p`.
+const LINE_COMPONENT_BOUND: u64 = 61;
+const _: () = assert!(LINE_COMPONENT_BOUND <= LINE_BOUND);
 
 /// Pairs of affine points, one per lane, prepared for the Miller loop.
 #[derive(Clone, Copy)]
@@ -430,10 +434,7 @@ pub mod fuzz {
         use super::*;
         use crate::core::{
             curve::g1,
-            field::{
-                fp::{rns::Rns, unsat28::Unsat28, unsat49::Unsat49},
-                fp12::LINE_BOUND,
-            },
+            field::fp::{rns::Rns, unsat28::Unsat28, unsat49::Unsat49},
         };
         use commonware_invariants::minifuzz;
         use commonware_simd::emulated::{EmulatedScalar, EmulatedX86V4C};
@@ -470,9 +471,9 @@ pub mod fuzz {
                 for coordinate in [point.x, point.y, point.z] {
                     coordinate.neg::<{ g2::BOUND + 1 }, S>(simd);
                 }
-                line[0].neg::<62, S>(simd);
-                line[1].neg::<{ LINE_BOUND + 1 }, S>(simd);
-                line[2].neg::<{ LINE_BOUND + 1 }, S>(simd);
+                for component in line {
+                    component.neg::<{ LINE_COMPONENT_BOUND + 1 }, S>(simd);
+                }
             }
         }
 
