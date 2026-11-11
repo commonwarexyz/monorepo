@@ -74,7 +74,7 @@ struct Inner<E: Context, V: Codec> {
 }
 
 impl<E: Context, V: CodecShared> Inner<E, V> {
-    /// See [Recovery::init].
+    /// See [Recovery::init_bounded].
     async fn init(context: E, cfg: Config<V::Cfg>, ceiling: u64) -> Result<Self, Error> {
         let manager_cfg = ManagerConfig {
             partition: cfg.partition,
@@ -406,9 +406,19 @@ impl<E: Context, V: CodecShared> Glob<E, V> {
 pub struct Recovery<E: Context, V: Codec>(Box<Inner<E, V>>);
 
 impl<E: Context, V: CodecShared> Recovery<E, V> {
+    /// Open every value section under initialization ownership.
+    pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
+        Self::init_bounded(context, cfg, u64::MAX).await
+    }
+
     /// Open value sections through `ceiling` under paired initialization ownership. Later sections
-    /// stay closed until paired recovery removes them.
-    pub async fn init(context: E, cfg: Config<V::Cfg>, ceiling: u64) -> Result<Self, Error> {
+    /// stay closed, and paired recovery must remove them with [Self::truncate] before
+    /// [Self::finish] publishes the glob.
+    pub(crate) async fn init_bounded(
+        context: E,
+        cfg: Config<V::Cfg>,
+        ceiling: u64,
+    ) -> Result<Self, Error> {
         Ok(Self(Box::new(Inner::init(context, cfg, ceiling).await?)))
     }
 
@@ -519,7 +529,7 @@ mod tests {
         context: E,
         cfg: Config<V::Cfg>,
     ) -> Result<Glob<E, V>, Error> {
-        Ok(Recovery::init(context, cfg, u64::MAX).await?.finish())
+        Ok(Recovery::init(context, cfg).await?.finish())
     }
 
     impl<E: crate::Context, V: CodecShared> Glob<E, V> {
@@ -532,7 +542,7 @@ mod tests {
                 codec_config: self.0.codec_config.clone(),
             };
             _ = self.sync_all().await?;
-            let pending = Recovery::init(context, cfg, u64::MAX).await?;
+            let pending = Recovery::init(context, cfg).await?;
             let pending = pending.truncate_section(section, end).await?;
             Ok(pending.finish())
         }

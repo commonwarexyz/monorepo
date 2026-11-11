@@ -220,7 +220,7 @@ impl<const COMPRESSED: bool> StorageWorkload for SegmentedGlobWorkload<COMPRESSE
             write_buffer: WRITE_BUFFER,
         };
         let mut journal: glob::Glob<_, Vec<u8>> =
-            glob::Recovery::init(context.child("journal"), config, u64::MAX)
+            glob::Recovery::init(context.child("journal"), config)
                 .await?
                 .finish();
 

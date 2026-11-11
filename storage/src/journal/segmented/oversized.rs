@@ -299,7 +299,7 @@ impl<E: Context, I: Record, V: CodecShared> Pending<E, I, V> {
             RecoveryMode::Floors { floors } => {
                 let preflight =
                     FixedJournal::preflight_floors(index_context, index_cfg, floors).await?;
-                let values = GlobRecovery::init(value_context, value_cfg, u64::MAX).await?;
+                let values = GlobRecovery::init(value_context, value_cfg).await?;
                 Self::validate_value_floors(&values, &preflight)?;
                 (preflight.finish().await?, values)
             }
@@ -310,7 +310,7 @@ impl<E: Context, I: Record, V: CodecShared> Pending<E, I, V> {
                 let preflight =
                     FixedJournal::preflight_restore(index_context, index_cfg, section, index_size)
                         .await?;
-                let values = GlobRecovery::init(value_context, value_cfg, section).await?;
+                let values = GlobRecovery::init_bounded(value_context, value_cfg, section).await?;
                 let value_size = Self::validate_restore_values(&values, &preflight, section)?;
                 let index = preflight.finish().await?;
 
@@ -3379,11 +3379,10 @@ mod tests {
                 codec_config: (),
                 write_buffer: cfg.value_write_buffer,
             };
-            let mut glob: Glob<_, TestValue> =
-                GlobRecovery::init(context.child("glob"), glob_cfg, u64::MAX)
-                    .await
-                    .expect("Failed to init glob")
-                    .finish();
+            let mut glob: Glob<_, TestValue> = GlobRecovery::init(context.child("glob"), glob_cfg)
+                .await
+                .expect("Failed to init glob")
+                .finish();
             (glob, _) = glob.prune(2).await.expect("Failed to prune glob");
             glob = glob.sync_all().await.expect("Failed to sync glob");
             drop(glob);
@@ -4062,11 +4061,10 @@ mod tests {
                 codec_config: (),
                 write_buffer: cfg.value_write_buffer,
             };
-            let mut glob: Glob<_, TestValue> =
-                GlobRecovery::init(context.child("glob"), glob_cfg, u64::MAX)
-                    .await
-                    .expect("Failed to init glob")
-                    .finish();
+            let mut glob: Glob<_, TestValue> = GlobRecovery::init(context.child("glob"), glob_cfg)
+                .await
+                .expect("Failed to init glob")
+                .finish();
             let orphan_value: TestValue = [99; 16];
             (glob, _, _) = glob
                 .append(3, &orphan_value)
@@ -4121,11 +4119,10 @@ mod tests {
                 codec_config: (),
                 write_buffer: cfg.value_write_buffer,
             };
-            let mut glob: Glob<_, TestValue> =
-                GlobRecovery::init(context.child("glob"), glob_cfg, u64::MAX)
-                    .await
-                    .expect("Failed to init glob")
-                    .finish();
+            let mut glob: Glob<_, TestValue> = GlobRecovery::init(context.child("glob"), glob_cfg)
+                .await
+                .expect("Failed to init glob")
+                .finish();
 
             for section in 2u64..=4 {
                 let orphan_value: TestValue = [section as u8; 16];
@@ -4167,11 +4164,10 @@ mod tests {
                 codec_config: (),
                 write_buffer: cfg.value_write_buffer,
             };
-            let mut glob: Glob<_, TestValue> =
-                GlobRecovery::init(context.child("glob"), glob_cfg, u64::MAX)
-                    .await
-                    .expect("Failed to init glob")
-                    .finish();
+            let mut glob: Glob<_, TestValue> = GlobRecovery::init(context.child("glob"), glob_cfg)
+                .await
+                .expect("Failed to init glob")
+                .finish();
 
             for section in 1u64..=3 {
                 let orphan_value: TestValue = [section as u8; 16];
@@ -4227,11 +4223,10 @@ mod tests {
                 codec_config: (),
                 write_buffer: cfg.value_write_buffer,
             };
-            let mut glob: Glob<_, TestValue> =
-                GlobRecovery::init(context.child("glob"), glob_cfg, u64::MAX)
-                    .await
-                    .expect("Failed to init glob")
-                    .finish();
+            let mut glob: Glob<_, TestValue> = GlobRecovery::init(context.child("glob"), glob_cfg)
+                .await
+                .expect("Failed to init glob")
+                .finish();
 
             for section in 2u64..=3 {
                 let orphan_value: TestValue = [section as u8; 16];
@@ -4366,11 +4361,10 @@ mod tests {
                 codec_config: (),
                 write_buffer: cfg.value_write_buffer,
             };
-            let mut glob: Glob<_, TestValue> =
-                GlobRecovery::init(context.child("glob"), glob_cfg, u64::MAX)
-                    .await
-                    .expect("Failed to init glob")
-                    .finish();
+            let mut glob: Glob<_, TestValue> = GlobRecovery::init(context.child("glob"), glob_cfg)
+                .await
+                .expect("Failed to init glob")
+                .finish();
             let orphan_value: TestValue = [2; 16];
             (glob, _, _) = glob
                 .append(2, &orphan_value)
@@ -4438,11 +4432,10 @@ mod tests {
                 codec_config: (),
                 write_buffer: cfg.value_write_buffer,
             };
-            let mut glob: Glob<_, TestValue> =
-                GlobRecovery::init(context.child("glob"), glob_cfg, u64::MAX)
-                    .await
-                    .expect("Failed to init glob")
-                    .finish();
+            let mut glob: Glob<_, TestValue> = GlobRecovery::init(context.child("glob"), glob_cfg)
+                .await
+                .expect("Failed to init glob")
+                .finish();
 
             for section in [2u64, 4, 6] {
                 let orphan_value: TestValue = [section as u8; 16];
@@ -5135,11 +5128,10 @@ mod tests {
                 codec_config: (),
                 write_buffer: cfg.value_write_buffer,
             };
-            let mut glob: Glob<_, TestValue> =
-                GlobRecovery::init(context.child("glob"), glob_cfg, u64::MAX)
-                    .await
-                    .expect("Failed to init glob")
-                    .finish();
+            let mut glob: Glob<_, TestValue> = GlobRecovery::init(context.child("glob"), glob_cfg)
+                .await
+                .expect("Failed to init glob")
+                .finish();
 
             for section in 2u64..=4 {
                 let orphan_value: TestValue = [section as u8; 16];
