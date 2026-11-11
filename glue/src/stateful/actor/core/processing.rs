@@ -6577,6 +6577,42 @@ mod tests {
         });
     }
 
+    /// A verification stays pending when the search for a cached ancestor needs a digest that
+    /// its history cannot supply.
+    #[test]
+    fn unavailable_history_leaves_the_cached_state_search_pending() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let genesis = TestBlock::new(0, 0);
+            let chain = successors(&genesis, 5);
+            let (parent, block) = (&chain[3], &chain[4]);
+            let app = ReplayGatedApp::new(Height::zero(), []);
+            let harness = HeldRead::with_app(&context, "unavailable-search", app, &[]).await;
+
+            // One cached state makes recovery search the branch for the nearest cached ancestor.
+            let first = &chain[0];
+            let history = History::anchored([genesis.digest()]);
+            assert!(
+                harness
+                    .verification(context.child("verify_first"), first, &genesis, history)
+                    .await
+            );
+
+            // A history that ends at another commitment selects no height, so the digest two
+            // heights below the parent is unavailable. That is not a verdict on the block.
+            let history = History::suffix([block.digest()]);
+            let mut verify = harness.verification(context.child("verify"), block, parent, history);
+            assert!(poll!(&mut verify).is_pending());
+            await_marshal_replies(&harness.mailbox, &harness.marshal.mailbox).await;
+            assert!(
+                poll!(&mut verify).is_pending(),
+                "unavailable history must leave the verification pending"
+            );
+
+            drop(verify);
+            harness.stop().await;
+        });
+    }
+
     /// A retained step's successor with a round at or before the finalized round is rejected
     /// before the application processes it.
     #[test]

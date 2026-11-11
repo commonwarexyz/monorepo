@@ -2395,6 +2395,12 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_hint_finalized_triggers_fetch() {
+        harness::hint_finalized_triggers_fetch::<InlineHarness>();
+        harness::hint_finalized_triggers_fetch::<DeferredHarness>();
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_blocks_forward_range() {
         harness::blocks_forward_range::<InlineHarness>();
         harness::blocks_forward_range::<DeferredHarness>();
@@ -15089,6 +15095,49 @@ mod tests {
             assert!(
                 resolver.active_subscription(commitment).is_none(),
                 "an answered caller's request must be canceled"
+            );
+        });
+    }
+
+    /// A caller dropped while marshal is idle is still registered when its block arrives locally,
+    /// and that arrival cancels the request the caller owned.
+    #[test_traced("WARN")]
+    fn test_standard_local_ingress_cancels_dropped_caller_request() {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let (mailbox, _, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "local-ingress-dropped-caller",
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::default(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(genesis.clone()),
+            )
+            .await;
+
+            // The only caller for the commitment owns its request.
+            let block = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let acquisition = mailbox.acquire(block.digest());
+            wait_until(&context, Duration::from_secs(1), "acquisition", || {
+                resolver.active_subscription(block.digest()).is_some()
+            })
+            .await;
+
+            // Marshal is idle when the caller drops, so the next event still finds it registered.
+            drop(acquisition);
+            assert!(
+                mailbox
+                    .verified(
+                        Round::new(Epoch::zero(), View::new(1)),
+                        ready(block.clone())
+                    )
+                    .await
+            );
+            assert!(
+                resolver.active_subscription(block.digest()).is_none(),
+                "local ingress must cancel the request of a dropped caller it has not pruned"
             );
         });
     }

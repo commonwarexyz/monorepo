@@ -1498,6 +1498,11 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_coding_hint_finalized_triggers_fetch() {
+        harness::hint_finalized_triggers_fetch::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
     fn test_coding_blocks_forward_range() {
         harness::blocks_forward_range::<CodingHarness>();
     }
