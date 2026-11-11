@@ -1641,15 +1641,17 @@ where
             self.certified.insert(parent, V::parent_commitment(&block));
         }
 
-        // The resolver retires the delivered demand when it receives this delivery's verdict.
-        self.satisfy_demand(&block);
-
-        // Apply the pending floor transition this block anchors.
-        if let Some(anchor) = self.floor.take_matching(commitment) {
-            self = self
-                .apply_floor(anchor, block, buffer, application, resolver)
-                .await;
-            response.send_lossy(Outcome::Resolved(Resolution::Complete));
+        // Send the verdict before the handoff. The handoff cancels the block's subscription request
+        // when a fetching caller or an active speculative fetch was waiting for it, and the
+        // resolver keeps the source feedback of a canceled delivery only if its verdict was already
+        // sent. A block that anchors the pending floor transition is consumed by that transition
+        // and is not stored as an ordinary delivery.
+        response.send_lossy(Outcome::Resolved(Resolution::Complete));
+        let anchored;
+        (self, anchored) = self
+            .ingest(block.clone(), buffer, application, resolver)
+            .await;
+        if anchored {
             return self;
         }
 
@@ -1702,7 +1704,6 @@ where
             });
             self.prefetch.retire(commitment);
         }
-        response.send_lossy(Outcome::Resolved(Resolution::Complete));
         self
     }
 

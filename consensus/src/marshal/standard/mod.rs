@@ -6166,6 +6166,7 @@ mod tests {
         active_fetches: Arc<Mutex<Vec<FetchRecord>>>,
         targeted: Arc<Mutex<Vec<TargetedFetch>>>,
         retains: Arc<Mutex<usize>>,
+        retains_before_verdict: Arc<Mutex<usize>>,
         auto_delivery: Arc<Mutex<Option<Bytes>>>,
         delivery_responses: Arc<Mutex<Vec<oneshot::Receiver<Outcome>>>>,
         sender: Option<mailbox::Sender<handler::Message<D>>>,
@@ -6182,6 +6183,7 @@ mod tests {
                     active_fetches: Arc::new(Mutex::new(Vec::new())),
                     targeted: Arc::new(Mutex::new(Vec::new())),
                     retains: Arc::new(Mutex::new(0)),
+                    retains_before_verdict: Arc::new(Mutex::new(0)),
                     auto_delivery: Arc::new(Mutex::new(None)),
                     delivery_responses: Arc::new(Mutex::new(Vec::new())),
                     sender: Some(sender),
@@ -6275,11 +6277,10 @@ mod tests {
             *self.retains.lock()
         }
 
-        /// Retires `fetch` the way a real resolver does when an accepted delivery completes it.
-        fn complete(&self, fetch: &FetchRecord) {
-            self.active_fetches
-                .lock()
-                .retain(|active| active.key != fetch.key || active.subscriber != fetch.subscriber);
+        /// Returns how many `retain` calls arrived while an automatic delivery still awaited its
+        /// verdict.
+        fn retains_before_verdict(&self) -> usize {
+            *self.retains_before_verdict.lock()
         }
 
         fn enqueue(&self, message: handler::Message<D>) -> Feedback {
@@ -6322,6 +6323,10 @@ mod tests {
                 .lock()
                 .retain(|fetch| predicate(&fetch.key, &fetch.subscriber));
             *self.retains.lock() += 1;
+            let responses = self.delivery_responses.lock();
+            if responses.iter().any(|response| response.is_empty()) {
+                *self.retains_before_verdict.lock() += 1;
+            }
             Feedback::Ok
         }
     }
@@ -14946,10 +14951,12 @@ mod tests {
         });
     }
 
-    /// An exact resolver delivery leaves its caller-owned demand for the delivery verdict to
-    /// retire, while local ingress retires the demand itself.
+    /// An exact resolver delivery answers its caller and cancels the caller's request, as local
+    /// ingress does. The verdict is sent first, because a resolver may discard a verdict that
+    /// follows the cancellation. Marshal does not store a block that no evidence backs, so a later
+    /// acquisition of it starts a new request.
     #[test_traced("WARN")]
-    fn test_standard_acquire_delivery_leaves_demand_to_verdict() {
+    fn test_standard_acquire_delivery_retires_demand() {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
@@ -14964,24 +14971,33 @@ mod tests {
             )
             .await;
 
-            // An exact delivery leaves the caller's request active for the resolver to retire on
-            // the delivery verdict.
+            // Marshal sends the verdict of an accepted delivery, answers the caller, and then
+            // cancels the caller's request.
             let delivered = make_raw_block(genesis.digest(), Height::new(1), 100);
+            resolver.respond_to_next_fetch(delivered.encode());
             let acquisition = mailbox.acquire(delivered.digest());
+            assert_eq!(acquisition.await.unwrap().digest(), delivered.digest());
+            assert!(resolver.wait_for_delivery_response().await);
+            assert!(
+                resolver.active_subscription(delivered.digest()).is_none(),
+                "an answered delivery must cancel its caller's request"
+            );
+            assert_eq!(
+                resolver.retains_before_verdict(),
+                0,
+                "the verdict must be sent before the request is canceled"
+            );
+
+            // The block was not stored, so a second acquisition starts a request of its own.
+            let _again = mailbox.acquire(delivered.digest());
             wait_until(
                 &context,
                 Duration::from_secs(1),
-                "delivered acquisition",
+                "second acquisition",
                 || resolver.active_subscription(delivered.digest()).is_some(),
             )
             .await;
-            let fetch = resolver.active_subscription(delivered.digest()).unwrap();
-            deliver_acquisition_test_block(&resolver, fetch, &delivered).await;
-            assert!(
-                resolver.active_subscription(delivered.digest()).is_some(),
-                "resolver delivery must not cancel demand before its verdict"
-            );
-            assert_eq!(acquisition.await.unwrap().digest(), delivered.digest());
+            assert_eq!(resolver.subscriptions(delivered.digest()), 2);
 
             // A locally verified block satisfies its caller without a resolver verdict.
             let verified = make_raw_block(genesis.digest(), Height::new(1), 200);
@@ -15005,6 +15021,74 @@ mod tests {
             assert!(
                 resolver.active_subscription(verified.digest()).is_none(),
                 "local ingress must retire satisfied demand"
+            );
+        });
+    }
+
+    /// A caller's request that marshal issued while a delivery of the same block was queued is
+    /// canceled when that delivery answers the caller.
+    #[test_traced("WARN")]
+    fn test_standard_acquire_behind_queued_delivery_leaves_no_request() {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let (mut mailbox, _, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "acquire-behind-queued-delivery",
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::default(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(genesis.clone()),
+            )
+            .await;
+
+            // A finalization requests the missing block under its round.
+            let block = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let commitment = block.digest();
+            let round = Round::new(Epoch::zero(), View::new(1));
+            report_finalized(&mut mailbox, &schemes, round, View::zero(), commitment).await;
+            let is_finality = |fetch: &FetchRecord| {
+                fetch.key == handler::Key::Block(commitment)
+                    && fetch.subscriber == handler::Annotation::Round(round)
+            };
+            wait_until(&context, Duration::from_secs(1), "finality request", || {
+                resolver.active_fetches().iter().any(is_finality)
+            })
+            .await;
+
+            // An acquisition and the response to the finality request are both queued before
+            // marshal runs. Marshal handles its mailbox first, so the acquisition issues its own
+            // request, and the delivery then answers the caller.
+            let acquisition = mailbox.acquire(commitment);
+            let (response, verdict) = oneshot::channel();
+            assert!(
+                resolver
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Block(commitment),
+                            subscribers: NonEmptyVec::new((
+                                handler::Annotation::Round(round),
+                                tracing::Span::none(),
+                            )),
+                        },
+                        value: block.encode(),
+                        response,
+                    })
+                    .accepted()
+            );
+            assert_eq!(
+                verdict.await.expect("delivery must receive a verdict"),
+                Outcome::Resolved(Resolution::Complete)
+            );
+            assert_eq!(acquisition.await.unwrap().digest(), commitment);
+            assert_eq!(resolver.subscriptions(commitment), 1);
+
+            // The delivered subscribers did not include the caller's request, so the verdict
+            // cannot retire it, and marshal cancels it.
+            assert!(
+                resolver.active_subscription(commitment).is_none(),
+                "an answered caller's request must be canceled"
             );
         });
     }
@@ -15876,9 +15960,9 @@ mod tests {
         }
     }
 
-    /// Only active speculative demand owns a resolver request, so retiring queued or completed
-    /// demand needs no resolver cancellation, and a resolver delivery leaves its own request to
-    /// the delivery verdict.
+    /// Only active speculative demand owns a resolver request. A body that arrives while the
+    /// request is active cancels it, whether it comes from local ingress or from the resolver.
+    /// Retiring queued or completed demand needs no resolver cancellation.
     #[test_traced("WARN")]
     fn test_standard_prefetch_demand_cancels_resolver_only_while_active() {
         const PARTITION: &str = "prefetch-cancels-only-active";
@@ -15919,8 +16003,9 @@ mod tests {
             );
             assert_eq!(resolver.retain_count(), retains + 1);
 
-            // A resolver delivery, a local body for queued demand, a local re-ingest of a
-            // completed body, and its consumption each leave the resolver untouched.
+            // A resolver delivery cancels the active request it answers. A local body for queued
+            // demand, a local re-ingest of the completed body, and its consumption then leave the
+            // resolver untouched.
             let completed = make_raw_block(local.digest(), Height::new(2), 200);
             let queued = make_raw_block(completed.digest(), Height::new(3), 300);
             let ready_key = handler::Key::Block(completed.digest());
@@ -15942,11 +16027,9 @@ mod tests {
             let retains = resolver.retain_count();
             let fetch = active_fetch(ready_key).unwrap();
             deliver_acquisition_test_block(&resolver, fetch, &completed).await;
-            assert_eq!(
-                resolver.retain_count(),
-                retains,
-                "a resolver delivery must not cancel requests"
-            );
+            assert_eq!(resolver.retain_count(), retains + 1);
+            assert!(active_fetch(ready_key).is_none());
+            let retains = resolver.retain_count();
             let round = Round::new(Epoch::zero(), View::new(3));
             assert!(mailbox.verified(round, ready(queued.clone())).await);
             assert_eq!(
@@ -16167,7 +16250,7 @@ mod tests {
             prune_canceled(&mailbox).await;
             assert!(active(&next).is_none());
 
-            // A verdict-completed body occupies capacity until canonical storage claims it.
+            // A delivered body occupies capacity until canonical storage claims it.
             let completed = make_raw_block(queued.digest(), Height::new(8), 800);
             let tail = make_raw_block(completed.digest(), Height::new(9), 900);
             let _lease = mailbox.prefetch(Arc::from([completed.digest(), tail.digest()]), 0..2);
@@ -16179,8 +16262,7 @@ mod tests {
             )
             .await;
             let fetch = active(&completed).unwrap();
-            deliver_acquisition_test_block(&resolver, fetch.clone(), &completed).await;
-            resolver.complete(&fetch);
+            deliver_acquisition_test_block(&resolver, fetch, &completed).await;
             let _ = mailbox.get_processed().await;
             assert!(!fetched(&tail));
             mailbox.hint_finalized(
@@ -16377,8 +16459,7 @@ mod tests {
                         .into_iter()
                         .find(|fetch| fetch.key == handler::Key::Block(block.digest()))
                         .expect("selected request must exist");
-                    deliver_acquisition_test_block(&resolver, fetch.clone(), block).await;
-                    resolver.complete(&fetch);
+                    deliver_acquisition_test_block(&resolver, fetch, block).await;
                     assert!(range.next().now_or_never().is_none());
                     let _ = mailbox.get_processed().await;
                     assert_eq!(fetched_keys(), expected);
@@ -16395,8 +16476,7 @@ mod tests {
                     .into_iter()
                     .find(|fetch| fetch.key == handler::Key::Block(head.digest()))
                     .expect("head request must exist");
-                deliver_acquisition_test_block(&resolver, fetch.clone(), head).await;
-                resolver.complete(&fetch);
+                deliver_acquisition_test_block(&resolver, fetch, head).await;
                 assert_eq!(range.next().await.unwrap().unwrap().digest(), head.digest());
                 let _ = mailbox.get_processed().await;
                 assert_eq!(fetched_keys(), expected);
@@ -17103,8 +17183,7 @@ mod tests {
                     );
                 }
                 let fetch = resolver.active_subscription(block.digest()).unwrap();
-                deliver_acquisition_test_block(&resolver, fetch.clone(), block).await;
-                resolver.complete(&fetch);
+                deliver_acquisition_test_block(&resolver, fetch, block).await;
                 assert!(mailbox.get_block(&block.digest()).await.is_none());
             }
 
