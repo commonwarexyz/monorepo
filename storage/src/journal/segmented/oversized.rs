@@ -931,6 +931,7 @@ impl<E: Context, I: Record, V: CodecShared> Recovery<E, I, V> {
             match self.values.verify(section, offset, size).await {
                 Ok(true) => return Some(Ok((section, position, entry))),
                 Ok(false) => {
+                    warn!(section, position, "invalid value detected: truncating");
                     validation.truncations.push((section, position));
                     validation.truncated = true;
                 }
