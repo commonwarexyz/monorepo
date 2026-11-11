@@ -28,7 +28,7 @@
 //!   |     +-- Ready (owner's end of a pool worker's run queue)
 //!   |     +-- Timers (Arc, the pool's on a pool worker: sleep
 //!   |     |       registrations and their deadlines)
-//!   |     +-- cached timers bound, IDs of sleeps dropped here
+//!   |     +-- cached timers bound
 //!   |     +-- Driver
 //!   |     |     +-- io_uring ring (SQ/CQ)
 //!   |     |     +-- Waiters (requests and unconsumed results)
@@ -177,8 +177,7 @@ use super::{
     mailbox::{Mailbox, Message},
     pool::{MAX_WORKERS, Pool, Threads},
     request::{RequestOutput, RetiredResources},
-    slab::Id,
-    sleep::{DROPPED_CAPACITY, RESCUE_INTERVAL, Sleep, Timers},
+    sleep::{RESCUE_INTERVAL, Sleep, Timers},
     spinner::{Config as SpinnerConfig, Spinner},
     task::{AfterPoll, Ready, RootWaker, Runnable},
     tasks::Tasks,
@@ -1128,15 +1127,6 @@ pub struct Local {
     ///
     /// [`Wheel::bound`]: super::wheel::Wheel::bound
     pub timers_next: u64,
-    /// Pending removals from `timers`: the registrations whose sleeps were
-    /// dropped, or completed early by a poll, on this worker while it was not
-    /// closing. Queuing their identities lets those drops skip the timers'
-    /// lock. Only this worker pushes and drains it: each registration here
-    /// removes the latest one and takes its slot, the next service pass, or
-    /// cleanup before closing `timers`, removes the rest, and each service
-    /// pass caps its capacity at [`DROPPED_CAPACITY`] (see [`super::sleep`]).
-    /// While any remain, the worker serves again rather than park.
-    pub timers_dropped: Vec<Id>,
     /// Reject new registration and send wakes to the global queue, while
     /// allowing idempotent cancellation.
     pub closing: bool,
@@ -1201,7 +1191,6 @@ impl Local {
             driver: Some(driver),
             timers,
             timers_next: u64::MAX,
-            timers_dropped: Vec::new(),
             closing: false,
             now,
             now_stale: false,
@@ -1880,10 +1869,6 @@ impl Worker {
         }
 
         // Detach local and forwarded observers before running callbacks.
-        // Registrations queued by sleeps dropped here before the worker began
-        // closing leave first, so closure wakes no dropped sleep's waker. A
-        // closing worker removes a dropped sleep's registration at once, so
-        // none queues from now on.
         // Admission is closed, so later I/O handle drops find no registration
         // to detach and sleeps registered here release no waker. Driver service
         // can still produce deferred work, and so can callbacks that drop
@@ -1894,14 +1879,10 @@ impl Worker {
                 driver,
                 timers,
                 timers_next,
-                timers_dropped,
                 deferred,
                 ..
             } = &mut *local;
             driver.as_mut().unwrap().close(deferred);
-            if !timers_dropped.is_empty() {
-                timers.drain(timers_dropped, deferred);
-            }
             timers.close(deferred);
             *timers_next = u64::MAX;
             local.update_pending();
@@ -1999,9 +1980,7 @@ impl Worker {
 
     /// Service the io_uring ring and timers using one time sample, collecting
     /// callbacks, and return whether kernel service was deferred to an idle
-    /// wait. Timer service first removes the registrations of sleeps dropped
-    /// or completed early on this worker since the last pass, then expires due
-    /// ones. A pool worker that is not closing also expires its peers' overdue
+    /// wait. A pool worker that is not closing also expires its peers' overdue
     /// timers, at most once per [`RESCUE_INTERVAL`].
     fn service(&mut self, defer_kernel_service: bool) -> bool {
         let mut local = self.local.borrow_mut();
@@ -2017,7 +1996,6 @@ impl Worker {
             driver,
             timers,
             timers_next,
-            timers_dropped,
             closing,
             deferred,
             shared,
@@ -2031,21 +2009,6 @@ impl Worker {
 
         // The timers count this time from their origin.
         let nanos = timers.nanos(*now);
-
-        // Registrations of sleeps dropped here leave first, in critical
-        // sections of at most one budget each that defer their wakers'
-        // destruction, so expiry never fires them. A batch that leaves the
-        // wheel empty leaves no firing time to cache.
-        if !timers_dropped.is_empty() && timers.drain(timers_dropped, deferred) {
-            *timers_next = u64::MAX;
-        }
-
-        // The queue is empty now, whether this pass or registrations emptied
-        // it. Most passes queue far fewer, so this keeps the usual capacity
-        // and reallocates only after a burst.
-        if timers_dropped.capacity() > DROPPED_CAPACITY {
-            timers_dropped.shrink_to(DROPPED_CAPACITY);
-        }
 
         // Expiry defers observer notifications until after this borrow ends.
         // The cached bound skips the timers until a registration may be due,
@@ -2307,12 +2270,10 @@ impl Worker {
 
             // Callbacks and messages can submit I/O or make tasks runnable, so
             // the pre-service idle decision alone is not enough to permit parking.
-            // They can also drop sleeps registered here, whose removal and
-            // released wakers wait for a service pass, which runs first.
             let (ready, needs_kernel, pending_submissions) = {
                 let local = self.local.borrow();
                 (
-                    local.is_ready() || !local.timers_dropped.is_empty(),
+                    local.is_ready(),
                     !local.driver.as_ref().unwrap().is_empty(),
                     local.driver.as_ref().unwrap().has_pending_submissions(),
                 )
