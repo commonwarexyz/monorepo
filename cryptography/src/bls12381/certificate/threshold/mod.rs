@@ -541,7 +541,6 @@ macro_rules! impl_certificate_bls12381_threshold {
             ///
             /// Returns a [`commonware_cryptography::certificate::mocks::Fixture`] whose keys and
             /// scheme instances share a consistent ordering.
-            #[allow(dead_code)]
             pub fn fixture<V, R>(
                 rng: &mut R,
                 namespace: &[u8],
@@ -847,6 +846,7 @@ mod tests {
     use commonware_utils::{
         Faults, N3f1, N5f1, NZU32, Participant, TryCollect, Widen, ordered::Set, test_rng,
     };
+    use scheme::Scheme;
 
     const NAMESPACE: &[u8] = b"test-bls12381-threshold";
     const MESSAGE: &[u8] = b"test message";
@@ -869,8 +869,15 @@ mod tests {
         }
     }
 
-    // Use the macro to generate the test scheme
-    impl_certificate_bls12381_threshold!(TestSubject, Vec<u8>, N3f1);
+    // Use the macro to generate the test scheme. The tests build schemes from keys of their own, so
+    // its fixture goes unused.
+    #[allow(dead_code)]
+    mod scheme {
+        use super::TestSubject;
+        use commonware_utils::N3f1;
+
+        impl_certificate_bls12381_threshold!(TestSubject, Vec<u8>, N3f1);
+    }
 
     #[allow(clippy::type_complexity)]
     fn setup_signers<V: Variant>(

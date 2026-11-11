@@ -1043,6 +1043,8 @@ mod tests {
         assert!(Signers::decode_cfg(encoded, &10).is_ok());
     }
 
+    // The tests build schemes from keys of their own, so the generated fixture goes unused.
+    #[allow(dead_code)]
     mod ed25519_fixture {
         use crate::{certificate::Subject, impl_certificate_ed25519};
         use commonware_utils::N3f1;

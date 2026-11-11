@@ -370,7 +370,6 @@ macro_rules! impl_certificate_secp256r1 {
             ///
             /// Returns a [`commonware_cryptography::certificate::mocks::Fixture`] whose keys and
             /// scheme instances share a consistent ordering.
-            #[allow(dead_code)]
             pub fn fixture<R>(
                 rng: &mut R,
                 namespace: &[u8],
@@ -627,6 +626,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_utils::{Faults, N3f1, TryCollect, non_empty, ordered::BiMap, test_rng};
     use rand_core::CryptoRng;
+    use scheme::Scheme;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -653,17 +653,25 @@ mod tests {
         }
     }
 
-    // Use the macro to generate the test scheme
-    impl_certificate_secp256r1!(TestSubject, Vec<u8>, N3f1);
+    // Use the macro to generate the test scheme. The tests build schemes from keys of their own, so
+    // its fixture goes unused.
+    #[allow(dead_code)]
+    mod scheme {
+        use super::TestSubject;
+        use commonware_utils::N3f1;
 
-    fn setup_signers(
+        impl_certificate_secp256r1!(TestSubject, Vec<u8>, N3f1);
+    }
+
+    /// Returns `n` signing keys and the participants they form.
+    fn setup_keys(
         rng: &mut impl CryptoRng,
         n: u32,
-    ) -> (Vec<Scheme<PublicKey>>, Scheme<PublicKey>) {
+    ) -> (Vec<PrivateKey>, BiMap<PublicKey, PublicKey>) {
         let private_keys: Vec<_> = (0..n).map(|_| PrivateKey::random(&mut *rng)).collect();
 
         // For tests, use secp256r1 keys as both identity and signing keys
-        let participants: BiMap<PublicKey, PublicKey> = private_keys
+        let participants = private_keys
             .iter()
             .map(|sk| {
                 let pk = sk.public_key();
@@ -671,6 +679,15 @@ mod tests {
             })
             .try_collect()
             .unwrap();
+
+        (private_keys, participants)
+    }
+
+    fn setup_signers(
+        rng: &mut impl CryptoRng,
+        n: u32,
+    ) -> (Vec<Scheme<PublicKey>>, Scheme<PublicKey>) {
+        let (private_keys, participants) = setup_keys(rng, n);
 
         let signers = private_keys
             .into_iter()
@@ -687,8 +704,12 @@ mod tests {
     #[test]
     fn test_member_reports_membership_without_signing() {
         let mut rng = test_rng();
-        let (schemes, verifier) = setup_signers(&mut rng, 4);
-        let participants = verifier.generic.participants.clone();
+        let (private_keys, participants) = setup_keys(&mut rng, 4);
+        let schemes: Vec<_> = private_keys
+            .into_iter()
+            .map(|sk| Scheme::signer(NAMESPACE, participants.clone(), sk).unwrap())
+            .collect();
+        let verifier = Scheme::verifier(NAMESPACE, participants.clone());
         let subject = TestSubject {
             message: Bytes::from_static(MESSAGE),
         };
@@ -792,18 +813,10 @@ mod tests {
         impl_certificate_secp256r1!(CountingSubject, Vec<u8>, N3f1);
 
         let mut rng = test_rng();
-        let (schemes, verifier) = setup_signers(&mut rng, 5);
-        let participants = verifier.generic.participants;
-        let mut schemes: Vec<_> = schemes
+        let (private_keys, participants) = setup_keys(&mut rng, 5);
+        let mut schemes: Vec<_> = private_keys
             .into_iter()
-            .map(|scheme| {
-                Scheme::signer(
-                    NAMESPACE,
-                    participants.clone(),
-                    scheme.generic.signer.unwrap().1,
-                )
-                .unwrap()
-            })
+            .map(|sk| Scheme::signer(NAMESPACE, participants.clone(), sk).unwrap())
             .collect();
         schemes.sort_by_key(|scheme| scheme.me().unwrap().index());
         let quorum = N3f1::quorum(schemes.len()) as usize;
@@ -1478,8 +1491,7 @@ mod tests {
     #[test]
     fn test_scheme_clone_and_verifier() {
         let mut rng = test_rng();
-        let (schemes, _) = setup_signers(&mut rng, 4);
-        let participants = schemes[0].generic.participants.clone();
+        let (schemes, verifier) = setup_signers(&mut rng, 4);
 
         // Clone a signer
         let signer = schemes[0].clone();
@@ -1493,7 +1505,6 @@ mod tests {
         );
 
         // A verifier cannot produce votes
-        let verifier = Scheme::verifier(NAMESPACE, participants);
         assert!(
             verifier
                 .sign::<Sha256Digest>(TestSubject {

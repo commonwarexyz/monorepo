@@ -450,7 +450,6 @@ macro_rules! impl_certificate_bls12381_multisig {
             ///
             /// Returns a [`commonware_cryptography::certificate::mocks::Fixture`] whose keys and
             /// scheme instances share a consistent ordering.
-            #[allow(dead_code)]
             pub fn fixture<V, R>(
                 rng: &mut R,
                 namespace: &[u8],
@@ -735,6 +734,7 @@ mod tests {
     use commonware_math::algebra::{CryptoGroup, Random};
     use commonware_parallel::Sequential;
     use commonware_utils::{Faults, N3f1, Participant, TryCollect, ordered::BiMap, test_rng};
+    use scheme::Scheme;
 
     const NAMESPACE: &[u8] = b"test-bls12381-multisig";
     const MESSAGE: &[u8] = b"test message";
@@ -757,8 +757,37 @@ mod tests {
         }
     }
 
-    // Use the macro to generate the test scheme
-    impl_certificate_bls12381_multisig!(TestSubject, Vec<u8>, N3f1);
+    // Use the macro to generate the test scheme. The tests build schemes from keys of their own, so
+    // its fixture goes unused.
+    #[allow(dead_code)]
+    mod scheme {
+        use super::TestSubject;
+        use commonware_utils::N3f1;
+
+        impl_certificate_bls12381_multisig!(TestSubject, Vec<u8>, N3f1);
+    }
+
+    /// Returns `n` consensus keys and the participants they form.
+    fn setup_keys<V: Variant>(
+        rng: &mut impl CryptoRng,
+        n: u32,
+    ) -> (Vec<Private>, BiMap<ed25519::PublicKey, V::Public>) {
+        // Generate identity keys (ed25519) and consensus keys (BLS)
+        let identity_keys: Vec<_> = (0..n)
+            .map(|_| Ed25519PrivateKey::random(&mut *rng))
+            .collect();
+        let consensus_keys: Vec<Private> = (0..n).map(|_| Private::random(&mut *rng)).collect();
+
+        // Build BiMap of identity public keys -> consensus public keys
+        let participants = identity_keys
+            .iter()
+            .zip(consensus_keys.iter())
+            .map(|(id_sk, cons_sk)| (id_sk.public_key(), compute_public::<V>(cons_sk)))
+            .try_collect()
+            .unwrap();
+
+        (consensus_keys, participants)
+    }
 
     fn setup_signers<V: Variant>(
         rng: &mut impl CryptoRng,
@@ -767,19 +796,7 @@ mod tests {
         Vec<Scheme<ed25519::PublicKey, V>>,
         Scheme<ed25519::PublicKey, V>,
     ) {
-        // Generate identity keys (ed25519) and consensus keys (BLS)
-        let identity_keys: Vec<_> = (0..n)
-            .map(|_| Ed25519PrivateKey::random(&mut *rng))
-            .collect();
-        let consensus_keys: Vec<Private> = (0..n).map(|_| Private::random(&mut *rng)).collect();
-
-        // Build BiMap of identity public keys -> consensus public keys
-        let participants: BiMap<ed25519::PublicKey, V::Public> = identity_keys
-            .iter()
-            .zip(consensus_keys.iter())
-            .map(|(id_sk, cons_sk)| (id_sk.public_key(), compute_public::<V>(cons_sk)))
-            .try_collect()
-            .unwrap();
+        let (consensus_keys, participants) = setup_keys::<V>(rng, n);
 
         let signers = consensus_keys
             .into_iter()
@@ -855,8 +872,12 @@ mod tests {
     /// key outside the committee yields no member.
     fn test_member_reports_membership_without_signing<V: Variant>() {
         let mut rng = test_rng();
-        let (schemes, verifier) = setup_signers::<V>(&mut rng, 4);
-        let participants = verifier.generic.participants.clone();
+        let (consensus_keys, participants) = setup_keys::<V>(&mut rng, 4);
+        let schemes: Vec<_> = consensus_keys
+            .into_iter()
+            .map(|sk| Scheme::<_, V>::signer(NAMESPACE, participants.clone(), sk).unwrap())
+            .collect();
+        let verifier = Scheme::<_, V>::verifier(NAMESPACE, participants.clone());
         let subject = TestSubject {
             message: Bytes::from_static(MESSAGE),
         };
