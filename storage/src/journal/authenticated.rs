@@ -19,8 +19,10 @@ use crate::{
         contiguous::{Batch, Contiguous, Many, Mutable},
     },
     merkle::{
-        self, Bagging, Family, Location, Position, Proof, Readable, batch, full::Merkle,
-        hasher::Standard as StandardHasher, mem::Mem,
+        self, Bagging, Family, Location, Position, Proof, Readable, batch,
+        full::{Merkle, Retain},
+        hasher::Standard as StandardHasher,
+        mem::Mem,
     },
 };
 use alloc::{
@@ -951,14 +953,12 @@ where
         // operations. A journal that is empty at position zero leaves the Merkle structure
         // nothing to authenticate, so Merkle state beside it is discarded.
         let hasher = StandardHasher::<H>::new(bagging);
-        let merkle = Merkle::prepare(
-            context.child("merkle"),
-            &hasher,
-            merkle_cfg,
-            Some(Location::new(selected_end)),
-            bounds == (0..0),
-        )
-        .await?;
+        let retain = if bounds == (0..0) {
+            Retain::Nothing
+        } else {
+            Retain::AtMost(Location::new(selected_end))
+        };
+        let merkle = Merkle::prepare(context.child("merkle"), &hasher, merkle_cfg, retain).await?;
         if *merkle.leaves() < bounds.start {
             return Err(JournalError::ItemPruned(*merkle.leaves()).into());
         }
@@ -1370,8 +1370,7 @@ mod tests {
                 merkle_context,
                 &hasher,
                 cfg,
-                Some(Location::new(0)),
-                false,
+                Retain::AtMost(Location::new(0)),
             )
             .await
             .unwrap();

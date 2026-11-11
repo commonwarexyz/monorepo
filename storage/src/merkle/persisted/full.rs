@@ -183,6 +183,17 @@ pub struct Merkle<F: Family, E: Context, D: Digest, S: Strategy> {
     pub(crate) strategy: S,
 }
 
+/// The leaves a recovery may retain.
+pub(crate) enum Retain<F: Family> {
+    /// Every leaf the persisted structure can reconstruct.
+    All,
+    /// At most this many leaves. The persisted pruning boundary must not exceed it.
+    AtMost(Location<F>),
+    /// No leaf: the caller's leaf source is empty at position zero, so the persisted pruning
+    /// boundary and pins are cleared first.
+    Nothing,
+}
+
 /// A validated Merkle prefix whose storage has not yet been deliberately truncated.
 pub(crate) struct Recovery<F: Family, E: Context, D: Digest, S: Strategy> {
     /// Node journal that may extend beyond the greatest complete tree.
@@ -271,7 +282,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         hasher: &impl Hasher<F, Digest = D>,
         cfg: Config<S>,
     ) -> Result<Self, Error<F>> {
-        Self::prepare(context, hasher, cfg, None, false)
+        Self::prepare(context, hasher, cfg, Retain::All)
             .await?
             .finish()
             .await
@@ -287,7 +298,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         cfg: Config<S>,
         max_leaves: Location<F>,
     ) -> Result<Self, Error<F>> {
-        Self::prepare(context, hasher, cfg, Some(max_leaves), false)
+        Self::prepare(context, hasher, cfg, Retain::AtMost(max_leaves))
             .await?
             .finish()
             .await
@@ -299,16 +310,17 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// An interrupted [Self::init_sync] can leave this state until its retry completes the reset.
     /// A pruned journal with no persisted boundary is the remnant of an interrupted
     /// [Self::destroy] and is cleared before any leaf cap applies, so the store reopens empty.
-    ///
-    /// `discard` clears the persisted boundary and pins first, for a caller whose leaf source is
-    /// empty at position zero.
     pub(crate) async fn prepare(
         context: E,
         hasher: &impl Hasher<F, Digest = D>,
         cfg: Config<S>,
-        max_leaves: Option<Location<F>>,
-        discard: bool,
+        retain: Retain<F>,
     ) -> Result<Recovery<F, E, D, S>, Error<F>> {
+        let (max_leaves, discard) = match retain {
+            Retain::All => (None, false),
+            Retain::AtMost(leaves) => (Some(leaves), false),
+            Retain::Nothing => (Some(Location::new(0)), true),
+        };
         let mut metadata = Metadata::<_, U64, Vec<u8>>::init(
             context.child("metadata"),
             MConfig {
@@ -3802,8 +3814,7 @@ mod tests {
                             context.child("cap"),
                             &hasher,
                             cfg.clone(),
-                            Some(Location::new(8)),
-                            false,
+                            Retain::AtMost(Location::new(8)),
                         )
                         .await
                         .unwrap();
@@ -3821,8 +3832,7 @@ mod tests {
                                 context.child("ordinary"),
                                 &hasher,
                                 cfg,
-                                None,
-                                false,
+                                Retain::All,
                             )
                             .await
                             .unwrap();
