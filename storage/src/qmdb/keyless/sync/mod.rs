@@ -15,7 +15,7 @@ use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_utils::range::NonEmptyRange;
-use std::num::NonZeroU64;
+use std::{num::NonZeroU64, ops::Range};
 
 impl<F, E, V, C, H, S> sync::Database for Db<F, E, V, C, H, S>
 where
@@ -105,8 +105,9 @@ where
     async fn discard_local_state(
         context: Self::Context,
         config: &Self::Config,
+        resumed: Range<Location<F>>,
     ) -> Result<(), qmdb::Error<F>> {
-        sync::discard_local_state::<F, _, H, S>(context, config.merkle.clone()).await
+        sync::discard_local_state::<F, _, H, S>(context, config.merkle.clone(), resumed).await
     }
 
     async fn local_pinned_nodes(

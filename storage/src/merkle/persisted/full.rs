@@ -189,7 +189,7 @@ pub(crate) enum Retain<F: Family> {
     All,
     /// At most this many leaves. The persisted pruning boundary must not exceed it.
     AtMost(Location<F>),
-    /// No leaf: the caller's leaf source holds no item the persisted structure describes, so
+    /// No leaf. The caller's leaf source holds no item the persisted structure describes, so
     /// the persisted pruning boundary and pins are cleared first.
     Nothing,
 }
@@ -308,8 +308,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     ///
     /// A persisted pruning boundary beyond the recovered journal fails with [Error::MissingNode].
     /// An interrupted [Self::init_sync] can leave this state until its retry completes the reset.
-    /// A pruned journal with no persisted boundary is the remnant of an interrupted
-    /// [Self::destroy] and is cleared before any leaf cap applies, so the store reopens empty.
+    /// A pruned journal with no persisted boundary has lost its pins. A discard or an interrupted
+    /// [Self::destroy] leaves one, and it is cleared before any leaf cap applies, so the store
+    /// reopens empty.
     pub(crate) async fn prepare(
         context: E,
         hasher: &impl Hasher<F, Digest = D>,
@@ -369,9 +370,10 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             replay_buffer: cfg.replay_buffer,
         };
 
-        // Only a destroy interrupted after removing the metadata leaves a pruned journal with no
-        // persisted boundary: prune and init_sync make the boundary durable first. Its pins went
-        // with the metadata, so clear it before a leaf cap could reject its start.
+        // A pruned journal with no persisted boundary lost its pins with the metadata. The
+        // discard above leaves one, and so does a destroy interrupted after removing the
+        // metadata. Prune and init_sync make the boundary durable first. Clear the journal before
+        // a leaf cap could reject its start.
         let orphaned = persisted_pruned_to.is_none()
             && Journal::<E, D>::span(context.child("span"), &journal_cfg)
                 .await?

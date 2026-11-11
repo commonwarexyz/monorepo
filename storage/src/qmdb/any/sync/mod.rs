@@ -25,7 +25,10 @@ use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
 use commonware_utils::range::NonEmptyRange;
-use core::num::{NonZeroU64, NonZeroUsize};
+use core::{
+    num::{NonZeroU64, NonZeroUsize},
+    ops::Range,
+};
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -148,8 +151,9 @@ where
     async fn discard_local_state(
         context: Self::Context,
         config: &Self::Config,
+        resumed: Range<Location<F>>,
     ) -> Result<(), qmdb::Error<F>> {
-        qmdb::sync::discard_local_state::<F, _, H, S>(context, config.merkle.clone()).await
+        qmdb::sync::discard_local_state::<F, _, H, S>(context, config.merkle.clone(), resumed).await
     }
 
     async fn local_pinned_nodes(

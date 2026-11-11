@@ -12,7 +12,7 @@ use crate::{
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_utils::range::NonEmptyRange;
-use core::num::NonZeroU64;
+use core::{num::NonZeroU64, ops::Range};
 
 impl<F, E, O, H, S> sync::Database for Db<F, E, O, H, S>
 where
@@ -72,6 +72,7 @@ where
     async fn discard_local_state(
         _context: Self::Context,
         _config: &Self::Config,
+        _resumed: Range<Location<F>>,
     ) -> Result<(), Error<F>> {
         Ok(())
     }
