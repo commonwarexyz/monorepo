@@ -827,12 +827,11 @@ impl Runnable {
 
     /// Deliver a new task's first runnable. The current worker keeps it when
     /// that worker belongs to the task's pool, is not closing, and either has
-    /// nothing else queued or is the pool's only worker, and another worker
-    /// may steal it from there at once (see [`Pool::enqueue_spawned`]).
-    /// Otherwise it goes to the pool's global queue, and the push wakes a
-    /// parked worker to start it. Local delivery can still export the
-    /// runnable through an overflow in [`Pool::enqueue_spawned`]. The caller
-    /// must hold no `Local` borrow.
+    /// nothing else queued or is the pool's only worker. Otherwise it goes to
+    /// the pool's global queue, and the push wakes a parked worker to start
+    /// it. Another worker may steal a runnable kept this way at once (see
+    /// [`Pool::enqueue_spawned`]), and an overflow there can still export
+    /// it. The caller must hold no `Local` borrow.
     pub fn spawn(self) {
         let owner = self.0.owner;
         let refused = Local::with_current(|local| match local {

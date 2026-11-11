@@ -336,9 +336,13 @@ pub enum Push<'a, T> {
 pub enum Backlog {
     /// Nothing a claim could take: no value, or a claim already held.
     None,
-    /// One unclaimed value, at this 55-bit head count, and whether it was
-    /// pushed marked.
-    Lone(u64, bool),
+    /// One unclaimed value.
+    Lone(
+        /// The value's 55-bit head count.
+        u64,
+        /// Whether the value was pushed marked.
+        bool,
+    ),
     /// Two or more unclaimed values.
     More,
 }
@@ -631,8 +635,8 @@ impl<T> Owner<T> {
 
     /// Publish a value marked, as [`Self::push`] does otherwise. While it is
     /// the only value queued, [`Queue::backlog`] and the decision of
-    /// [`Queue::steal_into_if`] report it marked. A value handed back is not
-    /// marked.
+    /// [`Queue::steal_into_if`] report it marked, until an overflow
+    /// republishes it at a later count. A value handed back is not marked.
     pub fn push_marked(&mut self, value: T) -> Push<'_, T> {
         self.push_with(value, true, || {})
     }
@@ -1466,9 +1470,10 @@ pub mod tests {
     }
 
     /// The mark keeps the full 55-bit count, so an unmarked lone value whose
-    /// count shares the marked one's low 24 bits, or its `u32` position, is
-    /// not reported marked, to the backlog hint or to the steal's decision.
-    /// Only a full period of the head's count brings the marked count back.
+    /// count a narrower mark would confuse with the marked one, such as one
+    /// sharing its low 24 bits or its `u32` position, is not reported marked,
+    /// to the backlog hint or to the steal's decision. Only a full period of
+    /// the head's count brings the marked count back.
     #[test]
     fn test_stale_mark_matches_only_after_a_full_period() {
         let start = 5;

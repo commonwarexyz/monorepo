@@ -2380,10 +2380,13 @@ std::thread_local! {
 }
 commonware_macros::stability_scope!(ALPHA, cfg(any(feature = "std", test)) {
     /// Sets the function that [`Rayon`] calls on the current thread before it blocks the thread
-    /// in its pool, or clears it with `None`, and returns the function it replaces. A runtime
-    /// worker installs one to hand off its queued work before a parallel call blocks it, and
-    /// restores the replaced one when it stops. The hook runs inside the call, so its time counts
-    /// toward the call's measured run, and a hook must not itself make a parallel call.
+    /// in its pool, or clears it with `None`, and returns the function it replaces. Every
+    /// synchronous parallel body that runs on the pool calls it, including a join that a worker of
+    /// the pool runs in place, which can hold the thread until the other side returns. A serial
+    /// run, [`Strategy::spawn`] and [`Strategy::block_on`] do not call it. A runtime worker
+    /// installs one to hand off its queued work before a parallel call blocks it, and restores
+    /// the replaced one when it stops. The hook runs inside the call, so its time counts toward
+    /// the call's measured run, and a hook must not itself make a parallel call.
     pub fn set_block_hook(hook: Option<fn()>) -> Option<fn()> {
         BLOCK_HOOK
             .try_with(|current| current.replace(hook))
