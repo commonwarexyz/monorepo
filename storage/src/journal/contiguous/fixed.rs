@@ -1678,6 +1678,12 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         Ok(self)
     }
 
+    /// Wait for every started sync to complete, surfacing a failure without changing storage.
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) async fn wait_for_sync(self) -> Result<Self, Error> {
+        Ok(Self(Box::new(self.0.wait_for_sync().await?)))
+    }
+
     /// Durably persists the current state of the structure.
     ///
     /// Does not advance the recovery watermark, so reopen may replay entries above it. Use
