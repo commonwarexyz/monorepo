@@ -277,6 +277,9 @@ commonware_macros::stability_scope!(BETA {
 });
 
 commonware_macros::stability_scope!(ALPHA {
+    mod uint;
+    pub use uint::{U256, Uint};
+
     #[cfg(feature = "arbitrary")]
     pub mod conformance;
 
