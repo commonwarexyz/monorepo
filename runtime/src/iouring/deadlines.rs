@@ -66,7 +66,7 @@ impl Deadlines {
         let fires = self
             .origin
             .after_nanos(fires)
-            .expect("a request deadline's firing time is an instant");
+            .expect("a request deadline's firing time must fit Instant");
 
         self.next = Some(self.next.map_or(fires, |next| next.min(fires)));
     }
@@ -117,7 +117,7 @@ impl Deadlines {
         self.next = (bound != u64::MAX).then(|| {
             self.origin
                 .after_nanos(bound)
-                .expect("a request deadline's firing time is an instant")
+                .expect("a request deadline's firing time must fit Instant")
         });
     }
 
