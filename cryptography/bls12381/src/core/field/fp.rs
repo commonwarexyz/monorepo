@@ -886,10 +886,9 @@ pub(crate) mod testing {
     /// Checks that debug builds reject values beyond the integer, limb, and multiplier limits.
     #[cfg(test)]
     pub(crate) fn check_limits<S: Simd, F: Positional<S>>(simd: S) {
-        use crate::core::debug_counter::DebugCounter;
         use std::panic::{AssertUnwindSafe, catch_unwind};
 
-        if !DebugCounter::live() {
+        if !cfg!(debug_assertions) {
             return;
         }
         let rejects = |f: &dyn Fn()| catch_unwind(AssertUnwindSafe(f)).is_err();
