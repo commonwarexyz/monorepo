@@ -235,9 +235,9 @@ mod fuzz {
 
         /// Returns the affine coordinates of an element other than the identity.
         fn affine(element: &G1) -> [[u8; BYTES]; 2] {
-            let [x, y, z] = element.0.map(|coordinate| reference::reduce(&coordinate));
+            let [x, y, z] = element.0.map(|coordinate| reference::decode(&coordinate));
             let inverse = reference::invert(z);
-            [x, y].map(|coordinate| reference::to_bytes(reference::mul(coordinate, inverse)))
+            [x, y].map(|coordinate| reference::encode(reference::mul(coordinate, inverse)))
         }
 
         #[test]
