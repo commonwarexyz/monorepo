@@ -234,7 +234,7 @@ where
         // Translated keys can collide, so read candidates until the full key matches.
         for &loc in self.snapshot.get(key) {
             let Operation::Update(Update(k, v)) = self.log.read(*loc).await? else {
-                unreachable!("location ({loc}) does not reference update operation");
+                unreachable!("location does not reference update operation. loc={loc}");
             };
 
             if &k == key {
@@ -276,7 +276,7 @@ where
         for (op, group) in zip_eq(ops, candidates.chunk_by(|a, b| a.0 == b.0)) {
             let Operation::Update(Update(k, v)) = op else {
                 unreachable!(
-                    "location ({}) does not reference update operation",
+                    "location does not reference update operation. loc={}",
                     group[0].0
                 );
             };

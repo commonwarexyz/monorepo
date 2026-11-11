@@ -3,11 +3,7 @@ use crate::{
     index::Ordered as Index,
     journal::contiguous::Contiguous,
     merkle::{Family, Location},
-    qmdb::{
-        any::db::Db,
-        operation::{Key, Operation as OperationTrait},
-        value::ValueEncoding,
-    },
+    qmdb::{any::db::Db, operation::Key, value::ValueEncoding},
 };
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
@@ -67,16 +63,6 @@ impl<
 where
     Operation<F, K, V>: Codec,
 {
-    async fn get_update_op(
-        reader: &impl Contiguous<Item = Operation<F, K, V>>,
-        loc: Location<F>,
-    ) -> Result<Update<K, V>, crate::qmdb::Error<F>> {
-        match reader.read(*loc).await? {
-            Operation::Update(key_data) => Ok(key_data),
-            _ => unreachable!("expected update operation at location {}", loc),
-        }
-    }
-
     /// Find the span produced by the provided locations that contains `key`, if any.
     async fn find_span(
         &self,
@@ -85,7 +71,7 @@ where
     ) -> Result<LocatedKey<F, K, V>, crate::qmdb::Error<F>> {
         // Collision order is arbitrary, so check each candidate's cyclic span.
         for loc in locs {
-            let data = Self::get_update_op(&self.log, loc).await?;
+            let data = self.read_update(loc).await?;
             if contains_cyclic(&data.key..&data.next_key, key) {
                 return Ok(Some((loc, data)));
             }
@@ -174,7 +160,7 @@ where
         // Predecessor ownership includes the next key, so an active query finds the prior key.
         // The owner's key must still be smaller to exclude cyclic wraparound.
         for loc in locs {
-            let data = Self::get_update_op(&self.log, loc).await?;
+            let data = self.read_update(loc).await?;
             if data.key < *key
                 && contains_cyclic((Excluded(&data.key), Included(&data.next_key)), key)
             {
@@ -193,34 +179,6 @@ where
         self.get_with_loc(key)
             .await
             .map(|res| res.map(|(data, _)| (data.value, data.next_key)))
-    }
-
-    /// Returns the key data for `key` with its location, or None if the key is not active.
-    // Explicit Send avoids the borrowed-iterator inference limitation (rust-lang/rust#100013).
-    #[allow(clippy::manual_async_fn, clippy::type_complexity)]
-    pub(crate) fn get_with_loc(
-        &self,
-        key: &K,
-    ) -> impl Future<Output = Result<Option<(Update<K, V>, Location<F>)>, crate::qmdb::Error<F>>> + Send
-    {
-        async move {
-            // Resolve translated-key collisions before returning an update and its location.
-            for loc in self.snapshot.get(key).copied() {
-                let op = self.log.read(*loc).await?;
-                assert!(
-                    op.is_update(),
-                    "location does not reference update operation. loc={loc}"
-                );
-                if op.key().expect("update operation must have key") == key {
-                    let Operation::Update(data) = op else {
-                        unreachable!("expected update operation");
-                    };
-                    return Ok(Some((data, loc)));
-                }
-            }
-
-            Ok(None)
-        }
     }
 
     /// Streams active (key, value) pairs in ascending key order within `range`. Read errors are
@@ -325,7 +283,7 @@ where
         locs: impl Iterator<Item = Location<F>> + Send,
     ) -> Result<Vec<Update<K, V>>, crate::qmdb::Error<F>> {
         // Conflicting entries are independent, so their journal reads can run concurrently.
-        let futures = locs.map(|loc| Self::get_update_op(&self.log, loc));
+        let futures = locs.map(|loc| self.read_update(loc));
         let mut updates = try_join_all(futures).await?;
 
         // Descending order lets the stream emit ascending keys with constant-time pops.
