@@ -199,34 +199,6 @@ impl<S: Simd> Unsat28<S> {
         if S::U32_LANES > S::U64_LANES { 2 } else { 1 }
     };
 
-    /// Loads up to `S::U32_LANES` elements, one per lane, filling the remaining lanes with `fill`.
-    #[inline(always)]
-    pub fn load(simd: S, elements: &[[u8; BYTES]], fill: &[u8; BYTES]) -> Self {
-        let fill = limbs_from_words(words_from_bytes(fill));
-        let mut lanes = [[0; LIMBS]; MAX_LANES];
-        for (i, lane) in lanes.iter_mut().enumerate().take(S::U32_LANES) {
-            *lane = elements
-                .get(i)
-                .map_or(fill, |element| limbs_from_words(words_from_bytes(element)));
-        }
-        // Integers below 2^384 are below 10p.
-        Self::raw(simd, &lanes, 10).to_lanes(simd)
-    }
-
-    /// Stores the canonical value of each lane into `elements`, dropping lanes beyond its length.
-    #[inline(always)]
-    pub fn store(self, simd: S, elements: &mut [[u8; BYTES]]) {
-        let canonical = self
-            .carry(simd)
-            .mul(simd, Self::constant(simd, &FROM_LANES, 1))
-            .subtract_modulus(simd);
-        let rows = canonical.to_rows(simd);
-        for (lane, element) in elements.iter_mut().enumerate().take(S::U32_LANES) {
-            let limbs = core::array::from_fn(|i| rows[i][lane]);
-            *element = bytes_from_words(&words_from_limbs(limbs));
-        }
-    }
-
     /// Transposes the carried limbs of the first `S::U32_LANES` lanes, bounded by `bound * p`,
     /// into limb rows.
     #[inline(always)]
@@ -274,107 +246,10 @@ impl<S: Simd> Unsat28<S> {
     /// Converts an integer `a` into this module's Montgomery form `a * 2^392`.
     #[inline(always)]
     fn to_lanes(self, simd: S) -> Self {
-        self.mul(simd, Self::constant(simd, &TO_LANES, 1))
+        self.product(simd, Self::constant(simd, &TO_LANES, 1))
     }
 
-    /// Returns `self + rhs`, without carrying.
-    #[inline(always)]
-    pub fn add(mut self, simd: S, rhs: Self) -> Self {
-        self.bound.add(rhs.bound);
-        self.bound.assert_le(LIMIT);
-        self.limb_bound.add(rhs.limb_bound);
-        self.limb_bound.assert_le(LIMB_LIMIT);
-        for (limb, rhs) in self.limbs.iter_mut().zip(rhs.limbs) {
-            *limb = simd.u32_add(*limb, rhs);
-        }
-        self
-    }
-
-    /// Returns `self + K * p - rhs`, which is `self - rhs`, without carrying.
-    #[inline(always)]
-    pub fn sub<const K: u64>(mut self, simd: S, rhs: Self) -> Self {
-        rhs.limb_bound.assert_le(2);
-        // The subtrahend must be below (K - 1) * p; see bias.
-        self.bound.sub_with_bias(rhs.bound, K - 1);
-        self.bound.add(DebugCounter::new(1));
-        self.bound.assert_le(LIMIT);
-        self.limb_bound.add(DebugCounter::new(3));
-        self.limb_bound.assert_le(LIMB_LIMIT);
-        let bias = const { bias(K) };
-        for ((limb, rhs), bias) in self.limbs.iter_mut().zip(rhs.limbs).zip(bias) {
-            *limb = simd.u32_sub(simd.u32_add(*limb, simd.u32_splat(bias)), rhs);
-        }
-        self
-    }
-
-    /// Returns `K * p - self`, which is `-self`, without carrying.
-    #[inline(always)]
-    pub fn neg<const K: u64>(mut self, simd: S) -> Self {
-        self.limb_bound.assert_le(2);
-        let mut bound = DebugCounter::new(1);
-        bound.sub_with_bias(self.bound, K - 1);
-        bound.assert_le(LIMIT);
-        let bias = const { bias(K) };
-        for (limb, bias) in self.limbs.iter_mut().zip(bias) {
-            *limb = simd.u32_sub(simd.u32_splat(bias), *limb);
-        }
-        self.bound = bound;
-        self.limb_bound = DebugCounter::new(3);
-        self
-    }
-
-    /// Propagates carries so every limb is below `2^28`, without reducing modulo `p`.
-    #[inline(always)]
-    pub fn carry(mut self, simd: S) -> Self {
-        let mask = simd.u32_splat(MASK);
-        for i in 0..LIMBS - 1 {
-            let carry = simd.u32_shr::<LIMB_BITS>(self.limbs[i]);
-            self.limbs[i + 1] = simd.u32_add(self.limbs[i + 1], carry);
-            self.limbs[i] = simd.u32_and(self.limbs[i], mask);
-        }
-        // The value is below 2^392, so the top limb is now below 2^28 as well.
-        self.limb_bound = DebugCounter::new(1);
-        self
-    }
-
-    /// Returns `self` as a multiplicand, given that its limb bound is at most `U`.
-    ///
-    /// Carries only when `U` exceeds [`SLACK`], so the decision is made at compile time.
-    #[inline(always)]
-    pub fn ready<const U: u64>(self, simd: S) -> Self {
-        self.limb_bound.assert_le(U);
-        if U > SLACK { self.carry(simd) } else { self }
-    }
-
-    /// Returns `self * rhs`.
-    ///
-    /// Runs as its own kernel, so formulas call one copy rather than inlining it at every use.
-    #[inline(always)]
-    pub fn mul(self, simd: S, rhs: Self) -> Self {
-        /// The product as an operation, so that NEON multiplies by the limbs of `p` by vector lane.
-        struct Multiply<S: Simd>(Unsat28<S>, Unsat28<S>);
-
-        impl<S: Simd> Operation<S> for Multiply<S> {
-            type Output = Unsat28<S>;
-
-            #[inline(always)]
-            fn portable(self, simd: S) -> Unsat28<S> {
-                self.0.multiply(simd, self.1, Splat)
-            }
-
-            #[inline(always)]
-            fn neon(self, simd: S) -> Unsat28<S>
-            where
-                S: Neon,
-            {
-                self.0.multiply(simd, self.1, Lanes::new(simd))
-            }
-        }
-
-        simd.execute(Multiply(self, rhs))
-    }
-
-    /// Body of [`Self::mul`], inlined into the calling kernel.
+    /// Body of [`Field::product`], inlined into the calling kernel.
     ///
     /// `modulus` multiplies quotient limbs by the limbs of `p`.
     #[inline(always)]
@@ -420,7 +295,7 @@ impl<S: Simd> Unsat28<S> {
         }
     }
 
-    /// Accumulates and reduces column `k` of [`Self::mul`].
+    /// Accumulates and reduces column `k` of [`Field::product`].
     #[inline(always)]
     #[allow(clippy::too_many_arguments)]
     fn column<M: Modulus<S>>(
@@ -558,7 +433,7 @@ impl<S: Simd> Unsat28<S> {
     }
 }
 
-/// Multiplies quotient limbs by the limbs of `p` in [`Unsat28::mul`].
+/// Multiplies quotient limbs by the limbs of `p` in [`Unsat28::product`].
 trait Modulus<S: Simd>: Copy {
     /// Returns the 64-bit products of half `h` of the lanes of `q` and limb `j` of `p`, split as
     /// [`Simd::u32_widen_mul_first`] and [`Simd::u32_widen_mul_second`].
@@ -617,14 +492,32 @@ impl<S: Simd> Field<S> for Unsat28<S> {
     type Product = Self;
     const PRODUCTS: usize = 8;
 
+    /// Loads up to `S::U32_LANES` elements, one per lane, filling the remaining lanes with `fill`.
     #[inline(always)]
     fn load(simd: S, elements: &[[u8; BYTES]], fill: &[u8; BYTES]) -> Self {
-        Self::load(simd, elements, fill)
+        let fill = limbs_from_words(words_from_bytes(fill));
+        let mut lanes = [[0; LIMBS]; MAX_LANES];
+        for (i, lane) in lanes.iter_mut().enumerate().take(S::U32_LANES) {
+            *lane = elements
+                .get(i)
+                .map_or(fill, |element| limbs_from_words(words_from_bytes(element)));
+        }
+        // Integers below 2^384 are below 10p.
+        Self::raw(simd, &lanes, 10).to_lanes(simd)
     }
 
+    /// Stores the canonical value of each lane into `elements`, dropping lanes beyond its length.
     #[inline(always)]
     fn store(self, simd: S, elements: &mut [[u8; BYTES]]) {
-        self.store(simd, elements);
+        let canonical = self
+            .carry(simd)
+            .product(simd, Self::constant(simd, &FROM_LANES, 1))
+            .subtract_modulus(simd);
+        let rows = canonical.to_rows(simd);
+        for (lane, element) in elements.iter_mut().enumerate().take(S::U32_LANES) {
+            let limbs = core::array::from_fn(|i| rows[i][lane]);
+            *element = bytes_from_words(&words_from_limbs(limbs));
+        }
     }
 
     type Raw = [u32; LIMBS];
@@ -660,19 +553,50 @@ impl<S: Simd> Field<S> for Unsat28<S> {
         }
     }
 
+    /// Returns `self + rhs`, without carrying.
     #[inline(always)]
-    fn add(self, simd: S, rhs: Self) -> Self {
-        self.add(simd, rhs)
+    fn add(mut self, simd: S, rhs: Self) -> Self {
+        self.bound.add(rhs.bound);
+        self.bound.assert_le(LIMIT);
+        self.limb_bound.add(rhs.limb_bound);
+        self.limb_bound.assert_le(LIMB_LIMIT);
+        for (limb, rhs) in self.limbs.iter_mut().zip(rhs.limbs) {
+            *limb = simd.u32_add(*limb, rhs);
+        }
+        self
     }
 
+    /// Returns `self + K * p - rhs`, which is `self - rhs`, without carrying.
     #[inline(always)]
-    fn sub<const K: u64>(self, simd: S, rhs: Self) -> Self {
-        self.sub::<K>(simd, rhs)
+    fn sub<const K: u64>(mut self, simd: S, rhs: Self) -> Self {
+        rhs.limb_bound.assert_le(2);
+        // The subtrahend must be below (K - 1) * p; see bias.
+        self.bound.sub_with_bias(rhs.bound, K - 1);
+        self.bound.add(DebugCounter::new(1));
+        self.bound.assert_le(LIMIT);
+        self.limb_bound.add(DebugCounter::new(3));
+        self.limb_bound.assert_le(LIMB_LIMIT);
+        let bias = const { bias(K) };
+        for ((limb, rhs), bias) in self.limbs.iter_mut().zip(rhs.limbs).zip(bias) {
+            *limb = simd.u32_sub(simd.u32_add(*limb, simd.u32_splat(bias)), rhs);
+        }
+        self
     }
 
+    /// Returns `K * p - self`, which is `-self`, without carrying.
     #[inline(always)]
-    fn neg<const K: u64>(self, simd: S) -> Self {
-        self.neg::<K>(simd)
+    fn neg<const K: u64>(mut self, simd: S) -> Self {
+        self.limb_bound.assert_le(2);
+        let mut bound = DebugCounter::new(1);
+        bound.sub_with_bias(self.bound, K - 1);
+        bound.assert_le(LIMIT);
+        let bias = const { bias(K) };
+        for (limb, bias) in self.limbs.iter_mut().zip(bias) {
+            *limb = simd.u32_sub(simd.u32_splat(bias), *limb);
+        }
+        self.bound = bound;
+        self.limb_bound = DebugCounter::new(3);
+        self
     }
 
     #[inline(always)]
@@ -691,19 +615,51 @@ impl<S: Simd> Field<S> for Unsat28<S> {
         self
     }
 
+    /// Propagates carries so every limb is below `2^28`, without reducing modulo `p`.
     #[inline(always)]
-    fn carry(self, simd: S) -> Self {
-        self.carry(simd)
+    fn carry(mut self, simd: S) -> Self {
+        let mask = simd.u32_splat(MASK);
+        for i in 0..LIMBS - 1 {
+            let carry = simd.u32_shr::<LIMB_BITS>(self.limbs[i]);
+            self.limbs[i + 1] = simd.u32_add(self.limbs[i + 1], carry);
+            self.limbs[i] = simd.u32_and(self.limbs[i], mask);
+        }
+        // The value is below 2^392, so the top limb is now below 2^28 as well.
+        self.limb_bound = DebugCounter::new(1);
+        self
     }
 
+    /// Carries only when `U` exceeds [`SLACK`], so the decision is made at compile time.
     #[inline(always)]
     fn ready<const U: u64>(self, simd: S) -> Self {
-        self.ready::<U>(simd)
+        self.limb_bound.assert_le(U);
+        if U > SLACK { self.carry(simd) } else { self }
     }
 
+    /// Runs as its own kernel, so formulas call one copy rather than inlining it at every use.
     #[inline(always)]
     fn product(self, simd: S, rhs: Self) -> Self::Product {
-        self.mul(simd, rhs)
+        /// The product as an operation, so that NEON multiplies by the limbs of `p` by vector lane.
+        struct Multiply<S: Simd>(Unsat28<S>, Unsat28<S>);
+
+        impl<S: Simd> Operation<S> for Multiply<S> {
+            type Output = Unsat28<S>;
+
+            #[inline(always)]
+            fn portable(self, simd: S) -> Unsat28<S> {
+                self.0.multiply(simd, self.1, Splat)
+            }
+
+            #[inline(always)]
+            fn neon(self, simd: S) -> Unsat28<S>
+            where
+                S: Neon,
+            {
+                self.0.multiply(simd, self.1, Lanes::new(simd))
+            }
+        }
+
+        simd.execute(Multiply(self, rhs))
     }
 
     #[inline(always)]
@@ -866,7 +822,7 @@ pub mod fuzz {
                     };
                     let mut output = [[0; BYTES]; MAX_LANES];
                     sum(LIMIT / SLACK)
-                        .mul(simd, sum((LIMIT - 1) / SLACK))
+                        .product(simd, sum((LIMIT - 1) / SLACK))
                         .store(simd, &mut output);
                     output[0]
                 }
