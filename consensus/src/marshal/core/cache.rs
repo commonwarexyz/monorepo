@@ -61,7 +61,8 @@ where
         prunable::Archive<TwoCap, R, <V::Block as Digestible>::Digest, V::StoredBlock>,
     /// Certified blocks indexed by height and keyed by digest.
     ///
-    /// Also includes uncertified ancestors fetched during optimistic verification.
+    /// Holds fetched blocks whose commitments this node certified, directly or through the parent
+    /// link of a certified descendant.
     certified_blocks:
         prunable::Archive<TwoCap, R, <V::Block as Digestible>::Digest, V::StoredBlock>,
     /// Notarizations stored by view

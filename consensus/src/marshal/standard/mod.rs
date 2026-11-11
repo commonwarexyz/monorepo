@@ -2472,7 +2472,7 @@ mod tests {
             let anchor = anchor.unwrap();
 
             // Subscribe to the anchor, creating a buffer-backed waiter.
-            let subscription = mailbox.acquire(anchor.digest());
+            let subscription = mailbox.subscribe(anchor.digest());
 
             // Set a floor whose anchor block is not yet available locally.
             let round = Round::new(Epoch::zero(), View::new(ANCHOR_HEIGHT));
@@ -2520,7 +2520,7 @@ mod tests {
     }
 
     /// A pending floor anchor that reaches the buffer installs the floor. With
-    /// `subscribe`, a query queued behind acquisition of the buffered anchor
+    /// `subscribe`, a query queued behind a subscription for the buffered anchor
     /// observes the installed floor.
     fn buffered_anchor_installs_floor(subscribe: bool) {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -2577,9 +2577,9 @@ mod tests {
             // The anchor reaches the buffer while only the pending floor's waiter awaits it.
             let _ = buffer.broadcast(Recipients::All, ready(anchor.clone()));
 
-            // A query queued behind acquisition observes the installed floor.
+            // A query queued behind the subscription observes the installed floor.
             if subscribe {
-                let subscription = mailbox.acquire(anchor.digest());
+                let subscription = mailbox.subscribe(anchor.digest());
                 let (_, block) = mailbox.get_anchor().await.unwrap();
                 assert_eq!(block.digest(), anchor.digest());
                 assert_eq!(subscription.await.unwrap().digest(), anchor.digest());
@@ -2684,7 +2684,7 @@ mod tests {
             }
 
             // A caller waits on the same anchor through its own buffer waiter.
-            let subscription = mailbox.acquire(commitment);
+            let subscription = mailbox.subscribe(commitment);
             while buffer.commitment_subscription_count() != 2 {
                 reschedule().await;
             }
@@ -2856,7 +2856,7 @@ mod tests {
             StandardHarness::propose(&mut server_handle, round, &ready(anchor.clone())).await;
 
             // Subscribe while the anchor is unavailable on the victim.
-            let subscription = mailbox.acquire(anchor.digest());
+            let subscription = mailbox.subscribe(anchor.digest());
 
             // Record a pending floor anchor and start the resolver fetch.
             let finalization = StandardHarness::make_finalization(
@@ -2983,7 +2983,7 @@ mod tests {
             StandardHarness::propose(&mut server_handle, fork_round, &ready(fork.clone())).await;
 
             // Subscribe while the fork block is unavailable on the victim.
-            let subscription = mailbox.acquire(fork.digest());
+            let subscription = mailbox.subscribe(fork.digest());
 
             // Record a pending floor anchor for the unavailable fork block and
             // start the resolver fetch.
@@ -3541,19 +3541,6 @@ mod tests {
                 } => result,
             }
             context.sleep(Duration::from_millis(250)).await;
-
-            // The selected parent's notarization reaches the victim after it rejects the
-            // conflicting header. Marshal already holds the parent's body.
-            let parent_notarization = StandardHarness::make_notarization(
-                Proposal::new(skipped_round, View::new(1), skipped_digest),
-                &schemes,
-                QUORUM,
-            );
-            byzantine_certificate_sender.send(
-                Recipients::One(victim.clone()),
-                Certificate::<S, D>::Notarization(parent_notarization).encode(),
-                true,
-            );
 
             // The Byzantine validator and the other two honest validators
             // notarize the header naming view 2 without the victim's vote.

@@ -868,10 +868,7 @@ mod tests {
                 "missing candidate should register a local buffer wait"
             );
             assert!(
-                !resolver
-                    .fetches()
-                    .iter()
-                    .any(|fetch| fetch.key == handler::Key::Block(commitment)),
+                resolver.fetches().is_empty(),
                 "missing candidate verification must not fetch from peers"
             );
             assert!(
@@ -5030,24 +5027,11 @@ mod tests {
         }
     }
 
-    /// A cached floor block whose parent digest disagrees with its parent commitment halts
-    /// marshal, since a floor anchor bypasses proposal verification.
+    /// A floor block whose parent digest disagrees with its parent commitment halts marshal, since
+    /// a floor anchor bypasses proposal verification.
     #[test_traced("WARN")]
     #[should_panic(expected = "floor block parent commitment mismatch")]
     fn test_coding_floor_anchor_panics_on_parent_commitment_mismatch() {
-        floor_anchor_parent_commitment_mismatch(true);
-    }
-
-    /// A fetched floor block whose parent digest disagrees with its parent commitment is
-    /// rejected before marshal archives it.
-    #[test_traced("WARN")]
-    fn test_coding_floor_delivery_rejects_parent_commitment_mismatch() {
-        floor_anchor_parent_commitment_mismatch(false);
-    }
-
-    /// Sets a floor whose block names one parent by digest and another by commitment. The block
-    /// is cached locally when `cached` and fetched from a peer otherwise.
-    fn floor_anchor_parent_commitment_mismatch(cached: bool) {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture {
@@ -5063,21 +5047,16 @@ mod tests {
             )
             .await;
 
-            // Finalize a floor block whose parent digest names its real parent while its context
-            // names a different parent commitment.
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
             let parent_round = Round::new(Epoch::zero(), View::new(1));
             let parent_context = CodingCtx {
                 round: parent_round,
                 leader: participants[0].clone(),
-                parent: (View::zero(), genesis_coding_commitment(&genesis_block())),
+                parent: (View::zero(), genesis_commitment()),
             };
-            let parent = make_coding_block(
-                parent_context,
-                genesis_block().digest(),
-                Height::new(1),
-                100,
-            );
+            let parent =
+                make_coding_block(parent_context, Sha256::hash(&[b""]), Height::new(1), 100);
+
             let floor_round = Round::new(Epoch::zero(), View::new(2));
             let bad_context = CodingCtx {
                 round: floor_round,
@@ -5087,6 +5066,7 @@ mod tests {
             let floor_block = make_coding_block(bad_context, parent.digest(), Height::new(2), 200);
             let coded_floor = encode_block(floor_block.clone(), coding_config);
             assert_ne!(coded_floor.parent(), coded_floor.context().parent.1.block());
+
             let finalization = CodingHarness::make_finalization(
                 Proposal::new(
                     floor_round,
@@ -5096,27 +5076,9 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
-            if cached {
-                // The cached floor block reaches the anchor check directly and panics there.
-                assert!(mailbox.verified(floor_round, coded_floor).await);
-                mailbox.set_floor(finalization);
-                let _ = mailbox.get_processed().await;
-            } else {
-                // The fetched floor block fails delivery validation, so nothing is archived and
-                // processing stays at genesis.
-                resolver.respond_to_next_fetch(coded_floor.encode());
-                mailbox.set_floor(finalization);
-                while resolver.fetches().is_empty() {
-                    reschedule().await;
-                }
-                assert!(!resolver.wait_for_delivery_response().await);
-                assert_eq!(
-                    mailbox.get_processed().await,
-                    Some(Processed::Block(Height::zero()))
-                );
-                assert!(mailbox.get_block(Height::new(2)).await.is_none());
-                assert!(mailbox.get_finalization(Height::new(2)).await.is_none());
-            }
+            resolver.respond_to_next_fetch(coded_floor.encode());
+            mailbox.set_floor(finalization);
+            context.sleep(Duration::from_secs(5)).await;
         })
     }
 
@@ -6431,6 +6393,92 @@ mod tests {
             assert_eq!(
                 mailbox.get_block(&digest).await.unwrap().commitment(),
                 notarized.commitment()
+            );
+        });
+    }
+
+    /// A cached finalization authenticates and archives an acquired block only when it names the
+    /// block's own commitment. Two encodings of one block share its digest.
+    #[test_traced("WARN")]
+    fn test_coding_acquired_block_is_finalized_only_under_its_finalization() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (mut mailbox, resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("validator"),
+                "finalized-other-commitment",
+                ConstantProvider::new(schemes[0].clone()),
+                RecordingCodingBuffer::default(),
+            )
+            .await;
+
+            // The same block is encoded under two configurations.
+            let (candidate_ctx, finalized) = missing_candidate(participants[0].clone());
+            let config = finalized.config();
+            let other_config = CodingConfig {
+                minimum_shards: config.minimum_shards.checked_add(1).unwrap(),
+                extra_shards: NZU16!(config.extra_shards.get() - 1),
+            };
+            let other: TestCodedBlock = encode_block(
+                make_coding_block(
+                    candidate_ctx.clone(),
+                    genesis_block().digest(),
+                    Height::new(1),
+                    100,
+                ),
+                other_config,
+            );
+            assert_eq!(finalized.digest(), other.digest());
+            assert_ne!(finalized.commitment(), other.commitment());
+
+            // Marshal holds a finalization for one encoding and acquires the other.
+            let finalization = CodingHarness::make_finalization(
+                Proposal::new(candidate_ctx.round, View::zero(), finalized.commitment()),
+                &schemes,
+                QUORUM,
+            );
+            CodingHarness::report_finalization(&mut mailbox, finalization).await;
+            let acquisition = mailbox.acquire(other.commitment());
+            let _ = mailbox.get_processed().await;
+            let fetch = resolver
+                .fetches()
+                .into_iter()
+                .find(|fetch| fetch.key == handler::Key::Block(other.commitment()))
+                .expect("acquired commitment must be requested");
+            assert!(resolver.deliver(fetch, other.encode()).await);
+
+            // The finalization does not name the acquired commitment, so the body is neither
+            // trusted nor archived at its height.
+            let delivered = acquisition.await.expect("acquisition dropped");
+            assert_eq!(delivered.commitment(), other.commitment());
+            assert!(
+                delivered.shard(0).is_some(),
+                "a block must not be trusted under a finalization for another commitment"
+            );
+            assert!(
+                mailbox.get_block(Height::new(1)).await.is_none(),
+                "a block must not be archived under a finalization for another commitment"
+            );
+            assert!(mailbox.get_finalization(Height::new(1)).await.is_none());
+
+            // The finalized encoding is archived once it arrives.
+            let fetch = resolver
+                .fetches()
+                .into_iter()
+                .find(|fetch| fetch.key == handler::Key::Block(finalized.commitment()))
+                .expect("finalized commitment must be requested");
+            assert!(resolver.deliver(fetch, finalized.encode()).await);
+            assert_eq!(
+                mailbox
+                    .get_block(Height::new(1))
+                    .await
+                    .unwrap()
+                    .commitment(),
+                finalized.commitment()
             );
         });
     }

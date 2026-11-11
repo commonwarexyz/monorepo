@@ -98,8 +98,9 @@ fn check_block<B: Block>(
 /// A failure to acquire a block on the selected branch.
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 pub enum Error {
-    /// The block cannot be acquired: the source closed, holds no commitment to start from, or
-    /// selects a branch that conflicts with finalized history.
+    /// The block cannot be acquired: the source closed, holds no commitment to start from, selects
+    /// a branch that conflicts with finalized history, or reads a canonical height that a floor
+    /// update skipped or that marshal has processed and does not store.
     #[error("block unavailable")]
     Unavailable,
     /// A block or requested range is outside its expected heights.
@@ -128,7 +129,8 @@ pub enum Error {
 ///
 /// Later finalization or pruning does not redirect an acquisition that is already pending. It
 /// stays pending until the body arrives, every waiter drops, or marshal shuts down. A read of a
-/// canonical height also ends with [`Error::Unavailable`] when a floor update skips that height.
+/// canonical height also ends with [`Error::Unavailable`] when a floor update skips that height
+/// or when the height is at or below marshal's processed height and its block is not stored.
 pub struct Blocks<B: Block> {
     tip: Height,
     source: Arc<dyn Source<B>>,
@@ -992,10 +994,7 @@ mod tests {
     fn range_scopes_prefetch_to_its_lifetime() {
         deterministic::Runner::default().start(|context| async move {
             // A source over an anchored history of heights 4 through 9.
-            type TestMessage = Message<harness::S, Standard<TestBlock>>;
-            let (sender, mut receiver) =
-                commonware_actor::mailbox::new::<TestMessage>(context, NZUsize!(16));
-            let marshal = Mailbox::new(sender, NZUsize!(1), NZUsize!(8));
+            let (marshal, mut receiver) = marshal(context, 8);
             let blocks = chain(10);
             let commitments: Arc<[_]> = blocks[4..].iter().map(Digestible::digest).collect();
             let source = marshal.blocks_with_parent(
@@ -1768,23 +1767,21 @@ mod tests {
     fn range_error_releases_prefetch_and_bodies() {
         deterministic::Runner::default().start(|context| async move {
             // Each error case uses its own marshal and fails the range at height 1.
-            type TestMessage = Message<harness::S, Standard<TestBlock>>;
             for expected in [
                 Error::InvalidHeight,
                 Error::InvalidDigest,
                 Error::InvalidParent,
                 Error::Unavailable,
             ] {
-                let (sender, mut receiver) = commonware_actor::mailbox::new::<TestMessage>(
+                let (marshal, mut receiver) = marshal(
                     context.child(match expected {
                         Error::InvalidHeight => "invalid_height",
                         Error::InvalidDigest => "invalid_digest",
                         Error::InvalidParent => "invalid_parent",
                         Error::Unavailable => "unavailable",
                     }),
-                    NZUsize!(16),
+                    8,
                 );
-                let marshal = Mailbox::new(sender, NZUsize!(1), NZUsize!(8));
                 let mut blocks = chain(6);
                 let replacement = match expected {
                     Error::InvalidHeight => TestBlock::new(blocks[0].digest(), Height::new(7), 1),

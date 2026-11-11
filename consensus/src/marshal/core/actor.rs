@@ -31,7 +31,7 @@ use commonware_actor::mailbox;
 use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::{
     Digested, Digestible,
-    certificate::{Provider, Verifier},
+    certificate::{Provider, Scoped, Verifier},
 };
 use commonware_macros::{boxed, select_loop};
 use commonware_p2p::Recipients;
@@ -1535,177 +1535,168 @@ where
     ) -> Box<Self> {
         let ResolverDelivery {
             delivery,
-            value,
+            mut value,
             response,
         } = message;
-        if let Key::Finalized { height } = delivery.key {
-            // Without an epoch for the height or a scope for that epoch, the response cannot be
-            // validated, so the key is retired without crediting or blaming its source.
-            let Some(epoch) = self.epocher.containing(height).map(|bounds| bounds.epoch()) else {
-                response.send_lossy(Outcome::Ignored);
-                return self;
-            };
-            let Some(scoped) = self.provider.scoped(epoch) else {
-                debug!(
-                    %height,
-                    floor = %self.floor.processed_height(),
-                    "ignoring stale delivery"
-                );
-                response.send_lossy(Outcome::Ignored);
-                return self;
-            };
-            let mut value = value;
-            let certificate_codec_config = scoped.certificate_codec_config();
+        match delivery.key {
+            Key::Block(commitment) => {
+                // Local finality, gap-repair, or certification evidence for the commitment lets
+                // decoding trust it. Without such evidence, decoding recomputes the commitment.
+                let digest = V::commitment_to_inner(commitment);
+                let finalization = self
+                    .cache
+                    .get_finalization_for(digest)
+                    .await
+                    .filter(|certificate| certificate.proposal.payload == commitment);
+                let repairing = self.repair_parent == Some(commitment);
+                let certified = self.certified.contains_commitment(&commitment);
+                let expected = if finalization.is_some() || repairing || certified {
+                    ExpectedCommitment::Trusted(commitment)
+                } else {
+                    ExpectedCommitment::Untrusted(commitment)
+                };
+                let Ok(block) =
+                    V::decode_block(value, &self.block_codec_config, expected, &self.strategy)
+                        .await
+                else {
+                    response.send_lossy(Outcome::Invalid);
+                    return self;
+                };
 
-            // Decode the certificate under the bounds of the height's epoch.
-            let Ok(finalization) = Finalization::read_cfg(&mut value, &certificate_codec_config)
-            else {
-                response.send_lossy(Outcome::Invalid);
-                return self;
-            };
+                // A certified block's digest binds its parent commitment, so certification extends
+                // to the parent.
+                let height = block.height();
+                if certified && let Some(parent) = height.previous() {
+                    self.certified.insert(parent, V::parent_commitment(&block));
+                }
 
-            // The certificate's epoch must match the scope that bounds its encoding.
-            if finalization.epoch() != epoch {
-                response.send_lossy(Outcome::Invalid);
-                return self;
+                // Send the verdict before the handoff. The handoff cancels the block's subscription
+                // request when a fetching caller or an active speculative fetch was waiting for it,
+                // and the resolver keeps the source feedback of a canceled delivery only if its
+                // verdict was already sent. A block that anchors the pending floor transition is
+                // consumed by that transition and is not stored as an ordinary delivery.
+                response.send_lossy(Outcome::Resolved(Resolution::Complete));
+                let anchored;
+                (self, anchored) = self
+                    .ingest(block.clone(), buffer, application, resolver)
+                    .await;
+                if anchored {
+                    return self;
+                }
+
+                // Witness the round and sync the round floor before archiving the block.
+                if let Some(certificate) = &finalization {
+                    self = self
+                        .witness_round(height, certificate.round(), buffer, application, resolver)
+                        .await;
+                    self.stream = self
+                        .stream
+                        .sync()
+                        .await
+                        .expect("round floor sync must succeed");
+                }
+
+                // Store the block under the strongest local evidence for its commitment: finality
+                // (a cached finalization, the repair walk, or the finalized archives),
+                // certification above the processed height, or a held notarization that names it.
+                // Otherwise it is not stored.
+                if finalization.is_some()
+                    || repairing
+                    || self.finalized_commitment(height).await == Some(commitment)
+                {
+                    (self, _) = self
+                        .store_finalization(height, &block, finalization, application, resolver)
+                        .await;
+                } else if certified
+                    && height > self.floor.processed_height()
+                    && let Some(bounds) = self.epocher.containing(height)
+                {
+                    self.cache = self
+                        .cache
+                        .put_certified(bounds.epoch(), height, digest, &block)
+                        .await;
+                    self.prefetch.retire(commitment);
+                } else if let Some(notarization) = self
+                    .cache
+                    .get_notarization_for(digest)
+                    .await
+                    .filter(|notarization| notarization.proposal.payload == commitment)
+                {
+                    // Storing under the notarization's round lets the block's later finalization
+                    // and readers find it, as for a locally available notarized block. No caller
+                    // awaits this write, so the sync pool observes its durability.
+                    let round = notarization.round();
+                    let handle;
+                    (self.cache, handle) = self.cache.put_notarized(round, digest, &block).await;
+                    syncs.push(async move {
+                        handle.durable(round, "notarized").await;
+                        PooledSync::Observed
+                    });
+                    self.prefetch.retire(commitment);
+                }
             }
+            Key::Finalized { height } => {
+                // Without an epoch for the height or a scope for that epoch, the response cannot
+                // be validated, so the key is retired without crediting or blaming its source.
+                let Some((epoch, scoped)) = self.scoped_for_height(height) else {
+                    debug!(
+                        %height,
+                        floor = %self.floor.processed_height(),
+                        "ignoring stale delivery"
+                    );
+                    response.send_lossy(Outcome::Ignored);
+                    return self;
+                };
+                let certificate_codec_config = scoped.certificate_codec_config();
 
-            // Decode the block carried with the finalization.
-            let Ok(block) = V::ApplicationBlock::decode_cfg(&mut value, &self.block_codec_config)
-            else {
-                response.send_lossy(Outcome::Invalid);
-                return self;
-            };
+                let Ok(finalization) =
+                    Finalization::read_cfg(&mut value, &certificate_codec_config)
+                else {
+                    response.send_lossy(Outcome::Invalid);
+                    return self;
+                };
 
-            // Once the certificate verifies, the finalization authenticates the application block,
-            // so only the height and digest are checked here. The working block is then rebuilt
-            // from the finalized commitment.
-            let commitment = finalization.proposal.payload;
-            if block.height() != height {
-                response.send_lossy(Outcome::Invalid);
-                return self;
+                // We decoded the certificate with the codec config for the height's epoch, so the
+                // finalization must claim that same epoch. A mismatch means the bytes were bounded
+                // against the wrong participant set, so reject before verification.
+                if finalization.epoch() != epoch {
+                    response.send_lossy(Outcome::Invalid);
+                    return self;
+                }
+
+                // Decode the block carried with the finalization. Below, it is checked against
+                // the requested height and the finalization payload.
+                let Ok(block) =
+                    V::ApplicationBlock::decode_cfg(&mut value, &self.block_codec_config)
+                else {
+                    response.send_lossy(Outcome::Invalid);
+                    return self;
+                };
+
+                // Once the certificate verifies, the finalization authenticates the application
+                // block, so only the height and digest are checked here. The working block is then
+                // rebuilt from the finalized commitment.
+                let commitment = finalization.proposal.payload;
+                if block.height() != height {
+                    response.send_lossy(Outcome::Invalid);
+                    return self;
+                }
+                let block = Digested::compute(block, &self.strategy).await;
+                if block.digest() != V::commitment_to_inner(commitment) {
+                    response.send_lossy(Outcome::Invalid);
+                    return self;
+                }
+                delivers.push(PendingVerification {
+                    scoped,
+                    finalization,
+                    block,
+                    response,
+                });
             }
-            let block = Digested::compute(block, &self.strategy).await;
-            if block.digest() != V::commitment_to_inner(commitment) {
+            Key::Notarized { .. } => {
+                // Marshal requests only finalized heights and exact bodies.
                 response.send_lossy(Outcome::Invalid);
-                return self;
             }
-            delivers.push(PendingVerification {
-                scoped,
-                finalization,
-                block,
-                response,
-            });
-            return self;
-        }
-
-        // Marshal requests only finalized heights and exact bodies, so any other key is invalid.
-        let Key::Block(commitment) = delivery.key else {
-            response.send_lossy(Outcome::Invalid);
-            return self;
-        };
-
-        // Local finality, gap-repair, or certification evidence for the commitment lets decoding
-        // trust it. Without such evidence, decoding recomputes the commitment.
-        let digest = V::commitment_to_inner(commitment);
-        let finalization = self
-            .cache
-            .get_finalization_for(digest)
-            .await
-            .filter(|certificate| certificate.proposal.payload == commitment);
-        let repairing = self.repair_parent == Some(commitment);
-        let certified = self.certified.contains_commitment(&commitment);
-        let expected = if finalization.is_some() || repairing || certified {
-            ExpectedCommitment::Trusted(commitment)
-        } else {
-            ExpectedCommitment::Untrusted(commitment)
-        };
-        let Ok(block) =
-            V::decode_block(value, &self.block_codec_config, expected, &self.strategy).await
-        else {
-            response.send_lossy(Outcome::Invalid);
-            return self;
-        };
-
-        // A fetched floor anchor whose parent digest disagrees with its parent commitment is
-        // invalid, since applying the floor asserts that they agree.
-        if self.floor.matches_pending_anchor(commitment)
-            && block.height() > Height::zero()
-            && block.parent() != V::commitment_to_inner(V::parent_commitment(&block))
-        {
-            response.send_lossy(Outcome::Invalid);
-            return self;
-        }
-
-        // A certified block's digest binds its parent commitment, so certification extends to
-        // the parent.
-        let height = block.height();
-        if certified && let Some(parent) = height.previous() {
-            self.certified.insert(parent, V::parent_commitment(&block));
-        }
-
-        // Send the verdict before the handoff. The handoff cancels the block's subscription request
-        // when a fetching caller or an active speculative fetch was waiting for it, and the
-        // resolver keeps the source feedback of a canceled delivery only if its verdict was already
-        // sent. A block that anchors the pending floor transition is consumed by that transition
-        // and is not stored as an ordinary delivery.
-        response.send_lossy(Outcome::Resolved(Resolution::Complete));
-        let anchored;
-        (self, anchored) = self
-            .ingest(block.clone(), buffer, application, resolver)
-            .await;
-        if anchored {
-            return self;
-        }
-
-        // Witness the round and sync the round floor before archiving the block.
-        if let Some(certificate) = &finalization {
-            self = self
-                .witness_round(height, certificate.round(), buffer, application, resolver)
-                .await;
-            self.stream = self
-                .stream
-                .sync()
-                .await
-                .expect("round floor sync must succeed");
-        }
-
-        // Store the block under the strongest local evidence for its commitment: finality (a
-        // cached finalization, the repair walk, or the finalized archives), certification above
-        // the processed height, or a held notarization that names it. Otherwise it is not stored.
-        if finalization.is_some()
-            || repairing
-            || self.finalized_commitment(height).await == Some(commitment)
-        {
-            (self, _) = self
-                .store_finalization(height, &block, finalization, application, resolver)
-                .await;
-        } else if certified
-            && height > self.floor.processed_height()
-            && let Some(bounds) = self.epocher.containing(height)
-        {
-            self.cache = self
-                .cache
-                .put_certified(bounds.epoch(), height, digest, &block)
-                .await;
-            self.prefetch.retire(commitment);
-        } else if let Some(notarization) = self
-            .cache
-            .get_notarization_for(digest)
-            .await
-            .filter(|notarization| notarization.proposal.payload == commitment)
-        {
-            // Storing under the notarization's round lets the block's later finalization and
-            // readers find it, as for a locally available notarized block. No caller awaits this
-            // write, so the sync pool observes its durability.
-            let round = notarization.round();
-            let handle;
-            (self.cache, handle) = self.cache.put_notarized(round, digest, &block).await;
-            syncs.push(async move {
-                handle.durable(round, "notarized").await;
-                PooledSync::Observed
-            });
-            self.prefetch.retire(commitment);
         }
         self
     }
@@ -1803,15 +1794,18 @@ where
         self
     }
 
-    /// Returns the commitment finalized at `height` from its finalization, its stored block, or
-    /// the parent link of the stored block above it.
+    /// Returns the epoch containing `height` and the scope that verifies its certificates.
+    fn scoped_for_height(&self, height: Height) -> Option<(Epoch, Scoped<P::Scheme>)> {
+        let epoch = self.epocher.containing(height)?.epoch();
+        let scoped = self.provider.scoped(epoch)?;
+        Some((epoch, scoped))
+    }
+
+    /// Returns the commitment finalized at `height` from its finalization or the parent link of the
+    /// stored block above it.
     async fn finalized_commitment(&self, height: Height) -> Option<V::Commitment> {
         if let Some(finalization) = self.get_finalization_by_height(height).await {
             return Some(finalization.proposal.payload);
-        }
-        if let Some(stored) = self.get_finalized_block(height).await {
-            let block = V::restore_across(stored, &self.strategy).await;
-            return Some(V::commitment(&block));
         }
         let next = Height::new(height.get().checked_add(1)?);
         self.get_finalized_block(next)

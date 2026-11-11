@@ -4336,18 +4336,7 @@ pub fn subscribe_canceled_subscriptions<H: TestHarness>() {
 
         let sub1_rx = handle.mailbox.acquire(H::commitment(&block1));
         let sub2_rx = handle.mailbox.acquire(H::commitment(&block2));
-        let surviving_rx = handle.mailbox.acquire(H::commitment(&block1));
-
-        // FIFO mailbox processing registers all callers before cancellation.
-        assert!(
-            handle
-                .mailbox
-                .get_block(&H::digest(&block1))
-                .await
-                .is_none()
-        );
         drop(sub1_rx);
-        context.sleep(Duration::from_millis(1)).await;
 
         for (view, block) in [(1u64, &block1), (2, &block2)] {
             let round = Round::new(Epoch::zero(), View::new(view));
@@ -4366,10 +4355,6 @@ pub fn subscribe_canceled_subscriptions<H: TestHarness>() {
             H::report_finalization(&mut handle.mailbox, finalization).await;
         }
 
-        // The surviving caller for the first block and the caller for the second still receive
-        // them.
-        let received1 = surviving_rx.await.unwrap();
-        assert_eq!(received1.digest(), H::digest(&block1));
         let received2 = sub2_rx.await.unwrap();
         assert_eq!(received2.digest(), digest2);
         assert_eq!(received2.height().get(), 2);

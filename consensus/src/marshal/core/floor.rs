@@ -311,13 +311,6 @@ impl<S: Scheme, C: Digest> State<S, C> {
         });
     }
 
-    /// Returns whether `commitment` belongs to the pending floor anchor.
-    pub(super) fn matches_pending_anchor(&self, commitment: C) -> bool {
-        self.pending
-            .as_ref()
-            .is_some_and(|pending| pending.finalization.proposal.payload == commitment)
-    }
-
     /// Takes the pending floor if `commitment` is its payload.
     #[must_use]
     pub(super) fn take_matching(&mut self, commitment: C) -> Option<Finalization<S, C>> {
