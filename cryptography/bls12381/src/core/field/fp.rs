@@ -178,7 +178,12 @@ pub(crate) mod reference {
     pub(crate) const ZERO: Element = [0; WORDS];
 
     /// One.
-    pub(crate) const ONE: Element = [1, 0, 0, 0, 0, 0];
+    pub(crate) const ONE: Element = small(1);
+
+    /// Returns the element with the integer value `n`.
+    pub(crate) const fn small(n: u64) -> Element {
+        [n, 0, 0, 0, 0, 0]
+    }
 
     /// `-p^(-1) mod 2^64`.
     const INV: u64 = montgomery::negated_inverse(MODULUS[0]);
@@ -266,7 +271,7 @@ pub(crate) mod testing {
         super::arithmetic::Field,
         BYTES, MINUS_ONE, MODULUS, ONE, WORDS, encode, limbs_from_words, montgomery, multiple,
         power_of_two,
-        reference::{self, Element},
+        reference::{self, Element, small},
         rns::Rns,
         unsat28::Unsat28,
         unsat49::Unsat49,
@@ -701,8 +706,7 @@ pub(crate) mod testing {
         }
 
         /// Returns the formula's value on one lane's elements.
-        fn expected<S: Simd, F: Positional<S>>(&self, a: Element, b: Element) -> Element {
-            let small = |n: u64| [n, 0, 0, 0, 0, 0];
+        const fn expected<S: Simd, F: Positional<S>>(&self, a: Element, b: Element) -> Element {
             match self.formula {
                 Formula::Add => reference::add(a, b),
                 Formula::Sub => reference::sub(a, b),

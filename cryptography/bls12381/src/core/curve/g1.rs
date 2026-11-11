@@ -297,7 +297,7 @@ pub(crate) mod fuzz {
 
         const ZERO: Element = reference::ZERO;
         const ONE: Element = reference::ONE;
-        const B: Element = [4, 0, 0, 0, 0, 0];
+        const B: Element = reference::small(4);
         const GENERATOR: Coordinates = GENERATOR;
         const IDENTITY: Coordinates = IDENTITY;
 

@@ -686,7 +686,7 @@ const INVERSE_EXPONENT: [u64; WORDS] = {
 pub mod fuzz {
     use super::*;
     use crate::core::field::fp::{
-        reference::{self, Element},
+        reference::{self, Element, small},
         testing::{self, Check},
     };
     use arbitrary::{Arbitrary, Unstructured};
@@ -760,11 +760,6 @@ pub mod fuzz {
                 type_name::<F>()
             );
         }
-    }
-
-    /// Returns the element with the integer value `n`.
-    const fn small(n: u64) -> Element {
-        [n, 0, 0, 0, 0, 0]
     }
 
     fn operations<S: Simd, F: Field<S>>(

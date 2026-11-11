@@ -754,7 +754,7 @@ pub(crate) mod reference {
 
     /// Returns the element of the base field with the integer value `n`.
     pub(crate) const fn small(n: u64) -> Element {
-        ([n, 0, 0, 0, 0, 0], fp::ZERO)
+        (fp::small(n), fp::ZERO)
     }
 
     /// Returns `a + b`.
