@@ -84,11 +84,11 @@ enum PreflightMode {
 
     /// Restore one checkpoint section and discard every later section.
     Restore {
-        /// The checkpoint section remains explicit because an empty checkpoint has no floor.
+        /// The checkpoint section.
         section: u64,
 
-        /// Logical byte prefix of each checkpoint-covered section, which replay preserves.
-        floors: BTreeMap<u64, u64>,
+        /// Logical byte size the checkpoint section is truncated to.
+        size: u64,
     },
 }
 
@@ -214,7 +214,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
 
         let page_size = cfg.page_cache.page_size();
         let mut boundaries = BTreeMap::new();
-        let mut floors = BTreeMap::new();
 
         for (&candidate, name) in stored.range(..=section) {
             // Earlier sections end at their retained terminal page. The checkpoint supplies the
@@ -224,9 +223,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
                 if size == 0 {
                     None
                 } else {
-                    let entry = Self::boundary(&blob, page_size, section, size).await?;
-                    floors.insert(section, size);
-                    Some(entry)
+                    Some(Self::boundary(&blob, page_size, section, size).await?)
                 }
             } else if physical_size == 0 {
                 None
@@ -245,7 +242,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
                         "section {candidate} is not a complete checkpoint-covered index"
                     )));
                 }
-                floors.insert(candidate, logical_size);
                 Some(A::decode(entry.coalesce()).map_err(Error::Codec)?)
             };
             boundaries.insert(candidate, entry);
@@ -255,7 +251,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
             context,
             cfg,
             boundaries,
-            mode: PreflightMode::Restore { section, floors },
+            mode: PreflightMode::Restore { section, size },
         })
     }
 
@@ -297,9 +293,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         // sections unread.
         let (floors, restore, ceiling) = match mode {
             PreflightMode::Floors { floors } => (floors, None, u64::MAX),
-            PreflightMode::Restore { section, floors } => {
-                let size = floors.get(&section).copied().unwrap_or(0);
-                (floors, Some((section, size)), section)
+            PreflightMode::Restore { section, size } => {
+                (BTreeMap::new(), Some((section, size)), section)
             }
         };
 
@@ -1665,10 +1660,10 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_segmented_fixed_restore_floors_block_below_checkpoint_repair() {
+    fn test_segmented_fixed_restore_rejects_below_checkpoint_repair() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = lazy_recovery_cfg("segmented-fixed-restore-floors");
+            let cfg = lazy_recovery_cfg("segmented-fixed-restore-repair");
             seed(&context, &cfg, 0..=1).await;
 
             // Tear an interior page below the checkpoint boundary. The preflight reads only the
