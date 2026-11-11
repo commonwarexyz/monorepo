@@ -241,18 +241,6 @@ pub(crate) mod reference {
         super::encode(a)
     }
 
-    /// Returns the residue of a big-endian integer, as [`decode`].
-    #[cfg(test)]
-    pub(crate) fn reduce(bytes: &[u8; BYTES]) -> Element {
-        decode(bytes)
-    }
-
-    /// Returns the big-endian encoding of a canonical integer, as [`encode`].
-    #[cfg(test)]
-    pub(crate) const fn to_bytes(a: Element) -> [u8; BYTES] {
-        encode(a)
-    }
-
     /// Draws a canonical integer: one below `2^381`, mapping integers at or above `p` to zero.
     ///
     /// Fails when the input holds fewer than [`BYTES`] bytes.
