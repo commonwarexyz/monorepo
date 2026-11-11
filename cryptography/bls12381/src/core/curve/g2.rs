@@ -1,7 +1,6 @@
 //! Arithmetic on points of G2, the curve `y^2 = x^3 + 4 (1 + i)` over the quadratic extension.
 //!
-//! A [`Point`] holds as many projective points as its extension values hold elements, one per lane,
-//! and its formulas run once over every base field representation.
+//! A [`Point`] holds one projective point per lane, in any base field representation.
 //!
 //! # Coordinate bounds
 //!
@@ -13,6 +12,8 @@
 //! Raw coordinates hold each lane of a point in the representation's own form, through
 //! [`Field::store_raw`] with bound [`BOUND`], so storing and loading them costs no conversion and
 //! loaded raw coordinates satisfy the coordinate bounds.
+//!
+//! # How the formulas keep their bounds
 //!
 //! Multiplications by `3b = 12 (1 + i)` scale a factor by `12` before a product and multiply the
 //! product by `1 + i`, which only rearranges its [signed sums](crate::core::field::arithmetic::Signed).
@@ -190,11 +191,9 @@ impl<S: Simd, F: Field<S>> Points<S> for Point<F> {
         }
     }
 
-    /// Returns `-self`.
-    ///
-    /// Multiplies `Y` by `-1` rather than subtracting it, so the coordinates keep their bounds.
     #[inline(always)]
     fn negate(self, simd: S) -> Self {
+        // Multiply Y by -1 rather than subtracting it, so the coordinates keep their bounds.
         let minus_one = F::load(simd, &[], &MINUS_ONE);
         Self {
             y: self.y.ready::<1, S>(simd).mul_base(simd, minus_one),
@@ -202,11 +201,9 @@ impl<S: Simd, F: Field<S>> Points<S> for Point<F> {
         }
     }
 
-    /// Returns `-self` in every lane whose bit is set in `lanes`, and `self` in the others.
-    ///
-    /// Multiplies `Y` by `1` or `-1`, selected without branching on `lanes`.
     #[inline(always)]
     fn negate_lanes(self, simd: S, lanes: u64) -> Self {
+        // Multiply Y by 1 or -1, selected without branching on lanes.
         let sign = F::load(simd, &[], &ONE).select(simd, F::load(simd, &[], &MINUS_ONE), lanes);
         Self {
             y: self.y.ready::<1, S>(simd).mul_base(simd, sign),
@@ -217,14 +214,12 @@ impl<S: Simd, F: Field<S>> Points<S> for Point<F> {
     /// Returns the image of every lane under the endomorphism `psi`, the Frobenius map carried
     /// through the twist, which multiplies points of the prime-order subgroup by the curve
     /// parameter `x`.
-    ///
-    /// Conjugates each coordinate and multiplies `X` by [`PSI_X`]` i` and `Y` by [`PSI_Y`],
-    /// forming `conj(y) PSI_Y` from its four base field products so that no conjugate needs a
-    /// bias; `Z`'s conjugate multiplies its imaginary component by `-1` instead, as
-    /// [`Self::negate`] does, so the coordinates keep their bounds. Seven base field products and
-    /// five reductions in all.
     #[inline(always)]
     fn endomorphism(self, simd: S) -> Self {
+        // Conjugate each coordinate and multiply X by PSI_X i and Y by PSI_Y, forming
+        // conj(y) PSI_Y from its four base field products so that no conjugate needs a bias. Z's
+        // conjugate multiplies its imaginary component by -1 instead, as negate does, so the
+        // coordinates keep their bounds. Seven base field products and five reductions in all.
         simd.execute(
             #[inline(always)]
             move |simd: S| {
@@ -264,16 +259,14 @@ impl<S: Simd, F: Field<S>> Points<S> for Point<F> {
         )
     }
 
-    /// Returns `self + rhs`.
-    ///
-    /// This is Algorithm 7 of Renes, Costello, and Batina, "Complete addition formulas for prime
-    /// order elliptic curves" (2016), which accepts any pair of points, including the identity and
-    /// equal points. Each cross term is a schoolbook product of sums less the two known products,
-    /// or the two products accumulated for [`Field::SCHOOLBOOK`], and `3b z1 z2` comes from one
-    /// more product, so that `Y1 Y2 + 3b Z1 Z2` and `Y1 Y2 - 3b Z1 Z2` each take one reduction. That
-    /// leaves thirteen extension products, reduced in two stages of six and three values.
     #[inline(always)]
     fn add(self, simd: S, rhs: Self) -> Self {
+        // Algorithm 7 of Renes, Costello, and Batina, "Complete addition formulas for prime order
+        // elliptic curves" (2016). Each cross term is a schoolbook product of sums less the two
+        // known products, or the two products accumulated for Field::SCHOOLBOOK, and 3b Z1 Z2
+        // comes from one more product, so that Y1 Y2 + 3b Z1 Z2 and Y1 Y2 - 3b Z1 Z2 each take one
+        // reduction. That leaves thirteen extension products, reduced in two stages of six and
+        // three values.
         simd.execute(
             #[inline(always)]
             move |simd: S| {
@@ -293,13 +286,11 @@ impl<S: Simd, F: Field<S>> Points<S> for Point<F> {
         )
     }
 
-    /// Returns `2 * self`.
-    ///
-    /// This is Algorithm 9 of Renes, Costello, and Batina, which accepts any point, including the
-    /// identity. It returns the same point as [`Self::add`] of `self` with itself, with seven
-    /// extension products and one squaring, reduced in two stages of four and three values.
     #[inline(always)]
     fn double(self, simd: S) -> Self {
+        // Algorithm 9 of Renes, Costello, and Batina, with seven extension products and one
+        // squaring, reduced in two stages of four and three values. It returns the same point as
+        // add of self with itself.
         simd.execute(
             #[inline(always)]
             move |simd: S| {
@@ -499,9 +490,10 @@ where
         }
     }
 
-    /// Returns `factor * 3b xz` as a product, given `xz12 = 12 xz`: `3b xz = (1 + i) (12 xz)`,
-    /// multiplying the product by `1 + i`, or under [`Field::SCHOOLBOOK`] the factor `12 xz`
-    /// itself.
+    /// Returns `factor * 3b xz` as a product, given `xz12 = 12 xz`.
+    ///
+    /// Since `3b xz = (1 + i) (12 xz)`, this multiplies the product by `1 + i`, or under
+    /// [`Field::SCHOOLBOOK`] multiplies `12 xz` by `1 + i` before the product.
     #[inline(always)]
     fn by_b3xz(simd: S, factor: Fp2<F>, xz12: Fp2<F>) -> Product<F, S> {
         if F::SCHOOLBOOK {
