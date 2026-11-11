@@ -96,11 +96,11 @@ pub(super) fn qmdb_config(
 ) {
     let db_a = fixed::Config {
         merkle: MerkleConfig {
-            metadata_partition: format!("{prefix}-qmdb-a-mmr-metadata"),
+            partition: format!("{prefix}-qmdb-a-mmr-metadata"),
             replay_buffer: IO_BUFFER_SIZE,
             replay_concurrency: NZUsize!(2),
             strategy: Sequential,
-            cache: Default::default(),
+            resident_height: Default::default(),
         },
         log: FixedLogConfig {
             partition: format!("{prefix}-qmdb-a-log-journal"),

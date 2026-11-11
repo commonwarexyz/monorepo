@@ -97,11 +97,11 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
             let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
             let cfg = Config::<EightCap, Sequential> {
                 merkle: MerkleConfig {
-                    metadata_partition: format!("test-qmdb-merkle-metadata-{suffix}"),
+                    partition: format!("test-qmdb-merkle-metadata-{suffix}"),
                     replay_buffer: NZUsize!(1024),
                     replay_concurrency: NZUsize!(2),
                     strategy: Sequential,
-                    cache: Default::default(),
+                    resident_height: Default::default(),
                 },
                 log: FConfig {
                     partition: format!("test-qmdb-log-journal-{suffix}"),

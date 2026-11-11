@@ -194,8 +194,8 @@ mod tests {
 
     fn merkle_config() -> authenticated::Config<Sequential> {
         authenticated::Config {
-            metadata_partition: "local-pins-metadata".into(),
-            cache: Default::default(),
+            partition: "local-pins-metadata".into(),
+            resident_height: Default::default(),
             replay_buffer: NZUsize!(1024),
             replay_concurrency: NZUsize!(2),
             strategy: Sequential,
@@ -321,7 +321,7 @@ mod tests {
                 log: journal_config(),
             };
             let mut source_config = local_config.clone();
-            source_config.merkle.metadata_partition.push_str("-source");
+            source_config.merkle.partition.push_str("-source");
             source_config.log.partition.push_str("-source");
             let populate = |label: &'static str, config, value| {
                 let context = context.child(label);
@@ -399,7 +399,7 @@ mod tests {
                 log: journal_config(),
             };
             let mut source_config = local_config.clone();
-            source_config.merkle.metadata_partition.push_str("-source");
+            source_config.merkle.partition.push_str("-source");
             source_config.log.partition.push_str("-source");
 
             // The local database ends at 3, before the target's start at 30.
@@ -489,7 +489,7 @@ mod tests {
                 log: journal_config(),
             };
             let mut source_config = local_config.clone();
-            source_config.merkle.metadata_partition.push_str("-source");
+            source_config.merkle.partition.push_str("-source");
             source_config.log.partition.push_str("-source");
             let populate = |label: &'static str, config, values: [u64; 2]| {
                 let context = context.child(label);

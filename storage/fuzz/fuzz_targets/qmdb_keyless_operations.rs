@@ -197,11 +197,11 @@ fn test_config<S: Strategy>(test_name: &str, strategy: S) -> Config<CodecConfig,
     let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
     Config {
         merkle: MerkleConfig {
-            metadata_partition: format!("{test_name}-meta"),
+            partition: format!("{test_name}-meta"),
             replay_buffer: NZUsize!(1024),
             replay_concurrency: NZUsize!(2),
             strategy,
-            cache: commonware_storage_fuzz::low_resident_height(),
+            resident_height: commonware_storage_fuzz::low_resident_height(),
         },
         log: VConfig {
             partition: format!("{test_name}-log"),

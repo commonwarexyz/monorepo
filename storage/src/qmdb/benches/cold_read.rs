@@ -300,11 +300,11 @@ fn config<E: Strategizer>(ctx: &E, args: &Args) -> AnyConfig<EightCap, Rayon> {
     let page_cache = CacheRef::new(page_size, NZUsize!(args.cache));
     AnyConfig {
         merkle: authenticated::Config {
-            metadata_partition: "cold-merkle-meta".into(),
+            partition: "cold-merkle-meta".into(),
             replay_buffer: REPLAY_BUFFER,
             replay_concurrency: NZUsize!(args.threads),
             strategy: ctx.strategy(NZUsize!(args.threads)),
-            cache: Default::default(),
+            resident_height: Default::default(),
         },
         log: FConfig {
             partition: "cold-log".into(),

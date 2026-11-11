@@ -124,11 +124,11 @@ fn test_config(name: &str) -> Config<OneCap, Sequential> {
     let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(2));
     Config {
         merkle: MerkleConfig {
-            metadata_partition: format!("{name}-meta"),
+            partition: format!("{name}-meta"),
             replay_buffer: NZUsize!(1024),
             replay_concurrency: NZUsize!(2),
             strategy: Sequential,
-            cache: Default::default(),
+            resident_height: Default::default(),
         },
         log: FConfig {
             partition: format!("{name}-log"),

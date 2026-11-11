@@ -611,11 +611,11 @@ pub mod test {
             .unwrap();
             Config {
                 merkle: MerkleConfig {
-                    metadata_partition: "rebranch-merkle-metadata".into(),
+                    partition: "rebranch-merkle-metadata".into(),
                     replay_buffer: NZUsize!(4096),
                     replay_concurrency: NZUsize!(2),
                     strategy: Sequential,
-                    cache: Default::default(),
+                    resident_height: Default::default(),
                 },
                 log: JournalConfig {
                     partition: "rebranch-ops-journal".into(),

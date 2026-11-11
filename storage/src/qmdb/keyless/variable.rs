@@ -50,11 +50,11 @@ mod tests {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
             merkle: crate::journal::authenticated::Config {
-                metadata_partition: format!("metadata-{suffix}"),
+                partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
-                cache: crate::journal::authenticated::low_resident_height(),
+                resident_height: crate::journal::authenticated::low_resident_height(),
             },
             log: JournalConfig {
                 partition: format!("log-journal-{suffix}"),

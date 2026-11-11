@@ -531,11 +531,11 @@ mod tests {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         storage_keyless::Config {
             merkle: MerkleConfig {
-                metadata_partition: format!("metadata-{suffix}"),
+                partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
-                cache: Default::default(),
+                resident_height: Default::default(),
             },
             log: FixedJournalConfig {
                 partition: format!("log-{suffix}"),

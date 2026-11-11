@@ -21,7 +21,7 @@ use commonware_utils::{
     channel::mpsc,
     prefetch::Lookahead,
 };
-use core::{num::NonZeroUsize, ops::Range};
+use core::{convert::Infallible, num::NonZeroUsize, ops::Range};
 use futures::{StreamExt as _, pin_mut};
 use std::{collections::VecDeque, sync::Arc};
 
@@ -458,38 +458,6 @@ where
     Ok(())
 }
 
-/// Hash every chunk of `leaves` from a scan of `log` of its own, for builds without decode tasks.
-/// Initialization never takes this path: it asks for a hashing build only when
-/// [SnapshotBuild::hashes_leaves] says decode tasks will hash, and otherwise the journal replays
-/// on tasks of its own, `replay_concurrency` at a time.
-async fn hash_serially<F, C, H>(
-    log: &C,
-    init_buffer: NonZeroUsize,
-    leaves: &LeafSink<F, H>,
-) -> Result<(), Error<F>>
-where
-    F: Family,
-    C: Contiguous<Item: Encode>,
-    H: MerkleHasher<F> + 'static,
-{
-    for chunk in leaves.chunks() {
-        let mut hasher = leaves.chunk_hasher(chunk.clone());
-        let stream = log
-            .replay(chunk, init_buffer, ReadOptions::DONT_CACHE)
-            .await?;
-        pin_mut!(stream);
-        while let Some(batch) = stream.next().await {
-            for (_, op) in batch? {
-                hasher.push(&op);
-            }
-        }
-        if !leaves.send(hasher.finish()?).await {
-            break;
-        }
-    }
-    Ok(())
-}
-
 /// Build one parallel-init worker's partial snapshot: apply the routed operations (streamed in log
 /// order over `rx`) to `index`, resolving translated-key collisions with the worker's own log
 /// `reader` and `(location -> key)` cache. Sets the bits of the range's active locations in the
@@ -608,7 +576,7 @@ where
 }
 
 /// Worker counts, partition ranges, and cache allocation for a parallel snapshot build.
-struct ParallelPlan {
+pub struct ParallelPlan {
     /// Total partitions to distribute.
     partitions: usize,
     /// Concurrent decode tasks. Zero means the coordinator decodes inline.
@@ -899,49 +867,35 @@ pub trait SnapshotBuild<F: Family>:
         }
     }
 
-    /// Whether [Self::build_snapshot_hashing] hashes the journal's operations on the build's own
-    /// decode tasks at this concurrency and cache size, rather than in a scan of their own.
-    fn hashes_leaves(
+    /// The plan of a build whose decode tasks also hash the journal's operations. Index types
+    /// that never spawn decode tasks declare [Infallible].
+    type HashingPlan: Send + 'static;
+
+    /// The plan of a build at this concurrency and cache size whose decode tasks hash the
+    /// journal's operations as they decode them, or `None` if this index builds without them.
+    fn hashing_plan(
         &self,
         _init_concurrency: Self::Concurrency,
         _cache_size: Option<NonZeroUsize>,
-    ) -> bool {
-        false
+    ) -> Option<Self::HashingPlan> {
+        None
     }
 
-    /// Like [Self::build_snapshot], but also hashes every chunk of `leaves` and sends them to it
-    /// in order.
-    #[allow(clippy::too_many_arguments)]
+    /// Like [Self::build_snapshot], but follows `plan`, whose decode tasks also hash every chunk
+    /// of `leaves` and send them to it in order.
     fn build_snapshot_hashing<E, C, H>(
         &mut self,
         context: E,
         inactivity_floor_loc: Location<F>,
         log: &Arc<C>,
-        init_concurrency: Self::Concurrency,
+        plan: Self::HashingPlan,
         init_buffer: NonZeroUsize,
-        cache_size: Option<NonZeroUsize>,
         leaves: LeafSink<F, H>,
     ) -> impl Future<Output = Result<(usize, BitMap), Error<F>>> + Send
     where
         E: Spawner,
         C: Contiguous<Item: Operation<F> + Encode> + 'static,
-        H: MerkleHasher<F> + 'static,
-    {
-        async move {
-            let built = self
-                .build_snapshot(
-                    context,
-                    inactivity_floor_loc,
-                    log,
-                    init_concurrency,
-                    init_buffer,
-                    cache_size,
-                )
-                .await?;
-            hash_serially(&**log, init_buffer, &leaves).await?;
-            Ok(built)
-        }
-    }
+        H: MerkleHasher<F> + 'static;
 }
 
 /// Build a partitioned index's snapshot on parallel workers, or serially when the concurrency
@@ -984,50 +938,6 @@ where
     .await
 }
 
-/// Like [build_partitioned], but also hashes every chunk of `leaves`, on the decode tasks.
-#[allow(clippy::too_many_arguments)]
-async fn build_partitioned_hashing<F, E, C, I, H>(
-    snapshot: &mut I,
-    context: E,
-    inactivity_floor_loc: Location<F>,
-    log: &Arc<C>,
-    init_concurrency: NonZeroUsize,
-    init_buffer: NonZeroUsize,
-    cache_size: Option<NonZeroUsize>,
-    leaves: LeafSink<F, H>,
-) -> Result<(usize, BitMap), Error<F>>
-where
-    F: Family,
-    E: Spawner,
-    C: Contiguous<Item: Operation<F> + Encode> + 'static,
-    I: Partitioned + Index<Value = Location<F>>,
-    H: MerkleHasher<F> + 'static,
-{
-    let Some(plan) = ParallelPlan::new(snapshot.partition_count(), init_concurrency, cache_size)
-    else {
-        let built = build_snapshot_serial(
-            inactivity_floor_loc,
-            &**log,
-            snapshot,
-            init_buffer,
-            cache_size,
-        )
-        .await?;
-        hash_serially(&**log, init_buffer, &leaves).await?;
-        return Ok(built);
-    };
-    build_snapshot_parallel(
-        snapshot,
-        plan,
-        context,
-        inactivity_floor_loc,
-        log,
-        init_buffer,
-        leaves,
-    )
-    .await
-}
-
 mod sealed {
     use crate::translator::Translator;
 
@@ -1046,15 +956,53 @@ mod sealed {
 
 impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::unordered::Index<T, Location<F>> {
     type Concurrency = ();
+    type HashingPlan = Infallible;
+
+    async fn build_snapshot_hashing<E, C, H>(
+        &mut self,
+        _context: E,
+        _inactivity_floor_loc: Location<F>,
+        _log: &Arc<C>,
+        plan: Infallible,
+        _init_buffer: NonZeroUsize,
+        _leaves: LeafSink<F, H>,
+    ) -> Result<(usize, BitMap), Error<F>>
+    where
+        E: Spawner,
+        C: Contiguous<Item: Operation<F> + Encode> + 'static,
+        H: MerkleHasher<F> + 'static,
+    {
+        match plan {}
+    }
 }
+
 impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::ordered::Index<T, Location<F>> {
     type Concurrency = ();
+    type HashingPlan = Infallible;
+
+    async fn build_snapshot_hashing<E, C, H>(
+        &mut self,
+        _context: E,
+        _inactivity_floor_loc: Location<F>,
+        _log: &Arc<C>,
+        plan: Infallible,
+        _init_buffer: NonZeroUsize,
+        _leaves: LeafSink<F, H>,
+    ) -> Result<(usize, BitMap), Error<F>>
+    where
+        E: Spawner,
+        C: Contiguous<Item: Operation<F> + Encode> + 'static,
+        H: MerkleHasher<F> + 'static,
+    {
+        match plan {}
+    }
 }
 
 impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
     for crate::index::partitioned::unordered::Index<T, Location<F>, P>
 {
     type Concurrency = NonZeroUsize;
+    type HashingPlan = ParallelPlan;
 
     async fn build_snapshot<E, C>(
         &mut self,
@@ -1081,12 +1029,12 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
         .await
     }
 
-    fn hashes_leaves(
+    fn hashing_plan(
         &self,
         init_concurrency: NonZeroUsize,
         cache_size: Option<NonZeroUsize>,
-    ) -> bool {
-        ParallelPlan::new(self.partition_count(), init_concurrency, cache_size).is_some()
+    ) -> Option<ParallelPlan> {
+        ParallelPlan::new(self.partition_count(), init_concurrency, cache_size)
     }
 
     async fn build_snapshot_hashing<E, C, H>(
@@ -1094,9 +1042,8 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
         context: E,
         inactivity_floor_loc: Location<F>,
         log: &Arc<C>,
-        init_concurrency: NonZeroUsize,
+        plan: ParallelPlan,
         init_buffer: NonZeroUsize,
-        cache_size: Option<NonZeroUsize>,
         leaves: LeafSink<F, H>,
     ) -> Result<(usize, BitMap), Error<F>>
     where
@@ -1104,14 +1051,13 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
         C: Contiguous<Item: Operation<F> + Encode> + 'static,
         H: MerkleHasher<F> + 'static,
     {
-        build_partitioned_hashing(
+        build_snapshot_parallel(
             self,
+            plan,
             context,
             inactivity_floor_loc,
             log,
-            init_concurrency,
             init_buffer,
-            cache_size,
             leaves,
         )
         .await
@@ -1122,6 +1068,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
     for crate::index::partitioned::ordered::Index<T, Location<F>, P>
 {
     type Concurrency = NonZeroUsize;
+    type HashingPlan = ParallelPlan;
 
     async fn build_snapshot<E, C>(
         &mut self,
@@ -1148,12 +1095,12 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
         .await
     }
 
-    fn hashes_leaves(
+    fn hashing_plan(
         &self,
         init_concurrency: NonZeroUsize,
         cache_size: Option<NonZeroUsize>,
-    ) -> bool {
-        ParallelPlan::new(self.partition_count(), init_concurrency, cache_size).is_some()
+    ) -> Option<ParallelPlan> {
+        ParallelPlan::new(self.partition_count(), init_concurrency, cache_size)
     }
 
     async fn build_snapshot_hashing<E, C, H>(
@@ -1161,9 +1108,8 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
         context: E,
         inactivity_floor_loc: Location<F>,
         log: &Arc<C>,
-        init_concurrency: NonZeroUsize,
+        plan: ParallelPlan,
         init_buffer: NonZeroUsize,
-        cache_size: Option<NonZeroUsize>,
         leaves: LeafSink<F, H>,
     ) -> Result<(usize, BitMap), Error<F>>
     where
@@ -1171,14 +1117,13 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
         C: Contiguous<Item: Operation<F> + Encode> + 'static,
         H: MerkleHasher<F> + 'static,
     {
-        build_partitioned_hashing(
+        build_snapshot_parallel(
             self,
+            plan,
             context,
             inactivity_floor_loc,
             log,
-            init_concurrency,
             init_buffer,
-            cache_size,
             leaves,
         )
         .await

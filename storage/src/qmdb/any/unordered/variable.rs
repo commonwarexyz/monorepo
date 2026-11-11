@@ -123,11 +123,11 @@ pub(crate) mod test {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
             merkle: crate::journal::authenticated::Config {
-                metadata_partition: format!("metadata-{seed}"),
+                partition: format!("metadata-{seed}"),
                 replay_buffer: NZUsize!(1024),
                 replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
-                cache: Default::default(),
+                resident_height: Default::default(),
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-journal-{seed}"),

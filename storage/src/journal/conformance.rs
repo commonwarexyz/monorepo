@@ -45,11 +45,11 @@ fn fill_variable_item<const COMPRESSED: bool>(
 
 fn authenticated_merkle_config(prefix: &str) -> authenticated::Config<Sequential> {
     authenticated::Config {
-        metadata_partition: format!("{prefix}-merkle-metadata"),
+        partition: format!("{prefix}-merkle-metadata"),
         replay_buffer: REPLAY_BUFFER,
         replay_concurrency: NZUsize!(2),
         strategy: Sequential,
-        cache: Default::default(),
+        resident_height: Default::default(),
     }
 }
 

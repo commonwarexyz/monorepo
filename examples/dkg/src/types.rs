@@ -566,11 +566,11 @@ impl<E: StorageContext> dkg::SecretStore for Secrets<E> {
 pub fn db_config(prefix: &str, page_cache: CacheRef) -> fixed::Config<TwoCap, Sequential> {
     fixed::Config {
         merkle: MerkleConfig {
-            metadata_partition: format!("{prefix}-qmdb-mmr-metadata"),
+            partition: format!("{prefix}-qmdb-merkle"),
             replay_buffer: IO_BUFFER_SIZE,
             replay_concurrency: NZUsize!(2),
             strategy: Sequential,
-            cache: Default::default(),
+            resident_height: Default::default(),
         },
         log: FixedLogConfig {
             partition: format!("{prefix}-qmdb-log-journal"),

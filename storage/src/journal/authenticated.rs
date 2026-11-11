@@ -24,7 +24,7 @@
 //! Items before the Merkle structure's start are not readable, even when a backing blob still
 //! holds them.
 //!
-//! Nodes at or above [`CacheConfig::resident_height`] stay in memory. A lower node is rebuilt when
+//! Nodes at or above [`Config::resident_height`] stay in memory. A lower node is rebuilt when
 //! needed from the operations in its aligned region of leaves.
 //!
 //! A prune commits the operations, writes the frontier at the new boundary, then deletes
@@ -73,9 +73,8 @@ mod metrics;
 mod tree;
 #[cfg(test)]
 pub(crate) use config::tests::low_resident_height;
-pub use config::{CacheConfig, Config};
+pub use config::{Config, ResidentHeight};
 pub(crate) use frontier::Frontier;
-use metrics::Metrics;
 pub(crate) use tree::{Chunk, ChunkHasher};
 use tree::{ChunkPlan, Tree};
 
@@ -668,13 +667,12 @@ where
         pins: Vec<H::Digest>,
         apply_batch_size: NonZeroU64,
     ) -> Result<Self, Error<F>> {
-        let merkle = Tree::new(start, pins, config, Metrics::new(&context))?;
+        let merkle = Tree::new(start, pins, config, &context)?;
         let bounds = journal.bounds();
         if *start < bounds.start || *start > bounds.end {
             return Err(merkle::Error::RangeOutOfBounds(start).into());
         }
-        let frontier =
-            Frontier::open(context.child("frontier"), config.metadata_partition.clone()).await?;
+        let frontier = Frontier::open(context.child("frontier"), config.partition.clone()).await?;
         let merkle = Self::align(merkle, &journal, &hasher, apply_batch_size).await?;
         Ok(Self {
             merkle,
@@ -893,9 +891,9 @@ where
         Self::assemble(journal, merkle, self.frontier, self.hasher).await
     }
 
-    /// Like [Self::finish], but runs `read` over the selected operations while their Merkle
-    /// digests are rebuilt on a task of their own. `read` must drop every clone of the journal
-    /// before it completes.
+    /// Like [Self::finish], but runs `read` over the selected operations while the journal replays
+    /// them on tasks of its own to rebuild their Merkle digests, so they are read twice. `read`
+    /// must drop every clone of the journal before it completes.
     pub(crate) async fn finish_with<T, X, Fut>(
         self,
         read: impl FnOnce(Arc<C>) -> Fut,
@@ -951,9 +949,9 @@ where
         ))
     }
 
-    /// Like [Self::finish_with], but `read` scans the selected operations for the journal. It must
-    /// hash every chunk of the [LeafSink] it receives and send them in order. A task of its own
-    /// appends them to the Merkle structure, so the operations are read and decoded once.
+    /// Like [Self::finish_with], but the journal does not replay the operations. Instead `read`
+    /// must hash every chunk of the [LeafSink] it receives while it scans them, and send them in
+    /// order. A task of its own appends them to the Merkle structure, so they are read once.
     pub(crate) async fn finish_hashing<T, X, Fut>(
         self,
         read: impl FnOnce(Arc<C>, LeafSink<F, StandardHasher<H>>) -> Fut,
@@ -1154,14 +1152,10 @@ where
         predicate: fn(&C::Item) -> bool,
         bagging: merkle::Bagging,
     ) -> Result<Recovery<F, E, C, H, S>, Error<F>> {
-        let frontier = Frontier::open(
-            context.child("frontier"),
-            merkle_cfg.metadata_partition.clone(),
-        )
-        .await?;
+        let frontier =
+            Frontier::open(context.child("frontier"), merkle_cfg.partition.clone()).await?;
         let (boundary, pins) = frontier.boundary();
-        let merkle_context = context.child("merkle");
-        let merkle = Tree::new(boundary, pins, &merkle_cfg, Metrics::new(&merkle_context))?;
+        let merkle = Tree::new(boundary, pins, &merkle_cfg, &context.child("merkle"))?;
 
         let journal = C::recover(context.child("journal"), journal_cfg, max_size).await?;
         let bounds = journal.bounds();
@@ -1520,17 +1514,15 @@ where
     H: Hasher,
     S: Strategy,
 {
-    let frontier = Frontier::<F, E, H::Digest>::open(
-        context.child("frontier"),
-        config.metadata_partition.clone(),
-    )
-    .await?;
+    let frontier =
+        Frontier::<F, E, H::Digest>::open(context.child("frontier"), config.partition.clone())
+            .await?;
     let (boundary, pins) = frontier.boundary();
     let bounds = journal.bounds();
     if boundary > location || bounds.start > *boundary || bounds.end < *location {
         return Ok(None);
     }
-    let tree = Tree::new(boundary, pins, config, Metrics::new(&context))?
+    let tree = Tree::new(boundary, pins, config, &context)?
         .replay(journal, hasher, Location::new(bounds.end), APPLY_BATCH_SIZE)
         .await?;
     if tree.root(hasher, inactive_peaks)? != expected_root {
@@ -1648,11 +1640,11 @@ mod tests {
     /// Create Merkle configuration for tests with the given strategy.
     fn merkle_config_with<S: Strategy>(suffix: &str, strategy: S) -> MerkleConfig<S> {
         MerkleConfig {
-            metadata_partition: format!("mmr-metadata-{suffix}"),
+            partition: format!("mmr-metadata-{suffix}"),
             replay_buffer: NZUsize!(1024),
             replay_concurrency: NZUsize!(2),
             strategy,
-            cache: Default::default(),
+            resident_height: Default::default(),
         }
     }
 
@@ -1832,7 +1824,7 @@ mod tests {
             Location::new(0),
             Vec::new(),
             &merkle_config(suffix),
-            Metrics::new(&context),
+            &context,
         )
         .unwrap();
         let journal = ContiguousJournal::init(context.child("journal"), journal_config(suffix))
@@ -1975,7 +1967,7 @@ mod tests {
             Location::new(0),
             Vec::new(),
             &merkle_config_with("replay", strategy),
-            Metrics::new(&context),
+            &context,
         )
         .unwrap();
         let merkle = ReplayJournal::<F, S>::align(merkle, &journal, &hasher, NZU64!(7))
@@ -2775,7 +2767,7 @@ mod tests {
             drop(journal);
             let frontier = Frontier::<mmr::Family, _, Digest>::open(
                 context.child("after"),
-                merkle_config("start_sync_prune").metadata_partition,
+                merkle_config("start_sync_prune").partition,
             )
             .await
             .unwrap();
@@ -2806,7 +2798,7 @@ mod tests {
             ));
             let frontier = Frontier::<mmr::Family, _, <Sha256 as Hasher>::Digest>::open(
                 context.child("reopen"),
-                merkle_config("prune-failure").metadata_partition,
+                merkle_config("prune-failure").partition,
             )
             .await
             .unwrap();
@@ -2903,12 +2895,10 @@ mod tests {
         // A frontier past the operations is corrupt, whatever the cap.
         let past = Location::new(110);
         let pins = F::nodes_to_pin(past).map(|_| Sha256::fill(0)).collect();
-        let frontier = Frontier::<F, _, Digest>::open(
-            context.child("past"),
-            merkle_config("ahead").metadata_partition,
-        )
-        .await
-        .unwrap();
+        let frontier =
+            Frontier::<F, _, Digest>::open(context.child("past"), merkle_config("ahead").partition)
+                .await
+                .unwrap();
         drop(frontier.set(past, pins).await.unwrap());
         assert!(matches!(
             prepare("past", Some(120)).await,
@@ -2966,7 +2956,7 @@ mod tests {
                 let suffix = format!("malformed-frontier-{index}");
                 let frontier = Frontier::<F, _, Digest>::open(
                     context.child("write"),
-                    merkle_config(&suffix).metadata_partition,
+                    merkle_config(&suffix).partition,
                 )
                 .await
                 .unwrap();

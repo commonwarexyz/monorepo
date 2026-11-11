@@ -66,11 +66,11 @@ fn config() -> Config<OneCap, Sequential> {
     let page_cache = CacheRef::new(NZU16!(4096), NZUsize!(8));
     Config {
         merkle: MerkleConfig {
-            metadata_partition: "lifecycle-merkle-metadata".into(),
+            partition: "lifecycle-merkle-metadata".into(),
             replay_buffer: NZUsize!(1024),
             replay_concurrency: NZUsize!(2),
             strategy: Sequential,
-            cache: Default::default(),
+            resident_height: Default::default(),
         },
         log: JournalConfig {
             partition: "lifecycle-operations".into(),

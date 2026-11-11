@@ -151,11 +151,11 @@ const WRITE_BUFFER_SIZE: usize = 1024;
 fn test_config(name: &str, page_cache: CacheRef) -> Config<TwoCap, Sequential> {
     Config {
         merkle: MerkleConfig {
-            metadata_partition: format!("fuzz-current-mmb-pruning-{name}-merkle-metadata"),
+            partition: format!("fuzz-current-mmb-pruning-{name}-merkle-metadata"),
             replay_buffer: NZUsize!(WRITE_BUFFER_SIZE),
             replay_concurrency: NZUsize!(2),
             strategy: Sequential,
-            cache: Default::default(),
+            resident_height: Default::default(),
         },
         log: FConfig {
             partition: format!("fuzz-current-mmb-pruning-{name}-log-journal"),

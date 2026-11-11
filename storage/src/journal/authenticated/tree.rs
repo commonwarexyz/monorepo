@@ -26,7 +26,9 @@ use crate::{
 use commonware_codec::{Encode, EncodeShared};
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
-use commonware_runtime::{AbortOnDrop, ReadOptions, Spawner, telemetry::metrics::GaugeExt as _};
+use commonware_runtime::{
+    AbortOnDrop, Metrics as RuntimeMetrics, ReadOptions, Spawner, telemetry::metrics::GaugeExt as _,
+};
 use commonware_utils::channel::mpsc;
 use futures::{Stream, StreamExt as _, TryStreamExt as _, pin_mut, stream};
 use std::{
@@ -466,30 +468,22 @@ pub(crate) struct Tree<F: Family, D: Digest, S: Strategy> {
 
 impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
     /// An empty tree pruned to `boundary`. `pins` are the digests [`Family::nodes_to_pin`] lists
-    /// for it.
+    /// for it. Its metrics register under `context`.
     pub(crate) fn new(
         boundary: Location<F>,
         pins: Vec<D>,
         config: &Config<S>,
-        metrics: Metrics,
+        context: &impl RuntimeMetrics,
     ) -> Result<Self, super::Error<F>> {
-        config
-            .cache
-            .validate()
-            .map_err(|error| JournalError::InvalidConfiguration(error.into()))?;
         let mem = Mem::from_components(Vec::new(), boundary, pins.clone())?;
+        let height = config.resident_height.get();
         let tree = Self {
             mem: Arc::new(mem),
-            metrics: Box::new(metrics),
+            metrics: Box::new(Metrics::new(context)),
             boundary,
             pins: F::nodes_to_pin(boundary).zip(pins).collect(),
-            resident: Resident::new(
-                config.cache.resident_height,
-                F::location_to_position(boundary),
-            ),
-            regions: Regions {
-                height: config.cache.resident_height,
-            },
+            resident: Resident::new(height, F::location_to_position(boundary)),
+            regions: Regions { height },
             strategy: config.strategy.clone(),
             replay_buffer: config.replay_buffer,
             replay_concurrency: config.replay_concurrency,
@@ -1105,7 +1099,7 @@ impl<F: Family, D: Digest, S: Strategy> Readable for Tree<F, D, S> {
 mod tests {
     use super::*;
     use crate::{
-        journal::{Error as JournalError, authenticated::CacheConfig, contiguous::Batch},
+        journal::{Error as JournalError, authenticated::ResidentHeight, contiguous::Batch},
         merkle::{Bagging, hasher::Standard, mmb, mmr},
     };
     use commonware_cryptography::{Sha256, sha256::Digest as D};
@@ -1219,8 +1213,8 @@ mod tests {
 
     fn config(resident_height: u32) -> Config<Sequential> {
         Config {
-            metadata_partition: String::new(),
-            cache: CacheConfig { resident_height },
+            partition: String::new(),
+            resident_height: ResidentHeight::new(resident_height).unwrap(),
             replay_buffer: NonZeroUsize::MIN,
             replay_concurrency: NonZeroUsize::new(2).unwrap(),
             strategy: Sequential,
@@ -1261,7 +1255,7 @@ mod tests {
         end: u64,
     ) -> Tree<F, D, Sequential> {
         let cfg = config(resident_height);
-        Tree::new(Location::new(0), Vec::new(), &cfg, Metrics::new(context))
+        Tree::new(Location::new(0), Vec::new(), &cfg, context)
             .unwrap()
             .replay(ops, hasher, Location::new(end), NZU64!(7))
             .await
@@ -1300,7 +1294,7 @@ mod tests {
                     "pruned nodes retained"
                 );
                 ops.bounds.start = *boundary;
-                let opened = Tree::new(boundary, pins, &config(height), Metrics::new(&context))
+                let opened = Tree::new(boundary, pins, &config(height), &context)
                     .unwrap()
                     .replay(&ops, &hasher, Location::new(513), NZU64!(7))
                     .await
@@ -1382,13 +1376,8 @@ mod tests {
                             ..config(resident)
                         };
                         let open = || {
-                            Tree::new(
-                                Location::new(boundary),
-                                pins.clone(),
-                                &config,
-                                Metrics::new(&context),
-                            )
-                            .unwrap()
+                            Tree::new(Location::new(boundary), pins.clone(), &config, &context)
+                                .unwrap()
                         };
 
                         // Replay one in batches and the other in subtrees.
@@ -1460,13 +1449,9 @@ mod tests {
     /// A chunk, whole or partial, that does not start at the tree's end is rejected.
     async fn misplaced_chunks_are_rejected<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new(Bagging::ForwardFold);
-        let tree = Tree::<F, D, Sequential>::new(
-            Location::new(0),
-            Vec::new(),
-            &config(2),
-            Metrics::new(&context),
-        )
-        .unwrap();
+        let tree =
+            Tree::<F, D, Sequential>::new(Location::new(0), Vec::new(), &config(2), &context)
+                .unwrap();
         let plan = tree.chunk_plan(Location::new(40), 4);
         let chunks: Vec<_> = plan.chunks().collect();
         assert_eq!(chunks, [0..16, 16..32, 32..40]);
@@ -1476,13 +1461,9 @@ mod tests {
                 chunk_hasher.push(&loc);
             }
             let chunk = chunk_hasher.finish().unwrap();
-            let tree = Tree::<F, D, Sequential>::new(
-                Location::new(0),
-                Vec::new(),
-                &config(2),
-                Metrics::new(&context),
-            )
-            .unwrap();
+            let tree =
+                Tree::<F, D, Sequential>::new(Location::new(0), Vec::new(), &config(2), &context)
+                    .unwrap();
             assert!(matches!(
                 tree.apply_chunk(&hasher, chunk).await,
                 Err(merkle::Error::DataCorrupted(_))
@@ -1506,8 +1487,7 @@ mod tests {
         let boundary = Location::<F>::new(*F::MAX_LEAVES - 40);
         let ops = Operations::range(*boundary..*F::MAX_LEAVES);
         let pins: Vec<_> = F::nodes_to_pin(boundary).map(|_| Sha256::fill(7)).collect();
-        let tree = Tree::<F, D, _>::new(boundary, pins.clone(), &config(5), Metrics::new(&context))
-            .unwrap();
+        let tree = Tree::<F, D, _>::new(boundary, pins.clone(), &config(5), &context).unwrap();
         let mut batch = tree.new_batch();
         for loc in ops.bounds.clone() {
             batch = batch.add(&hasher, &ops.item(loc).encode());

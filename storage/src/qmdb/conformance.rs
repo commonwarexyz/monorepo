@@ -126,11 +126,11 @@ const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
 fn merkle_config(suffix: &str) -> MerkleConfig<Sequential> {
     MerkleConfig {
-        metadata_partition: format!("{suffix}-mm"),
+        partition: format!("{suffix}-mm"),
         replay_buffer: NZUsize!(1024),
         replay_concurrency: NZUsize!(2),
         strategy: Sequential,
-        cache: Default::default(),
+        resident_height: Default::default(),
     }
 }
 

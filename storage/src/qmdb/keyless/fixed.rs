@@ -63,11 +63,11 @@ mod tests {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
             merkle: crate::journal::authenticated::Config {
-                metadata_partition: format!("fixed-metadata-{suffix}"),
+                partition: format!("fixed-metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 replay_concurrency: NZUsize!(2),
                 strategy,
-                cache: crate::journal::authenticated::low_resident_height(),
+                resident_height: crate::journal::authenticated::low_resident_height(),
             },
             log: JournalConfig {
                 partition: format!("fixed-log-journal-{suffix}"),
@@ -1367,11 +1367,11 @@ mod tests {
                 NonZeroU16::new(<Operation<mmr::Family, U64> as FixedSize>::SIZE as u16).unwrap();
             Config {
                 merkle: crate::journal::authenticated::Config {
-                    metadata_partition: "rebranch-merkle-metadata".into(),
+                    partition: "rebranch-merkle-metadata".into(),
                     replay_buffer: NZUsize!(1024),
                     replay_concurrency: NZUsize!(2),
                     strategy: Sequential,
-                    cache: Default::default(),
+                    resident_height: Default::default(),
                 },
                 log: JournalConfig {
                     partition: "rebranch-log".into(),

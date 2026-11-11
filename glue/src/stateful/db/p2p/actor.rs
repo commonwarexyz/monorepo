@@ -577,11 +577,11 @@ mod tests {
         let page_cache = CacheRef::new(NZU16!(101), NZUsize!(11));
         fixed::Config {
             merkle: MerkleConfig {
-                metadata_partition: format!("{suffix}-mmr-metadata"),
+                partition: format!("{suffix}-mmr-metadata"),
                 replay_buffer: NZUsize!(1024),
                 replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
-                cache: Default::default(),
+                resident_height: Default::default(),
             },
             log: FixedLogConfig {
                 partition: format!("{suffix}-log-journal"),

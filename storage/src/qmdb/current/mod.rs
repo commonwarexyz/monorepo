@@ -866,11 +866,11 @@ pub mod tests {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
             merkle: MerkleConfig {
-                metadata_partition: format!("{partition_prefix}-metadata-partition"),
+                partition: format!("{partition_prefix}-metadata-partition"),
                 replay_buffer: NZUsize!(1024),
                 replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
-                cache: crate::journal::authenticated::low_resident_height(),
+                resident_height: crate::journal::authenticated::low_resident_height(),
             },
             log: FConfig {
                 partition: format!("{partition_prefix}-partition-prefix"),
@@ -903,11 +903,11 @@ pub mod tests {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
             merkle: MerkleConfig {
-                metadata_partition: format!("{partition_prefix}-metadata-partition"),
+                partition: format!("{partition_prefix}-metadata-partition"),
                 replay_buffer: NZUsize!(1024),
                 replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
-                cache: crate::journal::authenticated::low_resident_height(),
+                resident_height: crate::journal::authenticated::low_resident_height(),
             },
             log: VConfig {
                 partition: format!("{partition_prefix}-partition-prefix"),
@@ -2068,11 +2068,11 @@ pub mod tests {
             let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = Config {
                 merkle: MerkleConfig {
-                    metadata_partition: "forged-exclusion-metadata".to_string(),
+                    partition: "forged-exclusion-metadata".to_string(),
                     replay_buffer: NZUsize!(1024),
                     replay_concurrency: NZUsize!(2),
                     strategy: Sequential,
-                    cache: Default::default(),
+                    resident_height: Default::default(),
                 },
                 log: VConfig {
                     partition: "forged-exclusion-log".to_string(),

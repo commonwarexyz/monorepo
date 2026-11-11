@@ -313,43 +313,46 @@ where
         let metrics = Metrics::new(context);
         let (concurrency, buffer, cache) = (cfg.init_concurrency, cfg.init_buffer, cfg.init_cache);
 
-        // An index built on decode tasks also hashes the journal's operations there, so the log
-        // is read once. Others build alongside the journal's own replay.
-        let (log, (index, active_keys, activity)) = if index.hashes_leaves(concurrency, cache) {
-            pending
-                .finish_hashing(|journal, leaves| async move {
-                    let mut index = index;
-                    let (active_keys, activity) = index
-                        .build_snapshot_hashing(
-                            snapshot_context,
-                            floor,
-                            &journal,
-                            concurrency,
-                            buffer,
-                            cache,
-                            leaves,
-                        )
-                        .await?;
-                    Ok::<_, QmdbError<F>>((index, active_keys, activity))
-                })
-                .await?
-        } else {
-            pending
-                .finish_with(|journal| async move {
-                    let mut index = index;
-                    let (active_keys, activity) = index
-                        .build_snapshot(
-                            snapshot_context,
-                            floor,
-                            &journal,
-                            concurrency,
-                            buffer,
-                            cache,
-                        )
-                        .await?;
-                    Ok::<_, QmdbError<F>>((index, active_keys, activity))
-                })
-                .await?
+        // A partitioned index built on decode tasks hashes the journal's operations as it decodes
+        // them, so the log is read once. Any other index builds while the journal replays the log
+        // on tasks of its own.
+        let (log, (index, active_keys, activity)) = match index.hashing_plan(concurrency, cache) {
+            Some(plan) => {
+                pending
+                    .finish_hashing(|journal, leaves| async move {
+                        let mut index = index;
+                        let (active_keys, activity) = index
+                            .build_snapshot_hashing(
+                                snapshot_context,
+                                floor,
+                                &journal,
+                                plan,
+                                buffer,
+                                leaves,
+                            )
+                            .await?;
+                        Ok::<_, QmdbError<F>>((index, active_keys, activity))
+                    })
+                    .await?
+            }
+            None => {
+                pending
+                    .finish_with(|journal| async move {
+                        let mut index = index;
+                        let (active_keys, activity) = index
+                            .build_snapshot(
+                                snapshot_context,
+                                floor,
+                                &journal,
+                                concurrency,
+                                buffer,
+                                cache,
+                            )
+                            .await?;
+                        Ok::<_, QmdbError<F>>((index, active_keys, activity))
+                    })
+                    .await?
+            }
         };
         return db::Db::from_snapshot(log, index, floor, active_keys, &activity, bitmap, metrics);
     }
@@ -453,11 +456,11 @@ pub(crate) mod test {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
             merkle: MerkleConfig {
-                metadata_partition: format!("metadata-{suffix}"),
+                partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 replay_concurrency: NZUsize!(2),
                 strategy,
-                cache: crate::journal::authenticated::low_resident_height(),
+                resident_height: crate::journal::authenticated::low_resident_height(),
             },
             log: FConfig {
                 partition: format!("log-journal-{suffix}"),
@@ -502,11 +505,11 @@ pub(crate) mod test {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
             merkle: MerkleConfig {
-                metadata_partition: format!("metadata-{suffix}"),
+                partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
-                cache: crate::journal::authenticated::low_resident_height(),
+                resident_height: crate::journal::authenticated::low_resident_height(),
             },
             log: VConfig {
                 partition: format!("log-journal-{suffix}"),

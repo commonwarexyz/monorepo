@@ -6,7 +6,7 @@ use commonware_runtime::{
     deterministic::{self, PartialWriteMode},
     mocks::PendingSyncs,
 };
-use commonware_storage::journal::authenticated::CacheConfig;
+use commonware_storage::journal::authenticated::ResidentHeight;
 use commonware_utils::{Probability, probability};
 use futures::future::poll_immediate;
 use rand::{Rng, RngExt as _};
@@ -184,8 +184,8 @@ pub fn bounded_items(u: &mut Unstructured<'_>) -> arbitrary::Result<u64> {
 }
 
 /// A low resident height, so small databases rebuild digests from their operations.
-pub const fn low_resident_height() -> CacheConfig {
-    CacheConfig { resident_height: 2 }
+pub const fn low_resident_height() -> ResidentHeight {
+    ResidentHeight::new(2).unwrap()
 }
 
 /// Generate a buffer size in `1..=2048`.

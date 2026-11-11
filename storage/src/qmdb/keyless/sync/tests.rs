@@ -661,11 +661,11 @@ pub(crate) mod harnesses {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         keyless::Config {
             merkle: MerkleConfig {
-                metadata_partition: format!("metadata-{suffix}"),
+                partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
-                cache: crate::journal::authenticated::low_resident_height(),
+                resident_height: crate::journal::authenticated::low_resident_height(),
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-{suffix}"),
@@ -855,11 +855,11 @@ pub(crate) mod harnesses {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         keyless::Config {
             merkle: MerkleConfig {
-                metadata_partition: format!("metadata-{suffix}"),
+                partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
-                cache: crate::journal::authenticated::low_resident_height(),
+                resident_height: crate::journal::authenticated::low_resident_height(),
             },
             log: crate::journal::contiguous::fixed::Config {
                 partition: format!("log-{suffix}"),

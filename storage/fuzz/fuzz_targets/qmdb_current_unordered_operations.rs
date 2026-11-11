@@ -146,11 +146,11 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
         let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
         let cfg = Config {
             merkle: MerkleConfig {
-                metadata_partition: format!("fuzz-current-{suffix}-merkle-metadata"),
+                partition: format!("fuzz-current-{suffix}-merkle-metadata"),
                 replay_buffer: NZUsize!(WRITE_BUFFER_SIZE),
                 replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
-                cache: commonware_storage_fuzz::low_resident_height(),
+                resident_height: commonware_storage_fuzz::low_resident_height(),
             },
             log: FConfig {
                 partition: format!("fuzz-current-{suffix}-log-journal"),

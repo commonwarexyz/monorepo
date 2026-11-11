@@ -435,11 +435,11 @@ fn main() {
         let pc = CacheRef::new(PAGE_SIZE, page_cache);
         let pc_var = pc.clone();
         let merkle_config = MerkleConfig {
-            metadata_partition: "constantinople-merkle-metadata".into(),
+            partition: "constantinople-merkle-metadata".into(),
             replay_buffer: REPLAY_BUFFER,
             replay_concurrency: threads,
             strategy: ctx.strategy(threads),
-            cache: Default::default(),
+            resident_height: Default::default(),
         };
         let journal_config = FConfig {
             partition: "constantinople-log".into(),

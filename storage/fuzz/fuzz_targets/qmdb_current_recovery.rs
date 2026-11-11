@@ -106,11 +106,11 @@ fn make_config(suffix: &str, params: ConfigParams) -> Config<TwoCap, ((), ()), S
     let page_cache = CacheRef::new(page_size, page_cache_size);
     Config {
         merkle: MerkleConfig {
-            metadata_partition: format!("crash-merkle-metadata-{suffix}"),
+            partition: format!("crash-merkle-metadata-{suffix}"),
             replay_buffer,
             replay_concurrency: NZUsize!(2),
             strategy: Sequential,
-            cache: commonware_storage_fuzz::low_resident_height(),
+            resident_height: commonware_storage_fuzz::low_resident_height(),
         },
         log: VConfig {
             partition: format!("crash-log-{suffix}"),

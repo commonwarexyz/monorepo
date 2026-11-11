@@ -98,11 +98,11 @@ fn db_config(suffix: &str) -> Config<TwoCap, VConfig<((), (RangeCfg<usize>, ()))
     let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
     Config {
         merkle: MerkleConfig {
-            metadata_partition: format!("metadata-{suffix}"),
+            partition: format!("metadata-{suffix}"),
             replay_buffer: NZUsize!(1024),
             replay_concurrency: NZUsize!(2),
             strategy: Sequential,
-            cache: commonware_storage_fuzz::low_resident_height(),
+            resident_height: commonware_storage_fuzz::low_resident_height(),
         },
         log: VConfig {
             partition: format!("log-{suffix}"),

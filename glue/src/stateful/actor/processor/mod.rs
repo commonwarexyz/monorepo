@@ -1894,11 +1894,11 @@ mod tests {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         QmdbConfig {
             merkle: MerkleConfig {
-                metadata_partition: format!("{prefix}_mmr_metadata"),
+                partition: format!("{prefix}_mmr_metadata"),
                 replay_buffer: IO_BUFFER_SIZE,
                 replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
-                cache: Default::default(),
+                resident_height: Default::default(),
             },
             log: FixedLogConfig {
                 partition: format!("{prefix}_log_journal"),

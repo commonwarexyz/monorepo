@@ -1214,11 +1214,11 @@ mod tests {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         CurrentConfig {
             merkle: MerkleConfig {
-                metadata_partition: format!("stateful-current-metadata-{suffix}"),
+                partition: format!("stateful-current-merkle-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
-                cache: Default::default(),
+                resident_height: Default::default(),
             },
             log: FixedJournalConfig {
                 partition: format!("stateful-current-log-{suffix}"),
@@ -1241,11 +1241,11 @@ mod tests {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         CurrentConfig {
             merkle: MerkleConfig {
-                metadata_partition: format!("stateful-current-metadata-{suffix}"),
+                partition: format!("stateful-current-merkle-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
-                cache: Default::default(),
+                resident_height: Default::default(),
             },
             log: VariableJournalConfig {
                 partition: format!("stateful-current-log-{suffix}"),

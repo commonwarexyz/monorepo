@@ -748,8 +748,8 @@ fn any_config(suffix: &str) -> any::Config<TwoCap, FixedJournalConfig, Sequentia
     let page_cache = CacheRef::new(NZU16!(101), NZUsize!(11));
     any::Config {
         merkle: MerkleConfig {
-            metadata_partition: format!("transfers-metadata-{suffix}"),
-            cache: Default::default(),
+            partition: format!("transfers-metadata-{suffix}"),
+            resident_height: Default::default(),
             replay_buffer: NZUsize!(1024),
             replay_concurrency: NZUsize!(2),
             strategy: Sequential,
