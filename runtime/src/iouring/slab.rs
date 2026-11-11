@@ -1,4 +1,4 @@
-//! Generational slot storage for a worker's local registrations.
+//! Generational slot storage for registrations.
 //!
 //! Removal returns values so callers can drop them outside worker borrows.
 //! Slots with exhausted generations are permanently retired.
@@ -22,7 +22,9 @@ struct Slot<T> {
     next_free: Option<usize>,
 }
 
-/// Growable storage accessed only by its owning worker.
+/// Growable storage with no synchronization of its own. Each user provides
+/// the exclusion: a worker for its own waiters, and the timers' lock for
+/// sleep registrations.
 pub struct Slab<T> {
     /// Every slot ever allocated, live or not.
     slots: Vec<Slot<T>>,

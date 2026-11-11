@@ -2721,9 +2721,11 @@ fn test_teardown_drops_every_future_before_closing_timers() {
             // The future's own sleep drops after this guard, so its timer is
             // still registered unless teardown has already closed its timers.
             let local = Local::current().expect("future dropped off its worker");
+
             if !local.borrow().timers.is_closed() {
                 self.early.fetch_add(1, Ordering::Relaxed);
             }
+
             self.drops.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -3310,18 +3312,20 @@ fn test_cleanup_runs_released_wakers_before_waiting_for_retained_io() {
     )));
     let released = Arc::new(AtomicBool::new(false));
     let waited = Runner::new(config().with_worker_threads(1)).start(|_| async {
-        // Two sleeps on worker zero's timers: dropping the first releases a
-        // waker that drops the second, whose waker releases the permit.
+        // Two sleeps wait on worker zero's timers. Dropping the first releases
+        // a waker that drops the second, whose waker releases the permit.
         let last = Waker::from(Arc::new(ReleasePermit {
             permit: permit.clone(),
             released: released.clone(),
         }));
+
         let mut second = Sleep::new(Duration::from_secs(60));
         assert!(
             Pin::new(&mut second)
                 .poll(&mut TaskContext::from_waker(&last))
                 .is_pending()
         );
+
         drop(last);
         let middle = Waker::from(Arc::new(DropSleep(Mutex::new(Some(second)))));
         let mut first = Sleep::new(Duration::from_secs(60));
@@ -3330,6 +3334,7 @@ fn test_cleanup_runs_released_wakers_before_waiting_for_retained_io() {
                 .poll(&mut TaskContext::from_waker(&middle))
                 .is_pending()
         );
+
         drop(middle);
 
         // A dedicated worker retains a sync that waits for the permit, then
@@ -3361,6 +3366,7 @@ fn test_cleanup_runs_released_wakers_before_waiting_for_retained_io() {
                 None,
             )
             .unwrap();
+
             assert!(output.is_some());
 
             // Install the wake poll and consume startup signals, so the only
@@ -3375,12 +3381,14 @@ fn test_cleanup_runs_released_wakers_before_waiting_for_retained_io() {
                 .park(worker.processed_seq, Some(Instant::now()));
             parked.unwrap();
             worker.service(false);
+
             {
                 let local = worker.local.borrow();
                 let driver = local.driver.as_ref().unwrap();
                 assert!(!driver.is_empty());
                 assert!(!driver.has_pending_submissions());
             }
+
             worker
                 .local
                 .borrow_mut()
@@ -3392,16 +3400,21 @@ fn test_cleanup_runs_released_wakers_before_waiting_for_retained_io() {
             // Free the permit after a generous delay so a failure ends.
             let watchdog = thread::spawn(move || {
                 let deadline = Instant::now() + TEST_TIMEOUT;
+
                 while !released.load(Ordering::SeqCst) {
                     if Instant::now() >= deadline {
                         drop(permit.lock().take());
                         return false;
                     }
+
                     thread::sleep(Duration::from_millis(1));
                 }
+
                 true
             });
+
             worker.cleanup();
+
             assert!(worker.take_panic().is_none());
             watchdog.join().unwrap()
         })
@@ -4054,9 +4067,10 @@ fn test_wake_from_a_dedicated_worker_goes_to_the_pool() {
 }
 
 /// A task registers a receive and a sleep on worker zero, then a wake from
-/// another worker moves it there. Polled on that worker, both stay pending
-/// through a forward from worker zero. Worker zero holds the registrations, and
-/// the receive's result arrives through its forward.
+/// another worker moves it there. Polled on that worker, both stay pending,
+/// the receive through a forward from worker zero and the sleep in worker
+/// zero's timers. Worker zero holds the registrations, and the receive's
+/// result arrives through its forward.
 #[test]
 fn test_operation_and_sleep_follow_their_task_to_another_worker() {
     Runner::new(config().with_worker_threads(2)).start(|context| async move {
@@ -4082,10 +4096,11 @@ fn test_operation_and_sleep_follow_their_task_to_another_worker() {
             assert!(futures::poll!(&mut recv).is_pending());
             assert!(futures::poll!(&mut sleep).is_pending());
 
-            // The wake comes from the other worker, which polls this task and
-            // forwards both registrations from worker zero. The root writes to
-            // the peer only after these polls, since a receive that completes
-            // before its forward is polled may return its result immediately.
+            // The wake comes from the other worker, which polls this task,
+            // forwards the receive from worker zero and polls the sleep in
+            // worker zero's timers. The root writes to the peer only after
+            // these polls, since a receive that completes before its forward
+            // is polled may return its result immediately.
             moved.await.unwrap();
             let polled = thread::current().id();
             assert!(futures::poll!(&mut recv).is_pending());
@@ -4400,12 +4415,16 @@ fn test_expiry_backlog_keeps_pace_with_long_polls() {
             let drained = drained.clone();
             move |_| async move {
                 let (mut turn, mut run, mut longest, mut measured) = (None, 0, 0, 0);
+
                 while measured < MEASURED {
                     let began = Instant::now();
+
                     while began.elapsed() < 2 * BACKLOG_SLICE {
                         std::hint::spin_loop();
                     }
+
                     polls.fetch_add(1, Ordering::Relaxed);
+
                     if drained.load(Ordering::Relaxed) {
                         let current = sleep::tests::turn();
                         run = if current == turn { run + 1 } else { 1 };
@@ -4413,8 +4432,10 @@ fn test_expiry_backlog_keeps_pace_with_long_polls() {
                         longest = longest.max(run);
                         measured += 1;
                     }
+
                     reschedule().await;
                 }
+
                 longest
             }
         });
@@ -4430,6 +4451,7 @@ fn test_expiry_backlog_keeps_pace_with_long_polls() {
                     let mut sleeps: Vec<_> = (0..2 * BUDGET)
                         .map(|_| context.sleep_until(deadline))
                         .collect();
+
                     poll_fn(|cx| {
                         for sleep in &mut sleeps {
                             assert!(
@@ -4437,6 +4459,7 @@ fn test_expiry_backlog_keeps_pace_with_long_polls() {
                                 "the storm's deadline passed before its group registered"
                             );
                         }
+
                         Poll::Ready(())
                     })
                     .await;
@@ -4444,10 +4467,12 @@ fn test_expiry_backlog_keeps_pace_with_long_polls() {
                     // Report the long polls counted when the first sleep
                     // completed and when the last one did.
                     let mut first = None;
+
                     for sleep in sleeps {
                         sleep.await;
                         first.get_or_insert(polls.load(Ordering::Relaxed));
                     }
+
                     (first.unwrap(), polls.load(Ordering::Relaxed))
                 })
             })
@@ -4456,11 +4481,13 @@ fn test_expiry_backlog_keeps_pace_with_long_polls() {
         // The storm spans from the earliest first completion to the latest
         // last one. Once it has drained, the spinner measures.
         let (mut first, mut last) = (usize::MAX, 0);
+
         for group in groups {
             let (began, ended) = group.await.unwrap();
             first = first.min(began);
             last = last.max(ended);
         }
+
         drained.store(true, Ordering::Relaxed);
         let longest = spinner.await.unwrap();
 
@@ -4507,9 +4534,11 @@ fn test_deadline_backlog_keeps_pace_with_long_polls() {
             move |_| async move {
                 while !stop.load(Ordering::Relaxed) {
                     let began = Instant::now();
+
                     while began.elapsed() < 2 * BACKLOG_SLICE {
                         std::hint::spin_loop();
                     }
+
                     polls.fetch_add(1, Ordering::Relaxed);
                     reschedule().await;
                 }
@@ -4530,6 +4559,7 @@ fn test_deadline_backlog_keeps_pace_with_long_polls() {
                 deadline,
             }))
         };
+
         let storm = context.child("storm").spawn({
             let polls = polls.clone();
             move |_| async move {
@@ -4540,6 +4570,7 @@ fn test_deadline_backlog_keeps_pace_with_long_polls() {
                 // Report the long polls counted when the first request timed
                 // out and when the last one did.
                 let mut first = None;
+
                 for request in requests {
                     assert!(matches!(
                         request.await,
@@ -4547,9 +4578,11 @@ fn test_deadline_backlog_keeps_pace_with_long_polls() {
                     ));
                     first.get_or_insert(polls.load(Ordering::Relaxed));
                 }
+
                 (first.unwrap(), polls.load(Ordering::Relaxed))
             }
         });
+
         let (first, last) = storm.await.unwrap();
         stop.store(true, Ordering::Relaxed);
         spinner.await.unwrap();
@@ -4699,6 +4732,7 @@ fn test_shutdown_while_a_task_is_mid_poll_on_another_worker() {
             assert_ne!(other, thread::current().id());
         }
     });
+
     assert_eq!(
         *forwarded.lock(),
         Some(("pending".into(), "pending".into()))
@@ -4709,6 +4743,7 @@ fn test_shutdown_while_a_task_is_mid_poll_on_another_worker() {
         Some(poller),
         "the future must drop on its poller"
     );
+
     drop(peer);
 }
 
@@ -4733,6 +4768,7 @@ fn test_shutdown_retains_a_taken_forward_until_polling_ends() {
                 exact: true,
                 deadline: None,
             }));
+
             assert!(futures::poll!(&mut receive).is_pending());
             let root = poll_fn(|cx| Poll::Ready(cx.waker().clone())).await;
 
@@ -4803,7 +4839,9 @@ fn test_shutdown_retains_a_taken_forward_until_polling_ends() {
             .await;
         }
     });
+
     assert_eq!(forwarded.lock().as_deref(), Some("pending"));
+
     drop(peer);
 }
 
@@ -5779,16 +5817,20 @@ fn test_expiry_storm_keeps_a_requeued_task_in_the_run_queue() {
                 let stop = stop.clone();
                 move |_| async move {
                     let (mut seen, mut most) = (0, 0);
+
                     while !stop.load(Ordering::Relaxed) {
                         let now = completed.load(Ordering::Relaxed);
                         most = most.max(now - seen);
                         seen = now;
                         let began = Instant::now();
+
                         while began.elapsed() < work {
                             std::hint::spin_loop();
                         }
+
                         reschedule().await;
                     }
+
                     most
                 }
             });
@@ -5805,12 +5847,15 @@ fn test_expiry_storm_keeps_a_requeued_task_in_the_run_queue() {
                         let mut polled = false;
                         poll_fn(|cx| {
                             let result = sleep.as_mut().poll(cx);
+
                             if !mem::replace(&mut polled, true) {
                                 registered.fetch_add(1, Ordering::Relaxed);
                             }
+
                             result
                         })
                         .await;
+
                         completed.fetch_add(1, Ordering::Relaxed);
                     })
                 })
@@ -5821,10 +5866,12 @@ fn test_expiry_storm_keeps_a_requeued_task_in_the_run_queue() {
             while registered.load(Ordering::Relaxed) < SLEEPERS {
                 reschedule().await;
             }
+
             assert!(
                 SystemTime::now() < deadline,
                 "the storm's setup outlasted its lead"
             );
+
             let overflowed = Arc::new(AtomicBool::new(false));
             on_next_overflow(&context.shared.pool, {
                 let overflowed = overflowed.clone();
@@ -5834,8 +5881,10 @@ fn test_expiry_storm_keeps_a_requeued_task_in_the_run_queue() {
             for sleeper in sleepers {
                 sleeper.await.unwrap();
             }
+
             stop.store(true, Ordering::Relaxed);
             let most = spinner.await.unwrap();
+
             assert!(
                 most <= CAPACITY,
                 "the requeued task waited for {most} sleepers with polls of {work:?}"
@@ -5866,6 +5915,7 @@ fn test_due_sleep_fires_beside_a_full_run_queue() {
                 stop.store(true, Ordering::Relaxed);
             }
         });
+
         while !registered.load(Ordering::Relaxed) {
             reschedule().await;
         }
@@ -5891,20 +5941,26 @@ fn test_due_sleep_fires_beside_a_full_run_queue() {
             let starved = starved.clone();
             move || {
                 let began = Instant::now();
+
                 while !stop.load(Ordering::Relaxed) {
                     if began.elapsed() > Duration::from_secs(5) {
                         starved.store(true, Ordering::Relaxed);
                         stop.store(true, Ordering::Relaxed);
                     }
+
                     thread::sleep(Duration::from_millis(1));
                 }
             }
         });
+
         sleeper.await.unwrap();
+
         for spinner in spinners {
             spinner.await.unwrap();
         }
+
         watchdog.join().unwrap();
+
         assert!(
             !starved.load(Ordering::Relaxed),
             "a full run queue starved a due sleep"

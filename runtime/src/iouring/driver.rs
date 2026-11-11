@@ -507,6 +507,7 @@ impl State {
         if self.waiters.deadline(id).is_some() {
             self.deadlines.remove(id.0.index);
         }
+
         self.retire_cancelled(id, deferred);
     }
 
@@ -528,6 +529,7 @@ impl State {
         // for the pass.
         let mut expired = mem::take(&mut self.expired);
         self.deadlines.expire(now, &mut expired);
+
         for slot in expired.drain(..) {
             // Completion and cancellation remove a deadline, so the slot
             // that expiry detached still holds the active request that
@@ -539,6 +541,7 @@ impl State {
             assert!(self.waiters.cancel(id), "expired request already cancelled");
             self.retire_cancelled(id, deferred);
         }
+
         self.expired = expired;
     }
 
@@ -915,6 +918,7 @@ pub mod tests {
                 .state
                 .waiters
                 .insert(request, Observer::Local(Some(waker.clone())));
+
             if let Some(deadline) = deadline {
                 self.driver.state.deadlines.insert(id.0.index, deadline);
             }
@@ -1230,6 +1234,7 @@ pub mod tests {
                 if register_first {
                     harness.service_at(now, false);
                 }
+
                 now = harness.fires_at(deadline);
                 harness.service_at(now, false);
 
@@ -2175,12 +2180,14 @@ pub mod tests {
                 .unwrap();
             thread::yield_now();
         }
+
         assert_eq!(harness.driver.state.deadlines.len(), 1);
         let fires = harness.fires_at(deadline);
         harness
             .driver
             .state
             .advance_timeouts(fires, &mut harness.deferred);
+
         assert!(harness.driver.next_deadline().is_none());
 
         harness.collect();
@@ -3021,23 +3028,28 @@ pub mod tests {
         let mut harness = Harness::new(8);
         let deadline = harness.start + Duration::from_secs(30);
         let mut peers = Vec::new();
+
         for tag in 0..6 {
             let (socket, mut peer) = UnixStream::pair().unwrap();
             peer.write_all(b"x").unwrap();
             harness.admit(recv(socket, 1, Some(deadline)), tag);
             peers.push(peer);
         }
+
         harness
             .driver
             .state
             .register_deadlines(harness.start, &mut harness.deferred);
+
         assert_eq!(harness.driver.state.deadlines.len(), 6);
         assert!(harness.driver.next_deadline().is_some());
 
         // Each completion unlinks its deadline at once.
         harness.until(6);
+
         assert_eq!(harness.driver.state.deadlines.len(), 0);
         assert!(harness.driver.next_deadline().is_none());
+
         harness.drain();
     }
 
@@ -3050,6 +3062,7 @@ pub mod tests {
             let deadline = harness.start + Duration::from_secs(10);
             let (socket, _peer) = UnixStream::pair().unwrap();
             let id = harness.admit(recv(socket, 1, Some(deadline)), 0);
+
             if in_flight {
                 harness.service_at(harness.start, false);
                 assert!(harness.driver.state.waiters.is_in_flight(id));
@@ -3059,15 +3072,18 @@ pub mod tests {
                     .state
                     .register_deadlines(harness.start, &mut harness.deferred);
             }
+
             assert!(harness.driver.state.deadlines.contains(id.0.index));
 
             // Never early: one nanosecond before the rounded deadline.
             let fires = harness.fires_at(deadline);
             assert!(fires >= deadline && fires < deadline + Duration::from_nanos(RESOLUTION));
+
             harness
                 .driver
                 .state
                 .advance_timeouts(fires - Duration::from_nanos(1), &mut harness.deferred);
+
             assert!(harness.driver.state.deadlines.contains(id.0.index));
             assert!(harness.driver.state.pending_cancels.is_empty());
 
@@ -3077,8 +3093,10 @@ pub mod tests {
                 .driver
                 .state
                 .advance_timeouts(fires, &mut harness.deferred);
+
             assert_eq!(harness.driver.state.deadlines.len(), 0);
             assert!(harness.driver.next_deadline().is_none());
+
             if in_flight {
                 // The owner's ring cancels the operation, which retires the
                 // request at its CQE.
@@ -3095,6 +3113,7 @@ pub mod tests {
             // Either way, the request reports a timeout.
             assert_eq!(harness.completed.len(), 1);
             assert!(timed_out(&harness.completed[0], 0));
+
             harness.drain();
         }
     }
@@ -3104,20 +3123,24 @@ pub mod tests {
     fn assert_deadlines_belong_to_active_requests(harness: &Harness) {
         let state = &harness.driver.state;
         let mut installed = 0;
+
         for index in 0..state.waiters.slots() {
             if !state.deadlines.contains(index as u32) {
                 continue;
             }
+
             installed += 1;
             let holder = state.waiters.active_at(index).unwrap();
             assert!(state.waiters.deadline(holder).is_some());
         }
+
         assert_eq!(installed, state.deadlines.len());
     }
 
     #[test]
     fn test_randomized_requests_keep_deadlines_on_active_occupants() {
         let (mut timeouts, mut reuses, mut stale) = (0usize, 0usize, 0usize);
+
         for seed in 0..16 {
             // Random admissions, peer traffic, drops and cancellations of any
             // identity ever issued, stale ones included, and services at
@@ -3127,6 +3150,7 @@ pub mod tests {
             let mut issued: Vec<WaiterId> = Vec::new();
             let mut peers: Vec<UnixStream> = Vec::new();
             let mut elapsed = Duration::ZERO;
+
             for step in 0..3_000u64 {
                 match rng.random_range(0..10) {
                     // Admit a receive of one or two bytes without a deadline,
@@ -3135,21 +3159,26 @@ pub mod tests {
                         if harness.driver.len() >= 12 {
                             continue;
                         }
+
                         let now = harness.start + elapsed;
+
                         let deadline = match rng.random_range(0..5) {
                             0 => None,
                             1 => Some(now - elapsed.min(Duration::from_millis(1))),
                             2 | 3 => Some(now + Duration::from_micros(rng.random_range(1..20_000))),
                             _ => Some(now + Duration::from_secs(60)),
                         };
+
                         let (socket, peer) = UnixStream::pair().unwrap();
                         peer.set_nonblocking(true).unwrap();
                         let len = rng.random_range(1..=2);
                         let id = harness.admit(recv(socket, len, deadline), step);
                         harness.collect();
+
                         if id.0.generation > 0 {
                             reuses += 1;
                         }
+
                         issued.push(id);
                         peers.push(peer);
                     }
@@ -3158,7 +3187,9 @@ pub mod tests {
                         if peers.is_empty() {
                             continue;
                         }
+
                         let pick = rng.random_range(0..peers.len());
+
                         if rng.random_range(0..4) == 0 {
                             peers.swap_remove(pick);
                         } else {
@@ -3170,10 +3201,13 @@ pub mod tests {
                         if issued.is_empty() {
                             continue;
                         }
+
                         let id = issued[rng.random_range(0..issued.len())];
+
                         if !harness.driver.state.waiters.is_pending(id) {
                             stale += 1;
                         }
+
                         harness.orphan(id);
                     }
                     // Cancel any identity ever issued.
@@ -3181,10 +3215,13 @@ pub mod tests {
                         if issued.is_empty() {
                             continue;
                         }
+
                         let id = issued[rng.random_range(0..issued.len())];
+
                         if !harness.driver.state.waiters.is_pending(id) {
                             stale += 1;
                         }
+
                         harness.driver.state.cancel(id, &mut harness.deferred);
                         harness.collect();
                     }
@@ -3194,13 +3231,16 @@ pub mod tests {
                         harness.service_at(harness.start + elapsed, false);
                     }
                 }
+
                 assert_deadlines_belong_to_active_requests(&harness);
             }
 
             // Draining completes every request and leaves no deadline.
             harness.drain();
+
             assert_deadlines_belong_to_active_requests(&harness);
             assert_eq!(harness.driver.state.deadlines.len(), 0);
+
             timeouts += harness
                 .completed
                 .iter()
@@ -3226,6 +3266,7 @@ pub mod tests {
         let (socket, _peer) = UnixStream::pair().unwrap();
         let fd: Arc<OwnedFd> = Arc::new(socket.into());
         let count = u64::from(BUDGET) + 3;
+
         for tag in 0..count {
             let request = Request::Recv(RecvRequest {
                 fd: fd.clone(),
@@ -3235,12 +3276,15 @@ pub mod tests {
                 exact: true,
                 deadline: Some(deadline + Duration::from_nanos(tag % 5)),
             });
+
             harness.admit(request, tag);
         }
+
         harness
             .driver
             .state
             .register_deadlines(harness.start, &mut harness.deferred);
+
         assert_eq!(harness.driver.state.deadlines.len(), count as usize);
 
         // One pass expires one budget. While some remain due, the next
@@ -3252,6 +3296,7 @@ pub mod tests {
             .state
             .advance_timeouts(now, &mut harness.deferred);
         harness.collect();
+
         assert_eq!(harness.completed.len(), BUDGET as usize);
         assert_eq!(harness.driver.state.deadlines.len(), 3);
         assert!(harness.driver.next_deadline().unwrap() <= now);
@@ -3263,8 +3308,10 @@ pub mod tests {
             .state
             .advance_timeouts(now, &mut harness.deferred);
         harness.collect();
+
         assert_eq!(harness.completed.len(), count as usize);
         assert!(harness.driver.next_deadline().is_none());
+
         for tag in 0..count {
             assert!(
                 harness
@@ -3273,6 +3320,7 @@ pub mod tests {
                     .any(|completed| timed_out(completed, tag))
             );
         }
+
         harness.drain();
     }
 }

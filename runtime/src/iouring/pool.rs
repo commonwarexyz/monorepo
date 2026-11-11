@@ -132,10 +132,11 @@
 //! cleanup, so an unwind that skips the runner's shutdown still releases the
 //! barrier.
 //!
-//! No worker closes its mailbox, drops the messages it took from it, or
-//! destroys its io_uring ring until every pool worker has drained the set and
-//! finished its last poll, since a task polled on one worker can hold
-//! registrations on another, whose mailbox forwards their results.
+//! No worker closes its mailbox or its timers, drops the messages it took from
+//! its mailbox, or destroys its io_uring ring until every pool worker has
+//! drained the set and finished its last poll, since a task polled on one
+//! worker can hold registrations on another, whose mailbox forwards their
+//! results and whose timers its sleeps poll.
 //!
 //! The barrier's state is [`Closing`], under a lock of its own: `closed`
 //! releases the workers waiting in [`Pool::wait_closed`], `stopped` ends the
