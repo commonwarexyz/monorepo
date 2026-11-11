@@ -708,6 +708,9 @@ where
     }
 
     /// Prune the view-indexed caches below the given round.
+    ///
+    /// Every epoch below the round's epoch is destroyed. The round's epoch is pruned in whole
+    /// sections, so entries just below the round's view, in the section that holds it, can remain.
     pub(crate) async fn prune_by_view(mut self, round: Round) -> Self {
         // Remove and close prunable archives from older epochs
         let new_floor = round.epoch();
