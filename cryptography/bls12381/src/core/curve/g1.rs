@@ -320,11 +320,11 @@ pub(crate) mod fuzz {
         }
 
         fn encode(a: Element) -> [u8; BYTES] {
-            reference::to_bytes(a)
+            reference::encode(a)
         }
 
         fn decode(bytes: &[u8; BYTES]) -> Element {
-            reference::reduce(bytes)
+            reference::decode(bytes)
         }
 
         fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Element> {

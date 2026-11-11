@@ -736,7 +736,7 @@ const fn split(element: &[u8; BYTES]) -> [&[u8; FP_BYTES]; 2] {
 /// Reference arithmetic on elements with canonical components, for testing formulas.
 #[cfg(any(test, feature = "fuzz"))]
 pub(crate) mod reference {
-    use super::{BYTES, FP_BYTES};
+    use super::BYTES;
     use crate::core::field::fp::reference as fp;
     use arbitrary::Unstructured;
 
@@ -795,15 +795,12 @@ pub(crate) mod reference {
     /// Returns the residues of an encoding's components.
     pub(crate) fn decode(bytes: &[u8; BYTES]) -> Element {
         let [c0, c1] = super::split(bytes);
-        (fp::reduce(c0), fp::reduce(c1))
+        (fp::decode(c0), fp::decode(c1))
     }
 
     /// Returns the encoding of an element, the imaginary component first.
-    pub(crate) fn encode((c0, c1): Element) -> [u8; BYTES] {
-        let mut bytes = [0; BYTES];
-        bytes[..FP_BYTES].copy_from_slice(&fp::to_bytes(c1));
-        bytes[FP_BYTES..].copy_from_slice(&fp::to_bytes(c0));
-        bytes
+    pub(crate) const fn encode((c0, c1): Element) -> [u8; BYTES] {
+        super::encode(c0, c1)
     }
 
     /// Draws an element with canonical components, as [`fp::canonical`] draws each.
