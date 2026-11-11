@@ -183,9 +183,11 @@
 //! late. An early bound costs spurious expiry passes or lock attempts until
 //! expiry has drained the wheel bucket whose minimum was removed (see
 //! [`Wheel`]). A removal that empties the wheel publishes no bound. Drops and
-//! early completions leave the owner's cached bound where it was, so an idle
-//! owner then takes one timed wake at a removed firing time, whose expiry
-//! pass caches the wheel's bound.
+//! early completions leave the owner's cached bound where it was, so an owner
+//! that is about to park takes the wheel's bound again (see
+//! [`Timers::refresh`]). An idle owner therefore waits for no removed firing
+//! time unless it was the minimum of a wheel bucket that expiry has not
+//! drained, which costs it timed wakes until expiry drains that bucket.
 //!
 //! # Closure
 //!
@@ -596,6 +598,21 @@ impl Timers {
             .store(registrations.wheel.bound(), Ordering::Relaxed);
 
         true
+    }
+
+    /// The wheel's bound, published and returned for the owner's cached
+    /// bound, which the owner takes before it parks. Drops and early
+    /// completions leave that cache where it was, so without this an idle
+    /// owner would take a timed wake at the firing time of a sleep that is
+    /// gone. The bound can stay early after a bucket's minimum leaves, by a
+    /// removal or by a pass that runs out of budget in that bucket (see
+    /// [`Wheel::bound`]).
+    pub fn refresh(&self) -> u64 {
+        let registrations = self.lock();
+        let bound = registrations.wheel.bound();
+        self.published.store(bound, Ordering::Relaxed);
+
+        bound
     }
 
     /// Close the timers at their owner's cleanup: reject later registrations,
