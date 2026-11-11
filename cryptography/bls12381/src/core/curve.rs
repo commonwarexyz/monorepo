@@ -59,7 +59,7 @@ pub mod fuzz {
         fp::testing::{Check, check_any},
     };
     use arbitrary::{Arbitrary, Unstructured};
-    use core::{fmt::Debug, marker::PhantomData};
+    use core::fmt::Debug;
     use std::{format, vec::Vec};
 
     /// Largest number of points added into each lane in one case.
@@ -412,35 +412,6 @@ pub mod fuzz {
         Ok(())
     }
 
-    /// Runs [`formulas`] on a curve in any representation.
-    struct Formulas<C>(PhantomData<C>);
-
-    impl<C> Clone for Formulas<C> {
-        fn clone(&self) -> Self {
-            *self
-        }
-    }
-
-    impl<C> Copy for Formulas<C> {}
-
-    impl<C: Curve> Check for Formulas<C> {
-        fn check<S: Simd, F: Field<S>>(
-            self,
-            simd: S,
-            u: &mut Unstructured<'_>,
-        ) -> arbitrary::Result<()> {
-            simd.execute(
-                #[inline(always)]
-                |simd: S| formulas::<C, S, F>(simd, u),
-            )
-        }
-    }
-
-    /// Runs [`formulas`] in a representation and on an emulated backend drawn from the input.
-    fn run<C: Curve>(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
-        check_any(u, Formulas::<C>(PhantomData))
-    }
-
     /// A check of one curve's formulas.
     #[derive(Clone, Copy, Debug, Arbitrary)]
     pub enum Plan {
@@ -457,10 +428,23 @@ pub mod fuzz {
     impl Plan {
         /// Runs the operation using the remaining input.
         pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
-            match self {
-                Self::G1 => run::<g1::fuzz::G1>(u),
-                Self::G2 => run::<g2::fuzz::G2>(u),
-            }
+            check_any(u, self)
+        }
+    }
+
+    impl Check for Plan {
+        fn check<S: Simd, F: Field<S>>(
+            self,
+            simd: S,
+            u: &mut Unstructured<'_>,
+        ) -> arbitrary::Result<()> {
+            simd.execute(
+                #[inline(always)]
+                |simd: S| match self {
+                    Self::G1 => formulas::<g1::fuzz::G1, S, F>(simd, u),
+                    Self::G2 => formulas::<g2::fuzz::G2, S, F>(simd, u),
+                },
+            )
         }
     }
 
