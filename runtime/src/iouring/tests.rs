@@ -4639,23 +4639,21 @@ fn test_batch_started_during_a_long_batch_is_taken_before_parking() {
 }
 
 /// A pool claim moves the word without mail, so the turn it causes finishes
-/// without the inbox lock that another thread holds through it, while the
-/// turn after a message takes the batch.
+/// without the inbox lock that another thread holds through it and still
+/// offers to defer kernel service to its wait, which its service does with a
+/// receive in flight. The turn after a message takes the batch and services
+/// the kernel at once.
 #[test]
-fn test_claim_without_mail_takes_nothing() {
+fn test_claim_without_mail_takes_nothing_and_keeps_kernel_service_deferred() {
     let [claim, mail] = claim_then_mail();
-    assert!(!claim.blocked, "a claim without mail took from the mailbox");
-    assert!(!mail.mail, "the turn after a message left its batch");
-}
 
-/// A pool claim moves the word without mail, so the turn it causes still
-/// offers to defer kernel service to its wait, and its service defers it with
-/// a receive in flight, while a turn with mail services the kernel at once.
-#[test]
-fn test_claim_without_mail_keeps_kernel_service_deferred() {
-    let [claim, mail] = claim_then_mail();
+    // The claim's turn takes nothing and keeps the deferral.
+    assert!(!claim.blocked, "a claim without mail took from the mailbox");
     assert!(claim.offered, "a claim without mail stopped the deferral");
     assert!(claim.deferred, "service ignored the offered deferral");
+
+    // The message's turn takes the batch and services the kernel.
+    assert!(!mail.mail, "the turn after a message left its batch");
     assert!(!mail.offered, "mail did not stop the deferral");
     assert!(!mail.deferred, "service deferred despite mail");
 }

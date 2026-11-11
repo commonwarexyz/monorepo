@@ -780,7 +780,7 @@ pub mod tests {
         IoBuf, IoBufMut, IoBufs,
         iouring::{
             mailbox::Mailbox,
-            park::tests::{handles, wait_until_armed, wake},
+            park::tests::{handles, unpark_when_armed, wait_until_armed, wake},
             request::{
                 Cache, DIRECT_ALIGN, IOVEC_BATCH_SIZE, ReadAtRequest, RecvRequest, RequestOutput,
                 SyncRequest, WriteAtRequest, WriteAtState,
@@ -2566,11 +2566,7 @@ pub mod tests {
             // Keep the receive blocked. Only a notification after arming can
             // produce a CQE during this bounded wait.
             let deadline = Instant::now() + Duration::from_secs(10);
-            let unparker = harness.driver.state.unparker.clone();
-            let producer = thread::spawn(move || {
-                wait_until_armed(&unparker, deadline);
-                unparker.unpark();
-            });
+            let producer = unpark_when_armed(harness.driver.state.unparker.clone(), deadline);
             assert!(harness.park(0, Some(deadline)).unwrap());
             producer.join().unwrap();
 

@@ -586,10 +586,13 @@ pub mod tests {
         }
     }
 
-    /// Wait until the owner arms, failing by the test timeout if it never
-    /// parks.
-    fn wait_until_armed_by_timeout(unparker: &Unparker) {
-        wait_until_armed(unparker, Instant::now() + TEST_TIMEOUT);
+    /// Spawn a thread that notifies the word once its owner arms, failing by
+    /// `deadline` if the owner never parks.
+    pub fn unpark_when_armed(unparker: Unparker, deadline: Instant) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            wait_until_armed(&unparker, deadline);
+            unparker.unpark();
+        })
     }
 
     /// Whether the owner is armed to block on the word.
@@ -602,8 +605,8 @@ pub mod tests {
         unparker.word.load(Ordering::Relaxed)
     }
 
-    /// Number of notifications since creation or the last [`reset`], modulo the
-    /// sequence width.
+    /// Number of notifications since the word was created, modulo the sequence
+    /// width.
     pub fn notifications(unparker: &Unparker) -> u32 {
         word(unparker) / INCREMENT
     }
@@ -633,12 +636,6 @@ pub mod tests {
     #[cfg(feature = "loom")]
     pub fn wake(_unparker: &Unparker, _count: u32) -> libc::c_long {
         unreachable!("loom builds have no kernel futex")
-    }
-
-    /// Forget an unarmed word's notifications, so a test can count new ones.
-    pub fn reset(parker: &Parker) {
-        assert_eq!(parker.word.load(Ordering::Relaxed) & WAITER, 0);
-        parker.word.store(0, Ordering::Relaxed);
     }
 
     /// Restore the previous signal handler after the notifier has joined.
@@ -679,36 +676,6 @@ pub mod tests {
         assert!(parker.park(0, Some(deadline)).is_none());
         assert!(Instant::now() >= deadline);
         assert_eq!(word(&unparker), 0);
-    }
-
-    /// A notification after arming races the kernel's compare-and-wait, and
-    /// either way it ends a timed idle park before its deadline.
-    #[commonware_macros::test_group("miri")]
-    #[test]
-    fn test_timed_park_notification_race() {
-        // Notify once the owner arms.
-        let parker = Parker::new();
-        let unparker = parker.unparker();
-        let producer = std::thread::spawn({
-            let unparker = unparker.clone();
-            move || {
-                wait_until_armed_by_timeout(&unparker);
-                unparker.unpark();
-            }
-        });
-
-        // The timed park returns well before its deadline.
-        let deadline = Instant::now() + TEST_TIMEOUT;
-        let _ = parker.park(0, Some(deadline));
-        assert!(
-            Instant::now() < deadline,
-            "notification did not wake the idle worker"
-        );
-        producer.join().unwrap();
-
-        // The notification advanced the sequence and the park disarmed.
-        assert!(parker.moved(0));
-        assert!(!waiting(&unparker));
     }
 
     /// A signal interrupts a timed idle park without counting as a
@@ -855,16 +822,10 @@ pub mod tests {
             let parker = Parker::new();
             let unparker = parker.unparker();
             let before = parker.observe();
-            let notifier = std::thread::spawn({
-                let unparker = unparker.clone();
-                move || {
-                    wait_until_armed_by_timeout(&unparker);
-                    unparker.unpark();
-                }
-            });
+            let deadline = Instant::now() + TEST_TIMEOUT;
+            let notifier = unpark_when_armed(unparker.clone(), deadline);
 
             // The park returns well before its deadline.
-            let deadline = Instant::now() + TEST_TIMEOUT;
             let _ = parker.park(before, Some(deadline));
             assert!(
                 Instant::now() < deadline,
@@ -878,8 +839,8 @@ pub mod tests {
         }
     }
 
-    /// A notification after the observation prevents the next idle park from
-    /// sleeping.
+    /// A notification after the observation makes the arm refuse to block
+    /// against the older sequence, so the next idle park does not sleep.
     #[commonware_macros::test_group("miri")]
     #[test]
     fn test_unpark_before_park_skips_sleep() {
@@ -889,7 +850,9 @@ pub mod tests {
         let seen = parker.observe();
         unparker.unpark();
 
-        // The park against the older observation returns at once.
+        // An arm against the older observation refuses to block, and so the
+        // park returns at once.
+        assert!(!parker.arm(seen).still_idle());
         assert!(parker.park(seen, None).is_none());
 
         // The notification was counted and the park disarmed.
@@ -914,26 +877,6 @@ pub mod tests {
         // A wait on the stale snapshot returns at once instead of blocking,
         // through the userspace equality check or the futex EAGAIN path.
         assert!(!parker.futex_wait(arm.snapshot(), None, Instant::now()));
-        drop(arm);
-
-        // The notification was counted and the guard disarmed.
-        assert_eq!(notifications(&unparker), 1);
-        assert!(!waiting(&unparker));
-    }
-
-    /// A notification before arming makes the arm refuse to block against the
-    /// older sequence.
-    #[commonware_macros::test_group("miri")]
-    #[test]
-    fn test_arm_after_notify_skips_blocking() {
-        // Notify before arming against the initial observation.
-        let parker = Parker::new();
-        let unparker = parker.unparker();
-        unparker.unpark();
-
-        // The arm notices the notification and refuses to block.
-        let arm = parker.arm(0);
-        assert!(!arm.still_idle());
         drop(arm);
 
         // The notification was counted and the guard disarmed.
@@ -1185,10 +1128,15 @@ mod loom_tests {
     /// those does not finish in minutes.
     const PREEMPTIONS: usize = 8;
 
-    /// Explore `model` with preemptions bounded at [`PREEMPTIONS`].
-    fn check_bounded(model: impl Fn() + Sync + Send + 'static) {
+    /// Preemptions explored by the models with two producers and one worker.
+    /// Exploring every interleaving of three threads does not finish in
+    /// minutes, and five finishes in seconds.
+    const THREE_THREAD_PREEMPTIONS: usize = 5;
+
+    /// Explore `model` with at most `preemptions` preemptions.
+    fn check_bounded(preemptions: usize, model: impl Fn() + Sync + Send + 'static) {
         let mut builder = loom::model::Builder::new();
-        builder.preemption_bound = Some(PREEMPTIONS);
+        builder.preemption_bound = Some(preemptions);
         builder.check(model);
     }
 
@@ -1386,7 +1334,7 @@ mod loom_tests {
     /// that an earlier one failed to end, so each shorter program checks that
     /// its last notification is not lost.
     fn worker_program(ops: u32, path: ParkPath) {
-        check_bounded(move || {
+        check_bounded(PREEMPTIONS, move || {
             // Run the program on a producer thread, with a ring wait already
             // queued on the reused ring path.
             let parker = Parker::new();
@@ -1506,7 +1454,7 @@ mod loom_tests {
     /// models userspace ownership and waking, not kernel CQE delivery.
     #[test]
     fn test_batch_notification_and_take_gate() {
-        check_bounded(|| {
+        check_bounded(PREEMPTIONS, || {
             // A producer sends two messages around a claim notification.
             let parker = Parker::new();
             let mailbox = Arc::new(Mailbox::new(parker.unparker()));
@@ -1735,12 +1683,7 @@ mod loom_tests {
     /// preserve conservation and progress.
     #[test]
     fn test_three_thread_stress() {
-        // Exploring every interleaving of three threads does not finish in
-        // minutes, so preemptions are bounded at five, which finishes in
-        // seconds.
-        let mut builder = loom::model::Builder::new();
-        builder.preemption_bound = Some(5);
-        builder.check(|| {
+        check_bounded(THREE_THREAD_PREEMPTIONS, || {
             // Two producers publish once each.
             let parker = Parker::new();
             let unparker = parker.unparker();
@@ -1787,7 +1730,7 @@ mod loom_tests {
     /// park after it installs a new wait.
     #[test]
     fn test_stale_ring_wait_across_idle_and_ring_parks() {
-        check_bounded(|| {
+        check_bounded(PREEMPTIONS, || {
             // Leave a ring wait queued before the producer starts.
             let parker = Parker::new();
             let unparker = parker.unparker();
@@ -1842,10 +1785,7 @@ mod loom_tests {
     /// its wake must not strand the worker.
     #[test]
     fn test_concurrent_publishers_wake_a_reused_ring_wait() {
-        // As in `test_three_thread_stress`, preemptions are bounded at five.
-        let mut builder = loom::model::Builder::new();
-        builder.preemption_bound = Some(5);
-        builder.check(|| {
+        check_bounded(THREE_THREAD_PREEMPTIONS, || {
             // Leave a ring wait queued, then two producers publish once each.
             let parker = Parker::new();
             let unparker = parker.unparker();
@@ -1883,10 +1823,7 @@ mod loom_tests {
     /// reused wait.
     #[test]
     fn test_late_clear_on_a_reused_ring_wait_covers_a_skipped_wake() {
-        // As in `test_three_thread_stress`, preemptions are bounded at five.
-        let mut builder = loom::model::Builder::new();
-        builder.preemption_bound = Some(5);
-        builder.check(|| {
+        check_bounded(THREE_THREAD_PREEMPTIONS, || {
             // Leave a ring wait queued, then two producers publish once each.
             let parker = Parker::new();
             let unparker = parker.unparker();

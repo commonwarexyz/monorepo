@@ -694,10 +694,7 @@ impl Drop for Searcher<'_> {
 pub mod tests {
     use super::*;
     use crate::iouring::{
-        park::{
-            Parker,
-            tests::{notifications, reset},
-        },
+        park::{Parker, tests::notifications},
         pool::{
             HALF, Pool,
             tests::{pool, push, ready, task},
@@ -788,27 +785,9 @@ pub mod tests {
             .collect()
     }
 
-    /// Whether worker `index` was unparked since its word's last reset.
+    /// Whether worker `index` was unparked since its word was created.
     fn notified(pool: &Pool, index: u32) -> bool {
         notifications(&pool.mailbox(index).unparker) != 0
-    }
-
-    /// See worker one's notification through a futex wait, an arm, or a spin
-    /// on its `parker`, then reset its word.
-    fn observe_notification(pool: &Pool, parker: &Parker, mode: usize) {
-        assert!(notified(pool, 1));
-
-        // A notification since the worker's observation ends the wait at once,
-        // and turns the arm back.
-        match mode {
-            0 => assert!(parker.park(0, None).is_none()),
-            1 => assert!(!parker.arm(0).still_idle()),
-            _ => assert!(parker.moved(0)),
-        }
-
-        // The worker observes again before its next wait, which then blocks.
-        reset(parker);
-        assert!(!notified(pool, 1));
     }
 
     /// Discard every runnable in the global queue and in `readies`, then
@@ -1453,73 +1432,72 @@ pub mod tests {
     /// returns it, and publishes again, and the late notification ends its
     /// next wait with no claim and no count, while a later claim brings one as
     /// usual.
-    ///
-    /// Each way a worker sees a notification is checked: its futex wait, an
-    /// arm that the notification turns back, and its spin.
     #[test]
     fn test_late_notification_of_a_claim_brings_no_count() {
-        for mode in 0..3 {
-            let (pool, parts) = leaked(2);
+        let (pool, parts) = leaked(2);
+        let unparker = &pool.mailbox(1).unparker;
 
-            // Worker one finds no work and publishes itself parked.
-            {
-                let (searcher, ready, _) = &mut *parts[1].borrow_mut();
-                assert_eq!(searcher.prepare_park(ready), Park::Wait);
-            }
+        // Worker one finds no work and publishes itself parked.
+        {
+            let (searcher, ready, _) = &mut *parts[1].borrow_mut();
+            assert_eq!(searcher.prepare_park(ready), Park::Wait);
+        }
 
-            // Pause the wake after its claim, so the worker runs before the
-            // notification.
-            on_wake_point(WakePoint::AfterClaim, {
-                let part = parts[1].clone();
-                move || {
-                    // The claim cleared worker one's bit and reserved its count.
-                    assert_eq!(pool.idle().search_count(), 1);
-                    assert!(!pool.idle().is_idle(1));
+        // Pause the wake after its claim, so the worker runs before the
+        // notification.
+        on_wake_point(WakePoint::AfterClaim, {
+            let part = parts[1].clone();
+            move || {
+                // The claim cleared worker one's bit and reserved its count.
+                assert_eq!(pool.idle().search_count(), 1);
+                assert!(!pool.idle().is_idle(1));
 
-                    // An independent wake resumes the claimed worker, which
-                    // runs its loop and parks again.
-                    pool.mailbox(1).unparker.unpark();
-                    observe_notification(pool, &part.borrow().2, mode);
+                // An independent wake resumes the claimed worker, which runs
+                // its loop and parks again.
+                let before = notifications(unparker);
+                unparker.unpark();
+                assert_eq!(notifications(unparker), before + 1);
 
-                    // Its withdrawal keeps the claim's count, and it returns
-                    // that count before it publishes again.
-                    let (searcher, ready, _) = &mut *part.borrow_mut();
-                    searcher.finish_park();
-                    assert!(searcher.searching);
-                    searcher.leave_search();
-                    assert_eq!(pool.idle().search_count(), 0);
-                    assert_eq!(searcher.prepare_park(ready), Park::Wait);
-                }
-            });
-
-            // A push's wake claims worker one and runs the hook before it notifies.
-            pool.idle().notify_global(pool.mailboxes());
-
-            // The push's notification reaches the new publication, which no wake
-            // claimed.
-            assert!(pool.idle().is_idle(1));
-            observe_notification(pool, &parts[1].borrow().2, mode);
-
-            // Its withdrawal finds no claim, so it holds no count, and it parks again.
-            {
-                let (searcher, ready, _) = &mut *parts[1].borrow_mut();
+                // Its withdrawal keeps the claim's count, and it returns that
+                // count before it publishes again.
+                let (searcher, ready, _) = &mut *part.borrow_mut();
                 searcher.finish_park();
-                assert!(!searcher.searching);
+                assert!(searcher.searching);
+                searcher.leave_search();
                 assert_eq!(pool.idle().search_count(), 0);
                 assert_eq!(searcher.prepare_park(ready), Park::Wait);
             }
+        });
 
-            // A fresh claim brings one count.
-            pool.idle().notify_global(pool.mailboxes());
-            let (searcher, _, parker) = &mut *parts[1].borrow_mut();
-            observe_notification(pool, parker, mode);
+        // A push's wake claims worker one and runs the hook before it notifies.
+        let before = notifications(unparker);
+        pool.idle().notify_global(pool.mailboxes());
+
+        // The push's notification follows the hook's independent wake and
+        // reaches the new publication, which no wake claimed.
+        assert_eq!(notifications(unparker), before + 2);
+        assert!(pool.idle().is_idle(1));
+
+        // Its withdrawal finds no claim, so it holds no count, and it parks again.
+        {
+            let (searcher, ready, _) = &mut *parts[1].borrow_mut();
             searcher.finish_park();
-            assert!(searcher.searching);
-
-            // Returning that count leaves a clean idle state.
-            searcher.leave_search();
+            assert!(!searcher.searching);
             assert_eq!(pool.idle().search_count(), 0);
-            assert!((0..2).all(|index| !pool.idle().is_idle(index)));
+            assert_eq!(searcher.prepare_park(ready), Park::Wait);
         }
+
+        // A fresh claim notifies once and brings one count.
+        let before = notifications(unparker);
+        pool.idle().notify_global(pool.mailboxes());
+        assert_eq!(notifications(unparker), before + 1);
+        let (searcher, _, _) = &mut *parts[1].borrow_mut();
+        searcher.finish_park();
+        assert!(searcher.searching);
+
+        // Returning that count leaves a clean idle state.
+        searcher.leave_search();
+        assert_eq!(pool.idle().search_count(), 0);
+        assert!((0..2).all(|index| !pool.idle().is_idle(index)));
     }
 }
