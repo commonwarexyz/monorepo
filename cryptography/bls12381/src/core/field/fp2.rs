@@ -1,10 +1,9 @@
 //! The quadratic extension `Fp2 = Fp[i] / (i^2 + 1)`, over any base field representation.
 //!
-//! An [`Fp2`] holds two base field values, so it holds as many extension elements as its base
-//! field values hold elements, one per lane. Its arithmetic runs once over every representation of
-//! the [base field arithmetic](super::arithmetic). A [`Product`] holds a [`Signed`] sum of base
-//! field products in each component, so sums and differences of extension products share
-//! reductions, and subtracting one never adds a bias until it is reduced.
+//! An [`Fp2`] holds one element per lane, as two base field values in any representation of the
+//! [base field arithmetic](super::arithmetic). Products return a [`Product`], a [`Signed`] sum of
+//! base field products in each component: callers add and subtract products, then reduce the
+//! result once, and a subtraction adds no bias until that reduction.
 //!
 //! # Bounds
 //!
@@ -33,9 +32,8 @@
 //! so neither adds a bias. [`accumulate_product`](Fp2::accumulate_product) and
 //! [`subtract_product`](Fp2::subtract_product) add a product of two elements to a sum, or
 //! subtract it, with the bounds of [`product`](Fp2::product) followed by
-//! [`accumulate`](Fp2::accumulate) or [`product_sub`](Fp2::product_sub); residues multiply-add
-//! into the sums without forming the product. [`lift`](Fp2::lift) gives positive sums with the
-//! value's bounds.
+//! [`accumulate`](Fp2::accumulate) or [`product_sub`](Fp2::product_sub). [`lift`](Fp2::lift)
+//! gives positive sums with the value's bounds.
 //!
 //! [`reduce::<K>`](Fp2::reduce) applies [`Field::reduce_signed`] with the bias `K` to each
 //! component. A positional negative sum must be below `K`, and the component returns the positive
@@ -54,15 +52,13 @@
 //! bias `64` to components with integer bound at most `77` in every representation, so
 //! multiplications chain without carrying between them.
 //!
-//! Debug builds keep products and reductions as calls so that chained arithmetic fits in a stack
-//! frame.
-//!
 //! # Kernels
 //!
 //! Products ([`product`](Fp2::product), [`product_schoolbook`](Fp2::product_schoolbook), and
 //! [`square_product`](Fp2::square_product)) and reductions ([`reduce`](Fp2::reduce) and
 //! [`reduce_tight`](Fp2::reduce_tight)) run through [`Field::kernel`], as their own kernels unless
-//! the representation inlines them.
+//! the representation inlines them. Debug builds keep products and reductions as calls so that
+//! chained arithmetic fits in a stack frame.
 
 use super::{
     MAX_LANES,
@@ -308,14 +304,14 @@ impl<F> Fp2<F> {
 
     /// Forms the product `self * rhs`.
     ///
-    /// This is [`Field::quadratic`]: the real component is `a0 b0` less `a1 b1`, and the imaginary
-    /// component comes from [`Field::cross`], which reuses both known products. Both factors'
-    /// components must have limb bound `1`.
+    /// Both factors' components must have limb bound `1`.
     #[inline(always)]
     pub fn product<S: Simd>(self, simd: S, rhs: Self) -> Product<F, S>
     where
         F: Field<S>,
     {
+        // The real component is a0 b0 less a1 b1, and the imaginary component comes from
+        // Field::cross, which reuses both known products.
         F::kernel(
             simd,
             #[inline(always)]
@@ -338,6 +334,7 @@ impl<F> Fp2<F> {
     where
         F: Field<S>,
     {
+        // Residues multiply-add into the sums without forming the product.
         let [c0, c1] = F::accumulate_quadratic(simd, [sum.c0, sum.c1], [a.c0, a.c1], [b.c0, b.c1]);
         Fp2 { c0, c1 }
     }
@@ -365,16 +362,16 @@ impl<F> Fp2<F> {
 
     /// Forms the product `self * rhs` with four base field products.
     ///
-    /// The real component is `a0 b0` less `a1 b1`, and the imaginary component is
-    /// `a0 b1 + a1 b0`, accumulated as it forms. Unlike [`Self::product`], no product takes a sum
-    /// of components, so large factors keep smaller positional bounds at the cost of one more
-    /// positional product; residues form the same products either way. Every factor must be
-    /// ready, as for [`Field::product`].
+    /// Every factor must be ready, as for [`Field::product`]. Unlike [`Self::product`], no base
+    /// field product takes a sum of components, so large factors keep smaller positional bounds at
+    /// the cost of one more positional product; residues form the same products either way.
     #[inline(always)]
     pub fn product_schoolbook<S: Simd>(self, simd: S, rhs: Self) -> Product<F, S>
     where
         F: Field<S>,
     {
+        // The real component is a0 b0 less a1 b1, and the imaginary component is a0 b1 + a1 b0,
+        // accumulated as it forms.
         F::kernel(
             simd,
             #[inline(always)]
@@ -395,7 +392,6 @@ impl<F> Fp2<F> {
 
     /// Forms the product `self * self` with two base field products.
     ///
-    /// The real component is `(c0 + c1)(c0 - c1)` and the imaginary component is `(2 c0) c1`.
     /// Both components must have limb bound `1`, and the bias `K` must cover `c1` as for
     /// [`Field::sub`].
     #[inline(always)]
@@ -403,6 +399,7 @@ impl<F> Fp2<F> {
     where
         F: Field<S>,
     {
+        // The real component is (c0 + c1)(c0 - c1) and the imaginary component is (2 c0) c1.
         F::kernel(
             simd,
             #[inline(always)]
@@ -443,8 +440,6 @@ impl<F> Fp2<F> {
     }
 
     /// Returns `a + b` for products.
-    ///
-    /// Adds the positive sums and the negative sums of each component.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn accumulate<S: Simd>(simd: S, a: Product<F, S>, b: Product<F, S>) -> Product<F, S>
     where
@@ -457,9 +452,6 @@ impl<F> Fp2<F> {
     }
 
     /// Returns `a - b` for products, without a bias.
-    ///
-    /// Adds the negative sums of `b` to the positive sums of `a`, and the positive sums of `b`
-    /// to the negative sums of `a`.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn product_sub<S: Simd>(simd: S, a: Product<F, S>, b: Product<F, S>) -> Product<F, S>
     where
@@ -472,14 +464,12 @@ impl<F> Fp2<F> {
     }
 
     /// Returns `product * (1 + i)`, without a bias.
-    ///
-    /// The real component is `c0 - c1` and the imaginary component `c0 + c1`, each formed as in
-    /// [`Self::product_sub`] and [`Self::accumulate`].
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn product_mul_by_nonresidue<S: Simd>(simd: S, product: Product<F, S>) -> Product<F, S>
     where
         F: Field<S>,
     {
+        // The real component is c0 - c1 and the imaginary component c0 + c1.
         Fp2 {
             c0: product.c0.sub::<S, F>(simd, product.c1),
             c1: product.c0.add::<S, F>(simd, product.c1),
@@ -591,9 +581,7 @@ impl<F> Fp2<F> {
     /// Returns `product(0)`, ..., `product(N - 1)`, each reduced as [`Self::reduce_tight`] does
     /// with the bias `K`, for their `C = 2 * N` components.
     ///
-    /// Forms each product once, in order. When [`Field::INTERLEAVE`] covers the `C` components,
-    /// they reduce in one call of [`Field::reduce_each_signed_tight`]; otherwise each product
-    /// reduces right after it is formed.
+    /// Forms each product once, in order.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub(super) fn reduce_each_tight<const N: usize, const C: usize, const K: u64, S: Simd>(
         simd: S,
@@ -603,6 +591,8 @@ impl<F> Fp2<F> {
         F: Field<S>,
     {
         const { assert!(N > 0 && C == 2 * N) };
+        // When Field::INTERLEAVE covers the C components, they reduce in one call of
+        // Field::reduce_each_signed_tight; otherwise each product reduces right after it forms.
         if C > F::INTERLEAVE {
             let mut reduced = [Self::reduce_tight::<K, S>(simd, product(0)); N];
             unroll::<N>(
@@ -621,10 +611,10 @@ impl<F> Fp2<F> {
         ))
     }
 
-    /// Returns the difference of each component's signed sums, as one sum of products per
-    /// component, subtracting the negative sums once with the bias `K` as
-    /// [`Signed::difference`] does: reducing the result as [`Field::reduce`] does is
-    /// [`Self::reduce`] with the bias `K`.
+    /// Returns each component's positive sum less its negative sums, biased by `K` as
+    /// [`Signed::difference`] does, as one sum of products per component.
+    ///
+    /// Reducing the result with [`Field::reduce`] gives [`Self::reduce`] with the bias `K`.
     #[inline(always)]
     pub fn difference<const K: u64, S: Simd>(simd: S, product: Product<F, S>) -> Fp2<F::Product>
     where
@@ -639,10 +629,8 @@ impl<F> Fp2<F> {
     /// Returns `sum(0)`, ..., `sum(N - 1)`, each a difference from [`Self::difference`] reduced
     /// as [`Field::reduce`] does, for their `C = 2 * N` components.
     ///
-    /// Forms each sum once, in order. When [`Field::INTERLEAVE`] covers the `C` components, they
-    /// reduce in one call of [`Field::reduce_each`], so formulas reduce every independent value
-    /// of a stage at once, each with its own bias; otherwise each sum reduces right after it is
-    /// formed.
+    /// Forms each sum once, in order. Formulas pass every independent value of a stage, each with
+    /// its own bias, so that the values reduce together.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn reduce_each<const N: usize, const C: usize, S: Simd>(
         simd: S,
@@ -652,6 +640,8 @@ impl<F> Fp2<F> {
         F: Field<S>,
     {
         const { assert!(N > 0 && C == 2 * N) };
+        // When Field::INTERLEAVE covers the C components, they reduce in one call of
+        // Field::reduce_each; otherwise each sum reduces right after it forms.
         if C > F::INTERLEAVE {
             let reduce = |sum: Fp2<F::Product>| Self {
                 c0: F::reduce(simd, sum.c0),
@@ -674,7 +664,7 @@ impl<F> Fp2<F> {
     /// Returns the inverse `(c0 - c1 i) / (c0^2 + c1^2)`, or zero for zero.
     ///
     /// Both components must have limb bound `1` and integer bound at most [`TIGHT`]; so do the
-    /// result's. Inverts in the base field with [`Field::invert`].
+    /// result's.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn invert<S: Simd>(self, simd: S) -> Self
     where
