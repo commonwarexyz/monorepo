@@ -833,7 +833,7 @@ pub mod fuzz {
                 reference::mul(element, [SLACK, 0, 0, 0, 0, 0])
             };
             let expected = reference::mul(times(LIMIT / SLACK), times((LIMIT - 1) / SLACK));
-            assert_eq!(test_dispatch(Widest), reference::to_bytes(expected));
+            assert_eq!(test_dispatch(Widest), reference::encode(expected));
             check_consistent(|| Widest);
         }
 
@@ -890,7 +890,7 @@ pub mod fuzz {
                 sum,
                 largest_top().1,
             ]
-            .map(reference::to_bytes);
+            .map(reference::encode);
             assert_eq!(test_dispatch(Fold), expected);
             check_consistent(|| Fold);
         }
