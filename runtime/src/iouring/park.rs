@@ -33,17 +33,17 @@
 //!
 //! These checks compare sequences, so they could miss a notification only if
 //! the 31-bit sequence wrapped all the way around between the observation and
-//! the moment the kernel queues the wait. Each source can notify again only
-//! after the worker acts. A mailbox notifies once per empty-to-nonempty
-//! transition and keeps its batch until the worker takes it, at most once per
-//! turn. A pool claim answers one idle publication, and the worker publishes
-//! once per last look, which a turn repeats only after a search it started
-//! there found the backlog gone. Permit grants coalesce in the driver's set of
-//! permit futures, whose waker fires at most once per poll of that set. A
-//! notification can also lag behind its condition, but only while its
-//! producer thread is inside the call, one per thread. The interval therefore
-//! holds a bounded handful of notifications per source and one per thread, far
-//! fewer than a wrap needs.
+//! the arm, or the kernel's compare of a newly queued wait. That takes about
+//! two billion notifications, and each one in the interval has its own cause. A
+//! mailbox notifies once per empty-to-nonempty transition and keeps its batch
+//! until the worker takes it, at most once per turn. A pool claim answers one
+//! idle publication, and only a publication that no claim answered leads to
+//! another search and publication, so the last looks of a turn collect at most
+//! one claim. Permit grants wake the worker at most once per poll of the
+//! driver's set of permit futures, and each further poll advances one of the
+//! worker's requests, so they are bounded by the requests it holds. A
+//! notification can also lag behind its condition, but only while its producer
+//! thread is inside the call, one per thread.
 //!
 //! The worker waits on the word in two places: in the ring through a one-shot
 //! `IORING_OP_FUTEX_WAIT` ([`ArmGuard::install`]) while it has unfinished
