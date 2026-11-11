@@ -2100,7 +2100,7 @@ impl Worker {
                 return None;
             }
         }
-        Self::take_global(&self.local, pool)
+        self.take_global(pool)
     }
 
     /// Act on the pool's nonzero unserved hint `hint` once it is due, taking
@@ -2131,14 +2131,22 @@ impl Worker {
 
     /// Return the oldest global runnable and append the rest of its capped
     /// share to the run queue. Fall back to the oldest run queue runnable if
-    /// the global queue was empty. `local` must be an unborrowed pool worker
-    /// of `pool`.
+    /// the global queue was empty, which pays a debt left by a hinted take as
+    /// any pop from the run queue does. `pool` must be this worker's pool,
+    /// and the caller must hold no Local borrow.
     #[inline(never)]
     #[must_use]
-    fn take_global(local: &RefCell<Local>, pool: &Pool) -> Option<Runnable> {
-        let mut local = local.borrow_mut();
+    fn take_global(&mut self, pool: &Pool) -> Option<Runnable> {
+        let mut local = self.local.borrow_mut();
         let ready = local.ready_mut();
-        pool.take(ready).or_else(|| ready.pop())
+        if let Some(runnable) = pool.take(ready) {
+            return Some(runnable);
+        }
+        let runnable = ready.pop();
+        if runnable.is_some() {
+            self.unserved_debt = false;
+        }
+        runnable
     }
 
     /// Try to steal from the other run queues, then publish this worker idle
@@ -2420,8 +2428,9 @@ impl Worker {
                     self.callbacks(searcher.as_mut());
                 }
             } else {
-                // A future timer by itself uses a timed futex wait. Spinning
-                // is skipped when it could consume the remaining deadline.
+                // A future timer or re-look by itself uses a timed futex wait.
+                // Spinning is skipped when it could consume the remaining
+                // deadline.
                 let near_deadline = deadline
                     .is_some_and(|deadline| deadline.saturating_duration_since(now) <= max_spin);
 

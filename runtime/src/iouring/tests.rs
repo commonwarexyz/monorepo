@@ -4571,6 +4571,84 @@ fn test_unserved_global_stream_lets_the_run_queue_progress() {
     });
 }
 
+/// A pop from the run queue that the global queue interval falls back to,
+/// finding the global queue empty, pays the debt of an earlier take for an
+/// unserved hint, as any pop from the run queue does. Each of a few tasks
+/// queued here pushes two tasks into the global queue from outside the pool,
+/// which wakes no worker and leaves a hint, then polls past the global age.
+/// With an interval of 2, from either phase of the countdown, the worker
+/// takes both pushed tasks, one for a hint and one for the interval, before
+/// it pops the next pusher. Every other pusher is popped by an interval call
+/// right after a hinted take, so its pushes leave a hint that the next call
+/// must serve ahead of the run queue. A debt left in place by that pop would
+/// make that call pop another pusher first.
+#[test]
+fn test_run_queue_pop_at_the_interval_pays_the_hint_debt() {
+    /// Tasks that each push two tasks into the global queue.
+    const PUSHERS: usize = 4;
+
+    let cfg = config().with_global_queue_interval(2);
+    Runner::new(cfg).start(|context| async move {
+        // A one-worker pool keeps every spawn here, so no push into the
+        // global queue leaves a hint before the pushers run.
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let mut wakes = Vec::new();
+        let pushers: Vec<_> = (0..PUSHERS)
+            .map(|pusher| {
+                let (wake, woken) = oneshot::channel::<()>();
+                wakes.push(wake);
+                let order = order.clone();
+                // Spawned from outside the pusher's own context, so finishing
+                // the pusher does not abort what it pushed.
+                let spawner = context.child("pushed");
+                context.child("pusher").spawn(move |_| async move {
+                    woken.await.unwrap();
+                    order.lock().push(("pusher", pusher));
+                    thread::spawn(move || {
+                        for _ in 0..2 {
+                            let order = order.clone();
+                            spawner.child("pushed").spawn(move |_| async move {
+                                order.lock().push(("pushed", pusher));
+                            });
+                        }
+                    })
+                    .join()
+                    .unwrap();
+                    thread::sleep(Duration::from_micros(10 * GLOBAL_AGE));
+                })
+            })
+            .collect();
+
+        // Idle tasks queued behind the pushers keep the run queue at least
+        // half full, so each take from the global queue moves one runnable.
+        let fillers = Recorded::spawn(&context, HALF);
+        every_worker_waits(&context.shared.pool).await;
+
+        // Queue the pushers, then the idle tasks behind them.
+        for wake in wakes {
+            wake.send(()).unwrap();
+        }
+        fillers.wake();
+        for pusher in pushers {
+            pusher.await.unwrap();
+        }
+        for task in fillers.tasks {
+            task.await.unwrap();
+        }
+
+        let mut expected = Vec::new();
+        for pusher in 0..PUSHERS - 1 {
+            expected.extend([("pusher", pusher), ("pushed", pusher), ("pushed", pusher)]);
+        }
+        expected.push(("pusher", PUSHERS - 1));
+        let order: Vec<_> = order.lock().iter().take(expected.len()).copied().collect();
+        assert_eq!(
+            order, expected,
+            "a pusher ran before the tasks its predecessor pushed"
+        );
+    });
+}
+
 /// A runner restores the block hook of the thread that starts it, which its
 /// worker zero replaces with its own while it runs, on return and on unwind.
 #[test]
