@@ -1168,7 +1168,10 @@ impl Local {
                 shared.pool.mailbox(index).clone(),
                 shared.pool.timers()[index as usize].clone(),
             ),
-            Role::Dedicated => (Arc::new(Mailbox::new()?), Arc::new(Timers::new())),
+            Role::Dedicated => (
+                Arc::new(Mailbox::new()?),
+                Arc::new(Timers::new(Instant::now())),
+            ),
         };
         let now = Instant::now();
         let driver = Driver::new(&shared.cfg.ring_config, mailbox.waker.clone(), now)?;
@@ -2017,7 +2020,8 @@ impl Worker {
             .service(*now, defer_kernel_service, deferred);
         let outcome = result.expect("io_uring driver service failed");
 
-        // The timers count this time from their origin.
+        // The timers count this time from their origin, which all of a pool's
+        // timers share, so the rescue of peers below compares it as well.
         let nanos = timers.nanos(*now);
 
         // Expiry defers observer notifications until after this borrow ends.
@@ -2053,7 +2057,7 @@ impl Worker {
             && *now >= self.rescue_at
         {
             self.rescue_at = *now + RESCUE_INTERVAL;
-            Timers::rescue_peers(shared.pool.timers(), seat.index as usize, *now, deferred);
+            Timers::rescue_peers(shared.pool.timers(), seat.index as usize, nanos, deferred);
         }
 
         local.update_pending();

@@ -38,11 +38,11 @@
 //! own, such as a slab index, and keeps the state behind them. Each worker's
 //! sleep timers ([`super::sleep::Timers`], 1024 ns ticks) and each
 //! driver's request deadlines ([`super::deadlines::Deadlines`], 2^20 ns ticks)
-//! own an instance. Each owner counts nanoseconds from an [`Instant`] of its
-//! own, its creation, at which its wheel's base starts, and converts with
-//! [`InstantExt`]. An instant before that origin counts as zero, so a
-//! deadline there is due at once, and a firing time converts back to an
-//! instant at or after its deadline.
+//! own an instance. Each owner counts nanoseconds from an origin [`Instant`],
+//! at which its wheel's base starts, and converts with [`InstantExt`]. An
+//! instant before that origin counts as zero, so a deadline there is due at
+//! once, and a firing time converts back to an instant at or after its
+//! deadline.
 
 use std::time::{Duration, Instant};
 

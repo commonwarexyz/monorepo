@@ -9,14 +9,15 @@
 //! timers, so that peers can reach them, and a dedicated worker owns private
 //! ones.
 //!
-//! Timers count time in nanoseconds since their origin, the instant of their
-//! creation. Registration converts a deadline to that count, zero for one
-//! before the origin, which is due at once, and the wheel rounds it up to its
-//! firing time, never before the deadline. A deadline at most [`MAX_TIMEOUT`]
-//! ahead stays far below the end of the count, about 584 years after the
-//! origin, so rounding never saturates. The published bound and the owner's
-//! latest expiry time are counts of the timers' own, so a peer converts its
-//! current time for each worker's timers it checks.
+//! Timers count time in nanoseconds since their origin, an instant given at
+//! their creation. A pool's timers share the pool's origin, and a dedicated
+//! worker's take the instant of their creation. Registration converts a
+//! deadline to that count, zero for one before the origin, which is due at
+//! once, and the wheel rounds it up to its firing time, never before the
+//! deadline. A deadline at most [`MAX_TIMEOUT`] ahead stays far below the end
+//! of the count, about 584 years after the origin, so rounding never
+//! saturates. A peer that checks a pool's timers therefore converts its
+//! current time once for all of them.
 //!
 //! # Registration and Completion
 //!
@@ -394,14 +395,15 @@ pub struct Timers {
     /// waits or is polled again for the wake of the ending that its read
     /// missed.
     epoch: CachePadded<AtomicU64>,
-    /// The instant of the timers' creation, from which their wheel, bound and
-    /// expiry times count nanoseconds.
+    /// The instant from which the wheel, bound and expiry times count
+    /// nanoseconds, shared by all of one pool's timers.
     origin: Instant,
 }
 
 impl Timers {
-    /// Empty timers whose origin is the current time.
-    pub fn new() -> Self {
+    /// Empty timers that count time from `origin`. All of one pool's timers
+    /// share it, so that a peer compares one time with all of them.
+    pub fn new(origin: Instant) -> Self {
         Self {
             registrations: CachePadded::new(Mutex::new(Registrations {
                 entries: Slab::default(),
@@ -412,7 +414,7 @@ impl Timers {
             published: CachePadded::new(AtomicU64::new(u64::MAX)),
             served: CachePadded::new(AtomicU64::new(0)),
             epoch: CachePadded::new(AtomicU64::new(0)),
-            origin: Instant::now(),
+            origin,
         }
     }
 
@@ -660,9 +662,9 @@ impl Timers {
     /// every worker but `own` whose published bound is overdue by
     /// [`RESCUE_THRESHOLD`] and whose owner has run no expiry pass for as
     /// long, with one budget per worker, skipping timers whose lock is held.
-    /// Each worker's timers compare `now` in their own nanoseconds. Wakes
-    /// land in `deferred`.
-    pub fn rescue_peers(all: &[Arc<Self>], own: usize, now: Instant, deferred: &mut Deferred) {
+    /// The timers of `all` are one pool's, which share their origin, and
+    /// `now` counts nanoseconds since it. Wakes land in `deferred`.
+    pub fn rescue_peers(all: &[Arc<Self>], own: usize, now: u64, deferred: &mut Deferred) {
         let threshold = RESCUE_THRESHOLD.as_nanos() as u64;
 
         for (index, timers) in all.iter().enumerate() {
@@ -679,9 +681,6 @@ impl Timers {
             if bound == u64::MAX {
                 continue;
             }
-
-            // Each worker's timers count time from their own origin.
-            let now = timers.nanos(now);
 
             if now < bound.saturating_add(threshold) {
                 continue;
@@ -1318,7 +1317,7 @@ pub mod tests {
     fn test_expiry_wakes_once_and_poll_reports_fired() {
         // An earlier registration, then a later one, publish the earlier
         // firing time.
-        let timers = Arc::new(Timers::new());
+        let timers = Arc::new(Timers::new(Instant::now()));
         let (first, first_waker) = counter();
         let (second, second_waker) = counter();
         let deadline = later();
@@ -1368,7 +1367,7 @@ pub mod tests {
     fn test_repoll_completes_a_deadline_that_the_latest_pass_reached() {
         // Two registrations at one deadline, polled with one waker, as a task
         // that holds both would poll them.
-        let timers = Arc::new(Timers::new());
+        let timers = Arc::new(Timers::new(Instant::now()));
         let (count, waker) = counter();
         let deadline = later();
         let mut first = register(&timers, deadline, &waker);
@@ -1402,7 +1401,7 @@ pub mod tests {
     #[test]
     fn test_drop_removes_the_registration_and_releases_its_waker() {
         // Two sleeps wait on timers that hold a clone of their waker each.
-        let timers = Arc::new(Timers::new());
+        let timers = Arc::new(Timers::new(Instant::now()));
         let (count, waker) = counter();
         let early = registered(&timers, later(), &waker);
         let late = registered(&timers, 2 * later(), &waker);
@@ -1434,7 +1433,7 @@ pub mod tests {
     fn test_closed_sleeps_are_woken_and_complete_only_past_their_deadline() {
         // Two sleeps wait when their timers close, one whose deadline has
         // passed and one whose deadline is ahead.
-        let timers = Arc::new(Timers::new());
+        let timers = Arc::new(Timers::new(Instant::now()));
         let (count, waker) = counter();
         let mut passed = registered(&timers, 1, &waker);
         let mut ahead = registered(&timers, 60 * later(), &waker);
@@ -1514,7 +1513,7 @@ pub mod tests {
         for (end, outcome) in ends {
             // A waiting registration with the root's waker, polled without
             // the lock.
-            let timers = Arc::new(Timers::new());
+            let timers = Arc::new(Timers::new(Instant::now()));
             let mut sleeper = register(&timers, later(), &root);
             let before = locks();
 
@@ -1551,7 +1550,7 @@ pub mod tests {
 
         // A registration stores the waker of the root that this thread
         // records, whose polls take no lock.
-        let timers = Arc::new(Timers::new());
+        let timers = Arc::new(Timers::new(Instant::now()));
         let root = root_waker();
         let scope = RootWaker::install(&root);
         let mut sleeper = register(&timers, later(), &root);
@@ -1620,7 +1619,7 @@ pub mod tests {
 
             // A registration stores the first task's waker, whose polls take
             // no lock.
-            let timers = Arc::new(Timers::new());
+            let timers = Arc::new(Timers::new(Instant::now()));
             let mut sleeper = register(&timers, later(), &wakers[0]);
             let before = locks();
 
@@ -1746,7 +1745,7 @@ pub mod tests {
     fn test_callbacks_never_run_under_the_timers_lock() {
         // Three checked wakers on one worker's timers. Cloning the last one
         // also expires the timers, as a peer's rescue would.
-        let timers = Arc::new(Timers::new());
+        let timers = Arc::new(Timers::new(Instant::now()));
         let deadline = later();
         let (checks, wakers) =
             LockCheck::wakers(&timers, [None, None, Some(deadline + RESOLUTION)]);
@@ -2100,7 +2099,7 @@ mod loom_tests {
                     phase: AtomicUsize::new(Kept::RUNNING),
                 });
                 let waker = Waker::from(kept.clone());
-                let timers = Arc::new(Timers::new());
+                let timers = Arc::new(Timers::new(Instant::now()));
                 let (mut sleeper, _) = timers.register_at(waker.clone(), later());
 
                 assert!(sleeper.poll(&Context::from_waker(&waker)).is_pending());
@@ -2176,7 +2175,7 @@ mod loom_tests {
                 let pool = Arc::new(Pool::new(vec![Arc::new(Mailbox::new().unwrap())]));
                 let set = Tasks::new(1);
                 let mut ready = pool.queue(0).owner();
-                let timers = Arc::new(Timers::new());
+                let timers = Arc::new(Timers::new(Instant::now()));
 
                 // With `adopt`, the registration holds a waker of no task,
                 // which the task's first poll replaces with its own under the
@@ -2243,7 +2242,7 @@ mod loom_tests {
                 let root = Waker::from(RootWaker::new(Arc::downgrade(&mailbox)));
                 let _scope = RootWaker::install(&root);
                 let cx = Context::from_waker(&root);
-                let timers = Arc::new(Timers::new());
+                let timers = Arc::new(Timers::new(Instant::now()));
 
                 // With `adopt`, the registration holds a waker of no root,
                 // which the root's first poll replaces with its own under the
