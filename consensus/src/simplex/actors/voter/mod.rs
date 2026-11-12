@@ -8112,6 +8112,7 @@ mod tests {
             )
             .await;
 
+            // The voter starts in view 1.
             let target_view = match batcher_receiver.recv().await.unwrap() {
                 batcher::Message::Update { current, .. } => current,
                 _ => panic!("the voter must first send an update"),
@@ -8198,6 +8199,8 @@ mod tests {
                 },
             )
             .await;
+
+            // The voter starts in view 1.
             match batcher_receiver.recv().await.unwrap() {
                 batcher::Message::Update { current, .. } => assert_eq!(current, View::new(1)),
                 _ => panic!("the voter must first send an update"),

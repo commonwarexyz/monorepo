@@ -1939,6 +1939,7 @@ mod tests {
         let round_info = Rnd::new(Epoch::new(1), View::new(1));
         let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([4u8; 32]));
 
+        // Certification stays outstanding, succeeds, fails, or is aborted.
         let outcomes: [fn(&mut Round<ed25519::Scheme, Sha256Digest>); 4] = [
             |_| {},
             |round| round.certified(true),
@@ -1946,12 +1947,15 @@ mod tests {
             |round| round.abort_certify(),
         ];
         for outcome in outcomes {
-            // A recovered notarization leaves its proposal unverified.
+            // A recovered notarization leaves its proposal unverified. Its certification is
+            // requested and reaches the outcome.
             let mut round = notarized_round(&schemes, &proposal, Participant::new(1));
             let mut pool = AbortablePool::<()>::default();
             round.set_certify_handle(pool.push(futures::future::pending()));
             outcome(&mut round);
 
+            // The proposal stays pending verification until `request_verify` claims the request
+            // without sending it.
             assert!(round.pending_verification().is_some());
             assert!(!round.request_verify());
             assert!(round.pending_verification().is_none());

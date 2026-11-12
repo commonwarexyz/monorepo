@@ -4608,6 +4608,44 @@ mod tests {
         });
     }
 
+    /// A notarization of the proposal under verification does not supersede that verification.
+    /// Its verdict still counts, so this validator votes to notarize the notarized view.
+    #[test]
+    fn matching_notarization_does_not_supersede_verification() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with(
+                &mut context,
+                4,
+                1,
+                9,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(2),
+                4,
+            );
+
+            // Request verification of P1 at view 1.
+            let p1 = fetch_proposal(1, 0, 123);
+            assert!(state.set_proposal(View::new(1), &p1));
+            assert!(matches!(state.try_verify(), Verify::Ready(..)));
+
+            // P1 is notarized while its verification is in flight. The request stands.
+            let notarization = build_notarization(&verifier, &schemes, &p1);
+            assert!(state.add_notarization(notarization).0);
+            assert!(!state.verification_superseded(View::new(1)));
+
+            // The verdict still counts.
+            assert!(state.verified(View::new(1)));
+            assert!(state.construct_notarize(View::new(1)).is_some());
+        });
+    }
+
     #[test]
     fn pending_optimistic_child_verification_rejects_replaced_parent_notarization() {
         let runtime = deterministic::Runner::default();
@@ -4728,6 +4766,48 @@ mod tests {
 
             assert!(state.certified(View::new(1), true).is_some());
             assert_eq!(state.current_view(), View::new(2));
+            assert!(!matches!(
+                state.next_timeout(),
+                (_, TimeoutReason::InvalidProposal)
+            ));
+        });
+    }
+
+    /// A verification failure that arrives after a certificate replaced the proposal says
+    /// nothing about the replacement, even when both name the same parent, so it must not
+    /// latch.
+    #[test]
+    fn failed_verification_ignores_replaced_proposal_verdict() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with(
+                &mut context,
+                4,
+                1,
+                9,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(2),
+                4,
+            );
+
+            // Request verification of A at view 1.
+            let a = fetch_proposal(1, 0, 127);
+            assert!(state.set_proposal(View::new(1), &a));
+            assert!(matches!(state.try_verify(), Verify::Ready(..)));
+
+            // B, a conflicting proposal on the same parent, is notarized at view 1.
+            let b = fetch_proposal(1, 0, 128);
+            let notarization = build_notarization(&verifier, &schemes, &b);
+            assert!(state.add_notarization(notarization).0);
+
+            // The automaton then rejects A. That verdict says nothing about B.
+            state.verification_failed(View::new(1), TimeoutReason::InvalidProposal);
             assert!(!matches!(
                 state.next_timeout(),
                 (_, TimeoutReason::InvalidProposal)
