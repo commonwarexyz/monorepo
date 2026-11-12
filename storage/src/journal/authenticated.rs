@@ -28,8 +28,10 @@
 //! needed from the operations in its aligned region of leaves.
 //!
 //! A prune commits the operations, writes the frontier at the new boundary, then deletes
-//! operation blobs. A state sync writes its boundary only after its root is verified, and deletes
-//! the operations before it after that. Startup finishes a deletion that a crash interrupted.
+//! operation blobs. A state sync marks the frontier before it appends operations, writes its
+//! boundary only after its root is verified, and deletes the operations before it after that.
+//! Startup finishes a deletion that a crash interrupted, and refuses a journal whose frontier is
+//! marked, since its operations may mix local ones with unverified ones.
 //!
 //! # Ownership
 //!
@@ -86,6 +88,11 @@ pub enum Error<F: Family> {
 
     #[error("journal error: {0}")]
     Journal(#[from] super::Error),
+
+    /// A state sync appended operations and did not record its boundary. The journal opens once a
+    /// sync completes.
+    #[error("incomplete state sync")]
+    IncompleteSync,
 }
 
 /// Strong ref to an ancestor [`MerkleizedBatch`] in the journal-batch chain.
@@ -338,6 +345,8 @@ where
         match error {
             Error::Journal(inner) => inner,
             Error::Merkle(inner) => JournalError::Merkle(anyhow::Error::from(inner)),
+            // Only opening a journal reports an incomplete sync.
+            error @ Error::IncompleteSync => JournalError::Merkle(anyhow::Error::from(error)),
         }
     }
 
@@ -683,8 +692,8 @@ where
         })
     }
 
-    /// Record the boundary of a journal built by [Self::from_components] in its frontier, then
-    /// prune the operations before it.
+    /// Record the boundary of a journal built by [Self::from_components] in its frontier, ending
+    /// an incomplete sync, then prune the operations before it.
     pub async fn persist_boundary(mut self) -> Result<Self, Error<F>> {
         let boundary = self.merkle.bounds().start;
         let pins = self.pinned_nodes_at(boundary).await?;
@@ -1154,6 +1163,9 @@ where
     ) -> Result<Recovery<F, E, C, H, S>, Error<F>> {
         let frontier =
             Frontier::open(context.child("frontier"), merkle_cfg.partition.clone()).await?;
+        if frontier.sync_incomplete() {
+            return Err(Error::IncompleteSync);
+        }
         let (boundary, pins) = frontier.boundary();
         let merkle_context = context.child("merkle");
         let merkle = Tree::new(boundary, pins, &merkle_cfg, &merkle_context)?;
@@ -1495,6 +1507,26 @@ impl<E: Context, J: Backing<E>> Stored<E, J> {
         let recovery = J::recover(context, cfg, Some(max_size)).await?;
         Ok(Self::Opened(recovery))
     }
+}
+
+/// Durably mark the frontier under `config` before a state sync appends operations, so the journal
+/// refuses to open with [Error::IncompleteSync] until [Journal::persist_boundary] records the
+/// synced boundary.
+pub(crate) async fn mark_sync_incomplete<F, E, H, S>(
+    context: E,
+    config: &Config<S>,
+) -> Result<(), Error<F>>
+where
+    F: Family,
+    E: Context,
+    H: Hasher,
+    S: Strategy,
+{
+    Frontier::<F, E, H::Digest>::open(context, config.partition.clone())
+        .await?
+        .mark_sync_incomplete()
+        .await?;
+    Ok(())
 }
 
 /// The digests pinned at `location`, computed from the local frontier if its rebuilt root matches
@@ -2940,6 +2972,37 @@ mod tests {
     #[test]
     fn test_pinned_nodes_at_errors_mmb() {
         deterministic::Runner::default().start(pinned_nodes_at_errors::<mmb::Family>);
+    }
+
+    /// A journal whose frontier marks an incomplete sync refuses to open.
+    async fn incomplete_sync_refuses_to_open<F: Family + PartialEq>(context: Context) {
+        drop(create_journal_with_ops::<F>(context.child("initial"), "incomplete", 20).await);
+        mark_sync_incomplete::<F, _, Sha256, _>(
+            context.child("mark"),
+            &merkle_config("incomplete"),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            TestJournal::<F>::new(
+                context.child("reopen"),
+                merkle_config("incomplete"),
+                journal_config("incomplete"),
+                |_| true,
+                ForwardFold,
+            )
+            .await,
+            Err(Error::IncompleteSync)
+        ));
+    }
+
+    #[test]
+    fn test_incomplete_sync_refuses_to_open_mmr() {
+        deterministic::Runner::default().start(incomplete_sync_refuses_to_open::<mmr::Family>);
+    }
+    #[test]
+    fn test_incomplete_sync_refuses_to_open_mmb() {
+        deterministic::Runner::default().start(incomplete_sync_refuses_to_open::<mmb::Family>);
     }
 
     /// A frontier whose pins don't match its boundary, or whose boundary is not a valid location,

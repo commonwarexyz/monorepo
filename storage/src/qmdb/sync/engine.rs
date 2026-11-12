@@ -242,6 +242,9 @@ where
 
     /// Tracks whether the current target has already been reported as reached.
     reached_current_target_reported: bool,
+
+    /// Whether the database has marked the sync incomplete, before the first append.
+    marked_incomplete: bool,
 }
 
 #[cfg(test)]
@@ -313,6 +316,7 @@ where
             reached_target_tx: config.reached_target_tx,
             reached_current_target_reported: false,
             metrics,
+            marked_incomplete: false,
         };
         engine.schedule_requests();
         engine.record_progress();
@@ -540,6 +544,11 @@ where
             // at or after it, so the batch is never empty.
             operations.drain(..(*next_loc - *range_start_loc) as usize);
             next_loc += operations.len() as u64;
+            if !self.marked_incomplete {
+                DB::mark_sync_incomplete(self.context.child("mark_incomplete"), &self.config)
+                    .await?;
+                self.marked_incomplete = true;
+            }
             self.journal = self.journal.append(operations).await?;
         }
 
@@ -788,6 +797,7 @@ pub(crate) mod tests {
     struct TestConfig {
         journal_size: u64,
         pinned_node_probes: Arc<AtomicUsize>,
+        incomplete_marks: Arc<AtomicUsize>,
     }
 
     impl crate::qmdb::sync::DatabaseConfig for TestConfig {
@@ -845,6 +855,14 @@ pub(crate) mod tests {
         type Hasher = Sha256;
         type Journal = TestJournal;
         type Op = i32;
+
+        async fn mark_sync_incomplete(
+            _context: Self::Context,
+            config: &Self::Config,
+        ) -> Result<(), qmdb::Error<Self::Family>> {
+            config.incomplete_marks.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
 
         async fn from_sync_result(
             _context: Self::Context,
@@ -918,6 +936,7 @@ pub(crate) mod tests {
             db_config: TestConfig {
                 journal_size,
                 pinned_node_probes,
+                incomplete_marks: Arc::default(),
             },
             update_rx: None,
             finish_rx: None,
@@ -1272,6 +1291,40 @@ pub(crate) mod tests {
             let engine = engine.apply_operations().await.unwrap();
             assert_eq!(engine.journal.size(), Location::new(10));
             assert!(engine.fetched_operations.is_empty());
+        });
+    }
+
+    /// The database marks the sync incomplete once, before the engine first appends to its
+    /// journal, and not at all for a sync that appends nothing.
+    #[test]
+    fn marks_sync_incomplete_before_first_append() {
+        deterministic::Runner::default().start(|context| async move {
+            let engine = Engine::new(test_engine_config(
+                context.child("complete"),
+                10,
+                Arc::default(),
+            ))
+            .await
+            .unwrap();
+            let engine = engine.apply_operations().await.unwrap();
+            assert_eq!(engine.config.incomplete_marks.load(Ordering::SeqCst), 0);
+
+            let mut engine = Engine::new(test_engine_config(
+                context.child("partial"),
+                7,
+                Arc::default(),
+            ))
+            .await
+            .unwrap();
+            engine.fetched_operations.insert(Location::new(7), vec![1]);
+            let mut engine = engine.apply_operations().await.unwrap();
+            assert_eq!(engine.config.incomplete_marks.load(Ordering::SeqCst), 1);
+            engine
+                .fetched_operations
+                .insert(Location::new(8), vec![2, 3]);
+            let engine = engine.apply_operations().await.unwrap();
+            assert_eq!(engine.journal.size(), Location::new(10));
+            assert_eq!(engine.config.incomplete_marks.load(Ordering::SeqCst), 1);
         });
     }
 

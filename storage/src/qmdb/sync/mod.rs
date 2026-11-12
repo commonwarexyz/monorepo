@@ -55,8 +55,8 @@ where
 
 /// Create or open a database and sync it to the target in `config`.
 ///
-/// If the sync fails or is interrupted, sync again before opening the database with its
-/// `init`.
+/// A sync that fails or is interrupted after appending operations leaves a database whose `init`
+/// returns [`crate::qmdb::Error::IncompleteSync`] until a sync completes.
 #[boxed]
 pub async fn sync<DB, S>(
     config: Config<DB, S>,

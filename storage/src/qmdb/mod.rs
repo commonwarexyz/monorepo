@@ -306,6 +306,11 @@ pub enum Error<F: Family> {
     #[error("initialization bound must allow at least one operation")]
     InvalidInitializationBound,
 
+    /// A state sync appended operations to the database and did not finish. The database opens
+    /// once a sync completes.
+    #[error("incomplete state sync")]
+    IncompleteSync,
+
     /// Database state failed a consistency check. The payload names the check.
     #[error("data corrupted: {0}")]
     DataCorrupted(&'static str),
@@ -412,6 +417,7 @@ impl<F: Family> From<crate::journal::authenticated::Error<F>> for Error<F> {
         match e {
             crate::journal::authenticated::Error::Journal(j) => Self::Journal(j),
             crate::journal::authenticated::Error::Merkle(m) => Self::Merkle(m),
+            crate::journal::authenticated::Error::IncompleteSync => Self::IncompleteSync,
         }
     }
 }

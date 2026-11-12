@@ -57,9 +57,10 @@ impl<C: Clone + Send + Sync + 'static, S: Strategy> Config for crate::qmdb::comp
 ///
 /// Every authenticated QMDB variant implements this trait, and callers drive it through
 /// [`sync`](super::sync): the engine calls [`Self::local_pinned_nodes`] when a sync journal left
-/// on disk already reaches the target, fetches and verifies the remaining operations, builds the
-/// database with [`Self::from_sync_result`], checks [`Self::ops_root`] against the target, and only
-/// then calls [`Self::persist_sync_result`].
+/// on disk already reaches the target, calls [`Self::mark_sync_incomplete`] before appending its
+/// first fetched operation, fetches and verifies the remaining operations, builds the database with
+/// [`Self::from_sync_result`], checks [`Self::ops_root`] against the target, and only then calls
+/// [`Self::persist_sync_result`].
 ///
 /// [`Source`]: super::Source
 pub trait Database: Sized + Send {
@@ -85,6 +86,17 @@ pub trait Database: Sized + Send {
 
     /// The hasher producing [`Self::Digest`].
     type Hasher: commonware_cryptography::Hasher<Digest = Self::Digest>;
+
+    /// Durably record that the engine is about to append operations to the database's journal,
+    /// so the database refuses to open with [`crate::qmdb::Error::IncompleteSync`] until
+    /// [`Self::persist_sync_result`] records the synced state.
+    ///
+    /// Appended operations follow the local ones the sync keeps, which it verifies only at the end.
+    /// Databases whose journal holds nothing across a restart must explicitly return `Ok(())`.
+    fn mark_sync_incomplete(
+        context: Self::Context,
+        config: &Self::Config,
+    ) -> impl Future<Output = Result<(), crate::qmdb::Error<Self::Family>>> + Send;
 
     /// Build a database from the journal and pinned nodes populated by the sync engine.
     fn from_sync_result(
@@ -171,11 +183,15 @@ mod tests {
         journal::{authenticated, contiguous::fixed},
         merkle::{Location, mmr::Family as MmrFamily},
         qmdb::{
+            self,
             keyless::{self, fixed::Operation},
             sync::{
-                self, Request, Source as _, Target,
+                self, Request, Source, Target,
                 engine::Config,
-                source::tests::{FailSource, SequenceSource},
+                source::{
+                    self,
+                    tests::{FailSource, SequenceSource},
+                },
             },
         },
     };
@@ -552,6 +568,161 @@ mod tests {
                 .unwrap();
             assert_eq!(reopened.bounds(), Location::new(0)..Location::new(5));
             assert_eq!(reopened.root(), local_root);
+        });
+    }
+
+    type KeylessDb = keyless::fixed::Db<MmrFamily, deterministic::Context, U64, Sha256, Sequential>;
+
+    /// A keyless config whose partitions end with `suffix`.
+    fn keyless_config(suffix: &str) -> keyless::fixed::Config<Sequential> {
+        let mut config = keyless::Config {
+            merkle: merkle_config(),
+            log: journal_config(),
+        };
+        config.merkle.partition.push_str(suffix);
+        config.log.partition.push_str(suffix);
+        config
+    }
+
+    /// A synced keyless database with one commit, at floor zero, after each of `values`.
+    async fn keyless_db(
+        context: deterministic::Context,
+        config: keyless::fixed::Config<Sequential>,
+        values: &[u64],
+    ) -> KeylessDb {
+        let mut db = KeylessDb::init(context, config, None).await.unwrap();
+        for &value in values {
+            let batch = db
+                .new_batch()
+                .append(U64::new(value))
+                .with_inactivity_floor(Location::new(0))
+                .merkleize(&db)
+                .await
+                .unwrap();
+            db = db.apply_batch(batch).await.unwrap();
+        }
+        db.sync().await.unwrap()
+    }
+
+    /// Serves requests that start before `limit` from `inner`, and fails the rest.
+    struct ServesBefore<S> {
+        inner: S,
+        limit: Location<MmrFamily>,
+    }
+
+    impl<S: Source<Family = MmrFamily, Error = qmdb::Error<MmrFamily>>> Source for ServesBefore<S> {
+        type Family = MmrFamily;
+        type Digest = S::Digest;
+        type Op = S::Op;
+        type Error = qmdb::Error<MmrFamily>;
+
+        async fn serve(&self, request: Request<MmrFamily>) -> source::Result<Self> {
+            if request.start() >= self.limit {
+                return Err(qmdb::Error::KeyNotFound);
+            }
+            self.inner.serve(request).await
+        }
+    }
+
+    /// A sync that appends fetched operations after kept local ones that differ from the target's
+    /// fails its root check and leaves a database that refuses to open, instead of one whose
+    /// root matches neither the local database nor the target.
+    #[test]
+    fn failed_sync_after_appending_refuses_to_open() {
+        deterministic::Runner::default().start(|context| async move {
+            // The databases hold the same commits at 0, 2 and 4 and different values at 1 and 3,
+            // and the source continues to 9.
+            let local_config = keyless_config("");
+            drop(keyless_db(context.child("local"), local_config.clone(), &[11, 13]).await);
+            let source_config = keyless_config("-source");
+            let source_db = keyless_db(context.child("source"), source_config, &[22, 24, 26, 28]);
+            let source_db = Arc::new(source_db.await);
+            let target = Target {
+                root: source_db.root(),
+                range: non_empty_range!(Location::new(2), Location::new(9)),
+            };
+
+            // The sync keeps the local operations from 2 and appends the source's from 5.
+            let result = sync::sync::<KeylessDb, _>(Config {
+                context: context.child("sync"),
+                source: source_db,
+                target,
+                max_outstanding_requests: NZUsize!(1),
+                fetch_batch_size: NZU64!(2),
+                apply_batch_size: NZU64!(2),
+                db_config: local_config.clone(),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+            })
+            .await;
+            assert!(matches!(
+                result,
+                Err(sync::Error::Engine(sync::EngineError::RootMismatch { .. }))
+            ));
+            assert!(matches!(
+                KeylessDb::init(context.child("reopen"), local_config, None).await,
+                Err(qmdb::Error::IncompleteSync)
+            ));
+        });
+    }
+
+    /// A sync interrupted after appending operations leaves a database that refuses to open, and
+    /// syncing again completes it.
+    #[test]
+    fn interrupted_sync_after_appending_is_retried() {
+        deterministic::Runner::default().start(|context| async move {
+            // The local database is the first 3 operations of the source's 9.
+            let local_config = keyless_config("");
+            drop(keyless_db(context.child("local"), local_config.clone(), &[22]).await);
+            let source_config = keyless_config("-source");
+            let source_db = keyless_db(context.child("source"), source_config, &[22, 24, 26, 28]);
+            let source_db = Arc::new(source_db.await);
+            let target = Target {
+                root: source_db.root(),
+                range: non_empty_range!(Location::new(2), Location::new(9)),
+            };
+            let config = |label: &'static str, source| Config {
+                context: context.child(label),
+                source,
+                target: target.clone(),
+                max_outstanding_requests: NZUsize!(1),
+                fetch_batch_size: NZU64!(2),
+                apply_batch_size: NZU64!(2),
+                db_config: local_config.clone(),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+            };
+
+            // A source that stops serving at 7 interrupts the sync after it appends from 3.
+            let interrupted = ServesBefore {
+                inner: source_db.clone(),
+                limit: Location::new(7),
+            };
+            assert!(matches!(
+                sync::sync::<KeylessDb, _>(config("interrupted", interrupted)).await,
+                Err(sync::Error::Source(_))
+            ));
+            assert!(matches!(
+                KeylessDb::init(context.child("refused"), local_config.clone(), None).await,
+                Err(qmdb::Error::IncompleteSync)
+            ));
+
+            // Syncing again records the target's boundary, and the database opens there.
+            let complete = ServesBefore {
+                inner: source_db,
+                limit: Location::new(9),
+            };
+            let db = sync::sync::<KeylessDb, _>(config("retry", complete))
+                .await
+                .unwrap();
+            assert_eq!(db.root(), target.root);
+            drop(db);
+            let db = KeylessDb::init(context.child("reopen"), local_config, None)
+                .await
+                .unwrap();
+            assert_eq!(db.root(), target.root);
         });
     }
 

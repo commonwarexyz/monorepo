@@ -48,6 +48,13 @@ where
     /// A [super::Db] populated with the state from the given range.
     /// Its inactivity floor comes from the final commit, while the Merkle pruning boundary is
     /// the range start.
+    async fn mark_sync_incomplete(
+        context: Self::Context,
+        config: &Self::Config,
+    ) -> Result<(), Error<F>> {
+        Ok(authenticated::mark_sync_incomplete::<F, _, H, S>(context, &config.merkle).await?)
+    }
+
     async fn from_sync_result(
         context: Self::Context,
         db_config: Self::Config,
