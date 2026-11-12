@@ -96,8 +96,8 @@
 //!
 //! `certify` is requested for the notarized payload whether or not this participant verified it.
 //! When a leader equivocates, that payload can differ from the one `verify` was requested for in
-//! the view, and that request is dropped. When a notarization arrives before `verify` is
-//! requested for its proposal, `verify` for the same payload can follow `certify`.
+//! the view, and that request is dropped. Once `certify` is requested for a view, `verify` is not
+//! requested for that view until a restart.
 //!
 //! Customizing `certify` is useful for systems that employ erasure coding, where participants may want
 //! to wait until they have received enough shards to reconstruct and validate the full block before

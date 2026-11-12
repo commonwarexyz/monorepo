@@ -320,9 +320,10 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// payloads, so implementations must key any state on `(round, payload)` rather than on
         /// either alone.
         ///
-        /// Certification can be requested for a payload this participant was never asked to
-        /// verify. It can also be requested before or after [`Automaton::verify`] for the same
-        /// payload, including after consensus has dropped that request's receiver.
+        /// Certification can be requested while [`Automaton::verify`] for the same payload is
+        /// still outstanding, after consensus has dropped that request's receiver, or for a
+        /// payload this participant was never asked to verify. Once certification is requested
+        /// for a round, [`Automaton::verify`] is not requested for that round until a restart.
         ///
         /// Like [`Automaton::verify`], payloads produced by [`Automaton::propose`] are certifiable-by-construction.
         /// Also like [`Automaton::verify`], certification is single-shot for the given

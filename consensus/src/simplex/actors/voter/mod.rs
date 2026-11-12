@@ -8148,6 +8148,126 @@ mod tests {
         });
     }
 
+    /// Verification of a view is not requested once its certification is.
+    ///
+    /// View 2 starts a term, so its certification is requested as soon as its notarization
+    /// arrives in view 1. Its proposal becomes verifiable only after view 1 certifies, so it is
+    /// never sent for verification, and certification alone leads to a finalize vote without a
+    /// notarize vote.
+    #[test_traced]
+    fn test_certification_precludes_verification() {
+        let n = 4;
+        let quorum = quorum(n);
+        let epoch = Epoch::new(333);
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, b"certification_precludes_verification", n);
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+            let elector = RoundRobin::<Sha256>::default();
+            let built_elector: RoundRobinElector<ed25519::Scheme> =
+                elector.clone().build(schemes[0].participants());
+            let leaders: Vec<_> = (1..=3)
+                .map(|view| {
+                    usize::from(built_elector.elect(Round::new(epoch, View::new(view)), ()))
+                })
+                .collect();
+            let local_index = (0..schemes.len())
+                .find(|index| !leaders.contains(index))
+                .expect("one validator must lead none of views 1 to 3");
+            let verify_requests = Arc::new(Mutex::new(Vec::new()));
+            let certifications: CertificationRequests = Arc::new(Mutex::new(Vec::new()));
+            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
+                &context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                VoterOptions {
+                    leader_timeout: Duration::from_secs(5),
+                    certification_timeout: Duration::from_secs(5),
+                    local_index,
+                    verify_requests: Some(verify_requests.clone()),
+                    certifier: hold(View::new(2), certifications.clone()),
+                    ..Default::default()
+                },
+            )
+            .await;
+            match batcher_receiver.recv().await.unwrap() {
+                batcher::Message::Update { current, .. } => assert_eq!(current, View::new(1)),
+                _ => panic!("the voter must first send an update"),
+            }
+
+            // View 2's notarization arrives first, and its certification is requested. Its
+            // payload is relayed, so verifying it would succeed and produce a notarize vote.
+            let signers = peers(&schemes, local_index);
+            let proposal_1 = Proposal::new(
+                Round::new(epoch, View::new(1)),
+                View::zero(),
+                Sha256::hash(&[b"proposal_1"]),
+            );
+            let proposal_2 = Proposal::new(
+                Round::new(epoch, View::new(2)),
+                View::new(1),
+                Sha256::hash(&[b"proposal_2"]),
+            );
+            relay.broadcast(
+                &participants[leaders[1]],
+                Recipients::All,
+                (
+                    proposal_2.payload,
+                    (proposal_2.round, proposal_1.payload, 0u64).encode(),
+                ),
+            );
+            let (_, notarization_2) = build_notarization(&signers, &proposal_2, quorum);
+            mailbox.recovered(Certificate::Notarization(notarization_2));
+            let certified_2 =
+                take_certification_request(&context, &certifications, View::new(2)).await;
+            assert!(verify_requests.lock().is_empty());
+
+            // View 1's notarization arrives and certifies, so we enter view 2.
+            let (_, notarization_1) = build_notarization(&signers, &proposal_1, quorum);
+            mailbox.recovered(Certificate::Notarization(notarization_1));
+            loop {
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Update { current, .. } if current == View::new(2) => break,
+                    _ => {}
+                }
+            }
+
+            // View 1 was verifiable when its notarization arrived, so it was sent for
+            // verification ahead of its certification. View 2 became verifiable only after its
+            // certification was requested, so it is not sent.
+            context.sleep(Duration::from_millis(100)).await;
+            assert_eq!(*verify_requests.lock(), vec![View::new(1)]);
+            assert!(!certified_2.is_closed());
+
+            // Certification alone carries view 2 to a finalize vote.
+            certified_2.send(true).unwrap();
+            loop {
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Constructed(Vote::Notarize(notarize)) => {
+                        panic!(
+                            "the voter must not vote to notarize view {}",
+                            notarize.view()
+                        );
+                    }
+                    batcher::Message::Constructed(Vote::Finalize(finalize)) => {
+                        assert_eq!(finalize.proposal, proposal_2);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(*verify_requests.lock(), vec![View::new(1)]);
+        });
+    }
+
     /// Tests that permanently invalid proposal ancestry fast-paths `nullify`
     /// instead of waiting for the local timeout.
     fn invalid_ancestry_emits_nullify_immediately<S, F, L>(mut fixture: F, elector: L)

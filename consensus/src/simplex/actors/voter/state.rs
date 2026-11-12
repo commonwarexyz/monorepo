@@ -1163,6 +1163,11 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     ///
     /// Missing ancestry is requested from the proposal's elected leader
     /// (see [`Self::resolve_ancestry`] for when an error justifies a fetch).
+    ///
+    /// A proposal whose certification was requested still has its ancestry
+    /// resolved, since the certificates fetched for it can advance the view.
+    /// [`Round::request_verify`] then refuses the request, so the proposal is
+    /// not returned as [`Verify::Ready`].
     pub fn try_verify(&mut self) -> Verify<S, D> {
         // Bound the scan as in [`Self::try_propose`].
         // Ascending order gives the current view precedence over optimistic work.
@@ -3867,6 +3872,74 @@ mod tests {
             };
             assert_eq!(ctx.parent, (View::new(2), parent.payload));
             assert_eq!(proposal, child);
+        });
+    }
+
+    /// Once a proposal's certification is requested, its missing parent notarization is still
+    /// requested from the proposal's leader, but the proposal is not returned for verification
+    /// after its ancestry resolves.
+    #[test]
+    fn try_verify_only_resolves_ancestry_once_certification_requested() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    participants,
+                    schemes,
+                    verifier,
+                    ..
+                },
+                mut state,
+            ) = setup_state_with(
+                &mut context,
+                4,
+                1,
+                9,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(2),
+                4,
+            );
+
+            // View 6 starts term 2 and is notarized on parent 2 while we are in term 1. A term
+            // start certifies without its parent, so its certification is requested.
+            let child = fetch_proposal(6, 2, 44);
+            let notarization = build_notarization(&verifier, &schemes, &child);
+            assert!(state.add_notarization(notarization).0);
+            let (ready, fetches) = state.certify_candidates();
+            assert_eq!(ready, vec![child.clone()]);
+            assert!(fetches.is_empty());
+            let mut pool = AbortablePool::<()>::default();
+            state.set_certify_handle(View::new(6), pool.push(futures::future::pending()));
+
+            // Nullifying term 1 enters view 6 and elects its leader. The parent's notarization
+            // is requested from that leader.
+            let nullification =
+                build_nullification(&verifier, &schemes, Rnd::new(Epoch::new(9), View::new(3)));
+            assert!(state.add_nullification(nullification));
+            assert_eq!(state.current_view(), View::new(6));
+            let leader =
+                participants[usize::from(state.leader_index(View::new(6)).unwrap())].clone();
+            assert!(matches!(
+                state.try_verify(),
+                Verify::Resolve {
+                    proposal,
+                    view,
+                    kind: Kind::Notarization,
+                    target,
+                }
+                    if proposal == View::new(6)
+                        && view == View::new(2)
+                        && target == leader
+            ));
+
+            // Certifying the parent resolves the ancestry, and nothing is sent for verification.
+            let parent = fetch_proposal(2, 1, 43);
+            let notarization = build_notarization(&verifier, &schemes, &parent);
+            assert!(state.add_notarization(notarization).0);
+            assert!(state.certified(View::new(2), true).is_some());
+            assert_eq!(state.parent_payload(&child), Ok(parent.payload));
+            assert!(matches!(state.try_verify(), Verify::Wait));
         });
     }
 
