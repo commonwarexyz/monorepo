@@ -26,6 +26,17 @@
 //! is the driver until the connection opens, a pending read, or a pending send. Each then reads
 //! what changed from the browser itself.
 //!
+//! ```text
+//!  browser events                                           waiting tasks
+//!
+//!  sockets found -------------.
+//!  connection state changes --+                           .--> driver, until the channel opens
+//!  channel opens or closes ---+--> Connection::changed ---+--> pending read
+//!  unsent bytes fall low -----'             ^             '--> pending send
+//!                                           | a message it refuses, which closes the connection
+//!  message arrives -------------> Connection::received ------> pending read
+//! ```
+//!
 //! # Endpoints
 //!
 //! A browser makes its end of a connection itself. It opens the sockets, creates the
@@ -64,6 +75,14 @@
 //! connection, and open the data channel. Neither end is the caller, so their addresses decide
 //! which endpoint begins that handshake.
 //!
+//! ```text
+//!    address A   <   address B          both pages see this order
+//!        |               |
+//!        v               v
+//!     page A          page B
+//!     begins          waits
+//! ```
+//!
 //! The task that drives an endpoint runs these steps for its caller.
 //!
 //! ```text
@@ -76,6 +95,21 @@
 //!    |-- Endpoint::dial(address) ------>|-- those of the other end ---------------->|
 //!    |                                  |<--------------------- data channel open --|
 //!    |<----------------- Sink, Stream --|                                           |
+//! ```
+//!
+//! A call into the browser always runs to its end. Abandoning one would close its connection,
+//! and a browser never settles a call whose connection closes under it, so the call would never
+//! release its callbacks. A caller that goes away ends the driver at its next wait.
+//!
+//! ```text
+//!  open this end   find sockets    await address   tell other end  await channel   hold callbacks
+//!  #############   ............    .............   ##############  .............   ..............
+//!                  ^               ^                               ^               ^
+//!                  bind dropped    |                               dial dropped    |
+//!                                  endpoint dropped                                halves dropped
+//!
+//!  #  a call into the browser, run to its end
+//!  .  a wait, where the driver ends if its caller is gone
 //! ```
 
 use super::{Address, Config};
@@ -135,6 +169,16 @@ fn refused(err: JsValue, reported: Error) -> Error {
 }
 
 /// Bytes a connection received, and the tasks waiting for it to change.
+///
+/// ```text
+///               State::inbound            Stream::buffer
+///  browser ---> ################ -------> ########## -------> caller
+///               received,                 taken,
+///               not yet taken             not yet returned
+///
+///               |<------ held for the reader ------>|
+///               at most receive_buffer_size beyond the pending read
+/// ```
 #[derive(Default)]
 struct State {
     /// Bytes received that the stream has not taken.
@@ -283,7 +327,7 @@ impl Drop for Connection {
 /// Establishes a connection and owns the callbacks the browser invokes for it.
 ///
 /// Callbacks and pending browser operations are not [Send]. They stay in the task that drives
-/// the attempt, so the [Sink] and [Stream] can move to other tasks.
+/// the endpoint, so the [Sink] and [Stream] can move to other tasks.
 struct Driver {
     connection: Arc<Connection>,
     released: oneshot::Receiver<()>,
@@ -418,6 +462,18 @@ impl Driver {
     /// The other page may not have dialed yet. A browser that has given up on an address that
     /// stayed silent can still connect once the page there reaches it, so the connection
     /// failing does not end the wait. A closed channel or a failed handshake does.
+    ///
+    /// ```text
+    ///                               .--> channel opens -------------------> Sink, Stream
+    ///                               |
+    ///  dial, after the browser -----+--> channel closes ------------------> ConnectionFailed
+    ///  is told about the other end  |
+    ///                               +--> handshake fails, or the other ---> ConnectionFailed
+    ///                               |    page ends the connection
+    ///                               |
+    ///                               '--> browser gives up on an address --> keeps waiting
+    ///                                    that stayed silent
+    /// ```
     async fn opened(&self) -> Result<(), Error> {
         self.wait(|connection| match connection.channel.ready_state() {
             RtcDataChannelState::Open => Some(Ok(())),
@@ -475,8 +531,9 @@ async fn drive(
     dialed: oneshot::Receiver<Address>,
     mut connected: oneshot::Sender<Connected>,
 ) {
-    // Open this page's end. Each of these steps finishes promptly, and the browser never
-    // settles one whose connection closes under it, so none is abandoned midway.
+    // Open this page's end. Each of these steps finishes promptly, and none is abandoned
+    // midway. Abandoning one would close the connection, and the browser never settles a step
+    // whose connection closes under it, so the step would never release its callbacks.
     let started = async {
         let driver = Driver::new(&config)?;
         driver.open().await?;
@@ -584,6 +641,15 @@ impl Endpoint {
 }
 
 /// Lifecycle state for the write half of a connection.
+///
+/// ```text
+///             send is called             it completes
+///    Open -------------------> Sending --------------------> Open
+///                                |
+///                                | it fails, or send is called after it was dropped
+///                                v
+///                             Closed ---- send is called ----> Closed
+/// ```
 enum SinkState {
     /// Sends may be attempted.
     Open,
@@ -689,6 +755,15 @@ pub struct Stream {
 
 /// A read in progress. Unless it completes, dropping it discards every byte received for the
 /// stream.
+///
+/// ```text
+///             recv is called             it completes
+///    Ready ------------------> Reading --------------------> Ready
+///                                 |
+///                                 | it fails, or it is dropped
+///                                 v
+///                              Closed ---- recv is called ----> Closed
+/// ```
 struct Reading<'a> {
     connection: &'a Connection,
     buffer: &'a mut BytesMut,

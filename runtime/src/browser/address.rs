@@ -24,7 +24,8 @@ const MAX_NAME_SIZE: usize = 63;
 /// Suffix of the names browsers announce on the local network.
 const LOCAL: &str = ".local";
 
-/// Longest socket as written: the longest name, its suffix, a colon, and a port.
+/// Length of the longest socket as written, which is the longest name, its suffix, a colon,
+/// and a port.
 const MAX_SOCKET_SIZE: usize = MAX_NAME_SIZE + LOCAL.len() + 1 + 5;
 
 /// Priority a browser gives the first socket of an address it dials. Each later socket ranks
@@ -93,6 +94,13 @@ impl FromStr for Socket {
 ///
 /// An address holds up to sixteen sockets its endpoint can be reached at. An endpoint with
 /// more leaves out sockets of the device's own before any that a STUN server reported.
+///
+/// ```text
+///  as the browser lists them   o o o o o o o o o o o o o o o o o o o o r r
+///  as the address lists them   o o o o o o o o o o o o o o . . . . . . r r
+///
+///  o  the device's own     r  reported by a STUN server     .  left out
+/// ```
 ///
 /// An address also holds the fingerprint of a certificate, a username, and a password. The
 /// endpoint's browser makes those three for this one connection, and a browser connects only

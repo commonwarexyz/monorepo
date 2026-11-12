@@ -15,6 +15,15 @@
 //! itself without waiting for a timer or a connection stops the page from handling anything
 //! else. A loop over [crate::reschedule] is one such task.
 //!
+//! ```text
+//!  tasks that wait    | event | A  B   | event | C      | event | A      |   time -->
+//!
+//!  a task that keeps  | event | A  A  A  A  A  A  A  A  A  A  A  A  A  A  ...
+//!  waking itself                ^ runs again before the next event, which never gets its turn
+//!
+//!  A, B, C  tasks, each run when something wakes it
+//! ```
+//!
 //! [crate::Spawner::dedicated] and [crate::Spawner::shared] change nothing, because every task
 //! shares the event loop.
 //!
@@ -114,9 +123,31 @@
 //!
 //! # Connections
 //!
-//! A connection is an ordered, reliable stream of bytes that the browsers encrypt. Each browser
-//! authenticates the other only by the address its page dialed. A page that must know who
-//! it reached has to authenticate it over the connection.
+//! A connection is an ordered, reliable stream of bytes that the browsers encrypt. The browsers
+//! acknowledge, retransmit, and order what they carry, so the runtime adds no acknowledgement
+//! of its own.
+//!
+//! ```text
+//!              page A                                                    page B
+//!
+//!            Sink::send                                               Stream::recv
+//!                |                                                         ^
+//!                | cut into messages                    joined into bytes  |
+//!                v                                                         |
+//!      .- +--------------+                                          +--------------+ -.
+//!      |  | data channel |<== acknowledges, retransmits, orders ==> | data channel |  |
+//!      |  +--------------+                                          +--------------+  |
+//!      |         |                                                         ^          |
+//!      |         v                                                         |          |
+//!      |  +--------------+                                          +--------------+  |
+//!      |  |  encryption  |<============= UDP packets =============> |  encryption  |  |
+//!      '- +--------------+                                          +--------------+ -'
+//!
+//!     its browser                                                            its browser
+//! ```
+//!
+//! Each browser authenticates the other only by the address its page dialed. A page that must
+//! know who it reached has to authenticate it over the connection.
 //!
 //! WebRTC gives a page no way to slow down a peer that sends faster than the page reads. A
 //! connection therefore holds at most the receive buffer size set in its [Config] beyond its

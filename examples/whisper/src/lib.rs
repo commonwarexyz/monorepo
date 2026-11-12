@@ -155,7 +155,7 @@ impl Listener {
     }
 }
 
-/// Formats what a page tells the other: who it is and where to dial it.
+/// Formats who a page is and where to dial it, which is what it tells the other page.
 fn contact(me: &PublicKey, address: &Address) -> String {
     hex(&(me.clone(), Bytes::from(address.to_string())).encode())
 }
@@ -304,6 +304,19 @@ async fn session(
 ///
 /// The page drives the session with [Whisper::dial] and [Whisper::send], and follows it through
 /// the listener it passes to [Whisper::new].
+///
+/// ```text
+///  page                                                   session task
+///    |                                                          |
+///    |-- new Whisper(stun_servers, listener) ------------------>|
+///    |<---------------------------- listener("identity", key) --|  then binds an endpoint
+///    |<------------------------- listener("contact", contact) --|
+///    |-- dial(contact) ---------------------------------------->|  dials, then proves keys
+///    |<--------------------------- listener("connected", key) --|
+///    |-- send(text) ------------------------------------------->|  sends to the other page
+///    |<---------------------------- listener("message", text) --|  received from it
+///    |<--------------------------- listener("closed", reason) --|
+/// ```
 #[wasm_bindgen]
 pub struct Whisper {
     requests: mpsc::Sender<Request>,
@@ -316,7 +329,7 @@ impl Whisper {
     /// `stun_servers` lists the URLs of the STUN servers that tell this page its public
     /// address. Without one, only pages on the same device or local network can connect.
     ///
-    /// `listener` is called as `listener(event, detail)` with these events:
+    /// `listener` is called as `listener(event, detail)` with these events.
     ///
     /// | Event | Detail |
     /// |-------|--------|
