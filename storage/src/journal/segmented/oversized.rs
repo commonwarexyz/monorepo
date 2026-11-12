@@ -50,10 +50,7 @@
 //! trail proven syncs, publishing once a section is durable and idle (or on an empty flush).
 
 use super::{
-    fixed::{
-        Config as FixedConfig, Journal as FixedJournal, Recovery as FixedRecovery,
-        Replay as FixedReplay,
-    },
+    fixed::{Config as FixedConfig, Journal as FixedJournal, Recovery as FixedRecovery},
     glob::{Config as GlobConfig, Glob, Recovery as GlobRecovery},
 };
 use crate::{
@@ -114,19 +111,6 @@ pub struct Config<C> {
 
     /// Codec configuration for values.
     pub codec_config: C,
-}
-
-/// Recovery contract applied while opening the index and value journals.
-///
-/// Exactly one mode establishes their shared boundary. `Restore` uses an explicit checkpoint, and
-/// `Floors` preserves each per-section validated prefix, if any, while repairing the suffix above
-/// it.
-enum RecoveryMode<'a> {
-    /// Restore one checkpoint section and remove every later section unread.
-    Restore { section: u64, index_size: u64 },
-
-    /// Prove committed floors, then repair suffixes.
-    Floors { floors: &'a BTreeMap<u64, u64> },
 }
 
 /// Durable recovery state for a journal that validates every uncommitted value during replay.
@@ -275,52 +259,65 @@ impl<E: Context, I: Record, V: CodecShared> From<Pending<E, I, V>> for Oversized
 }
 
 impl<E: Context, I: Record, V: CodecShared> Pending<E, I, V> {
-    /// Open the index and value journals, reconciling them per the selected [RecoveryMode] contract.
-    async fn init(
-        context: E,
-        cfg: Config<V::Cfg>,
-        recovery: RecoveryMode<'_>,
-    ) -> Result<Self, Error> {
+    /// Split `cfg` into the configurations of the index and value journals.
+    fn configs(cfg: Config<V::Cfg>) -> (FixedConfig, GlobConfig<V::Cfg>) {
         let index_cfg = FixedConfig {
             partition: cfg.index_partition,
             page_cache: cfg.index_page_cache,
             write_buffer: cfg.index_write_buffer,
+            replay_buffer: cfg.replay_buffer,
         };
-        let index_context = context.child("index");
         let value_cfg = GlobConfig {
             partition: cfg.value_partition,
             compression: cfg.compression,
             codec_config: cfg.codec_config,
             write_buffer: cfg.value_write_buffer,
         };
-        let value_context = context.child("values");
+        (index_cfg, value_cfg)
+    }
 
-        let (index, values) = match recovery {
-            RecoveryMode::Floors { floors } => {
-                let preflight =
-                    FixedJournal::preflight_floors(index_context, index_cfg, floors).await?;
-                let values = GlobRecovery::init(value_context, value_cfg).await?;
-                Self::validate_value_floors(&values, &preflight)?;
-                (preflight.finish().await?, values)
-            }
-            RecoveryMode::Restore {
-                section,
-                index_size,
-            } => {
-                let preflight =
-                    FixedJournal::preflight_restore(index_context, index_cfg, section, index_size)
-                        .await?;
-                let values = GlobRecovery::init_bounded(value_context, value_cfg, section).await?;
-                let value_size = Self::validate_restore_values(&values, &preflight, section)?;
-                let index = preflight.finish().await?;
+    /// Prove each per-section validated prefix in both journals and return the recoveries that
+    /// repair the suffixes above them. The index recovery has modified nothing: its replay
+    /// starts only after every floor's value extent is verified.
+    async fn preflight_floors(
+        context: E,
+        cfg: Config<V::Cfg>,
+        floors: &BTreeMap<u64, u64>,
+        read_options: ReadOptions,
+    ) -> Result<(FixedRecovery<E, I>, GlobRecovery<E, V>), Error> {
+        let (index_cfg, value_cfg) = Self::configs(cfg);
+        let index =
+            FixedJournal::preflight_floors(context.child("index"), index_cfg, floors, read_options)
+                .await?;
+        let values = GlobRecovery::init(context.child("values"), value_cfg).await?;
+        Self::validate_value_floors(&values, &index)?;
+        Ok((index, values))
+    }
 
-                // The index truncation is already durable. Release its unreferenced values only
-                // after that proof, preserving the index-first crash-recovery order.
-                let values = values.truncate(section, value_size).await?;
-                (index, values.sync(section).await?)
-            }
-        };
-        Ok(Self { index, values })
+    /// Open both journals at an explicit checkpoint, restoring `section` to `index_size` index
+    /// bytes and removing every later section unread.
+    async fn restore(
+        context: E,
+        cfg: Config<V::Cfg>,
+        section: u64,
+        index_size: u64,
+    ) -> Result<Self, Error> {
+        let (index_cfg, value_cfg) = Self::configs(cfg);
+        let preflight =
+            FixedJournal::preflight_restore(context.child("index"), index_cfg, section, index_size)
+                .await?;
+        let values =
+            GlobRecovery::init_bounded(context.child("values"), value_cfg, section).await?;
+        let value_size = Self::validate_restore_values(&values, &preflight, section)?;
+        let index = preflight.finish().await?;
+
+        // The index truncation is already durable. Release its unreferenced values only after
+        // that proof, preserving the index-first crash-recovery order.
+        let values = values.truncate(section, value_size).await?;
+        Ok(Self {
+            index,
+            values: values.sync(section).await?,
+        })
     }
 
     /// Return the value boundary owned by an optional terminal index entry.
@@ -482,24 +479,6 @@ impl<E: Context, I: Record, V: CodecShared> Pending<E, I, V> {
             tracking: Some(tracking),
         })
     }
-
-    /// Replay unpublished index sections without releasing recovery ownership.
-    async fn replay(
-        self,
-        buffer: NonZeroUsize,
-        read_options: ReadOptions,
-        tracking: Tracking<E>,
-    ) -> Result<Recovery<E, I, V>, Error> {
-        let index = self.index.replay(0, 0, buffer, read_options).await?;
-        Ok(Recovery {
-            index,
-            values: self.values,
-            validation: Validation::new(),
-            tracking,
-            in_progress: false,
-            interrupted: false,
-        })
-    }
 }
 
 impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
@@ -520,15 +499,7 @@ impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
         checkpoint: (u64, u64),
     ) -> Result<Self, Error> {
         let (section, index_size) = checkpoint;
-        let journal = Pending::init(
-            context,
-            cfg,
-            RecoveryMode::Restore {
-                section,
-                index_size,
-            },
-        )
-        .await?;
+        let journal = Pending::restore(context, cfg, section, index_size).await?;
         Ok(journal.cleanup_orphan_value_sections().await?.into())
     }
 
@@ -543,8 +514,6 @@ impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
         marker_partition: String,
         read_options: ReadOptions,
     ) -> Result<Recovery<E, I, V>, Error> {
-        let replay_buffer = cfg.replay_buffer;
-
         // Open the commit markers before the data they constrain.
         let metadata: Metadata<E, SectionKey, u64> = Metadata::init(
             context.child("metadata"),
@@ -566,15 +535,22 @@ impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
 
         // Every advertised prefix is proven before ordinary suffix repair may mutate either
         // journal. An empty sidecar commits no prefix, so replay validates every value.
-        let journal = Pending::init(context, cfg, RecoveryMode::Floors { floors: &floors }).await?;
+        let (index, values) =
+            Pending::preflight_floors(context, cfg, &floors, read_options).await?;
 
         // Keep the durable floors attached while replay validates each uncommitted suffix.
-        let tracking = Tracking {
-            metadata,
-            marker_sync_pending: None,
-            barriers: BTreeMap::new(),
-        };
-        journal.replay(replay_buffer, read_options, tracking).await
+        Ok(Recovery {
+            index,
+            values,
+            validation: Validation::new(),
+            tracking: Tracking {
+                metadata,
+                marker_sync_pending: None,
+                barriers: BTreeMap::new(),
+            },
+            in_progress: false,
+            interrupted: false,
+        })
     }
 
     /// Append entry + value.
@@ -853,7 +829,8 @@ impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
 /// durable marker until the first invalid one. Dropping it before [Recovery::finish] destroys the
 /// handle, and the owner must initialize again.
 pub struct Recovery<E: Context, I: Record, V: Codec> {
-    index: FixedReplay<E, I>,
+    /// Index recovery, which modifies nothing until its first entry is requested.
+    index: FixedRecovery<E, I>,
 
     /// Value recovery owner that validates entries at or above each durable floor until the
     /// first invalid value.
@@ -871,6 +848,9 @@ pub struct Recovery<E: Context, I: Record, V: Codec> {
 
 impl<E: Context, I: Record, V: CodecShared> Recovery<E, I, V> {
     /// Returns the next `(section, position, entry)`, or `None` once every section is exhausted.
+    ///
+    /// The first call opens the index sections, which may discard a torn tail page. An error
+    /// opening them ends the replay.
     ///
     /// An index error ends the section that produced it, and iteration continues with the next
     /// section. A value-verification error is returned without ending its section, and finishing
@@ -944,7 +924,7 @@ impl<E: Context, I: Record, V: CodecShared> Recovery<E, I, V> {
             return Err(Error::ReplayFailed);
         }
         let mut journal = Pending {
-            index: self.index.finish()?,
+            index: self.index.finish().await?,
             values: self.values,
         };
 
@@ -1111,24 +1091,19 @@ mod tests {
                 },
                 pending: outer.clone(),
             };
-            let Pending { index, values } = Pending::<_, TestEntry, TestValue>::init(
+            let (mut index, values) = Pending::<_, TestEntry, TestValue>::preflight_floors(
                 delayed,
                 cfg.clone(),
-                RecoveryMode::Floors {
-                    floors: &BTreeMap::new(),
-                },
+                &BTreeMap::new(),
+                ReadOptions::default(),
             )
             .await
             .unwrap();
-            let mut replay = index
-                .replay(0, 0, cfg.replay_buffer, ReadOptions::default())
-                .await
-                .unwrap();
-            while let Some(item) = replay.next().await {
+            while let Some(item) = index.next().await {
                 item.unwrap();
             }
             let recovery = Pending {
-                index: replay.finish().unwrap(),
+                index: index.finish().await.unwrap(),
                 values,
             };
             for section in 1..=2 {
@@ -2655,7 +2630,8 @@ mod tests {
             page_cache.clear();
             recordings.clear();
 
-            // The replay must preserve the caller's policy on the lazy refill.
+            // The first call opens the index writer, which reads its tail page once. The lazy
+            // refill follows and must preserve the caller's policy.
             let (section, position, entry) = replay
                 .next()
                 .await
@@ -2663,9 +2639,14 @@ mod tests {
                 .expect("Failed to read replay item");
             assert_eq!((section, position, entry.id), (1, 0, 1));
             let reads = recordings.snapshot().reads;
-            assert!(!reads.is_empty(), "the replay must read the evicted page");
+            let (opened, replayed) = reads.split_at(1);
+            assert_eq!(opened, [ReadOptions::default()]);
             assert!(
-                reads
+                !replayed.is_empty(),
+                "the replay must read the evicted page"
+            );
+            assert!(
+                replayed
                     .iter()
                     .all(|options| *options == ReadOptions::DONT_CACHE),
                 "every replay read must use the caller's options"

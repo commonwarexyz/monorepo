@@ -180,11 +180,13 @@ impl StorageWorkload for SegmentedFixedWorkload {
             partition: format!("segmented-fixed-conformance-{seed}"),
             page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: WRITE_BUFFER,
+            replay_buffer: REPLAY_BUFFER,
         };
         let mut journal = segmented_fixed::Journal::<_, u64>::preflight_floors(
             context.child("journal"),
             config,
             &BTreeMap::new(),
+            ReadOptions::default(),
         )
         .await?
         .finish()
