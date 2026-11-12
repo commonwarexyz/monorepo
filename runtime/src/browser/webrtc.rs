@@ -2,16 +2,24 @@
 //!
 //! The two halves of a connection share its JavaScript objects, and tasks hold the halves. The
 //! callbacks the browser invokes and the promises of the steps that establish a connection are
-//! not [Send]. They stay in the task that drives the endpoint:
+//! not [Send]. They stay in the task that drives the endpoint.
 //!
 //! ```text
-//!  tasks (Send)                              driver task (not Send)
-//!  ------------                              ----------------------
-//!  Sink ----+                                Driver
-//!           +--> Arc<Connection> <-- weak -- callbacks for events and messages
-//!  Stream --+      RtcPeerConnection         promise of each step
-//!                  RtcDataChannel
-//!                  Mutex<State>  -- drop --> callbacks released
+//!     a task            a task                     driver task, not Send
+//!   +--------+        +--------+                 +-------------------------+
+//!   |  Sink  |        | Stream |                 | callbacks, and the      |
+//!   +--------+        +--------+                 | promise of each step    |
+//!        |                 |                     +-------------------------+
+//!        '--------.--------'                                  :
+//!                 | keep it open                              : weak
+//!                 v                                           v
+//!   +---------------------------------------------------------------------+
+//!   | Connection      RtcPeerConnection   RtcDataChannel   Mutex<State>   |
+//!   +---------------------------------------------------------------------+
+//!                 |
+//!                 | both halves dropped
+//!                 v
+//!         connection closes, driver releases the callbacks
 //! ```
 //!
 //! Every callback except the one for messages only wakes whoever waits on the connection. That
@@ -20,13 +28,55 @@
 //!
 //! # Endpoints
 //!
-//! A browser connects two pages once each has given it a description of its own end and a
-//! description of the other. Every endpoint describes itself with an offer, which depends on
-//! nothing the other page says. Its [Address] holds the parts of that offer the other page
-//! cannot know in advance. A page that dials an address rebuilds from it the answer the
-//! endpoint there would have given to the page's own offer, so neither page waits for the
-//! other to describe itself. Both pages offered, so their addresses decide which endpoint
-//! begins the handshake that secures the connection.
+//! A browser makes its end of a connection itself. It opens the sockets, creates the
+//! certificate, and picks the username and password that checks sent to it must use. An
+//! [Address] holds those parts, so it depends on nothing the other page says. A page that dials
+//! an address tells its own browser that the parts in it are the other end, and the pages
+//! exchange nothing else.
+//!
+//! ```text
+//!              browser of page A            browser of page B
+//!
+//!              +---------------+            +---------------+
+//!  its own     | certificate A |            | certificate B |
+//!  end, which  | credentials A |            | credentials B |
+//!  it made     | sockets A     |            | sockets B     |
+//!              +---------------+            +---------------+
+//!                      |                            |
+//!                  address A                    address B
+//!                      |                            |
+//!                      '------------.  .------------'
+//!                                    \/
+//!                                    /\
+//!                      .------------'  '------------.
+//!                      |                            |
+//!                  address B                    address A
+//!                      |                            |
+//!                      v                            v
+//!              +---------------+            +---------------+
+//!  the other   | fingerprint B |            | fingerprint A |
+//!  end, which  | credentials B |            | credentials A |
+//!  it is told  | sockets B     |            | sockets A     |
+//!              +---------------+            +---------------+
+//! ```
+//!
+//! The browsers then check that they reach each other, run the handshake that secures the
+//! connection, and open the data channel. Neither end is the caller, so their addresses decide
+//! which endpoint begins that handshake.
+//!
+//! The task that drives an endpoint runs these steps for its caller.
+//!
+//! ```text
+//!  caller                          driver task                                   browser
+//!    |                                  |                                           |
+//!    |-- Context::bind ---------------->|-- open this end ------------------------->|
+//!    |                                  |<----- fingerprint, credentials, sockets --|
+//!    |<------------ Endpoint, address --|                                           |
+//!    |                                  |                                           |
+//!    |-- Endpoint::dial(address) ------>|-- those of the other end ---------------->|
+//!    |                                  |<--------------------- data channel open --|
+//!    |<----------------- Sink, Stream --|                                           |
+//! ```
 
 use super::{Address, Config};
 use crate::{Error, IoBufs};
@@ -326,8 +376,11 @@ impl Driver {
         .await
     }
 
-    /// Creates an offer and applies it as the description of this page's end.
-    async fn offer(&self) -> Result<(), JsValue> {
+    /// Has the browser open this page's end.
+    ///
+    /// A browser reports what it opened only in an offer, the description that begins WebRTC's
+    /// own exchange, so the driver asks for one and applies it to this end.
+    async fn open(&self) -> Result<(), JsValue> {
         let peer = &self.connection.peer;
         let offer = JsFuture::from(peer.create_offer()).await?;
         JsFuture::from(peer.set_local_description(offer.unchecked_ref())).await?;
@@ -349,11 +402,14 @@ impl Driver {
             .ok_or(JsValue::NULL)
     }
 
-    /// Applies `answer` as the description of the other page's end.
-    async fn answered(&self, answer: &str) -> Result<(), JsValue> {
-        let description = RtcSessionDescriptionInit::new(RtcSdpType::Answer);
-        description.set_sdp(answer);
-        JsFuture::from(self.connection.peer.set_remote_description(&description)).await?;
+    /// Tells the browser about the other end.
+    ///
+    /// A browser accepts another end only as the answer to its offer, which is the form
+    /// `description` is written in.
+    async fn tell(&self, description: &str) -> Result<(), JsValue> {
+        let answer = RtcSessionDescriptionInit::new(RtcSdpType::Answer);
+        answer.set_sdp(description);
+        JsFuture::from(self.connection.peer.set_remote_description(&answer)).await?;
         Ok(())
     }
 
@@ -419,11 +475,11 @@ async fn drive(
     dialed: oneshot::Receiver<Address>,
     mut connected: oneshot::Sender<Connected>,
 ) {
-    // Describe this page's end. Each of these steps finishes promptly, and the browser never
+    // Open this page's end. Each of these steps finishes promptly, and the browser never
     // settles one whose connection closes under it, so none is abandoned midway.
     let started = async {
         let driver = Driver::new(&config)?;
-        driver.offer().await?;
+        driver.open().await?;
         Ok(driver)
     };
     let driver = match started.await {
@@ -458,8 +514,8 @@ async fn drive(
         return;
     };
 
-    // Both pages offered, so their addresses decide which endpoint begins the handshake that
-    // secures the connection. An endpoint cannot dial itself.
+    // Neither end is the caller, so the addresses decide which endpoint begins the handshake
+    // that secures the connection. An endpoint cannot dial itself.
     let active = match remote.cmp(&local) {
         Ordering::Less => true,
         Ordering::Greater => false,
@@ -468,7 +524,7 @@ async fn drive(
             return;
         }
     };
-    if let Err(err) = driver.answered(&remote.answer(&section, active)).await {
+    if let Err(err) = driver.tell(&remote.describe(&section, active)).await {
         let _ = connected.send(Err(refused(err, Error::ConnectionFailed)));
         return;
     }
@@ -540,8 +596,25 @@ enum SinkState {
 /// Implementation of [crate::Sink] for the `browser` runtime.
 ///
 /// A send completes once the browser has accepted its bytes. They may not have reached the
-/// other page yet. The connection closes when both the sink and its [Stream] are dropped.
-/// Closing does not wait for the bytes the browser still holds, so they may never be delivered.
+/// other page yet. A send waits once the browser holds more than 1 MiB that it has not sent,
+/// and resumes when that falls to 256 KiB.
+///
+/// ```text
+///  unsent bytes
+///    1 MiB -|       /\          /\          /\
+///           |      /  \        /  \        /  \
+///           |     /    \      /    \      /    \
+///           |    /      \    /      \    /      \
+///           |   /        \  /        \  /        \
+///  256 KiB -|  /          \/          \/          \
+///           | /
+///           |/
+///        0 -+----------------------------------------> time
+///             sends  waits sends waits sends waits
+/// ```
+///
+/// The connection closes when both the sink and its [Stream] are dropped. Closing does not
+/// wait for the bytes the browser still holds, so they may never be delivered.
 pub struct Sink {
     connection: Arc<Connection>,
     state: SinkState,

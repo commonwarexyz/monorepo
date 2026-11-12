@@ -93,16 +93,25 @@ impl FromStr for Socket {
 ///
 /// An address holds the fingerprint of the certificate its endpoint proves, the username and
 /// password that authenticate checks sent to the endpoint, and up to sixteen sockets the
-/// endpoint can be reached at. It is written as
+/// endpoint can be reached at. It is written as those parts in order, joined by the characters
+/// shown under them.
 ///
 /// ```text
-/// <fingerprint>:<username>:<password>,<socket>,<socket>,...
+///  proves the endpoint
+///         | authenticate checks sent to it
+///         |                |                           where it can be reached
+///         |                |                                      |
+///   .-----^-----. .--------^--------. .---------------------------^----------------------------.
+///  +-------------+------+------------+------------------+--------------------+------------------+
+///  | fingerprint | user |  password  |      socket      |       socket       |      socket      |
+///  +-------------+------+------------+------------------+--------------------+------------------+
+///    a346..9e41  : 1qYx : kV9h..t8Zs , 203.0.113.7:5001 , [2001:db8::7]:5002 , d77f..local:5001
 /// ```
 ///
 /// The fingerprint is 64 lowercase hexadecimal characters. A socket is a port at an IP address
-/// or at a name the browser announces on the local network, such as `203.0.113.7:51413`,
-/// `[2001:db8::7]:51413`, or `4f1c0a8e-6a52-4b1e-9d0c-3c5a1b2e7f90.local:51413`. An address
-/// has one spelling, and only that spelling parses.
+/// or at a name the browser announces on the local network. The figure shortens the
+/// fingerprint, the password, and the name. An address has one spelling, and only that
+/// spelling parses.
 ///
 /// An address reveals the sockets it lists. Holding one does not let a page connect to its
 /// endpoint, which connects only to the address it dials.
@@ -187,10 +196,11 @@ impl Address {
         Some((address, section.to_string()))
     }
 
-    /// Describes the endpoint at this address as its browser would in answer to an offer whose
-    /// only section is named `section`. An `active` endpoint begins the handshake that secures
+    /// Describes the endpoint at this address to a browser whose own end has one section,
+    /// named `section`. The description has the form of an answer, the only form in which a
+    /// browser accepts the other end. An `active` endpoint begins the handshake that secures
     /// the connection.
-    pub(super) fn answer(&self, section: &str, active: bool) -> String {
+    pub(super) fn describe(&self, section: &str, active: bool) -> String {
         let fingerprint = self
             .fingerprint
             .iter()

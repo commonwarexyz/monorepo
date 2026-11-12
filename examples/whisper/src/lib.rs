@@ -1,27 +1,46 @@
 //! Send encrypted messages directly to another browser using the browser runtime of
 //! `commonware-runtime` and `commonware-stream`.
 //!
-//! Every page has a contact: its public key and the address of an endpoint it has bound, hex
-//! encoded. Two pages connect once each dials the contact of the other. The users pass the
-//! contacts along in either order and however they like, such as in a chat or an email. No
-//! server carries the contacts or the messages.
+//! Every page has a contact, which holds its public key and the address of an endpoint it has
+//! bound. A contact is written in hexadecimal, two characters for every byte.
 //!
 //! ```text
-//!  Page A                                                Page B
-//!    |                                                     |
-//!    |-- contact A: hex(key A, address A) ---------------->|   passed by the users
-//!    |<---------------- contact B: hex(key B, address B) --|   passed by the users
-//!    |                                                     |
-//!    |-- dial address B -------><-------- dial address A --|
-//!    |<=============== WebRTC data channel ===============>|
-//!    |                                                     |
-//!    |<========== handshake between key A and key B ======>|   each expects the other's key
-//!    |<================ encrypted messages ===============>|
+//!  +---------------------+--------+---------------------+
+//!  |     public key      | length |  address, as text   |
+//!  +---------------------+--------+---------------------+
+//!    c5e7fa2d...02d72b67    8102    34663463...33303336
+//! ```
+//!
+//! Two pages connect once each dials the contact of the other. The users pass the contacts
+//! along in either order and however they like, such as in a chat or an email. No server
+//! carries the contacts or the messages.
+//!
+//! ```text
+//!  page A, whose address is smaller                                      page B
+//!    |                                                                     |
+//!    |-- contact A ------------------------------------------------------->|
+//!    |<------------------------------------------------------- contact B --|
+//!    |                                                                     |
+//!    |-- dials address B ------------------------------------------------->|
+//!    |<------------------------------------------------- dials address A --|
+//!    |<======================== WebRTC data channel ======================>|
+//!    |                                                                     |
+//!    |-- begins the handshake, expects key B ----------------------------->|
+//!    |<------------------------------------- admits only key A, answers ---|
+//!    |<======================== encrypted messages =======================>|
 //! ```
 //!
 //! Once connected, the pages authenticate the keys named in the contacts and encrypt every
 //! message to them. The page with the smaller address begins that handshake. The pages trust
 //! the contacts, so whoever can replace a page's contact on the way can stand in for that page.
+//!
+//! A session moves through these states. It closes when a step fails or either page leaves.
+//!
+//! ```text
+//!  binding --> awaiting contact --> dialing --> handshake --> connected
+//!     |               |                |            |             |
+//!     '---------------'----------------'------------'-------------'--> closed
+//! ```
 
 #![cfg(target_arch = "wasm32")]
 

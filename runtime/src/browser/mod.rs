@@ -48,14 +48,16 @@
 //! string their users pass along.
 //!
 //! ```text
-//!  Page A                                                  Page B
-//!    |                                                       |
-//!    |  Context::bind                          Context::bind |
-//!    |---------------------- address A --------------------->|  carried by the application
-//!    |<--------------------- address B ----------------------|  carried by the application
-//!    |  Endpoint::dial(address B)  Endpoint::dial(address A) |
-//!    |                                                       |
-//!    |<============== Sink and Stream to each other ========>|  direct between the browsers
+//!  page A                         application                         page B
+//!    |                                 |                                 |
+//!    |  Context::bind                  |                  Context::bind  |
+//!    |                                 |                                 |
+//!    |---------- address A ----------->|---------- address A ----------->|
+//!    |<--------- address B ------------|<--------- address B ------------|
+//!    |                                 |                                 |
+//!    |  Endpoint::dial(address B)      |      Endpoint::dial(address A)  |
+//!    |                                                                   |
+//!    |<======================= Sink and Stream =========================>|
 //! ```
 //!
 //! An endpoint connects to one other endpoint. A page binds one for every page it connects to.
@@ -66,14 +68,45 @@
 //! its [Config]. A STUN server reports the address a request arrived from and carries none of
 //! the connection's traffic.
 //!
+//! ```text
+//!                             STUN server
+//!                                 ^  |
+//!                  "where am I?"  |  |  "203.0.113.7:5001"
+//!                                 |  v
+//!  page A ====================== NAT A ============== NAT B ====================== page B
+//!  192.168.1.5                203.0.113.7          198.51.100.9                  10.0.0.4
+//!
+//!  ====  the connection, which no server carries
+//! ```
+//!
 //! The runtime contacts no server unless one is configured. It never relays a connection, so
 //! pages whose networks keep them from reaching each other directly cannot connect.
 //!
 //! Either page may dial first, and the first to dial waits for the other. A browser stops
 //! sending to an address that has not answered for some seconds, and a NAT soon forgets the
 //! path a page opened through it. Pages behind NATs should therefore dial at about the same
-//! time. A dial fails once the endpoint it reached proves another certificate than the address
-//! names.
+//! time. Where nothing stands between the pages, the browser of the second page answers the
+//! first page's checks before its own page dials, and the first page only waits.
+//!
+//! ```text
+//!  B can be reached before it dials
+//!           A dials                                 B dials
+//!            |                                       |
+//!            v                                       v
+//!  page A    oooooooooooooooooooooooooooooooooooooooo===========
+//!  page B                                            ===========
+//!
+//!  B cannot be reached until it dials
+//!           A dials        browser gives up         B dials
+//!            |              |                        |
+//!            v              v                        v
+//!  page A    ###############.........................===========
+//!  page B                                            ===========
+//!
+//!  o  checks answered     #  checks unanswered     .  no checks sent     =  connected
+//! ```
+//!
+//! A dial fails once the endpoint it reached proves another certificate than the address names.
 //!
 //! A STUN server that does not respond can delay [Context::bind] by tens of seconds, and the
 //! other page may never dial. Neither step has a deadline of its own, so callers must put one
@@ -90,21 +123,42 @@
 //! pending read, and closes when its peer sends more. A protocol that moves more than that must
 //! let the reader set the pace, for example by sending only what the reader has requested.
 //!
+//! ```text
+//!  bytes held for the reader
+//!
+//!  |<----- pending read ------>|<----------- receive_buffer_size ----------->|
+//!  ##########################################################################x
+//!                                                                            ^
+//!                                          the byte that closes the connection
+//! ```
+//!
 //! A connection closes when its [Sink] and [Stream] are both dropped. Dropping one of them
-//! tells the peer nothing. Reads and sends have no deadline of their own. When a peer
-//! disappears without closing, the browser may take tens of seconds to notice.
+//! tells the peer nothing and leaves the other usable. Reads and sends have no deadline of
+//! their own. When a peer disappears without closing, the browser may take tens of seconds to
+//! notice.
+//!
+//! What ends a connection decides what each half returns from then on.
 //!
 //! ```text
-//!  what happened                          Stream::recv                 Sink::send
-//!  -------------                          ------------                 ----------
-//!  peer closed, or the transport failed   buffered bytes, RecvFailed,  SendFailed, then Closed
-//!                                         then Closed
-//!  peer sent text, or more than the       buffered bytes, RecvFailed,  SendFailed, then Closed
-//!  receive buffer allows                  then Closed
-//!  pending read dropped                   Closed                       unaffected
-//!  pending send dropped                   unaffected                   Closed
-//!  one half dropped                       the other half is unaffected
-//!  both halves dropped                    the connection closes
+//!  the peer closes, the transport fails, or the peer sends text or too many bytes
+//!                             |
+//!                             v
+//!  Stream::recv   Ok   Ok     |  buffered     RecvFailed   Closed   Closed
+//!  Sink::send     Ok   Ok     |  SendFailed   Closed       Closed   Closed
+//!
+//!  a pending read is dropped
+//!                             |
+//!                             v
+//!  Stream::recv   Ok   Ok     |  Closed       Closed       Closed   Closed
+//!  Sink::send     Ok   Ok     |  Ok           Ok           Ok       Ok
+//!
+//!  a pending send is dropped
+//!                             |
+//!                             v
+//!  Stream::recv   Ok   Ok     |  Ok           Ok           Ok       Ok
+//!  Sink::send     Ok   Ok     |  Closed       Closed       Closed   Closed
+//!
+//!  each column is one call, in order       buffered  bytes received before the event
 //! ```
 //!
 //! # Example

@@ -158,6 +158,18 @@ impl Runner {
     /// When the returned future completes or is dropped, every spawned task is aborted. An
     /// aborted task is destroyed the next time the event loop runs it.
     ///
+    /// ```text
+    ///  future returned by Runner::start
+    ///    |
+    ///    '-- root task
+    ///          |
+    ///          |-- spawned task         --+
+    ///          |     |                    |   aborted when the future
+    ///          |     '-- spawned task   --+   completes or is dropped
+    ///          |                          |
+    ///          '-- spawned task         --+
+    /// ```
+    ///
     /// A [Context] kept past that point cannot spawn tasks, and nothing wakes its sleeps. A
     /// [Sink](super::Sink) or [Stream](super::Stream) kept past it keeps its connection open.
     pub async fn start<F, Fut>(self, f: F) -> Fut::Output

@@ -1,16 +1,29 @@
 //! Deadlines for sleeping tasks.
 //!
 //! A sleep that has to wait registers its deadline in one ordered map. A single driver owns the
-//! runtime's only browser timeout and keeps it armed no later than the earliest deadline:
+//! runtime's only browser timeout and keeps it armed no later than the earliest deadline.
 //!
 //! ```text
-//!  tasks (Send)                 shared state                    driver (owns the JS callback)
-//!  ------------                 ------------                    -----------------------------
-//!  Sleep::poll  -- insert -->   sleepers: deadline -> waker
-//!               -- wake ----->  driver waker  ------------->    setTimeout(earliest deadline)
-//!                                                                         |
-//!  task resumes <-- wake ---    expired sleepers removed  <--   timeout fires, driver polls
-//!  Sleep::drop  -- remove -->   sleepers
+//!  now
+//!   |       deadline         deadline                       deadline
+//!   v          |                |                              |
+//!  -+----------o----------------o------------------------------o--------> time
+//!              ^
+//!              the one browser timeout, armed for the earliest deadline
+//! ```
+//!
+//! Tasks reach the driver only through the map and the driver's waker, so the JavaScript
+//! callback stays with the driver.
+//!
+//! ```text
+//!  task                    sleepers                   driver                   browser
+//!    |                        |                          |                        |
+//!    |-- insert deadline ---->|                          |                        |
+//!    |-- wake, unless a timeout fires in time ---------->|                        |
+//!    |                        |                          |-- setTimeout --------->|
+//!    |                        |                          |<-------------- fires --|
+//!    |                        |<------ remove expired ---|                        |
+//!    |<---------------------------------------- wake ----|                        |
 //! ```
 //!
 //! A timeout armed for a dropped sleep is left to fire. The driver then finds nothing expired

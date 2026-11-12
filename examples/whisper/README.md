@@ -5,15 +5,41 @@
 Send encrypted messages directly to another browser using the browser runtime of [commonware-runtime](https://docs.rs/commonware-runtime)
 and [commonware-stream](https://docs.rs/commonware-stream).
 
-Every page has a contact: one string that names its public key and where it can be reached. Two pages connect over
+Every page has a contact, one string that names its public key and where it can be reached. Two pages connect over
 WebRTC once each dials the contact of the other. The users pass the contacts along in either order, and no server
 carries the contacts or the messages. The pages authenticate the keys in the contacts before exchanging messages.
+
+```text
+ page A, whose address is smaller                                      page B
+   |                                                                     |
+   |-- contact A ------------------------------------------------------->|
+   |<------------------------------------------------------- contact B --|
+   |                                                                     |
+   |-- dials address B ------------------------------------------------->|
+   |<------------------------------------------------- dials address A --|
+   |<======================== WebRTC data channel ======================>|
+   |                                                                     |
+   |-- begins the handshake, expects key B ----------------------------->|
+   |<------------------------------------- admits only key A, answers ---|
+   |<======================== encrypted messages =======================>|
+```
 
 ## Reaching the Other Page
 
 The pages connect directly. On its own, a page knows only the addresses of its device. To be reached from another
 network, it asks the STUN server named in `index.html` for its public address. No message passes through that server.
 With the list of servers emptied, a page contacts no server and reaches only pages on the same device or local network.
+
+```text
+                            STUN server
+                                ^  |
+                 "where am I?"  |  |  "203.0.113.7:5001"
+                                |  v
+ page A ====================== NAT A ============== NAT B ====================== page B
+ 192.168.1.5                203.0.113.7          198.51.100.9                  10.0.0.4
+
+ ====  the connection, which no server carries
+```
 
 A page cannot accept a connection from a page it knows nothing about, so both pages dial. The first to dial waits for
 the other. Chrome stops sending to a page that has not answered for about 15 seconds, and a NAT soon forgets the path
