@@ -758,8 +758,8 @@ impl<const N: usize> BitMap<N> {
 
         // All of these chunks require all of their bits to be checked.
         // If first_chunk == last_chunk, we skip the loop.
-        for full_chunk in (first_chunk + 1)..last_chunk {
-            if self.chunks[full_chunk] != Self::EMPTY_CHUNK {
+        for full_chunk in self.chunks.iter().take(last_chunk).skip(first_chunk + 1) {
+            if *full_chunk != Self::EMPTY_CHUNK {
                 return false;
             }
         }

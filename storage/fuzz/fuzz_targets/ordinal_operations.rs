@@ -184,11 +184,11 @@ fn fuzz(input: FuzzInput) {
 
                 OrdinalOperation::Prune { min } => {
                     if let Some(ordinal) = store.take() {
-                        let min_blob = *min / items_per_blob.get();
+                        let min_blob = *min / items_per_blob;
                         store = Some(ordinal.prune(*min).await.expect("failed to prune store"));
                         // Remove all data in pruned blobs from expected state
-                        expected_data.retain(|&index, _| index / items_per_blob.get() >= min_blob);
-                        synced_data.retain(|&index, _| index / items_per_blob.get() >= min_blob);
+                        expected_data.retain(|&index, _| index / items_per_blob >= min_blob);
+                        synced_data.retain(|&index, _| index / items_per_blob >= min_blob);
                     }
                 }
 

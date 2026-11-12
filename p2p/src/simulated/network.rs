@@ -922,7 +922,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             let completions = self.transmitter.enqueue(
                 now,
                 origin.clone(),
-                recipient.clone(),
+                recipient,
                 channel,
                 message.clone(),
                 latency,

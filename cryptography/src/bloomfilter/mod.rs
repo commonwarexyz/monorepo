@@ -278,7 +278,7 @@ impl<H: Hasher> Read for BloomFilter<H> {
         buf: &mut impl Buf,
         (hashers_cfg, bits_cfg): &Self::Cfg,
     ) -> Result<Self, CodecError> {
-        if !bits_cfg.get().is_power_of_two() {
+        if !bits_cfg.is_power_of_two() {
             return Err(CodecError::Invalid(
                 "BloomFilter",
                 "bits must be a power of 2",

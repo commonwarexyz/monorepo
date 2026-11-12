@@ -15,7 +15,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  STABLE_VERSION: 1.99.1
+  STABLE_VERSION: stable
 
 jobs:
   Tests:

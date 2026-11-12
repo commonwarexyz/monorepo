@@ -675,7 +675,7 @@ mod tests {
                 parent: (parent_view, parent_commitment),
             };
             let block = make_coding_block(ctx, parent_digest, Height::new(height), height * 100);
-            let coded: TestCodedBlock = encode_block(block.clone(), coding_config);
+            let coded: TestCodedBlock = encode_block(block, coding_config);
             parent_view = round.view();
             parent_commitment = coded.commitment();
             parent_digest = coded.digest();
@@ -1853,7 +1853,7 @@ mod tests {
                     leader: me.clone(),
                     parent: (last_view, last_commitment),
                 };
-                let block = make_coding_block(ctx.clone(), parent, Height::new(i), i * 100);
+                let block = make_coding_block(ctx, parent, Height::new(i), i * 100);
                 let coded_block = encode_block(block.clone(), coding_config);
                 last_commitment = coded_block.commitment();
                 if i == 10 {
@@ -4440,10 +4440,7 @@ mod tests {
                         Height::new(height),
                         height * 100,
                     );
-                    encode_block(
-                        block.clone(),
-                        coding_config_for_participants(NUM_VALIDATORS as u16),
-                    )
+                    encode_block(block, coding_config_for_participants(NUM_VALIDATORS as u16))
                 };
                 parent_view = round.view();
                 parent_commitment = block.commitment();

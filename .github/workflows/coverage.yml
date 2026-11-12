@@ -15,8 +15,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  STABLE_VERSION: 1.99.1
-  NIGHTLY_VERSION: nightly-2026-08-20
+  STABLE_VERSION: stable
+  NIGHTLY_VERSION: nightly
   # cargo-llvm-cov cannot find the test binaries in a nextest archive built with Cargo's build-dir
   # layout v2, the nightly default since 2026-07-30 (taiki-e/cargo-llvm-cov#520). Keep the old
   # layout until that is fixed.

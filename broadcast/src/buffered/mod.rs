@@ -622,7 +622,7 @@ mod tests {
         while let Some((peer, network)) = registrations.pop_first() {
             let context = context.child("peer").with_attribute("public_key", &peer);
             let (engine, engine_mailbox) = TestEngine::new(context, config(&peer, oracle));
-            mailboxes.insert(peer.clone(), engine_mailbox);
+            mailboxes.insert(peer, engine_mailbox);
             engine.start(network);
         }
 
@@ -1445,7 +1445,7 @@ mod tests {
         while let Some((peer, network)) = registrations.pop_first() {
             let ctx = context.child("peer").with_attribute("public_key", &peer);
             let (engine, engine_mailbox) = TestEngine::new(ctx, config(&peer, oracle));
-            mailboxes.insert(peer.clone(), engine_mailbox);
+            mailboxes.insert(peer, engine_mailbox);
             handles.push(engine.start(network));
         }
 

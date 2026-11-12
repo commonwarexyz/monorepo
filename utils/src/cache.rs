@@ -1823,9 +1823,9 @@ mod tests {
                     assert_eq!(self.topology[slot].admitted_at(), 0);
                 }
             }
-            for slot in self.slots.len()..self.topology.len() {
-                assert_eq!(self.topology[slot].location(), Location::Free);
-                assert_eq!(self.topology[slot].admitted_at(), 0);
+            for slot in self.topology.iter().skip(self.slots.len()) {
+                assert_eq!(slot.location(), Location::Free);
+                assert_eq!(slot.admitted_at(), 0);
             }
 
             assert!(self.ghost.index.len() <= self.ghost.capacity);

@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 env:
-  STABLE_VERSION: 1.99.1
+  STABLE_VERSION: stable
 
 jobs:
   All:
