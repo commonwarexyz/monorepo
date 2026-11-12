@@ -486,10 +486,14 @@ impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
     ///
     /// Recovery keeps exactly the checkpointed state. Each section below `section` is adopted at
     /// its validated terminal boundary, `section` is truncated to `index size`, and everything
-    /// after it is removed. A prune interrupted between its index and value removals can leave
-    /// value sections older than the oldest retained index section, and recovery removes them too.
-    /// A missing or damaged boundary the checkpoint covers fails init with [Error::Corruption], and
-    /// interior damage below a boundary surfaces lazily as read errors.
+    /// after it is removed without being opened. A prune interrupted between its index and value
+    /// removals can leave value sections older than the oldest retained index section, and
+    /// recovery removes them too.
+    ///
+    /// A missing or damaged boundary the checkpoint covers fails init with [Error::Corruption],
+    /// and interior damage below a boundary surfaces lazily as read errors. Every blob name in
+    /// the index and value partitions must still decode as a section number, including those
+    /// after the checkpoint.
     ///
     /// Callers must only provide a checkpoint that was durably synced before it was published. The
     /// empty checkpoint `(0, 0)` opens empty storage without creating or writing any blob.
@@ -918,7 +922,12 @@ impl<E: Context, I: Record, V: CodecShared> Recovery<E, I, V> {
         }
     }
 
-    /// Finish marker-aware startup recovery and return the tracked journal.
+    /// Returns the journal.
+    ///
+    /// Fails with [Error::ReplayFailed] when the recovery was not fully drained, yielded an
+    /// error, or was interrupted. Otherwise each section is durably truncated at its first
+    /// invalid entry, values no retained entry references are released, and the retained
+    /// lengths are staged as the next markers.
     pub async fn finish(self) -> Result<Oversized<E, I, V>, Error> {
         if self.in_progress || self.interrupted || self.validation.failed {
             return Err(Error::ReplayFailed);
@@ -959,8 +968,8 @@ mod tests {
         buffer::paged::{CacheRef, corrupt_page},
         deterministic,
         mocks::{
-            DeferredSync, DelayedSyncContext, PendingSyncs, ReadGateContext, SyncFaultContext,
-            drive_pending_syncs, next_pending_sync,
+            DeferredSync, DelayedSyncContext, MutationFaultContext, MutationFaults, PendingSyncs,
+            ReadGateContext, SyncFaultContext, drive_pending_syncs, next_pending_sync,
         },
     };
     use commonware_utils::{NZU16, NZUsize, Widen, probability};
@@ -2594,7 +2603,8 @@ mod tests {
         });
     }
 
-    /// The tracked startup replay passes the caller's read options to every backing index read.
+    /// The tracked startup replay passes the caller's read options to every index read it makes
+    /// once the index writers are open.
     #[test_traced]
     fn test_oversized_replay_propagates_read_options() {
         let executor = deterministic::Runner::default();
@@ -5297,10 +5307,20 @@ mod tests {
         const SECTIONS: u64 = 3;
         const ENTRIES: u64 = 2;
         const FLOOR: u64 = 2;
+
+        // Stop the prune before its first mutation, then its second, and so on until one prune
+        // completes, and crash after each.
         let mut interrupted = 0;
-        for seed in 0..64u64 {
-            let (failed, checkpoint) =
-                deterministic::Runner::seeded(seed).start_and_recover(|context| async move {
+        loop {
+            let faults = MutationFaults::default();
+            let (pruned, checkpoint) = deterministic::Runner::default().start_and_recover({
+                let faults = faults.clone();
+                |context| async move {
+                    let context = MutationFaultContext {
+                        inner: context,
+                        faults: faults.clone(),
+                    };
+
                     // Open an empty tracked journal.
                     let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_markers(
                         context.child("first"),
@@ -5328,20 +5348,13 @@ mod tests {
                     journal = journal.sync_all().await.unwrap();
                     journal = journal.sync(Vec::<u64>::new()).await.unwrap();
 
-                    // Fail syncs and removals at random so the prune stops at different steps.
-                    *context.storage_fault_config().write() = deterministic::FaultConfig {
-                        sync_rate: Some(probability!(0.5)),
-                        remove_rate: Some(probability!(0.5)),
-                        ..Default::default()
-                    };
-                    let result = journal.prune(FLOOR).await;
-                    *context.storage_fault_config().write() = deterministic::FaultConfig::default();
-                    result.is_err()
-                });
-            if !failed {
-                continue;
-            }
-            interrupted += 1;
+                    faults.allow(interrupted);
+                    journal.prune(FLOOR).await.is_ok()
+                }
+            });
+            let stopped = faults.failed();
+            let scenario = format!("stopped after {interrupted} mutations");
+            assert_eq!(pruned, !stopped, "{scenario}");
 
             // Sections at or above the floor are whole, and each earlier section is whole or gone.
             deterministic::Runner::from(checkpoint).start(|context| async move {
@@ -5352,7 +5365,7 @@ mod tests {
                     ReadOptions::default(),
                 )
                 .await
-                .expect("an interrupted prune must leave a reopenable image");
+                .unwrap_or_else(|err| panic!("{scenario}: must reopen: {err}"));
                 while let Some(item) = replay.next().await {
                     item.unwrap();
                 }
@@ -5365,26 +5378,42 @@ mod tests {
                     };
                     assert!(
                         retained == ENTRIES || (section < FLOOR && retained == 0),
-                        "section {section} must be whole or pruned, retained {retained}"
+                        "{scenario}: section {section} must be whole or pruned, retained {retained}"
                     );
+
+                    // Nothing is removed before the first mutation, and no section below the
+                    // floor survives a completed prune.
+                    if interrupted == 0 {
+                        assert_eq!(retained, ENTRIES, "{scenario}: section {section}");
+                    }
+                    if pruned && section < FLOOR {
+                        assert_eq!(retained, 0, "{scenario}: section {section}");
+                    }
                     for position in 0..retained {
                         let entry = journal.get(section, position).await.unwrap();
                         assert_eq!(
                             entry.id,
                             section * ENTRIES + position,
-                            "a retained entry must keep its position"
+                            "{scenario}: a retained entry must keep its position"
                         );
                         let (offset, size) = entry.value_location();
                         assert_eq!(
                             journal.get_value(section, offset, size).await.unwrap(),
                             [u8::try_from(entry.id).expect("id must fit in a byte"); 16],
-                            "a retained entry must read back its value"
+                            "{scenario}: a retained entry must read back its value"
                         );
                     }
                 }
             });
+            if !stopped {
+                break;
+            }
+            interrupted += 1;
         }
-        assert!(interrupted > 0, "some seed must interrupt the prune");
+
+        // Prune rewrites the markers, then removes the index section and the value section of
+        // every section below the floor, so it can stop at least once before each.
+        assert!(interrupted > 2 * FLOOR, "{interrupted}");
     }
 
     /// A checkpoint restore after a prune interrupted at any step keeps every entry at or above
@@ -5395,10 +5424,21 @@ mod tests {
     fn test_init_with_checkpoint_after_interrupted_prune() {
         const SECTIONS: u64 = 4;
         const FLOOR: u64 = 3;
+
+        // Stop the prune before its first mutation, then its second, and so on until one prune
+        // completes, and crash after each.
         let mut orphaned = 0;
-        for seed in 0..64u64 {
-            let (failed, checkpoint) =
-                deterministic::Runner::seeded(seed).start_and_recover(|context| async move {
+        let mut interrupted = 0;
+        loop {
+            let faults = MutationFaults::default();
+            let (pruned, checkpoint) = deterministic::Runner::default().start_and_recover({
+                let faults = faults.clone();
+                |context| async move {
+                    let context = MutationFaultContext {
+                        inner: context,
+                        faults: faults.clone(),
+                    };
+
                     // Make one entry per section durable.
                     let mut journal: Oversized<_, TestEntry, TestValue> =
                         Oversized::init_with_checkpoint(context.child("first"), test_cfg(), (0, 0))
@@ -5412,69 +5452,88 @@ mod tests {
                     }
                     journal = journal.sync_all().await.unwrap();
 
-                    // Fail removals at random so the prune stops at different steps.
-                    context.storage_fault_config().write().remove_rate = Some(probability!(0.3));
-                    let result = journal.prune(FLOOR).await;
-                    context.storage_fault_config().write().remove_rate = None;
-                    result.is_err()
-                });
-            if !failed {
-                continue;
-            }
+                    faults.allow(interrupted);
+                    journal.prune(FLOOR).await.is_ok()
+                }
+            });
+            let stopped = faults.failed();
+            let scenario = format!("stopped after {interrupted} mutations");
+            assert_eq!(pruned, !stopped, "{scenario}");
 
-            let stopped_between =
-                deterministic::Runner::from(checkpoint).start(|context| async move {
-                    // A prune that stopped after its index removals leaves value sections the index
-                    // no longer names.
-                    let index = context.scan("test-index").await.unwrap();
-                    let values = context.scan("test-values").await.unwrap();
-                    let stopped_between = values.iter().any(|section| !index.contains(section));
+            let orphans = deterministic::Runner::from(checkpoint).start(|context| async move {
+                // A prune that stopped after an index removal leaves value sections with no
+                // index section, and no stop leaves an index section without its values.
+                let index = context.scan("test-index").await.unwrap();
+                let values = context.scan("test-values").await.unwrap();
+                let orphans = values.iter().any(|section| !index.contains(section));
+                assert!(
+                    index.iter().all(|section| values.contains(section)),
+                    "{scenario}: every index section must keep its value section"
+                );
 
-                    // The restore keeps the last section whole and every section the index retains.
-                    let journal = Oversized::<_, TestEntry, TestValue>::init_with_checkpoint(
-                        context.child("restore"),
-                        test_cfg(),
-                        (SECTIONS - 1, ENTRY_SIZE),
-                    )
-                    .await
-                    .expect("an interrupted prune must leave a restorable image");
-                    let oldest = journal
-                        .oldest_section()
-                        .expect("the last section is retained");
-                    assert!(
-                        oldest <= FLOOR,
-                        "the prune floor bounds what a prune removes"
-                    );
-                    for section in oldest..SECTIONS {
-                        let entry = journal.get(section, 0).await.unwrap();
-                        assert_eq!(entry.id, section, "a retained entry must keep its section");
-                        assert_eq!(
-                            journal
-                                .get_value(section, entry.value_offset, entry.value_size)
-                                .await
-                                .unwrap(),
-                            [u8::try_from(section).expect("section must fit in a byte"); 16],
-                            "a retained entry must read back its value"
-                        );
-                    }
-
-                    // The value sections that lost their index section are gone.
+                // The restore keeps the last section whole and every section the index retains.
+                let journal = Oversized::<_, TestEntry, TestValue>::init_with_checkpoint(
+                    context.child("restore"),
+                    test_cfg(),
+                    (SECTIONS - 1, ENTRY_SIZE),
+                )
+                .await
+                .unwrap_or_else(|err| panic!("{scenario}: must restore: {err}"));
+                let oldest = journal
+                    .oldest_section()
+                    .expect("the last section is retained");
+                assert!(
+                    oldest <= FLOOR,
+                    "{scenario}: the prune floor bounds what a prune removes"
+                );
+                for section in oldest..SECTIONS {
+                    let entry = journal.get(section, 0).await.unwrap();
                     assert_eq!(
-                        context.scan("test-values").await.unwrap(),
-                        context.scan("test-index").await.unwrap(),
-                        "every value section must have an index section"
+                        entry.id, section,
+                        "{scenario}: a retained entry must keep its section"
                     );
-                    journal.destroy().await.unwrap();
-                    stopped_between
-                });
-            if stopped_between {
+                    assert_eq!(
+                        journal
+                            .get_value(section, entry.value_offset, entry.value_size)
+                            .await
+                            .unwrap(),
+                        [u8::try_from(section).expect("section must fit in a byte"); 16],
+                        "{scenario}: a retained entry must read back its value"
+                    );
+                }
+
+                // Nothing is removed before the first mutation, and no section below the
+                // floor survives a completed prune.
+                if interrupted == 0 {
+                    assert_eq!(oldest, 0, "{scenario}");
+                }
+                if pruned {
+                    assert_eq!(oldest, FLOOR, "{scenario}");
+                }
+
+                // The value sections that lost their index section are gone.
+                assert_eq!(
+                    context.scan("test-values").await.unwrap(),
+                    context.scan("test-index").await.unwrap(),
+                    "{scenario}: every value section must have an index section"
+                );
+                journal.destroy().await.unwrap();
+                orphans
+            });
+            if orphans {
                 orphaned += 1;
             }
+            if !stopped {
+                break;
+            }
+            interrupted += 1;
         }
-        assert!(
-            orphaned > 0,
-            "some seed must stop between the index and value removals"
-        );
+
+        // Prune removes the index section and then the value section of every section below the
+        // floor, so it can stop at least once before each. The value sections outlive the index
+        // removals, so every stop before a value removal leaves one with no index section.
+        assert!(interrupted >= 2 * FLOOR, "{interrupted}");
+        assert!(orphaned >= FLOOR, "{orphaned}");
     }
 
     /// A checkpoint restore still rejects a value-only section between the oldest retained index

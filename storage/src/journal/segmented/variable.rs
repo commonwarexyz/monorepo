@@ -402,10 +402,13 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
 /// [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
 /// and
 /// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
-/// the first invalid data read will be considered the new end of the journal (and the underlying
-/// [Blob] will be truncated to the last valid item). Because any blob could have trailing bytes,
-/// [Journal::init] returns a [Recovery] that replays and repairs every section from its start, and
-/// the journal is available only once that replay completes.
+/// a section ends at its last complete item: replay truncates a torn page or an incomplete
+/// trailing item to the end of the item before it. A complete item that fails to decode is not
+/// repaired. Replay returns its error and the recovery cannot finish.
+///
+/// Because any blob could have trailing bytes, [Journal::init] returns a [Recovery] that replays
+/// and repairs every section from its start, and the journal is available only once that replay
+/// completes.
 ///
 /// Mutating functions consume the journal and return it only on success: an error (or a dropped
 /// future) destroys the handle. Mutations on pruned sections fail with
@@ -425,8 +428,10 @@ impl<E: Storage + Metrics, V: CodecShared> std::fmt::Debug for Journal<E, V> {
 impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// Open through `(section, logical byte end)` and remove later sections.
     ///
-    /// An end inside an item rounds down. All retained data is validated before returning. Payload
-    /// reads stop at the bound, but every section name is validated, including names above it.
+    /// An end inside an item rounds down. All retained data is validated before returning.
+    /// Nothing above the page containing the bound is read, and later sections are removed
+    /// without being opened. Every blob name in the partition must still decode as a section
+    /// number, including those above the bound.
     pub async fn init_at_most(
         context: E,
         cfg: Config<V::Cfg>,
@@ -889,8 +894,7 @@ impl<E: Storage + Metrics, V: CodecShared> Recovery<E, V> {
     /// Returns the journal.
     ///
     /// Fails with [Error::ReplayFailed] when the recovery was not fully drained, yielded an
-    /// error, or was interrupted. The journal is then destroyed and the owner must initialize
-    /// again.
+    /// error, or was interrupted.
     pub fn finish(self) -> Result<Journal<E, V>, Error> {
         if self.in_progress || self.errored || !self.finished {
             return Err(Error::ReplayFailed);

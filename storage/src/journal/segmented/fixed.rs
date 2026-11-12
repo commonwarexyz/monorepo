@@ -71,8 +71,12 @@ struct Inner<E: Storage + Metrics, A: CodecFixed> {
 }
 
 impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
-    /// Size of each entry.
-    const CHUNK_SIZE: usize = A::SIZE;
+    /// Size of each entry in bytes. Evaluating this rejects zero-size item types at compile
+    /// time, which would otherwise divide by zero in the chunk math.
+    const CHUNK_SIZE: usize = {
+        assert!(A::SIZE > 0, "journal item size must be nonzero");
+        A::SIZE
+    };
     const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE as u64;
 
     /// Return canonical section names in numeric order without opening writers.
@@ -495,13 +499,15 @@ impl<E: Storage + Metrics, A: CodecFixedShared> std::fmt::Debug for Journal<E, A
 }
 
 impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
-    /// Size of each entry.
+    /// Size of each entry in bytes.
     pub const CHUNK_SIZE: usize = Inner::<E, A>::CHUNK_SIZE;
 
     /// Open through `(section, logical byte end)` and remove later sections.
     ///
-    /// An end inside an item rounds down. All retained data is validated before returning. Payload
-    /// reads stop at the bound, but every section name is validated, including names above it.
+    /// An end inside an item rounds down. All retained data is validated before returning.
+    /// Nothing above the page containing the bound is read, and later sections are removed
+    /// without being opened. Every blob name in the partition must still decode as a section
+    /// number, including those above the bound.
     pub async fn init_at_most(
         context: E,
         cfg: Config,
@@ -555,12 +561,15 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// [Recovery] that replays every section.
     ///
     /// `minimum_items` maps a section to the number of items its durable marker protects. An
-    /// empty map opens every section with no floor.
+    /// empty map opens every section with no floor. Every section it names must exist, even with
+    /// a count of zero: a floor for a missing section fails with [Error::Corruption].
     ///
     /// The caller must drain the recovery and call [Recovery::finish] to obtain the journal. Each
     /// section is replayed from position zero with a buffer of [Config::replay_buffer] bytes,
     /// allocated lazily as the recovery advances. Every backing blob read performed by the replay
-    /// uses `read_options`, including reads after advancing to another section.
+    /// uses `read_options`, including reads after advancing to another section. Opening the
+    /// writers on the first [Recovery::next] reads each section's last page with the default
+    /// options.
     pub async fn preflight_floors(
         context: E,
         cfg: Config,
@@ -573,7 +582,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Return the longest item-aligned prefix of `section` within `end` that lies within validated
     /// page prefixes, or `end` itself when the section does not exist. Reads only pages that
     /// intersect the prefix below `end`.
-    pub(crate) async fn recoverable_prefix_len_at_most(
+    async fn recoverable_prefix_len_at_most(
         &self,
         section: u64,
         end: u64,
@@ -595,7 +604,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// `size` is the logical byte size of `section` and must be a multiple of
     /// [Self::CHUNK_SIZE]. The checkpoint proves the retained items, so the recovery replays
     /// nothing: [Recovery::finish] durably truncates `section` to `size` bytes and removes every
-    /// later section.
+    /// later section without opening it. Every blob name in the partition must still decode as a
+    /// section number, including those of later sections.
     pub async fn preflight_restore(
         context: E,
         cfg: Config,
@@ -1076,8 +1086,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Recovery<E, A> {
     /// Returns the journal.
     ///
     /// A recovery from [Journal::preflight_floors] fails with [Error::ReplayFailed] when it was
-    /// not fully drained, yielded an error, or was interrupted. The journal is then destroyed and
-    /// the owner must initialize again. Storage without any section has nothing to drain.
+    /// not fully drained, yielded an error, or was interrupted. Storage without any section has
+    /// nothing to drain.
     ///
     /// A recovery from [Journal::preflight_restore] opens the sections through its checkpoint,
     /// truncates the checkpoint section, and removes every later section unread. The truncation
@@ -1798,7 +1808,7 @@ mod tests {
             seed(&context, &cfg, 1..=1).await;
 
             // A durable floor proves its prefix. Preflight reads only the page containing the
-            // terminal entry and leaves the ordinary replay pass to inspect the suffix.
+            // terminal entry and leaves the rest of the section to the replay.
             recordings.clear();
             let floors = BTreeMap::from([(1, 16)]);
             let preflight = Journal::<_, u64>::preflight_floors(
