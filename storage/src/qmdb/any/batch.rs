@@ -1174,13 +1174,15 @@ where
         }
     }
 
-    /// Start an empty [`Walked`] at this batch's first location, reserving `capacity` mutations
-    /// plus the trailing commit. Building it here keeps its locations on the base that
+    /// Start an empty [`Walked`] at this batch's first location. `capacity` bounds the operations
+    /// the batch emits before its floor walk. The walk appends its moves and the commit after
+    /// them, about one move per write under [`Proportional`], so `ops` reserves room for both.
+    /// Building it here keeps its locations on the base that
     /// [`peek_uncommitted`](Self::peek_uncommitted) reads them back with.
     fn walked(&self, capacity: usize) -> Walked<F, U> {
         Walked {
             base: self.base_state.size,
-            ops: Vec::with_capacity(capacity + 1),
+            ops: Vec::with_capacity(2 * (capacity + 1)),
             diff: Vec::with_capacity(capacity),
             floor_diff: Vec::new(),
             active_keys_delta: 0,
@@ -2773,8 +2775,8 @@ where
             neighbors.finish_prev(db.strategy(), is_deleted);
         }
 
-        // Generate operations.
-        let mut walked = m.walked(deleted.len() + updated.len() + created.len());
+        // Generate operations. Each created or deleted key may also rewrite its predecessor.
+        let mut walked = m.walked(updated.len() + 2 * (created.len() + deleted.len()));
 
         // Process deletes.
         let mut ancestors = DiffCursors::new(m.ancestors.iter().map(|a| a.diff.as_slice()));

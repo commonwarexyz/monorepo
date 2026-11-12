@@ -28,13 +28,15 @@ use crate::{
         Error,
         durability::Barrier,
         frame::{
-            FrameInfo, Limited, decode_item, decode_length_prefix, encode_frame_into, find_frame,
-            read_frame_at,
+            FrameInfo, Limited, UncompressedFrame, decode_item, decode_length_prefix,
+            encode_frame_into, find_frame, read_frame_at,
         },
     },
 };
 use bytes::{Bytes, BytesMut};
-use commonware_codec::{Buf, Codec, CodecShared, Copying, Viewing, varint::MAX_U32_VARINT_SIZE};
+use commonware_codec::{
+    Buf, Codec, CodecShared, Copying, EncodeSize as _, Viewing, varint::MAX_U32_VARINT_SIZE,
+};
 use commonware_macros::boxed;
 use commonware_runtime::{
     Blob as RBlob, Buf as _, Handle, IoBuf, ReadOptions,
@@ -1678,7 +1680,16 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         &self,
         items: Many<'_, V>,
     ) -> Result<PreparedAppend<V>, Error> {
+        // A batch of uncompressed frames has a known total length, so its buffer is allocated
+        // once. A single frame reserves its exact length as it is encoded.
         let mut encoded = Vec::new();
+        if self.compression.is_none() && items.len() > 1 {
+            let mut total = 0;
+            for item in items.iter() {
+                total += UncompressedFrame::new(item)?.encode_size();
+            }
+            encoded.reserve_exact(total);
+        }
         let mut item_starts = Vec::with_capacity(items.len());
         let mut encode = |item: &V| {
             item_starts.push(encoded.len());
