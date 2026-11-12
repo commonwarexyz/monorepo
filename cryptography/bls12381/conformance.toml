@@ -1,0 +1,3 @@
+["commonware_cryptography_bls12381::group::scalar::fuzz::tests::conformance::CodecConformance<Scalar>"]
+n_cases = 65536
+hash = "4451fb02f369931649308b61e187cd905b33b665f381dfb3a88bae9f993053fb"

@@ -2031,7 +2031,10 @@ version = "2026.11.0"
 dependencies = [
  "arbitrary",
  "blst",
+ "bytes",
  "commonware-allocator",
+ "commonware-codec",
+ "commonware-conformance",
  "commonware-formatting",
  "commonware-invariants",
  "commonware-macros",
@@ -2042,6 +2045,7 @@ dependencies = [
  "criterion",
  "rand_core 0.10.1",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]

@@ -13,7 +13,8 @@
 //!   [`Additive::scale`], and [`Space::msm`].
 //! - [`Scalar`]: [`Field::inv`], [`Ring::exp`], [`Multiplicative::square`], [`FieldNTT`] for
 //!   roots of unity, and [`Random::random`] for sampling. The inherent [`Scalar::from_bytes`]
-//!   and [`Scalar::to_bytes`] convert the canonical big-endian encoding.
+//!   and [`Scalar::to_bytes`] convert the canonical big-endian encoding, as do the traits of
+//!   `commonware-codec`.
 //! - [`GT`]: [`Multiplicative::square`]. [`GT::ONE`] is the identity.
 //!
 //! Operations over slices cost less per element than the same operation repeated on single
