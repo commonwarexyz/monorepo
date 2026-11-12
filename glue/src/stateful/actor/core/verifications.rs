@@ -21,9 +21,9 @@ use crate::stateful::{
         },
     },
 };
-use commonware_consensus::simplex::marshal::{
+use commonware_consensus::{
     ancestry::BlockProvider,
-    core::{Mailbox as MarshalMailbox, Variant},
+    simplex::marshal::core::{Mailbox as MarshalMailbox, Variant},
 };
 use commonware_macros::select;
 use commonware_runtime::{Clock, Supervisor};

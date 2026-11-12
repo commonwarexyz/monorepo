@@ -53,10 +53,10 @@
 use crate::{
     Application, Automaton, Block, CertifiableAutomaton, Epochable, Handoff, Heightable, Relay,
     Reporter,
+    ancestry::Ancestry,
     simplex::{
         Plan,
         marshal::{
-            ancestry::Ancestry,
             application::{
                 build::{self, Resolved},
                 gates::{GateOutcome, Gates},
@@ -189,13 +189,7 @@ impl<E, S, A, B, ES> Inline<E, S, A, B, ES>
 where
     E: Metrics + Clock,
     S: Scheme,
-    A: Application<
-            E,
-            Block = B,
-            SigningScheme = S,
-            Context = Context<B::Digest, S::PublicKey>,
-            Input = (),
-        >,
+    A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>, Input = ()>,
     B: Block + Codec,
     ES: Epocher,
 {
@@ -297,13 +291,7 @@ impl<E, S, A, B, ES> Automaton for Inline<E, S, A, B, ES>
 where
     E: Spawner + Metrics + Clock,
     S: Scheme,
-    A: Application<
-            E,
-            Block = B,
-            SigningScheme = S,
-            Context = Context<B::Digest, S::PublicKey>,
-            Input = (),
-        >,
+    A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>, Input = ()>,
     B: Block + Codec,
     ES: Epocher,
 {
@@ -527,13 +515,7 @@ impl<E, S, A, B, ES> CertifiableAutomaton for Inline<E, S, A, B, ES>
 where
     E: Spawner + Metrics + Clock,
     S: Scheme,
-    A: Application<
-            E,
-            Block = B,
-            SigningScheme = S,
-            Context = Context<B::Digest, S::PublicKey>,
-            Input = (),
-        >,
+    A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>, Input = ()>,
     B: Block + Codec,
     ES: Epocher,
 {
@@ -737,13 +719,7 @@ mod tests {
     where
         E: Spawner + Metrics + Clock,
         S: Scheme,
-        A: Application<
-                E,
-                Block = B,
-                SigningScheme = S,
-                Context = Context<B::Digest, S::PublicKey>,
-                Input = (),
-            >,
+        A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>, Input = ()>,
         B: Block + Codec,
         ES: crate::types::Epocher,
     {

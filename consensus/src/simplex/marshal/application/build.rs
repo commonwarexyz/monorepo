@@ -9,10 +9,8 @@
 
 use crate::{
     Application, Handoff,
-    simplex::{
-        marshal::{ancestry::Ancestry, application::gates::Gates},
-        types::Context,
-    },
+    ancestry::Ancestry,
+    simplex::{marshal::application::gates::Gates, types::Context},
 };
 use commonware_cryptography::{Digest, Digested, PublicKey};
 use commonware_macros::select;

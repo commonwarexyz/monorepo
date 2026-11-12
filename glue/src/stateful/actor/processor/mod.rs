@@ -29,10 +29,8 @@ use crate::stateful::{
 };
 use commonware_consensus::{
     Block, CertifiableBlock, Handoff, Heightable, Roundable,
-    simplex::marshal::{
-        ancestry::{AncestorStream, Ancestry, BlockProvider, BoxedAncestry},
-        core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
-    },
+    ancestry::{AncestorStream, Ancestry, BlockProvider, BoxedAncestry},
+    simplex::marshal::core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
     types::{Height, Round},
 };
 use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
@@ -1136,11 +1134,8 @@ mod tests {
     use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
     use commonware_consensus::{
         Block as ConsensusBlock, CertifiableBlock, Heightable,
-        simplex::{
-            marshal::ancestry::{self as marshal_ancestry, Ancestry, BlockProvider, BoxedAncestry},
-            mocks::scheme::Scheme as MockScheme,
-            types::Context as ConsensusContext,
-        },
+        ancestry::{self as marshal_ancestry, Ancestry, BlockProvider, BoxedAncestry},
+        simplex::{mocks::scheme::Scheme as MockScheme, types::Context as ConsensusContext},
         types::{Epoch, Height, Round, View},
     };
     use commonware_cryptography::{
