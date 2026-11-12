@@ -241,7 +241,7 @@ mod tests {
         },
         telemetry::metrics::has_metric_value,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
+    use commonware_utils::{NZU16, NZU64, NZUsize, probability, sequence::FixedBytes};
     use rand::RngExt as _;
     use std::{
         collections::BTreeMap,
@@ -3150,5 +3150,210 @@ mod tests {
             .await;
             assert!(matches!(result, Err(Error::RecordCorrupted)));
         });
+    }
+
+    const DESTROY_SECTIONS: u64 = 3;
+    const DESTROY_SECTION_ITEMS: u64 = 4;
+    const DESTROY_ITEMS: u64 = DESTROY_SECTIONS * DESTROY_SECTION_ITEMS;
+
+    type DestroyArchive = Archive<FourCap, deterministic::Context, FixedBytes<64>, i32>;
+
+    fn destroy_config() -> Config<FourCap, ()> {
+        test_config("destroy", NZU64!(DESTROY_SECTION_ITEMS), FourCap)
+    }
+
+    /// Fill and sync [DESTROY_SECTIONS] sections, returning the open archive with a marker
+    /// published for each.
+    async fn seed_for_destroy(context: &deterministic::Context) -> DestroyArchive {
+        let mut archive = Archive::init(context.child("seed"), destroy_config())
+            .await
+            .unwrap();
+        for index in 0..DESTROY_ITEMS {
+            archive = archive
+                .put(index, test_key(&index.to_string()), &(index as i32))
+                .await
+                .unwrap();
+        }
+        archive = archive.sync().await.unwrap();
+
+        // A sync with no new data publishes the marker that trails the last section.
+        archive.sync().await.unwrap()
+    }
+
+    /// Returns the seeded indices the archive holds, requiring index and key lookups to agree.
+    async fn retained_indices(archive: &DestroyArchive) -> Vec<u64> {
+        let mut retained = Vec::new();
+        for index in 0..DESTROY_ITEMS {
+            let by_index = archive.get(Identifier::Index(index)).await.unwrap();
+            assert!(by_index.is_none_or(|value| value == index as i32));
+            assert_eq!(
+                archive
+                    .get(Identifier::Key(&test_key(&index.to_string())))
+                    .await
+                    .unwrap(),
+                by_index
+            );
+            if by_index.is_some() {
+                retained.push(index);
+            }
+        }
+        retained
+    }
+
+    /// Reopen the archive an interrupted destroy left behind and return the seeded indices it
+    /// retains.
+    ///
+    /// A second open must observe what the first did, the archive must accept writes to its
+    /// oldest section and to a new one, and a retried destroy must remove every partition.
+    async fn reopen_and_retire(context: &deterministic::Context) -> Vec<u64> {
+        let cfg = destroy_config();
+        let archive = DestroyArchive::init(context.child("first"), cfg.clone())
+            .await
+            .unwrap();
+        let retained = retained_indices(&archive).await;
+        drop(archive);
+        let mut archive = DestroyArchive::init(context.child("second"), cfg.clone())
+            .await
+            .unwrap();
+        assert_eq!(retained_indices(&archive).await, retained);
+
+        for index in [0, DESTROY_ITEMS] {
+            archive = archive
+                .put(index, test_key(&index.to_string()), &(index as i32))
+                .await
+                .unwrap();
+        }
+        archive = archive.sync().await.unwrap();
+        for index in [0, DESTROY_ITEMS] {
+            assert_eq!(
+                archive.get(Identifier::Index(index)).await.unwrap(),
+                Some(index as i32)
+            );
+        }
+
+        archive.destroy().await.unwrap();
+        for partition in [
+            &cfg.metadata_partition,
+            &cfg.key_partition,
+            &cfg.value_partition,
+        ] {
+            assert!(matches!(
+                context.scan(partition).await,
+                Err(RError::PartitionMissing(_))
+            ));
+        }
+        retained
+    }
+
+    /// A destroy stopped by a failed removal leaves an archive that reopens with every section
+    /// whole or absent, and that a retried destroy removes.
+    #[test_traced]
+    fn test_interrupted_destroy_reopens() {
+        let mut interrupted = 0;
+        for seed in 0..32u64 {
+            let (stopped, checkpoint) =
+                deterministic::Runner::seeded(seed).start_and_recover(|context| async move {
+                    let archive = seed_for_destroy(&context).await;
+
+                    // Fail a sample of removals so destroy stops at varying depths, from the
+                    // first marker blob through the value journal.
+                    context.storage_fault_config().write().remove_rate = Some(probability!(0.2));
+                    let result = archive.destroy().await;
+                    context.storage_fault_config().write().remove_rate = None;
+                    result.is_err()
+                });
+            if !stopped {
+                continue;
+            }
+            interrupted += 1;
+            deterministic::Runner::from(checkpoint).start(|context| async move {
+                let retained = reopen_and_retire(&context).await;
+                for section in
+                    retained.chunk_by(|a, b| a / DESTROY_SECTION_ITEMS == b / DESTROY_SECTION_ITEMS)
+                {
+                    assert_eq!(
+                        section.len() as u64,
+                        DESTROY_SECTION_ITEMS,
+                        "seed {seed} reopened with {retained:?}"
+                    );
+                }
+            });
+        }
+        assert!(interrupted > 0, "no seed interrupted destroy");
+    }
+
+    /// Destroy removes the markers and then the key and value journals concurrently, so a crash
+    /// can leave any subset of either journal's sections. Each such image reopens holding
+    /// exactly the sections whose key and value blobs both survive.
+    #[test_traced]
+    fn test_destroy_interrupted_inside_journals_reopens() {
+        // Bit k of a mask removes the k-th section of a journal. EVERYTHING also removes the
+        // journal's partition.
+        const EVERYTHING: u8 = 1 << DESTROY_SECTIONS;
+
+        /// Remove the blobs of the partition that the mask selects by position in name order,
+        /// and the partition itself when asked. Returns the number of blobs found.
+        async fn remove(
+            context: &deterministic::Context,
+            partition: &str,
+            mask: u8,
+            partition_too: bool,
+        ) -> usize {
+            let mut names = context.scan(partition).await.unwrap();
+            names.sort();
+            for (position, name) in names.iter().enumerate() {
+                if mask & (1 << position) != 0 {
+                    context.remove(partition, Some(name)).await.unwrap();
+                }
+            }
+            if partition_too {
+                context.remove(partition, None).await.unwrap();
+            }
+            names.len()
+        }
+
+        for markers_partition_removed in [false, true] {
+            for key_mask in 0..=EVERYTHING {
+                for value_mask in 0..=EVERYTHING {
+                    deterministic::Runner::default().start(|context| async move {
+                        let cfg = destroy_config();
+                        drop(seed_for_destroy(&context).await);
+
+                        // The markers are gone before either journal is touched.
+                        let markers = remove(
+                            &context,
+                            &cfg.metadata_partition,
+                            u8::MAX,
+                            markers_partition_removed,
+                        )
+                        .await;
+                        assert!(markers > 0);
+
+                        // Leave each journal with the sections its mask spares.
+                        let removed = |mask: u8| if mask == EVERYTHING { u8::MAX } else { mask };
+                        for (partition, mask) in [
+                            (&cfg.key_partition, key_mask),
+                            (&cfg.value_partition, value_mask),
+                        ] {
+                            let sections =
+                                remove(&context, partition, removed(mask), mask == EVERYTHING)
+                                    .await;
+                            assert_eq!(sections as u64, DESTROY_SECTIONS);
+                        }
+
+                        let gone = removed(key_mask) | removed(value_mask);
+                        let expected: Vec<u64> = (0..DESTROY_ITEMS)
+                            .filter(|index| gone & (1 << (index / DESTROY_SECTION_ITEMS)) == 0)
+                            .collect();
+                        assert_eq!(
+                            reopen_and_retire(&context).await,
+                            expected,
+                            "markers partition removed {markers_partition_removed}, key mask \
+                             {key_mask:#06b}, value mask {value_mask:#06b}"
+                        );
+                    });
+                }
+            }
+        }
     }
 }
