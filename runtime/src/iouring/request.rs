@@ -190,6 +190,8 @@ pub enum Request {
     WriteAt(WriteAtRequest),
     /// Make a held file durable.
     Sync(SyncRequest),
+    /// Set the length of a held file.
+    Ftruncate(FtruncateRequest),
     /// Connect a socket using a stable native address.
     Connect(ConnectRequest),
     /// Observe one readiness event without consuming socket data.
@@ -204,7 +206,7 @@ impl Request {
             Self::Recv(r) => r.deadline,
             Self::Connect(r) => r.deadline,
             Self::Poll(r) => r.deadline,
-            Self::ReadAt(_) | Self::WriteAt(_) | Self::Sync(_) => None,
+            Self::ReadAt(_) | Self::WriteAt(_) | Self::Sync(_) | Self::Ftruncate(_) => None,
         }
     }
 
@@ -213,7 +215,7 @@ impl Request {
     /// Storage mutations retain the same detached-work contract as blocking
     /// storage. Cancellation of reads and network requests stops follow-up SQEs.
     pub const fn retains_on_orphan(&self) -> bool {
-        matches!(self, Self::WriteAt(_) | Self::Sync(_))
+        matches!(self, Self::WriteAt(_) | Self::Sync(_) | Self::Ftruncate(_))
     }
 
     /// Gate shared by every durability operation on this open.
@@ -246,6 +248,7 @@ impl Request {
             Self::ReadAt(r) => r.build_sqe(),
             Self::WriteAt(w) => w.build_sqe(),
             Self::Sync(s) => s.build_sqe(),
+            Self::Ftruncate(t) => t.build_sqe(),
             Self::Connect(r) => r.build_sqe(),
             Self::Poll(r) => r.build_sqe(),
         };
@@ -266,6 +269,7 @@ impl Request {
             Self::ReadAt(r) => r.on_cqe(state, result),
             Self::WriteAt(w) => w.on_cqe(state, result),
             Self::Sync(s) => s.on_cqe(state, result),
+            Self::Ftruncate(t) => t.on_cqe(state, result),
             Self::Connect(r) => r.on_cqe(state, result),
             Self::Poll(r) => r.on_cqe(state, result),
         }
@@ -352,6 +356,18 @@ impl Request {
                     },
                 )
             }
+            Self::Ftruncate(r) => {
+                // Settle here so a caller that stopped waiting still leaves the open's debt
+                // correct.
+                let result = r.file.resized(result);
+                (
+                    RequestOutput::Ftruncate(result),
+                    RetiredResources::File {
+                        _file: r.file,
+                        _write: None,
+                    },
+                )
+            }
             Self::Connect(r) => (
                 RequestOutput::Connect(result),
                 RetiredResources::Connect {
@@ -380,6 +396,8 @@ pub enum RequestOutput {
     WriteAt(Result<(), Error>),
     /// Completion of a data sync.
     Sync(Result<(), Error>),
+    /// Completion of a file resize.
+    Ftruncate(Result<(), Error>),
     /// Completion of a socket connection attempt.
     Connect(Result<(), Error>),
     /// Completion of one socket readiness observation.
@@ -411,7 +429,7 @@ pub enum RetiredResources {
     File {
         /// Storage open carrying its file, directory hold, and durability debt.
         _file: Arc<Shared>,
-        /// Original write owners, absent for reads and standalone sync.
+        /// Original write owners, absent for reads, standalone syncs, and resizes.
         _write: Option<WriteBuffers>,
     },
     /// Socket and stable address retained by a connection attempt.
@@ -1008,6 +1026,34 @@ impl SyncRequest {
     }
 }
 
+/// Logical file resize request and its in-loop state.
+pub struct FtruncateRequest {
+    /// Open whose file the ftruncate SQE uses.
+    pub file: Arc<Shared>,
+    /// Physical length the file takes.
+    len: u64,
+}
+
+impl FtruncateRequest {
+    /// Retain the open until the kernel has finished with its file.
+    pub const fn new(file: Arc<Shared>, len: u64) -> Self {
+        Self { file, len }
+    }
+
+    /// Build the ftruncate SQE for this request.
+    fn build_sqe(&self) -> SqueueEntry {
+        opcode::Ftruncate::new(Fd(self.file.as_raw_fd()), self.len).build()
+    }
+
+    /// Classify one ftruncate CQE and decide whether the logical request completes
+    /// or needs another SQE.
+    ///
+    /// Like a data sync, an error keeps its raw errno, including an unsolicited `ECANCELED`.
+    fn on_cqe(&self, state: WaiterState, result: i32) -> Option<Result<(), Error>> {
+        on_sync_cqe(state, result)
+    }
+}
+
 /// Socket connection request with stable kernel address storage.
 pub struct ConnectRequest {
     /// Socket retained through its operation CQE.
@@ -1485,6 +1531,12 @@ mod tests {
                 (
                     Request::Sync(SyncRequest::new(make_file())),
                     opcode::Fsync::CODE,
+                    None,
+                    true,
+                ),
+                (
+                    Request::Ftruncate(FtruncateRequest::new(make_file(), 4096)),
+                    opcode::Ftruncate::CODE,
                     None,
                     true,
                 ),
@@ -2280,6 +2332,47 @@ mod tests {
     }
 
     #[test]
+    fn test_active_ftruncate_paths() {
+        let mut request = Request::Ftruncate(FtruncateRequest::new(make_file(), 0));
+        assert!(request.on_cqe(ACTIVE, -libc::EINTR).is_none());
+        let sqe = request.build_sqe(waiter_id(0, 0));
+        assert_eq!(sqe.get_opcode(), opcode::Ftruncate::CODE as u32);
+
+        // A resize exposes the kernel error code, including unsolicited ECANCELED.
+        for code in [libc::ECANCELED, libc::EIO, libc::EFBIG] {
+            let file = make_file();
+            file.tracker.write();
+            let request = Request::Ftruncate(FtruncateRequest::new(file.clone(), 0));
+            let RequestOutput::Ftruncate(Err(Error::BlobResizeFailed(_, _, error))) =
+                complete(request, ACTIVE, -code)
+            else {
+                panic!("expected resize I/O error");
+            };
+            assert_eq!(error.raw_os_error(), Some(code));
+
+            // The failure is settled at completion: the mutation stays uncovered, and the open
+            // is not poisoned.
+            assert!(file.tracker.is_dirty());
+            assert_eq!(file.tracker.begin_sync(), 0);
+            assert!(file.tracker.failure().is_none());
+        }
+
+        // Success settles the mutation at completion without poisoning.
+        for result in [0, 1] {
+            let file = make_file();
+            file.tracker.write();
+            assert_eq!(file.tracker.begin_sync(), 0);
+            let request = Request::Ftruncate(FtruncateRequest::new(file.clone(), 0));
+            assert!(matches!(
+                complete(request, ACTIVE, result),
+                RequestOutput::Ftruncate(Ok(()))
+            ));
+            assert_eq!(file.tracker.begin_sync(), 1);
+            assert!(file.tracker.failure().is_none());
+        }
+    }
+
+    #[test]
     fn test_sync_completion_credits_only_its_successful_barrier() {
         for trailing in [false, true] {
             for success in [false, true] {
@@ -2452,6 +2545,21 @@ mod tests {
         let request = Request::Sync(SyncRequest::new(make_file()));
         let (output, retired) = request.complete(Err(Error::Timeout));
         assert!(matches!(output, RequestOutput::Sync(Err(Error::Timeout))));
+        drop(retired);
+
+        // A local failure with no CQE is still named as a resize failure and leaves the
+        // mutation uncovered without poisoning the open.
+        let file = make_file();
+        file.tracker.write();
+        let request = Request::Ftruncate(FtruncateRequest::new(file.clone(), 0));
+        let (output, retired) = request.complete(Err(Error::Timeout));
+        assert!(matches!(
+            output,
+            RequestOutput::Ftruncate(Err(Error::BlobResizeFailed(..)))
+        ));
+        assert!(file.tracker.is_dirty());
+        assert_eq!(file.tracker.begin_sync(), 0);
+        assert!(file.tracker.failure().is_none());
         drop(retired);
 
         let request = Request::Connect(make_connect_request("127.0.0.1:1234"));

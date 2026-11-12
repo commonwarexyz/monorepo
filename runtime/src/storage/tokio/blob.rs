@@ -724,8 +724,10 @@ impl crate::Blob for Blob {
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
         let file = self.shared.clone();
+        // Validate the signed file length before mutation accounting.
         let len = len
             .checked_add(self.data_offset)
+            .filter(|len| *len <= i64::MAX as u64)
             .ok_or(Error::OffsetOverflow)?;
         self.shared.tracker.write();
         task::spawn_blocking(move || {
@@ -2067,6 +2069,41 @@ mod tests {
             drop(storage);
             std::fs::remove_dir_all(directory).unwrap();
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_resize_length_bound() {
+        let (storage, directory) = storage_for_reopen_test("resize_length_bound", Layout::ALL);
+        let path = directory.join("readonly");
+        std::fs::write(&path, b"").unwrap();
+        let blob = Blob::new(
+            File::options().read(true).open(&path).unwrap(),
+            0,
+            storage.hold.clone(),
+            storage
+                .pending
+                .admit("partition", b"readonly", false)
+                .unwrap()
+                .0,
+        );
+
+        // A physical length beyond the signed file limit fails before any mutation is recorded.
+        for len in [i64::MAX as u64 + 1, u64::MAX] {
+            assert!(matches!(blob.resize(len).await, Err(Error::OffsetOverflow)));
+        }
+        assert!(!blob.shared.tracker.is_dirty());
+
+        // The largest representable length reaches the kernel, which rejects the read-only
+        // descriptor.
+        assert!(matches!(
+            blob.resize(i64::MAX as u64).await,
+            Err(Error::BlobResizeFailed(_, _, error)) if error.raw_os_error() == Some(libc::EINVAL)
+        ));
+        assert!(blob.shared.tracker.is_dirty());
+        drop(blob);
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     /// Pauses before panicking as the write releases its first buffer.
