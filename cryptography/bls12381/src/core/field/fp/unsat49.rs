@@ -29,7 +29,7 @@
 //! gives the product bound `ceil(A * B / LIMIT) + 1`.
 
 use super::{
-    super::arithmetic::Field, BYTES, MAX_LANES, MODULUS, WORDS, bytes_from_words, power_of_two,
+    super::arithmetic::Field, BYTES, MAX_U64_LANES, MODULUS, WORDS, bytes_from_words, power_of_two,
     words_from_bytes,
 };
 use crate::{core::debug_counter::DebugCounter, montgomery::negated_inverse};
@@ -114,9 +114,9 @@ impl<S: Simd> Copy for Unsat49<S> {}
 impl<S: Simd> Unsat49<S> {
     /// Transposes carried per-lane limbs, bounded by `bound * p`, into limb rows.
     #[inline(always)]
-    fn raw(simd: S, lanes: &[[u64; LIMBS]; MAX_LANES], bound: u64) -> Self {
-        const { assert!(S::U64_LANES <= MAX_LANES) };
-        let mut rows = [[0; MAX_LANES]; LIMBS];
+    fn raw(simd: S, lanes: &[[u64; LIMBS]; MAX_U64_LANES], bound: u64) -> Self {
+        const { assert!(S::U64_LANES <= MAX_U64_LANES) };
+        let mut rows = [[0; MAX_U64_LANES]; LIMBS];
         for (lane, limbs) in lanes.iter().enumerate() {
             for (row, limb) in rows.iter_mut().zip(limbs) {
                 row[lane] = *limb;
@@ -135,10 +135,10 @@ impl<S: Simd> Unsat49<S> {
 
     /// Returns each lane's limbs, without any conversion.
     #[inline(always)]
-    fn lane_limbs(self, simd: S) -> [[u64; LIMBS]; MAX_LANES] {
-        let mut lanes = [[0; LIMBS]; MAX_LANES];
+    fn lane_limbs(self, simd: S) -> [[u64; LIMBS]; MAX_U64_LANES] {
+        let mut lanes = [[0; LIMBS]; MAX_U64_LANES];
         for (i, row) in self.limbs.into_iter().enumerate() {
-            let mut values = [0; MAX_LANES];
+            let mut values = [0; MAX_U64_LANES];
             simd.u64_store(row, &mut values);
             for (lane, value) in lanes.iter_mut().zip(values) {
                 lane[i] = value;
@@ -150,7 +150,7 @@ impl<S: Simd> Unsat49<S> {
     /// Converts an integer `a` into this module's Montgomery form `a * 2^392`.
     #[inline(always)]
     fn to_lanes(self, simd: S) -> Self {
-        self.product(simd, Self::raw(simd, &[TO_LANES; MAX_LANES], 1))
+        self.product(simd, Self::raw(simd, &[TO_LANES; MAX_U64_LANES], 1))
     }
 
     /// Body of [`Field::product`], inlined into the calling kernel.
@@ -274,7 +274,7 @@ impl<S: Simd> Field<S> for Unsat49<S> {
 
     #[inline(always)]
     fn load(simd: S, elements: &[[u8; BYTES]], fill: &[u8; BYTES]) -> Self {
-        let mut lanes = [limbs_from_words(words_from_bytes(fill)); MAX_LANES];
+        let mut lanes = [limbs_from_words(words_from_bytes(fill)); MAX_U64_LANES];
         for (lane, element) in lanes.iter_mut().zip(elements) {
             *lane = limbs_from_words(words_from_bytes(element));
         }
@@ -286,7 +286,7 @@ impl<S: Simd> Field<S> for Unsat49<S> {
     fn store(self, simd: S, elements: &mut [[u8; BYTES]]) {
         let canonical = self
             .carry(simd)
-            .product(simd, Self::raw(simd, &[FROM_LANES; MAX_LANES], 1))
+            .product(simd, Self::raw(simd, &[FROM_LANES; MAX_U64_LANES], 1))
             .subtract_modulus(simd);
         let lanes = canonical.lane_limbs(simd);
         for (element, limbs) in elements.iter_mut().zip(lanes).take(S::U64_LANES) {
@@ -315,7 +315,7 @@ impl<S: Simd> Field<S> for Unsat49<S> {
         debug_assert!(lanes.len() >= S::U64_LANES);
         let mut limbs = [simd.u64_splat(0); LIMBS];
         for (i, limb) in limbs.iter_mut().enumerate() {
-            let mut row = [0; MAX_LANES];
+            let mut row = [0; MAX_U64_LANES];
             for (value, lane) in row.iter_mut().zip(lanes).take(S::U64_LANES) {
                 *value = lane[i];
             }
@@ -377,7 +377,7 @@ impl<S: Simd> Field<S> for Unsat49<S> {
     #[inline(always)]
     fn select(mut self, simd: S, rhs: Self, lanes: u64) -> Self {
         let lanes = black_box(lanes);
-        let mut masks = [0u64; MAX_LANES];
+        let mut masks = [0u64; MAX_U64_LANES];
         for (lane, mask) in masks.iter_mut().enumerate() {
             *mask = 0u64.wrapping_sub((lanes >> lane) & 1);
         }
@@ -452,7 +452,7 @@ impl<S: Simd> Field<S> for Unsat49<S> {
     fn reduce_tight(simd: S, product: Self::Product) -> Self {
         product
             .carry(simd)
-            .product(simd, Self::raw(simd, &[ONE; MAX_LANES], 1))
+            .product(simd, Self::raw(simd, &[ONE; MAX_U64_LANES], 1))
     }
 }
 
@@ -478,7 +478,7 @@ pub mod fuzz {
         }
 
         fn from_raw(simd: S, lanes: &[[u64; LIMBS]], bound: u64) -> Self {
-            let mut all = [[0; LIMBS]; MAX_LANES];
+            let mut all = [[0; LIMBS]; MAX_U64_LANES];
             for (lane, limbs) in all.iter_mut().zip(lanes) {
                 *lane = *limbs;
             }

@@ -238,7 +238,7 @@ const fn is_zero(value: u64) -> u64 {
 /// Entry `k` of the table holds `k + 1` times a point. Every lane selects from the whole table,
 /// so neither the operations nor the memory accesses depend on the digits.
 #[inline(always)]
-fn gather<S: Simd, P: Points<S>>(simd: S, identity: P, table: &[P], digits: [i16; MAX_LANES]) -> P {
+fn lookup<S: Simd, P: Points<S>>(simd: S, identity: P, table: &[P], digits: [i16; MAX_LANES]) -> P {
     let mut negative = 0;
     let mut magnitudes = [0; MAX_LANES];
     for (lane, digit) in digits.iter().enumerate() {
@@ -262,7 +262,7 @@ fn gather<S: Simd, P: Points<S>>(simd: S, identity: P, table: &[P], digits: [i16
 ///
 /// `digits(component, window)` returns each lane's digit of the window, as [`digits`] splits
 /// them for `components` components of `windows` windows. A table holds the multiples of the
-/// base, and every window selects one entry per component through [`gather`] and combines them
+/// base, and every window selects one entry per component through [`lookup`] and combines them
 /// by Horner's rule over the endomorphism, from the last component down, then adds the sum to
 /// an accumulator doubled [`WINDOW_BITS`] times between windows. The schedule is fixed, so
 /// neither the operations nor the memory accesses depend on the digits.
@@ -289,9 +289,9 @@ fn multiply<S: Simd, P: Points<S>>(
     // bits in G2, so the doublings cover one component rather than the whole scalar, at the cost
     // of components - 1 endomorphism images per window.
     for window in (0..windows).rev() {
-        let mut term = gather(simd, identity, &table, digits(components - 1, window));
+        let mut term = lookup(simd, identity, &table, digits(components - 1, window));
         for c in (0..components - 1).rev() {
-            let entry = gather(simd, identity, &table, digits(c, window));
+            let entry = lookup(simd, identity, &table, digits(c, window));
             term = term.endomorphism(simd).add(simd, entry);
         }
         if window + 1 < windows {
