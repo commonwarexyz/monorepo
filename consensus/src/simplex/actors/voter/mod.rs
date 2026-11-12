@@ -129,6 +129,7 @@ mod tests {
         >,
     >;
     type CertificationRequests = Arc<Mutex<Vec<(View, oneshot::Sender<bool>)>>>;
+    type VerificationRequests = Arc<Mutex<Vec<(View, oneshot::Sender<bool>)>>>;
 
     fn labeled_metric_snapshot(
         metrics: &str,
@@ -307,7 +308,7 @@ mod tests {
         /// Views whose verification requests reached the mock application.
         verify_requests: Option<Arc<Mutex<Vec<View>>>>,
         /// Verification response senders held by the test instead of answered.
-        held_verifications: Option<CertificationRequests>,
+        held_verifications: Option<VerificationRequests>,
         /// Whether every mock application verification should fail.
         fail_verification: bool,
         certifier: mocks::application::Certifier<Sha256Digest>,
@@ -8064,19 +8065,15 @@ mod tests {
         });
     }
 
-    /// A notarization for a conflicting proposal in the same view should cancel
-    /// the in-flight verification of the leader's proposal.
+    /// A notarization for a conflicting proposal of the same view drops the in-flight
+    /// verification of the leader's proposal.
     ///
-    /// The leader sends us proposal A and we request its verification. Before
-    /// the application answers, a notarization for a different proposal B in
-    /// the same view arrives. The slot is replaced by B and marked equivocated,
-    /// so any verdict for A is discarded on completion. The view does not
-    /// advance until B certifies, so the request for A is never dropped: the
-    /// application keeps working on a proposal that can no longer be notarized,
-    /// and the single verification slot stays occupied for as long as the
-    /// equivocating leader withholds A.
+    /// The leader sends us proposal A and we request its verification. Before the application
+    /// answers, a notarization for a different proposal B of the same view arrives. Nothing uses
+    /// a verdict for A once B is notarized, so the request is dropped while B's certification is
+    /// still pending and the view has not advanced.
     #[test_traced]
-    fn conflicting_notarization_cancels_inflight_verification() {
+    fn test_conflicting_notarization_cancels_inflight_verification() {
         let n = 4;
         let quorum = quorum(n);
         let epoch = Epoch::new(333);
@@ -8096,7 +8093,7 @@ mod tests {
             let leader_index =
                 usize::from(built_elector.elect(Round::new(epoch, View::new(1)), ()));
             let local_index = (leader_index + 1) % schemes.len();
-            let held: CertificationRequests = Arc::new(Mutex::new(Vec::new()));
+            let held: VerificationRequests = Arc::new(Mutex::new(Vec::new()));
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
                 &context,
                 &oracle,
@@ -8117,11 +8114,11 @@ mod tests {
 
             let target_view = match batcher_receiver.recv().await.unwrap() {
                 batcher::Message::Update { current, .. } => current,
-                _ => panic!("expected initial update"),
+                _ => panic!("the voter must first send an update"),
             };
             assert_eq!(target_view, View::new(1));
 
-            // The leader's proposal A reaches us; verification is requested.
+            // The leader's proposal A reaches us and verification is requested.
             let parent = target_view.previous().unwrap_or(View::zero());
             let a = Proposal::new(
                 Round::new(epoch, target_view),
@@ -8143,10 +8140,10 @@ mod tests {
             mailbox.recovered(Certificate::Notarization(notarization));
             context.sleep(Duration::from_millis(100)).await;
 
-            // A can no longer be notarized, so its verification should be canceled.
+            // A cannot be notarized once B is, so its verification is dropped.
             assert!(
                 held.lock()[0].1.is_closed(),
-                "verification of A is still in flight after a conflicting notarization"
+                "a conflicting notarization must drop the in-flight verification of A"
             );
         });
     }
