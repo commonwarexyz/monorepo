@@ -1,3 +1,4 @@
+use commonware_bench::Inputs;
 use commonware_utils::TestRng;
 use criterion::{BatchSize, Criterion, criterion_group};
 use rand::RngExt as _;
@@ -10,10 +11,9 @@ struct MockIndex {
 }
 
 fn n_items() -> &'static [usize] {
-    if commonware_bench::full() {
-        &[100_000, 1_000_000, 10_000_000]
-    } else {
-        &[100_000]
+    match Inputs::current() {
+        Inputs::Full => &[100_000, 1_000_000, 10_000_000],
+        _ => &[100_000],
     }
 }
 

@@ -1,3 +1,4 @@
+use commonware_bench::Inputs;
 use commonware_cryptography::{
     Signer as _,
     bls12381::{
@@ -107,18 +108,16 @@ impl Bench {
 
 // Configure contributors based on context
 fn contributors() -> &'static [u32] {
-    if commonware_bench::full() {
-        &[5, 10, 20, 50, 100, 250, 500]
-    } else {
-        &[5, 10, 20, 50]
+    match Inputs::current() {
+        Inputs::Full => &[5, 10, 20, 50, 100, 250, 500],
+        _ => &[5, 10, 20, 50],
     }
 }
 
 fn concurrency_levels() -> &'static [usize] {
-    if commonware_bench::full() {
-        &[1, 4, 8]
-    } else {
-        &[1]
+    match Inputs::current() {
+        Inputs::Full => &[1, 4, 8],
+        _ => &[1],
     }
 }
 

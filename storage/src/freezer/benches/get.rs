@@ -1,4 +1,5 @@
 use super::utils::{FreezerType, Key, append_random, init};
+use commonware_bench::Inputs;
 use commonware_runtime::{
     Runner,
     benchmarks::{context, tokio},
@@ -12,18 +13,16 @@ use std::{hint::black_box, time::Instant};
 
 /// Items pre-loaded into the store.
 fn n_items() -> u64 {
-    if commonware_bench::full() {
-        250_000
-    } else {
-        10_000
+    match Inputs::current() {
+        Inputs::Full => 250_000,
+        _ => 10_000,
     }
 }
 
 fn n_reads() -> &'static [usize] {
-    if commonware_bench::full() {
-        &[1_000, 10_000, 50_000]
-    } else {
-        &[1_000]
+    match Inputs::current() {
+        Inputs::Full => &[1_000, 10_000, 50_000],
+        _ => &[1_000],
     }
 }
 

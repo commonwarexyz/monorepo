@@ -1,4 +1,5 @@
 use super::utils::{append_random, init};
+use commonware_bench::Inputs;
 use commonware_runtime::{
     Runner, Supervisor as _,
     benchmarks::{context, tokio},
@@ -8,10 +9,9 @@ use criterion::{Criterion, criterion_group};
 use std::time::{Duration, Instant};
 
 fn n_items() -> &'static [u64] {
-    if commonware_bench::full() {
-        &[10_000, 50_000, 100_000, 500_000]
-    } else {
-        &[10_000]
+    match Inputs::current() {
+        Inputs::Full => &[10_000, 50_000, 100_000, 500_000],
+        _ => &[10_000],
     }
 }
 

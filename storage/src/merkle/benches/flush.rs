@@ -9,6 +9,7 @@
 //! destroyed) every `cycles` flushes so the backing journal doesn't grow without bound over a run.
 //! `cycles` scales down as `n` grows so the peak on-disk size stays roughly constant.
 
+use commonware_bench::Inputs;
 use commonware_cryptography::{Sha256, sha256};
 use commonware_math::algebra::Random as _;
 use commonware_parallel::Sequential;
@@ -39,10 +40,9 @@ const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
 const REBUILD_NODE_BUDGET: usize = 2_000_000;
 
 fn n_leaves() -> &'static [usize] {
-    if commonware_bench::full() {
-        &[10_000, 100_000, 1_000_000]
-    } else {
-        &[10_000, 100_000]
+    match Inputs::current() {
+        Inputs::Full => &[10_000, 100_000, 1_000_000],
+        _ => &[10_000, 100_000],
     }
 }
 

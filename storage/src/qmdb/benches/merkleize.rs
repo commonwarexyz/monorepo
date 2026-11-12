@@ -12,7 +12,7 @@
 use crate::common::{
     CHUNK_SIZE, Digest, REPLAY_BUFFER_SIZE, WRITE_BUFFER_SIZE, seed_db, write_random_updates,
 };
-use commonware_bench::{Benchmark, Metric, Workload};
+use commonware_bench::{Benchmark, Inputs, Metric, Workload};
 use commonware_cryptography::Sha256;
 use commonware_macros::boxed;
 use commonware_parallel::Rayon;
@@ -847,18 +847,17 @@ variants! {
 }
 
 fn main_num_keys(seed_sync: bool) -> &'static [u64] {
-    match (commonware_bench::full(), seed_sync) {
-        (false, _) => &[10_000],
-        (true, false) => &[10_000, 100_000, 1_000_000],
-        (true, true) => &[10_000, 100_000],
+    match (Inputs::current(), seed_sync) {
+        (Inputs::Full, false) => &[10_000, 100_000, 1_000_000],
+        (Inputs::Full, true) => &[10_000, 100_000],
+        _ => &[10_000],
     }
 }
 
 fn churned_num_keys() -> &'static [u64] {
-    if commonware_bench::full() {
-        &[10_000, 100_000]
-    } else {
-        &[10_000]
+    match Inputs::current() {
+        Inputs::Full => &[10_000, 100_000],
+        _ => &[10_000],
     }
 }
 

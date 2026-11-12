@@ -11,6 +11,7 @@
 //! within a small factor rather than diverging quadratically.
 
 use super::DummyMetrics;
+use commonware_bench::Inputs;
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_storage::{
     index::{Unordered, partitioned},
@@ -23,10 +24,9 @@ use std::{
 };
 
 fn n_items() -> &'static [usize] {
-    if commonware_bench::full() {
-        &[10_000, 50_000, 200_000]
-    } else {
-        &[10_000, 50_000]
+    match Inputs::current() {
+        Inputs::Full => &[10_000, 50_000, 200_000],
+        _ => &[10_000, 50_000],
     }
 }
 

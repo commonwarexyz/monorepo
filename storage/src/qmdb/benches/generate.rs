@@ -7,6 +7,7 @@ use crate::common::{
     Digest, define_fixed_variants, define_vec_variants, gen_random_kv, gen_store_random_kv,
     make_fixed_value, make_var_value, open_keyless_db, open_store_db,
 };
+use commonware_bench::Inputs;
 use commonware_macros::boxed;
 use commonware_runtime::{
     Supervisor as _,
@@ -30,13 +31,12 @@ const CASES: [(u64, u64); 1] = [(NUM_ELEMENTS, NUM_OPERATIONS)];
 /// The full run also measures the store at the init bench's population size, where the log
 /// outgrows the page cache.
 fn store_cases() -> &'static [(u64, u64)] {
-    if commonware_bench::full() {
-        &[
+    match Inputs::current() {
+        Inputs::Full => &[
             (NUM_ELEMENTS, NUM_OPERATIONS),
             (NUM_ELEMENTS * 100, NUM_OPERATIONS * 100),
-        ]
-    } else {
-        &[(NUM_ELEMENTS, NUM_OPERATIONS)]
+        ],
+        _ => &[(NUM_ELEMENTS, NUM_OPERATIONS)],
     }
 }
 

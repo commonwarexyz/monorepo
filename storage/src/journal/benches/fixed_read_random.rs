@@ -1,4 +1,5 @@
 use crate::{append_fixed_random_data, get_fixed_journal};
+use commonware_bench::Inputs;
 use commonware_runtime::{
     Runner as _, Supervisor as _,
     benchmarks::{context, tokio},
@@ -25,10 +26,9 @@ const ITEM_SIZE: usize = 32;
 
 /// Number of items to write to the journal we will be reading from.
 fn items_to_write() -> u64 {
-    if commonware_bench::smoke() {
-        10_000
-    } else {
-        5_000_000
+    match Inputs::current() {
+        Inputs::Smoke => 10_000,
+        _ => 5_000_000,
     }
 }
 
@@ -92,10 +92,9 @@ fn bench_fixed_read_random(c: &mut Criterion) {
     let mut initialized = false;
     let runner = tokio::Runner::new(cfg.clone());
     for mode in ["serial", "concurrent", "read_many"] {
-        let reads: &[usize] = if commonware_bench::smoke() {
-            &[100]
-        } else {
-            &[100, 1_000, 10_000, 100_000]
+        let reads: &[usize] = match Inputs::current() {
+            Inputs::Smoke => &[100],
+            _ => &[100, 1_000, 10_000, 100_000],
         };
 
         for &items_to_read in reads {

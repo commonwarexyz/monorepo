@@ -19,27 +19,37 @@ commonware_macros::stability_scope!(ALPHA {
     /// Environment variable containing a JSONL file for custom benchmark metrics.
     pub const METRICS_PATH_ENV: &str = "COMMONWARE_BENCH_METRICS_PATH";
 
-    /// Environment variable that adds the large benchmark inputs when set to `1`.
-    pub const FULL_ENV: &str = "COMMONWARE_BENCH_FULL";
-
-    /// Returns whether [`FULL_ENV`] is set to `1`, so benchmarks add their large inputs.
-    pub fn full() -> bool {
-        static FULL: LazyLock<bool> =
-            LazyLock::new(|| std::env::var_os(FULL_ENV).is_some_and(|value| value == "1"));
-        *FULL
+    /// The inputs a benchmark runs with.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum Inputs {
+        /// The smallest inputs that still run every benchmark, used under `cargo test`, where
+        /// Criterion runs each benchmark once without measuring it.
+        Smoke,
+        /// The inputs `cargo bench` measures.
+        Standard,
+        /// The largest inputs, selected with `COMMONWARE_BENCH_FULL=1` (`just bench-full`).
+        Full,
     }
 
-    /// Returns whether the benchmarks run under `cargo test` instead of `cargo bench`.
-    ///
-    /// `cargo test` puts Criterion in test mode, where it runs each benchmark once without
-    /// measuring it, so benchmarks check this to set up their smallest inputs. Like Criterion, it
-    /// decides from the binary's arguments (`cargo bench` passes `--bench`), and it returns
-    /// `false` for `--list` so listings name the regular inputs. It also returns `false` when
-    /// [`full`] is set, so `cargo test` then runs the large inputs once.
-    pub fn smoke() -> bool {
-        static SMOKE: LazyLock<bool> =
-            LazyLock::new(|| !full() && criterion_test_mode(std::env::args_os().skip(1)));
-        *SMOKE
+    impl Inputs {
+        /// Returns the inputs for this benchmark run.
+        ///
+        /// [`Inputs::Full`] when `COMMONWARE_BENCH_FULL=1` is set. Otherwise [`Inputs::Smoke`]
+        /// under `cargo test` and [`Inputs::Standard`] under `cargo bench`. Like Criterion, it
+        /// decides from the binary's arguments (`cargo bench` passes `--bench`), and `--list`
+        /// gets [`Inputs::Standard`] so listings name the measured inputs.
+        pub fn current() -> Self {
+            static CURRENT: LazyLock<Inputs> = LazyLock::new(|| {
+                if std::env::var_os("COMMONWARE_BENCH_FULL").is_some_and(|value| value == "1") {
+                    Inputs::Full
+                } else if criterion_test_mode(std::env::args_os().skip(1)) {
+                    Inputs::Smoke
+                } else {
+                    Inputs::Standard
+                }
+            });
+            *CURRENT
+        }
     }
 
     /// Mirrors the mode selection in Criterion's `configure_from_args`, where arguments after

@@ -1,5 +1,6 @@
 //! Shared setup for the proof generation and verification benchmarks.
 
+use commonware_bench::Inputs;
 use commonware_cryptography::{Sha256, sha256};
 use commonware_math::algebra::Random as _;
 use commonware_storage::merkle::{
@@ -22,10 +23,9 @@ pub type SingleSample<F> = (Location<F>, sha256::Digest);
 pub type RangeSample<F> = (Range<Location<F>>, Vec<sha256::Digest>);
 
 pub fn n_leaves() -> &'static [usize] {
-    if commonware_bench::full() {
-        &[10_000, 100_000, 1_000_000, 5_000_000, 10_000_000]
-    } else {
-        &[10_000, 100_000]
+    match Inputs::current() {
+        Inputs::Full => &[10_000, 100_000, 1_000_000, 5_000_000, 10_000_000],
+        _ => &[10_000, 100_000],
     }
 }
 

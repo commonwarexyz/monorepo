@@ -1,3 +1,4 @@
+use commonware_bench::Inputs;
 use commonware_cryptography::{Sha256, sha256};
 use commonware_math::algebra::Random as _;
 use commonware_runtime::{
@@ -25,10 +26,9 @@ enum Mode {
 const THREADS: NonZeroUsize = NZUsize!(8);
 
 fn n_leaves() -> &'static [usize] {
-    if commonware_bench::full() {
-        &[100_000, 1_000_000, 5_000_000, 10_000_000]
-    } else {
-        &[100_000]
+    match Inputs::current() {
+        Inputs::Full => &[100_000, 1_000_000, 5_000_000, 10_000_000],
+        _ => &[100_000],
     }
 }
 

@@ -1,6 +1,7 @@
 //! Random key-lookup benchmark for Archive.
 
 use super::utils::{Archive, Key, Variant, append_random};
+use commonware_bench::Inputs;
 use commonware_runtime::{
     Runner,
     benchmarks::{context, tokio},
@@ -14,22 +15,18 @@ use std::{hint::black_box, time::Instant};
 
 /// Items pre-loaded into the archive.
 fn n_items() -> u64 {
-    if commonware_bench::smoke() {
-        1_000
-    } else if commonware_bench::full() {
-        250_000
-    } else {
-        10_000
+    match Inputs::current() {
+        Inputs::Smoke => 1_000,
+        Inputs::Standard => 10_000,
+        Inputs::Full => 250_000,
     }
 }
 
 fn n_reads() -> &'static [usize] {
-    if commonware_bench::smoke() {
-        &[100]
-    } else if commonware_bench::full() {
-        &[1_000, 10_000, 50_000]
-    } else {
-        &[1_000]
+    match Inputs::current() {
+        Inputs::Smoke => &[100],
+        Inputs::Standard => &[1_000],
+        Inputs::Full => &[1_000, 10_000, 50_000],
     }
 }
 

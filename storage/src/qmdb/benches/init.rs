@@ -7,6 +7,7 @@ use crate::common::{
     Digest, StoreDb, define_fixed_variants, define_vec_variants, gen_random_kv,
     gen_store_random_kv, make_fixed_value, make_var_value, open_store_db, store_cfg,
 };
+use commonware_bench::Inputs;
 use commonware_macros::boxed;
 use commonware_runtime::{
     Runner as _, Supervisor as _,
@@ -27,15 +28,13 @@ const COMMIT_FREQUENCY: u32 = 10_000;
 const CACHE_SIZES: [Option<NonZeroUsize>; 2] = [None, Some(NZUsize!(1 << 18))];
 
 fn cases() -> &'static [(u64, u64)] {
-    if commonware_bench::smoke() {
-        &[(1_000, 10_000)]
-    } else if commonware_bench::full() {
-        &[
+    match Inputs::current() {
+        Inputs::Smoke => &[(1_000, 10_000)],
+        Inputs::Standard => &[(NUM_ELEMENTS, NUM_OPERATIONS)],
+        Inputs::Full => &[
             (NUM_ELEMENTS, NUM_OPERATIONS),
             (NUM_ELEMENTS * 3, NUM_OPERATIONS * 3),
-        ]
-    } else {
-        &[(NUM_ELEMENTS, NUM_OPERATIONS)]
+        ],
     }
 }
 

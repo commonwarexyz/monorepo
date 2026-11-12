@@ -1,3 +1,4 @@
+use commonware_bench::Inputs;
 use commonware_storage::merkle::{Family, Location, Position};
 use commonware_utils::test_rng;
 use criterion::{Criterion, criterion_group};
@@ -9,10 +10,9 @@ use std::hint::black_box;
 const SAMPLES: usize = 4096;
 
 fn n_leaves() -> &'static [u64] {
-    if commonware_bench::full() {
-        &[1_000_000, 1_000_000_000_000, 1 << 62]
-    } else {
-        &[1_000_000, 1_000_000_000_000]
+    match Inputs::current() {
+        Inputs::Full => &[1_000_000, 1_000_000_000_000, 1 << 62],
+        _ => &[1_000_000, 1_000_000_000_000],
     }
 }
 

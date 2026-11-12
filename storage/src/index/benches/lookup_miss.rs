@@ -1,4 +1,5 @@
 use super::{Digest, DummyMetrics};
+use commonware_bench::Inputs;
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_storage::{
     index::{Unordered, unordered},
@@ -14,10 +15,9 @@ use std::{
 const N_LOOKUPS: usize = 10_000;
 
 fn n_items() -> &'static [usize] {
-    if commonware_bench::full() {
-        &[10_000, 50_000, 100_000, 500_000, 1_000_000]
-    } else {
-        &[10_000, 50_000]
+    match Inputs::current() {
+        Inputs::Full => &[10_000, 50_000, 100_000, 500_000, 1_000_000],
+        _ => &[10_000, 50_000],
     }
 }
 

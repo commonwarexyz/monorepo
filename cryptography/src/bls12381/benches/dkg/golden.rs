@@ -1,3 +1,4 @@
+use commonware_bench::Inputs;
 use commonware_codec::EncodeSize as _;
 use commonware_cryptography::bls12381::dkg::golden::{
     self, DealerLog, Info, PrivateKey, PublicKey, Setup, SignedDealerLog,
@@ -14,12 +15,10 @@ const BENCH_NAMESPACE: &[u8] = b"bench";
 // One dealer is enough: Golden DKG cost scales with the number of receivers,
 // not the number of dealers.
 fn receivers() -> &'static [u32] {
-    if commonware_bench::smoke() {
-        &[5]
-    } else if commonware_bench::full() {
-        &[5, 10, 15, 20, 25]
-    } else {
-        &[5, 10, 25]
+    match Inputs::current() {
+        Inputs::Smoke => &[5],
+        Inputs::Standard => &[5, 10, 25],
+        Inputs::Full => &[5, 10, 15, 20, 25],
     }
 }
 

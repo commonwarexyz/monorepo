@@ -1,3 +1,4 @@
+use commonware_bench::Inputs;
 use commonware_cryptography::{Sha256, sha256};
 use commonware_math::algebra::Random as _;
 use commonware_storage::merkle::{self, Bagging::ForwardFold, Family, mem::Mem};
@@ -8,10 +9,9 @@ use futures::executor::block_on;
 type StandardHasher<H> = merkle::hasher::Standard<H>;
 
 fn n_leaves() -> &'static [usize] {
-    if commonware_bench::full() {
-        &[10_000, 100_000, 1_000_000, 5_000_000, 10_000_000]
-    } else {
-        &[10_000, 100_000]
+    match Inputs::current() {
+        Inputs::Full => &[10_000, 100_000, 1_000_000, 5_000_000, 10_000_000],
+        _ => &[10_000, 100_000],
     }
 }
 

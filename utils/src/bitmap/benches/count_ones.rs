@@ -1,3 +1,4 @@
+use commonware_bench::Inputs;
 use commonware_utils::{TestRng, bitmap::BitMap};
 use criterion::{Criterion, criterion_group};
 use rand::RngExt as _;
@@ -18,10 +19,9 @@ fn bench_count_ones<const CHUNK_SIZE: usize>(c: &mut Criterion, size: u64) {
 }
 
 fn benchmark_count_ones(c: &mut Criterion) {
-    let sizes: &[u64] = if commonware_bench::smoke() {
-        &[64, 1 << 10]
-    } else {
-        &[64, 1 << 10, 1 << 14, 1 << 18, 1 << 22, 1 << 28]
+    let sizes: &[u64] = match Inputs::current() {
+        Inputs::Smoke => &[64, 1 << 10],
+        _ => &[64, 1 << 10, 1 << 14, 1 << 18, 1 << 22, 1 << 28],
     };
 
     for &size in sizes {

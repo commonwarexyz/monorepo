@@ -17,6 +17,7 @@
 //! are sorted before the call, as a caller iterating sorted keys passes them.
 
 use commonware_allocator::mimalloc;
+use commonware_bench::Inputs;
 use commonware_runtime::{
     Metrics, Name, Supervisor,
     telemetry::metrics::{Metric, Registered},
@@ -160,7 +161,7 @@ fn main() {
         .collect();
     let sizes = if !args.is_empty() {
         args
-    } else if commonware_bench::full() {
+    } else if Inputs::current() == Inputs::Full {
         DEFAULT_ITEMS.to_vec()
     } else {
         eprintln!(
