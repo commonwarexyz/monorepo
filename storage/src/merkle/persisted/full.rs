@@ -189,8 +189,8 @@ pub(crate) enum Retain<F: Family> {
     All,
     /// At most this many leaves. The persisted pruning boundary must not exceed it.
     AtMost(Location<F>),
-    /// No leaf. The caller's leaf source holds no item the persisted structure describes, so
-    /// the persisted pruning boundary and pins are cleared first.
+    /// No leaf. The caller keeps no item of its leaf source, so the persisted pruning boundary
+    /// and pins are cleared first.
     Nothing,
 }
 

@@ -902,8 +902,10 @@ where
 
     /// Recover a journal whose last matching item ends at or below `max_size`.
     ///
-    /// Initialization durably discards the suffix before returning. A cap below retained
-    /// history, or pruned history with no matching retained item, returns a pruning error.
+    /// Initialization durably discards the suffix before returning. When the journal retains
+    /// its first item and no item matches at or below `max_size`, it is emptied together with
+    /// its Merkle structure, whatever that structure retained. A cap below retained history, or
+    /// pruned history with no matching retained item, returns a pruning error.
     #[boxed]
     pub async fn init_at_most(
         context: E,
@@ -950,10 +952,10 @@ where
         };
 
         // Recover Merkle at the selected operation end and require it to cover retained
-        // operations. A journal that is empty at position zero leaves the Merkle structure
-        // nothing to authenticate, so Merkle state beside it is discarded.
+        // operations. A selection that is empty at position zero leaves the Merkle structure
+        // nothing to authenticate, so Merkle state beside it is discarded, whatever it retained.
         let hasher = StandardHasher::<H>::new(bagging);
-        let retain = if bounds == (0..0) {
+        let retain = if bounds.start == 0 && selected_end == 0 {
             Retain::Nothing
         } else {
             Retain::AtMost(Location::new(selected_end))
@@ -4682,5 +4684,76 @@ mod tests {
             mmb::Family,
             VariableJournal<Context, TestOp<mmb::Family>>,
         >(cfg, &partitions);
+    }
+
+    /// A bounded open that selects no item empties the journal. An empty Merkle structure needs
+    /// none of the nodes pruning removed, so the open succeeds beside a pruned structure. A cap
+    /// that selects a commit below the structure's pruning boundary still fails and changes
+    /// nothing.
+    #[test_traced]
+    fn test_init_at_most_without_match_empties_journal_beside_pruned_merkle() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let fresh =
+                create_empty_journal::<mmr::Family>(context.child("fresh"), "no-match-fresh").await;
+            let fresh_root = fresh.root(0).unwrap();
+            fresh.destroy().await.unwrap();
+            let open_at_most = |context: Context, suffix: &'static str, max_size: u64| {
+                TestJournal::<mmr::Family>::init_at_most(
+                    context,
+                    merkle_config(suffix),
+                    journal_config(suffix),
+                    max_size,
+                    |op: &TestOp<mmr::Family>| op.is_commit(),
+                    ForwardFold,
+                )
+            };
+
+            for (suffix, max_size) in [("no-match-one", 1), ("no-match-zero", 0)] {
+                // Commit twice to a log that starts at zero, then prune the Merkle structure
+                // above the log's start, as a state sync that starts inside the first log
+                // section does.
+                let mut journal =
+                    create_empty_journal::<mmr::Family>(context.child("first"), suffix).await;
+                for i in 0..6u8 {
+                    let op = match i {
+                        1 | 5 => TestOp::<mmr::Family>::Commit(None, Location::new(0)),
+                        _ => create_operation::<mmr::Family>(i),
+                    };
+                    (journal, _) = journal.append(&op).await.unwrap();
+                }
+                journal = journal.sync().await.unwrap();
+                journal.merkle = journal.merkle.prune(Location::new(4)).await.unwrap();
+                journal = journal.sync().await.unwrap();
+                let bounds = journal.bounds();
+                let root = journal.root(0).unwrap();
+                drop(journal);
+
+                // The first commit ends at two, below the structure's pruning boundary.
+                assert!(matches!(
+                    open_at_most(context.child("below_boundary"), suffix, 3).await,
+                    Err(Error::Merkle(merkle::Error::ElementPruned(_)))
+                ));
+                let journal =
+                    create_empty_journal::<mmr::Family>(context.child("unchanged"), suffix).await;
+                assert_eq!(journal.bounds(), bounds);
+                assert_eq!(journal.root(0).unwrap(), root);
+                drop(journal);
+
+                // No commit ends at or below the cap, so the journal and the structure are
+                // emptied.
+                let journal = open_at_most(context.child("no_match"), suffix, max_size)
+                    .await
+                    .expect("a bounded open that selects no item must succeed");
+                assert_eq!(journal.bounds(), 0..0);
+                assert_eq!(journal.root(0).unwrap(), fresh_root);
+                drop(journal);
+                let journal =
+                    create_empty_journal::<mmr::Family>(context.child("reopened"), suffix).await;
+                assert_eq!(journal.bounds(), 0..0);
+                assert_eq!(journal.root(0).unwrap(), fresh_root);
+                journal.destroy().await.unwrap();
+            }
+        });
     }
 }
