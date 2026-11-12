@@ -35,6 +35,12 @@ pub(super) struct CertificateWaiter<S: Scheme, D: commonware_cryptography::Diges
     reply: Reply<Option<Arc<Lqc<S, D>>>>,
 }
 
+/// A progress subscription waiting for progress to differ from `since`.
+pub(super) struct ProgressWaiter<D: commonware_cryptography::Digest> {
+    since: MarshalProgress<D>,
+    reply: Reply<MarshalProgress<D>>,
+}
+
 impl<E, H, S, B, P, R, V, A> Ledger<E, H, S, B, P, R, V, A>
 where
     E: Context + Spawner,
@@ -136,21 +142,52 @@ where
             Message::Install { floor, reply } => self.install_floor(floor, reply),
             Message::Prune { below, reply } => self.prune(below, reply),
             Message::Progress { reply } => {
-                let durable = self.meta.durable();
-                let _ = reply.send(Ok(MarshalProgress {
-                    floor: durable.floor,
-                    proven: OutputIndex::new(self.order.cut().index()),
-                    delivered: OutputIndex::new(
-                        self.delivered
-                            .iter()
-                            .map(|block| block.height().get())
-                            .sum(),
-                    ),
-                    acknowledged: OutputIndex::new(durable.ack.index()),
-                }));
+                let _ = reply.send(Ok(self.progress()));
+            }
+            Message::SubscribeProgress { since, reply } => {
+                let progress = self.progress();
+                if progress != since {
+                    let _ = reply.send(Ok(progress));
+                } else {
+                    self.progress_waiters.push(ProgressWaiter { since, reply });
+                }
             }
         }
         Ok(())
+    }
+
+    /// Returns marshal's progress.
+    fn progress(&self) -> MarshalProgress<H::Digest> {
+        let durable = self.meta.durable();
+        MarshalProgress {
+            floor: durable.floor,
+            proven: OutputIndex::new(self.order.cut().index()),
+            delivered: OutputIndex::new(
+                self.delivered
+                    .iter()
+                    .map(|block| block.height().get())
+                    .sum(),
+            ),
+            acknowledged: OutputIndex::new(durable.ack.index()),
+        }
+    }
+
+    /// Answers progress subscriptions whose progress has changed.
+    pub(super) fn drive_progress(&mut self) {
+        if self.progress_waiters.is_empty() {
+            return;
+        }
+        let progress = self.progress();
+        for waiter in std::mem::take(&mut self.progress_waiters) {
+            if waiter.reply.is_closed() {
+                continue;
+            }
+            if waiter.since == progress {
+                self.progress_waiters.push(waiter);
+            } else {
+                let _ = waiter.reply.send(Ok(progress));
+            }
+        }
     }
 
     /// Answers with the exact block when it is held or, with `fetch`, once peers supply it.

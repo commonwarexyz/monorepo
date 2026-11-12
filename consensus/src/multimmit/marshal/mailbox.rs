@@ -23,8 +23,9 @@ use std::{num::NonZeroUsize, sync::Arc};
 
 /// The handle to a running marshal: requests, and the reporter consensus feeds.
 ///
-/// Staging ([`Mailbox::stage_block`]) and subscriptions ([`Mailbox::subscribe_block`]) wait for
-/// room when marshal's queue is full; other requests fail with [`Error::Busy`] instead.
+/// Staging ([`Mailbox::stage_block`]) and subscriptions ([`Mailbox::subscribe_block`],
+/// [`Mailbox::subscribe_progress`]) wait for room when marshal's queue is full; other requests
+/// fail with [`Error::Busy`] instead.
 pub struct Mailbox<H: Hasher, S: Scheme, B: Body<H>> {
     sender: mpsc::Sender<Message<H, S, B>>,
     lane: Arc<Lane<S, H::Digest>>,
@@ -215,6 +216,16 @@ impl<H: Hasher, S: Scheme, B: Body<H>> Mailbox<H, S, B> {
     /// Returns marshal's progress.
     pub async fn progress(&self) -> Result<MarshalProgress<H::Digest>, Error> {
         self.request(|reply| Message::Progress { reply }).await
+    }
+
+    /// Returns marshal's progress once it differs from `since`. Dropping the future stops
+    /// waiting.
+    pub async fn subscribe_progress(
+        &self,
+        since: MarshalProgress<H::Digest>,
+    ) -> Result<MarshalProgress<H::Digest>, Error> {
+        self.request_waiting(|reply| Message::SubscribeProgress { since, reply })
+            .await
     }
 }
 

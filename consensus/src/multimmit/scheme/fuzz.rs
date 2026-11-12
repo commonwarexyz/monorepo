@@ -312,11 +312,11 @@ fn campaign<S: Fixture>(committee: &Committee<S>, input: &[u8]) {
         .unwrap();
         let artifacts = [
             &Artifact::Vqc(vqc.clone()),
-            &Artifact::Lqc(lqc.clone()),
-            &Artifact::Vqc(forged_vqc.clone()),
-            &Artifact::Lqc(forged_lqc.clone()),
-            &Artifact::Vqc(context_vqc.clone()),
-            &Artifact::Lqc(context_lqc.clone()),
+            &Artifact::Lqc(lqc),
+            &Artifact::Vqc(forged_vqc),
+            &Artifact::Lqc(forged_lqc),
+            &Artifact::Vqc(context_vqc),
+            &Artifact::Lqc(context_lqc),
         ];
         let expected = [true, true, false, false, false, false];
         assert_eq!(
@@ -329,7 +329,7 @@ fn campaign<S: Fixture>(committee: &Committee<S>, input: &[u8]) {
             expected
         );
 
-        let mut authenticated = messages.clone();
+        let mut authenticated = messages;
         authenticated.extend(votes.into_iter().map(ViewMessage::Vote));
         authenticated.extend(previous.iter().cloned());
         for message in &authenticated {

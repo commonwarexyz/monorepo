@@ -247,9 +247,8 @@ where
 
     /// Fetches `head` and its ancestors down to `low` from peers.
     pub(super) fn fetch_range(&mut self, head: BlockRef<H::Digest>, low: Height) {
-        let per_response = (self.limits.max_response_bytes.get()
-            / self.limits.max_block_bytes.get())
-        .clamp(1, usize::from(MAX_BLOCKS)) as u64;
+        let per_response = (self.limits.max_response_bytes.get() / self.limits.max_block_bytes)
+            .clamp(1, usize::from(MAX_BLOCKS)) as u64;
         let span = head.height().get().saturating_sub(low.get()) + 1;
         let len = NonZeroU16::new(span.min(per_response) as u16).expect("at least one block");
         let reserve = u64::from(len.get()) * self.limits.max_block_bytes.get() as u64;
