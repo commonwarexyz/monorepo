@@ -1269,6 +1269,12 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         true
     }
 
+    /// Returns true when the in-flight verification for `view` no longer
+    /// describes the proposal and parent we hold, discarding the stale binding.
+    pub fn verification_superseded(&mut self, view: View) -> bool {
+        self.verification_is_stale(view)
+    }
+
     /// Marks proposal verification as complete when the peer payload validates.
     pub fn verified(&mut self, view: View) -> bool {
         if self.verification_is_stale(view) {

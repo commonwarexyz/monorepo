@@ -527,10 +527,12 @@ impl<
                 *pending_propose = None;
             }
         }
-        if pending_verify
-            .as_ref()
-            .is_some_and(|request| request.view() < current_view)
-        {
+        // Also drop a request whose proposal or parent was replaced in its
+        // view (such as by a conflicting notarization): its verdict would be
+        // discarded, and keeping it lets an equivocating leader hold the slot.
+        if pending_verify.as_ref().is_some_and(|request| {
+            request.view() < current_view || self.state.verification_superseded(request.view())
+        }) {
             *pending_verify = None;
         }
 
