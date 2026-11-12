@@ -108,8 +108,8 @@ pub(crate) trait CompactSyncTestHarness: Sized + 'static {
     fn sync(db: Self::Db) -> impl Future<Output = Self::Db> + Send;
     /// Commits the applied batches of `full`.
     fn commit_full(full: Self::Full) -> impl Future<Output = Self::Full> + Send;
-    /// Drops the witnesses of commits with fewer than `loc` operations. Fails while a
-    /// compact sync import has not been applied.
+    /// Drops the witnesses of commits with fewer than `loc` operations. A pending compact-sync
+    /// import is journaled first.
     fn prune(
         db: Self::Db,
         loc: Location<Self::Family>,
@@ -122,7 +122,7 @@ pub(crate) trait CompactSyncTestHarness: Sized + 'static {
     /// Returns the number of operations in `db`, commits included.
     fn size(db: &Self::Db) -> Location<Self::Family>;
     /// Returns the inactivity floor declared by the last commit in `db`.
-    fn inactivity_floor_loc(db: &Self::Db) -> Location<Self::Family>;
+    fn inactivity_floor(db: &Self::Db) -> Location<Self::Family>;
     /// Returns the metadata carried by the last commit in `db`.
     fn metadata(db: &Self::Db) -> Option<Self::Value>;
     /// Returns the current root of `full`.
@@ -189,14 +189,14 @@ pub(crate) fn test_compact_sync_roundtrip<H: CompactSyncTestHarness>() {
 
         assert_eq!(H::root(&client), target.root);
         assert_eq!(H::metadata(&client), Some(metadata.clone()));
-        assert_eq!(H::inactivity_floor_loc(&client), floor);
+        assert_eq!(H::inactivity_floor(&client), floor);
         drop(client);
 
         // The synced witness is durable, so a reopen recovers the same state.
         let reopened = H::init(context.child("reopen"), client_cfg, None).await;
         assert_eq!(H::root(&reopened), target.root);
         assert_eq!(H::metadata(&reopened), Some(metadata));
-        assert_eq!(H::inactivity_floor_loc(&reopened), floor);
+        assert_eq!(H::inactivity_floor(&reopened), floor);
 
         H::destroy(reopened).await;
         let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
@@ -451,7 +451,7 @@ pub(crate) fn test_compact_source_serves_retained_target<H: CompactSyncTestHarne
         // Apply two commits, recording the target after each.
         let mut targets = Vec::new();
         for i in 1u8..=2 {
-            let floor = H::inactivity_floor_loc(&source);
+            let floor = H::inactivity_floor(&source);
             source = H::apply(source, &[H::value(i)], Some(H::value(i)), floor).await;
             source = H::sync(source).await;
             targets.push(H::target(&source));
@@ -526,7 +526,7 @@ pub(crate) fn test_compact_source_reopen_bounded_initialization_regrow_and_stale
         .unwrap();
         assert_eq!(H::root(&served1), target1.root);
         assert_eq!(H::metadata(&served1), Some(metadata1.clone()));
-        assert_eq!(H::inactivity_floor_loc(&served1), floor1);
+        assert_eq!(H::inactivity_floor(&served1), floor1);
         H::destroy(served1).await;
 
         // Grow the source to target2, the history the bounded reopen discards.
@@ -559,7 +559,7 @@ pub(crate) fn test_compact_source_reopen_bounded_initialization_regrow_and_stale
         .unwrap();
         assert_eq!(H::root(&served2), target1.root);
         assert_eq!(H::metadata(&served2), Some(metadata1.clone()));
-        assert_eq!(H::inactivity_floor_loc(&served2), floor1);
+        assert_eq!(H::inactivity_floor(&served2), floor1);
         H::destroy(served2).await;
 
         // The rewind persists across an unbounded reopen, and a new commit regrows the source to
@@ -585,7 +585,7 @@ pub(crate) fn test_compact_source_reopen_bounded_initialization_regrow_and_stale
         .unwrap();
         assert_eq!(H::root(&served3), target3.root);
         assert_eq!(H::metadata(&served3), Some(metadata3.clone()));
-        assert_eq!(H::inactivity_floor_loc(&served3), floor3);
+        assert_eq!(H::inactivity_floor(&served3), floor3);
         H::destroy(served3).await;
 
         let source =
@@ -634,7 +634,7 @@ pub(crate) fn test_compact_sync_reuses_pruned_partition<H: CompactSyncTestHarnes
         let client_cfg = H::with_witness_items_per_section(H::config(&suffix), NZU64!(1));
         let mut seeded = H::init(context.child("seed"), client_cfg.clone(), None).await;
         for i in 1u8..=3 {
-            let floor = H::inactivity_floor_loc(&seeded);
+            let floor = H::inactivity_floor(&seeded);
             seeded = H::apply(seeded, &[H::value(i)], Some(H::value(i)), floor).await;
             seeded = H::sync(seeded).await;
         }
@@ -725,28 +725,7 @@ pub(crate) fn test_compact_sync_dropped_import_preserves_existing_state<
         // Drop the unpersisted import. It must not replace the previous durable witness.
         drop(imported);
 
-        // Pruning requires a persisted import, so rebuild the pending import to check rejection.
-        let response = fetch_compact_state(&source, target_b.clone())
-            .await
-            .unwrap();
-        let sync::Response::Boundary {
-            op, pinned_nodes, ..
-        } = response
-        else {
-            unreachable!("boundary fetch returns a boundary response");
-        };
-        let imported = H::import(
-            context.child("import").with_attribute("index", 2),
-            &client_cfg,
-            target_b.size - 1,
-            pinned_nodes,
-            op,
-        )
-        .await
-        .unwrap();
-        assert!(H::prune(imported, target_b.size).await.is_err());
-
-        // The dropped imports never touched the journal: state A is still there.
+        // The dropped import never touched the journal: state A is still there.
         let reopened = H::init(context.child("reopen"), client_cfg, None).await;
         assert_eq!(H::target(&reopened), target_a);
         H::destroy(reopened).await;
@@ -822,7 +801,7 @@ pub(crate) fn test_compact_serve_refuses_previous_contents_while_import_pending<
         };
         assert!(proof.verify_with_pinned_nodes::<Sha256, _>(
             target.size - 1,
-            std::slice::from_ref(&op),
+            [&op],
             &pinned_nodes,
             &target.root,
         ));

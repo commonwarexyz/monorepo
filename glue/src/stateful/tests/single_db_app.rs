@@ -52,10 +52,7 @@ use commonware_storage::{
     archive::prunable,
     journal::contiguous::fixed::Config as FixedLogConfig,
     mmr::{self, Location, full::Config as MmrJournalConfig},
-    qmdb::{
-        any::{FixedConfig, unordered::fixed},
-        sync::Target,
-    },
+    qmdb::{any::unordered::fixed, sync::Target},
     translator::TwoCap,
 };
 use commonware_utils::{
@@ -71,9 +68,9 @@ pub(super) type Qmdb<E> =
 pub(crate) type SingleDatabaseSet<E> = Shared<Qmdb<E>>;
 
 /// Builds the QMDB configuration used by single-database tests.
-pub(super) fn qmdb_config(prefix: &str, page_cache: CacheRef) -> FixedConfig<TwoCap, Sequential> {
-    FixedConfig {
-        merkle_config: MmrJournalConfig {
+pub(super) fn qmdb_config(prefix: &str, page_cache: CacheRef) -> fixed::Config<TwoCap, Sequential> {
+    fixed::Config {
+        merkle: MmrJournalConfig {
             journal_partition: format!("{prefix}-qmdb-mmr-journal"),
             metadata_partition: format!("{prefix}-qmdb-mmr-metadata"),
             items_per_blob: NZU64!(11),
@@ -82,7 +79,7 @@ pub(super) fn qmdb_config(prefix: &str, page_cache: CacheRef) -> FixedConfig<Two
             strategy: Sequential,
             page_cache: page_cache.clone(),
         },
-        journal_config: FixedLogConfig {
+        log: FixedLogConfig {
             partition: format!("{prefix}-qmdb-log-journal"),
             items_per_blob: NZU64!(7),
             page_cache,
@@ -290,7 +287,10 @@ impl<E: Spawner + StorageContext> Application<E> for App {
     }
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
-        Target::new(block.state_root, block.range.clone())
+        Target {
+            root: block.state_root,
+            range: block.range.clone(),
+        }
     }
 }
 
@@ -370,7 +370,7 @@ impl EngineDefinition for SingleDbEngine {
             SYNC_BATCH_SIZE,
             fixed::Operation::<mmr::Family, sha256::Digest, sha256::Digest>::SIZE,
         );
-        max_message_size(&[
+        max_message_size([
             simplex::max_payload_size::<MockScheme<ed25519::PublicKey>, sha256::Digest>(
                 participants,
             ),

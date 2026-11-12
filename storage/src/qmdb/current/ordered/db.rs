@@ -11,11 +11,9 @@ use crate::{
     merkle::{self, Location},
     qmdb::{
         Error,
-        any::{
-            ValueEncoding,
-            ordered::{Operation, Update},
-        },
+        any::ordered::{Operation, Update},
         operation::Key,
+        value::ValueEncoding,
     },
 };
 use commonware_codec::Codec;
@@ -29,7 +27,7 @@ use futures::stream::Stream;
 /// This type is generic over the index type `I`, allowing it to be used with both regular
 /// and partitioned indices.
 pub type Db<F, E, C, K, V, I, H, const N: usize, S> =
-    crate::qmdb::current::db::Db<F, E, C, I, H, Update<K, V>, N, S>;
+    crate::qmdb::current::Db<F, E, C, I, H, Update<K, V>, N, S>;
 
 // Shared read-only functionality.
 impl<
@@ -64,6 +62,12 @@ where
     /// The query key need not be active. This lookup does not wrap around to the last key.
     pub async fn get_prev_key(&self, key: &K) -> Result<Option<K>, Error<F>> {
         self.any.get_prev_key(key).await
+    }
+
+    /// Returns the value of `key` and the next active key, wrapping from the last key to the first,
+    /// or `None` if `key` is not active.
+    pub async fn get_with_next_key(&self, key: &K) -> Result<Option<(V::Value, K)>, Error<F>> {
+        self.any.get_with_next_key(key).await
     }
 
     /// Streams active (key, value) pairs in ascending key order within `range`.
@@ -141,13 +145,13 @@ where
                 Ok(ExclusionProof::KeyValue(op_proof, key_data))
             }
             None => {
-                // The DB is empty. Use the last CommitFloor to prove emptiness. The Commit proof
-                // variant requires the CommitFloor's floor to equal its own location (genuinely
+                // The DB is empty. Use the last Commit to prove emptiness. The Commit proof
+                // variant requires the Commit's floor to equal its own location (genuinely
                 // empty at commit time). If this doesn't hold, the persisted state is inconsistent.
                 let last_commit_loc = self.any.log.size() - 1;
                 let op = self.any.log.read(*last_commit_loc).await?;
-                let Operation::CommitFloor(value, floor) = op else {
-                    unreachable!("last_commit_loc should always point to a CommitFloor");
+                let Operation::Commit(value, floor) = op else {
+                    unreachable!("last_commit_loc should always point to a Commit");
                 };
                 assert_eq!(
                     floor, last_commit_loc,

@@ -155,11 +155,11 @@ fn variable_log_config<C>(suffix: &str, page_cache: CacheRef, codec_config: C) -
     }
 }
 
-fn any_fixed_config(suffix: &str) -> any::FixedConfig<OneCap, Sequential> {
+fn any_fixed_config(suffix: &str) -> any::Config<OneCap, FConfig, Sequential> {
     let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     any::Config {
-        merkle_config: merkle_config(suffix, &pc),
-        journal_config: fixed_log_config(suffix, pc),
+        merkle: merkle_config(suffix, &pc),
+        log: fixed_log_config(suffix, pc),
         translator: OneCap,
         init_cache: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(1 << 21),
@@ -167,11 +167,11 @@ fn any_fixed_config(suffix: &str) -> any::FixedConfig<OneCap, Sequential> {
     }
 }
 
-fn any_variable_config(suffix: &str) -> any::VariableConfig<OneCap, ((), ()), Sequential> {
+fn any_variable_config(suffix: &str) -> any::Config<OneCap, VConfig<((), ())>, Sequential> {
     let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     any::Config {
-        merkle_config: merkle_config(suffix, &pc),
-        journal_config: variable_log_config(suffix, pc, ((), ())),
+        merkle: merkle_config(suffix, &pc),
+        log: variable_log_config(suffix, pc, ((), ())),
         translator: OneCap,
         init_cache: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(1 << 21),
@@ -179,11 +179,11 @@ fn any_variable_config(suffix: &str) -> any::VariableConfig<OneCap, ((), ()), Se
     }
 }
 
-fn current_fixed_config(suffix: &str) -> current::FixedConfig<OneCap, Sequential> {
+fn current_fixed_config(suffix: &str) -> current::Config<OneCap, FConfig, Sequential> {
     let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     current::Config {
-        merkle_config: merkle_config(suffix, &pc),
-        journal_config: fixed_log_config(suffix, pc),
+        merkle: merkle_config(suffix, &pc),
+        log: fixed_log_config(suffix, pc),
         grafted_metadata_partition: format!("{suffix}-graft"),
         translator: OneCap,
         init_cache: Some(NZUsize!(1024)),
@@ -192,11 +192,11 @@ fn current_fixed_config(suffix: &str) -> current::FixedConfig<OneCap, Sequential
     }
 }
 
-fn current_variable_config(suffix: &str) -> current::VariableConfig<OneCap, ((), ()), Sequential> {
+fn current_variable_config(suffix: &str) -> current::Config<OneCap, VConfig<((), ())>, Sequential> {
     let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     current::Config {
-        merkle_config: merkle_config(suffix, &pc),
-        journal_config: variable_log_config(suffix, pc, ((), ())),
+        merkle: merkle_config(suffix, &pc),
+        log: variable_log_config(suffix, pc, ((), ())),
         grafted_metadata_partition: format!("{suffix}-graft"),
         translator: OneCap,
         init_cache: Some(NZUsize!(1024)),
@@ -208,7 +208,7 @@ fn current_variable_config(suffix: &str) -> current::VariableConfig<OneCap, ((),
 fn immutable_fixed_config(suffix: &str) -> immutable::fixed::Config<TwoCap, Sequential> {
     let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     immutable::Config {
-        merkle_config: merkle_config(suffix, &pc),
+        merkle: merkle_config(suffix, &pc),
         log: fixed_log_config(suffix, pc),
         translator: TwoCap,
         init_buffer: NZUsize!(1 << 21),
@@ -220,19 +220,22 @@ fn immutable_variable_config(
 ) -> immutable::variable::Config<TwoCap, ((), ()), Sequential> {
     let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     immutable::Config {
-        merkle_config: merkle_config(suffix, &pc),
+        merkle: merkle_config(suffix, &pc),
         log: variable_log_config(suffix, pc, ((), ())),
         translator: TwoCap,
         init_buffer: NZUsize!(1 << 21),
     }
 }
 
-fn compact_witness_config(suffix: &str) -> crate::journal::contiguous::variable::Config<()> {
+fn compact_witness_config<C>(
+    suffix: &str,
+    codec_config: C,
+) -> crate::journal::contiguous::variable::Config<C> {
     crate::journal::contiguous::variable::Config {
         partition: format!("{suffix}-compact-witness"),
         items_per_section: NZU64!(64),
         compression: None,
-        codec_config: (),
+        codec_config,
         page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         write_buffer: NZUsize!(1024),
         replay_buffer: NZUsize!(1024),
@@ -242,8 +245,7 @@ fn compact_witness_config(suffix: &str) -> crate::journal::contiguous::variable:
 fn immutable_fixed_compact_config(suffix: &str) -> immutable::fixed::CompactConfig<Sequential> {
     immutable::CompactConfig {
         strategy: Sequential,
-        witness: compact_witness_config(suffix),
-        commit_codec_config: (),
+        witness: compact_witness_config(suffix, ()),
     }
 }
 
@@ -252,8 +254,7 @@ fn immutable_variable_compact_config(
 ) -> immutable::variable::CompactConfig<((), ()), Sequential> {
     immutable::CompactConfig {
         strategy: Sequential,
-        witness: compact_witness_config(suffix),
-        commit_codec_config: ((), ()),
+        witness: compact_witness_config(suffix, ((), ())),
     }
 }
 
@@ -273,7 +274,7 @@ fn colliding_digest(prefix: u8, suffix: u64) -> Digest {
 }
 
 /// Apply a batch of keyed writes (creates, updates, or deletes) to the database.
-async fn apply_writes<F: Family, D: DbAny<F, Key = Digest, Value = Digest>>(
+async fn apply_writes<F: Family, D: DbAny<Family = F, Key = Digest, Value = Digest>>(
     db: D,
     writes: Vec<(Digest, Option<Digest>)>,
 ) -> D {
@@ -336,8 +337,7 @@ mod tests {
     fn keyless_fixed_compact_config(suffix: &str) -> keyless::fixed::CompactConfig<Sequential> {
         keyless::CompactConfig {
             strategy: Sequential,
-            witness: compact_witness_config(suffix),
-            commit_codec_config: (),
+            witness: compact_witness_config(suffix, ()),
         }
     }
 
@@ -346,16 +346,15 @@ mod tests {
     ) -> keyless::variable::CompactConfig<(commonware_codec::RangeCfg<usize>, ()), Sequential> {
         keyless::CompactConfig {
             strategy: Sequential,
-            witness: compact_witness_config(suffix),
-            commit_codec_config: ((0..=10000usize).into(), ()),
+            witness: compact_witness_config(suffix, ((0..=10000usize).into(), ())),
         }
     }
 
-    type Store = store::db::Db<Ctx, Digest, Digest, OneCap>;
+    type Store = store::Db<Ctx, Digest, Digest, OneCap>;
 
-    fn store_config(suffix: &str) -> store::db::Config<OneCap, ((), ())> {
+    fn store_config(suffix: &str) -> store::Config<OneCap, ((), ())> {
         let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
-        store::db::Config {
+        store::Config {
             log: variable_log_config(suffix, pc, ((), ())),
             translator: OneCap,
             init_cache: Some(NZUsize!(1024)),
@@ -372,7 +371,7 @@ mod tests {
     /// Apply a batch of immutable sets to the database.
     macro_rules! apply_sets {
         ($db:ident, $ops:expr) => {{
-            let floor = $db.inactivity_floor_loc();
+            let floor = $db.inactivity_floor();
             let mut batch = $db.new_batch();
             for (k, v) in $ops {
                 batch = batch.set(k, v);
@@ -389,7 +388,7 @@ mod tests {
     /// Apply a batch of keyless appends to the database.
     macro_rules! apply_appends {
         ($db:ident, $vals:expr) => {{
-            let floor = $db.inactivity_floor_loc();
+            let floor = $db.inactivity_floor();
             let mut batch = $db.new_batch();
             for v in $vals {
                 batch = batch.append(v);
@@ -460,7 +459,7 @@ mod tests {
     }
 
     /// Apply [`keyed_batches`] for `seed` to `db` and return its root.
-    async fn keyed_root<F: Family, D: DbAny<F, Key = Digest, Value = Digest>>(
+    async fn keyed_root<F: Family, D: DbAny<Family = F, Key = Digest, Value = Digest>>(
         mut db: D,
         seed: u64,
     ) -> (D, Vec<u8>) {
@@ -482,7 +481,7 @@ mod tests {
             let mut db = Store::init(context.child("db"), cfg, None).await?;
             for writes in keyed_batches(seed) {
                 let batch = writes.into_iter().collect();
-                db = db.apply_batch(batch, &mut Proportional).await?;
+                db = db.apply_batch(batch).await?;
             }
             db.sync().await?;
             Ok(())
@@ -782,7 +781,7 @@ mod tests {
     ) -> (D, Vec<u8>)
     where
         F: Family,
-        D: DbAny<F, Key = Digest, Value = Digest>,
+        D: DbAny<Family = F, Key = Digest, Value = Digest>,
         P: Policy<F, Digest, Digest> + Send,
     {
         for (writes, rule) in floor_batches(seed) {
@@ -877,7 +876,7 @@ mod tests {
             let mut db = Store::init(context.child("db"), cfg, None).await?;
             for (writes, mut rule) in floor_batches(seed) {
                 let batch = writes.into_iter().collect();
-                db = db.apply_batch(batch, &mut rule).await?;
+                db = db.apply_batch_with(batch, &mut rule).await?;
             }
             db.sync().await?;
             Ok(())
@@ -1579,7 +1578,7 @@ mod tests {
 // Each test creates two databases (`fwd` and `rev`) and applies the same set of
 // operations in forward and reverse order, then asserts the roots are equal.
 
-async fn apply_both_orders<F: Family, D: DbAny<F, Key = Digest, Value = Digest>>(
+async fn apply_both_orders<F: Family, D: DbAny<Family = F, Key = Digest, Value = Digest>>(
     fwd: D,
     rev: D,
     ops: Vec<(Digest, Option<Digest>)>,
@@ -1594,7 +1593,10 @@ async fn apply_both_orders<F: Family, D: DbAny<F, Key = Digest, Value = Digest>>
 }
 
 #[boxed]
-async fn assert_keyed_order_independent<F: Family, D: DbAny<F, Key = Digest, Value = Digest>>(
+async fn assert_keyed_order_independent<
+    F: Family,
+    D: DbAny<Family = F, Key = Digest, Value = Digest>,
+>(
     fwd: D,
     rev: D,
 ) -> (D, D) {

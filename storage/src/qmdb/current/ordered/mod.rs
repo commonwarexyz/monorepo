@@ -9,16 +9,12 @@
 //! - [fixed]: Variant optimized for values of fixed size.
 //! - [variable]: Variant for values of variable size.
 
-pub mod db;
+pub(crate) mod db;
 pub mod fixed;
 pub mod proof;
 pub mod variable;
 
-/// Wire tag for [proof::constant::ExclusionProof::KeyValue].
-pub const KEY_VALUE_CONTEXT: u8 = 0;
-
-/// Wire tag for [proof::constant::ExclusionProof::Commit].
-pub const COMMIT_CONTEXT: u8 = 1;
+pub use crate::qmdb::any::ordered::{Operation, Update};
 
 #[cfg(test)]
 pub mod tests {
@@ -36,10 +32,8 @@ pub mod tests {
         qmdb::{
             Error,
             any::{
-                ValueEncoding,
                 ordered::{Operation, Update},
                 traits::{DbAny, UnmerkleizedBatch as _},
-                value::{FixedEncoding, VariableEncoding},
             },
             current::{
                 BitmapPrunedBits,
@@ -47,6 +41,7 @@ pub mod tests {
                 tests::apply_random_ops,
             },
             store::tests::{TestKey, TestValue},
+            value::{FixedEncoding, ValueEncoding, VariableEncoding},
         },
         translator::OneCap,
     };
@@ -85,15 +80,15 @@ pub mod tests {
     pub async fn test_build_small_close_reopen<F, C, Fn, Fut>(context: Context, mut open_db: Fn)
     where
         F: Graftable,
-        C: DbAny<F> + BitmapPrunedBits,
+        C: DbAny<Family = F> + BitmapPrunedBits,
         C::Key: TestKey,
-        <C as DbAny<F>>::Value: TestValue,
+        C::Value: TestValue,
         Fn: FnMut(Context, String) -> Fut,
         Fut: Future<Output = C>,
     {
         let partition = "build-small".to_string();
         let db: C = open_db(context.child("first"), partition.clone()).await;
-        assert_eq!(db.inactivity_floor_loc(), Location::<F>::new(0));
+        assert_eq!(db.inactivity_floor(), Location::<F>::new(0));
         assert_eq!(db.bounds().start, Location::<F>::new(0));
         let root0 = db.root();
         drop(db);
@@ -103,7 +98,7 @@ pub mod tests {
 
         // Add one key.
         let k1: C::Key = TestKey::from_seed(0);
-        let v1: <C as DbAny<F>>::Value = TestValue::from_seed(10);
+        let v1: C::Value = TestValue::from_seed(10);
         assert!(db.get(&k1).await.unwrap().is_none());
         let merkleized = db
             .new_batch()
@@ -127,7 +122,7 @@ pub mod tests {
 
         // Delete that one key.
         assert!(db.get(&k1).await.unwrap().is_some());
-        let metadata: <C as DbAny<F>>::Value = TestValue::from_seed(1);
+        let metadata: C::Value = TestValue::from_seed(1);
         let merkleized = db
             .new_batch()
             .write(k1, None)
@@ -184,7 +179,7 @@ pub mod tests {
         C: Mutable<Item = Operation<F, Digest, V>>,
         V: ValueEncoding<Value = Digest>,
         Operation<F, Digest, V>: Codec,
-        TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
+        TestDb<F, C, V>: DbAny<Family = F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
         Fn: FnMut(Context, String) -> Fut + 'static,
         Fut: Future<Output = TestDb<F, C, V>>,
     {
@@ -321,7 +316,7 @@ pub mod tests {
         C: Mutable<Item = Operation<F, Digest, V>>,
         V: ValueEncoding<Value = Digest>,
         Operation<F, Digest, V>: Codec,
-        TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
+        TestDb<F, C, V>: DbAny<Family = F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
         Fn: FnMut(Context, String) -> Fut + 'static,
         Fut: Future<Output = TestDb<F, C, V>>,
     {
@@ -356,7 +351,7 @@ pub mod tests {
             // retained op to tip.
             let max_ops = 4;
             let end_loc = db.bounds().end;
-            let start_loc = db.any.inactivity_floor_loc();
+            let start_loc = db.any.inactivity_floor();
 
             for loc in *start_loc..*end_loc {
                 let loc = Location::<F>::new(loc);
@@ -385,7 +380,7 @@ pub mod tests {
         C: Mutable<Item = Operation<F, Digest, V>>,
         V: ValueEncoding<Value = Digest>,
         Operation<F, Digest, V>: Codec,
-        TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
+        TestDb<F, C, V>: DbAny<Family = F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
         Fn: FnMut(Context, String) -> Fut + 'static,
         Fut: Future<Output = TestDb<F, C, V>>,
     {
@@ -405,7 +400,7 @@ pub mod tests {
             let res = db.key_value_proof(&bad_key).await;
             assert!(matches!(res, Err(Error::KeyNotFound)));
 
-            let start = *db.inactivity_floor_loc();
+            let start = *db.inactivity_floor();
             for i in start..db.any.bitmap.len() {
                 if !db.any.bitmap.get_bit(i) {
                     continue;
@@ -415,8 +410,8 @@ pub mod tests {
                 let op = db.any.log.read(*Location::<F>::new(i)).await.unwrap();
                 let (key, value) = match op {
                     Operation::Update(key_data) => (key_data.key, key_data.value),
-                    Operation::CommitFloor(_, _) => continue,
-                    _ => unreachable!("expected update or commit floor operation"),
+                    Operation::Commit(_, _) => continue,
+                    _ => unreachable!("expected update or commit operation"),
                 };
                 let (proof, proved_value) = db.key_value_proof(&key).await.unwrap();
                 assert_eq!(proved_value, value);
@@ -462,7 +457,7 @@ pub mod tests {
         C: Mutable<Item = Operation<F, Digest, V>>,
         V: ValueEncoding<Value = Digest>,
         Operation<F, Digest, V>: Codec,
-        TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
+        TestDb<F, C, V>: DbAny<Family = F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
         Fn: FnMut(Context, String) -> Fut + 'static,
         Fut: Future<Output = TestDb<F, C, V>>,
     {
@@ -541,7 +536,7 @@ pub mod tests {
         Operation<F, Digest, V>: Codec,
         Update<Digest, V>: Codec,
         <Update<Digest, V> as Read>::Cfg: Default,
-        TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
+        TestDb<F, C, V>: DbAny<Family = F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
         Fn: FnMut(Context, String) -> Fut + 'static,
         Fut: Future<Output = TestDb<F, C, V>>,
     {
@@ -885,8 +880,8 @@ pub mod tests {
         use crate::{
             merkle::{mmb, mmr},
             qmdb::{
-                any::value::{FixedEncoding, VariableEncoding},
                 current::ordered::proof::{constant, dynamic},
+                value::{FixedEncoding, VariableEncoding},
             },
         };
         use commonware_codec::conformance::CodecConformance;

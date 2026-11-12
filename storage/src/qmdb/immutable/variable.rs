@@ -2,10 +2,10 @@
 //!
 //! For fixed-size values, use [super::fixed] instead.
 
-use super::{Config as BaseConfig, Immutable, operation::Operation as BaseOperation};
+use super::{Config as BaseConfig, operation::Operation as BaseOperation};
 use crate::{
     journal::contiguous::variable::{self, Config as JournalConfig},
-    qmdb::any::value::VariableEncoding,
+    qmdb::value::VariableEncoding,
 };
 
 /// Type alias for a variable-size operation.
@@ -13,7 +13,7 @@ pub type Operation<F, K, V> = BaseOperation<F, K, VariableEncoding<V>>;
 
 /// Type alias for the variable-size immutable database.
 pub type Db<F, E, K, V, H, T, S> =
-    Immutable<F, E, K, VariableEncoding<V>, variable::Journal<E, Operation<F, K, V>>, H, T, S>;
+    super::Db<F, E, K, VariableEncoding<V>, variable::Journal<E, Operation<F, K, V>>, H, T, S>;
 
 /// Type alias for the variable-size compact immutable db.
 pub type CompactDb<F, E, K, V, H, S> = super::CompactDb<F, E, K, VariableEncoding<V>, H, S>;
@@ -52,7 +52,7 @@ mod tests {
     fn config(suffix: &str) -> Config<TwoCap, ((), ()), Sequential> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         super::BaseConfig {
-            merkle_config: MmrConfig {
+            merkle: MmrConfig {
                 journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
@@ -91,12 +91,11 @@ mod tests {
                 partition: "compact-immutable-variable-witness".into(),
                 items_per_section: NZU64!(64),
                 compression: None,
-                codec_config: (),
+                codec_config: ((), ()),
                 page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
-            commit_codec_config: ((), ()),
         };
         CompactDb::init(context, cfg, None).await.unwrap()
     }
@@ -263,7 +262,6 @@ mod tests {
         test_variable_delayed_merkleize_after_ancestor_apply => run_delayed_merkleize_after_ancestor_apply, open;
         test_variable_get_many => run_get_many, open;
         test_variable_get_many_duplicate_keys => run_get_many_duplicate_keys, open;
-        test_variable_get_many_unexpected_data => run_get_many_unexpected_data, open;
         test_variable_apply_after_ancestor_dropped => run_apply_after_ancestor_dropped, open;
         test_variable_dropped_ancestor_reads => run_dropped_ancestor_reads, open;
         test_variable_multi_key_batch_reads => run_multi_key_batch_reads, open;

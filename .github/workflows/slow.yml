@@ -99,6 +99,7 @@ jobs:
       matrix:
         include:
           - fuzz_dir: broadcast/fuzz
+          - fuzz_dir: clearing/fuzz
           - fuzz_dir: codec/fuzz
           - fuzz_dir: coding/fuzz
           - fuzz_dir: collector/fuzz
@@ -141,7 +142,7 @@ jobs:
           - fuzz_dir: simd/fuzz
           # Apple Silicon has SHA-2 and SHA-3 without SVE.
           - fuzz_dir: simd/fuzz
-            os: macos-15
+            os: macos-latest
             simd-backend: neon
             cpu-features: "neon sha2 sha3"
           - fuzz_dir: stream/fuzz
@@ -274,9 +275,9 @@ jobs:
       matrix:
         include:
           - name: x86_64
-            os: ubuntu-latest
+            os: ubuntu-latest-16
           - name: arm64
-            os: ubuntu-24.04-arm
+            os: ubuntu-26.04-arm
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
@@ -323,7 +324,7 @@ jobs:
           - name: x86_64
             os: ubuntu-latest
           - name: arm64
-            os: ubuntu-24.04-arm
+            os: ubuntu-26.04-arm
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4

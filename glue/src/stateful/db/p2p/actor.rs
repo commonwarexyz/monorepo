@@ -378,10 +378,7 @@ mod tests {
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedLogConfig,
         mmr::{self, Location, Proof, full::Config as MmrJournalConfig},
-        qmdb::{
-            any::{FixedConfig, unordered::fixed},
-            sync,
-        },
+        qmdb::{any::unordered::fixed, sync},
         translator::TwoCap,
     };
     use commonware_utils::{
@@ -497,7 +494,7 @@ mod tests {
             Feedback::Ok
         }
 
-        fn fetch_all<T>(&mut self, fetches: Vec<T>) -> Feedback
+        fn fetch_all<T>(&mut self, fetches: impl IntoIterator<Item = T>) -> Feedback
         where
             T: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
         {
@@ -574,10 +571,10 @@ mod tests {
         }
     }
 
-    fn db_config(suffix: &str) -> FixedConfig<TwoCap, Sequential> {
+    fn db_config(suffix: &str) -> fixed::Config<TwoCap, Sequential> {
         let page_cache = CacheRef::new(NZU16!(101), NZUsize!(11));
-        FixedConfig {
-            merkle_config: MmrJournalConfig {
+        fixed::Config {
+            merkle: MmrJournalConfig {
                 journal_partition: format!("{suffix}-mmr-journal"),
                 metadata_partition: format!("{suffix}-mmr-metadata"),
                 items_per_blob: NZU64!(11),
@@ -586,7 +583,7 @@ mod tests {
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
-            journal_config: FixedLogConfig {
+            log: FixedLogConfig {
                 partition: format!("{suffix}-log-journal"),
                 items_per_blob: NZU64!(7),
                 page_cache,
@@ -1687,7 +1684,10 @@ mod tests {
             let batch = batch.merkleize(&database).await.unwrap();
             let database = database.apply_batch(batch).await.unwrap();
             let bounds = database.bounds();
-            let target = sync::Target::new(database.root(), bounds.clone().try_into().unwrap());
+            let target = sync::Target {
+                root: database.root(),
+                range: bounds.clone().try_into().unwrap(),
+            };
             slot.put(database);
 
             // Small fetch and apply batches exercise repeated source polling between journal
@@ -1762,7 +1762,10 @@ mod tests {
                 let good_db = good_db.read().await;
                 assert_eq!(bad_db.bounds(), good_db.bounds());
                 assert_ne!(bad_db.root(), good_db.root());
-                sync::Target::new(good_db.root(), good_db.bounds().try_into().unwrap())
+                sync::Target {
+                    root: good_db.root(),
+                    range: good_db.bounds().try_into().unwrap(),
+                }
             };
 
             let manager = oracle.manager();

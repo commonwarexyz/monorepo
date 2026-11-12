@@ -8,8 +8,8 @@ use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{Graftable, Location, full::Config as MerkleConfig, mmb, mmr},
     qmdb::{
-        any::{traits::DbAny as _, value::FixedEncoding},
-        current::{FixedConfig as Config, ordered::fixed::Db as CurrentDb},
+        current::ordered::fixed::{Config, Db as CurrentDb},
+        value::FixedEncoding,
     },
     translator::TwoCap,
 };
@@ -129,7 +129,7 @@ async fn commit_pending<F: Graftable>(
     pending_inserts: &mut HashMap<RawKey, RawValue>,
     pending_deletes: &mut HashSet<RawKey>,
 ) -> Db<F> {
-    let inherited = db.inactivity_floor_loc();
+    let inherited = db.inactivity_floor();
     let mut batch = db.new_batch();
     for (k, v) in pending_writes.drain(..) {
         batch = batch.write(k, v);
@@ -150,7 +150,7 @@ async fn commit_pending<F: Graftable>(
     *committed_state = policy.check_raw(
         committed_state.drain(),
         inherited,
-        db.inactivity_floor_loc(),
+        db.inactivity_floor(),
         db.bounds().end - 1,
     );
     db
@@ -189,7 +189,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
     runner.start(|context| async move {
         let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
         let cfg = Config {
-            merkle_config: MerkleConfig {
+            merkle: MerkleConfig {
                 journal_partition: format!("fuzz-current-ord-{suffix}-merkle-journal"),
                 metadata_partition: format!("fuzz-current-ord-{suffix}-merkle-metadata"),
                 items_per_blob: NZU64!(MERKLE_ITEMS_PER_BLOB),
@@ -198,7 +198,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
-            journal_config: FConfig {
+            log: FConfig {
                 partition: format!("fuzz-current-ord-{suffix}-log-journal"),
                 items_per_blob: NZU64!(LOG_ITEMS_PER_BLOB),
                 write_buffer: NZUsize!(WRITE_BUFFER_SIZE),

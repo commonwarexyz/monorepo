@@ -856,6 +856,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             finished,
             errored: false,
             repairing: false,
+            in_progress: false,
         })
     }
 
@@ -966,6 +967,7 @@ pub struct Replay<E: Storage + Metrics, A: CodecFixed> {
     finished: bool,
     errored: bool,
     repairing: bool,
+    in_progress: bool,
 }
 
 impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
@@ -1035,7 +1037,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
             "torn page detected: truncating"
         );
 
-        // Keep the interruption guard set until a new reader has replaced the stale view.
+        // Mark the repair incomplete until a new reader has replaced the stale view.
         self.repairing = true;
         let current = self
             .sections
@@ -1058,7 +1060,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
 
     /// Durably truncate the front section to its last complete item.
     async fn repair_tail(&mut self, section: u64, size: u64) -> Result<(), Error> {
-        // Keep the interruption guard set until the repair is durable.
+        // Mark the repair incomplete until it is durable.
         self.repairing = true;
         let writer = self.journal.0.manager.take(section).await?;
         let writer = writer.truncate(size).await?;
@@ -1082,17 +1084,29 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
     /// exhausted.
     ///
     /// An error ends the section that produced it, and iteration continues with the
-    /// next section. Errors while mutating storage to repair a section, and
-    /// [Error::ReplayInterrupted], end the replay.
+    /// next section. Errors while mutating storage to repair a section end the replay.
+    /// Dropping a pending call also ends it. The next call returns
+    /// [Error::ReplayInterrupted] and [Self::finish] fails.
     pub async fn next(&mut self) -> Option<Result<(u64, u64, A), Error>> {
-        // An unfinished repair may have dropped the section's writer. A cancelled repair still
-        // needs an error. A completed failure already yielded one.
+        if self.in_progress {
+            self.in_progress = false;
+            self.repairing = false;
+            self.sections.clear();
+            return self.fail(Error::ReplayInterrupted);
+        }
+
+        // Leave this set if the future is dropped at any await in the replay.
+        self.in_progress = true;
+        let result = self.next_inner().await;
+        self.in_progress = false;
+        result
+    }
+
+    async fn next_inner(&mut self) -> Option<Result<(u64, u64, A), Error>> {
+        // A failed storage repair may have dropped its writer. Stop after its error.
         if self.repairing {
             self.repairing = false;
             self.sections.clear();
-            if !self.errored {
-                return self.fail(Error::ReplayInterrupted);
-            }
         }
         while let Some(current) = self.sections.front_mut() {
             // Ensure we have enough data for one item
@@ -1166,7 +1180,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
     /// Fails when the reader was not fully drained or yielded an error: the journal is
     /// destroyed and recovery is re-initialization.
     pub fn finish(mut self) -> Result<Journal<E, A>, Error> {
-        if self.errored || !self.finished {
+        if self.in_progress || self.errored || !self.finished {
             return Err(Error::ReplayFailed);
         }
         if let Some(start) = self.recovered_from {
@@ -1191,11 +1205,11 @@ mod tests {
         buffer::paged::{CacheRef, corrupt_page},
         deterministic,
         mocks::{
-            DelayedSyncContext, PendingSyncs, RecordingContext, fail_pending_syncs,
-            release_pending_syncs,
+            DelayedSyncContext, PendingSyncs, ReadGateContext, RecordingContext,
+            fail_pending_syncs, release_pending_syncs,
         },
     };
-    use commonware_utils::{NZU16, NZUsize};
+    use commonware_utils::{NZU16, NZUsize, Widen};
     use core::num::NonZeroU16;
     use std::{
         ops::RangeInclusive,
@@ -1998,6 +2012,40 @@ mod tests {
                 .await
                 .expect("failed to open");
             assert_eq!(blob_size, 8 * 28);
+        });
+    }
+
+    #[test_traced]
+    fn test_segmented_fixed_restore_rejects_damaged_earlier_boundary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = lazy_recovery_cfg("segmented-fixed-restore-earlier-boundary");
+            seed(&context, &cfg, 0..=1).await;
+
+            // Tear the terminal page of the section below the checkpoint section.
+            let (blob, size) = context
+                .open(&cfg.partition, &0u64.to_be_bytes())
+                .await
+                .expect("failed to open");
+            blob.resize(size - 1).await.expect("failed to truncate");
+            blob.sync().await.expect("failed to sync");
+            drop(blob);
+
+            // The checkpoint covers every earlier section whole, so one without a valid terminal
+            // boundary is committed damage that restore reports and leaves untouched.
+            let result = Journal::<_, u64>::preflight_restore(
+                context.child("restore"),
+                cfg.clone(),
+                1,
+                16 * Widen::<u64>::widen(u64::SIZE),
+            )
+            .await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
+            let (_, blob_size) = context
+                .open(&cfg.partition, &0u64.to_be_bytes())
+                .await
+                .expect("failed to open");
+            assert_eq!(blob_size, size - 1);
         });
     }
 
@@ -3591,6 +3639,69 @@ mod tests {
 
             let err = handle.await.expect_err("sync handle should fail");
             assert!(matches!(err, RError::Io(_)));
+        });
+    }
+
+    /// Cancelling an ordinary read invalidates the replay without changing its durable data.
+    #[rstest::rstest]
+    #[case::finish(false)]
+    #[case::next(true)]
+    fn test_segmented_fixed_replay_dropped_during_read_fails_replay(#[case] resume: bool) {
+        deterministic::Runner::default().start(|context| async move {
+            const SECTION: u64 = 0;
+            let cfg = aligned_cfg();
+            let mut journal = Journal::<_, u64>::init(context.child("seed"), cfg.clone())
+                .await
+                .unwrap();
+            for value in 0..6 {
+                (journal, _) = journal.append(SECTION, &value).await.unwrap();
+            }
+            drop(journal.sync_all().await.unwrap());
+
+            let (gated, gate) =
+                ReadGateContext::new(context.child("cancel"), cfg.partition.clone());
+            let journal = Journal::<_, u64>::init(gated, cfg.clone()).await.unwrap();
+            let mut replay = journal
+                .replay(SECTION, 0, NZUsize!(16), ReadOptions::default())
+                .await
+                .unwrap();
+
+            // Dropping a call before it is polled starts no read and leaves the replay usable.
+            drop(replay.next());
+            gate.arm();
+            {
+                let next = replay.next();
+                futures::pin_mut!(next);
+                assert!(futures::poll!(next.as_mut()).is_pending());
+                assert!(gate.blocked() > 0);
+            }
+            gate.disarm();
+
+            if resume {
+                assert!(matches!(
+                    replay.next().await,
+                    Some(Err(Error::ReplayInterrupted))
+                ));
+                assert!(replay.next().await.is_none());
+                assert!(replay.next().await.is_none());
+            }
+            assert!(matches!(replay.finish(), Err(Error::ReplayFailed)));
+
+            let journal = Journal::<_, u64>::init(context.child("reopen"), cfg)
+                .await
+                .unwrap();
+            let mut replay = journal
+                .replay(SECTION, 0, NZUsize!(16), ReadOptions::default())
+                .await
+                .unwrap();
+            for value in 0..6 {
+                assert_eq!(
+                    replay.next().await.unwrap().unwrap(),
+                    (SECTION, value, value)
+                );
+            }
+            assert!(replay.next().await.is_none());
+            replay.finish().unwrap().destroy().await.unwrap();
         });
     }
 }

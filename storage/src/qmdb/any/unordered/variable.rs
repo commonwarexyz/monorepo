@@ -6,9 +6,12 @@
 
 use crate::{
     index::unordered::Index,
-    journal::contiguous::variable::Journal,
+    journal::contiguous::variable::{Config as JournalConfig, Journal},
     merkle::Location,
-    qmdb::any::{unordered, value::VariableEncoding},
+    qmdb::{
+        any::{self, unordered},
+        value::VariableEncoding,
+    },
 };
 
 pub type Update<K, V> = unordered::Update<K, VariableEncoding<V>>;
@@ -27,17 +30,22 @@ pub type Db<F, E, K, V, H, T, S> = super::Db<
     S,
 >;
 
+/// Configuration for a [Db].
+pub type Config<T, C, S> = any::Config<T, JournalConfig<C>, S>;
+
 /// Partitioned index variants that divide the key space into `2^(P*8)` partitions.
 ///
 /// See [partitioned::Db] for the generic type, or use the convenience aliases:
 /// - [partitioned::p256::Db] for 256 partitions (P=1)
 /// - [partitioned::p64k::Db] for 65,536 partitions (P=2)
 pub mod partitioned {
+    use super::{JournalConfig, any};
     pub use super::{Operation, Update};
     use crate::{
         index::partitioned::unordered::Index, journal::contiguous::variable::Journal,
         merkle::Location,
     };
+    use core::num::NonZeroUsize;
 
     /// A key-value QMDB with a partitioned snapshot index and variable-size values.
     ///
@@ -45,6 +53,7 @@ pub mod partitioned {
     /// the number of prefix bytes used for partitioning:
     /// - `P = 1`: 256 partitions
     /// - `P = 2`: 65,536 partitions
+    /// - `P = 3`: ~16 million partitions
     ///
     /// Use partitioned indices when you have a large number of keys (>> 2^(P*8)) and memory
     /// efficiency is important. Keys should be uniformly distributed across the prefix space.
@@ -59,16 +68,21 @@ pub mod partitioned {
         S,
     >;
 
+    /// Configuration for a [Db].
+    pub type Config<T, C, S> = any::Config<T, JournalConfig<C>, S, NonZeroUsize>;
+
     /// Convenience type aliases for 256 partitions (P=1).
     pub mod p256 {
         /// Variable-value DB with 256 partitions.
         pub type Db<F, E, K, V, H, T, S> = super::Db<F, E, K, V, H, T, 1, S>;
+        pub use super::Config;
     }
 
     /// Convenience type aliases for 65,536 partitions (P=2).
     pub mod p64k {
         /// Variable-value DB with 65,536 partitions.
         pub type Db<F, E, K, V, H, T, S> = super::Db<F, E, K, V, H, T, 2, S>;
+        pub use super::Config;
     }
 }
 
@@ -80,7 +94,7 @@ pub(crate) mod test {
         mmr,
         qmdb::{
             Error,
-            any::{VariableConfig, batch::Slot},
+            any::batch::Slot,
             bitmap::{Candidates, FnCandidates},
             floor::{Bounded, Proportional},
         },
@@ -107,8 +121,8 @@ pub(crate) mod test {
 
     pub(crate) fn create_test_config(seed: u64) -> VarConfig {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
-        VariableConfig {
-            merkle_config: crate::mmr::full::Config {
+        Config {
+            merkle: crate::mmr::full::Config {
                 journal_partition: format!("journal-{seed}"),
                 metadata_partition: format!("metadata-{seed}"),
                 items_per_blob: NZU64!(13),
@@ -117,7 +131,7 @@ pub(crate) mod test {
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
-            journal_config: crate::journal::contiguous::variable::Config {
+            log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-journal-{seed}"),
                 items_per_section: NZU64!(7),
                 write_buffer: NZUsize!(1024),
@@ -134,7 +148,7 @@ pub(crate) mod test {
     }
 
     pub(crate) type VarConfig =
-        VariableConfig<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ())), Sequential>;
+        Config<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ())), Sequential>;
 
     /// A type alias for the concrete [Db] type used in these unit tests.
     pub(crate) type AnyTest =
@@ -198,8 +212,8 @@ pub(crate) mod test {
                 unordered::Operation::Delete(key) => {
                     batch = batch.write(key, None);
                 }
-                unordered::Operation::CommitFloor(_, _) => {
-                    panic!("CommitFloor not supported in apply_ops");
+                unordered::Operation::Commit(_, _) => {
+                    panic!("Commit not supported in apply_ops");
                 }
             }
         }
@@ -227,8 +241,7 @@ pub(crate) mod test {
 
             // Read set: key(5) duplicated at slots 0 and 3, read-only key(6), missing key(9000),
             // and key(20) deleted at slot 4.
-            let read_keys = [key(5), key(6), key(9000), key(5), key(20)];
-            let keys: Vec<&Digest> = read_keys.iter().collect();
+            let keys = [key(5), key(6), key(9000), key(5), key(20)];
             let slots = vec![
                 Slot::Put(to_bytes(5_000)),
                 Slot::Keep,
@@ -244,7 +257,7 @@ pub(crate) mod test {
 
             let mut explicit = db.new_batch();
             let explicit_values = explicit.get_many(&keys, &db).await.unwrap();
-            for (key, slot) in read_keys.iter().zip(&slots) {
+            for (key, slot) in keys.iter().zip(&slots) {
                 match slot {
                     Slot::Keep => {}
                     Slot::Put(value) => explicit = explicit.write(*key, Some(value.clone())),
@@ -256,7 +269,7 @@ pub(crate) mod test {
             }
             let explicit_root = explicit.merkleize(&db).await.unwrap().root();
 
-            let (staged_values, staged) = db.new_batch().stage(&keys, &db).await.unwrap();
+            let (staged, staged_values) = db.new_batch().stage(&keys, &db).await.unwrap();
             let staged_root = staged
                 .merkleize(slots.clone(), unstaged.clone(), &db)
                 .await
@@ -310,9 +323,8 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            let read_keys = [key(0), key(100)];
-            let keys: Vec<&Digest> = read_keys.iter().collect();
-            let (values, staged) = parent
+            let keys = [key(0), key(100)];
+            let (staged, values) = parent
                 .new_batch::<Sha256>()
                 .stage(&keys, &db)
                 .await
@@ -397,9 +409,8 @@ pub(crate) mod test {
 
                 // key(3) is untouched by the ancestors (their floor raises move other
                 // keys), so its staged read stays committed-resolved.
-                let read_keys = [key(0), key(100), key(1), key(3)];
-                let keys: Vec<&Digest> = read_keys.iter().collect();
-                let (values, staged) = parent
+                let keys = [key(0), key(100), key(1), key(3)];
+                let (staged, values) = parent
                     .new_batch::<Sha256>()
                     .stage(&keys, &db)
                     .await
@@ -581,7 +592,7 @@ pub(crate) mod test {
             let db = db.commit().await.unwrap();
 
             let root = db.root();
-            let inactivity_floor = db.inactivity_floor_loc();
+            let inactivity_floor = db.inactivity_floor();
             let db = db.sync().await.unwrap(); // test pruning boundary after sync w/ prune
             let db = db.prune(inactivity_floor).await.unwrap();
             let bounds = db.bounds();
@@ -593,7 +604,7 @@ pub(crate) mod test {
             let db = open_db(context.child("open").with_attribute("index", 5)).await;
             assert_eq!(root, db.root());
             assert_eq!(db.bounds(), bounds);
-            assert_eq!(db.inactivity_floor_loc(), inactivity_floor);
+            assert_eq!(db.inactivity_floor(), inactivity_floor);
             assert_eq!(db.snapshot.items(), snapshot_items);
 
             db.destroy().await.unwrap();
@@ -622,7 +633,7 @@ pub(crate) mod test {
             let db = db.apply_batch(merkleized).await.unwrap();
 
             // inactivity_floor should be at some location < op_count
-            let inactivity_floor = db.inactivity_floor_loc();
+            let inactivity_floor = db.inactivity_floor();
             let beyond_floor = inactivity_floor + 1;
 
             // Try to prune beyond the inactivity floor
@@ -697,7 +708,7 @@ pub(crate) mod test {
             let db = db.apply_batch(seed).await.unwrap();
 
             let keys = [&key];
-            let (_, staged) = db.new_batch().stage(&keys, &db).await.unwrap();
+            let (staged, _) = db.new_batch().stage(&keys, &db).await.unwrap();
             let sibling = db
                 .new_batch()
                 .write(key, Some(vec![1]))
@@ -751,7 +762,7 @@ pub(crate) mod test {
                 .root();
 
             let target = key(0);
-            let (values, staged) = parent
+            let (staged, values) = parent
                 .new_batch::<Sha256>()
                 .stage(&[&target], &db)
                 .await
@@ -831,7 +842,7 @@ pub(crate) mod test {
                 Err(Error::StaleRead)
             ));
 
-            let (_, staged) = db_a.new_batch().stage(&keys, &db_a).await.unwrap();
+            let (staged, _) = db_a.new_batch().stage(&keys, &db_a).await.unwrap();
             assert!(matches!(
                 staged.expand(&keys, &db_b).await,
                 Err(Error::StaleRead)
@@ -1115,11 +1126,11 @@ pub(crate) mod test {
         };
         is_send(db.new_batch().merkleize_with(db, &mut policy));
         is_send(async move {
-            let (_, staged) = db.new_batch().stage(&[&key], db).await?;
+            let (staged, _) = db.new_batch().stage(&[&key], db).await?;
             staged.merkleize(Vec::new(), Vec::new(), db).await
         });
         is_send(async move {
-            let (_, staged) = db.new_batch().stage(&[&key], db).await?;
+            let (staged, _) = db.new_batch().stage(&[&key], db).await?;
             staged
                 .merkleize_with(Vec::new(), Vec::new(), db, &mut policy)
                 .await

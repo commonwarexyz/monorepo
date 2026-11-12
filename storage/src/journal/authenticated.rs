@@ -1255,11 +1255,9 @@ mod tests {
             mmb, mmr,
         },
         qmdb::{
-            any::{
-                operation::{Unordered as Op, update::Unordered as Update},
-                value::FixedEncoding,
-            },
+            any::operation::{Unordered as Op, update::Unordered as Update},
             operation::Committable,
+            value::FixedEncoding,
         },
         utils::detached::{DropMonitor, block_strategy},
     };
@@ -1728,7 +1726,7 @@ mod tests {
         }
 
         // Add commit
-        let commit_op = TestOp::<F>::CommitFloor(None, Location::<F>::new(0));
+        let commit_op = TestOp::<F>::Commit(None, Location::<F>::new(0));
         let (journal, _) = journal.append(&commit_op).await.unwrap();
         let journal = journal.sync().await.unwrap();
 
@@ -1781,7 +1779,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let commit_op = TestOp::<F>::CommitFloor(None, Location::<F>::new(0));
+        let commit_op = TestOp::<F>::Commit(None, Location::<F>::new(0));
         let (journal, _) = journal.append(&commit_op).await.unwrap();
         let journal = journal.sync().await.unwrap();
 
@@ -1890,7 +1888,7 @@ mod tests {
                     .unwrap();
                 for i in 0..15 {
                     let op = if [1, 3, 10, 13].contains(&i) {
-                        TestOp::<F>::CommitFloor(None, Location::new(0))
+                        TestOp::<F>::Commit(None, Location::new(0))
                     } else {
                         create_operation::<F>(i)
                     };
@@ -2033,7 +2031,7 @@ mod tests {
             let mut ops: Vec<TestOp<F>> = (0..len - 1)
                 .map(|i| create_operation::<F>(first + i as u8))
                 .collect();
-            ops.push(TestOp::<F>::CommitFloor(None, Location::new(0)));
+            ops.push(TestOp::<F>::Commit(None, Location::new(0)));
             ops
         }
 
@@ -2249,7 +2247,7 @@ mod tests {
 
         // Add commit and prune
         (journal, _) = journal
-            .append(&TestOp::<F>::CommitFloor(None, Location::<F>::new(50)))
+            .append(&TestOp::<F>::Commit(None, Location::<F>::new(50)))
             .await
             .unwrap();
         journal = journal.sync().await.unwrap();
@@ -2346,7 +2344,7 @@ mod tests {
         // Add commit operation to commit the operations
         let commit_loc;
         (journal, commit_loc) = journal
-            .append(&TestOp::<F>::CommitFloor(None, Location::<F>::new(0)))
+            .append(&TestOp::<F>::Commit(None, Location::<F>::new(0)))
             .await
             .unwrap();
         assert_eq!(
@@ -2388,7 +2386,7 @@ mod tests {
             (journal, _) = journal.append(op).await.unwrap();
         }
         (journal, _) = journal
-            .append(&TestOp::<F>::CommitFloor(None, Location::<F>::new(0)))
+            .append(&TestOp::<F>::Commit(None, Location::<F>::new(0)))
             .await
             .unwrap();
 
@@ -2423,7 +2421,7 @@ mod tests {
                     .unwrap();
             }
             (journal, _) = journal
-                .append(&TestOp::<mmr::Family>::CommitFloor(None, Location::new(0)))
+                .append(&TestOp::<mmr::Family>::Commit(None, Location::new(0)))
                 .await
                 .unwrap();
             let handle;
@@ -2546,7 +2544,7 @@ mod tests {
 
             // The mid-sync append is durable after the next sync.
             (journal, _) = journal
-                .append(&TestOp::<mmr::Family>::CommitFloor(None, Location::new(0)))
+                .append(&TestOp::<mmr::Family>::Commit(None, Location::new(0)))
                 .await
                 .unwrap();
             let handle;
@@ -2683,7 +2681,7 @@ mod tests {
 
         // Add commit at position 50
         (journal, _) = journal
-            .append(&TestOp::<F>::CommitFloor(None, Location::<F>::new(50)))
+            .append(&TestOp::<F>::Commit(None, Location::<F>::new(50)))
             .await
             .unwrap();
         journal = journal.sync().await.unwrap();
@@ -2711,7 +2709,7 @@ mod tests {
         let mut journal = create_journal_with_ops::<F>(context, "prune_boundary", 100).await;
 
         (journal, _) = journal
-            .append(&TestOp::<F>::CommitFloor(None, Location::<F>::new(50)))
+            .append(&TestOp::<F>::Commit(None, Location::<F>::new(50)))
             .await
             .unwrap();
         journal = journal.sync().await.unwrap();
@@ -2747,7 +2745,7 @@ mod tests {
         let mut journal = create_journal_with_ops::<F>(context, "trait_prune", 100).await;
 
         (journal, _) = journal
-            .append(&TestOp::<F>::CommitFloor(None, Location::<F>::new(50)))
+            .append(&TestOp::<F>::Commit(None, Location::<F>::new(50)))
             .await
             .unwrap();
         journal = journal.sync().await.unwrap();
@@ -2787,7 +2785,7 @@ mod tests {
         let mut journal = create_journal_with_ops::<F>(context, "prune_count", 100).await;
 
         (journal, _) = journal
-            .append(&TestOp::<F>::CommitFloor(None, Location::<F>::new(50)))
+            .append(&TestOp::<F>::Commit(None, Location::<F>::new(50)))
             .await
             .unwrap();
         journal = journal.sync().await.unwrap();
@@ -2829,7 +2827,7 @@ mod tests {
         let mut journal =
             create_journal_with_ops::<F>(context.child("pruned"), "oldest", 100).await;
         (journal, _) = journal
-            .append(&TestOp::<F>::CommitFloor(None, Location::<F>::new(50)))
+            .append(&TestOp::<F>::Commit(None, Location::<F>::new(50)))
             .await
             .unwrap();
         journal = journal.sync().await.unwrap();
@@ -2874,7 +2872,7 @@ mod tests {
         let mut journal =
             create_journal_with_ops::<F>(context.child("pruned"), "boundary", 100).await;
         (journal, _) = journal
-            .append(&TestOp::<F>::CommitFloor(None, Location::<F>::new(50)))
+            .append(&TestOp::<F>::Commit(None, Location::<F>::new(50)))
             .await
             .unwrap();
         journal = journal.sync().await.unwrap();
@@ -2901,7 +2899,7 @@ mod tests {
         let mut journal = create_journal_with_ops::<F>(context, "mmr_boundary", 50).await;
 
         (journal, _) = journal
-            .append(&TestOp::<F>::CommitFloor(None, Location::<F>::new(25)))
+            .append(&TestOp::<F>::Commit(None, Location::<F>::new(25)))
             .await
             .unwrap();
         journal = journal.sync().await.unwrap();
@@ -3184,7 +3182,7 @@ mod tests {
         let mut journal = create_journal_with_ops::<F>(context, "proof_pruned", 50).await;
 
         (journal, _) = journal
-            .append(&TestOp::<F>::CommitFloor(None, Location::<F>::new(25)))
+            .append(&TestOp::<F>::Commit(None, Location::<F>::new(25)))
             .await
             .unwrap();
         journal = journal.sync().await.unwrap();
@@ -3504,7 +3502,7 @@ mod tests {
         // Apply A, then commit and sync so the recovered state below includes it (reopen
         // selects the last commit operation during initialization).
         journal = journal.apply_batch(&merkleized_a).await.unwrap();
-        let commit_op = TestOp::<F>::CommitFloor(None, Location::<F>::new(0));
+        let commit_op = TestOp::<F>::Commit(None, Location::<F>::new(0));
         (journal, _) = journal.append(&commit_op).await.unwrap();
         journal = journal.sync().await.unwrap();
         let root_a = journal_root(&journal);
@@ -3623,7 +3621,7 @@ mod tests {
         for i in 0..4 {
             (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
         }
-        let commit_op = TestOp::<F>::CommitFloor(None, Location::<F>::new(0));
+        let commit_op = TestOp::<F>::Commit(None, Location::<F>::new(0));
 
         // Retain the chain A -> B, then apply a sibling of A with the same length.
         let batch_a = journal
@@ -3709,7 +3707,7 @@ mod tests {
     ) {
         let mut journal =
             create_journal_with_ops::<F>(context.child("open"), "dropped-items", 4).await;
-        let commit_op = TestOp::<F>::CommitFloor(None, Location::<F>::new(0));
+        let commit_op = TestOp::<F>::Commit(None, Location::<F>::new(0));
         let seed = journal
             .new_batch()
             .add(create_operation::<F>(5))

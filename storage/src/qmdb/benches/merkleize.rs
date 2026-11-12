@@ -25,7 +25,15 @@ use commonware_runtime::{
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     merkle::{self, full},
-    qmdb::any::traits::{DbAny, MerkleizedBatch, UnmerkleizedBatch as _},
+    qmdb::{
+        any::{
+            traits::{DbAny, MerkleizedBatch, UnmerkleizedBatch as _},
+            unordered::{fixed::Config as AnyFixedConfig, variable::Config as AnyVariableConfig},
+        },
+        current::unordered::{
+            fixed::Config as CurrentFixedConfig, variable::Config as CurrentVariableConfig,
+        },
+    },
     translator::EightCap,
 };
 use commonware_utils::{NZU64, NZUsize, TestRng};
@@ -322,10 +330,10 @@ fn var_log_cfg(pc: CacheRef) -> VConfig<((), ())> {
 pub(crate) fn any_fix_cfg_with_cache(
     ctx: &impl Strategizer,
     pc: CacheRef,
-) -> commonware_storage::qmdb::any::FixedConfig<EightCap, Rayon> {
-    commonware_storage::qmdb::any::FixedConfig {
-        merkle_config: merkle_cfg(ctx, pc.clone()),
-        journal_config: fix_log_cfg(pc),
+) -> AnyFixedConfig<EightCap, Rayon> {
+    AnyFixedConfig {
+        merkle: merkle_cfg(ctx, pc.clone()),
+        log: fix_log_cfg(pc),
         translator: EightCap,
         init_cache: crate::common::INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
@@ -336,10 +344,10 @@ pub(crate) fn any_fix_cfg_with_cache(
 fn any_var_cfg_with_cache(
     ctx: &impl Strategizer,
     pc: CacheRef,
-) -> commonware_storage::qmdb::any::VariableConfig<EightCap, ((), ()), Rayon> {
-    commonware_storage::qmdb::any::VariableConfig {
-        merkle_config: merkle_cfg(ctx, pc.clone()),
-        journal_config: var_log_cfg(pc),
+) -> AnyVariableConfig<EightCap, ((), ()), Rayon> {
+    AnyVariableConfig {
+        merkle: merkle_cfg(ctx, pc.clone()),
+        log: var_log_cfg(pc),
         translator: EightCap,
         init_cache: crate::common::INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
@@ -350,10 +358,10 @@ fn any_var_cfg_with_cache(
 pub(crate) fn cur_fix_cfg_with_cache(
     ctx: &impl Strategizer,
     pc: CacheRef,
-) -> commonware_storage::qmdb::current::FixedConfig<EightCap, Rayon> {
-    commonware_storage::qmdb::current::FixedConfig {
-        merkle_config: merkle_cfg(ctx, pc.clone()),
-        journal_config: fix_log_cfg(pc),
+) -> CurrentFixedConfig<EightCap, Rayon> {
+    CurrentFixedConfig {
+        merkle: merkle_cfg(ctx, pc.clone()),
+        log: fix_log_cfg(pc),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
         translator: EightCap,
         init_cache: crate::common::INIT_CACHE_SIZE,
@@ -365,10 +373,10 @@ pub(crate) fn cur_fix_cfg_with_cache(
 fn cur_var_cfg_with_cache(
     ctx: &impl Strategizer,
     pc: CacheRef,
-) -> commonware_storage::qmdb::current::VariableConfig<EightCap, ((), ()), Rayon> {
-    commonware_storage::qmdb::current::VariableConfig {
-        merkle_config: merkle_cfg(ctx, pc.clone()),
-        journal_config: var_log_cfg(pc),
+) -> CurrentVariableConfig<EightCap, ((), ()), Rayon> {
+    CurrentVariableConfig {
+        merkle: merkle_cfg(ctx, pc.clone()),
+        log: var_log_cfg(pc),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
         translator: EightCap,
         init_cache: crate::common::INIT_CACHE_SIZE,
@@ -382,7 +390,10 @@ fn cur_var_cfg_with_cache(
 /// This leaves inactive update operations above the inactivity floor, matching
 /// the workload optimized by bitmap-backed floor raising.
 #[boxed]
-async fn run_churned_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest>>(
+async fn run_churned_bench<
+    F: merkle::Family,
+    C: DbAny<Family = F, Key = Digest, Value = Digest>,
+>(
     db: C,
     num_keys: u64,
     churn_batches: u64,
@@ -435,7 +446,7 @@ impl BenchOptions {
 pub(crate) struct MerkleizeWorkload<F, C>
 where
     F: merkle::Family,
-    C: DbAny<F, Key = Digest, Value = Digest>,
+    C: DbAny<Family = F, Key = Digest, Value = Digest>,
 {
     context: Context,
     db: Option<C>,
@@ -451,7 +462,7 @@ where
 impl<F, C> MerkleizeWorkload<F, C>
 where
     F: merkle::Family,
-    C: DbAny<F, Key = Digest, Value = Digest>,
+    C: DbAny<Family = F, Key = Digest, Value = Digest>,
 {
     pub(crate) fn new(
         context: Context,
@@ -477,7 +488,7 @@ where
 impl<F, C> Workload for MerkleizeWorkload<F, C>
 where
     F: merkle::Family,
-    C: DbAny<F, Key = Digest, Value = Digest>,
+    C: DbAny<Family = F, Key = Digest, Value = Digest>,
     C::Merkleized: MerkleizedBatch<Digest = Digest>,
 {
     type Output = Digest;

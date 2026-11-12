@@ -23,7 +23,7 @@ impl<T: Translator, J: Clone, S: Strategy, B> Config for crate::qmdb::any::Confi
     type JournalConfig = J;
 
     fn journal_config(&self) -> Self::JournalConfig {
-        self.journal_config.clone()
+        self.log.clone()
     }
 }
 
@@ -54,7 +54,7 @@ impl<C: Clone + Send + Sync + 'static, S: Strategy> Config for crate::qmdb::comp
 /// Every authenticated QMDB variant implements this trait, and callers drive it through
 /// [`sync`](super::sync): the engine calls [`Self::local_pinned_nodes`] when a sync journal left
 /// on disk already reaches the target, fetches and verifies the remaining operations, builds the
-/// database with [`Self::from_sync_result`], checks [`Self::root`] against the target, and only
+/// database with [`Self::from_sync_result`], checks [`Self::ops_root`] against the target, and only
 /// then calls [`Self::persist_sync_result`].
 ///
 /// [`Source`]: super::Source
@@ -94,8 +94,9 @@ pub trait Database: Sized + Send {
 
     /// Persist any state that must remain provisional until the engine verifies the rebuilt root.
     ///
-    /// The engine calls this only after [`Self::root`] matches the requested target. Implementations
-    /// that persist everything in [`Self::from_sync_result`] must explicitly return `Ok(self)`.
+    /// The engine calls this only after [`Self::ops_root`] matches the requested target.
+    /// Implementations that persist everything in [`Self::from_sync_result`] must explicitly
+    /// return `Ok(self)`.
     fn persist_sync_result(
         self,
     ) -> impl Future<Output = Result<Self, crate::qmdb::Error<Self::Family>>> + Send;
@@ -113,9 +114,10 @@ pub trait Database: Sized + Send {
         journal: &Self::Journal,
     ) -> impl Future<Output = Result<Option<Vec<Self::Digest>>, crate::qmdb::Error<Self::Family>>> + Send;
 
-    /// Return the root the engine compares against the target. For
-    /// [`current`](crate::qmdb::current) this is the ops root, not the canonical root.
-    fn root(&self) -> Self::Digest;
+    /// Return the operations root the engine compares against the target.
+    ///
+    /// For [`current`](crate::qmdb::current), this differs from the canonical database root.
+    fn ops_root(&self) -> Self::Digest;
 }
 
 /// Whether a completed sync journal's `bounds` cover `range`: retained data reaches back to

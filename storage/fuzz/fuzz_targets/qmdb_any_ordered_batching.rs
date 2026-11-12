@@ -9,10 +9,11 @@ use commonware_storage::{
     journal::contiguous::fixed::{Config as FConfig, Journal},
     merkle::{Family as MerkleFamily, Location, mmb, mmr},
     mmr::full::Config as MerkleConfig,
-    qmdb::any::{
-        FixedConfig as Config,
-        db::Db as AnyDb,
-        ordered::{Operation, Update},
+    qmdb::{
+        any::{
+            Db as AnyDb,
+            ordered::{Operation, Update, fixed::Config},
+        },
         value::FixedEncoding,
     },
     translator::EightCap,
@@ -121,7 +122,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
         async move {
             let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
             let cfg = Config::<EightCap, Sequential> {
-                merkle_config: MerkleConfig {
+                merkle: MerkleConfig {
                     journal_partition: format!("test-qmdb-merkle-journal-{suffix}"),
                     metadata_partition: format!("test-qmdb-merkle-metadata-{suffix}"),
                     items_per_blob: NZU64!(500000),
@@ -130,7 +131,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                     strategy: Sequential,
                     page_cache: page_cache.clone(),
                 },
-                journal_config: FConfig {
+                log: FConfig {
                     partition: format!("test-qmdb-log-journal-{suffix}"),
                     items_per_blob: NZU64!(500000),
                     write_buffer: NZUsize!(1024),

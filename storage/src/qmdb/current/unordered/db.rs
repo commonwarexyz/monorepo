@@ -11,11 +11,9 @@ use crate::{
     merkle::{self, Location},
     qmdb::{
         Error,
-        any::{
-            ValueEncoding,
-            unordered::{Operation, Update},
-        },
+        any::unordered::{Operation, Update},
         operation::Key,
+        value::ValueEncoding,
     },
 };
 use commonware_codec::Codec;
@@ -27,7 +25,7 @@ use commonware_parallel::Strategy;
 /// This type is generic over the index type `I`, allowing it to be used with both regular
 /// and partitioned indices.
 pub type Db<F, E, C, K, V, I, H, const N: usize, S> =
-    crate::qmdb::current::db::Db<F, E, C, I, H, Update<K, V>, N, S>;
+    crate::qmdb::current::Db<F, E, C, I, H, Update<K, V>, N, S>;
 
 impl<
     F: merkle::Graftable,
@@ -54,7 +52,7 @@ where
         key: &K,
     ) -> Result<(KeyValueProof<F, H::Digest, N>, V::Value), Error<F>> {
         let op_loc = self.any.get_with_loc(key).await?;
-        let Some((value, loc)) = op_loc else {
+        let Some((Update(_, value), loc)) = op_loc else {
             return Err(Error::<F>::KeyNotFound);
         };
         let proof = self.operation_proof(loc).await?;

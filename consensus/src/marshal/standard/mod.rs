@@ -6330,7 +6330,7 @@ mod tests {
             Feedback::Ok
         }
 
-        fn fetch_all<F>(&mut self, fetches: Vec<F>) -> Feedback
+        fn fetch_all<F>(&mut self, fetches: impl IntoIterator<Item = F>) -> Feedback
         where
             F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
         {
@@ -6366,7 +6366,7 @@ mod tests {
 
         fn fetch_all_targeted<F>(
             &mut self,
-            fetches: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
+            fetches: impl IntoIterator<Item = (F, NonEmptyVec<Self::PublicKey>)>,
         ) -> Feedback
         where
             F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
@@ -14245,19 +14245,26 @@ mod tests {
         });
     }
 
-    /// Drives a fresh marshal with epochs of `epoch_length` blocks and a retention window of ten
-    /// views through `blocks` finalized heights, verifying each block at its finalization view so
-    /// the cache holds it. Epoch zero finalizes each height at the view of the same number; later
-    /// epochs count views from one.
+    /// Drives a fresh marshal configured with `epocher` and `view_retention` through `blocks`
+    /// finalized heights in epochs of `epoch_length` blocks, verifying each block at its
+    /// finalization view so the cache holds it. Epoch zero finalizes each height at the view of the
+    /// same number, and later epochs count views from one. The blocks are laid out by
+    /// `epoch_length`, not `epocher`. `epocher` may leave some heights out, but any height it
+    /// places must fall in the same epoch as in that layout.
     ///
-    /// Returns the last processed round after which the verified entry of epoch zero's last block
+    /// Returns the last processed round after which the verified entry of `watched`'s last block
     /// was still cached, asserting that the entry does not reappear once it is gone.
-    async fn epoch_zero_retention(
+    async fn epoch_retention<ES: Epocher>(
         context: &mut deterministic::Context,
         partition_prefix: &str,
+        epocher: ES,
         epoch_length: NonZeroU64,
+        view_retention: ViewDelta,
+        watched: Epoch,
         blocks: u64,
     ) -> Option<Round> {
+        // Start a marshal that keeps `view_retention` views under `epocher`. Its application
+        // acknowledges each block only when the test asks, starting with genesis.
         let Fixture { schemes, .. } =
             bls12381_threshold_vrf::fixture::<V, _>(context, NAMESPACE, NUM_VALIDATORS);
         let (certificates, finalized) =
@@ -14267,11 +14274,14 @@ mod tests {
             certificates,
             finalized,
             Config {
-                epocher: FixedEpocher::new(epoch_length),
-                ..test_config(
-                    partition_prefix,
-                    ConstantProvider::new(schemes[0].clone()),
-                    NZUsize!(1),
+                view_retention,
+                ..with_epocher(
+                    test_config(
+                        partition_prefix,
+                        ConstantProvider::new(schemes[0].clone()),
+                        NZUsize!(1),
+                    ),
+                    epocher,
                 )
             },
         )
@@ -14281,30 +14291,47 @@ mod tests {
         let _handle = actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
         assert_eq!(application.acknowledged().await, Height::zero());
 
-        let epocher = FixedEpocher::new(epoch_length);
-        let boundary = epocher.last(Epoch::zero()).expect("epoch zero is covered");
-        let boundary_round = Round::new(Epoch::zero(), View::new(boundary.get()));
+        // Map each height to the round it is finalized in, and find the round of the watched
+        // epoch's last block.
+        let layout = FixedEpocher::new(epoch_length);
+        let round_of = |height: Height| {
+            let info = layout
+                .containing(height)
+                .expect("the layout must cover every height");
+            let offset = height.get() - info.first().get();
+            let view = if info.epoch().is_zero() {
+                offset
+            } else {
+                offset + 1
+            };
+            Round::new(info.epoch(), View::new(view))
+        };
+        let boundary = layout
+            .last(watched)
+            .expect("the layout must cover the watched epoch");
+        let boundary_round = round_of(boundary);
+
+        // Build the chain from genesis one height at a time, tracking whether the watched block is
+        // still cached.
         let mut parent = StandardHarness::genesis_block(NUM_VALIDATORS as u16).digest();
         let mut last_kept = None;
         let mut gone = false;
         for height in 1..=blocks {
+            // Mark the block verified at its round so the cache holds it before it is finalized.
             let block = make_raw_block(parent, Height::new(height), height * 100);
             parent = block.digest();
-            let info = epocher
-                .containing(Height::new(height))
-                .expect("height is covered");
-            let offset = height - info.first().get();
-            let view = View::new(if info.epoch().is_zero() {
-                offset
-            } else {
-                offset + 1
-            });
-            let round = Round::new(info.epoch(), view);
+            let round = round_of(Height::new(height));
             assert!(mailbox.verified(round, ready(block.clone())).await);
+
+            // Finalize the block and wait until marshal processes it. Processing a finalization
+            // prunes the cache behind the previous one.
             let finalization = StandardHarness::make_finalization(
                 Proposal::new(
                     round,
-                    view.previous().expect("view is above zero"),
+                    round
+                        .view()
+                        .previous()
+                        .expect("the view must be above zero"),
                     block.digest(),
                 ),
                 &schemes,
@@ -14316,13 +14343,16 @@ mod tests {
                 mailbox.get_processed().await,
                 Some(Processed::Block(Height::new(height)))
             );
+
+            // Once the watched epoch has ended, record the last round after which its last block
+            // was still cached, and check that it never returns after it is pruned.
             if height < boundary.get() {
                 continue;
             }
             if mailbox.get_verified(boundary_round).await.is_some() {
                 assert!(
                     !gone,
-                    "epoch-zero cache must not reappear after it was destroyed, at {round}"
+                    "the cache of epoch {watched} must not reappear after it was destroyed, at {round}"
                 );
                 last_kept = Some(round);
             } else {
@@ -14332,20 +14362,21 @@ mod tests {
         last_kept
     }
 
-    /// Views restart with each epoch, so the part of the retention window that reaches below a
-    /// new epoch's first view is counted in whole earlier epochs. With epochs longer than the
-    /// window, the previous epoch's cache therefore survives the first `view_retention`
-    /// finalizations of the new epoch and goes with the next one.
+    /// With epochs longer than the retention window, the previous epoch's cache survives the first
+    /// `view_retention` finalizations of the new epoch and goes with the next one.
     #[test_traced("WARN")]
     fn test_standard_cache_keeps_previous_epoch_through_retention_window() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             // Epoch one spans views 1..=20, so the window of ten views is measurable from its
             // tenth finalization on, and the next one destroys epoch zero.
-            let kept = epoch_zero_retention(
+            let kept = epoch_retention(
                 &mut context,
                 "cache-keeps-previous-epoch",
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
                 BLOCKS_PER_EPOCH,
+                ViewDelta::new(10),
+                Epoch::zero(),
                 31,
             )
             .await;
@@ -14353,18 +14384,56 @@ mod tests {
         });
     }
 
-    /// When epochs span fewer views than the retention window, the part of the window that no
-    /// epoch can measure is counted in epochs, so earlier epochs are still destroyed.
+    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5646.
+    ///
+    /// When epochs span fewer views than the retention window, the window reaches through several
+    /// of them, one view per height, and every epoch below the lowest one it reaches is destroyed.
     #[test_traced("WARN")]
-    fn test_standard_cache_retention_counts_short_epochs() {
+    fn pr_5646_regression() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            // Three-block epochs span three views each. After the finalization at (8, 3), seven
-            // views of the window remain and are covered by seven earlier epochs, so the next
-            // finalization destroys epoch zero.
-            let kept =
-                epoch_zero_retention(&mut context, "cache-retention-short-epochs", NZU64!(3), 30)
-                    .await;
+            // Each epoch after the first spans ten views. After the finalization at (10, 10), the
+            // ninety views the window lacks are covered by the heights of epochs nine through one,
+            // so the next finalization destroys epoch zero. Each later epoch is destroyed ten
+            // finalizations after the one before it.
+            for (watched, last) in [(0, 10), (1, 11)] {
+                let kept = epoch_retention(
+                    &mut context,
+                    &format!("cache-retention-short-epochs-{watched}"),
+                    FixedEpocher::new(NZU64!(10)),
+                    NZU64!(10),
+                    ViewDelta::new(100),
+                    Epoch::new(watched),
+                    125,
+                )
+                .await;
+                assert_eq!(kept, Some(Round::new(Epoch::new(last), View::new(10))));
+            }
+        });
+    }
+
+    /// Heights the epocher has retired cannot be placed, so each epoch below the witnessed one
+    /// stands in for a single view of the retention window.
+    #[test_traced("WARN")]
+    fn test_standard_cache_retention_counts_retired_epochs_once() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            // The epocher places none of the processed heights. After the finalization at (8, 3),
+            // seven views of the window remain and are covered by epochs seven through one, so
+            // the next finalization destroys epoch zero.
+            let kept = epoch_retention(
+                &mut context,
+                "cache-retention-retired-heights",
+                RetiredThrough {
+                    epocher: FixedEpocher::new(NZU64!(3)),
+                    retired: Height::new(30),
+                },
+                NZU64!(3),
+                ViewDelta::new(10),
+                Epoch::zero(),
+                30,
+            )
+            .await;
             assert_eq!(kept, Some(Round::new(Epoch::new(8), View::new(3))));
         });
     }

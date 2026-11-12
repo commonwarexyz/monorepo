@@ -9,12 +9,9 @@ use commonware_storage::{
     merkle::{Graftable, Location, full::Config as MerkleConfig, mmb, mmr},
     qmdb::{
         ProofExt as _,
-        any::{
-            traits::DbAny as _,
-            unordered::{Update as UnorderedUpdate, fixed::Operation as UnorderedOperation},
-            value::FixedEncoding,
-        },
-        current::{FixedConfig as Config, unordered::fixed::Db as CurrentDb},
+        any::unordered::{Update as UnorderedUpdate, fixed::Operation as UnorderedOperation},
+        current::unordered::fixed::{Config, Db as CurrentDb},
+        value::FixedEncoding,
     },
     translator::TwoCap,
 };
@@ -133,7 +130,7 @@ async fn commit_pending<F: Graftable>(
     committed_state: &mut HashMap<RawKey, Option<RawValue>>,
     pending_expected: &mut HashMap<RawKey, Option<RawValue>>,
 ) -> Db<F> {
-    let inherited = db.inactivity_floor_loc();
+    let inherited = db.inactivity_floor();
     let mut batch = db.new_batch();
     for (k, v) in pending_writes.drain(..) {
         batch = batch.write(k, v);
@@ -153,7 +150,7 @@ async fn commit_pending<F: Graftable>(
             .iter()
             .filter_map(|(key, value)| Some((*key, (*value)?))),
         inherited,
-        db.inactivity_floor_loc(),
+        db.inactivity_floor(),
         db.bounds().end - 1,
     );
     for (key, value) in committed_state.iter_mut() {
@@ -172,7 +169,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
     runner.start(|context| async move {
         let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
         let cfg = Config {
-            merkle_config: MerkleConfig {
+            merkle: MerkleConfig {
                 journal_partition: format!("fuzz-current-{suffix}-merkle-journal"),
                 metadata_partition: format!("fuzz-current-{suffix}-merkle-metadata"),
                 items_per_blob: NZU64!(MERKLE_ITEMS_PER_BLOB),
@@ -181,7 +178,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
-            journal_config: FConfig {
+            log: FConfig {
                 partition: format!("fuzz-current-{suffix}-log-journal"),
                 items_per_blob: NZU64!(LOG_ITEMS_PER_BLOB),
                 write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
@@ -357,17 +354,28 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                 }
 
                 CurrentOperation::OpsRootWitness { other_ops_root } => {
-                    let witness = db
-                        .ops_root_witness()
-                        .await
-                        .expect("ops root witness should not fail");
+                    let witness = db.ops_root_witness().clone();
                     let ops_root = db.ops_root();
                     let root = db.root();
+                    let witness_root = witness.root::<Sha256>(&ops_root);
                     assert_eq!(
-                        witness.root::<Sha256>(&ops_root),
-                        root,
+                        witness_root, root,
                         "ops root witness should reconstruct the canonical root"
                     );
+                    // The witness is cached and the canonical root is derived from it, so check
+                    // it against content: a range proof built from the bitmap and grafted tree
+                    // must verify against the root the witness commits to.
+                    let start = db.sync_boundary();
+                    if start < db.bounds().end {
+                        let (proof, ops, chunks) = db
+                            .range_proof(start, NZU64!(1))
+                            .await
+                            .expect("Range proof should not fail");
+                        assert!(
+                            proof.verify::<Sha256, _, _>(start, &ops, &chunks, &witness_root),
+                            "ops root witness should match the bitmap and grafted tree"
+                        );
+                    }
                     assert!(
                         witness.verify::<Sha256>(&ops_root, &root),
                         "ops root witness should authenticate the ops root"
@@ -432,7 +440,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                             .await
                             .expect("ops historical proof should not fail");
                         let pinned = db
-                            .pinned_nodes_at(start)
+                            .ops_pinned_nodes_at(start)
                             .await
                             .expect("pinned node lookup should not fail");
                         assert!(

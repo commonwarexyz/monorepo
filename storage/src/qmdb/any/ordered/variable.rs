@@ -7,9 +7,12 @@
 
 use crate::{
     index::ordered::Index,
-    journal::contiguous::variable::Journal,
+    journal::contiguous::variable::{Config as JournalConfig, Journal},
     merkle::Location,
-    qmdb::any::{ordered, value::VariableEncoding},
+    qmdb::{
+        any::{self, ordered},
+        value::VariableEncoding,
+    },
 };
 
 pub type Update<K, V> = ordered::Update<K, VariableEncoding<V>>;
@@ -28,6 +31,9 @@ pub type Db<F, E, K, V, H, T, S> = super::Db<
     S,
 >;
 
+/// Configuration for a [Db].
+pub type Config<T, C, S> = any::Config<T, JournalConfig<C>, S>;
+
 /// Partitioned index variants that divide the key space into `2^(P*8)` partitions.
 ///
 /// See [partitioned::Db] for the generic type, or use the convenience aliases:
@@ -38,11 +44,13 @@ pub type Db<F, E, K, V, H, T, S> = super::Db<
 /// than 130,816 entries (see [`crate::index::partitioned::ordered`]); prefer `p64k` to keep ordered
 /// access mostly inline at larger scale.
 pub mod partitioned {
+    use super::{JournalConfig, any};
     pub use super::{Operation, Update};
     use crate::{
         index::partitioned::ordered::Index, journal::contiguous::variable::Journal,
         merkle::Location,
     };
+    use core::num::NonZeroUsize;
 
     /// An ordered key-value QMDB with a partitioned snapshot index and variable-size values.
     ///
@@ -50,6 +58,7 @@ pub mod partitioned {
     /// the number of prefix bytes used for partitioning:
     /// - `P = 1`: 256 partitions
     /// - `P = 2`: 65,536 partitions
+    /// - `P = 3`: ~16 million partitions
     ///
     /// Use partitioned indices when you have a large number of keys (>> 2^(P*8)) and memory
     /// efficiency is important. Keys should be uniformly distributed across the prefix space.
@@ -64,16 +73,21 @@ pub mod partitioned {
         S,
     >;
 
+    /// Configuration for a [Db].
+    pub type Config<T, C, S> = any::Config<T, JournalConfig<C>, S, NonZeroUsize>;
+
     /// Convenience type aliases for 256 partitions (P=1).
     pub mod p256 {
         /// Variable-value DB with 256 partitions.
         pub type Db<F, E, K, V, H, T, S> = super::Db<F, E, K, V, H, T, 1, S>;
+        pub use super::Config;
     }
 
     /// Convenience type aliases for 65,536 partitions (P=2).
     pub mod p64k {
         /// Variable-value DB with 65,536 partitions.
         pub type Db<F, E, K, V, H, T, S> = super::Db<F, E, K, V, H, T, 2, S>;
+        pub use super::Config;
     }
 }
 
@@ -85,7 +99,6 @@ pub(crate) mod test {
         qmdb::{
             Error,
             any::{
-                VariableConfig,
                 batch::{DiffEntry, Slot, StagedLoc, lookup_sorted},
                 ordered::test::{
                     test_ordered_any_db_basic, test_ordered_any_db_empty,
@@ -112,8 +125,12 @@ pub(crate) mod test {
     const PAGE_SIZE: u16 = 103;
     const PAGE_CACHE_SIZE: usize = 13;
 
-    pub(crate) type VarConfig<B = ()> =
-        VariableConfig<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ())), Sequential, B>;
+    pub(crate) type VarConfig<B = ()> = any::Config<
+        TwoCap,
+        JournalConfig<((), (commonware_codec::RangeCfg<usize>, ()))>,
+        Sequential,
+        B,
+    >;
 
     /// Type alias for the concrete [Db] type used in these unit tests.
     pub(crate) type AnyTest =
@@ -121,8 +138,8 @@ pub(crate) mod test {
 
     pub(crate) fn create_test_config<B>(seed: u64, init_concurrency: B) -> VarConfig<B> {
         let page_cache = CacheRef::new(NZU16!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE));
-        VariableConfig {
-            merkle_config: crate::mmr::full::Config {
+        any::Config {
+            merkle: crate::mmr::full::Config {
                 journal_partition: format!("mmr-journal-{seed}"),
                 metadata_partition: format!("mmr-metadata-{seed}"),
                 items_per_blob: NZU64!(12), // intentionally small and janky size
@@ -131,7 +148,7 @@ pub(crate) mod test {
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
-            journal_config: crate::journal::contiguous::variable::Config {
+            log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-journal-{seed}"),
                 items_per_section: NZU64!(14), // intentionally small and janky size
                 write_buffer: NZUsize!(64),
@@ -325,10 +342,10 @@ pub(crate) mod test {
                 Operation::Delete(key) => {
                     batch = batch.write(key, None);
                 }
-                Operation::CommitFloor(_, _) => {
-                    // CommitFloor consumes self, so this helper does not support it.
-                    // Test data from create_test_ops never includes CommitFloor.
-                    panic!("CommitFloor not supported in apply_ops");
+                Operation::Commit(_, _) => {
+                    // Commit consumes self, so this helper does not support it.
+                    // Test data from create_test_ops never includes Commit.
+                    panic!("Commit not supported in apply_ops");
                 }
             }
         }
@@ -539,7 +556,7 @@ pub(crate) mod test {
             // Stage both keys through the parent. Each must resolve in the grandparent's diff.
             let read_keys = [key(0), key(100)];
             let keys: Vec<&Digest> = read_keys.iter().collect();
-            let (values, staged) = parent
+            let (staged, values) = parent
                 .new_batch::<Sha256>()
                 .stage(&keys, &db)
                 .await
@@ -641,7 +658,7 @@ pub(crate) mod test {
                 // other keys), so its staged read stays committed-resolved.
                 let read_keys = [key(0), key(100), key(1), key(3)];
                 let keys: Vec<&Digest> = read_keys.iter().collect();
-                let (values, staged) = parent
+                let (staged, values) = parent
                     .new_batch::<Sha256>()
                     .stage(&keys, &db)
                     .await
@@ -728,7 +745,7 @@ pub(crate) mod test {
 
     #[allow(dead_code)]
     fn assert_non_trait_futures_are_send(db: &mut AnyTest, key: Digest) {
-        is_send(db.get_all(&key));
+        is_send(db.get_with_next_key(&key));
         is_send(db.get_with_loc(&key));
         is_send(db.get_span(&key));
         let mut policy = Bounded {
@@ -737,7 +754,7 @@ pub(crate) mod test {
         };
         is_send(db.new_batch().merkleize_with(db, &mut policy));
         is_send(async move {
-            let (_, staged) = db.new_batch().stage(&[&key], db).await?;
+            let (staged, _) = db.new_batch().stage(&[&key], db).await?;
             staged
                 .merkleize_with(vec![Slot::Keep], Vec::new(), db, &mut policy)
                 .await

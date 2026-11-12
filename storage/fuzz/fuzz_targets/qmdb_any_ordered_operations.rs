@@ -12,12 +12,10 @@ use commonware_storage::{
     qmdb::{
         ProofExt as _,
         any::{
-            FixedConfig as Config,
-            db::Db as AnyDb,
-            ordered::{Operation, Update},
-            traits::DbAny as _,
-            value::FixedEncoding,
+            Db as AnyDb,
+            ordered::{Operation, Update, fixed::Config},
         },
+        value::FixedEncoding,
     },
     translator::EightCap,
 };
@@ -129,7 +127,7 @@ async fn commit_pending<F: MerkleFamily>(
     pending_deletes: &mut HashSet<RawKey>,
     expected_op_count: &mut Location<F>,
 ) -> GenericDb<F> {
-    let inherited = db.inactivity_floor_loc();
+    let inherited = db.inactivity_floor();
     let mut batch = db.new_batch();
     for (k, v) in pending_writes.drain(..) {
         batch = batch.write(k, v);
@@ -158,7 +156,7 @@ async fn commit_pending<F: MerkleFamily>(
     *committed_state = policy.check_raw(
         committed_state.drain(),
         inherited,
-        db.inactivity_floor_loc(),
+        db.inactivity_floor(),
         db.bounds().end - 1,
     );
     db
@@ -196,7 +194,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
         async move {
             let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
             let cfg = Config::<EightCap, Sequential> {
-                merkle_config: MerkleConfig {
+                merkle: MerkleConfig {
                     journal_partition: format!("test-qmdb-mmr-journal-{suffix}"),
                     metadata_partition: format!("test-qmdb-mmr-metadata-{suffix}"),
                     items_per_blob: NZU64!(500000),
@@ -205,7 +203,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                     strategy: Sequential,
                     page_cache: page_cache.clone(),
                 },
-                journal_config: FConfig {
+                log: FConfig {
                     partition: format!("test-qmdb-log-journal-{suffix}"),
                     items_per_blob: NZU64!(500000),
                     write_buffer: NZUsize!(1024),
@@ -451,7 +449,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                         let ordered: BTreeMap<_, _> =
                             committed_state.iter().map(|(k, v)| (*k, *v)).collect();
                         let actual = db
-                            .get_all(&Key::new(*key))
+                            .get_with_next_key(&Key::new(*key))
                             .await
                             .expect("get all should not fail");
                         let expected = ordered.get(key).map(|value| {

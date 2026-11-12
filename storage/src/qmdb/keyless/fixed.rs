@@ -4,7 +4,7 @@
 
 use crate::{
     journal::contiguous::fixed::{self, Config as JournalConfig},
-    qmdb::{any::value::FixedEncoding, keyless::operation::Operation as BaseOperation},
+    qmdb::{keyless::operation::Operation as BaseOperation, value::FixedEncoding},
 };
 
 /// Keyless operation for fixed-size values.
@@ -12,7 +12,7 @@ pub type Operation<F, V> = BaseOperation<F, FixedEncoding<V>>;
 
 /// A keyless authenticated database for fixed-size data.
 pub type Db<F, E, V, H, S> =
-    super::Keyless<F, E, FixedEncoding<V>, fixed::Journal<E, Operation<F, V>>, H, S>;
+    super::Db<F, E, FixedEncoding<V>, fixed::Journal<E, Operation<F, V>>, H, S>;
 
 /// A compact keyless authenticated db for fixed-size data.
 pub type CompactDb<F, E, V, H, S> = super::CompactDb<F, E, FixedEncoding<V>, H, S>;
@@ -168,7 +168,6 @@ mod tests {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
-            commit_codec_config: (),
         };
         TestCompactDb::init(context, cfg, None).await.unwrap()
     }
@@ -199,7 +198,7 @@ mod tests {
         let original_pins = batch.pinned_nodes(&db).unwrap();
         assert!(original_proof.verify_with_pinned_nodes::<Sha256, _>(
             start,
-            &ops,
+            ops.iter(),
             &original_pins,
             &root
         ));
@@ -323,7 +322,6 @@ mod tests {
                     write_buffer: NZUsize!(1024),
                     replay_buffer: NZUsize!(1024),
                 },
-                commit_codec_config: (),
             };
             let mut db = TestCompactDb::<F>::init(context.child("create"), cfg.clone(), None)
                 .await
@@ -518,7 +516,7 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(*client.bounds().start, 5);
-            assert_eq!(*client.inactivity_floor_loc(), 0);
+            assert_eq!(*client.inactivity_floor(), 0);
 
             // Persist and reopen the imported suffix without requiring replay from its floor.
             _ = client.sync().await.unwrap();
@@ -634,7 +632,7 @@ mod tests {
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             let value0 = U64::new(1);
             let loc0;
-            let floor = db.inactivity_floor_loc();
+            let floor = db.inactivity_floor();
             (db, loc0) = apply_append(db, value0.clone(), floor).await;
 
             let starts_before = pending.starts();
@@ -657,7 +655,7 @@ mod tests {
             assert_eq!(db.get(loc0).await.unwrap(), Some(value0));
             let value1 = U64::new(2);
             let loc1;
-            let floor = db.inactivity_floor_loc();
+            let floor = db.inactivity_floor();
             (db, loc1) = apply_append(db, value1.clone(), floor).await;
             assert_eq!(
                 pending.completions(),
@@ -695,7 +693,7 @@ mod tests {
             let mut db = open_delayed_db(ctx.child("delayed"), "start-sync-fail", &pending)
                 .await
                 .unwrap();
-            let floor = db.inactivity_floor_loc();
+            let floor = db.inactivity_floor();
             (db, _) = apply_append(db, U64::new(1), floor).await;
 
             // Arm all future syncs to resolve to an injected error.
@@ -732,7 +730,7 @@ mod tests {
                 .unwrap();
             let value = U64::new(1);
             let loc;
-            let floor = db.inactivity_floor_loc();
+            let floor = db.inactivity_floor();
             (db, loc) = apply_append(db, value.clone(), floor).await;
 
             let handle;
@@ -773,7 +771,7 @@ mod tests {
                     );
                     let mut db = drive_pending_syncs(&pending, open).await.unwrap();
                     let root_p = db.root();
-                    let floor = db.inactivity_floor_loc();
+                    let floor = db.inactivity_floor();
                     (db, _) = apply_append(db, U64::new(11), floor).await;
                     db = drive_pending_syncs(&pending, db.sync()).await.unwrap();
                     let root_a = db.root();
@@ -792,7 +790,7 @@ mod tests {
                     let mut db = drive_pending_syncs(&pending, open).await.unwrap();
                     assert_eq!(db.bounds().end, Location::new(1));
                     assert_eq!(db.root(), root_p);
-                    let floor = db.inactivity_floor_loc();
+                    let floor = db.inactivity_floor();
                     let loc;
                     (db, loc) = apply_append(db, U64::new(22), floor).await;
                     assert_eq!(loc, Location::new(1));
@@ -871,7 +869,7 @@ mod tests {
             (db, handle) = db.start_sync().await.unwrap();
             assert!(pending.starts() > starts_before);
 
-            let floor = db.inactivity_floor_loc();
+            let floor = db.inactivity_floor();
             assert!(*floor > 0);
             let db = {
                 let mut prune = std::pin::pin!(db.prune(floor));

@@ -244,13 +244,23 @@ jobs:
             cpu-features: "avx2 bmi2 adx avx512f avx512bw avx512vl"
             partition: 2/2
             skip-cache-save: true
-          # Zen 2 has AVX2 and SHA-NI without AVX-512, VAES, or VPCLMULQDQ.
+          # Zen 2 has AVX2 and SHA-NI without AVX-512, VAES, or VPCLMULQDQ. QEMU emulates it on
+          # every runner without that exact feature set, so the full row splits its tests in two.
           - os: ubuntu-latest
             package: commonware-cryptography
             flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
             qemu: EPYC-Rome
             simd-backend: x86_v3
             cpu-features: "avx2 bmi2 adx sha"
+            partition: 1/2
+            skip-cache-save: true
+          - os: ubuntu-latest
+            package: commonware-cryptography
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
+            qemu: EPYC-Rome
+            simd-backend: x86_v3
+            cpu-features: "avx2 bmi2 adx sha"
+            partition: 2/2
             skip-cache-save: true
           - os: ubuntu-latest
             package: commonware-cryptography
@@ -259,22 +269,32 @@ jobs:
             static-features: "avx2 sha !avx512f"
             qemu: EPYC-Rome
             cpu-features: "avx2 bmi2 adx sha"
-          # Broadwell has AVX2, BMI2, and ADX without SHA-NI or AVX-512.
+          # Broadwell has AVX2, BMI2, and ADX without SHA-NI or AVX-512. Its full row splits its
+          # tests in two as well.
           - os: ubuntu-latest
             package: commonware-cryptography
             flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
             qemu: Broadwell
             simd-backend: x86_v3
             cpu-features: "avx2 bmi2 adx"
+            partition: 1/2
+            skip-cache-save: true
+          - os: ubuntu-latest
+            package: commonware-cryptography
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
+            qemu: Broadwell
+            simd-backend: x86_v3
+            cpu-features: "avx2 bmi2 adx"
+            partition: 2/2
             skip-cache-save: true
           # Neoverse N2 has SHA-3 and SVE2.
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-26.04-arm
             package: commonware-cryptography
             flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
             qemu: neoverse-n2
             simd-backend: arm_v9
             cpu-features: "neon sha2 sha3 sve sve2"
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-26.04-arm
             package: commonware-cryptography
             flags: "--cargo-profile release --target aarch64-unknown-linux-gnu --no-default-features --lib -p commonware-cryptography-curve25519"
             rustflags: "-C target-feature=+sha2,+sve2"
@@ -282,14 +302,14 @@ jobs:
             qemu: neoverse-n2
             cpu-features: "neon sha2 sha3 sve sve2"
           # Neoverse N1 has SHA-2 without SHA-3 or SVE.
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-26.04-arm
             package: commonware-cryptography
             flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
             qemu: neoverse-n1
             simd-backend: neon
             cpu-features: "neon sha2"
             skip-cache-save: true
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-26.04-arm
             package: commonware-cryptography
             flags: "--cargo-profile release --no-default-features --lib -p commonware-cryptography-curve25519"
             static-features: "!sha2 !sha3 !sve2"
@@ -312,7 +332,7 @@ jobs:
             qemu: Broadwell
             cpu-features: "avx2 bmi2 adx"
             simd-backend: x86_v3
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-26.04-arm
             package: commonware-simd
             flags: "--cargo-profile release --target aarch64-unknown-linux-gnu --no-default-features --lib"
             rustflags: "-C target-feature=+neon,+sha2,+sve,+sve2"
@@ -320,7 +340,7 @@ jobs:
             qemu: neoverse-n2
             cpu-features: "neon sha2 sha3 sve sve2"
             simd-backend: arm_v9
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-26.04-arm
             package: commonware-simd
             flags: "--cargo-profile release --target aarch64-unknown-linux-gnu --no-default-features --lib"
             rustflags: "-C target-feature=+neon,+sha2"
@@ -328,7 +348,7 @@ jobs:
             qemu: neoverse-n1
             cpu-features: "neon sha2"
             simd-backend: neon
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-26.04-arm
             package: commonware-simd
             flags: "--cargo-profile release --target aarch64-unknown-linux-gnu --no-default-features --lib"
             static-features: "neon !sha2 !sve !sve2"

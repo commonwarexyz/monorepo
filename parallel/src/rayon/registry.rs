@@ -6,6 +6,7 @@ use super::{
     ErrorKind, StartHandler, ThreadPoolBuildError, ThreadPoolBuilder, WorkerPosition, Yield,
     job::{JobRef, StackJob},
     latch::{AsCoreLatch, CoreLatch, Latch, LatchRef, LockLatch, OnceLatch, SpinLatch},
+    meter::Context,
     sleep::{Sleep, THREADS_MAX},
     unwind,
 };
@@ -458,11 +459,17 @@ impl Registry {
                 },
                 LatchRef::new(l),
             );
+
+            // The hand-off and the wait run in no context, so the run is charged for the job
+            // alone. The wait resets this thread's latch for its next call.
+            //
             // SAFETY: the job stays on this stack frame until its latch is set, which happens
             // once it has executed.
             unsafe {
-                self.inject(placement, job.as_job_ref());
-                job.latch.wait_and_reset(); // Make sure we can use the same latch again next time.
+                Context::suspend(|| {
+                    self.inject(placement, job.as_job_ref());
+                    job.latch.wait_and_reset();
+                });
 
                 job.into_result()
             }
@@ -498,11 +505,16 @@ impl Registry {
             },
             latch,
         );
+
+        // The hand-off and the wait run in no context, so the run is charged for the job alone.
+        //
         // SAFETY: the job stays on this stack frame until its latch is set, which happens once it
         // has executed, and `current_thread` is this thread's worker state.
         unsafe {
-            self.inject(placement, job.as_job_ref());
-            current_thread.wait_until(&job.latch);
+            Context::suspend(|| {
+                self.inject(placement, job.as_job_ref());
+                current_thread.wait_until(&job.latch);
+            });
             job.into_result()
         }
     }
@@ -540,6 +552,12 @@ impl Registry {
     #[cfg(test)]
     pub(super) fn sleeping_workers(&self, group: usize) -> usize {
         self.groups[group].sleep.sleeping_threads()
+    }
+
+    /// Whether a job waits in any group's injector or in the Wide injector.
+    #[cfg(test)]
+    pub(super) fn has_any_injected_job(&self) -> bool {
+        (0..self.groups.len()).any(|group| self.has_injected_job(group))
     }
 
     /// The number of times the worker at `index` was woken from sleep, for tests of who wakes.
@@ -810,12 +828,15 @@ impl WorkerThread {
 
     /// Wait until the latch is set. Try to keep busy by popping and
     /// stealing tasks as necessary.
+    ///
+    /// The wait suspends the calling thread's context, and the jobs it runs meanwhile charge their
+    /// own contexts.
     #[inline]
     pub(super) unsafe fn wait_until<L: AsCoreLatch + ?Sized>(&self, latch: &L) {
         let latch = latch.as_core_latch();
         if !latch.probe() {
             // SAFETY: the caller upholds `wait_until`'s contract.
-            unsafe { self.wait_until_cold(latch) };
+            Context::suspend(|| unsafe { self.wait_until_cold(latch) });
         }
     }
 
@@ -928,7 +949,8 @@ impl WorkerThread {
     }
 
     pub(super) fn yield_now(&self) -> Yield {
-        self.find_work().map_or(Yield::Idle, |job| {
+        // The search runs in no context, and the job found runs in its own.
+        Context::suspend(|| self.find_work()).map_or(Yield::Idle, |job| {
             // SAFETY: a job taken from a queue executes once, on a worker of its pool.
             unsafe { self.execute(job) };
             Yield::Executed

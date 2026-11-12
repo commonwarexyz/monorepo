@@ -581,7 +581,7 @@ fn run(input: FuzzInput) -> String {
                     let index = peer % mailboxes.len();
                     assert!(
                         mailboxes[index]
-                            .fetch_all(keys.into_iter().map(Key).collect())
+                            .fetch_all(keys.into_iter().map(Key))
                             .accepted()
                     );
                 }
@@ -612,7 +612,7 @@ fn run(input: FuzzInput) -> String {
                                 (Key(key), targets(&peers, target, target_mask))
                             },
                         )
-                        .collect();
+                        .collect::<Vec<_>>();
                     assert!(mailboxes[index].fetch_all_targeted(requests).accepted());
                 }
                 Operation::Cancel { peer, key } => {

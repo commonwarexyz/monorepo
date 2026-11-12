@@ -2061,7 +2061,7 @@ mod tests {
         // `CodingB` supplies the context type the coding variant requires. The bound uses the
         // encoded size of the largest `B`.
         simulated::Config {
-            max_size: commonware_p2p::max_message_size(&[
+            max_size: commonware_p2p::max_message_size([
                 <Coding<CodingB, C, H, P> as Variant>::max_buffer_payload_size(
                     u32::try_from(participants).unwrap(),
                     B::max_encode_size(&()),

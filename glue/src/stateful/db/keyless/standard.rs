@@ -21,13 +21,13 @@ use commonware_storage::{
     merkle::{Family, Location},
     qmdb::{
         Error,
-        any::value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
         keyless::{
-            Keyless, Operation,
+            Db, Operation,
             batch::{MerkleizedBatch, UnmerkleizedBatch},
             fixed, initial_root, variable,
         },
         sync::{self, Target as AnySyncTarget},
+        value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
     },
 };
 use commonware_utils::{
@@ -48,7 +48,7 @@ where
     Operation<F, V>: EncodeShared,
 {
     batch: UnmerkleizedBatch<F, H, V, S>,
-    db: Shared<Keyless<F, E, V, C, H, S>>,
+    db: Shared<Db<F, E, V, C, H, S>>,
 }
 
 impl<F, E, V, C, H, S> Deref for KeylessUnmerkleized<F, E, V, C, H, S>
@@ -144,7 +144,7 @@ where
     Operation<F, V>: EncodeShared,
 {
     inner: Arc<MerkleizedBatch<F, H::Digest, V, S>>,
-    db: Shared<Keyless<F, E, V, C, H, S>>,
+    db: Shared<Db<F, E, V, C, H, S>>,
 }
 
 impl<F, E, V, C, H, S> Clone for KeylessMerkleized<F, E, V, C, H, S>
@@ -306,10 +306,10 @@ where
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
-        AnySyncTarget::new(
-            initial_root::<F, FixedEncoding<V>, H>(),
-            non_empty_range!(Location::new(0), Location::new(1)),
-        )
+        AnySyncTarget {
+            root: initial_root::<F, FixedEncoding<V>, H>(),
+            range: non_empty_range!(Location::new(0), Location::new(1)),
+        }
     }
 
     fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
@@ -340,10 +340,10 @@ where
 
     fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds();
-        AnySyncTarget::new(
-            self.root(),
-            non_empty_range!(self.sync_boundary(), bounds.end),
-        )
+        AnySyncTarget {
+            root: self.root(),
+            range: non_empty_range!(self.sync_boundary(), bounds.end),
+        }
     }
 }
 
@@ -391,10 +391,10 @@ where
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
-        AnySyncTarget::new(
-            initial_root::<F, VariableEncoding<V>, H>(),
-            non_empty_range!(Location::new(0), Location::new(1)),
-        )
+        AnySyncTarget {
+            root: initial_root::<F, VariableEncoding<V>, H>(),
+            range: non_empty_range!(Location::new(0), Location::new(1)),
+        }
     }
 
     fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
@@ -425,10 +425,10 @@ where
 
     fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds();
-        AnySyncTarget::new(
-            self.root(),
-            non_empty_range!(self.sync_boundary(), bounds.end),
-        )
+        AnySyncTarget {
+            root: self.root(),
+            range: non_empty_range!(self.sync_boundary(), bounds.end),
+        }
     }
 }
 
@@ -613,7 +613,7 @@ mod tests {
             let database = <FixedDb as ManagedDb<_>>::apply(database, next)
                 .await
                 .unwrap();
-            assert_eq!(database.inactivity_floor_loc(), mmr::Location::new(1));
+            assert_eq!(database.inactivity_floor(), mmr::Location::new(1));
             slot.put(database);
         });
     }
@@ -688,34 +688,34 @@ mod tests {
                 .await
                 .unwrap();
 
-            let valid_target = AnySyncTarget::new(
-                merkleized.root(),
-                non_empty_range!(
+            let valid_target = AnySyncTarget {
+                root: merkleized.root(),
+                range: non_empty_range!(
                     merkleized.bounds().inactivity_floor,
                     merkleized.bounds().tip.size
                 ),
-            );
+            };
             assert!(<FixedDb as ManagedDb<_>>::matches_sync_target(
                 &merkleized,
                 &valid_target,
             ));
 
-            let wrong_start = AnySyncTarget::new(
-                merkleized.root(),
-                non_empty_range!(mmr::Location::new(0), merkleized.bounds().tip.size),
-            );
+            let wrong_start = AnySyncTarget {
+                root: merkleized.root(),
+                range: non_empty_range!(mmr::Location::new(0), merkleized.bounds().tip.size),
+            };
             assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
                 &merkleized,
                 &wrong_start,
             ));
 
-            let wrong_end = AnySyncTarget::new(
-                merkleized.root(),
-                non_empty_range!(
+            let wrong_end = AnySyncTarget {
+                root: merkleized.root(),
+                range: non_empty_range!(
                     merkleized.bounds().inactivity_floor,
                     merkleized.bounds().tip.size - 1
                 ),
-            );
+            };
             assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
                 &merkleized,
                 &wrong_end,

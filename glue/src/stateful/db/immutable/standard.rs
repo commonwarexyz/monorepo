@@ -21,14 +21,14 @@ use commonware_storage::{
     merkle::{Family, Location},
     qmdb::{
         Error,
-        any::value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
         immutable::{
-            Immutable, Operation,
+            Db, Operation,
             batch::{MerkleizedBatch, UnmerkleizedBatch},
             fixed, initial_root, variable,
         },
         operation::Key,
         sync::{self, Target as AnySyncTarget},
+        value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
     },
     translator::Translator,
 };
@@ -37,10 +37,11 @@ use commonware_utils::{
     channel::{mpsc, ring},
     non_empty_range,
 };
+use core::borrow::Borrow;
 use std::{ops::Deref, sync::Arc};
 
 /// Shared handle to an immutable database.
-type ImmutableDbHandle<F, E, K, V, C, H, T, S> = Shared<Immutable<F, E, K, V, C, H, T, S>>;
+type ImmutableDbHandle<F, E, K, V, C, H, T, S> = Shared<Db<F, E, K, V, C, H, T, S>>;
 
 /// A speculative batch of new keyed values over a shared immutable database.
 pub struct ImmutableUnmerkleized<F, E, K, V, C, H, T, S>
@@ -113,7 +114,10 @@ where
     /// Reads multiple values by key, falling back to applied state.
     ///
     /// Returns results in the same order as `keys`.
-    pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
+    pub async fn get_many(
+        &self,
+        keys: &[impl Borrow<K> + Sync],
+    ) -> Result<Vec<Option<V::Value>>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get_many(keys, &db).await
     }
@@ -202,7 +206,10 @@ where
     /// Reads multiple values by key, falling back to applied state.
     ///
     /// Returns results in the same order as `keys`.
-    pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
+    pub async fn get_many(
+        &self,
+        keys: &[impl Borrow<K> + Sync],
+    ) -> Result<Vec<Option<V::Value>>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get_many(keys, &db).await
     }
@@ -310,10 +317,10 @@ where
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
-        AnySyncTarget::new(
-            initial_root::<F, K, FixedEncoding<V>, H>(),
-            non_empty_range!(Location::new(0), Location::new(1)),
-        )
+        AnySyncTarget {
+            root: initial_root::<F, K, FixedEncoding<V>, H>(),
+            range: non_empty_range!(Location::new(0), Location::new(1)),
+        }
     }
 
     fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
@@ -344,10 +351,10 @@ where
 
     fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds();
-        AnySyncTarget::new(
-            self.root(),
-            non_empty_range!(self.sync_boundary(), bounds.end),
-        )
+        AnySyncTarget {
+            root: self.root(),
+            range: non_empty_range!(self.sync_boundary(), bounds.end),
+        }
     }
 }
 
@@ -401,10 +408,10 @@ where
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
-        AnySyncTarget::new(
-            initial_root::<F, K, VariableEncoding<V>, H>(),
-            non_empty_range!(Location::new(0), Location::new(1)),
-        )
+        AnySyncTarget {
+            root: initial_root::<F, K, VariableEncoding<V>, H>(),
+            range: non_empty_range!(Location::new(0), Location::new(1)),
+        }
     }
 
     fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
@@ -435,10 +442,10 @@ where
 
     fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds();
-        AnySyncTarget::new(
-            self.root(),
-            non_empty_range!(self.sync_boundary(), bounds.end),
-        )
+        AnySyncTarget {
+            root: self.root(),
+            range: non_empty_range!(self.sync_boundary(), bounds.end),
+        }
     }
 }
 
@@ -537,7 +544,7 @@ mod tests {
     fn fixed_config(suffix: &str) -> fixed::Config<TwoCap, Sequential> {
         let page_cache = CacheRef::new(NZU16!(101), NZUsize!(11));
         fixed::Config {
-            merkle_config: MerkleConfig {
+            merkle: MerkleConfig {
                 journal_partition: format!("stateful-immutable-journal-{suffix}"),
                 metadata_partition: format!("stateful-immutable-metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
@@ -621,7 +628,7 @@ mod tests {
             let database = <FixedDb as ManagedDb<_>>::apply(database, next)
                 .await
                 .unwrap();
-            assert_eq!(database.inactivity_floor_loc(), mmr::Location::new(1));
+            assert_eq!(database.inactivity_floor(), mmr::Location::new(1));
             slot.put(database);
         });
     }

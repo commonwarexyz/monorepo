@@ -3,10 +3,7 @@ use crate::{
     index::Ordered as Index,
     journal::contiguous::Contiguous,
     merkle::{Family, Location},
-    qmdb::{
-        any::{ValueEncoding, db::Db},
-        operation::{Key, Operation as OperationTrait},
-    },
+    qmdb::{any::db::Db, operation::Key, value::ValueEncoding},
 };
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
@@ -66,16 +63,6 @@ impl<
 where
     Operation<F, K, V>: Codec,
 {
-    async fn get_update_op(
-        reader: &impl Contiguous<Item = Operation<F, K, V>>,
-        loc: Location<F>,
-    ) -> Result<Update<K, V>, crate::qmdb::Error<F>> {
-        match reader.read(*loc).await? {
-            Operation::Update(key_data) => Ok(key_data),
-            _ => unreachable!("expected update operation at location {}", loc),
-        }
-    }
-
     /// Find the span produced by the provided locations that contains `key`, if any.
     async fn find_span(
         &self,
@@ -84,7 +71,7 @@ where
     ) -> Result<LocatedKey<F, K, V>, crate::qmdb::Error<F>> {
         // Collision order is arbitrary, so check each candidate's cyclic span.
         for loc in locs {
-            let data = Self::get_update_op(&self.log, loc).await?;
+            let data = self.read_update(loc).await?;
             if contains_cyclic(&data.key..&data.next_key, key) {
                 return Ok(Some((loc, data)));
             }
@@ -173,7 +160,7 @@ where
         // Predecessor ownership includes the next key, so an active query finds the prior key.
         // The owner's key must still be smaller to exclude cyclic wraparound.
         for loc in locs {
-            let data = Self::get_update_op(&self.log, loc).await?;
+            let data = self.read_update(loc).await?;
             if data.key < *key
                 && contains_cyclic((Excluded(&data.key), Included(&data.next_key)), key)
             {
@@ -183,39 +170,15 @@ where
         Ok(None)
     }
 
-    /// Get the (value, next-key) pair of `key` in the db, or None if it has no value.
-    pub async fn get_all(&self, key: &K) -> Result<Option<(V::Value, K)>, crate::qmdb::Error<F>> {
+    /// Returns the value of `key` and the next active key, wrapping from the last key to the first,
+    /// or `None` if `key` is not active.
+    pub async fn get_with_next_key(
+        &self,
+        key: &K,
+    ) -> Result<Option<(V::Value, K)>, crate::qmdb::Error<F>> {
         self.get_with_loc(key)
             .await
             .map(|res| res.map(|(data, _)| (data.value, data.next_key)))
-    }
-
-    /// Returns the key data for `key` with its location, or None if the key is not active.
-    // Explicit Send avoids the borrowed-iterator inference limitation (rust-lang/rust#100013).
-    #[allow(clippy::manual_async_fn, clippy::type_complexity)]
-    pub(crate) fn get_with_loc(
-        &self,
-        key: &K,
-    ) -> impl Future<Output = Result<Option<(Update<K, V>, Location<F>)>, crate::qmdb::Error<F>>> + Send
-    {
-        async move {
-            // Resolve translated-key collisions before returning an update and its location.
-            for loc in self.snapshot.get(key).copied() {
-                let op = self.log.read(*loc).await?;
-                assert!(
-                    op.is_update(),
-                    "location does not reference update operation. loc={loc}"
-                );
-                if op.key().expect("update operation must have key") == key {
-                    let Operation::Update(data) = op else {
-                        unreachable!("expected update operation");
-                    };
-                    return Ok(Some((data, loc)));
-                }
-            }
-
-            Ok(None)
-        }
     }
 
     /// Streams active (key, value) pairs in ascending key order within `range`. Read errors are
@@ -320,7 +283,7 @@ where
         locs: impl Iterator<Item = Location<F>> + Send,
     ) -> Result<Vec<Update<K, V>>, crate::qmdb::Error<F>> {
         // Conflicting entries are independent, so their journal reads can run concurrently.
-        let futures = locs.map(|loc| Self::get_update_op(&self.log, loc));
+        let futures = locs.map(|loc| self.read_update(loc));
         let mut updates = try_join_all(futures).await?;
 
         // Descending order lets the stream emit ascending keys with constant-time pops.
@@ -544,7 +507,7 @@ mod test {
     #[boxed]
     pub(crate) async fn test_ordered_any_db_empty<
         F: Family,
-        D: DbAny<F, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
+        D: DbAny<Family = F, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
     >(
         context: Context,
         db: D,
@@ -607,7 +570,7 @@ mod test {
     #[boxed]
     pub(crate) async fn test_ordered_any_db_basic<
         F: Family,
-        D: DbAny<F, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
+        D: DbAny<Family = F, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
     >(
         context: Context,
         db: D,
@@ -814,7 +777,7 @@ mod test {
     #[boxed]
     pub(crate) async fn test_ordered_any_update_collision_edge_case<
         F: Family,
-        D: DbAny<F, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
+        D: DbAny<Family = F, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
     >(
         db: D,
     ) {
@@ -1417,17 +1380,17 @@ mod test {
                 Sequential,
             >;
             let config = current::tests::variable_config_partitioned::<OneCap>("neighbors");
-            let config = current::VariableConfig {
-                journal_config: crate::journal::contiguous::variable::Config {
+            let config = current::ordered::variable::partitioned::Config {
+                log: crate::journal::contiguous::variable::Config {
                     codec_config: (((..=3).into(), ()), ((..=4096).into(), ())),
-                    partition: config.journal_config.partition,
-                    items_per_section: config.journal_config.items_per_section,
-                    compression: config.journal_config.compression,
-                    page_cache: config.journal_config.page_cache,
-                    write_buffer: config.journal_config.write_buffer,
-                    replay_buffer: config.journal_config.replay_buffer,
+                    partition: config.log.partition,
+                    items_per_section: config.log.items_per_section,
+                    compression: config.log.compression,
+                    page_cache: config.log.page_cache,
+                    write_buffer: config.log.write_buffer,
+                    replay_buffer: config.log.replay_buffer,
                 },
-                merkle_config: config.merkle_config,
+                merkle: config.merkle,
                 grafted_metadata_partition: config.grafted_metadata_partition,
                 translator: config.translator,
                 init_cache: config.init_cache,
@@ -1693,7 +1656,7 @@ mod test {
                 Sequential,
             >;
             let config = any::test::fixed_db_config::<OneCap>("scan-errors");
-            let cache = config.journal_config.page_cache.clone();
+            let cache = config.log.page_cache.clone();
             let db = TestDb::init(context.child("db"), config, None)
                 .await
                 .unwrap();
@@ -1787,17 +1750,17 @@ mod test {
                 Sequential,
             >;
             let base = any::test::variable_db_config::<OneCap>("scan-variable-keys");
-            let config = any::VariableConfig {
-                journal_config: crate::journal::contiguous::variable::Config {
+            let config = any::ordered::variable::Config {
+                log: crate::journal::contiguous::variable::Config {
                     codec_config: (((0..=32).into(), ()), ()),
-                    partition: base.journal_config.partition,
-                    items_per_section: base.journal_config.items_per_section,
-                    compression: base.journal_config.compression,
-                    page_cache: base.journal_config.page_cache,
-                    write_buffer: base.journal_config.write_buffer,
-                    replay_buffer: base.journal_config.replay_buffer,
+                    partition: base.log.partition,
+                    items_per_section: base.log.items_per_section,
+                    compression: base.log.compression,
+                    page_cache: base.log.page_cache,
+                    write_buffer: base.log.write_buffer,
+                    replay_buffer: base.log.replay_buffer,
                 },
-                merkle_config: base.merkle_config,
+                merkle: base.merkle,
                 translator: base.translator,
                 init_cache: base.init_cache,
                 init_buffer: base.init_buffer,

@@ -41,10 +41,7 @@ use commonware_storage::{
     journal::contiguous::fixed::Config as FixedLogConfig,
     metadata::{self, Metadata},
     mmr::{self, Location, full::Config as MmrJournalConfig},
-    qmdb::{
-        any::{FixedConfig, unordered::fixed},
-        sync::Target,
-    },
+    qmdb::{any::unordered::fixed, sync::Target},
     translator::TwoCap,
 };
 use commonware_utils::{
@@ -114,7 +111,7 @@ pub const MESSAGE_RATE: Quota = Quota::per_second(NZU32!(128));
 /// Returns the P2P `max_message_size` that admits every payload a validator's components send.
 pub fn max_message_size() -> u32 {
     let participants = MAX_PARTICIPANTS.get();
-    commonware_p2p::max_message_size(&[
+    commonware_p2p::max_message_size([
         orchestrator::max_payload_size::<Scheme, sha256::Digest>(participants),
         marshal::max_payload_size::<Standard<Block>, Scheme>(participants, &()),
         probe::max_payload_size::<Standard<Block>, Scheme>(participants, &()),
@@ -566,9 +563,9 @@ impl<E: StorageContext> dkg::SecretStore for Secrets<E> {
 }
 
 /// Application QMDB config with partitions derived from `prefix`.
-pub fn db_config(prefix: &str, page_cache: CacheRef) -> FixedConfig<TwoCap, Sequential> {
-    FixedConfig {
-        merkle_config: MmrJournalConfig {
+pub fn db_config(prefix: &str, page_cache: CacheRef) -> fixed::Config<TwoCap, Sequential> {
+    fixed::Config {
+        merkle: MmrJournalConfig {
             journal_partition: format!("{prefix}-qmdb-mmr-journal"),
             metadata_partition: format!("{prefix}-qmdb-mmr-metadata"),
             items_per_blob: NZU64!(11),
@@ -577,7 +574,7 @@ pub fn db_config(prefix: &str, page_cache: CacheRef) -> FixedConfig<TwoCap, Sequ
             strategy: Sequential,
             page_cache: page_cache.clone(),
         },
-        journal_config: FixedLogConfig {
+        log: FixedLogConfig {
             partition: format!("{prefix}-qmdb-log-journal"),
             items_per_blob: NZU64!(7),
             page_cache,

@@ -1189,6 +1189,7 @@ mod tests {
 
     type Qmdb<E> =
         any::unordered::fixed::Db<mmr::Family, E, Digest, Digest, Sha256, TwoCap, Sequential>;
+    type QmdbConfig = any::unordered::fixed::Config<TwoCap, Sequential>;
     type DbSet<E> = Shared<Qmdb<E>>;
     type TestMerkleized =
         <DbSet<deterministic::Context> as DatabaseSet<deterministic::Context>>::Merkleized;
@@ -1633,7 +1634,10 @@ mod tests {
         fn sync_targets(
             block: &Self::Block,
         ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::SyncTargets {
-            Target::new(block.state_root, block.range.clone())
+            Target {
+                root: block.state_root,
+                range: block.range.clone(),
+            }
         }
     }
 
@@ -1715,7 +1719,7 @@ mod tests {
         context_cell: ContextCell<deterministic::Context>,
         processor: Processor<deterministic::Context, ExecutionApp, Sequential>,
         provider: MapProvider,
-        db_config: any::FixedConfig<TwoCap, Sequential>,
+        db_config: QmdbConfig,
     }
 
     impl Harness {
@@ -1740,7 +1744,7 @@ mod tests {
         async fn with_app(
             context: deterministic::Context,
             provider: MapProvider,
-            config: any::FixedConfig<TwoCap, Sequential>,
+            config: QmdbConfig,
             app: ExecutionApp,
         ) -> Self {
             let databases = <DbSet<deterministic::Context> as DatabaseSet<
@@ -1884,10 +1888,10 @@ mod tests {
         format!("processor_harness_{id}")
     }
 
-    fn qmdb_config(prefix: &str) -> any::FixedConfig<TwoCap, Sequential> {
+    fn qmdb_config(prefix: &str) -> QmdbConfig {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
-        any::FixedConfig {
-            merkle_config: MmrJournalConfig {
+        QmdbConfig {
+            merkle: MmrJournalConfig {
                 journal_partition: format!("{prefix}_mmr_journal"),
                 metadata_partition: format!("{prefix}_mmr_metadata"),
                 items_per_blob: NZU64!(11),
@@ -1896,7 +1900,7 @@ mod tests {
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
-            journal_config: FixedLogConfig {
+            log: FixedLogConfig {
                 partition: format!("{prefix}_log_journal"),
                 items_per_blob: NZU64!(7),
                 page_cache,

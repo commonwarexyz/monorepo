@@ -16,16 +16,13 @@ use commonware_storage::{
     merkle::{Family, Graftable, Location, PendingChunk as _, mem::Mem, mmb, mmr},
     qmdb::{
         self, ProofExt as _,
-        any::{
-            ordered::fixed,
-            unordered,
-            value::{FixedEncoding, ValueEncoding, VariableEncoding},
-        },
+        any::{ordered::fixed, unordered},
         current::{
             grafting,
             proof::{OpsRootWitness, operation},
         },
         immutable, keyless,
+        value::{FixedEncoding, ValueEncoding, VariableEncoding},
     },
 };
 use commonware_utils::{bitmap::Prunable, sequence::FixedBytes};
@@ -388,7 +385,7 @@ fn plain_proof<F: Family, H: Hasher, O: Encode>(
 // Fixture matrices cover word and varint boundaries for values and metadata.
 const VARIABLE_LENGTHS: [usize; 8] = [0, 1, 31, 32, 33, 127, 128, 129];
 
-fn keyless_operation<F: Family, V: qmdb::any::value::ValueEncoding>(
+fn keyless_operation<F: Family, V: qmdb::value::ValueEncoding>(
     args: &KeylessArgs,
     index: u64,
     value: V::Value,
@@ -434,7 +431,7 @@ fn keyless<F: Family, H: Hasher>(args: &KeylessArgs) -> Result<AnyOutput, String
             );
             plain_proof::<F, H, _>(&args.tree, |index| {
                 let bytes = leaf(args.tree.seed, index);
-                keyless_operation::<F, qmdb::any::value::VariableEncoding<Vec<u8>>>(
+                keyless_operation::<F, qmdb::value::VariableEncoding<Vec<u8>>>(
                     args,
                     index,
                     bytes.into_iter().cycle().take(len).collect(),
@@ -444,7 +441,7 @@ fn keyless<F: Family, H: Hasher>(args: &KeylessArgs) -> Result<AnyOutput, String
     }
 }
 
-fn immutable_operation<F: Family, V: qmdb::any::value::ValueEncoding>(
+fn immutable_operation<F: Family, V: qmdb::value::ValueEncoding>(
     args: &ImmutableArgs,
     index: u64,
     value: V::Value,
@@ -491,7 +488,7 @@ fn immutable<F: Family, H: Hasher>(args: &ImmutableArgs) -> Result<AnyOutput, St
             );
             plain_proof::<F, H, _>(&args.tree, |index| {
                 let bytes = leaf(args.tree.seed, index);
-                immutable_operation::<F, qmdb::any::value::VariableEncoding<Vec<u8>>>(
+                immutable_operation::<F, qmdb::value::VariableEncoding<Vec<u8>>>(
                     args,
                     index,
                     bytes.into_iter().cycle().take(len).collect(),
@@ -572,13 +569,13 @@ where
                 UnorderedOperation::Update => {}
                 UnorderedOperation::Delete => return unordered::Operation::Delete(key(0)),
                 UnorderedOperation::Commit => {
-                    return unordered::Operation::CommitFloor(
+                    return unordered::Operation::Commit(
                         None,
                         Location::new(tree.inactivity_floor),
                     );
                 }
                 UnorderedOperation::CommitMetadata => {
-                    return unordered::Operation::CommitFloor(
+                    return unordered::Operation::Commit(
                         Some(value(index)),
                         Location::new(tree.inactivity_floor),
                     );
@@ -604,7 +601,7 @@ where
             unordered::Operation::Delete(key) => {
                 live.remove(&key);
             }
-            unordered::Operation::CommitFloor(_, _) => commit = Some(index),
+            unordered::Operation::Commit(_, _) => commit = Some(index),
         }
     }
     let mut active = vec![false; usize::try_from(tree.leaves).map_err(|e| e.to_string())?];
@@ -1593,7 +1590,7 @@ mod tests {
         if *proof.leaves == 1 {
             let initial = match encoding {
                 "fixed" => keyless::initial_root::<F, FixedEncoding<FixedBytes<32>>, H>(),
-                _ => keyless::initial_root::<F, qmdb::any::value::VariableEncoding<Vec<u8>>, H>(),
+                _ => keyless::initial_root::<F, qmdb::value::VariableEncoding<Vec<u8>>, H>(),
             };
             assert_eq!(root, initial);
         }

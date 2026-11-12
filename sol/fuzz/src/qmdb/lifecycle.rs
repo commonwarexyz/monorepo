@@ -13,12 +13,15 @@ use commonware_storage::{
     merkle::{Graftable, PendingChunk as _, full::Config as MerkleConfig, mmb, mmr},
     qmdb::{
         self,
-        any::{ordered::fixed::Update, value::FixedEncoding},
+        any::ordered::fixed::Update,
         current::{
-            FixedConfig,
-            ordered::{fixed::Db, proof::ExclusionProof},
+            ordered::{
+                fixed::{Config, Db},
+                proof::ExclusionProof,
+            },
             proof::constant::OperationProof,
         },
+        value::FixedEncoding,
     },
     translator::OneCap,
 };
@@ -59,10 +62,10 @@ impl LifecycleArgs {
     }
 }
 
-fn config() -> FixedConfig<OneCap, Sequential> {
+fn config() -> Config<OneCap, Sequential> {
     let page_cache = CacheRef::new(NZU16!(4096), NZUsize!(8));
-    FixedConfig {
-        merkle_config: MerkleConfig {
+    Config {
+        merkle: MerkleConfig {
             journal_partition: "lifecycle-merkle-journal".into(),
             metadata_partition: "lifecycle-merkle-metadata".into(),
             items_per_blob: NZU64!(11),
@@ -71,7 +74,7 @@ fn config() -> FixedConfig<OneCap, Sequential> {
             strategy: Sequential,
             page_cache: page_cache.clone(),
         },
-        journal_config: JournalConfig {
+        log: JournalConfig {
             partition: "lifecycle-operations".into(),
             items_per_blob: NZU64!(7),
             page_cache,
@@ -145,7 +148,7 @@ async fn exclusion<F: Graftable, H: Hasher>(
     let (proof, operation) = match proof {
         ExclusionProof::KeyValue(proof, update) => (proof, Operation::Update(update)),
         ExclusionProof::Commit(proof, metadata) => {
-            let operation = Operation::CommitFloor(metadata, proof.loc);
+            let operation = Operation::Commit(metadata, proof.loc);
             (proof, operation)
         }
     };

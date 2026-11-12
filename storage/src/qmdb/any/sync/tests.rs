@@ -134,13 +134,13 @@ where
         target_db = H::apply_ops(target_db, H::create_ops(50), None).await;
 
         // Start at the inactivity floor so the lower bound can rise twice under the same end.
-        let initial_lower_bound = H::inactivity_floor_loc(&target_db);
+        let initial_lower_bound = H::inactivity_floor(&target_db);
         assert!(
             *initial_lower_bound > 1,
             "test setup requires lower bound that can advance twice"
         );
         let upper_bound = H::bounds(&target_db).end;
-        let root = H::db_root(&target_db);
+        let root = H::ops_root(&target_db);
 
         let (update_sender, update_receiver) = ring::channel(NZUsize!(2));
         let target_db = Arc::new(target_db);
@@ -198,7 +198,7 @@ where
         let mut target_db = H::init_db(context.child("target")).await;
         target_db = H::apply_ops(target_db, H::create_ops(10), None).await;
         let initial_target = Target {
-            root: H::db_root(&target_db),
+            root: H::ops_root(&target_db),
             range: non_empty_range!(H::sync_boundary(&target_db), H::bounds(&target_db).end),
         };
 
@@ -206,7 +206,7 @@ where
         let updated_lower_bound = H::sync_boundary(&target_db);
         let updated_upper_bound = H::bounds(&target_db).end;
         let updated_target = Target {
-            root: H::db_root(&target_db),
+            root: H::ops_root(&target_db),
             range: non_empty_range!(updated_lower_bound, updated_upper_bound),
         };
         let updated_verification_root = H::canonical_root(&target_db);
@@ -319,7 +319,7 @@ where
         // Each of three successive targets is sent only once the previous one is reached.
         target_db = H::apply_ops(target_db, H::create_ops(8), None).await;
         let initial_target = Target {
-            root: H::db_root(&target_db),
+            root: H::ops_root(&target_db),
             range: non_empty_range!(
                 H::sync_boundary(&target_db),
                 H::bounds(&target_db).end
@@ -328,7 +328,7 @@ where
 
         target_db = H::apply_ops(target_db, H::create_ops_seeded(5, 1), None).await;
         let first_update = Target {
-            root: H::db_root(&target_db),
+            root: H::ops_root(&target_db),
             range: non_empty_range!(
                 H::sync_boundary(&target_db),
                 H::bounds(&target_db).end
@@ -337,7 +337,7 @@ where
 
         target_db = H::apply_ops(target_db, H::create_ops_seeded(5, 2), None).await;
         let second_update = Target {
-            root: H::db_root(&target_db),
+            root: H::ops_root(&target_db),
             range: non_empty_range!(
                 H::sync_boundary(&target_db),
                 H::bounds(&target_db).end
@@ -443,7 +443,7 @@ where
         let lower_bound = H::sync_boundary(&target_db);
         let upper_bound = H::bounds(&target_db).end;
         let target = Target {
-            root: H::db_root(&target_db),
+            root: H::ops_root(&target_db),
             range: non_empty_range!(lower_bound, upper_bound),
         };
         let verification_root = H::canonical_root(&target_db);
@@ -515,7 +515,7 @@ where
             db_config: H::config(&context.next_u64().to_string()),
             fetch_batch_size: NZU64!(5),
             target: Target {
-                root: H::db_root(&target_db),
+                root: H::ops_root(&target_db),
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             source: target_db.clone(),
@@ -562,7 +562,7 @@ where
             db_config: H::config(&context.next_u64().to_string()),
             fetch_batch_size: NZU64!(5),
             target: Target {
-                root: H::db_root(&target_db),
+                root: H::ops_root(&target_db),
                 range: non_empty_range!(lower_bound, upper_bound),
             },
             source: target_db.clone(),
@@ -599,7 +599,7 @@ where
         let target_ops = H::create_ops(50);
         target_db = H::apply_ops(target_db, target_ops, None).await;
 
-        let sync_root = H::db_root(&target_db);
+        let sync_root = H::ops_root(&target_db);
         let lower_bound = H::sync_boundary(&target_db);
         let upper_bound = H::bounds(&target_db).end;
         let target_db = Arc::new(target_db);
@@ -658,7 +658,7 @@ where
         let bounds = H::bounds(&db);
         let sync_upper_bound = bounds.end;
         let target_db_op_count = bounds.end;
-        let target_db_inactivity_floor_loc = H::inactivity_floor_loc(&db);
+        let target_db_inactivity_floor_loc = H::inactivity_floor(&db);
 
         let pinned_nodes = db.pinned_nodes_at(sync_lower_bound).await;
         let (_, journal) = db.into_log_components();
@@ -677,7 +677,7 @@ where
         // Verify database state
         assert_eq!(H::bounds(&sync_db).end, target_db_op_count);
         assert_eq!(
-            H::inactivity_floor_loc(&sync_db),
+            H::inactivity_floor(&sync_db),
             target_db_inactivity_floor_loc
         );
         assert_eq!(H::sync_boundary(&sync_db), sync_lower_bound);
@@ -725,7 +725,7 @@ where
         // Capture target db state for comparison
         let bounds = H::bounds(&target_db);
         let target_db_op_count = bounds.end;
-        let target_db_inactivity_floor_loc = H::inactivity_floor_loc(&target_db);
+        let target_db_inactivity_floor_loc = H::inactivity_floor(&target_db);
         let sync_lower_bound = H::sync_boundary(&target_db);
         let sync_upper_bound = bounds.end;
         let target_hash = H::canonical_root(&target_db);
@@ -750,7 +750,7 @@ where
         // Verify database state
         assert_eq!(H::bounds(&sync_db).end, target_db_op_count);
         assert_eq!(
-            H::inactivity_floor_loc(&sync_db),
+            H::inactivity_floor(&sync_db),
             target_db_inactivity_floor_loc
         );
         assert_eq!(H::sync_boundary(&sync_db), sync_lower_bound);
@@ -789,7 +789,7 @@ where
         let pinned_nodes = source_db.pinned_nodes_at(lower_bound).await;
         let target_hash = H::canonical_root(&source_db);
         let target_op_count = H::bounds(&source_db).end;
-        let target_inactivity_floor = H::inactivity_floor_loc(&source_db);
+        let target_inactivity_floor = H::inactivity_floor(&source_db);
 
         let (mmr, journal) = source_db.into_log_components();
 
@@ -809,7 +809,7 @@ where
 
         // Verify database state
         assert_eq!(H::bounds(&db).end, target_op_count);
-        assert_eq!(H::inactivity_floor_loc(&db), target_inactivity_floor);
+        assert_eq!(H::inactivity_floor(&db), target_inactivity_floor);
         assert_eq!(H::sync_boundary(&db), lower_bound);
 
         // Verify the root digest matches the target
@@ -830,10 +830,10 @@ where
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
-        // Create an empty database (initialized with a single CommitFloor operation)
+        // Create an empty database (initialized with a single Commit operation)
         let source_db = H::init_db(context.child("source")).await;
 
-        // An empty database has exactly 1 operation (the initial CommitFloor)
+        // An empty database has exactly 1 operation (the initial Commit)
         assert_eq!(H::bounds(&source_db).end, Location::new(1));
 
         let target_hash = H::canonical_root(&source_db);
@@ -855,7 +855,7 @@ where
 
         // Verify database state
         assert_eq!(H::bounds(&synced_db).end, Location::new(1));
-        assert_eq!(H::inactivity_floor_loc(&synced_db), Location::new(0));
+        assert_eq!(H::inactivity_floor(&synced_db), Location::new(0));
         assert_eq!(H::canonical_root(&synced_db), target_hash);
 
         // Test that we can perform operations on the synced database
@@ -957,7 +957,7 @@ where
         let boundary = H::sync_boundary(&target_db);
         let target_db = H::prune(target_db, boundary).await;
 
-        let sync_root = H::db_root(&target_db);
+        let sync_root = H::ops_root(&target_db);
         let lower_bound = H::sync_boundary(&target_db);
         let upper_bound = H::bounds(&target_db).end;
 
@@ -989,7 +989,7 @@ where
 
         // Sync reaches the target root only if the corrupted candidate is rejected for the retry.
         let synced_db: H::Db = sync::sync(config).await.unwrap();
-        assert_eq!(H::db_root(&synced_db), sync_root);
+        assert_eq!(H::ops_root(&synced_db), sync_root);
         H::destroy(synced_db).await;
     });
 }
@@ -1093,7 +1093,7 @@ where
             let boundary = H::sync_boundary(&target_db);
             target_db = H::prune(target_db, boundary).await;
 
-            if H::inactivity_floor_loc(&target_db) > Location::new(0) {
+            if H::inactivity_floor(&target_db) > Location::new(0) {
                 break;
             }
 
@@ -1104,18 +1104,18 @@ where
         // The new target raises both bounds, so adopting it cancels the old boundary request and
         // needs a fresh boundary at a higher start.
         let old_target = Target {
-            root: H::db_root(&target_db),
+            root: H::ops_root(&target_db),
             range: non_empty_range!(
-                H::inactivity_floor_loc(&target_db),
+                H::inactivity_floor(&target_db),
                 H::bounds(&target_db).end
             ),
         };
 
         target_db = H::apply_ops(target_db, H::create_ops_seeded(3, seed + 1), None).await;
         let new_target = Target {
-            root: H::db_root(&target_db),
+            root: H::ops_root(&target_db),
             range: non_empty_range!(
-                H::inactivity_floor_loc(&target_db),
+                H::inactivity_floor(&target_db),
                 H::bounds(&target_db).end
             ),
         };
@@ -1305,7 +1305,7 @@ where
         db = H::prune(db, floor).await;
         assert!(floor > Location::new(0));
         let mut target = Target {
-            root: H::db_root(&db),
+            root: H::ops_root(&db),
             range: non_empty_range!(floor, H::bounds(&db).end),
         };
         let source_db = Arc::new(AsyncRwLock::new(Some(db)));
@@ -1382,7 +1382,7 @@ where
                     let db = H::prune(db, floor).await;
                     let oldest = H::bounds(&db).start;
                     let next = Target {
-                        root: H::db_root(&db),
+                        root: H::ops_root(&db),
                         range: non_empty_range!(floor, H::bounds(&db).end),
                     };
                     *guard = Some(db);
@@ -1496,7 +1496,7 @@ pub(crate) fn test_local_pinned_nodes_below_floor<H: SyncTestHarness>() {
             assert!(round <= 64, "inactivity floor never passed a peak");
             db = H::apply_ops(db, H::create_ops(100), None).await;
             let end = H::bounds(&db).end;
-            let floor = H::inactivity_floor_loc(&db);
+            let floor = H::inactivity_floor(&db);
             if <H::Family as merkle::Family>::inactive_peaks(end, floor)
                 > <H::Family as merkle::Family>::inactive_peaks(end, start)
             {
@@ -1504,7 +1504,7 @@ pub(crate) fn test_local_pinned_nodes_below_floor<H: SyncTestHarness>() {
             }
         }
         let target = Target {
-            root: H::db_root(&db),
+            root: H::ops_root(&db),
             range: non_empty_range!(start, H::bounds(&db).end),
         };
         drop(H::db_sync(db).await);
@@ -1560,12 +1560,12 @@ macro_rules! db_any_harness_methods {
             db.sync_boundary()
         }
 
-        fn inactivity_floor_loc(db: &Self::Db) -> $crate::merkle::Location<Self::Family> {
-            db.inactivity_floor_loc()
+        fn inactivity_floor(db: &Self::Db) -> $crate::merkle::Location<Self::Family> {
+            db.inactivity_floor()
         }
 
-        fn db_root(db: &Self::Db) -> commonware_cryptography::sha256::Digest {
-            $crate::qmdb::sync::Database::root(db)
+        fn ops_root(db: &Self::Db) -> commonware_cryptography::sha256::Digest {
+            $crate::qmdb::sync::Database::ops_root(db)
         }
 
         fn canonical_root(db: &Self::Db) -> commonware_cryptography::sha256::Digest {
@@ -1592,7 +1592,7 @@ macro_rules! db_any_harness_methods {
                     Operation::Delete(key) => {
                         expected.insert(*key, None);
                     }
-                    Operation::CommitFloor(_, _) => {}
+                    Operation::Commit(_, _) => {}
                 }
             }
             for (key, value) in expected {
@@ -1617,6 +1617,10 @@ mod harnesses {
     use super::SyncTestHarness;
     use crate::{
         merkle::{self, mmb, mmr},
+        qmdb::any::{
+            ordered::fixed::Config as OrderedFixedConfig,
+            unordered::fixed::Config as UnorderedFixedConfig,
+        },
         translator::TwoCap,
     };
     use commonware_cryptography::sha256::Digest;
@@ -1738,9 +1742,7 @@ mod harnesses {
         >;
         type Metadata = Digest;
 
-        fn config(
-            suffix: &str,
-        ) -> crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential> {
+        fn config(suffix: &str) -> OrderedFixedConfig<TwoCap, commonware_parallel::Sequential> {
             crate::qmdb::any::test::fixed_db_config(suffix)
         }
 
@@ -1782,7 +1784,7 @@ mod harnesses {
                     Operation::Delete(key) => {
                         batch = batch.write(key, None);
                     }
-                    Operation::CommitFloor(_, _) => {}
+                    Operation::Commit(_, _) => {}
                 }
             }
             let merkleized = batch.merkleize(&db).await.unwrap();
@@ -1863,7 +1865,7 @@ mod harnesses {
                     Operation::Delete(key) => {
                         batch = batch.write(key, None);
                     }
-                    Operation::CommitFloor(_, _) => {}
+                    Operation::Commit(_, _) => {}
                 }
             }
             let merkleized = batch.merkleize(&db).await.unwrap();
@@ -1899,9 +1901,7 @@ mod harnesses {
         >;
         type Metadata = Digest;
 
-        fn config(
-            suffix: &str,
-        ) -> crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential> {
+        fn config(suffix: &str) -> UnorderedFixedConfig<TwoCap, commonware_parallel::Sequential> {
             crate::qmdb::any::test::fixed_db_config(suffix)
         }
 
@@ -1943,7 +1943,7 @@ mod harnesses {
                     Operation::Delete(key) => {
                         batch = batch.write(key, None);
                     }
-                    Operation::CommitFloor(_, _) => {}
+                    Operation::Commit(_, _) => {}
                 }
             }
             let merkleized = batch.merkleize(&db).await.unwrap();
@@ -2023,7 +2023,7 @@ mod harnesses {
                     Operation::Delete(key) => {
                         batch = batch.write(key, None);
                     }
-                    Operation::CommitFloor(_, _) => {}
+                    Operation::Commit(_, _) => {}
                 }
             }
             let merkleized = batch.merkleize(&db).await.unwrap();

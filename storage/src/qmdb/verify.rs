@@ -19,10 +19,13 @@ pub type ExtractedDigests<F, H> = Vec<(Position<F>, DigestOf<H>)>;
 pub trait ProofExt<F: Family, D: Digest> {
     /// Return true if the proof authenticates `ops` at the locations starting at `start_loc` in
     /// the database with the provided `root`.
-    fn verify<H: Hasher<Digest = D>, O: Encode>(
+    ///
+    /// `ops` must yield consecutive operations from `start_loc`, and a `len()` that differs from
+    /// the number yielded is rejected.
+    fn verify<'a, H: Hasher<Digest = D>, O: Encode + 'a>(
         &self,
         start_loc: Location<F>,
-        ops: &[O],
+        ops: impl IntoIterator<Item = &'a O, IntoIter: ExactSizeIterator>,
         root: &D,
     ) -> bool;
 
@@ -30,10 +33,10 @@ pub trait ProofExt<F: Family, D: Digest> {
     /// nodes pinned at `start_loc` in the database with the provided `root`.
     ///
     /// When `start_loc` is 0, `pinned_nodes` must be empty.
-    fn verify_with_pinned_nodes<H: Hasher<Digest = D>, O: Encode>(
+    fn verify_with_pinned_nodes<'a, H: Hasher<Digest = D>, O: Encode + 'a>(
         &self,
         start_loc: Location<F>,
-        ops: &[O],
+        ops: impl IntoIterator<Item = &'a O, IntoIter: ExactSizeIterator>,
         pinned_nodes: &[D],
         root: &D,
     ) -> bool;
@@ -45,10 +48,10 @@ pub trait ProofExt<F: Family, D: Digest> {
     ///
     /// Returns [Error::RootMismatch] if the proof reconstructs a root other than `root`, or
     /// [Error::InvalidProof] if the proof or its inputs are malformed.
-    fn verify_and_extract_digests<H: Hasher<Digest = D>, O: Encode>(
+    fn verify_and_extract_digests<'a, H: Hasher<Digest = D>, O: Encode + 'a>(
         &self,
         start_loc: Location<F>,
-        ops: &[O],
+        ops: impl IntoIterator<Item = &'a O, IntoIter: ExactSizeIterator>,
         root: &D,
     ) -> Result<ExtractedDigests<F, H>, Error<F>>;
 
@@ -58,10 +61,10 @@ pub trait ProofExt<F: Family, D: Digest> {
     /// # Errors
     ///
     /// Returns an error if the proof is invalid or does not reconstruct `root`.
-    fn to_proof_store<H: Hasher<Digest = D>, O: Encode>(
+    fn to_proof_store<'a, H: Hasher<Digest = D>, O: Encode + 'a>(
         &self,
         start_loc: Location<F>,
-        ops: &[O],
+        ops: impl IntoIterator<Item = &'a O, IntoIter: ExactSizeIterator>,
         root: &D,
     ) -> Result<ProofStore<F, D>, Error<F>>;
 
@@ -70,80 +73,76 @@ pub trait ProofExt<F: Family, D: Digest> {
     ///
     /// Operations must be in strictly ascending location order. Returns `false` if a location
     /// repeats or precedes the one before it, even if the operations are genuine.
-    fn verify_multi<H: Hasher<Digest = D>, O: Encode>(
+    fn verify_multi<'a, H: Hasher<Digest = D>, O: Encode + 'a>(
         &self,
-        ops: &[(Location<F>, O)],
+        ops: impl IntoIterator<Item = &'a (Location<F>, O)>,
         root: &D,
     ) -> bool;
 }
 
 /// Encode `ops` as the elements a Merkle proof authenticates.
-fn encode_ops<O: Encode>(ops: &[O]) -> Vec<Bytes> {
-    ops.iter().map(Encode::encode).collect()
+fn encode_ops<'a, O: Encode + 'a>(
+    ops: impl IntoIterator<Item = &'a O, IntoIter: ExactSizeIterator>,
+) -> impl ExactSizeIterator<Item = Bytes> {
+    ops.into_iter().map(Encode::encode)
 }
 
 impl<F: Family, D: Digest> ProofExt<F, D> for Proof<F, D> {
-    fn verify<H: Hasher<Digest = D>, O: Encode>(
+    fn verify<'a, H: Hasher<Digest = D>, O: Encode + 'a>(
         &self,
         start_loc: Location<F>,
-        ops: &[O],
+        ops: impl IntoIterator<Item = &'a O, IntoIter: ExactSizeIterator>,
         root: &D,
     ) -> bool {
-        self.verify_range_inclusion(&qmdb::hasher::<H>(), start_loc, &encode_ops(ops), root)
+        self.verify_range_inclusion(&qmdb::hasher::<H>(), start_loc, encode_ops(ops), root)
     }
 
-    fn verify_with_pinned_nodes<H: Hasher<Digest = D>, O: Encode>(
+    fn verify_with_pinned_nodes<'a, H: Hasher<Digest = D>, O: Encode + 'a>(
         &self,
         start_loc: Location<F>,
-        ops: &[O],
+        ops: impl IntoIterator<Item = &'a O, IntoIter: ExactSizeIterator>,
         pinned_nodes: &[D],
         root: &D,
     ) -> bool {
         self.verify_range_inclusion_with_pinned_nodes(
             &qmdb::hasher::<H>(),
             start_loc,
-            &encode_ops(ops),
+            encode_ops(ops),
             pinned_nodes,
             root,
         )
     }
 
-    fn verify_and_extract_digests<H: Hasher<Digest = D>, O: Encode>(
+    fn verify_and_extract_digests<'a, H: Hasher<Digest = D>, O: Encode + 'a>(
         &self,
         start_loc: Location<F>,
-        ops: &[O],
+        ops: impl IntoIterator<Item = &'a O, IntoIter: ExactSizeIterator>,
         root: &D,
     ) -> Result<ExtractedDigests<F, H>, Error<F>> {
         self.verify_range_inclusion_and_extract_digests(
             &qmdb::hasher::<H>(),
             start_loc,
-            &encode_ops(ops),
+            encode_ops(ops),
             root,
         )
     }
 
-    fn to_proof_store<H: Hasher<Digest = D>, O: Encode>(
+    fn to_proof_store<'a, H: Hasher<Digest = D>, O: Encode + 'a>(
         &self,
         start_loc: Location<F>,
-        ops: &[O],
+        ops: impl IntoIterator<Item = &'a O, IntoIter: ExactSizeIterator>,
         root: &D,
     ) -> Result<ProofStore<F, D>, Error<F>> {
-        ProofStore::new(
-            &qmdb::hasher::<H>(),
-            self,
-            start_loc,
-            &encode_ops(ops),
-            root,
-        )
+        ProofStore::new(&qmdb::hasher::<H>(), self, start_loc, encode_ops(ops), root)
     }
 
-    fn verify_multi<H: Hasher<Digest = D>, O: Encode>(
+    fn verify_multi<'a, H: Hasher<Digest = D>, O: Encode + 'a>(
         &self,
-        ops: &[(Location<F>, O)],
+        ops: impl IntoIterator<Item = &'a (Location<F>, O)>,
         root: &D,
     ) -> bool {
         let elements = ops
-            .iter()
+            .into_iter()
             .map(|(loc, op)| (*loc, op.encode()))
             .collect::<Vec<_>>();
         self.verify_multi_inclusion(&qmdb::hasher::<H>(), &elements, root)

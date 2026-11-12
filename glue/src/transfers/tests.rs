@@ -626,7 +626,7 @@ fn plan_deduplicates_many_keys() {
 
 /// A database of `A` accounts that the tests stage, settle, merkleize, and read back.
 trait TestDb<A: Account>:
-    DbAny<mmr::Family, Key = Key, Value = A, Digest = Digest>
+    DbAny<Family = mmr::Family, Key = Key, Value = A, Digest = Digest>
     + BatchableDb<Merkleized: MerkleizedBatch<Digest = Digest>>
 {
     /// Stages `keys` in a new batch, settles their reads with `settle`, and merkleizes the slots it
@@ -647,7 +647,7 @@ macro_rules! impl_test_db {
                 keys: &[&Key],
                 settle: impl FnOnce(Vec<Option<$account>>) -> Result<Vec<Slot<$account>>, E> + Send,
             ) -> Result<Self::Merkleized, E> {
-                let (reads, staged) = self.new_batch().stage(keys, self).await.unwrap();
+                let (staged, reads) = self.new_batch().stage(keys, self).await.unwrap();
                 let slots = settle(reads)?;
                 Ok(staged
                     .merkleize(slots, Vec::new(), self)
@@ -740,10 +740,10 @@ type CurrentOrdered = current::ordered::fixed::Db<
     Sequential,
 >;
 
-fn any_config(suffix: &str) -> any::FixedConfig<TwoCap, Sequential> {
+fn any_config(suffix: &str) -> any::Config<TwoCap, FixedJournalConfig, Sequential> {
     let page_cache = CacheRef::new(NZU16!(101), NZUsize!(11));
-    any::FixedConfig {
-        merkle_config: MerkleConfig {
+    any::Config {
+        merkle: MerkleConfig {
             journal_partition: format!("transfers-journal-{suffix}"),
             metadata_partition: format!("transfers-metadata-{suffix}"),
             items_per_blob: NZU64!(11),
@@ -752,7 +752,7 @@ fn any_config(suffix: &str) -> any::FixedConfig<TwoCap, Sequential> {
             strategy: Sequential,
             page_cache: page_cache.clone(),
         },
-        journal_config: FixedJournalConfig {
+        log: FixedJournalConfig {
             partition: format!("transfers-log-{suffix}"),
             items_per_blob: NZU64!(7),
             page_cache,
@@ -766,11 +766,11 @@ fn any_config(suffix: &str) -> any::FixedConfig<TwoCap, Sequential> {
     }
 }
 
-fn current_config(suffix: &str) -> current::FixedConfig<TwoCap, Sequential> {
+fn current_config(suffix: &str) -> current::Config<TwoCap, FixedJournalConfig, Sequential> {
     let any = any_config(suffix);
-    current::FixedConfig {
-        merkle_config: any.merkle_config,
-        journal_config: any.journal_config,
+    current::Config {
+        merkle: any.merkle,
+        log: any.log,
         grafted_metadata_partition: format!("transfers-grafted-{suffix}"),
         translator: TwoCap,
         init_cache: any.init_cache,
@@ -779,16 +779,16 @@ fn current_config(suffix: &str) -> current::FixedConfig<TwoCap, Sequential> {
     }
 }
 
-fn variable_config(suffix: &str) -> any::VariableConfig<TwoCap, ((), ()), Sequential> {
+fn variable_config(suffix: &str) -> any::unordered::variable::Config<TwoCap, ((), ()), Sequential> {
     let any = any_config(suffix);
-    any::VariableConfig {
-        merkle_config: any.merkle_config,
-        journal_config: VariableJournalConfig {
+    any::unordered::variable::Config {
+        merkle: any.merkle,
+        log: VariableJournalConfig {
             partition: format!("transfers-log-{suffix}"),
             items_per_section: NZU64!(7),
             compression: None,
             codec_config: ((), ()),
-            page_cache: any.journal_config.page_cache,
+            page_cache: any.log.page_cache,
             write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
         },
@@ -1330,13 +1330,13 @@ fn selection_reads_later_rounds_through_expand() {
         let mut selection = Selection::new();
         let touched = selection.touch(&rounds[0]);
         let keys: Vec<&Key> = selection.keys()[touched].iter().collect();
-        let (reads, mut staged) = proposer.new_batch().stage(&keys, &proposer).await.unwrap();
+        let (mut staged, reads) = proposer.new_batch().stage(&keys, &proposer).await.unwrap();
         selection.register(reads);
         let mut accepted = selection.apply(&rounds[0]);
         for round in &rounds[1..] {
             let touched = selection.touch(round);
             let keys: Vec<&Key> = selection.keys()[touched.clone()].iter().collect();
-            let (range, reads, expanded) = staged.expand(&keys, &proposer).await.unwrap();
+            let (expanded, range, reads) = staged.expand(&keys, &proposer).await.unwrap();
             assert_eq!(range, touched);
             selection.register(reads);
             accepted.extend(selection.apply(round));
@@ -2062,7 +2062,7 @@ macro_rules! impl_stateful_db {
             {
                 let plan = Plan::new(transfers, &Sequential)?;
                 let keys: Vec<&Key> = plan.keys().iter().collect();
-                let (reads, staged) = self.new_batches().await.stage(&keys).await.unwrap();
+                let (staged, reads) = self.new_batches().await.stage(&keys).await.unwrap();
                 let slots = plan.settle(&reads, &Sequential)?;
                 Ok(staged.merkleize(slots, Vec::new()).await.unwrap())
             }
@@ -2075,7 +2075,7 @@ macro_rules! impl_stateful_db {
                 let mut selection = Selection::new();
                 let touched = selection.touch(&rounds[0]);
                 let keys: Vec<&Key> = selection.keys()[touched].iter().collect();
-                let (reads, mut staged) = self.new_batches().await.stage(&keys).await.unwrap();
+                let (mut staged, reads) = self.new_batches().await.stage(&keys).await.unwrap();
                 selection.register(reads);
                 let mut accepted = selection.apply(&rounds[0]);
 
@@ -2084,7 +2084,7 @@ macro_rules! impl_stateful_db {
                 for round in &rounds[1..] {
                     let touched = selection.touch(round);
                     let keys: Vec<&Key> = selection.keys()[touched.clone()].iter().collect();
-                    let (range, reads, expanded) = staged.expand(&keys).await.unwrap();
+                    let (expanded, range, reads) = staged.expand(&keys).await.unwrap();
                     assert_eq!(
                         range, touched,
                         "expand must stage new keys where touch placed them"

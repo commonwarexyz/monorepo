@@ -43,7 +43,7 @@ cfg_if::cfg_if! {
 /// Benchmark a populated database: generate data, prune, sync. Returns elapsed time (excluding
 /// destroy).
 #[boxed]
-async fn bench_db<F: Family, C: DbAny<F, Key = Digest>>(
+async fn bench_db<F: Family, C: DbAny<Family = F, Key = Digest>>(
     db: C,
     elements: u64,
     operations: u64,
@@ -169,7 +169,7 @@ fn bench_store_generate(c: &mut Criterion) {
                             make_var_value,
                         )
                         .await;
-                        let floor = db.inactivity_floor_loc();
+                        let floor = db.inactivity_floor();
                         let db = db.prune(floor).await.unwrap();
                         let db = db.sync().await.unwrap();
                         total += start.elapsed();

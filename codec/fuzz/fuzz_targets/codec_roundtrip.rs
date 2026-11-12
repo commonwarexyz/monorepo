@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use bytes::{BufMut, Bytes, BytesMut, buf::UninitSlice};
 use commonware_codec::{
     BufsMut, Copying, Decode, DecodeExt, DecodeRangeExt, Encode, EncodeFixed, EncodeSize, Error,
-    IsUnit, RangeCfg, Read, ReadRangeExt, Write,
+    IsUnit, RangeCfg, Read, ReadRangeExt, U256, Write,
     types::lazy::Lazy,
     varint::{SInt, UInt},
 };
@@ -430,7 +430,7 @@ fn roundtrip_usize(v: usize) {
 
 fn roundtrip_overflow(continuation_bytes: u8, last_byte: u8) {
     let mut buf = Vec::new();
-    for _ in 0..continuation_bytes.min(20) {
+    for _ in 0..continuation_bytes.min(40) {
         buf.put_u8(0xFF);
     }
     buf.put_u8(last_byte);
@@ -438,6 +438,7 @@ fn roundtrip_overflow(continuation_bytes: u8, last_byte: u8) {
     let _ = UInt::<u32>::decode(buf.clone());
     let _ = UInt::<u64>::decode(buf.clone());
     let _ = UInt::<u128>::decode(buf.clone());
+    let _ = UInt::<U256>::decode(buf.clone());
     // Also test signed varint overflow
     let _ = SInt::<i16>::decode(buf.clone());
     let _ = SInt::<i32>::decode(buf.clone());
@@ -736,6 +737,7 @@ enum FuzzInput<'a> {
     UVarInt32(u32),
     UVarInt64(u64),
     UVarInt128(u128),
+    UVarInt256([u64; 4]),
 
     // Signed varints (ZigZag encoding)
     SVarInt16(i16),
@@ -751,6 +753,7 @@ enum FuzzInput<'a> {
     U32(u32),
     U64(u64),
     U128(u128),
+    U256([u64; 4]),
     I8(i8),
     I16(i16),
     I32(i32),
@@ -808,6 +811,7 @@ fn fuzz(input: FuzzInput) {
         FuzzInput::UVarInt32(v) => roundtrip_primitive(UInt(v)),
         FuzzInput::UVarInt64(v) => roundtrip_primitive(UInt(v)),
         FuzzInput::UVarInt128(v) => roundtrip_primitive(UInt(v)),
+        FuzzInput::UVarInt256(v) => roundtrip_primitive(UInt(U256::from_limbs(v))),
         // Signed varints
         FuzzInput::SVarInt16(v) => roundtrip_primitive(SInt(v)),
         FuzzInput::SVarInt32(v) => roundtrip_primitive(SInt(v)),
@@ -825,6 +829,7 @@ fn fuzz(input: FuzzInput) {
         FuzzInput::U32(v) => roundtrip_primitive(v),
         FuzzInput::U64(v) => roundtrip_primitive(v),
         FuzzInput::U128(v) => roundtrip_primitive(v),
+        FuzzInput::U256(v) => roundtrip_primitive(U256::from_limbs(v)),
         FuzzInput::I8(v) => roundtrip_primitive(v),
         FuzzInput::I16(v) => roundtrip_primitive(v),
         FuzzInput::I32(v) => roundtrip_primitive(v),

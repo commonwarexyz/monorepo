@@ -8,7 +8,7 @@ use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{Family as MerkleFamily, full::Config as MerkleConfig, mmb, mmr},
     qmdb::{
-        any::{FixedConfig as Config, unordered::fixed::Db},
+        any::unordered::fixed::{Config, Db},
         sync,
     },
     translator::TwoCap,
@@ -93,7 +93,7 @@ const PAGE_SIZE: NonZeroU16 = NZU16!(129);
 fn test_config(test_name: &str) -> Config<TwoCap, Sequential> {
     let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(1));
     Config {
-        merkle_config: MerkleConfig {
+        merkle: MerkleConfig {
             journal_partition: format!("{test_name}-merkle"),
             metadata_partition: format!("{test_name}-meta"),
             items_per_blob: NZU64!(3),
@@ -102,7 +102,7 @@ fn test_config(test_name: &str) -> Config<TwoCap, Sequential> {
             strategy: Sequential,
             page_cache: page_cache.clone(),
         },
-        journal_config: FConfig {
+        log: FConfig {
             partition: format!("{test_name}-log"),
             items_per_blob: NZU64!(3),
             write_buffer: NZUsize!(1024),
@@ -241,10 +241,10 @@ fn fuzz_family<F: MerkleFamily>(input: &mut FuzzInput, test_name: &str) {
                         .await
                         .expect("commit should not fail");
                     let db = db.commit().await.expect("Commit should not fail");
-                    let target = sync::Target::new(
-                        db.root(),
-                        non_empty_range!(db.sync_boundary(), db.bounds().end),
-                    );
+                    let target = sync::Target {
+                        root: db.root(),
+                        range: non_empty_range!(db.sync_boundary(), db.bounds().end),
+                    };
 
                     let wrapped_src = Arc::new(db);
                     let _result = test_sync(

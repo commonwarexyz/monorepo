@@ -138,7 +138,10 @@ impl StateCommitment {
 
     /// The journaled sync target this commitment names.
     fn journaled_target(&self) -> Target<mmr::Family, Digest> {
-        Target::new(self.sync_root, self.range.clone())
+        Target {
+            root: self.sync_root,
+            range: self.range.clone(),
+        }
     }
 
     /// The compact sync target this commitment names.
@@ -380,9 +383,9 @@ mod any_backend {
         type Db = Db;
 
         fn config(prefix: &str, page_cache: CacheRef) -> Config<Self> {
-            any::FixedConfig {
-                merkle_config: merkle_config(prefix, page_cache.clone()),
-                journal_config: log_config(prefix, page_cache),
+            any::unordered::fixed::Config {
+                merkle: merkle_config(prefix, page_cache.clone()),
+                log: log_config(prefix, page_cache),
                 translator: TwoCap,
                 init_cache: Some(QMDB_INIT_CACHE),
                 init_buffer: QMDB_INIT_BUFFER,
@@ -415,10 +418,10 @@ mod any_backend {
 
         fn commitment(merkleized: &MerkleizedBatches<Self>) -> StateCommitment {
             let bounds = merkleized.bounds();
-            StateCommitment::journaled(Target::new(
-                merkleized.root(),
-                non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
-            ))
+            StateCommitment::journaled(Target {
+                root: merkleized.root(),
+                range: non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
+            })
         }
 
         fn sync_target(commitment: &StateCommitment) -> SyncTarget<Self> {
@@ -475,9 +478,9 @@ mod current_backend {
         type Db = Db;
 
         fn config(prefix: &str, page_cache: CacheRef) -> Config<Self> {
-            current::FixedConfig {
-                merkle_config: merkle_config(prefix, page_cache.clone()),
-                journal_config: log_config(prefix, page_cache),
+            current::unordered::fixed::Config {
+                merkle: merkle_config(prefix, page_cache.clone()),
+                log: log_config(prefix, page_cache),
                 grafted_metadata_partition: format!("{prefix}-qmdb-grafted-metadata"),
                 translator: TwoCap,
                 init_cache: Some(QMDB_INIT_CACHE),
@@ -562,7 +565,7 @@ mod immutable_backend {
 
         fn config(prefix: &str, page_cache: CacheRef) -> Config<Self> {
             immutable::fixed::Config {
-                merkle_config: merkle_config(prefix, page_cache.clone()),
+                merkle: merkle_config(prefix, page_cache.clone()),
                 log: log_config(prefix, page_cache),
                 translator: TwoCap,
                 init_buffer: QMDB_INIT_BUFFER,
@@ -588,10 +591,10 @@ mod immutable_backend {
 
         fn commitment(merkleized: &MerkleizedBatches<Self>) -> StateCommitment {
             let bounds = merkleized.bounds();
-            StateCommitment::journaled(Target::new(
-                merkleized.root(),
-                non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
-            ))
+            StateCommitment::journaled(Target {
+                root: merkleized.root(),
+                range: non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
+            })
         }
 
         fn sync_target(commitment: &StateCommitment) -> SyncTarget<Self> {
@@ -622,7 +625,6 @@ mod immutable_backend {
             immutable::fixed::CompactConfig {
                 strategy: Sequential,
                 witness: witness_config(prefix, page_cache),
-                commit_codec_config: (),
             }
         }
 
@@ -708,10 +710,10 @@ mod keyless_backend {
 
         fn commitment(merkleized: &MerkleizedBatches<Self>) -> StateCommitment {
             let bounds = merkleized.bounds();
-            StateCommitment::journaled(Target::new(
-                merkleized.root(),
-                non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
-            ))
+            StateCommitment::journaled(Target {
+                root: merkleized.root(),
+                range: non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
+            })
         }
 
         fn sync_target(commitment: &StateCommitment) -> SyncTarget<Self> {
@@ -741,7 +743,6 @@ mod keyless_backend {
             keyless::fixed::CompactConfig {
                 strategy: Sequential,
                 witness: witness_config(prefix, page_cache),
-                commit_codec_config: (),
             }
         }
 

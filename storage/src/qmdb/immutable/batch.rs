@@ -1,16 +1,17 @@
 //! Batch mutation API for Immutable QMDBs.
 
-use super::Immutable;
+use super::Db;
 use crate::{
     Context,
     journal::{authenticated, contiguous::Mutable},
     merkle::{Family, Location, Proof},
     qmdb::{
         Error,
-        any::{ValueEncoding, batch::lookup_sorted},
+        any::batch::lookup_sorted,
         chain::{self, Bounds, Commitment, Compatible},
         immutable::operation::Operation,
         operation::Key,
+        value::ValueEncoding,
     },
     translator::Translator,
 };
@@ -18,6 +19,7 @@ use commonware_codec::EncodeShared;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::iter::zip_eq;
+use core::borrow::Borrow;
 use std::{
     collections::BTreeMap,
     iter,
@@ -119,7 +121,7 @@ where
 {
     /// Create a batch from the DB (no parent chain).
     pub(super) fn new<E, C, T>(
-        immutable: &Immutable<F, E, K, V, C, H, T, S>,
+        immutable: &Db<F, E, K, V, C, H, T, S>,
         base: Commitment<F, H::Digest>,
     ) -> Self
     where
@@ -166,7 +168,7 @@ where
 
     /// The inactivity floor this batch builds on: its parent's, or `db`'s for a batch with no
     /// parent.
-    fn floor<E, C, T>(&self, db: &Immutable<F, E, K, V, C, H, T, S>) -> Location<F>
+    fn floor<E, C, T>(&self, db: &Db<F, E, K, V, C, H, T, S>) -> Location<F>
     where
         E: Context,
         C: Mutable<Item = Operation<F, K, V>>,
@@ -174,7 +176,7 @@ where
         T: Translator,
     {
         self.parent.as_ref().map_or_else(
-            || db.inactivity_floor_loc(),
+            || db.inactivity_floor(),
             |parent| parent.bounds.inactivity_floor,
         )
     }
@@ -184,8 +186,8 @@ where
     #[allow(clippy::type_complexity)]
     fn compatible<'a, E, C, T>(
         &self,
-        db: &'a Immutable<F, E, K, V, C, H, T, S>,
-    ) -> Result<Compatible<'a, Immutable<F, E, K, V, C, H, T, S>>, Error<F>>
+        db: &'a Db<F, E, K, V, C, H, T, S>,
+    ) -> Result<Compatible<'a, Db<F, E, K, V, C, H, T, S>>, Error<F>>
     where
         E: Context,
         C: Mutable<Item = Operation<F, K, V>>,
@@ -217,7 +219,7 @@ where
     pub async fn get<E, C, T>(
         &self,
         key: &K,
-        db: &Immutable<F, E, K, V, C, H, T, S>,
+        db: &Db<F, E, K, V, C, H, T, S>,
     ) -> Result<Option<V::Value>, Error<F>>
     where
         E: Context,
@@ -251,8 +253,8 @@ where
     /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain.
     pub async fn get_many<E, C, T>(
         &self,
-        keys: &[&K],
-        db: &Immutable<F, E, K, V, C, H, T, S>,
+        keys: &[impl Borrow<K> + Sync],
+        db: &Db<F, E, K, V, C, H, T, S>,
     ) -> Result<Vec<Option<V::Value>>, Error<F>>
     where
         E: Context,
@@ -271,8 +273,9 @@ where
         let mut db_keys = Vec::new();
 
         for (i, key) in keys.iter().enumerate() {
+            let key = key.borrow();
             // Check local mutations.
-            if let Some(value) = self.mutations.get(*key) {
+            if let Some(value) = self.mutations.get(key) {
                 results.push(Some(value.clone()));
                 continue;
             }
@@ -281,7 +284,7 @@ where
             if let Some(entry) = self.parent.as_ref().and_then(|parent| {
                 parent
                     .read_diffs(db.bounds().end)
-                    .find_map(|diff| lookup_active(diff, *key, floor))
+                    .find_map(|diff| lookup_active(diff, key, floor))
             }) {
                 results.push(Some(entry.value.clone()));
                 continue;
@@ -289,7 +292,7 @@ where
 
             // Need DB fallthrough.
             db_indices.push(i);
-            db_keys.push(*key);
+            db_keys.push(key);
             results.push(None);
         }
 
@@ -317,7 +320,7 @@ where
     #[tracing::instrument(name = "qmdb.immutable.batch.merkleize", level = "info", skip_all)]
     pub async fn merkleize<E, C, T>(
         mut self,
-        db: &Immutable<F, E, K, V, C, H, T, S>,
+        db: &Db<F, E, K, V, C, H, T, S>,
     ) -> MerkleizeResult<F, H::Digest, K, V, S>
     where
         E: Context,
@@ -382,7 +385,10 @@ where
             bounds: chain::Bounds {
                 base: self.base,
                 db: boundary,
-                tip: Commitment::new(total_size, root),
+                tip: Commitment {
+                    size: total_size,
+                    root,
+                },
                 ancestors,
                 inactivity_floor,
             },
@@ -428,10 +434,10 @@ where
     /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain,
     /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to a
     /// dropped unapplied ancestor, and [`crate::merkle::Error::Empty`] if the batch has no
-    /// operations (such as a batch from [`Immutable::to_batch`]).
+    /// operations (such as a batch from [`Db::to_batch`]).
     pub fn proof<E, C, H, T>(
         &self,
-        db: &Immutable<F, E, K, V, C, H, T, S>,
+        db: &Db<F, E, K, V, C, H, T, S>,
     ) -> Result<Proof<F, D>, Error<F>>
     where
         E: Context,
@@ -463,7 +469,7 @@ where
     /// dropped unapplied ancestor.
     pub fn pinned_nodes<E, C, H, T>(
         &self,
-        db: &Immutable<F, E, K, V, C, H, T, S>,
+        db: &Db<F, E, K, V, C, H, T, S>,
     ) -> Result<Vec<D>, Error<F>>
     where
         E: Context,
@@ -519,7 +525,7 @@ where
     pub async fn get<E, C, H, T>(
         &self,
         key: &K,
-        db: &Immutable<F, E, K, V, C, H, T, S>,
+        db: &Db<F, E, K, V, C, H, T, S>,
     ) -> Result<Option<V::Value>, Error<F>>
     where
         E: Context,
@@ -547,8 +553,8 @@ where
     /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain.
     pub async fn get_many<E, C, H, T>(
         &self,
-        keys: &[&K],
-        db: &Immutable<F, E, K, V, C, H, T, S>,
+        keys: &[impl Borrow<K> + Sync],
+        db: &Db<F, E, K, V, C, H, T, S>,
     ) -> Result<Vec<Option<V::Value>>, Error<F>>
     where
         E: Context,
@@ -568,9 +574,10 @@ where
         let mut db_keys = Vec::new();
 
         for (i, key) in keys.iter().enumerate() {
+            let key = key.borrow();
             if let Some(entry) = self
                 .read_diffs(db.bounds().end)
-                .find_map(|diff| lookup_active(diff, *key, floor))
+                .find_map(|diff| lookup_active(diff, key, floor))
             {
                 results.push(Some(entry.value.clone()));
                 continue;
@@ -578,7 +585,7 @@ where
 
             // Need DB fallthrough.
             db_indices.push(i);
-            db_keys.push(*key);
+            db_keys.push(key);
             results.push(None);
         }
 
@@ -615,7 +622,7 @@ where
     }
 }
 
-impl<F, E, K, V, C, H, T, S> Immutable<F, E, K, V, C, H, T, S>
+impl<F, E, K, V, C, H, T, S> Db<F, E, K, V, C, H, T, S>
 where
     F: Family,
     E: Context,

@@ -8,11 +8,10 @@ use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{Graftable, Location, full::Config as MerkleConfig, mmb, mmr},
     qmdb::{
-        any::{traits::DbAny as _, unordered::fixed::Update},
+        any::unordered::fixed::Update,
         current::{
-            FixedConfig as Config,
             batch::{MerkleizedBatch, UnmerkleizedBatch},
-            unordered::fixed::Db as CurrentDb,
+            unordered::fixed::{Config, Db as CurrentDb},
         },
     },
     translator::OneCap,
@@ -116,7 +115,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 fn test_config(name: &str) -> Config<OneCap, Sequential> {
     let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(2));
     Config {
-        merkle_config: MerkleConfig {
+        merkle: MerkleConfig {
             journal_partition: format!("{name}-merkle"),
             metadata_partition: format!("{name}-meta"),
             items_per_blob: NZU64!(17),
@@ -125,7 +124,7 @@ fn test_config(name: &str) -> Config<OneCap, Sequential> {
             strategy: Sequential,
             page_cache: page_cache.clone(),
         },
-        journal_config: FConfig {
+        log: FConfig {
             partition: format!("{name}-log"),
             items_per_blob: NZU64!(13),
             write_buffer: NZUsize!(1024),
@@ -236,7 +235,7 @@ async fn assert_recovers<F: Graftable>(
     let db = db.commit().await.unwrap();
     assert_matches_model(&db, model).await;
     let roots = (db.root(), db.ops_root());
-    let floor = db.inactivity_floor_loc();
+    let floor = db.inactivity_floor();
     drop(db);
 
     let db: Db<F> = Db::init(context.child("reopened"), test_config(name), None)
@@ -247,11 +246,7 @@ async fn assert_recovers<F: Graftable>(
         roots,
         "roots changed across reopen"
     );
-    assert_eq!(
-        db.inactivity_floor_loc(),
-        floor,
-        "floor changed across reopen"
-    );
+    assert_eq!(db.inactivity_floor(), floor, "floor changed across reopen");
     assert_matches_model(&db, model).await;
     db.destroy().await.unwrap();
 }
@@ -277,7 +272,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
             );
             model.insert(key_from_seed(write.key), value_from_bytes(write.value));
         }
-        let floor = db.inactivity_floor_loc();
+        let floor = db.inactivity_floor();
         let (initial, _) = merkleize(&db, batch, floor, &input.initial_plan, &mut model).await;
         let db = db.apply_batch(initial).await.unwrap();
         let db = db.commit().await.unwrap();
@@ -287,7 +282,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
                 // Build the child while the parent is still pending.
                 let batch = apply_mutations(db.new_batch(), &input.parent);
                 apply_to_model(&mut model, &input.parent);
-                let floor = db.inactivity_floor_loc();
+                let floor = db.inactivity_floor();
                 let (parent, _) =
                     merkleize(&db, batch, floor, &input.parent_plan, &mut model).await;
                 let batch = apply_mutations(parent.new_batch::<Sha256>(), &input.child);
@@ -336,7 +331,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
                 // ancestor walk against a committed-only reference.
                 let batch = apply_mutations(db.new_batch(), &input.parent);
                 apply_to_model(&mut model, &input.parent);
-                let floor = db.inactivity_floor_loc();
+                let floor = db.inactivity_floor();
                 let (parent, _) =
                     merkleize(&db, batch, floor, &input.parent_plan, &mut model).await;
                 let batch = apply_mutations(parent.new_batch::<Sha256>(), &input.child);
@@ -391,7 +386,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
                 // re-deletes and re-creates the same colliding keys.
                 let batch = apply_mutations(db.new_batch(), &input.parent);
                 apply_to_model(&mut model, &input.parent);
-                let floor = db.inactivity_floor_loc();
+                let floor = db.inactivity_floor();
                 let (a, _) = merkleize(&db, batch, floor, &input.parent_plan, &mut model).await;
                 let batch = apply_mutations(a.new_batch::<Sha256>(), &input.child);
                 apply_to_model(&mut model, &input.child);

@@ -243,7 +243,7 @@ impl<P: Simplex> Resolver for RecordingResolver<P> {
         feedback
     }
 
-    fn fetch_all<F>(&mut self, fetches: Vec<F>) -> Feedback
+    fn fetch_all<F>(&mut self, fetches: impl IntoIterator<Item = F>) -> Feedback
     where
         F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
     {
@@ -301,7 +301,10 @@ impl<P: Simplex> TargetedResolver for RecordingResolver<P> {
         feedback
     }
 
-    fn fetch_all_targeted<F>(&mut self, fetches: Vec<(F, NonEmptyVec<Self::PublicKey>)>) -> Feedback
+    fn fetch_all_targeted<F>(
+        &mut self,
+        fetches: impl IntoIterator<Item = (F, NonEmptyVec<Self::PublicKey>)>,
+    ) -> Feedback
     where
         F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
     {

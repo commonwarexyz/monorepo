@@ -294,13 +294,13 @@ fn fuzz_family<F: Family, S: Strategy>(
         let mut commit_history = vec![(
             db.bounds().end,
             db.root(),
-            db.inactivity_floor_loc(),
+            db.inactivity_floor(),
             db.get_metadata().await.unwrap(),
         )];
         let mut commits = std::collections::BTreeMap::new();
 
         for op in &input.ops {
-            commits.insert(db.bounds().end, (db.root(), db.inactivity_floor_loc()));
+            commits.insert(db.bounds().end, (db.root(), db.inactivity_floor()));
             db = match op {
                 Operation::Append { value_bytes } => {
                     pending_appends.push(value_bytes.clone());
@@ -311,7 +311,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                     let pending_count = pending_appends.len() as u64;
                     let end = db.bounds().end;
                     let commit_loc = end.as_u64() + pending_count;
-                    let current_floor = db.inactivity_floor_loc();
+                    let current_floor = db.inactivity_floor();
 
                     // Pick the floor for this commit. `Bad*` kinds are guaranteed to trigger
                     // the expected error; Valid kinds (Current/AdvanceToCommit) apply cleanly.
@@ -355,13 +355,13 @@ fn fuzz_family<F: Family, S: Strategy>(
                             let db = db.commit().await.expect("Commit should not fail");
                             assert_eq!(db.bounds().end, expected_size);
                             assert_eq!(db.root(), expected_root);
-                            assert_eq!(db.inactivity_floor_loc(), floor.unwrap_or(current_floor));
+                            assert_eq!(db.inactivity_floor(), floor.unwrap_or(current_floor));
                             assert_eq!(db.get_metadata().await.unwrap(), metadata_bytes.clone());
                             expected_metadata = metadata_bytes.clone();
                             commit_history.push((
                                 db.bounds().end,
                                 db.root(),
-                                db.inactivity_floor_loc(),
+                                db.inactivity_floor(),
                                 db.get_metadata().await.unwrap(),
                             ));
                             db
@@ -459,7 +459,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                         let loc = bounds.start + (*loc_offset as u64 % len);
                         // Batch reads below the batch's inactivity floor are refused however far
                         // the database retains the location; the database itself still serves it.
-                        let floor = db.inactivity_floor_loc();
+                        let floor = db.inactivity_floor();
                         if loc < floor {
                             assert!(matches!(
                                 batch.get(loc, &db).await,
@@ -521,11 +521,11 @@ fn fuzz_family<F: Family, S: Strategy>(
                     commit_history.push((
                         db.bounds().end,
                         db.root(),
-                        db.inactivity_floor_loc(),
+                        db.inactivity_floor(),
                         db.get_metadata().await.unwrap(),
                     ));
                     let size = db.bounds().end;
-                    let floor = db.inactivity_floor_loc();
+                    let floor = db.inactivity_floor();
                     let db = db.prune(floor).await.expect("Prune should not fail");
                     assert_eq!(db.bounds().end, size);
                     assert_eq!(db.root(), expected_root);
@@ -541,17 +541,17 @@ fn fuzz_family<F: Family, S: Strategy>(
                     let db = db.apply_batch(merkleized).await.expect("Commit should not fail");
                     let expected_root = db.root();
                     let expected_size = db.bounds().end;
-                    let expected_floor = db.inactivity_floor_loc();
+                    let expected_floor = db.inactivity_floor();
                     let db = db.sync().await.expect("Sync should not fail");
                     assert_eq!(db.root(), expected_root);
                     assert_eq!(db.bounds().end, expected_size);
-                    assert_eq!(db.inactivity_floor_loc(), expected_floor);
+                    assert_eq!(db.inactivity_floor(), expected_floor);
                     assert_eq!(db.get_metadata().await.unwrap(), None);
                     expected_metadata = None;
                     commit_history.push((
                         db.bounds().end,
                         db.root(),
-                        db.inactivity_floor_loc(),
+                        db.inactivity_floor(),
                         db.get_metadata().await.unwrap(),
                     ));
                     db
@@ -571,7 +571,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                 }
 
                 Operation::SyncBoundary => {
-                    assert_eq!(db.sync_boundary(), db.inactivity_floor_loc());
+                    assert_eq!(db.sync_boundary(), db.inactivity_floor());
                     db
                 }
 
@@ -600,13 +600,13 @@ fn fuzz_family<F: Family, S: Strategy>(
                         restarts += 1;
                         assert_eq!(rewound.bounds().end, expected.0);
                         assert_eq!(rewound.root(), expected.1);
-                        assert_eq!(rewound.inactivity_floor_loc(), expected.2);
+                        assert_eq!(rewound.inactivity_floor(), expected.2);
                         assert_eq!(rewound.get_metadata().await.unwrap(), expected.3);
                         drop(rewound);
                         let db = reopen(&context, suffix, &strategy, &mut restarts).await;
                         assert_eq!(db.bounds().end, expected.0);
                         assert_eq!(db.root(), expected.1);
-                        assert_eq!(db.inactivity_floor_loc(), expected.2);
+                        assert_eq!(db.inactivity_floor(), expected.2);
                         assert_eq!(db.get_metadata().await.unwrap(), expected.3);
                         expected_metadata = expected.3.clone();
                         let db = db.commit().await.expect("Rewind commit should not fail");
@@ -617,7 +617,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                 }
 
                 Operation::ValidateBatch => {
-                    let before = (db.bounds(), db.root(), db.inactivity_floor_loc());
+                    let before = (db.bounds(), db.root(), db.inactivity_floor());
                     let mut batch = db.new_batch();
                     for value in &pending_appends {
                         batch = batch.append(value.clone());
@@ -625,7 +625,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                     let merkleized = batch.merkleize(&db).await.unwrap();
                     assert!(db.validate_batch(&merkleized).is_ok());
                     assert_eq!(
-                        (db.bounds(), db.root(), db.inactivity_floor_loc()),
+                        (db.bounds(), db.root(), db.inactivity_floor()),
                         before
                     );
                     db
@@ -636,7 +636,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                     assert_eq!(batch.root(), db.root());
                     assert_eq!(batch.bounds().base.size, db.bounds().end);
                     assert_eq!(batch.bounds().tip.size, db.bounds().end);
-                    assert_eq!(batch.bounds().inactivity_floor, db.inactivity_floor_loc());
+                    assert_eq!(batch.bounds().inactivity_floor, db.inactivity_floor());
                     db
                 }
 
@@ -654,7 +654,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                     commit_history.push((
                         db.bounds().end,
                         db.root(),
-                        db.inactivity_floor_loc(),
+                        db.inactivity_floor(),
                         db.get_metadata().await.unwrap(),
                     ));
                     db
@@ -691,7 +691,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                     commit_history.push((
                         db.bounds().end,
                         db.root(),
-                        db.inactivity_floor_loc(),
+                        db.inactivity_floor(),
                         db.get_metadata().await.unwrap(),
                     ));
                     let start_loc = (*start_offset as u64) % op_count.as_u64();
@@ -714,7 +714,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                             &root,
                         ));
                         for op in ops {
-                            let floor = op.has_floor();
+                            let floor = op.inactivity_floor();
                             let value = op.into_value();
                             assert!(
                                 floor.is_some() || value.is_some(),
@@ -741,7 +741,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                     commit_history.push((
                         db.bounds().end,
                         db.root(),
-                        db.inactivity_floor_loc(),
+                        db.inactivity_floor(),
                         db.get_metadata().await.unwrap(),
                     ));
                     // A historical proof only requires the commit at `size - 1` to be retained.
@@ -782,7 +782,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                             let (end, (root, floor)) = selected.expect("cap must select a modeled commit");
                             assert_eq!(opened.bounds().end, end);
                             assert_eq!(opened.root(), root);
-                            assert_eq!(opened.inactivity_floor_loc(), floor);
+                            assert_eq!(opened.inactivity_floor(), floor);
                             drop(opened);
                             let reopened = reopen(&context, suffix, &strategy, &mut restarts).await;
                             assert_eq!(reopened.bounds().end, end);
@@ -821,7 +821,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                     let expected = commit_history.last().unwrap();
                     assert_eq!(db.bounds().end, expected.0);
                     assert_eq!(db.root(), expected.1);
-                    assert_eq!(db.inactivity_floor_loc(), expected.2);
+                    assert_eq!(db.inactivity_floor(), expected.2);
                     assert_eq!(db.get_metadata().await.unwrap(), expected.3);
                     expected_metadata = expected.3.clone();
                     db
