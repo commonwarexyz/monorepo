@@ -1551,6 +1551,8 @@ mod tests {
             withheld.into_iter().for_each(&deliver);
             context.sleep(Duration::from_millis(100)).await;
 
+            // B's verification started. A's started only if it began before B was certified, and
+            // it was then cancelled.
             let observed = application.observed();
             let expected = if started.is_empty() {
                 vec![Verification::Started(b_digest)]

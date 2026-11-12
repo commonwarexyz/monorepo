@@ -702,8 +702,8 @@ mod tests {
     }
 
     /// Certification claims its round. The gates registered for the round's other blocks are
-    /// dropped, whether or not the certified block registered a gate, and other rounds keep
-    /// theirs.
+    /// dropped, whether or not the certified block registered a gate, and earlier and later
+    /// rounds keep theirs.
     #[test]
     fn test_claim_releases_other_gates_of_round() {
         for certified_has_gate in [true, false] {
@@ -712,14 +712,16 @@ mod tests {
             let conflicting = Sha256::hash(&[b"conflicting"]);
             let (_certified_tx, certified_rx) = oneshot::channel();
             let (conflicting_tx, conflicting_rx) = oneshot::channel();
+            let (earlier_tx, earlier_rx) = oneshot::channel();
             let (later_tx, later_rx) = oneshot::channel();
             if certified_has_gate {
-                gates.insert(round(1), certified, certified_rx);
+                gates.insert(round(2), certified, certified_rx);
             }
-            gates.insert(round(1), conflicting, conflicting_rx);
-            gates.insert(round(2), conflicting, later_rx);
+            gates.insert(round(2), conflicting, conflicting_rx);
+            gates.insert(round(1), conflicting, earlier_rx);
+            gates.insert(round(3), conflicting, later_rx);
 
-            let gate = gates.claim(round(1), certified, |_, _| {
+            let gate = gates.claim(round(2), certified, |_, _| {
                 unreachable!("a claim must not persist a proposal that was never staged")
             });
 
@@ -729,8 +731,8 @@ mod tests {
                 "a gate for another block of the certified round must be dropped"
             );
             assert!(
-                !later_tx.is_closed(),
-                "a gate of another round must be kept"
+                !earlier_tx.is_closed() && !later_tx.is_closed(),
+                "the gates of earlier and later rounds must be kept"
             );
         }
     }
