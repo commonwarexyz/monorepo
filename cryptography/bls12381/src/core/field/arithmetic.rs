@@ -129,7 +129,7 @@ use commonware_simd::{Operation, Simd};
 pub const TIGHT: u64 = 17;
 
 /// Most indices [`unroll`] calls: the components of an `Fp12` value.
-pub(crate) const UNROLLED: usize = 12;
+pub const UNROLLED: usize = 12;
 
 /// Calls `f` with each index below `N`, in order.
 ///
@@ -137,7 +137,7 @@ pub(crate) const UNROLLED: usize = 12;
 /// arrays indexed by it stay in registers, and a closure that matches on it runs one arm, however
 /// large the inlined body of `f`.
 #[inline(always)]
-pub(crate) fn unroll<const N: usize>(mut f: impl FnMut(usize)) {
+pub fn unroll<const N: usize>(mut f: impl FnMut(usize)) {
     const { assert!(N <= UNROLLED) };
     macro_rules! calls {
         ($($i:literal)*) => {$(

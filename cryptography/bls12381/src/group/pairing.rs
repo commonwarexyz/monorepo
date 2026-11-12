@@ -5,17 +5,15 @@ use super::{
     kernel::{Group, Kernel},
 };
 use crate::core::{
-    curve::{Points, g1, g2},
+    curve::g2,
     field::{
         MAX_LANES,
-        arithmetic::{Field, TIGHT},
-        fp::{self, BYTES as FP_BYTES},
-        fp2::{self, BYTES as FP2_BYTES, Fp2},
+        arithmetic::Field,
         fp12::{self, BYTES, Fp12},
     },
-    pairing::{G1Affine, G2Affine, Pair, SHARED, final_exponentiation, miller_loop},
+    pairing::{FILL, P_FILL, Pair, SHARED, final_exponentiation, miller_loop, to_affine},
 };
-use alloc::{vec, vec::Vec};
+use alloc::vec::Vec;
 use commonware_formatting::Hex;
 use commonware_math::algebra::{Multiplicative, Object};
 use commonware_simd::Simd;
@@ -166,25 +164,6 @@ impl MultiPairing<'_> {
     }
 }
 
-/// A pair that pairs to one and fills unused lanes: its G1 coordinates are zero, which the final
-/// exponentiation maps to one, and its G2 point is the generator, whose lines have nonzero
-/// constant terms.
-const FILL: (G1Affine, G2Affine) = ([[0; FP_BYTES]; 2], [g2::GENERATOR[0], g2::GENERATOR[1]]);
-
-/// The G1 point `(0 : 1 : 1)`, whose denominator is one.
-const P_FILL: g1::Coordinates = {
-    let mut fill = g1::IDENTITY;
-    fill[2] = fp::ONE;
-    fill
-};
-
-/// The G2 point `(0 : 1 : 1)`, whose denominator is one.
-const Q_FILL: g2::Coordinates = {
-    let mut fill = g2::IDENTITY;
-    fill[2] = fp2::ONE;
-    fill
-};
-
 impl Kernel for MultiPairing<'_> {
     type Output = GT;
 
@@ -241,88 +220,6 @@ impl Kernel for Pairings<'_> {
     }
 }
 
-/// Returns the affine coordinates of each pair of points, none of which may be the identity.
-///
-/// One inversion serves every pair, as Montgomery's trick: the G1 denominators and the norms of
-/// the G2 denominators multiply up in turn, the total inverts, and each inverse unwinds from the
-/// total with the running products. Runs its body through [`Simd::execute`], so that the body
-/// inlines into the backend's target-feature scope.
-#[cfg_attr(not(debug_assertions), inline(always))]
-fn to_affine<S: Simd, F: Field<S>>(
-    simd: S,
-    points: &[(g1::Coordinates, g2::Coordinates)],
-) -> Vec<(G1Affine, G2Affine)> {
-    const { assert!(F::LANES <= MAX_LANES) };
-    if points.is_empty() {
-        return Vec::new();
-    }
-    simd.execute(
-        #[inline(always)]
-        move |simd: S| {
-            let groups = points.len().div_ceil(F::LANES);
-            let mut loaded = Vec::with_capacity(groups);
-            // The G1 denominator and the norm of the G2 denominator of each group, tight with
-            // limb bound one, as inversion requires.
-            let mut denominators = Vec::with_capacity(2 * groups);
-            for group in points.chunks(F::LANES) {
-                // Unused lanes hold points with denominator one, which leave the products
-                // unchanged.
-                let mut g1 = [P_FILL; MAX_LANES];
-                let mut g2 = [Q_FILL; MAX_LANES];
-                for (lane, (p, q)) in group.iter().enumerate() {
-                    g1[lane] = *p;
-                    g2[lane] = *q;
-                }
-                let p = g1::Point::<F>::load(simd, &g1[..group.len()], &P_FILL);
-                let q = g2::Point::<F>::load(simd, &g2[..group.len()], &Q_FILL);
-                let norm =
-                    F::accumulate_product(simd, q.z.c0.product(simd, q.z.c0), q.z.c1, q.z.c1);
-                denominators.push(p.z);
-                denominators.push(F::reduce_tight(simd, norm));
-                loaded.push((p, q));
-            }
-            let mut running = Vec::with_capacity(denominators.len());
-            let mut total = denominators[0];
-            running.push(total);
-            for &denominator in &denominators[1..] {
-                total = F::reduce_tight(simd, total.product(simd, denominator));
-                running.push(total);
-            }
-            let mut inverse = total.invert(simd);
-            let mut inverses = vec![inverse; denominators.len()];
-            for i in (1..denominators.len()).rev() {
-                inverses[i] = F::reduce_tight(simd, inverse.product(simd, running[i - 1]));
-                inverse = F::reduce_tight(simd, inverse.product(simd, denominators[i]));
-            }
-            inverses[0] = inverse;
-
-            let mut affine = Vec::with_capacity(points.len());
-            for (group, (p, q)) in loaded.into_iter().enumerate() {
-                let lanes = (points.len() - group * F::LANES).min(F::LANES);
-                let (p_inverse, norm_inverse) = (inverses[2 * group], inverses[2 * group + 1]);
-                // The inverse of the G2 denominator is its conjugate over its norm.
-                let conjugate = q.z.conjugate::<{ TIGHT + 1 }, S>(simd).carry(simd);
-                let q_inverse =
-                    Fp2::reduce_tight::<1, S>(simd, conjugate.product_base(simd, norm_inverse));
-                // Multiplying tight coordinates by tight inverses stays within every product
-                // bound.
-                let mut px = [[0; FP_BYTES]; MAX_LANES];
-                let mut py = [[0; FP_BYTES]; MAX_LANES];
-                let mut qx = [[0; FP2_BYTES]; MAX_LANES];
-                let mut qy = [[0; FP2_BYTES]; MAX_LANES];
-                p.x.mul(simd, p_inverse).store(simd, &mut px);
-                p.y.mul(simd, p_inverse).store(simd, &mut py);
-                Fp2::mul::<64, S>(q.x, simd, q_inverse).store(simd, &mut qx);
-                Fp2::mul::<64, S>(q.y, simd, q_inverse).store(simd, &mut qy);
-                for lane in 0..lanes {
-                    affine.push(([px[lane], py[lane]], [qx[lane], qy[lane]]));
-                }
-            }
-            affine
-        },
-    )
-}
-
 /// Fuzzing operations for the pairing.
 #[cfg(any(test, feature = "fuzz"))]
 pub mod fuzz {
@@ -333,7 +230,7 @@ pub mod fuzz {
     };
     use arbitrary::{Arbitrary, Unstructured};
     use commonware_math::algebra::{CryptoGroup, test_suites};
-    use std::sync::LazyLock;
+    use std::{sync::LazyLock, vec};
 
     /// The pairing of the generators, which generates the target group.
     static GENERATOR: LazyLock<GT> = LazyLock::new(|| pairing(&G1::generator(), &G2::generator()));

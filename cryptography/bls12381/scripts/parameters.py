@@ -526,35 +526,35 @@ def emit(tables: Tables) -> str:
 use super::{{Basis, Conversion, MODULI, WORDS}};
 
 /// `floor(M / p)` for the product `M` of the first basis.
-pub(super) const M_OVER_P: u64 = {tables.big_m // P};
+pub const M_OVER_P: u64 = {tables.big_m // P};
 
 /// `floor(N / p)` for the product `N` of the second basis.
-pub(super) const N_OVER_P: u64 = {tables.big_n // P};
+pub const N_OVER_P: u64 = {tables.big_n // P};
 
 /// The first basis.
-pub(super) const M: Basis = {emit_basis(MODULI_M)};
+pub const M: Basis = {emit_basis(MODULI_M)};
 
 /// The second basis.
-pub(super) const N: Basis = {emit_basis(MODULI_N)};
+pub const N: Basis = {emit_basis(MODULI_N)};
 
 /// Rows of the conversion of the Montgomery quotient from the first basis to the second.
-pub(super) const REDUCE: [[u64; MODULI]; MODULI] = {fmt_matrix(tables.reduce.matrix, '')};
+pub const REDUCE: [[u64; MODULI]; MODULI] = {fmt_matrix(tables.reduce.matrix, '')};
 
 /// The conversion from the second basis to the first.
-pub(super) const EXPAND: Conversion = {emit_conversion(tables.expand)};
+pub const EXPAND: Conversion = {emit_conversion(tables.expand)};
 
 /// The conversion of a canonical integer, in {BITS}-bit digits, into the second basis.
-pub(super) const TO_RNS: Conversion = {emit_conversion(tables.to_rns)};
+pub const TO_RNS: Conversion = {emit_conversion(tables.to_rns)};
 
 /// Second-basis CRT weights times `M * 2^(-52)` modulo `N`, which removes the residue scale,
 /// then reduced modulo `p`, divided by `M`, and scaled by `2^{64 * WORDS}`.
-pub(super) const TO_CANONICAL: [[u64; WORDS]; MODULI] = {fmt_matrix(tables.to_canonical, '')};
+pub const TO_CANONICAL: [[u64; WORDS]; MODULI] = {fmt_matrix(tables.to_canonical, '')};
 
 /// `-N mod p`, scaled like [`TO_CANONICAL`].
-pub(super) const CANONICAL_CORRECTION: [u64; WORDS] = {fmt_array(tables.canonical_correction, '')};
+pub const CANONICAL_CORRECTION: [u64; WORDS] = {fmt_array(tables.canonical_correction, '')};
 
 /// The residues of `p` in each basis, times the basis's residue scale.
-pub(super) const ENCODED_P: [[u64; MODULI]; 2] = {fmt_matrix(tables.encoded_p, '')};
+pub const ENCODED_P: [[u64; MODULI]; 2] = {fmt_matrix(tables.encoded_p, '')};
 """
 
 

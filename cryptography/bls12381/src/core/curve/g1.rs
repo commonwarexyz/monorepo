@@ -31,7 +31,7 @@ pub type Coordinates = [[u8; BYTES]; 3];
 /// Largest integer bound of a coordinate, in units of `p`.
 // The positional representations return at most 73 from the subtraction in the X coordinate of
 // Point::add, and residues reduce to at most 17.
-pub const BOUND: u64 = 73;
+const BOUND: u64 = 73;
 
 /// The identity `(0 : 1 : 0)` as projective coordinates.
 pub const IDENTITY: Coordinates = [[0; BYTES], ONE, [0; BYTES]];
@@ -262,7 +262,7 @@ impl<S: Simd, F: Field<S>> Points<S> for Point<F> {
 /// Reference arithmetic and coordinate bound hooks for the
 /// [curve formula checks](crate::core::curve::fuzz).
 #[cfg(any(test, feature = "fuzz"))]
-pub(crate) mod fuzz {
+pub mod fuzz {
     use super::*;
     use crate::core::{
         curve::fuzz::Curve,
@@ -271,7 +271,7 @@ pub(crate) mod fuzz {
     use arbitrary::Unstructured;
 
     /// G1 over the reference base field.
-    pub(crate) struct G1;
+    pub struct G1;
 
     impl Curve for G1 {
         const NAME: &'static str = "G1";

@@ -36,7 +36,7 @@ pub const BYTES: usize = 3 * FP2_BYTES;
 
 /// Largest component integer bound of a [`Fp6::square_product`] factor, in units of `p`: the sum
 /// of two tightly reduced values.
-pub const SQUARE_BOUND: u64 = 2 * TIGHT;
+const SQUARE_BOUND: u64 = 2 * TIGHT;
 
 /// Positional bias of the tight reductions in this module, in units of `p`.
 ///
@@ -411,7 +411,7 @@ fn combine<S: Simd, F: Field<S>>(
 /// Returns `sum - a - b` for products, without a bias: Karatsuba's cross term, given the product
 /// of sums and the two products it covers.
 #[cfg_attr(not(debug_assertions), inline(always))]
-pub(super) fn cross_term<S: Simd, F: Field<S>>(
+pub fn cross_term<S: Simd, F: Field<S>>(
     simd: S,
     sum: fp2::Product<F, S>,
     a: fp2::Product<F, S>,

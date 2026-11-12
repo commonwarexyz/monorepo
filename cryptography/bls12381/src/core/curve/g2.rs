@@ -311,7 +311,7 @@ impl<F> Point<F> {
     /// Within the coordinate bounds, the reduced values have limb bound `1` and integer bounds at
     /// most `17`, `5`, `5`, and `43` in every representation.
     #[inline(always)]
-    pub(crate) fn doubling_stage<S: Simd>(self, simd: S, k: usize) -> Fp2<F::Product>
+    pub fn doubling_stage<S: Simd>(self, simd: S, k: usize) -> Fp2<F::Product>
     where
         F: Field<S>,
     {
@@ -340,7 +340,7 @@ impl<F> Point<F> {
     /// Returns the `k`th coordinate of the doubled point, as a sum of products to reduce, given the
     /// reduced values of [`Self::doubling_stage`].
     #[inline(always)]
-    pub(crate) fn doubled_coordinate<S: Simd>(
+    pub fn doubled_coordinate<S: Simd>(
         simd: S,
         &[yy, xy, yz, b3zz]: &[Fp2<F>; 4],
         k: usize,
@@ -369,7 +369,7 @@ impl<F> Point<F> {
 
 /// The first stage of an addition: the ready coordinates of both points and the products
 /// `X1 X2`, `Y1 Y2`, `Z1 Z2`, and `3b Z1 Z2`.
-pub(crate) struct Addition<F, S: Simd>
+pub struct Addition<F, S: Simd>
 where
     F: Field<S>,
 {
@@ -390,7 +390,7 @@ where
     /// Under [`Field::SCHOOLBOOK`] the cross terms take their own products, so `Z1 Z2` goes
     /// unused.
     #[inline(always)]
-    pub(crate) fn new(simd: S, lhs: Point<F>, rhs: Point<F>) -> Self {
+    pub fn new(simd: S, lhs: Point<F>, rhs: Point<F>) -> Self {
         let a = [
             lhs.x.ready::<1, S>(simd),
             lhs.y.ready::<1, S>(simd),
@@ -417,7 +417,7 @@ where
     /// cross terms `X1 Y2 + Y1 X2`, `Y1 Z2 + Z1 Y2`, and `X1 Z2 + Z1 X2`, then
     /// `Y1 Y2 + 3b Z1 Z2`, `Y1 Y2 - 3b Z1 Z2`, and `X1 X2`.
     #[inline(always)]
-    pub(crate) fn stage(&self, simd: S, k: usize) -> Fp2<F::Product> {
+    pub fn stage(&self, simd: S, k: usize) -> Fp2<F::Product> {
         match k {
             0 => Fp2::<F>::difference::<8, S>(simd, self.cross(simd, 0, 1, (self.xx, self.yy))),
             1 => Fp2::<F>::difference::<8, S>(simd, self.cross(simd, 1, 2, (self.yy, self.zz))),
@@ -457,7 +457,7 @@ where
     /// Returns the `k`th coordinate of the sum, as a sum of products to reduce, given the reduced
     /// values of [`Self::stage`].
     #[inline(always)]
-    pub(crate) fn coordinate(
+    pub fn coordinate(
         simd: S,
         &[xy, yz, xz, sum, difference, xx]: &[Fp2<F>; 6],
         k: usize,
@@ -503,7 +503,7 @@ where
 /// Reference arithmetic and coordinate bound hooks for the
 /// [curve formula checks](crate::core::curve::fuzz).
 #[cfg(any(test, feature = "fuzz"))]
-pub(crate) mod fuzz {
+pub mod fuzz {
     use super::*;
     use crate::core::{
         curve::fuzz::Curve,
@@ -512,7 +512,7 @@ pub(crate) mod fuzz {
     use arbitrary::Unstructured;
 
     /// G2 over the reference extension field.
-    pub(crate) struct G2;
+    pub struct G2;
 
     impl Curve for G2 {
         const NAME: &'static str = "G2";
