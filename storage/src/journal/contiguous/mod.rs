@@ -283,15 +283,6 @@ impl<T> Many<'_, T> {
             Self::Nested(nested_items) => nested_items.iter().all(|items| items.is_empty()),
         }
     }
-
-    /// Returns an iterator over the items of every segment, in order.
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &T> {
-        let segments = match self {
-            Self::Flat(items) => core::slice::from_ref(items),
-            Self::Nested(nested_items) => *nested_items,
-        };
-        segments.iter().flat_map(|items| items.iter())
-    }
 }
 
 /// A [Contiguous] journal that supports appending and prefix pruning.
