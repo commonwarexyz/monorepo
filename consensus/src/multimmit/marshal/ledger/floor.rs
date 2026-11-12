@@ -447,6 +447,15 @@ where
                 self.ends.reset(ordinal);
                 self.target = None;
                 self.delivered = durable.ack.emitted.clone();
+                self.finals.reset(
+                    &durable
+                        .ack
+                        .emitted
+                        .iter()
+                        .map(BlockRef::height)
+                        .collect::<Vec<_>>(),
+                );
+                self.finals_dirty = true;
                 self.acked = durable.ack.clone();
                 self.acks = FuturesOrdered::new();
                 self.outstanding = 0;

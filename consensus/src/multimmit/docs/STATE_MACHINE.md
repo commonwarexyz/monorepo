@@ -187,8 +187,10 @@ Marshal implements the Section 6 two-pass ordering variant from portable proofs.
 each L-QC it verifies (`Activity::Proven`) with the finality the certificate proves on its own and
 the history records whose order its placement fixed since the previous report, placement runs as
 fetch hints (`Activity::Placed`), and every DA certificate once its record is durable
-(`Activity::CertificateRecorded`). Dense delivery and application acknowledgement never enter
-consensus storage.
+(`Activity::CertificateRecorded`). Leader finality facts (`Activity::LeaderFinalized` and
+`Activity::LeaderFinalityUpdated`) and the facts in `Activity::Proven` also name each chain's final
+block, which marshal uses only to report final blocks ahead of ordering. Dense delivery and
+application acknowledgement never enter consensus storage.
 
 One owner task holds every store and machine and makes each transition synchronously; storage,
 reads, peer certificate verification and serving run as jobs on other tasks and return as events.
@@ -243,6 +245,14 @@ consensus: placement runs and older proofs are dropped under pressure, and recor
 their byte bound marshal stops instead). It also supports durable block staging, local get,
 network fetch, local subscription (satisfied by custody or the broadcast buffer, never by a peer
 fetch), certificate lookup and fetch, floor lookup and installation, pruning, and progress.
+
+Ahead of ordering, marshal reports each final block (`Update::Final`, no acknowledgement): the
+blocks on the parent-linked path below the newest final block a fact names on their chain, once
+local custody holds them, oldest first per chain and above what it already reported or delivered
+in this run. Each chain walks its final tip down once through held headers, keeping one reference
+per `final_lookahead` heights, and hands out at most `final_lookahead` blocks at a time. Reports
+never fetch, never follow the block's ordered delivery in the same run, and read bodies into the
+memory delivery reads from, so they do not hold back delivery.
 
 A floor is an L-QC, its leader's history record, and the exact last block of every chain once the
 order it proves is emitted. Marshal writes a cut entry whenever delivery reaches such an end, so
@@ -738,6 +748,9 @@ Marshal keeps a separate invariant set:
 - **M-INV-06:** Peer responses are decoded under protocol bounds and authenticated against their
   keys before anything is stored; peer L-QCs are verified before use.
 - **M-INV-07:** Every queue, window, cache and in-flight budget has a configured finite bound.
+- **M-INV-08:** A final-block report names only a block on the parent-linked path below a final
+  block a leader finality fact names, never one above it, and never follows that block's ordered
+  delivery in the same run. Reports authorize nothing.
 
 ## Steady-state resource proof
 
