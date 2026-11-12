@@ -1,11 +1,16 @@
-//! Montgomery arithmetic on canonical multi-word integers, shared by the prime fields.
+//! Arithmetic on canonical multi-word integers.
+//!
+//! The base and scalar fields share the modular arithmetic and the conversions between
+//! big-endian bytes and words. Only the base field inverts with [`invert`]; the scalar field
+//! raises to the power `r - 2`. The scalar field splits scalars with [`mul_words`] and
+//! [`divide`].
 //!
 //! Integers are little-endian words. Unless a function states otherwise, it takes integers below
 //! the modulus and returns the same. The functions are `const fn` so that field constants can be
 //! derived at compile time.
 
 /// Computes `-m^(-1) mod 2^64` for an odd modulus word `m` by Newton iteration.
-pub(crate) const fn negated_inverse(m: u64) -> u64 {
+pub const fn negated_inverse(m: u64) -> u64 {
     let mut inv = 1u64;
     let mut i = 0;
     while i < 6 {
@@ -15,22 +20,29 @@ pub(crate) const fn negated_inverse(m: u64) -> u64 {
     inv.wrapping_neg()
 }
 
-/// Returns whether `value < modulus`.
-pub(crate) const fn is_below<const N: usize>(value: &[u64; N], modulus: &[u64; N]) -> bool {
-    let mut borrow = 0;
+/// Returns `a - b` modulo `2^(64 N)` and whether it borrowed.
+pub const fn sub_words<const N: usize>(a: &[u64; N], b: &[u64; N]) -> ([u64; N], bool) {
+    let mut difference = [0; N];
+    let mut borrow = 0u64;
     let mut i = 0;
     while i < N {
-        let wide = (value[i] as u128)
-            .wrapping_sub(modulus[i] as u128)
+        let wide = (a[i] as u128)
+            .wrapping_sub(b[i] as u128)
             .wrapping_sub(borrow as u128);
+        difference[i] = wide as u64;
         borrow = (wide >> 127) as u64;
         i += 1;
     }
-    borrow == 1
+    (difference, borrow == 1)
+}
+
+/// Returns whether `value < modulus`.
+pub const fn is_below<const N: usize>(value: &[u64; N], modulus: &[u64; N]) -> bool {
+    sub_words(value, modulus).1
 }
 
 /// Returns `v mod modulus` for `v = value + carry 2^(64 N) < 2 modulus`.
-pub(crate) const fn subtract_modulus<const N: usize>(
+pub const fn subtract_modulus<const N: usize>(
     value: [u64; N],
     carry: u64,
     modulus: &[u64; N],
@@ -57,12 +69,107 @@ pub(crate) const fn subtract_modulus<const N: usize>(
     reduced
 }
 
-/// Returns `a + b mod modulus`.
-pub(crate) const fn add<const N: usize>(
-    a: &[u64; N],
-    b: &[u64; N],
-    modulus: &[u64; N],
+/// Returns the product of two little-endian integers, in `N = A + B` words.
+pub const fn mul_words<const A: usize, const B: usize, const N: usize>(
+    a: &[u64; A],
+    b: &[u64; B],
 ) -> [u64; N] {
+    const { assert!(N == A + B) };
+    let mut product = [0; N];
+    let mut i = 0;
+    while i < A {
+        let mut carry = 0u64;
+        let mut j = 0;
+        while j < B {
+            // A product of words plus a word and a carry is below 2^128.
+            let wide = product[i + j] as u128 + a[i] as u128 * b[j] as u128 + carry as u128;
+            product[i + j] = wide as u64;
+            carry = (wide >> 64) as u64;
+            j += 1;
+        }
+        product[i + B] = carry;
+        i += 1;
+    }
+    product
+}
+
+/// Returns `value / divisor` and `value mod divisor` for a value of `N = 2 D` words whose
+/// quotient fits in `D` words, given `reciprocal = floor(2^(64 N) / divisor)` in `R = D + 1`
+/// words, without branching on the value.
+///
+/// The quotient estimated from the reciprocal falls short by at most one, since
+/// `value * reciprocal / 2^(64 N)` is at least `value / divisor - value / 2^(64 N)`, so one
+/// conditional subtraction of the divisor corrects the remainder.
+pub const fn divide<const N: usize, const D: usize, const R: usize, const W: usize>(
+    value: &[u64; N],
+    divisor: &[u64; D],
+    reciprocal: &[u64; R],
+) -> ([u64; D], [u64; D]) {
+    const { assert!(N == 2 * D && R == D + 1 && W == N + R) };
+    let wide: [u64; W] = mul_words(value, reciprocal);
+    let mut quotient = [0; D];
+    let mut i = 0;
+    while i < D {
+        quotient[i] = wide[N + i];
+        i += 1;
+    }
+    let product: [u64; N] = mul_words(&quotient, divisor);
+    let (remainder, _) = sub_words(value, &product);
+    let mut extended = [0; N];
+    let mut i = 0;
+    while i < D {
+        extended[i] = divisor[i];
+        i += 1;
+    }
+    let (reduced, borrow) = sub_words(&remainder, &extended);
+    // Keep the remainder when it is below the divisor, and otherwise take the reduced one and
+    // add one to the quotient.
+    let keep = (borrow as u64).wrapping_neg();
+    let mut corrected = [0; D];
+    let mut carry = !keep & 1;
+    let mut i = 0;
+    while i < D {
+        corrected[i] = (remainder[i] & keep) | (reduced[i] & !keep);
+        let (sum, overflow) = quotient[i].overflowing_add(carry);
+        quotient[i] = sum;
+        carry = overflow as u64;
+        i += 1;
+    }
+    (quotient, corrected)
+}
+
+/// Returns the little-endian words of the big-endian integer `bytes`, for `B = 8 N`.
+pub const fn words_from_be_bytes<const N: usize, const B: usize>(bytes: &[u8; B]) -> [u64; N] {
+    const { assert!(B == 8 * N) };
+    let chunks = bytes.as_chunks::<8>().0;
+    let mut words = [0; N];
+    let mut i = 0;
+    while i < N {
+        words[i] = u64::from_be_bytes(chunks[N - 1 - i]);
+        i += 1;
+    }
+    words
+}
+
+/// Returns the big-endian encoding of the little-endian words `words`, for `B = 8 N`.
+pub const fn be_bytes_from_words<const N: usize, const B: usize>(words: &[u64; N]) -> [u8; B] {
+    const { assert!(B == 8 * N) };
+    let mut bytes = [0; B];
+    let mut i = 0;
+    while i < N {
+        let chunk = words[N - 1 - i].to_be_bytes();
+        let mut j = 0;
+        while j < 8 {
+            bytes[8 * i + j] = chunk[j];
+            j += 1;
+        }
+        i += 1;
+    }
+    bytes
+}
+
+/// Returns `a + b mod modulus`.
+pub const fn add<const N: usize>(a: &[u64; N], b: &[u64; N], modulus: &[u64; N]) -> [u64; N] {
     let mut sum = [0; N];
     let mut carry = 0;
     let mut i = 0;
@@ -76,7 +183,7 @@ pub(crate) const fn add<const N: usize>(
 }
 
 /// Returns `modulus - a`, mapping zero to zero.
-pub(crate) const fn neg<const N: usize>(a: &[u64; N], modulus: &[u64; N]) -> [u64; N] {
+pub const fn neg<const N: usize>(a: &[u64; N], modulus: &[u64; N]) -> [u64; N] {
     let mut value = [0; N];
     let mut borrow = 0;
     let mut nonzero = 0;
@@ -101,7 +208,7 @@ pub(crate) const fn neg<const N: usize>(a: &[u64; N], modulus: &[u64; N]) -> [u6
 }
 
 /// Returns `2^k mod modulus` by repeated doubling.
-pub(crate) const fn power_of_two<const N: usize>(k: u32, modulus: &[u64; N]) -> [u64; N] {
+pub const fn power_of_two<const N: usize>(k: u32, modulus: &[u64; N]) -> [u64; N] {
     let mut value = [0; N];
     value[0] = 1;
     let mut i = 0;
@@ -116,7 +223,7 @@ pub(crate) const fn power_of_two<const N: usize>(k: u32, modulus: &[u64; N]) -> 
 /// below `2^(64 N - 1)`, given `inv = -modulus^(-1) mod 2^64`.
 ///
 /// `a` may be any integer below `2^(64 N)`; `b` must be below the modulus.
-pub(crate) const fn mul<const N: usize>(
+pub const fn mul<const N: usize>(
     a: &[u64; N],
     b: &[u64; N],
     modulus: &[u64; N],
@@ -170,7 +277,7 @@ const LIMB_MASK: u64 = (1 << LIMB) - 1;
 const STEPS: u32 = 59;
 
 /// Returns `m^(-1) mod 2^62` for an odd modulus word `m`.
-pub(crate) const fn inverse_mod_limb(m: u64) -> u64 {
+pub const fn inverse_mod_limb(m: u64) -> u64 {
     negated_inverse(m).wrapping_neg() & LIMB_MASK
 }
 
@@ -351,7 +458,7 @@ const fn normalize<const L: usize>(mut r: [i64; L], sign: i64, modulus: &[i64; L
 /// given `inverse = modulus^(-1) mod 2^62` from [`inverse_mod_limb`].
 ///
 /// `L` signed limbs of [`LIMB`] bits must hold the modulus with two spare bits.
-pub(crate) const fn invert<const N: usize, const L: usize>(
+pub const fn invert<const N: usize, const L: usize>(
     a: &[u64; N],
     modulus: &[u64; N],
     inverse: u64,

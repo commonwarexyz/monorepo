@@ -72,7 +72,7 @@ use commonware_simd::Simd;
 pub const BYTES: usize = 2 * FP_BYTES;
 
 /// Returns the encoding of `c0 + c1 i` for little-endian words.
-pub(crate) const fn encode(c0: [u64; WORDS], c1: [u64; WORDS]) -> [u8; BYTES] {
+pub const fn encode(c0: [u64; WORDS], c1: [u64; WORDS]) -> [u8; BYTES] {
     let (c0, c1) = (fp::encode(c0), fp::encode(c1));
     let mut bytes = [0; BYTES];
     let mut i = 0;
@@ -584,7 +584,7 @@ impl<F> Fp2<F> {
     ///
     /// Forms each product once, in order.
     #[cfg_attr(not(debug_assertions), inline(always))]
-    pub(super) fn reduce_each_tight<const N: usize, const C: usize, const K: u64, S: Simd>(
+    pub fn reduce_each_tight<const N: usize, const C: usize, const K: u64, S: Simd>(
         simd: S,
         mut product: impl FnMut(usize) -> Product<F, S>,
     ) -> [Self; N]
@@ -727,45 +727,45 @@ const fn split(element: &[u8; BYTES]) -> [&[u8; FP_BYTES]; 2] {
 
 /// Reference arithmetic on elements with canonical components, for testing formulas.
 #[cfg(any(test, feature = "fuzz"))]
-pub(crate) mod reference {
+pub mod reference {
     use super::BYTES;
     use crate::core::field::fp::reference as fp;
     use arbitrary::Unstructured;
 
     /// An element `c0 + c1 i` as `(c0, c1)`, with canonical components.
-    pub(crate) type Element = (fp::Element, fp::Element);
+    pub type Element = (fp::Element, fp::Element);
 
     /// Zero.
-    pub(crate) const ZERO: Element = (fp::ZERO, fp::ZERO);
+    pub const ZERO: Element = (fp::ZERO, fp::ZERO);
 
     /// One.
-    pub(crate) const ONE: Element = (fp::ONE, fp::ZERO);
+    pub const ONE: Element = (fp::ONE, fp::ZERO);
 
     /// `1 + i`, the nonresidue that defines the cubic extension.
-    pub(crate) const NONRESIDUE: Element = (fp::ONE, fp::ONE);
+    pub const NONRESIDUE: Element = (fp::ONE, fp::ONE);
 
     /// Returns the element of the base field with the integer value `n`.
-    pub(crate) const fn small(n: u64) -> Element {
+    pub const fn small(n: u64) -> Element {
         (fp::small(n), fp::ZERO)
     }
 
     /// Returns `a + b`.
-    pub(crate) const fn add((a0, a1): Element, (b0, b1): Element) -> Element {
+    pub const fn add((a0, a1): Element, (b0, b1): Element) -> Element {
         (fp::add(a0, b0), fp::add(a1, b1))
     }
 
     /// Returns `-a`.
-    pub(crate) const fn neg((a0, a1): Element) -> Element {
+    pub const fn neg((a0, a1): Element) -> Element {
         (fp::neg(a0), fp::neg(a1))
     }
 
     /// Returns `a - b`.
-    pub(crate) const fn sub((a0, a1): Element, (b0, b1): Element) -> Element {
+    pub const fn sub((a0, a1): Element, (b0, b1): Element) -> Element {
         (fp::sub(a0, b0), fp::sub(a1, b1))
     }
 
     /// Returns `a * b`.
-    pub(crate) const fn mul((a0, a1): Element, (b0, b1): Element) -> Element {
+    pub const fn mul((a0, a1): Element, (b0, b1): Element) -> Element {
         (
             fp::sub(fp::mul(a0, b0), fp::mul(a1, b1)),
             fp::add(fp::mul(a0, b1), fp::mul(a1, b0)),
@@ -773,30 +773,30 @@ pub(crate) mod reference {
     }
 
     /// Returns the conjugate `c0 - c1 i`.
-    pub(crate) const fn conjugate((a0, a1): Element) -> Element {
+    pub const fn conjugate((a0, a1): Element) -> Element {
         (a0, fp::neg(a1))
     }
 
     /// Returns the inverse of a nonzero `a`: its conjugate over its norm.
-    pub(crate) fn invert((a0, a1): Element) -> Element {
+    pub fn invert((a0, a1): Element) -> Element {
         let norm = fp::add(fp::mul(a0, a0), fp::mul(a1, a1));
         let inverse = fp::invert(norm);
         (fp::mul(a0, inverse), fp::mul(fp::neg(a1), inverse))
     }
 
     /// Returns the residues of an encoding's components.
-    pub(crate) fn decode(bytes: &[u8; BYTES]) -> Element {
+    pub const fn decode(bytes: &[u8; BYTES]) -> Element {
         let [c0, c1] = super::split(bytes);
         (fp::decode(c0), fp::decode(c1))
     }
 
     /// Returns the encoding of an element, the imaginary component first.
-    pub(crate) const fn encode((c0, c1): Element) -> [u8; BYTES] {
+    pub const fn encode((c0, c1): Element) -> [u8; BYTES] {
         super::encode(c0, c1)
     }
 
     /// Draws an element with canonical components, as [`fp::canonical`] draws each.
-    pub(crate) fn canonical(u: &mut Unstructured<'_>) -> arbitrary::Result<Element> {
+    pub fn canonical(u: &mut Unstructured<'_>) -> arbitrary::Result<Element> {
         Ok((fp::canonical(u)?, fp::canonical(u)?))
     }
 }
