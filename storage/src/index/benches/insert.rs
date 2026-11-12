@@ -9,14 +9,6 @@ use criterion::{Criterion, criterion_group};
 use rand::seq::SliceRandom;
 use std::time::{Duration, Instant};
 
-fn n_items() -> &'static [usize] {
-    if commonware_bench::full() {
-        &[10_000, 50_000, 100_000, 500_000, 1_000_000]
-    } else {
-        &[10_000, 50_000]
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 enum Variant {
     Ordered,
@@ -57,6 +49,14 @@ const VARIANTS: [Variant; 9] = [
     Variant::HashedPartitionedUnordered1,
     Variant::HashedPartitionedUnordered2,
 ];
+
+fn n_items() -> &'static [usize] {
+    if commonware_bench::full() {
+        &[10_000, 50_000, 100_000, 500_000, 1_000_000]
+    } else {
+        &[10_000, 50_000]
+    }
+}
 
 fn bench_insert(c: &mut Criterion) {
     for &items in n_items() {

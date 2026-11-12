@@ -4,6 +4,10 @@ use criterion::{Criterion, criterion_group};
 use rand::RngExt as _;
 use std::hint::black_box;
 
+/// Positions evaluated per measured iteration. Amortizes timer overhead and exercises a spread of
+/// bit patterns (the cost varies with the popcount structure near the target).
+const SAMPLES: usize = 4096;
+
 fn n_leaves() -> &'static [u64] {
     if commonware_bench::full() {
         &[1_000_000, 1_000_000_000_000, 1 << 62]
@@ -11,10 +15,6 @@ fn n_leaves() -> &'static [u64] {
         &[1_000_000, 1_000_000_000_000]
     }
 }
-
-/// Positions evaluated per measured iteration. Amortizes timer overhead and exercises a spread of
-/// bit patterns (the cost varies with the popcount structure near the target).
-const SAMPLES: usize = 4096;
 
 /// Generate `SAMPLES` valid leaf positions drawn from leaf counts in `[0, max_leaves)`. The
 /// benchmark focuses on the common leaf/size (`Some`) path exercised by callers like `leaves()` and

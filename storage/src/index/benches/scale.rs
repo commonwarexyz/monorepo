@@ -140,10 +140,12 @@ fn main() {
     // Numeric args are sizes; other args name the variants to run (default: all). Flag-style args
     // (e.g. the `--bench` that `cargo bench` injects into the harness) are ignored.
     let argv: Vec<String> = std::env::args().skip(1).collect();
+
     // There are no Criterion benchmarks to list.
     if argv.iter().any(|a| a == "--list") {
         return;
     }
+
     let args: Vec<u64> = argv.iter().filter_map(|a| a.parse().ok()).collect();
     let batch =
         argv.iter()

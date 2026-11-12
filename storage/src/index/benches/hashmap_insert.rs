@@ -3,18 +3,18 @@ use criterion::{BatchSize, Criterion, criterion_group};
 use rand::RngExt as _;
 use std::collections::HashMap;
 
+struct MockIndex {
+    _section: u64,
+    _offset: u32,
+    _len: u32,
+}
+
 fn n_items() -> &'static [usize] {
     if commonware_bench::full() {
         &[100_000, 1_000_000, 10_000_000]
     } else {
         &[100_000]
     }
-}
-
-struct MockIndex {
-    _section: u64,
-    _offset: u32,
-    _len: u32,
 }
 
 fn bench_hashmap_insert(c: &mut Criterion) {

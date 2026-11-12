@@ -23,6 +23,7 @@ fn benchmark_count_ones(c: &mut Criterion) {
     } else {
         &[64, 1 << 10, 1 << 14, 1 << 18, 1 << 22, 1 << 28]
     };
+
     for &size in sizes {
         bench_count_ones::<4>(c, size);
         bench_count_ones::<8>(c, size);

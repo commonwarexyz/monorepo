@@ -8,7 +8,7 @@ use commonware_storage::archive::Archive as _;
 use criterion::{Criterion, criterion_group};
 use std::time::{Duration, Instant};
 
-fn item_counts() -> &'static [u64] {
+fn n_items() -> &'static [u64] {
     if commonware_bench::smoke() {
         &[1_000]
     } else if commonware_bench::full() {
@@ -22,7 +22,7 @@ fn bench_restart(c: &mut Criterion) {
     let cfg = Config::default();
     for variant in [Variant::Prunable, Variant::Immutable] {
         for compression in [None, Some(3)] {
-            for &items in item_counts() {
+            for &items in n_items() {
                 let mut initialized = false;
                 let runner = tokio::Runner::new(cfg.clone());
                 c.bench_function(

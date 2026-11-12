@@ -21,6 +21,7 @@ fn bench_threshold_batch_verify_same_message_pre(c: &mut Criterion) {
         } else {
             &[5, 10, 20, 50, 100, 250, 500]
         };
+
         for &n in sizes {
             let t = N3f1::quorum(n);
             let f = n - t;

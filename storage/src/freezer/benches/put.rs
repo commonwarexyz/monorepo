@@ -6,7 +6,7 @@ use commonware_runtime::{
 use criterion::{Criterion, criterion_group};
 use std::time::{Duration, Instant};
 
-fn item_counts() -> &'static [u64] {
+fn n_items() -> &'static [u64] {
     if commonware_bench::full() {
         &[10_000, 50_000, 100_000, 250_000]
     } else {
@@ -16,7 +16,7 @@ fn item_counts() -> &'static [u64] {
 
 fn bench_put(c: &mut Criterion) {
     let runner = tokio::Runner::default();
-    for &items in item_counts() {
+    for &items in n_items() {
         let label = format!("{}/items={}", module_path!(), items);
         c.bench_function(&label, |b| {
             b.to_async(&runner).iter_custom(move |iters| async move {

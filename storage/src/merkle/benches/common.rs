@@ -15,6 +15,12 @@ pub type StandardHasher<H> = merkle::hasher::Standard<H>;
 /// Number of leaves or ranges sampled from each tree.
 pub const SAMPLE_SIZE: usize = 100;
 
+/// A proven leaf and its location.
+pub type SingleSample<F> = (Location<F>, sha256::Digest);
+
+/// A proven range of leaves and their elements.
+pub type RangeSample<F> = (Range<Location<F>>, Vec<sha256::Digest>);
+
 pub fn n_leaves() -> &'static [usize] {
     if commonware_bench::full() {
         &[10_000, 100_000, 1_000_000, 5_000_000, 10_000_000]
@@ -22,12 +28,6 @@ pub fn n_leaves() -> &'static [usize] {
         &[10_000, 100_000]
     }
 }
-
-/// A proven leaf and its location.
-pub type SingleSample<F> = (Location<F>, sha256::Digest);
-
-/// A proven range of leaves and their elements.
-pub type RangeSample<F> = (Range<Location<F>>, Vec<sha256::Digest>);
 
 /// Builds an in-memory tree of `n` random elements and returns it with its root
 /// and the elements in location order.

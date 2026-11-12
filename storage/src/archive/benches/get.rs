@@ -13,7 +13,7 @@ use rand::RngExt as _;
 use std::{hint::black_box, time::Instant};
 
 /// Items pre-loaded into the archive.
-fn items() -> u64 {
+fn n_items() -> u64 {
     if commonware_bench::smoke() {
         1_000
     } else if commonware_bench::full() {
@@ -23,7 +23,7 @@ fn items() -> u64 {
     }
 }
 
-fn read_counts() -> &'static [usize] {
+fn n_reads() -> &'static [usize] {
     if commonware_bench::smoke() {
         &[100]
     } else if commonware_bench::full() {
@@ -46,7 +46,7 @@ fn select_indices(reads: usize) -> Vec<u64> {
     let mut rng = TestRng::new(42);
     let mut selected_indices = Vec::with_capacity(reads);
     for _ in 0..reads {
-        selected_indices.push(rng.random_range(0..items()));
+        selected_indices.push(rng.random_range(0..n_items()));
     }
     selected_indices
 }
@@ -85,7 +85,7 @@ fn bench_get(c: &mut Criterion) {
             let runner = tokio::Runner::new(cfg.clone());
             for mode in ["serial", "concurrent"] {
                 for pattern in ["key", "index"] {
-                    for &reads in read_counts() {
+                    for &reads in n_reads() {
                         c.bench_function(
                             &format!(
                                 "{}/variant={} mode={} pattern={} comp={} items={} reads={}",
@@ -96,7 +96,7 @@ fn bench_get(c: &mut Criterion) {
                                 compression
                                     .map(|l| l.to_string())
                                     .unwrap_or_else(|| "off".into()),
-                                items(),
+                                n_items(),
                                 reads
                             ),
                             |b| {
@@ -105,7 +105,7 @@ fn bench_get(c: &mut Criterion) {
                                     keys = commonware_runtime::tokio::Runner::new(cfg.clone())
                                         .start(|ctx| async move {
                                             let a = Archive::init(ctx, variant, compression).await;
-                                            let (_, keys) = append_random(a, items()).await;
+                                            let (_, keys) = append_random(a, n_items()).await;
                                             keys
                                         });
                                     initialized = true;

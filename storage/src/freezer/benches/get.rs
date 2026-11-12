@@ -11,7 +11,7 @@ use rand::RngExt as _;
 use std::{hint::black_box, time::Instant};
 
 /// Items pre-loaded into the store.
-fn items() -> u64 {
+fn n_items() -> u64 {
     if commonware_bench::full() {
         250_000
     } else {
@@ -19,7 +19,7 @@ fn items() -> u64 {
     }
 }
 
-fn read_counts() -> &'static [usize] {
+fn n_reads() -> &'static [usize] {
     if commonware_bench::full() {
         &[1_000, 10_000, 50_000]
     } else {
@@ -70,7 +70,7 @@ fn bench_get(c: &mut Criterion) {
     let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
     let (keys, checkpoint) = builder.start(|ctx| async move {
         let store = init(ctx, None).await;
-        let (store, keys) = append_random(store, items()).await;
+        let (store, keys) = append_random(store, n_items()).await;
         let checkpoint = store.close().await.unwrap();
         (keys, checkpoint)
     });
@@ -79,13 +79,13 @@ fn bench_get(c: &mut Criterion) {
     let runner = tokio::Runner::new(cfg.clone());
     for pattern in ["random", "recent"] {
         for mode in ["serial", "concurrent"] {
-            for &reads in read_counts() {
+            for &reads in n_reads() {
                 let label = format!(
                     "{}/pattern={} mode={} items={} reads={}",
                     module_path!(),
                     pattern,
                     mode,
-                    items(),
+                    n_items(),
                     reads
                 );
                 c.bench_function(&label, |b| {

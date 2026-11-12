@@ -20,19 +20,17 @@ const PARTITION: &str = "test-partition";
 /// Value of items_per_blob to use in the journal config.
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000);
 
-/// Number of items to write to the journal we will be reading from.
-const ITEMS_TO_WRITE: u64 = 5_000_000;
+/// Size of each journal item in bytes.
+const ITEM_SIZE: usize = 32;
 
+/// Number of items to write to the journal we will be reading from.
 fn items_to_write() -> u64 {
     if commonware_bench::smoke() {
         10_000
     } else {
-        ITEMS_TO_WRITE
+        5_000_000
     }
 }
-
-/// Size of each journal item in bytes.
-const ITEM_SIZE: usize = 32;
 
 /// Read `items_to_read` random items from the given `journal`, awaiting each
 /// result before continuing.
@@ -99,6 +97,7 @@ fn bench_fixed_read_random(c: &mut Criterion) {
         } else {
             &[100, 1_000, 10_000, 100_000]
         };
+
         for &items_to_read in reads {
             c.bench_function(
                 &format!(
