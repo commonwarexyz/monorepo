@@ -1269,10 +1269,15 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         true
     }
 
-    /// Returns true when the in-flight verification for `view` no longer
-    /// describes the proposal and parent we hold, discarding the stale binding.
-    pub fn verification_superseded(&mut self, view: View) -> bool {
-        self.verification_is_stale(view)
+    /// Returns whether a certificate replaced the proposal that the in-flight verification for
+    /// `view` is bound to. The certificate's proposal proceeds through certification, so
+    /// nothing uses a verdict for the replaced one.
+    pub fn verification_superseded(&self, view: View) -> bool {
+        self.views.get(&view).is_some_and(|round| {
+            round
+                .verifying()
+                .is_some_and(|(verifying, _)| round.proposal() != Some(verifying))
+        })
     }
 
     /// Marks proposal verification as complete when the peer payload validates.
@@ -4446,6 +4451,87 @@ mod tests {
             let finalization = build_finalization(&verifier, &schemes, &proposal);
             assert!(state.add_finalization(finalization).0);
             assert!(state.forwardable_proposal(view).is_some());
+        });
+    }
+
+    /// A certificate that displaces an ancestor does not supersede an in-flight verification.
+    /// The verification's ancestry is usable again once its parent is notarized with the payload
+    /// this validator voted for, and its verdict then counts.
+    #[test]
+    fn displaced_ancestor_does_not_supersede_verification() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with(
+                &mut context,
+                4,
+                1,
+                9,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(2),
+                4,
+            );
+
+            // Verify and vote for P1 at view 1 and for its child C2 at view 2.
+            let p1 = Proposal::new(
+                Rnd::new(Epoch::new(9), View::new(1)),
+                GENESIS_VIEW,
+                Sha256Digest::from([123u8; 32]),
+            );
+            let c2 = Proposal::new(
+                Rnd::new(Epoch::new(9), View::new(2)),
+                View::new(1),
+                Sha256Digest::from([124u8; 32]),
+            );
+            for proposal in [&p1, &c2] {
+                assert!(state.set_proposal(proposal.view(), proposal));
+                assert!(matches!(state.try_verify(), Verify::Ready(..)));
+                assert!(state.verified(proposal.view()));
+                assert!(state.construct_notarize(proposal.view()).is_some());
+            }
+
+            // Request verification of D3, the child of C2 at view 3.
+            let d3 = Proposal::new(
+                Rnd::new(Epoch::new(9), View::new(3)),
+                View::new(2),
+                Sha256Digest::from([125u8; 32]),
+            );
+            assert!(state.set_proposal(View::new(3), &d3));
+            let Verify::Ready(ctx, _) = state.try_verify() else {
+                panic!("D3 must be ready to verify");
+            };
+            assert_eq!(ctx.parent, (View::new(2), c2.payload));
+
+            // A conflicting Q1 is notarized at view 1. The ancestry of D3 is unusable until its
+            // parent is notarized, but D3 itself stands, so its verification is not superseded.
+            let q1 = Proposal::new(
+                Rnd::new(Epoch::new(9), View::new(1)),
+                GENESIS_VIEW,
+                Sha256Digest::from([126u8; 32]),
+            );
+            assert!(
+                state
+                    .add_notarization(build_notarization(&verifier, &schemes, &q1))
+                    .0
+            );
+            assert!(state.parent_payload(&d3).is_err());
+            assert!(!state.verification_superseded(View::new(3)));
+
+            // C2 is notarized at view 2 and the ancestry of D3 is usable again. Its verdict
+            // counts.
+            assert!(
+                state
+                    .add_notarization(build_notarization(&verifier, &schemes, &c2))
+                    .0
+            );
+            assert_eq!(state.parent_payload(&d3), Ok(c2.payload));
+            assert!(state.verified(View::new(3)));
+            assert!(state.construct_notarize(View::new(3)).is_some());
         });
     }
 
