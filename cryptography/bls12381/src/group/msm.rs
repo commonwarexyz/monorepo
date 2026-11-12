@@ -34,6 +34,13 @@ const STRAUS_WIDTHS: RangeInclusive<u32> = 2..=8;
 /// buckets at `2^11` points per lane.
 const PIPPENGER_WIDTHS: RangeInclusive<u32> = 2..=12;
 
+/// Elements whose images and digits Pippenger's method holds at once, as [`Method::choose`]
+/// sets it.
+// Every group of windows reads the images of a chunk once, so the chunk bounds the memory of the
+// images whatever the count of elements, and its images stay cached from one group to the next.
+// Chunks of 64 through 4096 elements take the same time within one percent.
+const PIPPENGER_CHUNK: NonZeroUsize = NonZeroUsize::new(256).unwrap();
+
 /// Estimated cost of an addition of points, in units of [`Method::cost`].
 const ADD_COST: usize = 10;
 
@@ -60,8 +67,8 @@ pub enum Method {
     /// number of components at the cost of the images: worthwhile for a few elements.
     Straus { width: u32, split: bool },
     /// Pippenger's method: each lane sums one window of every component of every element into
-    /// its own buckets.
-    Pippenger(u32),
+    /// its own buckets, holding the images of `chunk` elements at once.
+    Pippenger { width: u32, chunk: NonZeroUsize },
 }
 
 impl Method {
@@ -69,7 +76,10 @@ impl Method {
     pub fn choose<G: Group>(count: usize, lanes: usize) -> Self {
         STRAUS_WIDTHS
             .flat_map(|width| [false, true].map(|split| Self::Straus { width, split }))
-            .chain(PIPPENGER_WIDTHS.map(Self::Pippenger))
+            .chain(PIPPENGER_WIDTHS.map(|width| Self::Pippenger {
+                width,
+                chunk: PIPPENGER_CHUNK,
+            }))
             .min_by_key(|method| method.cost::<G>(count, lanes))
             .expect("the widths are not empty")
     }
@@ -98,7 +108,7 @@ impl Method {
                     + IMAGE_COST * groups * (2 * components - 1) * entries
                     + DOUBLE_COST * width as usize * windows
             }
-            Self::Pippenger(width) => {
+            Self::Pippenger { width, .. } => {
                 // Each group of windows adds every image of every element and sums the buckets
                 // in two running sums, then shifts the accumulated windows by `width * lanes`
                 // bits.
@@ -182,16 +192,19 @@ fn component_digits<G: Group>(
     digits
 }
 
-/// Returns the raw form of every image of every element under the powers of the endomorphism,
+/// Stores the raw form of every image of every element under the powers of the endomorphism,
 /// each followed by that of its negation, by element then by component.
+///
+/// `prepared` must hold [`Group::COMPONENTS`] entries per element.
 #[cfg_attr(not(debug_assertions), inline(always))]
 fn prepare<S: Simd, F: Field<S>, G: Group>(
     simd: S,
     elements: &[G],
     identity: Raw<S, F, G>,
-) -> Vec<[Raw<S, F, G>; 2]> {
+    prepared: &mut [[Raw<S, F, G>; 2]],
+) {
     const { assert!(F::LANES <= MAX_LANES) };
-    let mut prepared = vec![[identity; 2]; elements.len() * G::COMPONENTS];
+    debug_assert_eq!(prepared.len(), elements.len() * G::COMPONENTS);
     let mut stored = [identity; MAX_LANES];
     let span = F::LANES * G::COMPONENTS;
     for (elements, prepared) in elements.chunks(F::LANES).zip(prepared.chunks_mut(span)) {
@@ -212,7 +225,6 @@ fn prepare<S: Simd, F: Field<S>, G: Group>(
             }
         }
     }
-    prepared
 }
 
 /// Returns the sum of the elements times their scalars by Straus's method.
@@ -309,59 +321,74 @@ fn straus<S: Simd, F: Field<S>, G: Group>(
 /// Lane `l` of group `g` takes window `g * F::LANES + l` of every component of every scalar,
 /// and sums each element's image into its own bucket for the digit's magnitude, negated for a
 /// negative digit, so the lanes never touch the same bucket. Buckets stay in raw form, and each
-/// addition gathers one bucket per lane. Running sums over the buckets weight each by its
-/// magnitude, and the groups combine by doubling, from the most significant down. Finally lane
-/// `l` is shifted by `width * l` bits and the lanes are summed.
+/// addition gathers one bucket per lane. The elements enter `chunk` at a time, each chunk into
+/// the buckets of every group, so the images of one chunk are all that is held beside the
+/// buckets. Running sums over the buckets weight each by its magnitude, and the groups
+/// combine by doubling, from the most significant down. Finally lane `l` is shifted by
+/// `width * l` bits and the lanes are summed.
 #[cfg_attr(not(debug_assertions), inline(always))]
 fn pippenger<S: Simd, F: Field<S>, G: Group>(
     simd: S,
     elements: &[G],
     scalars: &[Scalar],
     width: u32,
+    chunk: NonZeroUsize,
 ) -> G {
     let identity = identity::<S, F, G>(simd);
     let zero = first_raw::<S, F, G>(simd, identity);
+    let chunk = chunk.get();
     let groups = windows::<G>(width).div_ceil(F::LANES);
     let span = groups * F::LANES;
-    let digits = component_digits::<G>(scalars, width, span, true);
-    let prepared = prepare::<S, F, G>(simd, elements, zero);
 
-    // Bucket b of lane l, for magnitude b + 1, is entry b * F::LANES + l.
-    let mut buckets = vec![zero; F::LANES << (width - 1)];
+    // Bucket b of lane l of a group, for magnitude b + 1, is entry b * F::LANES + l of the
+    // group's buckets, and `used` holds the largest magnitude each group has seen.
+    let group_buckets = F::LANES << (width - 1);
+    let mut buckets = vec![zero; groups * group_buckets];
+    let mut used = vec![0; groups];
+    let mut prepared = vec![[zero; 2]; elements.len().min(chunk) * G::COMPONENTS];
     let mut stored = [zero; MAX_LANES];
-    let mut total = identity;
-    let mut started = false;
-    for group in (0..groups).rev() {
-        buckets.fill(zero);
-        let mut used = 0;
-        for (element, digits) in prepared.iter().zip(digits.chunks_exact(span)) {
-            let digits = &digits[group * F::LANES..(group + 1) * F::LANES];
-            let mut slots = [None; MAX_LANES];
-            let mut sums = [&zero; MAX_LANES];
-            let mut terms = [&zero; MAX_LANES];
-            for (lane, &digit) in digits.iter().enumerate() {
-                if digit != 0 {
-                    let magnitude = digit.unsigned_abs() as usize;
-                    let slot = (magnitude - 1) * F::LANES + lane;
-                    used = used.max(magnitude);
-                    slots[lane] = Some(slot);
-                    sums[lane] = &buckets[slot];
-                    terms[lane] = &element[usize::from(digit < 0)];
+    for (elements, scalars) in elements.chunks(chunk).zip(scalars.chunks(chunk)) {
+        let digits = component_digits::<G>(scalars, width, span, true);
+        let prepared = &mut prepared[..elements.len() * G::COMPONENTS];
+        prepare::<S, F, G>(simd, elements, zero, prepared);
+        for (group, (buckets, used)) in buckets
+            .chunks_exact_mut(group_buckets)
+            .zip(&mut used)
+            .enumerate()
+        {
+            for (element, digits) in prepared.iter().zip(digits.chunks_exact(span)) {
+                let digits = &digits[group * F::LANES..(group + 1) * F::LANES];
+                let mut slots = [None; MAX_LANES];
+                let mut sums = [&zero; MAX_LANES];
+                let mut terms = [&zero; MAX_LANES];
+                for (lane, &digit) in digits.iter().enumerate() {
+                    if digit != 0 {
+                        let magnitude = digit.unsigned_abs() as usize;
+                        let slot = (magnitude - 1) * F::LANES + lane;
+                        *used = (*used).max(magnitude);
+                        slots[lane] = Some(slot);
+                        sums[lane] = &buckets[slot];
+                        terms[lane] = &element[usize::from(digit < 0)];
+                    }
                 }
-            }
-            if slots.iter().all(Option::is_none) {
-                continue;
-            }
-            let bucket = G::Points::<S, F>::load_raw(simd, &sums[..F::LANES]);
-            let term = G::Points::<S, F>::load_raw(simd, &terms[..F::LANES]);
-            outlined_add(simd, bucket, term).store_raw(simd, &mut stored[..F::LANES]);
-            for (slot, stored) in slots.iter().zip(&stored) {
-                if let Some(slot) = slot {
-                    buckets[*slot] = *stored;
+                if slots.iter().all(Option::is_none) {
+                    continue;
+                }
+                let bucket = G::Points::<S, F>::load_raw(simd, &sums[..F::LANES]);
+                let term = G::Points::<S, F>::load_raw(simd, &terms[..F::LANES]);
+                outlined_add(simd, bucket, term).store_raw(simd, &mut stored[..F::LANES]);
+                for (slot, stored) in slots.iter().zip(&stored) {
+                    if let Some(slot) = slot {
+                        buckets[*slot] = *stored;
+                    }
                 }
             }
         }
+    }
 
+    let mut total = identity;
+    let mut started = false;
+    for (buckets, &used) in buckets.chunks_exact(group_buckets).zip(&used).rev() {
         if started {
             for _ in 0..width as usize * F::LANES {
                 total = outlined_double(simd, total);
@@ -435,7 +462,9 @@ impl<G: Group> Kernel for Msm<'_, G> {
             Method::Straus { width, split } => {
                 straus::<S, F, G>(simd, elements, scalars, width, split)
             }
-            Method::Pippenger(width) => pippenger::<S, F, G>(simd, elements, scalars, width),
+            Method::Pippenger { width, chunk } => {
+                pippenger::<S, F, G>(simd, elements, scalars, width, chunk)
+            }
         }
     }
 }
