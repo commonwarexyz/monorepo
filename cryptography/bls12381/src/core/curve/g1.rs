@@ -12,14 +12,6 @@
 //! Raw coordinates hold each lane of a point in the representation's own form, through
 //! [`Field::store_raw`] with bound [`BOUND`], so storing and loading them costs no conversion and
 //! loaded raw coordinates satisfy the coordinate bounds.
-//!
-//! # How the formulas keep their bounds
-//!
-//! Subtractions remove small multiples of reduced products of coordinates. Such a product is
-//! bounded by `4p` in the positional representations and by `17p` in residues, so a multiple
-//! `C` of it is covered by a bias of `17C` in every representation. Inside a formula, the
-//! positional representations reach integer bounds of at most `912` and limb bounds of at most
-//! `12`; residues reach integer bounds of at most `629`.
 
 use crate::core::{
     curve::Points,
@@ -37,9 +29,8 @@ use commonware_simd::Simd;
 pub type Coordinates = [[u8; BYTES]; 3];
 
 /// Largest integer bound of a coordinate, in units of `p`.
-///
-/// The positional representations return at most `73` from the subtraction in [`Point::add`]'s
-/// `X` coordinate, and residues reduce to at most `17`.
+// The positional representations return at most 73 from the subtraction in the X coordinate of
+// Point::add, and residues reduce to at most 17.
 pub const BOUND: u64 = 73;
 
 /// The identity `(0 : 1 : 0)` as projective coordinates.
@@ -57,6 +48,11 @@ pub const GENERATOR: Coordinates = [
 ];
 
 /// Largest integer bound of a reduced value in residues, in units of `p`.
+// Subtractions in the formulas remove small multiples of reduced products of coordinates. Such a
+// product is bounded by 4p in the positional representations and by 17p in residues, so a
+// multiple C of it is covered by a bias of 17C in every representation. Inside a formula, the
+// positional representations reach integer bounds of at most 912 and limb bounds of at most 12;
+// residues reach integer bounds of at most 629.
 const REDUCED: u64 = 17;
 
 /// Positional bias of every subtraction of products, in units of `p`.
@@ -65,9 +61,9 @@ const REDUCED: u64 = 17;
 /// representations.
 const PRODUCT_BIAS: u64 = 64;
 
-/// A cube root of unity `beta` such that `(x, y) -> (beta x, y)` multiplies every point of the
-/// prime-order subgroup by `-x^2`, for the curve parameter `x`: a cube root of unity modulo the
-/// subgroup order `r = x^4 - x^2 + 1`.
+/// A cube root of unity `beta` modulo `p` such that `(x, y) -> (beta x, y)` multiplies every
+/// point of the prime-order subgroup by `-x^2`, for the curve parameter `x`. `-x^2` is a cube
+/// root of unity modulo the subgroup order `r = x^4 - x^2 + 1`.
 const BETA: [u8; BYTES] = encode([
     0x2e01_ffff_fffe_fffe,
     0xde17_d813_620a_0002,

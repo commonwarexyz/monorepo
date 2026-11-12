@@ -26,8 +26,9 @@ pub trait Points<S: Simd>: Copy {
     /// any conversion.
     fn store_raw(self, simd: S, points: &mut [Self::Raw]);
 
-    /// Loads lane `i` from `points[i]`, as [`Self::store_raw`] stored it, for at least one entry
-    /// per lane, without any conversion.
+    /// Loads lane `i` from `points[i]`, as [`Self::store_raw`] stored it, without any conversion.
+    ///
+    /// Requires at least one entry per lane.
     fn load_raw(simd: S, points: &[&Self::Raw]) -> Self;
 
     /// Returns `self + rhs` for any points, including the identity and equal points.
