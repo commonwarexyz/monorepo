@@ -12,21 +12,6 @@
 //! returns elements that satisfy the same, so elements chain through any number of operations.
 //! Loaded elements satisfy it.
 //!
-//! # How the operations keep their bounds
-//!
-//! Each operation forms its products lazily and finishes with one tight reduction of each output
-//! component, as for [`Field::reduce_tight`], so outputs are bounded however many products they
-//! sum. Karatsuba's products over `Fp6` are [carried](Fp6::carry_product) before they combine, so
-//! eager sums stay within their limb limits, and every combination subtracts through signed sums,
-//! so subtractions add a bias only in the final reductions. Their negative sums stay below
-//! `512p` in the positional representations.
-//!
-//! Representations with [`Field::SCHOOLBOOK`] multiply instead over the coefficients of
-//! `1, w, ..., w^5`, where `w^2 = v` and `w^6 = 1 + i`: each output coefficient is the sum of the
-//! products of the pairs of coefficients whose degrees add to its own, or to its own plus six,
-//! the latter with one factor first multiplied by `1 + i`. Every product accumulates into its
-//! output as it forms, so no sum is ever combined with another.
-//!
 //! # Kernels
 //!
 //! Every operation runs as its own kernel: arithmetic so that callers share one copy, and
@@ -161,10 +146,22 @@ pub struct Fp12<F> {
     pub c1: Fp6<F>,
 }
 
+// Each operation forms its products lazily and finishes with one tight reduction of each output
+// component, as for Field::reduce_tight, so outputs stay within BOUND however many products they
+// sum. Karatsuba's products over Fp6 are carried (Fp6::carry_product) before they combine, so
+// eager sums stay within their limb limits, and every combination subtracts through signed sums,
+// so subtractions add a bias only in the final reductions. Their negative sums stay below 512p
+// (BIAS) in the positional representations.
+//
+// Representations with Field::SCHOOLBOOK multiply instead over the coefficients of
+// 1, w, ..., w^5, where w^2 = v and w^6 = 1 + i: each output coefficient is the sum of the
+// products of the pairs of coefficients whose degrees add to its own, or to its own plus six,
+// the latter with one factor first multiplied by 1 + i. Every product accumulates into its
+// output as it forms, so no sum is ever combined with another.
 impl<F> Fp12<F> {
     /// Loads up to one element per lane, filling the remaining lanes with `fill`.
     ///
-    /// Interprets each component modulo `p` and returns the base field's initial bounds.
+    /// Interprets each component modulo `p` and returns the bounds of [`Field::load`].
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn load<S: Simd>(simd: S, elements: &[[u8; BYTES]], fill: &[u8; BYTES]) -> Self
     where
@@ -451,7 +448,7 @@ impl<F> Fp12<F> {
         // degree extensions" (2010), on the pairs of coefficients of w^k and w^(k + 3), elements
         // x + y s of Fp4 = Fp2[s] / (s^2 - (1 + i)) for s = w^3: each output is three times a part
         // of the square of such a pair, plus or minus twice an input coefficient. That takes nine
-        // extension squarings, or six squarings and six products accumulated as they form for
+        // extension squarings, or three squarings and six products accumulated as they form for
         // Field::SCHOOLBOOK.
         simd.execute(
             #[inline(always)]
@@ -548,7 +545,7 @@ impl<F> Fp12<F> {
 
     /// Loads the factors `(1 + i)^(j (p - 1) / 6)` for `j` from `1` to `5` in every lane.
     ///
-    /// Components have the base field's initial bounds.
+    /// Components have the bounds of [`Field::load`].
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn frobenius_coefficients<S: Simd>(simd: S) -> [Fp2<F>; 5]
     where

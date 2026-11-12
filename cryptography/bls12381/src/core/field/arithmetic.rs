@@ -1,11 +1,12 @@
 //! The [`Field`] trait: base field arithmetic on several elements at once, which the extension
 //! fields, curve formulas, and kernels are written over once for every representation.
 //!
-//! SIMD operation profiles choose the representation: [`Unsat49`], [`Unsat28`], or [`Rns`]. A
-//! formula forms products with [`Field::product`], adds them with [`Field::accumulate`] or
-//! [`Field::accumulate_product`], and reduces each sum once with [`Field::reduce`] or one of its
-//! variants. Positional representations reduce every product eagerly; [`Rns`] holds sums of
-//! products unreduced. A [`Signed`] sum defers a subtraction of products to its reduction.
+//! The kernels choose a representation for each SIMD backend: [`Unsat49`], [`Unsat28`], or
+//! [`Rns`]. A formula forms products with [`Field::product`], adds them with
+//! [`Field::accumulate`] or [`Field::accumulate_product`], and reduces each sum once with
+//! [`Field::reduce`] or one of its variants. Positional representations reduce every product
+//! eagerly; [`Rns`] holds sums of products unreduced. A [`Signed`] sum defers a subtraction of
+//! products to its reduction.
 //! Representations differ in when values need carrying, so a formula is correct for all of them
 //! only if it keeps every operand within the bounds below.
 //!
@@ -109,11 +110,11 @@
 //! negative sum, since the bias adds to the integer bound of the reduced value. Wide products
 //! always subtract with their fixed bias, which their reduction removes.
 //!
-//! The default [`Field::cross`] uses Karatsuba. Each input pair must sum to a factor with limb
-//! bound at most `2`. Its eager positive sum has integer bound `E(A0 + A1, B0 + B1)` and limb
-//! bound `1`, and its negative sum is the two known products, with their bounds added.
-//! [`Rns`] overrides it with two products and an accumulation, giving a positive wide integer
-//! bound `A0 * B1 + A1 * B0` with two terms and no negative sum.
+//! [`Field::cross`] requires each input pair to sum to a factor with limb bound at most `2`. For
+//! eager products, its positive sum has integer bound `E(A0 + A1, B0 + B1)` and limb bound `1`,
+//! and its negative sum is the two known products, with their bounds added. For [`Rns`], its
+//! positive sum has wide integer bound `A0 * B1 + A1 * B0` with two terms, and it has no negative
+//! sum.
 //!
 //! [`Unsat49`]: super::fp::unsat49::Unsat49
 //! [`Unsat28`]: super::fp::unsat28::Unsat28
@@ -266,7 +267,8 @@ pub trait Field<S: Simd>: Copy {
 
     /// Loads up to [`Self::LANES`] big-endian integers, filling the remaining lanes with `fill`.
     ///
-    /// Interprets each [`BYTES`]-byte integer modulo `p` and returns the initial value bounds.
+    /// Interprets each [`BYTES`]-byte integer modulo `p`. Returns integer bound `2` and
+    /// positional limb bound `1`.
     fn load(simd: S, elements: &[[u8; BYTES]], fill: &[u8; BYTES]) -> Self;
 
     /// Stores the canonical value of each lane, dropping lanes beyond `elements`.
@@ -275,15 +277,13 @@ pub trait Field<S: Simd>: Copy {
     fn store(self, simd: S, elements: &mut [[u8; BYTES]]);
 
     /// Runs an operation of base field, [`Fp2`], or [`Fp6`] size, such as a reduction or a
-    /// product.
-    ///
-    /// The default runs it as its own kernel, so that formulas call one copy of it. A
-    /// representation whose operations are small enough may run it inline instead.
+    /// product, either as its own kernel or inline, as the representation chooses.
     ///
     /// [`Fp2`]: super::fp2::Fp2
     /// [`Fp6`]: super::fp6::Fp6
     #[inline(always)]
     fn kernel<O: Operation<S>>(simd: S, operation: O) -> O::Output {
+        // A separate kernel lets every formula call one copy of the operation.
         simd.execute(operation)
     }
 
@@ -319,11 +319,11 @@ pub trait Field<S: Simd>: Copy {
     /// Returns `C * self` for a small positive constant `C`, without reducing.
     ///
     /// Integer and positional limb bounds multiply by `C`, as for `C` additions of `self`, and
-    /// every intermediate stays within them; the result must fit the value limits. The default
-    /// doubles and adds along the bits of `C`, costing no multiplication.
+    /// every intermediate stays within them; the result must fit the value limits.
     #[inline(always)]
     fn mul_small<const C: u64>(self, simd: S) -> Self {
         const { assert!(C > 0) };
+        // Doubles and adds along the bits of C, costing no multiplication.
         let mut result = self;
         let mut bit = 63 - C.leading_zeros();
         while bit > 0 {
@@ -367,10 +367,10 @@ pub trait Field<S: Simd>: Copy {
     /// its integer bound. Representations without positional limbs do not need carrying.
     fn ready<const U: u64>(self, simd: S) -> Self;
 
-    /// Forms a product. Both factors must be ready; eager representations reduce immediately.
+    /// Returns `self * rhs` as a sum of one product. Both factors must be ready.
     ///
     /// Each factor must satisfy the multiplier's limb limits and the value integer limit. The
-    /// result must fit the product accumulator limits and any subsequent reduction's budget.
+    /// result must fit the product accumulator limits and those of the reduction that consumes it.
     fn product(self, simd: S, rhs: Self) -> Self::Product;
 
     /// Returns `a + b`.
@@ -382,8 +382,8 @@ pub trait Field<S: Simd>: Copy {
     /// Returns `sum + a * b`, under the requirements of [`Self::product`] for the factors and of
     /// [`Self::accumulate`] for the sum.
     ///
-    /// Formulas accumulate every product they do not reuse this way: it may cost less than
-    /// forming the product and accumulating it, which the default does.
+    /// Formulas accumulate every product they do not reuse this way, since it may cost less than
+    /// [`Self::product`] followed by [`Self::accumulate`].
     #[inline(always)]
     fn accumulate_product(simd: S, sum: Self::Product, a: Self, b: Self) -> Self::Product {
         Self::accumulate(simd, sum, a.product(simd, b))
@@ -410,10 +410,11 @@ pub trait Field<S: Simd>: Copy {
         Self::accumulate(simd, sum, value.lift(simd))
     }
 
-    /// Reduces a sum of at most [`Self::PRODUCTS`] products and prepares its limbs for reuse.
+    /// Reduces a sum of at most [`Self::PRODUCTS`] products to a value with positional limb
+    /// bound `1`.
     ///
-    /// The input must satisfy the integer and machine-accumulator limits for reduction. The
-    /// output has the documented value integer bound and ready limbs; it need not be canonical.
+    /// The input must satisfy the integer and term bounds for reduction. The output has the
+    /// documented value integer bound and ready limbs; it need not be canonical.
     /// Reduction does not guarantee a smaller integer bound for an already eager product.
     fn reduce(simd: S, product: Self::Product) -> Self;
 
@@ -426,7 +427,7 @@ pub trait Field<S: Simd>: Copy {
     fn carry_product(simd: S, product: Self::Product) -> Self::Product;
 
     /// Reduces a sum of products to integer bound at most [`TIGHT`], whatever the sum's integer
-    /// bound, and prepares its limbs for reuse.
+    /// bound, and positional limb bound `1`.
     ///
     /// The input must satisfy the limits of [`Self::reduce`]. Costs at most one product more than
     /// [`Self::reduce`].
@@ -434,7 +435,7 @@ pub trait Field<S: Simd>: Copy {
 
     /// Returns `self * rhs`.
     ///
-    /// Both factors must be ready, and their product must fit the reduction budget. Returns the
+    /// Both factors must be ready, and their product must satisfy [`Self::reduce`]. Returns the
     /// documented multiplication integer bound and ready limbs.
     #[inline(always)]
     fn mul(self, simd: S, rhs: Self) -> Self {
@@ -447,9 +448,6 @@ pub trait Field<S: Simd>: Copy {
     /// Inputs must be ready and their pairwise sums must satisfy `ready::<2>`. The known products
     /// must accumulate within their accumulator. The [module documentation](self#signed-sums)
     /// gives the bounds of the result.
-    ///
-    /// The default uses Karatsuba: one product of the sums `a[0] + a[1]` and `b[0] + b[1]`, less
-    /// the two known products, which form the negative sum.
     #[inline(always)]
     fn cross(
         simd: S,
@@ -458,6 +456,8 @@ pub trait Field<S: Simd>: Copy {
         p0: Self::Product,
         p1: Self::Product,
     ) -> Signed<Self::Product> {
+        // Karatsuba: one product of the sums a[0] + a[1] and b[0] + b[1], less the two known
+        // products, which form the negative sum.
         let a = a[0].add(simd, a[1]).ready::<2>(simd);
         let b = b[0].add(simd, b[1]).ready::<2>(simd);
         Signed {
@@ -487,8 +487,6 @@ pub trait Field<S: Simd>: Copy {
     /// Returns `sum` plus the product of `a[0] + a[1] i` and `b[0] + b[1] i`, component by
     /// component, under the requirements of [`Self::quadratic`] and of [`Self::accumulate`] for
     /// each sum.
-    ///
-    /// The default forms the product and adds it as [`Signed::add`] does.
     #[inline(always)]
     fn accumulate_quadratic(
         simd: S,
@@ -496,6 +494,7 @@ pub trait Field<S: Simd>: Copy {
         a: [Self; 2],
         b: [Self; 2],
     ) -> [Signed<Self::Product>; 2] {
+        // Forms the product and adds it as Signed::add does.
         let [c0, c1] = Self::quadratic(simd, a, b);
         [
             sum[0].add::<S, Self>(simd, c0),
@@ -504,10 +503,8 @@ pub trait Field<S: Simd>: Copy {
     }
 
     /// Returns `sum` less the product of `a[0] + a[1] i` and `b[0] + b[1] i`, component by
-    /// component, under the requirements of [`Self::quadratic`] and of [`Self::accumulate`] for
-    /// each sum.
-    ///
-    /// The default forms the product and subtracts it as [`Signed::sub`] does, without a bias.
+    /// component and without a bias, under the requirements of [`Self::quadratic`] and of
+    /// [`Self::accumulate`] for each sum.
     #[inline(always)]
     fn subtract_quadratic(
         simd: S,
@@ -515,6 +512,7 @@ pub trait Field<S: Simd>: Copy {
         a: [Self; 2],
         b: [Self; 2],
     ) -> [Signed<Self::Product>; 2] {
+        // Forms the product and subtracts it as Signed::sub does.
         let [c0, c1] = Self::quadratic(simd, a, b);
         [
             sum[0].sub::<S, Self>(simd, c0),
@@ -542,14 +540,14 @@ pub trait Field<S: Simd>: Copy {
     ///
     /// Calls `sums` once for each index, in increasing order, so that it may form the sums as
     /// they are requested. A representation may form several sums before reducing them and
-    /// overlap their reductions, up to [`Self::INTERLEAVE`] sums; the default reduces each sum
-    /// right after forming it.
+    /// overlap their reductions, up to [`Self::INTERLEAVE`] sums.
     #[inline(always)]
     fn reduce_each<const N: usize>(
         simd: S,
         mut sums: impl FnMut(usize) -> Self::Product,
     ) -> [Self; N] {
         const { assert!(N > 0) };
+        // Reduces each sum right after forming it.
         let mut reduced = [Self::reduce(simd, sums(0)); N];
         unroll::<N>(
             #[inline(always)]
@@ -610,11 +608,10 @@ pub trait Field<S: Simd>: Copy {
     ///
     /// Requires a ready value with integer bound at most [`TIGHT`], so that every power stays
     /// within the limits of [`Self::mul`]. Returns the documented multiplication bounds.
-    ///
-    /// The default runs as its own kernel and exponentiates with fixed four-bit windows, which
-    /// costs about `380` squarings and `110` multiplications over every lane at once.
     #[inline(always)]
     fn invert(self, simd: S) -> Self {
+        // Runs as its own kernel and exponentiates with fixed four-bit windows: about 380
+        // squarings and 110 multiplications over every lane at once.
         simd.execute(
             #[inline(always)]
             move |simd: S| {

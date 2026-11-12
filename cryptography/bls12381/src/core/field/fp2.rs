@@ -105,7 +105,7 @@ pub struct Fp2<T> {
 impl<F> Fp2<F> {
     /// Loads up to one element per lane, filling the remaining lanes with `fill`.
     ///
-    /// Interprets each component modulo `p` and returns the base field's initial bounds.
+    /// Interprets each component modulo `p` and returns the bounds of [`Field::load`].
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn load<S: Simd>(simd: S, elements: &[[u8; BYTES]], fill: &[u8; BYTES]) -> Self
     where
@@ -247,7 +247,7 @@ impl<F> Fp2<F> {
         }
     }
 
-    /// Returns `self * (1 + i)`, the non-residue that defines the higher extensions, without
+    /// Returns `self * (1 + i)`, the nonresidue that defines the higher extensions, without
     /// reducing.
     ///
     /// The bias `K` must cover `c1` as for [`Field::sub`].
@@ -334,7 +334,7 @@ impl<F> Fp2<F> {
     where
         F: Field<S>,
     {
-        // Residues multiply-add into the sums without forming the product.
+        // Rns multiply-adds into the sums without forming the product.
         let [c0, c1] = F::accumulate_quadratic(simd, [sum.c0, sum.c1], [a.c0, a.c1], [b.c0, b.c1]);
         Fp2 { c0, c1 }
     }
@@ -362,9 +362,10 @@ impl<F> Fp2<F> {
 
     /// Forms the product `self * rhs` with four base field products.
     ///
-    /// Every factor must be ready, as for [`Field::product`]. Unlike [`Self::product`], no base
-    /// field product takes a sum of components, so large factors keep smaller positional bounds at
-    /// the cost of one more positional product; residues form the same products either way.
+    /// Every factor must be ready, as for [`Field::product`]. Unlike [`Self::product`], it
+    /// multiplies no sum of components, so its factors need not have limb bound `1` and its
+    /// positional bounds are smaller, at the cost of a fourth positional base field product.
+    /// [`Rns`](super::fp::rns::Rns) forms four products in either method.
     #[inline(always)]
     pub fn product_schoolbook<S: Simd>(self, simd: S, rhs: Self) -> Product<F, S>
     where
@@ -611,7 +612,7 @@ impl<F> Fp2<F> {
         ))
     }
 
-    /// Returns each component's positive sum less its negative sums, biased by `K` as
+    /// Returns each component's positive sum less its negative sum, biased by `K` as
     /// [`Signed::difference`] does, as one sum of products per component.
     ///
     /// Reducing the result with [`Field::reduce`] gives [`Self::reduce`] with the bias `K`.
@@ -629,8 +630,9 @@ impl<F> Fp2<F> {
     /// Returns `sum(0)`, ..., `sum(N - 1)`, each a difference from [`Self::difference`] reduced
     /// as [`Field::reduce`] does, for their `C = 2 * N` components.
     ///
-    /// Forms each sum once, in order. Formulas pass every independent value of a stage, each with
-    /// its own bias, so that the values reduce together.
+    /// Forms each sum once, in order. Formulas pass every value whose sum does not depend on
+    /// another's reduction, each difference with its own bias, so that the reductions can overlap
+    /// as [`Field::reduce_each`] allows.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn reduce_each<const N: usize, const C: usize, S: Simd>(
         simd: S,
@@ -1036,7 +1038,7 @@ pub mod fuzz {
         for _ in 0..ROUNDS {
             value = value.mul::<BIAS, S>(simd, b);
             expected = reference::mul(expected, rb);
-            // Components below BOUND + 1 and 2 * BOUND, carried to limb bound 1.
+            // Component integer bounds 2 * BOUND + 1 and 2 * BOUND, carried to limb bound 1.
             value = value
                 .mul_by_nonresidue::<{ BOUND + 1 }, S>(simd)
                 .carry(simd);
