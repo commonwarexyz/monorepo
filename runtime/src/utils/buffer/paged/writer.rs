@@ -160,6 +160,17 @@ pub struct Writer<B: Blob, Phase = Append> {
     buffer: Buffer,
 }
 
+/// The last valid page at the end of a blob.
+enum LastPage {
+    /// The blob holds no valid page.
+    Empty,
+    /// A full page's logical bytes.
+    Full(IoBuf),
+    /// A partial page's logical bytes, its active checksum, and whether its other checksum slot
+    /// is zeroed or covers a prefix of those bytes.
+    Partial(IoBuf, ActiveChecksum, bool),
+}
+
 impl<B: Blob> Recovery<B> {
     /// Open `blob` for initialization repair.
     ///
@@ -167,7 +178,8 @@ impl<B: Blob> Recovery<B> {
     /// `cache_ref` and appends stage in a write buffer of capacity `capacity`. Trims any invalid
     /// tail so the blob ends at a checksum-validated page. If that page is partial, also zeroes a
     /// checksum slot that an interrupted write or shrink left behind. Earlier pages are not
-    /// scanned.
+    /// scanned. The last valid page is kept in memory: a partial one in the write buffer, a full
+    /// one in `cache_ref`.
     ///
     /// Before appending, the tail-page contents must be durable: either pass a blob with no writes
     /// since it was opened or call [Self::sync]. Until then, recovery may read or truncate the
@@ -181,11 +193,13 @@ impl<B: Blob> Recovery<B> {
     ) -> Result<Self, Error> {
         let blob = Arc::new(blob);
         let page_size: u64 = cache_ref.page_size().widen();
-        let (partial_page_state, pages, invalid_data_found) =
+        let (last_page, pages) =
             Writer::<B>::read_last_valid_page(&blob, original_blob_size, page_size).await?;
+
+        // Every byte past the last valid page is invalid, so trim it from the blob.
+        let new_blob_size = pages * (page_size + CHECKSUM_SIZE);
+        let invalid_data_found = new_blob_size != original_blob_size;
         if invalid_data_found {
-            // Invalid data was detected, trim it from the blob.
-            let new_blob_size = pages * (page_size + CHECKSUM_SIZE);
             warn!(
                 original_blob_size,
                 new_blob_size, "truncating blob to remove invalid data"
@@ -205,7 +219,7 @@ impl<B: Blob> Recovery<B> {
         // The next rewrite of a partial tail page lands its checksum in the other slot. If a torn
         // write left part of a checksum there, a second torn write could complete it over bytes
         // beyond the valid length, so that slot is zeroed before the page can be rewritten.
-        if let Some((_, active, false)) = &partial_page_state {
+        if let LastPage::Partial(_, active, false) = &last_page {
             let slot_offset = pages * (page_size + CHECKSUM_SIZE) - CHECKSUM_SIZE
                 + Widen::<u64>::widen(active.slot.other().offset());
             warn!(
@@ -222,12 +236,19 @@ impl<B: Blob> Recovery<B> {
                 .await?;
         }
 
-        // Retain a partial page in the tip buffer; complete pages remain backed by the blob.
-        let (current_page, partial_page_state, partial_data) = match partial_page_state {
-            Some((partial_page, crc_record, _)) => {
+        // Retain a partial page in the tip buffer; complete pages remain backed by the blob, and the
+        // last one is cached because reads after opening tend to start at the tail.
+        let id = cache_ref.next_id();
+        let (current_page, partial_page_state, partial_data) = match last_page {
+            LastPage::Partial(partial_page, crc_record, _) => {
                 (pages - 1, Some(crc_record), Some(partial_page))
             }
-            None => (pages, None, None),
+            LastPage::Full(page) => {
+                let remaining = cache_ref.cache(id, page.as_ref(), (pages - 1) * page_size);
+                assert_eq!(remaining, 0, "a full page fills one cache slot");
+                (pages, None, None)
+            }
+            LastPage::Empty => (pages, None, None),
         };
 
         let buffer = Buffer::from(
@@ -244,7 +265,7 @@ impl<B: Blob> Recovery<B> {
             partial_page_state,
             durable_page_state: partial_page_state,
             sync_state,
-            id: cache_ref.next_id(),
+            id,
             cache_ref,
             buffer,
         })
@@ -476,42 +497,38 @@ impl<B: Blob> Writer<B> {
     ///
     /// # Returns
     ///
-    /// A tuple of `(partial_page, page_count, invalid_data_found)`:
+    /// A tuple of `(last_page, page_count)`:
     ///
-    /// - `partial_page`: If the last valid page is partial (contains fewer than `page_size` logical
-    ///   bytes), returns `Some((data, checksum, inert))` containing the logical data, its active
-    ///   checksum, and whether the page's other checksum slot is zeroed or covers a prefix of that
-    ///   data. Returns `None` if the last valid page is full or if no valid pages exist.
+    /// - `last_page`: The last valid page's logical data, or [LastPage::Empty] if no valid pages
+    ///   exist. A partial page (one with fewer than `page_size` logical bytes) also carries its
+    ///   active checksum and whether its other checksum slot is zeroed or covers a prefix of that
+    ///   data.
     ///
     /// - `page_count`: The number of pages in the blob up to and including the last valid page
     ///   found (whether or not it's partial). Note that it's possible earlier pages may be invalid
-    ///   since this function stops scanning when it finds one valid page.
-    ///
-    /// - `invalid_data_found`: `true` if there are any bytes in the blob that follow the last valid
-    ///   page. Typically the blob should be resized to eliminate them since their integrity cannot
-    ///   be guaranteed.
+    ///   since this function stops scanning when it finds one valid page. Any bytes past these
+    ///   pages are invalid, and the blob should typically be resized to eliminate them since their
+    ///   integrity cannot be guaranteed.
     async fn read_last_valid_page(
         blob: &B,
         blob_size: u64,
         page_size: u64,
-    ) -> Result<(Option<(IoBuf, ActiveChecksum, bool)>, u64, bool), Error> {
+    ) -> Result<(LastPage, u64), Error> {
         let physical_page_size = page_size + CHECKSUM_SIZE;
-        let partial_bytes = blob_size % physical_page_size;
-        let mut last_page_end = blob_size - partial_bytes;
 
-        // If the last physical page in the blob is truncated, it can't have a valid CRC record and
-        // must be invalid.
-        let mut invalid_data_found = partial_bytes != 0;
+        // A truncated last physical page can't have a valid CRC record, so the scan starts at the
+        // last whole page.
+        let mut last_page_end = blob_size - blob_size % physical_page_size;
 
         while last_page_end != 0 {
             // Read the last page and parse its CRC record.
-            // A valid full page remains disk-authoritative and may be read again after startup.
+            // Recovery keeps a valid page in memory, so it need not remain in the OS page cache.
             let page_start = last_page_end - physical_page_size;
             let buf = blob
                 .read_at(
                     page_start,
                     physical_page_size as usize,
-                    ReadOptions::default(),
+                    ReadOptions::DONT_CACHE,
                 )
                 .await?
                 .coalesce()
@@ -521,29 +538,25 @@ impl<B: Blob> Writer<B> {
                 Some(checksum) => {
                     // Found a valid page.
                     let len = checksum.len as u64;
-                    if len != page_size {
+                    let logical_bytes = buf.slice(..len as usize);
+                    let last_page = if len == page_size {
+                        LastPage::Full(logical_bytes)
+                    } else {
                         // The page is partial (logical data doesn't fill the page).
                         let inert = Checksum::other_slot_is_inert(buf.as_ref(), &checksum);
-                        let logical_bytes = buf.slice(..len as usize);
-                        return Ok((
-                            Some((logical_bytes, checksum, inert)),
-                            last_page_end / physical_page_size,
-                            invalid_data_found,
-                        ));
-                    }
-                    // The page is full.
-                    return Ok((None, last_page_end / physical_page_size, invalid_data_found));
+                        LastPage::Partial(logical_bytes, checksum, inert)
+                    };
+                    return Ok((last_page, last_page_end / physical_page_size));
                 }
                 None => {
                     // The page is invalid.
                     last_page_end = page_start;
-                    invalid_data_found = true;
                 }
             }
         }
 
         // No valid page exists in the blob.
-        Ok((None, 0, invalid_data_found))
+        Ok((LastPage::Empty, 0))
     }
 
     /// Capture an immutable [`Sealed`] view of the logical bytes.
@@ -1769,7 +1782,8 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Reopening also validates the disk-authoritative tail with the default options.
+            // Reopening validates the tail without the OS page cache, since recovery keeps the last
+            // valid page in memory.
             recordings.clear();
             let _recovered = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
@@ -1779,8 +1793,87 @@ mod tests {
             assert!(
                 reads
                     .iter()
-                    .all(|options| *options == ReadOptions::default())
+                    .all(|options| *options == ReadOptions::DONT_CACHE)
             );
+        });
+    }
+
+    /// Opening a blob that ends in a full page caches that page, so a read of the tail right after
+    /// opening needs no I/O. Earlier pages are not read. When recovery trims a torn last page, the
+    /// full page it recovers to is the one cached.
+    #[test_traced("DEBUG")]
+    fn test_open_caches_full_last_page() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (context, recordings) = RecordingContext::new(context);
+            let (blob, blob_size) = context
+                .open("test_partition", b"open_caches_last_page")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let page = PAGE_SIZE.get() as usize;
+            let data: Vec<u8> = (0u8..=255).cycle().take(page * 3).collect();
+            let (writer, _) = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap()
+                .append(&data)
+                .await
+                .unwrap();
+            writer.sync().await.unwrap();
+
+            // Reopen with a cold cache.
+            let (blob, blob_size) = context
+                .open("test_partition", b"open_caches_last_page")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            recordings.clear();
+            let writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            let reads = recordings.snapshot().reads;
+            assert!(!reads.is_empty());
+            assert!(
+                reads
+                    .iter()
+                    .all(|options| *options == ReadOptions::DONT_CACHE)
+            );
+
+            let mut probe = vec![0u8; page];
+            assert!(writer.try_read_sync_into(&mut probe, 2 * page as u64));
+            assert_eq!(probe, data[2 * page..]);
+            assert!(!writer.try_read_sync_into(&mut probe, page as u64));
+            drop(writer);
+
+            // Tear the last page.
+            let (blob, blob_size) = context
+                .open("test_partition", b"open_caches_last_page")
+                .await
+                .unwrap();
+            let offset = 2 * (PAGE_SIZE.get() as u64 + CHECKSUM_SIZE) + 7;
+            let byte = blob
+                .read_at(offset, 1, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
+            blob.write_at(
+                offset,
+                vec![byte.as_ref()[0] ^ 0xFF],
+                WriteOptions::default(),
+            )
+            .await
+            .unwrap();
+            blob.sync().await.unwrap();
+
+            // Recovery trims the torn page and caches the full page before it instead.
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(writer.size(), 2 * page as u64);
+            assert!(writer.try_read_sync_into(&mut probe, page as u64));
+            assert_eq!(probe, data[page..2 * page]);
+            assert!(!writer.try_read_sync_into(&mut probe, 0));
         });
     }
 

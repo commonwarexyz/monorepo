@@ -96,7 +96,7 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
                 write_buffer: cfg.write_buffer,
                 replay_buffer: cfg.replay_buffer,
             },
-            ReadOptions::default(),
+            ReadOptions::DONT_CACHE,
         )
         .await?;
 

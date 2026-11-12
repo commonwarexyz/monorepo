@@ -181,7 +181,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
                     physical_size,
                     page_size,
                     Self::CHUNK_SIZE,
-                    ReadOptions::default(),
+                    ReadOptions::DONT_CACHE,
                 )
                 .await
                 .map_err(|err| Self::boundary_error(candidate, physical_size, err))?;
@@ -216,7 +216,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
             page_size,
             size - Self::CHUNK_SIZE_U64,
             Self::CHUNK_SIZE,
-            ReadOptions::default(),
+            ReadOptions::DONT_CACHE,
         )
         .await
         .map_err(|err| Self::boundary_error(section, size, err))?;
@@ -552,7 +552,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
     /// Consumes the opened journal into a [Recovery] that replays every section with no floor.
     async fn recover(self, buffer: NonZeroUsize) -> Result<Recovery<E, A>, Error> {
-        let mut recovery = Recovery::new(buffer, ReadOptions::default());
+        let mut recovery = Recovery::new(buffer, ReadOptions::DONT_CACHE);
         recovery.begin(self).await?;
         Ok(recovery)
     }
@@ -568,8 +568,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// section is replayed from position zero with a buffer of [Config::replay_buffer] bytes,
     /// allocated lazily as the recovery advances. Every backing blob read performed by the replay
     /// uses `read_options`, including reads after advancing to another section. Opening the
-    /// writers on the first [Recovery::next] reads each section's last page with the default
-    /// options.
+    /// writers on the first [Recovery::next] reads each section's last page with
+    /// [ReadOptions::DONT_CACHE] regardless of `read_options`.
     pub async fn preflight_floors(
         context: E,
         cfg: Config,
@@ -592,7 +592,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             return Ok(end);
         };
         let recoverable = blob
-            .recoverable_prefix_len_at_most(0, end, buffer, ReadOptions::default())
+            .recoverable_prefix_len_at_most(0, end, buffer, ReadOptions::DONT_CACHE)
             .await?;
         Ok(recoverable - recoverable % Self::CHUNK_SIZE as u64)
     }
@@ -1691,7 +1691,7 @@ mod tests {
                 .expect("failed to replay");
             recordings.clear();
 
-            // The first call opens both writers, each reading its tail page once. The first lazy
+            // The first call opens both writers, each probing its tail page once. The first lazy
             // refill follows and must carry the caller's policy.
             let (section, position, item) = replay
                 .next()
@@ -1701,7 +1701,7 @@ mod tests {
             assert_eq!((section, position, item), (1, 0, test_digest(1)));
             let reads = recordings.snapshot().reads;
             let (opened, replayed) = reads.split_at(2);
-            assert_eq!(opened, [ReadOptions::default(); 2]);
+            assert_eq!(opened, [ReadOptions::DONT_CACHE; 2]);
             assert!(!replayed.is_empty());
             assert!(
                 replayed
@@ -1754,9 +1754,10 @@ mod tests {
                     .unwrap();
             let (journal, items) = drain(replay).await.unwrap();
             assert_eq!(items, vec![(1, 0, [0; 16]), (1, 1, [1; 16])]);
-            for position in 0..2 {
-                assert!(journal.try_get_sync(1, position).is_none());
-            }
+
+            // Opening caches the last full page. The replay adds nothing to the page cache.
+            assert!(journal.try_get_sync(1, 0).is_none());
+            assert_eq!(journal.try_get_sync(1, 1), Some([1; 16]));
 
             recordings.clear();
             assert_eq!(journal.get(1, 0).await.unwrap(), [0; 16]);
