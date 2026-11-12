@@ -35,6 +35,8 @@ jobs:
             test_flags: ""
           - package: commonware-cryptography-curve25519
             test_flags: ""
+          - package: commonware-cryptography-bls12381
+            test_flags: ""
           - package: commonware-storage
             test_flags: "--features test-traits"
             partition: "1/4"
