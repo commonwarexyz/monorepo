@@ -515,8 +515,8 @@ where
     ) -> oneshot::Receiver<bool> {
         // Certify may be reached without an earlier `verify`, so the shard
         // engine may not know the leader yet. A notarized commitment is still
-        // enough to start reconstruction from sender-indexed gossip shards
-        // already buffered for the commitment.
+        // enough to start reconstruction from the gossip shards and the local
+        // assigned shard already buffered for the commitment.
         self.shards.notarized(payload, round);
 
         // No in-progress task means we never verified this proposal locally.

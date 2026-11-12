@@ -121,7 +121,7 @@ mod tests {
         sha256::Sha256,
     };
     use commonware_macros::{select, test_group, test_traced};
-    use commonware_p2p::{Recipients, Sender as _};
+    use commonware_p2p::{Receiver as _, Recipients, Sender as _};
     use commonware_parallel::Sequential;
     use commonware_resolver::{Delivery, Fetch, Outcome, Resolution, Resolver, TargetedResolver};
     use commonware_runtime::{
@@ -3453,6 +3453,138 @@ mod tests {
                 _ = context.sleep(Duration::from_secs(5)) => {
                     panic!("certify did not reconstruct from buffered gossip shards");
                 },
+            }
+        })
+    }
+
+    /// A validator can hold its assigned shard from the leader and too few gossip shards when a
+    /// notarization arrives before the proposal could be verified. Certification names no
+    /// leader, yet the assigned shard counts toward reconstruction and is gossiped.
+    #[test_traced("WARN")]
+    fn test_certify_reconstructs_with_buffered_assigned_shard() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+                1024 * 1024,
+            )
+            .await;
+
+            let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+
+            let setup = CodingHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let shards = setup.extra;
+
+            // Register the peers' shard channels and link the network. No peer runs a marshal
+            // actor, so round-bound block fetches go unanswered.
+            let mut peer_senders = Vec::new();
+            let mut peer_receivers = Vec::new();
+            for peer in participants.iter().skip(1) {
+                let (sender, receiver) = oracle
+                    .control(peer.clone())
+                    .register(2, TEST_QUOTA)
+                    .await
+                    .unwrap();
+                peer_senders.push(sender);
+                peer_receivers.push(receiver);
+            }
+            setup_network_links(&mut oracle, &participants, LINK).await;
+
+            let genesis_ctx = CodingCtx {
+                round: Round::zero(),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
+
+            let mock_app: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new();
+            let cfg = MarshaledConfig {
+                application: mock_app,
+                marshal: marshal.clone(),
+                shards: shards.clone(),
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+
+            // The parent is available locally.
+            let parent_round = Round::new(Epoch::zero(), View::new(1));
+            let parent_ctx = CodingCtx {
+                round: parent_round,
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
+            let coded_parent: TestCodedBlock = encode_block(parent.clone(), coding_config);
+            let parent_commitment = coded_parent.commitment();
+            assert!(marshal.verified(parent_round, coded_parent).await);
+
+            let child_round = Round::new(Epoch::zero(), View::new(2));
+            let child_ctx = CodingCtx {
+                round: child_round,
+                leader: participants[1].clone(),
+                parent: (View::new(1), parent_commitment),
+            };
+            let child = make_coding_block(child_ctx, parent.digest(), Height::new(2), 200);
+            let coded_child: TestCodedBlock = encode_block(child, coding_config);
+            let child_commitment = coded_child.commitment();
+
+            // The leader delivers this validator's assigned shard, and one peer gossips its own.
+            // Two shards decode the block.
+            let assigned = coded_child.shard(0).expect("shard must exist").encode();
+            peer_senders[0].send(Recipients::One(me.clone()), assigned.clone(), true);
+            let gossip = coded_child.shard(2).expect("shard must exist").encode();
+            peer_senders[1].send(Recipients::One(me.clone()), gossip, true);
+            context.sleep(Duration::from_millis(250)).await;
+
+            // Certification is requested without a verification request.
+            let certify_rx = marshaled.certify(child_round, child_commitment).await;
+            select! {
+                result = certify_rx => {
+                    assert!(
+                        result.expect("certify must resolve"),
+                        "certify must reconstruct the candidate with the buffered assigned shard"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("certify must reconstruct with the buffered assigned shard");
+                },
+            }
+
+            // The assigned shard reaches the other participants as gossip exactly once.
+            // Certification names the leader after it holds the block, and that must not relay
+            // the shard again.
+            select! {
+                message = peer_receivers[2].recv() => {
+                    let (from, shard) = message.expect("gossip must arrive");
+                    assert_eq!(from, me);
+                    assert_eq!(shard.as_ref(), assigned.as_ref());
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("the assigned shard must be gossiped");
+                },
+            }
+            select! {
+                _ = peer_receivers[2].recv() => {
+                    panic!("the assigned shard must be gossiped once");
+                },
+                _ = context.sleep(Duration::from_millis(500)) => {},
             }
         })
     }
