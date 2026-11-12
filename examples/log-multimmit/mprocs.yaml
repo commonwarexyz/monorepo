@@ -1,0 +1,21 @@
+# Run the whole committee at once with mprocs (https://github.com/pvolok/mprocs).
+#
+#   cargo build --release
+#   mprocs
+#
+# Each pane is one participant. Participant 0 is the bootstrapper, so start it first if you launch
+# panes by hand. Storage lives under /tmp/commonware-log-multimmit and survives restarts, which is
+# the point: stop a pane, start it again, and it resumes where it left off.
+procs:
+  node0:
+    shell: "cargo run --release -- --me 0@3000 --participants 0,1,2,3,4,5 --producers 0,1 --storage-dir /tmp/commonware-log-multimmit/0"
+  node1:
+    shell: "cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 1@3001 --participants 0,1,2,3,4,5 --producers 0,1 --storage-dir /tmp/commonware-log-multimmit/1"
+  node2:
+    shell: "cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 2@3002 --participants 0,1,2,3,4,5 --producers 0,1 --storage-dir /tmp/commonware-log-multimmit/2"
+  node3:
+    shell: "cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 3@3003 --participants 0,1,2,3,4,5 --producers 0,1 --storage-dir /tmp/commonware-log-multimmit/3"
+  node4:
+    shell: "cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 4@3004 --participants 0,1,2,3,4,5 --producers 0,1 --storage-dir /tmp/commonware-log-multimmit/4"
+  node5:
+    shell: "cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 5@3005 --participants 0,1,2,3,4,5 --producers 0,1 --storage-dir /tmp/commonware-log-multimmit/5"
