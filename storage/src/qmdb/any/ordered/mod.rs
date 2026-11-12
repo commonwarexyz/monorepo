@@ -317,7 +317,7 @@ impl<K: Key, S: Send> Neighbors<K, S> {
 
     /// Sort the successor candidates for lookups, dropping the `removed` keys.
     pub(crate) fn finish_next(&mut self, strategy: &impl Strategy, removed: impl Fn(&K) -> bool) {
-        strategy.sort_by(&mut self.next, |a, b| a.cmp(b));
+        strategy.sort_unstable_by(&mut self.next, |a, b| a.cmp(b));
         self.next.dedup();
         self.next.retain(|key| !removed(key));
     }

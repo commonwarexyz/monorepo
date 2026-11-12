@@ -49,6 +49,14 @@
 //!   (within budget)
 //! ```
 //!
+//! # Sorting
+//!
+//! Sorts with unspecified equal-element order compare stable and unstable algorithms in serial
+//! and parallel execution. Each fixed placement has its own challenger schedule, and each
+//! algorithm's parallel busy time bounds its serial sampling. Serial-only callers compare both
+//! serial algorithms without consulting that budget. A sort's captured plan identifies the path
+//! its completion measures, even when another call has since changed the preferred path.
+//!
 //! # Spawned jobs
 //!
 //! A spawned job compares its estimated wall time against the overhead of offloading it. Callers
@@ -63,8 +71,8 @@
 //! # Sampling
 //!
 //! Fallible operations record samples only on success. An early error's short wall time would drag
-//! an estimate down and could unlock a serial sample of genuine work. Both paths produce identical
-//! results, so a misjudged call costs only throughput.
+//! an estimate down and could unlock a serial sample of genuine work. Every path satisfies the
+//! operation's contract, so a misjudged call costs only throughput.
 //!
 //! Updates are serialized per entry, but no lock is held while work runs. Concurrent calls may
 //! therefore decide from an estimate that another in-flight call later updates, and samples apply
@@ -77,6 +85,11 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+
+mod sort;
+pub(super) use sort::SortAlgorithm;
+#[cfg(test)]
+pub(super) use sort::SortPlan;
 
 /// Calls between samples of the preferred path, so its estimate does not go stale.
 const PREFERRED_SAMPLE_INTERVAL: u32 = 10;
@@ -214,6 +227,7 @@ impl SpawnPlan {
 pub(super) struct Policy {
     run_entries: Arc<RunEntries>,
     spawn_entries: Arc<SpawnEntries>,
+    sorts: sort::SortPolicy,
 }
 
 impl Policy {

@@ -2692,7 +2692,8 @@ where
             };
             prev_locations.extend(iter.copied());
         }
-        prev_locations.sort();
+        db.strategy()
+            .sort_unstable_by(&mut prev_locations, |a, b| a.cmp(b));
         prev_locations.dedup();
         if !staged_updates.is_empty() {
             let mut staged_at = 0;
@@ -2733,8 +2734,10 @@ where
                 deleted.push((key, loc));
             }
         }
-        db.strategy().sort_by(&mut deleted, |a, b| a.0.cmp(&b.0));
-        db.strategy().sort_by(&mut updated, |a, b| a.0.cmp(&b.0));
+        db.strategy()
+            .sort_unstable_by(&mut deleted, |a, b| a.0.cmp(&b.0));
+        db.strategy()
+            .sort_unstable_by(&mut updated, |a, b| a.0.cmp(&b.0));
 
         // Add the ancestors' active updates of keys this batch leaves alone: they may precede or
         // follow this batch's mutations but are invisible to the base-DB-only
@@ -2929,7 +2932,8 @@ where
                 neighbors.next.push(decided.cached.clone());
             }
         }
-        evicted.sort();
+        db.strategy()
+            .sort_unstable_by(&mut evicted, |a, b| a.cmp(b));
         let is_evicted = |key: &K| evicted.binary_search(key).is_ok();
         neighbors.finish_next(db.strategy(), is_evicted);
         if neighbors.next.is_empty() {
@@ -3016,7 +3020,8 @@ where
                 value: Some(value),
             });
         }
-        decided[walked_decisions..].sort_by(|a, b| a.key.cmp(&b.key));
+        db.strategy()
+            .sort_unstable_by(&mut decided[walked_decisions..], |a, b| a.key.cmp(&b.key));
         Ok(decided)
     }
 }
