@@ -902,7 +902,10 @@ impl<E: Storage + Metrics, V: CodecShared> Recovery<E, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::frame::encode_frame_into;
+    use crate::journal::{
+        frame::encode_frame_into,
+        segmented::manager::tests::{BoundedOpen, FaultedContext, check_interrupted_bounded_open},
+    };
     use commonware_codec::{EncodeSize, Write as _, varint::UInt};
     use commonware_macros::test_traced;
     use commonware_runtime::{
@@ -915,7 +918,7 @@ mod tests {
         },
     };
     use commonware_utils::{NZU16, NZUsize, probability};
-    use std::num::NonZeroU16;
+    use std::{num::NonZeroU16, ops::Range};
 
     impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
         /// Append raw bytes, which need not form a valid frame, to `section`.
@@ -980,6 +983,51 @@ mod tests {
             item?;
         }
         recovery.finish()
+    }
+
+    impl BoundedOpen for Journal<FaultedContext, u64> {
+        // A one-byte length prefix precedes the eight-byte item.
+        const ITEM_SIZE: u64 = 9;
+
+        async fn open(
+            context: FaultedContext,
+            page_cache: CacheRef,
+            bound: Option<(u64, u64)>,
+        ) -> Result<Self, Error> {
+            let cfg = Config {
+                partition: "bounded-open".into(),
+                compression: None,
+                codec_config: (),
+                page_cache,
+                write_buffer: NZUsize!(64),
+                replay_buffer: NZUsize!(64),
+            };
+            match bound {
+                Some((section, end)) => Self::init_at_most(context, cfg, section, end).await,
+                None => init_journal(context, cfg).await,
+            }
+        }
+
+        async fn extend(mut self, section: u64, items: Range<u64>) -> Self {
+            for item in items {
+                let offset;
+                (self, offset, _) = self.append(section, &item).await.unwrap();
+                assert_eq!(offset % Self::ITEM_SIZE, 0);
+            }
+            self.sync_all().await.unwrap()
+        }
+
+        async fn items(&self, section: u64) -> Vec<u64> {
+            let mut items = Vec::new();
+            for offset in (0..self.size(section).unwrap()).step_by(Self::ITEM_SIZE as usize) {
+                items.push(self.get(section, offset).await.unwrap());
+            }
+            items
+        }
+
+        fn last_section(&self) -> Option<u64> {
+            self.newest_section()
+        }
     }
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
@@ -1218,6 +1266,11 @@ mod tests {
                 journal.destroy().await.unwrap();
             }
         });
+    }
+
+    #[test]
+    fn test_bounded_initialization_retries_after_storage_faults() {
+        check_interrupted_bounded_open::<Journal<FaultedContext, u64>>();
     }
 
     #[test_traced]

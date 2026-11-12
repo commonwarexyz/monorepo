@@ -1115,7 +1115,12 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Recovery<E, A> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::codec::View;
+    use crate::{
+        journal::segmented::manager::tests::{
+            BoundedOpen, FaultedContext, check_interrupted_bounded_open,
+        },
+        utils::codec::View,
+    };
     use commonware_codec::FixedSize;
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
@@ -1131,7 +1136,7 @@ mod tests {
     use commonware_utils::{NZU16, NZUsize, Widen};
     use core::num::NonZeroU16;
     use std::{
-        ops::RangeInclusive,
+        ops::{Range, RangeInclusive},
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
@@ -1208,6 +1213,46 @@ mod tests {
                 .truncate_pending_section(section, end)
                 .await?;
             Ok(drain(journal.recover(replay_buffer).await?).await?.0)
+        }
+    }
+
+    impl BoundedOpen for Journal<FaultedContext, u64> {
+        const ITEM_SIZE: u64 = Self::CHUNK_SIZE as u64;
+
+        async fn open(
+            context: FaultedContext,
+            page_cache: CacheRef,
+            bound: Option<(u64, u64)>,
+        ) -> Result<Self, Error> {
+            let cfg = Config {
+                partition: "bounded-open".into(),
+                page_cache,
+                write_buffer: NZUsize!(64),
+                replay_buffer: NZUsize!(64),
+            };
+            match bound {
+                Some((section, end)) => Self::init_at_most(context, cfg, section, end).await,
+                None => init_journal(context, cfg).await,
+            }
+        }
+
+        async fn extend(mut self, section: u64, items: Range<u64>) -> Self {
+            for item in items {
+                (self, _) = self.append(section, &item).await.unwrap();
+            }
+            self.sync_all().await.unwrap()
+        }
+
+        async fn items(&self, section: u64) -> Vec<u64> {
+            let mut items = Vec::new();
+            for position in 0..self.section_len(section).unwrap() {
+                items.push(self.get(section, position).await.unwrap());
+            }
+            items
+        }
+
+        fn last_section(&self) -> Option<u64> {
+            self.newest_section()
         }
     }
 
@@ -1449,6 +1494,11 @@ mod tests {
                 journal.destroy().await.unwrap();
             }
         });
+    }
+
+    #[test]
+    fn test_bounded_initialization_retries_after_storage_faults() {
+        check_interrupted_bounded_open::<Journal<FaultedContext, u64>>();
     }
 
     #[test_traced]

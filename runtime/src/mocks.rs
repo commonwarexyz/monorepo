@@ -1417,12 +1417,196 @@ impl<B: Blob> Blob for SyncFaultBlob<B> {
     }
 }
 
+/// Controls a [MutationFaultContext]: after a set number of mutating operations succeed, every
+/// later one fails with an injected error.
+///
+/// A mutating operation is a write, resize, sync, started sync, or removal.
+#[derive(Clone, Default)]
+pub struct MutationFaults {
+    state: Arc<Mutex<MutationFaultState>>,
+}
+
+#[derive(Default)]
+struct MutationFaultState {
+    allowed: Option<u64>,
+    failed: bool,
+}
+
+impl MutationFaults {
+    /// Let `operations` more mutating operations succeed, then fail every later one.
+    pub fn allow(&self, operations: u64) {
+        *self.state.lock() = MutationFaultState {
+            allowed: Some(operations),
+            failed: false,
+        };
+    }
+
+    /// Stop failing operations.
+    pub fn disarm(&self) {
+        self.state.lock().allowed = None;
+    }
+
+    /// Whether an operation has failed since the last [Self::allow].
+    pub fn failed(&self) -> bool {
+        self.state.lock().failed
+    }
+
+    fn check(&self) -> Result<(), Error> {
+        let mut state = self.state.lock();
+        match &mut state.allowed {
+            None => Ok(()),
+            Some(0) => {
+                state.failed = true;
+                Err(Error::Io(
+                    std::io::Error::other("injected mutation failure").into(),
+                ))
+            }
+            Some(allowed) => {
+                *allowed -= 1;
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Context wrapper whose mutating storage operations fail once the shared [MutationFaults] has
+/// let its allowed number succeed. A failed operation never reaches the wrapped storage.
+#[derive(Clone)]
+pub struct MutationFaultContext<E> {
+    pub inner: E,
+    pub faults: MutationFaults,
+}
+
+forward_context!(MutationFaultContext, faults);
+
+impl<E: crate::Storage> crate::Storage for MutationFaultContext<E> {
+    type Blob = MutationFaultBlob<E::Blob>;
+
+    async fn open_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: std::ops::RangeInclusive<BlobVersion>,
+    ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
+        let (inner, len, version) = self.inner.open_versioned(partition, name, versions).await?;
+        Ok((
+            MutationFaultBlob {
+                inner,
+                faults: self.faults.clone(),
+            },
+            len,
+            version,
+        ))
+    }
+
+    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+        self.faults.check()?;
+        self.inner.remove(partition, name).await
+    }
+
+    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+        self.inner.scan(partition).await
+    }
+}
+
+/// Blob wrapper whose mutating operations fail once its [MutationFaults] allows no more.
+pub struct MutationFaultBlob<B> {
+    inner: B,
+    faults: MutationFaults,
+}
+
+impl<B: Blob> Blob for MutationFaultBlob<B> {
+    async fn read_at_buf(
+        &self,
+        offset: u64,
+        len: usize,
+        bufs: impl Into<IoBufsMut> + Send,
+        options: ReadOptions,
+    ) -> Result<IoBufsMut, Error> {
+        self.inner.read_at_buf(offset, len, bufs, options).await
+    }
+
+    async fn read_at(
+        &self,
+        offset: u64,
+        len: usize,
+        options: ReadOptions,
+    ) -> Result<IoBufsMut, Error> {
+        self.inner.read_at(offset, len, options).await
+    }
+
+    async fn write_at(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
+    ) -> Result<(), Error> {
+        self.faults.check()?;
+        self.inner.write_at(offset, bufs, options).await
+    }
+
+    async fn resize(&self, len: u64) -> Result<(), Error> {
+        self.faults.check()?;
+        self.inner.resize(len).await
+    }
+
+    async fn sync(&self) -> Result<(), Error> {
+        self.faults.check()?;
+        self.inner.sync().await
+    }
+
+    async fn start_sync(&self) -> Handle<()> {
+        if let Err(err) = self.faults.check() {
+            return Handle::ready(Err(err));
+        }
+        self.inner.start_sync().await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{Clock, IoBufMut, Runner, Sink, Spawner, Storage as _, Stream, deterministic};
     use commonware_macros::select;
     use std::{thread::sleep, time::Duration};
+
+    #[test]
+    fn mutation_faults_fail_after_allowed_operations() {
+        deterministic::Runner::default().start(|context| async move {
+            let faults = MutationFaults::default();
+            let context = MutationFaultContext {
+                inner: context,
+                faults: faults.clone(),
+            };
+            let (blob, _) = context.open("mutation", b"blob").await.unwrap();
+
+            // Two mutations succeed, then every later one fails, whatever its kind.
+            faults.allow(2);
+            blob.write_at(0, b"data", WriteOptions::default())
+                .await
+                .unwrap();
+            blob.sync().await.unwrap();
+            assert!(!faults.failed());
+            assert!(blob.resize(2).await.is_err());
+            assert!(faults.failed());
+            assert!(
+                blob.write_at(0, b"more", WriteOptions::default())
+                    .await
+                    .is_err()
+            );
+            assert!(blob.sync().await.is_err());
+            assert!(blob.start_sync().await.await.is_err());
+            assert!(context.remove("mutation", Some(b"blob")).await.is_err());
+
+            // Reads still succeed, and no failed mutation reached storage.
+            let read = blob.read_at(0, 4, ReadOptions::default()).await.unwrap();
+            assert_eq!(read.coalesce(), b"data");
+
+            // Disarming lets mutations through again.
+            faults.disarm();
+            blob.resize(2).await.unwrap();
+        });
+    }
 
     #[test]
     fn recording_context_preserves_data_and_records_options() {
