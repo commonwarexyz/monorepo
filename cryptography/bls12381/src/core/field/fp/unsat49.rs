@@ -37,7 +37,7 @@ use commonware_simd::Simd;
 use core::hint::black_box;
 
 /// Number of limbs in a field element.
-pub const LIMBS: usize = 8;
+const LIMBS: usize = 8;
 
 /// Bits per carried limb.
 const LIMB_BITS: u32 = 49;
@@ -48,14 +48,14 @@ const MASK: u64 = (1 << LIMB_BITS) - 1;
 /// Largest integer bound of any value, in units of `p`.
 ///
 /// Because `p < 2^381`, `LIMIT * p < 2^392` and `p / 2^392 < 1 / LIMIT`.
-pub const LIMIT: u64 = {
+const LIMIT: u64 = {
     assert!(MODULUS[WORDS - 1] < 1 << 61);
     1 << (8 * LIMB_BITS - 381)
 };
 
 /// Largest limb bound of a multiplicand, in units of `2^49`: the 52-bit multipliers accept limbs
 /// below `2^52`.
-pub const SLACK: u64 = 1 << (52 - LIMB_BITS);
+const SLACK: u64 = 1 << (52 - LIMB_BITS);
 
 /// Largest limb bound of any value, in units of `2^49`, so that carries fit the lanes.
 const LIMB_LIMIT: u64 = (1 << (64 - LIMB_BITS)) - 1;

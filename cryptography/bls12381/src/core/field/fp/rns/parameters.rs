@@ -8,13 +8,13 @@
 use super::{Basis, Conversion, MODULI, WORDS};
 
 /// `floor(M / p)` for the product `M` of the first basis.
-pub(super) const M_OVER_P: u64 = 645173;
+pub const M_OVER_P: u64 = 645173;
 
 /// `floor(N / p)` for the product `N` of the second basis.
-pub(super) const N_OVER_P: u64 = 645173;
+pub const N_OVER_P: u64 = 645173;
 
 /// The first basis.
-pub(super) const M: Basis = Basis {
+pub const M: Basis = Basis {
     moduli: [
         0x0003fffffffffff7,
         0x0003fffffffffff1,
@@ -48,7 +48,7 @@ pub(super) const M: Basis = Basis {
 };
 
 /// The second basis.
-pub(super) const N: Basis = Basis {
+pub const N: Basis = Basis {
     moduli: [
         0x0003ffffffffffff,
         0x0003fffffffffffd,
@@ -82,7 +82,7 @@ pub(super) const N: Basis = Basis {
 };
 
 /// Rows of the conversion of the Montgomery quotient from the first basis to the second.
-pub(super) const REDUCE: [[u64; MODULI]; MODULI] = [
+pub const REDUCE: [[u64; MODULI]; MODULI] = [
     [
         0x00032699de3041d8,
         0x0002ef308141868a,
@@ -166,7 +166,7 @@ pub(super) const REDUCE: [[u64; MODULI]; MODULI] = [
 ];
 
 /// The conversion from the second basis to the first.
-pub(super) const EXPAND: Conversion = Conversion {
+pub const EXPAND: Conversion = Conversion {
     matrix: [
         [
             0x0003cd0c20833f06,
@@ -282,7 +282,7 @@ pub(super) const EXPAND: Conversion = Conversion {
 };
 
 /// The conversion of a canonical integer, in 50-bit digits, into the second basis.
-pub(super) const TO_RNS: Conversion = Conversion {
+pub const TO_RNS: Conversion = Conversion {
     matrix: [
         [
             0x00010830415d1713,
@@ -399,7 +399,7 @@ pub(super) const TO_RNS: Conversion = Conversion {
 
 /// Second-basis CRT weights times `M * 2^(-52)` modulo `N`, which removes the residue scale,
 /// then reduced modulo `p`, divided by `M`, and scaled by `2^384`.
-pub(super) const TO_CANONICAL: [[u64; WORDS]; MODULI] = [
+pub const TO_CANONICAL: [[u64; WORDS]; MODULI] = [
     [
         0xad968922d2ae928f,
         0xde3ef8e05c6f5129,
@@ -467,7 +467,7 @@ pub(super) const TO_CANONICAL: [[u64; WORDS]; MODULI] = [
 ];
 
 /// `-N mod p`, scaled like [`TO_CANONICAL`].
-pub(super) const CANONICAL_CORRECTION: [u64; WORDS] = [
+pub const CANONICAL_CORRECTION: [u64; WORDS] = [
     0xc7f4fc34d1b16c47,
     0x9317e6793e817144,
     0x2780ac99a8b6ddd4,
@@ -477,7 +477,7 @@ pub(super) const CANONICAL_CORRECTION: [u64; WORDS] = [
 ];
 
 /// The residues of `p` in each basis, times the basis's residue scale.
-pub(super) const ENCODED_P: [[u64; MODULI]; 2] = [
+pub const ENCODED_P: [[u64; MODULI]; 2] = [
     [
         0x0002b5cba6fe3392,
         0x000004635da897ad,

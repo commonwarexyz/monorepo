@@ -1,6 +1,6 @@
 //! The scalar field of BLS12-381: integers modulo the prime order `r` of G1 and G2.
 
-use crate::montgomery;
+use crate::{core::curve::X_ABS, montgomery};
 use bytes::BufMut;
 use commonware_codec::{Buf, Error, FixedSize, Read, ReadExt as _, Write};
 use commonware_math::algebra::{Additive, Field, FieldNTT, Multiplicative, Object, Random, Ring};
@@ -72,102 +72,17 @@ const GENERATOR_INV: Scalar = GENERATOR.inv_inner();
 /// `2^256` as an element of the field, which shifts a word chunk of a wide integer into place.
 const SHIFT: Scalar = Scalar(R2);
 
-/// `|x|`, the magnitude of the curve parameter.
-pub(crate) const X_ABS: u64 = 0xd201_0000_0001_0000;
-
 /// `t = x^2` as little-endian words, where `r = t^2 - t + 1`.
-pub(crate) const X_SQUARED: [u64; 2] = [0x0000_0001_0000_0000, 0xac45_a401_0001_a402];
+pub const X_SQUARED: [u64; 2] = [0x0000_0001_0000_0000, 0xac45_a401_0001_a402];
+// X_SQUARED is the square of X_ABS.
+const _: () =
+    assert!(X_SQUARED[0] as u128 | (X_SQUARED[1] as u128) << 64 == X_ABS as u128 * X_ABS as u128);
 
 /// `floor(2^256 / t)`, which [`Scalar::split`] multiplies by to divide by `t`.
 const X_SQUARED_RECIPROCAL: [u64; 3] = [0x63f6_e522_f6cf_ee2e, 0x7c6b_ecf1_e01f_aadd, 1];
 
 /// `floor(2^128 / |x|)`, which [`Scalar::split_quarters`] multiplies by to divide by `|x|`.
 const X_ABS_RECIPROCAL: [u64; 2] = [0x3812_04ca_56cd_56b5, 1];
-
-/// Returns the product of two little-endian integers, in `N = A + B` words.
-const fn mul_words<const A: usize, const B: usize, const N: usize>(
-    a: &[u64; A],
-    b: &[u64; B],
-) -> [u64; N] {
-    const { assert!(N == A + B) };
-    let mut product = [0; N];
-    let mut i = 0;
-    while i < A {
-        let mut carry = 0u64;
-        let mut j = 0;
-        while j < B {
-            // A product of words plus a word and a carry is below 2^128.
-            let wide = product[i + j] as u128 + a[i] as u128 * b[j] as u128 + carry as u128;
-            product[i + j] = wide as u64;
-            carry = (wide >> 64) as u64;
-            j += 1;
-        }
-        product[i + B] = carry;
-        i += 1;
-    }
-    product
-}
-
-/// Returns `a - b` modulo `2^(64 N)` and whether it borrowed.
-const fn sub_words<const N: usize>(a: &[u64; N], b: &[u64; N]) -> ([u64; N], bool) {
-    let mut difference = [0; N];
-    let mut borrow = 0u64;
-    let mut i = 0;
-    while i < N {
-        let wide = (a[i] as u128)
-            .wrapping_sub(b[i] as u128)
-            .wrapping_sub(borrow as u128);
-        difference[i] = wide as u64;
-        borrow = (wide >> 127) as u64;
-        i += 1;
-    }
-    (difference, borrow == 1)
-}
-
-/// Returns `value / divisor` and `value mod divisor` for a value of `N = 2 D` words whose
-/// quotient fits in `D` words, given `reciprocal = floor(2^(64 N) / divisor)` in `R = D + 1`
-/// words, without branching on the value.
-///
-/// The quotient estimated from the reciprocal falls short by at most one, since
-/// `value * reciprocal / 2^(64 N)` is at least `value / divisor - value / 2^(64 N)`, so one
-/// conditional subtraction of the divisor corrects the remainder.
-const fn divide<const N: usize, const D: usize, const R: usize, const W: usize>(
-    value: &[u64; N],
-    divisor: &[u64; D],
-    reciprocal: &[u64; R],
-) -> ([u64; D], [u64; D]) {
-    const { assert!(N == 2 * D && R == D + 1 && W == N + R) };
-    let wide: [u64; W] = mul_words(value, reciprocal);
-    let mut quotient = [0; D];
-    let mut i = 0;
-    while i < D {
-        quotient[i] = wide[N + i];
-        i += 1;
-    }
-    let product: [u64; N] = mul_words(&quotient, divisor);
-    let (remainder, _) = sub_words(value, &product);
-    let mut extended = [0; N];
-    let mut i = 0;
-    while i < D {
-        extended[i] = divisor[i];
-        i += 1;
-    }
-    let (reduced, borrow) = sub_words(&remainder, &extended);
-    // Keep the remainder when it is below the divisor, and otherwise take the reduced one and
-    // add one to the quotient.
-    let keep = (borrow as u64).wrapping_neg();
-    let mut corrected = [0; D];
-    let mut carry = !keep & 1;
-    let mut i = 0;
-    while i < D {
-        corrected[i] = (remainder[i] & keep) | (reduced[i] & !keep);
-        let (sum, overflow) = quotient[i].overflowing_add(carry);
-        quotient[i] = sum;
-        carry = overflow as u64;
-        i += 1;
-    }
-    (quotient, corrected)
-}
 
 /// An element of the scalar field.
 ///
@@ -240,8 +155,11 @@ impl Scalar {
     /// Since `r = t^2 - t + 1`, the quotient by `t` is below `t`, so both halves fit in two
     /// words.
     pub(crate) const fn split(self) -> [[u64; 2]; 2] {
-        let (quotient, remainder) =
-            divide::<WORDS, 2, 3, 7>(&self.to_words(), &X_SQUARED, &X_SQUARED_RECIPROCAL);
+        let (quotient, remainder) = montgomery::divide::<WORDS, 2, 3, 7>(
+            &self.to_words(),
+            &X_SQUARED,
+            &X_SQUARED_RECIPROCAL,
+        );
         [remainder, quotient]
     }
 
@@ -251,7 +169,8 @@ impl Scalar {
     pub(crate) fn split_quarters(self) -> [u64; 4] {
         let mut quarters = [0; 4];
         for (half, quarters) in self.split().iter().zip(quarters.as_chunks_mut::<2>().0) {
-            let (quotient, remainder) = divide::<2, 1, 2, 4>(half, &[X_ABS], &X_ABS_RECIPROCAL);
+            let (quotient, remainder) =
+                montgomery::divide::<2, 1, 2, 4>(half, &[X_ABS], &X_ABS_RECIPROCAL);
             *quarters = [remainder[0], quotient[0]];
         }
         quarters
@@ -260,37 +179,20 @@ impl Scalar {
     /// Parses the canonical big-endian encoding.
     ///
     /// Returns `None` when the encoded integer is not below the group order.
-    pub fn from_bytes(bytes: &[u8; Self::BYTES]) -> Option<Self> {
-        let mut words = [0; WORDS];
-        for (word, chunk) in words.iter_mut().zip(bytes.as_chunks::<8>().0.iter().rev()) {
-            *word = u64::from_be_bytes(*chunk);
-        }
-        Self::from_words(words)
+    pub const fn from_bytes(bytes: &[u8; Self::BYTES]) -> Option<Self> {
+        Self::from_words(montgomery::words_from_be_bytes(bytes))
     }
 
     /// Returns the canonical big-endian encoding.
-    pub fn to_bytes(self) -> [u8; Self::BYTES] {
-        let mut bytes = [0; Self::BYTES];
-        let words = self.to_words();
-        for (chunk, word) in bytes
-            .as_chunks_mut::<8>()
-            .0
-            .iter_mut()
-            .zip(words.iter().rev())
-        {
-            *chunk = word.to_be_bytes();
-        }
-        bytes
+    pub const fn to_bytes(self) -> [u8; Self::BYTES] {
+        montgomery::be_bytes_from_words(&self.to_words())
     }
 
     /// Reduces a 512-bit big-endian integer modulo the group order.
     ///
     /// The result is statistically close to uniform (within `2^-256`) for uniform input.
-    pub fn from_bytes_wide(bytes: &[u8; Self::WIDE_BYTES]) -> Self {
-        let mut words = [0u64; 2 * WORDS];
-        for (word, chunk) in words.iter_mut().zip(bytes.as_chunks::<8>().0.iter().rev()) {
-            *word = u64::from_be_bytes(*chunk);
-        }
+    pub const fn from_bytes_wide(bytes: &[u8; Self::WIDE_BYTES]) -> Self {
+        let words: [u64; 2 * WORDS] = montgomery::words_from_be_bytes(bytes);
         let (low, high) = words.as_chunks::<WORDS>().0.split_at(1);
         // low * R^2 / R + high * R^3 / R = (low + high * 2^256) * R. Montgomery multiplication
         // accepts a left operand below 2^256 when the right one is below r.
@@ -578,17 +480,8 @@ pub mod fuzz {
     }
 
     /// Returns the big-endian encoding of the order.
-    fn order() -> [u8; Scalar::BYTES] {
-        let mut bytes = [0; Scalar::BYTES];
-        for (chunk, word) in bytes
-            .as_chunks_mut::<8>()
-            .0
-            .iter_mut()
-            .zip(MODULUS.iter().rev())
-        {
-            *chunk = word.to_be_bytes();
-        }
-        bytes
+    const fn order() -> [u8; Scalar::BYTES] {
+        montgomery::be_bytes_from_words(&MODULUS)
     }
 
     /// Returns the value of big-endian digits in the given base, by Horner's rule.
@@ -701,6 +594,7 @@ pub mod fuzz {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::montgomery::{mul_words, sub_words};
         use commonware_invariants::minifuzz;
         use commonware_utils::test_rng;
         use rand_core::Rng as _;

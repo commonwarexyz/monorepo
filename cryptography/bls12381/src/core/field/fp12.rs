@@ -33,7 +33,7 @@ use commonware_simd::Simd;
 pub const BYTES: usize = 2 * FP6_BYTES;
 
 /// Largest integer bound of a component, in units of `p`.
-pub const BOUND: u64 = TIGHT;
+const BOUND: u64 = TIGHT;
 
 /// Largest integer bound of a component of a line coefficient, in units of `p`.
 pub const LINE_BOUND: u64 = 64;
@@ -141,9 +141,9 @@ const FROBENIUS: [[u8; FP2_BYTES]; 5] = [
 #[derive(Clone, Copy)]
 pub struct Fp12<F> {
     /// The coefficients of `1`.
-    pub c0: Fp6<F>,
+    c0: Fp6<F>,
     /// The coefficients of `w`.
-    pub c1: Fp6<F>,
+    c1: Fp6<F>,
 }
 
 // Each operation forms its products lazily and finishes with one tight reduction of each output
@@ -823,19 +823,19 @@ const fn split(element: &[u8; BYTES]) -> [&[u8; FP6_BYTES]; 2] {
 /// An element is the polynomial `c_0 + c_1 w + ... + c_5 w^5` over `Fp2`, where `w^6 = 1 + i`:
 /// since `v = w^2`, the coefficient of `v^i w^j` in the tower is that of `w^(2i + j)`.
 #[cfg(any(test, feature = "fuzz"))]
-pub(crate) mod reference {
+pub mod reference {
     use super::{BYTES, FP2_BYTES};
     use crate::core::field::{fp::MODULUS, fp2::reference as fp2};
     use std::sync::OnceLock;
 
     /// The coefficients of `1, w, ..., w^5`.
-    pub(crate) type Element = [fp2::Element; 6];
+    pub type Element = [fp2::Element; 6];
 
     /// Zero.
-    pub(crate) const ZERO: Element = [fp2::ZERO; 6];
+    pub const ZERO: Element = [fp2::ZERO; 6];
 
     /// One.
-    pub(crate) const ONE: Element = {
+    pub const ONE: Element = {
         let mut one = ZERO;
         one[0] = fp2::ONE;
         one
@@ -848,7 +848,7 @@ pub(crate) mod reference {
     }
 
     /// Returns the residues of an encoding's components.
-    pub(crate) fn decode(bytes: &[u8; BYTES]) -> Element {
+    pub fn decode(bytes: &[u8; BYTES]) -> Element {
         let (chunks, _) = bytes.as_chunks::<FP2_BYTES>();
         let mut a = ZERO;
         for (index, chunk) in chunks.iter().enumerate() {
@@ -858,7 +858,7 @@ pub(crate) mod reference {
     }
 
     /// Returns the encoding of an element.
-    pub(crate) fn encode(a: &Element) -> [u8; BYTES] {
+    pub fn encode(a: &Element) -> [u8; BYTES] {
         let mut bytes = [0; BYTES];
         let (chunks, _) = bytes.as_chunks_mut::<FP2_BYTES>();
         for (index, chunk) in chunks.iter_mut().enumerate() {
@@ -868,7 +868,7 @@ pub(crate) mod reference {
     }
 
     /// Returns `a * b`, the product of polynomials with `w^6` replaced by `1 + i`.
-    pub(crate) fn mul(a: &Element, b: &Element) -> Element {
+    pub fn mul(a: &Element, b: &Element) -> Element {
         let mut product = ZERO;
         for (j, &x) in a.iter().enumerate() {
             for (k, &y) in b.iter().enumerate() {
@@ -897,12 +897,12 @@ pub(crate) mod reference {
     }
 
     /// Returns `a^exponent` for a little-endian exponent.
-    pub(crate) fn power(a: &Element, exponent: &[u64]) -> Element {
+    pub fn power(a: &Element, exponent: &[u64]) -> Element {
         pow(*a, ONE, |x, y| mul(&x, &y), exponent)
     }
 
     /// Returns the conjugate `a(-w)`, which is `a^(p^6)`.
-    pub(crate) fn conjugate(a: &Element) -> Element {
+    pub fn conjugate(a: &Element) -> Element {
         let mut conjugate = *a;
         for coefficient in conjugate.iter_mut().skip(1).step_by(2) {
             *coefficient = fp2::neg(*coefficient);
@@ -912,7 +912,7 @@ pub(crate) mod reference {
 
     /// Returns `gamma^k` for `k` from `0` to `5`, where `gamma = (1 + i)^((p - 1) / 6)` is
     /// `w^(p - 1)`.
-    pub(crate) fn frobenius_factors() -> &'static [fp2::Element; 6] {
+    pub fn frobenius_factors() -> &'static [fp2::Element; 6] {
         static FACTORS: OnceLock<[fp2::Element; 6]> = OnceLock::new();
         FACTORS.get_or_init(|| {
             // (p - 1) / 6, little-endian.
@@ -936,7 +936,7 @@ pub(crate) mod reference {
 
     /// Returns `a^p`: each coefficient `c_k` of `w^k` maps to `conj(c_k) w^(k p)`, which is
     /// `conj(c_k) gamma^k w^k`.
-    pub(crate) fn frobenius(a: &Element) -> Element {
+    pub fn frobenius(a: &Element) -> Element {
         let factors = frobenius_factors();
         let mut image = ZERO;
         for (k, coefficient) in image.iter_mut().enumerate() {
@@ -949,7 +949,7 @@ pub(crate) mod reference {
     ///
     /// `n = a conj(a)` lies in `Fp6`, whose norm `n n^(p^2) n^(p^4)` lies in `Fp2`, so
     /// `a^(-1) = conj(a) n^(p^2) n^(p^4) / (n n^(p^2) n^(p^4))`.
-    pub(crate) fn invert(a: &Element) -> Element {
+    pub fn invert(a: &Element) -> Element {
         let conjugate = conjugate(a);
         let n = mul(a, &conjugate);
         let n2 = frobenius(&frobenius(&n));
@@ -1011,7 +1011,7 @@ pub mod fuzz {
 
     /// Draws an element with canonical components: any element in half of the draws, otherwise
     /// zero, one, an element of `Fp2`, or an element of `Fp6`.
-    pub(crate) fn element(u: &mut Unstructured<'_>) -> arbitrary::Result<Element> {
+    pub fn element(u: &mut Unstructured<'_>) -> arbitrary::Result<Element> {
         let mut a = reference::ZERO;
         match u.int_in_range(0..=7u8)? {
             0..=3 => {
@@ -1109,7 +1109,7 @@ pub mod fuzz {
 
     /// Returns the same extension value with every component at integer bound `2 + K`, given
     /// loaded components with integer bound `2`.
-    pub(crate) fn widen<const K: u64, S: Simd, F: Field<S>>(simd: S, value: Fp2<F>) -> Fp2<F> {
+    pub fn widen<const K: u64, S: Simd, F: Field<S>>(simd: S, value: Fp2<F>) -> Fp2<F> {
         let zero = Fp2::<F>::load(simd, &[], &[0; FP2_BYTES]);
         value.sub::<K, S>(simd, zero).carry(simd)
     }
@@ -1320,7 +1320,7 @@ pub mod fuzz {
     }
 
     /// Returns the embedding of the coefficient `c0` of `a`: its coefficients of even degree.
-    pub(crate) fn even(a: &Element) -> Element {
+    pub fn even(a: &Element) -> Element {
         let mut even = *a;
         for coefficient in even.iter_mut().skip(1).step_by(2) {
             *coefficient = fp2::ZERO;

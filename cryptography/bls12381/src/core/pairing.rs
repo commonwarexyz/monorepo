@@ -14,31 +14,36 @@
 //! A pair of the G1 coordinates `(0, 0)`, which are not a point, and a G2 point whose lines have
 //! nonzero constant terms, such as the generator, contributes one after the final exponentiation.
 //! Such a pair fills a lane's unused slots.
+//!
+//! [`to_affine`] converts projective pairs without the identity to affine pairs with one shared
+//! inversion. [`FILL`] is a filling pair, and [`P_FILL`] a G1 point with denominator one that
+//! [`to_affine`] accepts in place of the identity.
 
 use crate::core::{
-    curve::g2::{self, Addition, Point},
+    curve::{
+        Points, X_ABS, g1,
+        g2::{self, Addition, Point},
+    },
     field::{
         MAX_LANES,
-        arithmetic::Field,
-        fp::BYTES as FP_BYTES,
+        arithmetic::{Field, TIGHT},
+        fp::{self, BYTES as FP_BYTES},
         fp2::{self, BYTES as FP2_BYTES, Fp2},
         fp12::{Fp12, LINE_BOUND},
         gather,
     },
 };
+use alloc::{vec, vec::Vec};
 use commonware_simd::Simd;
 
 /// Affine coordinates `[x, y]` of a G1 point as big-endian integers.
-pub type G1Affine = [[u8; FP_BYTES]; 2];
+type G1Affine = [[u8; FP_BYTES]; 2];
 
 /// Affine coordinates `[x, y]` of a G2 point as big-endian extension elements.
-pub type G2Affine = [[u8; FP2_BYTES]; 2];
+type G2Affine = [[u8; FP2_BYTES]; 2];
 
-/// `|z|`, the absolute value of the curve parameter `z = -0xd201000000010000`.
-const Z: u64 = 0xd201_0000_0001_0000;
-
-/// `|z| / 2`.
-const HALF_Z: u64 = Z / 2;
+/// `|x| / 2`.
+const HALF_X_ABS: u64 = X_ABS / 2;
 
 /// Most pairs whose Miller loops share squarings, which bounds the points held at once.
 pub const SHARED: usize = 8;
@@ -50,6 +55,25 @@ pub const SHARED: usize = 8;
 // the fp12 module.
 const LINE_COMPONENT_BOUND: u64 = 61;
 const _: () = assert!(LINE_COMPONENT_BOUND <= LINE_BOUND);
+
+/// A pair that pairs to one and fills unused lanes: its G1 coordinates are zero, which the final
+/// exponentiation maps to one, and its G2 point is the generator, whose lines have nonzero
+/// constant terms.
+pub const FILL: (G1Affine, G2Affine) = ([[0; FP_BYTES]; 2], [g2::GENERATOR[0], g2::GENERATOR[1]]);
+
+/// The G1 point `(0 : 1 : 1)`, whose denominator is one.
+pub const P_FILL: g1::Coordinates = {
+    let mut fill = g1::IDENTITY;
+    fill[2] = fp::ONE;
+    fill
+};
+
+/// The G2 point `(0 : 1 : 1)`, whose denominator is one.
+const Q_FILL: g2::Coordinates = {
+    let mut fill = g2::IDENTITY;
+    fill[2] = fp2::ONE;
+    fill
+};
 
 /// Pairs of affine points, one per lane, prepared for the Miller loop.
 #[derive(Clone, Copy)]
@@ -96,6 +120,88 @@ impl<F> Pair<F> {
     }
 }
 
+/// Returns the affine coordinates of each pair of points, none of which may be the identity.
+///
+/// One inversion serves every pair, as Montgomery's trick: the G1 denominators and the norms of
+/// the G2 denominators multiply up in turn, the total inverts, and each inverse unwinds from the
+/// total with the running products. Runs its body through [`Simd::execute`], so that the body
+/// inlines into the backend's target-feature scope.
+#[cfg_attr(not(debug_assertions), inline(always))]
+pub fn to_affine<S: Simd, F: Field<S>>(
+    simd: S,
+    points: &[(g1::Coordinates, g2::Coordinates)],
+) -> Vec<(G1Affine, G2Affine)> {
+    const { assert!(F::LANES <= MAX_LANES) };
+    if points.is_empty() {
+        return Vec::new();
+    }
+    simd.execute(
+        #[inline(always)]
+        move |simd: S| {
+            let groups = points.len().div_ceil(F::LANES);
+            let mut loaded = Vec::with_capacity(groups);
+            // The G1 denominator and the norm of the G2 denominator of each group, tight with
+            // limb bound one, as inversion requires.
+            let mut denominators = Vec::with_capacity(2 * groups);
+            for group in points.chunks(F::LANES) {
+                // Unused lanes hold points with denominator one, which leave the products
+                // unchanged.
+                let mut g1 = [P_FILL; MAX_LANES];
+                let mut g2 = [Q_FILL; MAX_LANES];
+                for (lane, (p, q)) in group.iter().enumerate() {
+                    g1[lane] = *p;
+                    g2[lane] = *q;
+                }
+                let p = g1::Point::<F>::load(simd, &g1[..group.len()], &P_FILL);
+                let q = g2::Point::<F>::load(simd, &g2[..group.len()], &Q_FILL);
+                let norm =
+                    F::accumulate_product(simd, q.z.c0.product(simd, q.z.c0), q.z.c1, q.z.c1);
+                denominators.push(p.z);
+                denominators.push(F::reduce_tight(simd, norm));
+                loaded.push((p, q));
+            }
+            let mut running = Vec::with_capacity(denominators.len());
+            let mut total = denominators[0];
+            running.push(total);
+            for &denominator in &denominators[1..] {
+                total = F::reduce_tight(simd, total.product(simd, denominator));
+                running.push(total);
+            }
+            let mut inverse = total.invert(simd);
+            let mut inverses = vec![inverse; denominators.len()];
+            for i in (1..denominators.len()).rev() {
+                inverses[i] = F::reduce_tight(simd, inverse.product(simd, running[i - 1]));
+                inverse = F::reduce_tight(simd, inverse.product(simd, denominators[i]));
+            }
+            inverses[0] = inverse;
+
+            let mut affine = Vec::with_capacity(points.len());
+            for (group, (p, q)) in loaded.into_iter().enumerate() {
+                let lanes = (points.len() - group * F::LANES).min(F::LANES);
+                let (p_inverse, norm_inverse) = (inverses[2 * group], inverses[2 * group + 1]);
+                // The inverse of the G2 denominator is its conjugate over its norm.
+                let conjugate = q.z.conjugate::<{ TIGHT + 1 }, S>(simd).carry(simd);
+                let q_inverse =
+                    Fp2::reduce_tight::<1, S>(simd, conjugate.product_base(simd, norm_inverse));
+                // Multiplying tight coordinates by tight inverses stays within every product
+                // bound.
+                let mut px = [[0; FP_BYTES]; MAX_LANES];
+                let mut py = [[0; FP_BYTES]; MAX_LANES];
+                let mut qx = [[0; FP2_BYTES]; MAX_LANES];
+                let mut qy = [[0; FP2_BYTES]; MAX_LANES];
+                p.x.mul(simd, p_inverse).store(simd, &mut px);
+                p.y.mul(simd, p_inverse).store(simd, &mut py);
+                Fp2::mul::<64, S>(q.x, simd, q_inverse).store(simd, &mut qx);
+                Fp2::mul::<64, S>(q.y, simd, q_inverse).store(simd, &mut qy);
+                for lane in 0..lanes {
+                    affine.push(([px[lane], py[lane]], [qx[lane], qy[lane]]));
+                }
+            }
+            affine
+        },
+    )
+}
+
 /// Returns, in each lane, the product of the Miller loops of that lane's pairs, or one for no
 /// pairs.
 ///
@@ -117,7 +223,7 @@ pub fn miller_loop<S: Simd, F: Field<S>>(simd: S, pairs: &[Pair<F>]) -> Fp12<F> 
 
 /// Returns the product of the Miller loops of up to [`SHARED`] pairs, which share their squarings.
 ///
-/// This is the Miller function of `|z|`, conjugated because `z` is negative.
+/// This is the Miller function of `|x|`, conjugated because `x` is negative.
 fn shared_miller_loop<S: Simd, F: Field<S>>(simd: S, pairs: &[Pair<F>]) -> Fp12<F> {
     // The loop runs on the twist y^2 = x^3 + 4 (1 + i) of G2 in the projective coordinates of
     // Point, with affine inputs, and evaluates each line as the sparse element
@@ -130,16 +236,16 @@ fn shared_miller_loop<S: Simd, F: Field<S>>(simd: S, pairs: &[Pair<F>]) -> Fp12<
         *point = pair.q;
     }
     let mut f = Fp12::one(simd);
-    // The bits of |z| below the leading one. The first square of one is skipped.
-    for bit in (0..Z.ilog2()).rev() {
-        if bit != Z.ilog2() - 1 {
+    // The bits of |x| below the leading one. The first square of one is skipped.
+    for bit in (0..X_ABS.ilog2()).rev() {
+        if bit != X_ABS.ilog2() - 1 {
             f.square(simd);
         }
         for (point, pair) in points.iter_mut().zip(pairs) {
             let line = double_step(simd, point, pair);
             f.mul_by_line(simd, &line);
         }
-        if (Z >> bit) & 1 == 1 {
+        if (X_ABS >> bit) & 1 == 1 {
             for (point, pair) in points.iter_mut().zip(pairs) {
                 let line = add_step(simd, point, pair);
                 f.mul_by_line(simd, &line);
@@ -152,7 +258,7 @@ fn shared_miller_loop<S: Simd, F: Field<S>>(simd: S, pairs: &[Pair<F>]) -> Fp12<
 /// Doubles `t` in place and returns the line tangent at it, evaluated at the pair's G1 point.
 ///
 /// The line is `[3b z^2 - y^2, 3 x^2 xp, -2 y z yp]` and the point is
-/// [`Points::double`](crate::core::curve::Points::double)'s.
+/// [`Points::double`]'s.
 #[cfg_attr(not(debug_assertions), inline(always))]
 fn double_step<S: Simd, F: Field<S>>(simd: S, t: &mut Point<F>, pair: &Pair<F>) -> [Fp2<F>; 3] {
     // The tangent at (x / z, y / z), scaled by -2 y z, is the line above once the curve equation
@@ -200,7 +306,7 @@ fn double_step<S: Simd, F: Field<S>>(simd: S, t: &mut Point<F>, pair: &Pair<F>) 
 /// pair's G1 point.
 ///
 /// The line is `[qx y - qy x, (qy z - y) xp, -(qx z - x) yp]` and the point is
-/// [`Points::add`](crate::core::curve::Points::add)'s.
+/// [`Points::add`]'s.
 #[cfg_attr(not(debug_assertions), inline(always))]
 fn add_step<S: Simd, F: Field<S>>(simd: S, t: &mut Point<F>, pair: &Pair<F>) -> [Fp2<F>; 3] {
     // The line's first products join the second stage of the addition.
@@ -269,18 +375,18 @@ pub fn final_exponentiation<S: Simd, F: Field<S>>(simd: S, f: Fp12<F>) -> Fp12<F
         .frobenius(simd, &coefficients);
     easy.mul(simd, &inverse);
 
-    // The hard part: an addition chain over z that computes the cube of
+    // The hard part: an addition chain over x that computes the cube of
     // easy^((p^4 - p^2 + 1) / r) (see "Faster Squaring in the Cyclotomic Subgroup of Sixth Degree
     // Extensions", Granger and Scott, 2010, and the chain of the zkcrypto pairing crate).
     let mut y0 = easy;
     y0.cyclotomic_square(simd);
-    let mut y1 = raise_to_z(simd, y0);
-    let y2 = raise_to_half_z(simd, y1);
+    let mut y1 = raise_to_x(simd, y0);
+    let y2 = raise_to_half_x(simd, y1);
     y1.mul(simd, &easy.conjugate(simd));
     let mut y1 = y1.conjugate(simd);
     y1.mul(simd, &y2);
-    let y2 = raise_to_z(simd, y1);
-    let mut y3 = raise_to_z(simd, y2);
+    let y2 = raise_to_x(simd, y1);
+    let mut y3 = raise_to_x(simd, y2);
     y3.mul(simd, &y1.conjugate(simd));
     let mut y1 = y1
         .frobenius(simd, &coefficients)
@@ -290,7 +396,7 @@ pub fn final_exponentiation<S: Simd, F: Field<S>>(simd: S, f: Fp12<F>) -> Fp12<F
         .frobenius(simd, &coefficients)
         .frobenius(simd, &coefficients);
     y1.mul(simd, &y2);
-    let mut y2 = raise_to_z(simd, y3);
+    let mut y2 = raise_to_x(simd, y3);
     y2.mul(simd, &y0);
     y2.mul(simd, &easy);
     y1.mul(simd, &y2);
@@ -298,23 +404,23 @@ pub fn final_exponentiation<S: Simd, F: Field<S>>(simd: S, f: Fp12<F>) -> Fp12<F
     y1
 }
 
-/// Returns `a^(z / 2)` for `a` in the cyclotomic subgroup.
-fn raise_to_half_z<S: Simd, F: Field<S>>(simd: S, a: Fp12<F>) -> Fp12<F> {
-    // Square and multiply over the bits of |z| / 2 below its leading one, then conjugate for the
-    // sign of z.
+/// Returns `a^(x / 2)` for `a` in the cyclotomic subgroup.
+fn raise_to_half_x<S: Simd, F: Field<S>>(simd: S, a: Fp12<F>) -> Fp12<F> {
+    // Square and multiply over the bits of |x| / 2 below its leading one, then conjugate for the
+    // sign of x.
     let mut result = a;
-    for bit in (0..HALF_Z.ilog2()).rev() {
+    for bit in (0..HALF_X_ABS.ilog2()).rev() {
         result.cyclotomic_square(simd);
-        if (HALF_Z >> bit) & 1 == 1 {
+        if (HALF_X_ABS >> bit) & 1 == 1 {
             result.mul(simd, &a);
         }
     }
     result.conjugate(simd)
 }
 
-/// Returns `a^z` for `a` in the cyclotomic subgroup.
-fn raise_to_z<S: Simd, F: Field<S>>(simd: S, a: Fp12<F>) -> Fp12<F> {
-    let mut result = raise_to_half_z(simd, a);
+/// Returns `a^x` for `a` in the cyclotomic subgroup.
+fn raise_to_x<S: Simd, F: Field<S>>(simd: S, a: Fp12<F>) -> Fp12<F> {
+    let mut result = raise_to_half_x(simd, a);
     result.cyclotomic_square(simd);
     result
 }
@@ -339,8 +445,8 @@ pub mod fuzz {
     pub enum Plan {
         /// Checks that the final exponentiation of any elements is multiplicative, maps zero to
         /// zero and the subfield `Fp6` (so every line scaling factor) to one, and maps each
-        /// nonzero element to an `x` with `conj(x) x = 1` and `x^p = x^z`, as on the target
-        /// group, where `p = z mod r`.
+        /// nonzero element to a `y` with `conj(y) y = 1` and `y^p = y^x`, as on the target
+        /// group, where `p = x mod r`.
         FinalExponentiation,
     }
 
@@ -387,28 +493,29 @@ pub mod fuzz {
         let (images, products) = outputs.split_at(count);
         for lane in 0..count {
             let label = std::format!("{target:?}, element {lane} of {count}");
-            let x = reference::decode(&images[lane]);
-            let y = reference::decode(&images[(lane + 1) % count]);
+            let image = reference::decode(&images[lane]);
+            let next = reference::decode(&images[(lane + 1) % count]);
             assert!(
-                products[lane] == reference::encode(&reference::mul(&x, &y)),
+                products[lane] == reference::encode(&reference::mul(&image, &next)),
                 "multiplicative, {label}"
             );
             if a[lane] == reference::ZERO {
-                assert!(x == reference::ZERO, "zero, {label}");
+                assert!(image == reference::ZERO, "zero, {label}");
                 continue;
             }
             // Elements of Fp6 have no coefficients of odd degree in w.
             if even(&a[lane]) == a[lane] {
-                assert!(x == reference::ONE, "subfield, {label}");
+                assert!(image == reference::ONE, "subfield, {label}");
             }
             assert!(
-                reference::mul(&reference::conjugate(&x), &x) == reference::ONE,
+                reference::mul(&reference::conjugate(&image), &image) == reference::ONE,
                 "cyclotomic, {label}"
             );
-            // z is negative, and conjugation inverts in the cyclotomic subgroup.
+            // x is negative, and conjugation inverts in the cyclotomic subgroup.
             assert!(
-                reference::frobenius(&x) == reference::conjugate(&reference::power(&x, &[Z])),
-                "frobenius is z, {label}"
+                reference::frobenius(&image)
+                    == reference::conjugate(&reference::power(&image, &[X_ABS])),
+                "frobenius is x, {label}"
             );
         }
         Ok(())

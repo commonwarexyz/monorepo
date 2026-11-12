@@ -138,7 +138,7 @@ fn splat<S: Simd, F: Field<S>, G: Group>(simd: S, element: &G) -> G::Points<S, F
 
 /// Loads the identity into every lane.
 #[inline(always)]
-pub(super) fn identity<S: Simd, F: Field<S>, G: Group>(simd: S) -> G::Points<S, F> {
+pub fn identity<S: Simd, F: Field<S>, G: Group>(simd: S) -> G::Points<S, F> {
     G::Points::<S, F>::load(simd, &[], &G::IDENTITY)
 }
 
@@ -155,7 +155,7 @@ fn first<S: Simd, F: Field<S>, G: Group>(simd: S, points: G::Points<S, F>) -> G 
 /// Adds the upper half of the lanes to the lower half until one remains, moving elements between
 /// lanes through their coordinates.
 #[inline(always)]
-pub(super) fn sum_lanes<S: Simd, F: Field<S>, G: Group>(simd: S, points: G::Points<S, F>) -> G {
+pub fn sum_lanes<S: Simd, F: Field<S>, G: Group>(simd: S, points: G::Points<S, F>) -> G {
     const { assert!(F::LANES <= MAX_LANES) };
     let mut lanes = [G::IDENTITY; MAX_LANES];
     points.store(simd, &mut lanes);
@@ -176,7 +176,7 @@ pub(super) fn sum_lanes<S: Simd, F: Field<S>, G: Group>(simd: S, points: G::Poin
 ///
 /// Requires `2 <= width <= 15` and `value < 2^(width * digits.len() - 1)`, so that the last
 /// digit absorbs the carry. Runs in time independent of the value.
-pub(super) fn signed_digits(value: &[u64], width: u32, negate: bool, digits: &mut [i16]) {
+pub fn signed_digits(value: &[u64], width: u32, negate: bool, digits: &mut [i16]) {
     debug_assert!((2..=15).contains(&width));
     let width = width as usize;
     let half = 1i32 << (width - 1);
@@ -205,7 +205,7 @@ pub(super) fn signed_digits(value: &[u64], width: u32, negate: bool, digits: &mu
 }
 
 /// Returns the number of windows of `width` bits in a component of `G`.
-pub(super) const fn windows<G: Group>(width: u32) -> usize {
+pub const fn windows<G: Group>(width: u32) -> usize {
     G::COMPONENT_BITS.div_ceil(width) as usize
 }
 
@@ -306,10 +306,7 @@ fn multiply<S: Simd, P: Points<S>>(
 
 /// Loads each of up to [`Field::LANES`] elements into its own lane.
 #[inline(always)]
-pub(super) fn load_each<S: Simd, F: Field<S>, G: Group>(
-    simd: S,
-    elements: &[G],
-) -> G::Points<S, F> {
+pub fn load_each<S: Simd, F: Field<S>, G: Group>(simd: S, elements: &[G]) -> G::Points<S, F> {
     const { assert!(F::LANES <= MAX_LANES) };
     debug_assert!(elements.len() <= F::LANES);
     let mut coordinates = [G::IDENTITY; MAX_LANES];

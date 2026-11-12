@@ -16,10 +16,10 @@ pub mod unsat49;
 pub const BYTES: usize = 48;
 
 /// Number of 64-bit words in an element.
-pub(crate) const WORDS: usize = 6;
+pub const WORDS: usize = 6;
 
 /// The modulus `p`, little-endian.
-pub(crate) const MODULUS: [u64; WORDS] = [
+pub const MODULUS: [u64; WORDS] = [
     0xb9fe_ffff_ffff_aaab,
     0x1eab_fffe_b153_ffff,
     0x6730_d2a0_f6b0_f624,
@@ -29,13 +29,13 @@ pub(crate) const MODULUS: [u64; WORDS] = [
 ];
 
 /// Largest count of 64-bit lanes of any backend.
-pub(crate) const MAX_U64_LANES: usize = 8;
+const MAX_U64_LANES: usize = 8;
 
 /// The encoding of one.
-pub(crate) const ONE: [u8; BYTES] = encode([1, 0, 0, 0, 0, 0]);
+pub const ONE: [u8; BYTES] = encode([1, 0, 0, 0, 0, 0]);
 
 /// `p - 1`, the encoding of `-1`.
-pub(crate) const MINUS_ONE: [u8; BYTES] = {
+pub const MINUS_ONE: [u8; BYTES] = {
     let mut bytes = encode(MODULUS);
     // The modulus is odd, so its low byte does not borrow.
     bytes[BYTES - 1] -= 1;
@@ -43,14 +43,8 @@ pub(crate) const MINUS_ONE: [u8; BYTES] = {
 };
 
 /// Returns the encoding of an element given as little-endian words.
-pub(crate) const fn encode(words: [u64; WORDS]) -> [u8; BYTES] {
-    let mut bytes = [0; BYTES];
-    let mut i = 0;
-    while i < BYTES {
-        bytes[i] = (words[WORDS - 1 - i / 8] >> (56 - 8 * (i % 8))) as u8;
-        i += 1;
-    }
-    bytes
+pub const fn encode(words: [u64; WORDS]) -> [u8; BYTES] {
+    bytes_from_words(&words)
 }
 
 /// Returns `2^k mod p`.
@@ -59,30 +53,17 @@ const fn power_of_two(k: u32) -> [u64; WORDS] {
 }
 
 /// Reads a big-endian integer into little-endian words.
-fn words_from_bytes(bytes: &[u8; BYTES]) -> [u64; WORDS] {
-    let mut words = [0; WORDS];
-    for (word, chunk) in words.iter_mut().zip(bytes.as_chunks::<8>().0.iter().rev()) {
-        *word = u64::from_be_bytes(*chunk);
-    }
-    words
+const fn words_from_bytes(bytes: &[u8; BYTES]) -> [u64; WORDS] {
+    montgomery::words_from_be_bytes(bytes)
 }
 
 /// Writes little-endian words as a big-endian integer.
-fn bytes_from_words(words: &[u64; WORDS]) -> [u8; BYTES] {
-    let mut bytes = [0; BYTES];
-    for (chunk, word) in bytes
-        .as_chunks_mut::<8>()
-        .0
-        .iter_mut()
-        .zip(words.iter().rev())
-    {
-        *chunk = word.to_be_bytes();
-    }
-    bytes
+const fn bytes_from_words(words: &[u64; WORDS]) -> [u8; BYTES] {
+    montgomery::be_bytes_from_words(words)
 }
 
 /// Returns `p - a` for a canonical big-endian element `a`, mapping zero to zero.
-pub(crate) fn neg(a: &[u8; BYTES]) -> [u8; BYTES] {
+pub const fn neg(a: &[u8; BYTES]) -> [u8; BYTES] {
     bytes_from_words(&montgomery::neg(&words_from_bytes(a), &MODULUS))
 }
 
@@ -174,53 +155,53 @@ const fn bias<const N: usize, const BITS: u32>(k: u64) -> [u64; N] {
 /// Its field operations are the [`montgomery`] functions it shares with the scalar field, which
 /// [`Plan::Arithmetic`](crate::montgomery::fuzz::Plan::Arithmetic) checks independently.
 #[cfg(any(test, feature = "fuzz"))]
-pub(crate) mod reference {
+pub mod reference {
     use super::*;
     use arbitrary::Unstructured;
 
     /// A canonical integer below `p`, little-endian.
-    pub(crate) type Element = [u64; WORDS];
+    pub type Element = [u64; WORDS];
 
     /// Zero.
-    pub(crate) const ZERO: Element = [0; WORDS];
+    pub const ZERO: Element = [0; WORDS];
 
     /// One.
-    pub(crate) const ONE: Element = small(1);
+    pub const ONE: Element = small(1);
 
     /// Returns the element with the integer value `n`.
-    pub(crate) const fn small(n: u64) -> Element {
+    pub const fn small(n: u64) -> Element {
         [n, 0, 0, 0, 0, 0]
     }
 
     /// `-p^(-1) mod 2^64`.
-    pub(crate) const INV: u64 = montgomery::negated_inverse(MODULUS[0]);
+    pub const INV: u64 = montgomery::negated_inverse(MODULUS[0]);
 
     /// `2^768 mod p`, which undoes a Montgomery multiplication's division by `2^384`.
     const R2: Element = power_of_two(768);
 
     /// Returns `a + b mod p`.
-    pub(crate) const fn add(a: Element, b: Element) -> Element {
+    pub const fn add(a: Element, b: Element) -> Element {
         montgomery::add(&a, &b, &MODULUS)
     }
 
     /// Returns `-a mod p`.
-    pub(crate) const fn neg(a: Element) -> Element {
+    pub const fn neg(a: Element) -> Element {
         montgomery::neg(&a, &MODULUS)
     }
 
     /// Returns `a - b mod p`.
-    pub(crate) const fn sub(a: Element, b: Element) -> Element {
+    pub const fn sub(a: Element, b: Element) -> Element {
         add(a, neg(b))
     }
 
     /// Returns `a * b mod p`, for any `a` below `2^384`.
-    pub(crate) const fn mul(a: Element, b: Element) -> Element {
+    pub const fn mul(a: Element, b: Element) -> Element {
         let product = montgomery::mul(&a, &b, &MODULUS, INV);
         montgomery::mul(&product, &R2, &MODULUS, INV)
     }
 
     /// Returns `a^(p - 2)`, the inverse of a nonzero `a`.
-    pub(crate) fn invert(a: Element) -> Element {
+    pub fn invert(a: Element) -> Element {
         let mut exponent = MODULUS;
         exponent[0] -= 2;
         let mut result = ONE;
@@ -236,19 +217,19 @@ pub(crate) mod reference {
     }
 
     /// Returns the residue of a big-endian integer.
-    pub(crate) fn decode(bytes: &[u8; BYTES]) -> Element {
+    pub const fn decode(bytes: &[u8; BYTES]) -> Element {
         mul(words_from_bytes(bytes), ONE)
     }
 
     /// Returns the big-endian encoding of a canonical integer.
-    pub(crate) const fn encode(a: Element) -> [u8; BYTES] {
+    pub const fn encode(a: Element) -> [u8; BYTES] {
         super::encode(a)
     }
 
     /// Draws a canonical integer: one below `2^381`, mapping integers at or above `p` to zero.
     ///
     /// Fails when the input holds fewer than [`BYTES`] bytes.
-    pub(crate) fn canonical(u: &mut Unstructured<'_>) -> arbitrary::Result<Element> {
+    pub fn canonical(u: &mut Unstructured<'_>) -> arbitrary::Result<Element> {
         let bytes = u.bytes(BYTES)?.try_into().expect("drew BYTES bytes");
         let mut words = words_from_bytes(bytes);
         words[WORDS - 1] &= (1 << 61) - 1;
@@ -273,7 +254,7 @@ pub(crate) mod reference {
 
 /// Shared checks of base field representations against [`reference`](mod@reference).
 #[cfg(any(test, feature = "fuzz"))]
-pub(crate) mod testing {
+pub mod testing {
     use super::{
         super::arithmetic::Field,
         BYTES, MINUS_ONE, MODULUS, ONE, WORDS, encode, limbs_from_words, montgomery, multiple,
@@ -304,7 +285,7 @@ pub(crate) mod testing {
 
     /// Draws a big-endian integer below `2^384`, biased toward zero, one, `p - 1`, `p`, and the
     /// largest integer.
-    pub(crate) fn bytes(u: &mut Unstructured<'_>) -> arbitrary::Result<[u8; BYTES]> {
+    pub fn bytes(u: &mut Unstructured<'_>) -> arbitrary::Result<[u8; BYTES]> {
         let raw: [u8; BYTES] = u.bytes(BYTES)?.try_into().expect("drew BYTES bytes");
         Ok(match u.int_in_range(0..=7)? {
             1 => [0; BYTES],
@@ -316,15 +297,15 @@ pub(crate) mod testing {
         })
     }
 
-    /// Draws a canonical element, the residue of [`bytes`].
-    pub(crate) fn element(u: &mut Unstructured<'_>) -> arbitrary::Result<Element> {
+    /// Draws a canonical element, the residue of [`bytes()`].
+    fn element(u: &mut Unstructured<'_>) -> arbitrary::Result<Element> {
         Ok(reference::decode(&bytes(u)?))
     }
 
     /// An emulated backend. The variants cover every lane count and algorithm path that dispatch
     /// can select.
     #[derive(Clone, Copy, Debug)]
-    pub(crate) enum Backend {
+    enum Backend {
         Scalar,
         X86V3,
         X86V4C,
@@ -334,7 +315,7 @@ pub(crate) mod testing {
 
     impl Backend {
         /// Draws a backend.
-        pub(crate) fn draw(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
+        fn draw(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
             Ok(match u.int_in_range(0..=4)? {
                 0 => Self::Scalar,
                 1 => Self::X86V3,
@@ -345,7 +326,7 @@ pub(crate) mod testing {
         }
 
         /// Executes an operation on this backend.
-        pub(crate) fn execute<O, R>(self, operation: O) -> R
+        fn execute<O, R>(self, operation: O) -> R
         where
             O: Operation<EmulatedScalar, Output = R>
                 + Operation<EmulatedX86V3, Output = R>
@@ -364,7 +345,7 @@ pub(crate) mod testing {
     }
 
     /// A computation written once over every representation and backend.
-    pub(crate) trait Kernel {
+    pub trait Kernel {
         /// The result of the computation.
         type Output;
 
@@ -382,7 +363,7 @@ pub(crate) mod testing {
 
     /// A representation and an emulated backend that supports it: residues require x86v4c.
     #[derive(Clone, Copy, Debug)]
-    pub(crate) struct Target {
+    pub struct Target {
         representation: Representation,
         backend: Backend,
     }
@@ -425,7 +406,7 @@ pub(crate) mod testing {
 
     impl Target {
         /// Draws a target, every representation equally often, then any backend that supports it.
-        pub(crate) fn draw(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
+        pub fn draw(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
             let representation = match u.int_in_range(0..=2)? {
                 0 => Representation::Unsat49,
                 1 => Representation::Unsat28,
@@ -442,18 +423,18 @@ pub(crate) mod testing {
         }
 
         /// Runs a kernel on this target.
-        pub(crate) fn run<K: Kernel>(self, kernel: K) -> K::Output {
+        pub fn run<K: Kernel>(self, kernel: K) -> K::Output {
             self.backend.execute(Execute(kernel, self.representation))
         }
 
         /// Returns the number of elements a value holds on this target.
-        pub(crate) fn lanes(self) -> usize {
+        pub fn lanes(self) -> usize {
             self.run(Lanes)
         }
     }
 
     /// A check of any representation on any backend.
-    pub(crate) trait Check {
+    pub trait Check {
         /// Runs the check on `F`, drawing its inputs from `u`.
         fn check<S: Simd, F: Field<S>>(
             self,
@@ -463,7 +444,7 @@ pub(crate) mod testing {
     }
 
     /// Runs a check on a [`Target`] drawn from `u`.
-    pub(crate) fn check_any<C: Check>(u: &mut Unstructured<'_>, check: C) -> arbitrary::Result<()> {
+    pub fn check_any<C: Check>(u: &mut Unstructured<'_>, check: C) -> arbitrary::Result<()> {
         /// Runs a check as a kernel, drawing its inputs from the same input.
         struct Checked<'a, 'b, C>(C, &'a mut Unstructured<'b>);
 
@@ -480,7 +461,7 @@ pub(crate) mod testing {
 
     /// A positional representation: carried limbs of radix `2^BITS` in Montgomery form with
     /// `R = 2^392`, and eagerly reduced products.
-    pub(crate) trait Positional<S: Simd>: Field<S, Product = Self> {
+    pub trait Positional<S: Simd>: Field<S, Product = Self> {
         /// Largest integer bound of any value, in units of `p`.
         const LIMIT: u64;
         /// Largest limb bound of a multiplicand, in units of the radix.
@@ -504,12 +485,12 @@ pub(crate) mod testing {
     }
 
     /// Returns the element whose Montgomery form is the integer `words`, below `2^384`.
-    pub(crate) const fn from_montgomery(words: [u64; WORDS]) -> Element {
+    pub const fn from_montgomery(words: [u64; WORDS]) -> Element {
         reference::mul(words, R_INVERSE)
     }
 
     /// Returns the element whose Montgomery form is `p - 1`, which lifts to `bound * p - 1`.
-    pub(crate) const fn largest() -> Element {
+    const fn largest() -> Element {
         let mut words = MODULUS;
         words[0] -= 1;
         from_montgomery(words)
@@ -517,7 +498,7 @@ pub(crate) mod testing {
 
     /// Returns the carried limbs of the Montgomery form of `element` plus `(bound - 1) * p`, in
     /// `N` limbs of `BITS` bits.
-    pub(crate) fn lift<const N: usize, const BITS: u32>(element: Element, bound: u64) -> [u64; N] {
+    pub fn lift<const N: usize, const BITS: u32>(element: Element, bound: u64) -> [u64; N] {
         const { assert!(N as u32 * BITS == R_BITS) };
         let value = limbs_from_words::<N, BITS>(reference::mul(element, power_of_two(R_BITS)));
         let offset = multiple::<N, BITS>(bound - 1);
@@ -538,7 +519,7 @@ pub(crate) mod testing {
     /// The top limb is `bound * t - 1` for the top limb `t` of `p`, so the limbs hold
     /// `bound * t * 2^(BITS * (N - 1)) - 1`, which is below `bound * p` and, since `t` exceeds
     /// `bound`, at least `(bound - 1) * p`.
-    pub(crate) fn widest<const N: usize, const BITS: u32>(bound: u64) -> Element {
+    pub fn widest<const N: usize, const BITS: u32>(bound: u64) -> Element {
         let mask = (1 << BITS) - 1;
         let top = bound * multiple::<N, BITS>(1)[N - 1] - 1;
         assert!(top <= mask, "bound exceeds the top limb");
@@ -557,26 +538,26 @@ pub(crate) mod testing {
     }
 
     /// Returns whether `limbs` are carried limbs of `BITS` bits holding an integer below `2p`.
-    pub(crate) fn is_tight<const N: usize, const BITS: u32>(limbs: [u64; N]) -> bool {
+    pub fn is_tight<const N: usize, const BITS: u32>(limbs: [u64; N]) -> bool {
         let twice = multiple::<N, BITS>(2);
         limbs.iter().all(|limb| *limb >> BITS == 0) && limbs.iter().rev().lt(twice.iter().rev())
     }
 
     /// Returns a value holding `elements` lifted to integer bound `bound`, one per lane.
-    pub(crate) fn loose<S: Simd, F: Positional<S>>(simd: S, elements: &[Element], bound: u64) -> F {
+    pub fn loose<S: Simd, F: Positional<S>>(simd: S, elements: &[Element], bound: u64) -> F {
         let lanes: Vec<F::Raw> = elements.iter().map(|e| F::lifted(*e, bound)).collect();
         F::from_raw(simd, &lanes, bound)
     }
 
     /// Selects a positional representation for every backend.
-    pub(crate) trait Family {
+    pub trait Family {
         /// The representation on backend `S`.
         type Value<S: Simd>: Positional<S>;
     }
 
     /// A group of formulas over positional values.
     #[derive(Clone, Copy, Debug)]
-    pub(crate) enum Formulas {
+    pub enum Formulas {
         /// Additions, subtractions, negations, doublings, and stores, which never reduce.
         Linear,
         /// Products of values with any bounds, and of uncarried sums.
@@ -852,7 +833,7 @@ pub(crate) mod testing {
     }
 
     /// Checks a formula of `formulas` in the representation `R` on a backend drawn from `u`.
-    pub(crate) fn run_formulas<R: Family>(
+    pub fn run_formulas<R: Family>(
         formulas: Formulas,
         u: &mut Unstructured<'_>,
     ) -> arbitrary::Result<()> {
@@ -879,7 +860,7 @@ pub(crate) mod testing {
 
     /// Checks that debug builds reject values beyond the integer, limb, and multiplier limits.
     #[cfg(test)]
-    pub(crate) fn check_limits<S: Simd, F: Positional<S>>(simd: S) {
+    pub fn check_limits<S: Simd, F: Positional<S>>(simd: S) {
         use std::panic::{AssertUnwindSafe, catch_unwind};
 
         if !cfg!(debug_assertions) {

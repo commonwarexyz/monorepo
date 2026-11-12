@@ -4,7 +4,7 @@ pub mod arithmetic;
 pub mod fp;
 pub mod fp12;
 pub mod fp2;
-pub mod fp6;
+mod fp6;
 
 /// Largest number of elements in a value, the widest representation's lane count.
 pub const MAX_LANES: usize = 16;
@@ -14,7 +14,7 @@ pub const MAX_LANES: usize = 16;
 ///
 /// The extension fields load their components with it. At most [`MAX_LANES`] items are read.
 #[inline(always)]
-pub(crate) fn gather<I, T: Copy, const N: usize>(
+pub fn gather<I, T: Copy, const N: usize>(
     gathered: &mut [[T; MAX_LANES]; N],
     items: &[I],
     components: impl Fn(&I) -> [&T; N],
@@ -31,7 +31,7 @@ pub(crate) fn gather<I, T: Copy, const N: usize>(
 ///
 /// The extension fields store their components with it. At most [`MAX_LANES`] items are written.
 #[inline(always)]
-pub(crate) fn scatter<I, T: Copy, const N: usize>(
+pub fn scatter<I, T: Copy, const N: usize>(
     gathered: &[[T; MAX_LANES]; N],
     items: &mut [I],
     mut set: impl FnMut(&mut I, [&T; N]),
@@ -53,7 +53,7 @@ pub(crate) fn scatter<I, T: Copy, const N: usize>(
 /// passing [`Field::LANES`](arithmetic::Field::LANES) as `lanes` so that the loop runs a
 /// constant number of times.
 #[inline(always)]
-pub(crate) fn lanes_of<'a, T, const N: usize>(
+pub fn lanes_of<'a, T, const N: usize>(
     items: &[&'a [T; N]],
     i: usize,
     lanes: usize,

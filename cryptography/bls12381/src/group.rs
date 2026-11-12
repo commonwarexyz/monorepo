@@ -1,6 +1,193 @@
 //! Groups of BLS12-381 and their scalar field, through the `commonware-math` algebra traits, and
 //! the pairing into the target group [`GT`].
 
+/// Implements, for the group `$group` that wraps its canonical projective coordinates and
+/// implements [`kernel::Group`] and `Neg`, the operators, the algebra traits, and the slice
+/// operations that G1 and G2 share, with `$generator` as the generator.
+///
+/// With fuzzing, the module `fuzz` it adds implements `Arbitrary` and `fuzz::Element` with
+/// `$eigenvalue` as the eigenvalue of the endomorphism.
+macro_rules! impl_group {
+    ($group:ident, generator: $generator:expr, eigenvalue: $eigenvalue:expr $(,)?) => {
+        impl ::core::fmt::Debug for $group {
+            fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                $crate::group::fmt_coordinates(stringify!($group), &self.0, f)
+            }
+        }
+
+        impl PartialEq for $group {
+            fn eq(&self, other: &Self) -> bool {
+                $crate::group::kernel::Kernel::dispatch($crate::group::kernel::Add(*self, -*other))
+                    .is_identity()
+            }
+        }
+
+        impl Eq for $group {}
+
+        impl ::commonware_math::algebra::Object for $group {}
+
+        impl<'a> ::core::ops::AddAssign<&'a Self> for $group {
+            fn add_assign(&mut self, rhs: &'a Self) {
+                *self = $crate::group::kernel::Kernel::dispatch($crate::group::kernel::Add(
+                    *self, *rhs,
+                ));
+            }
+        }
+
+        impl<'a> ::core::ops::Add<&'a Self> for $group {
+            type Output = Self;
+
+            fn add(mut self, rhs: &'a Self) -> Self {
+                self += rhs;
+                self
+            }
+        }
+
+        impl<'a> ::core::ops::SubAssign<&'a Self> for $group {
+            fn sub_assign(&mut self, rhs: &'a Self) {
+                *self += &-*rhs;
+            }
+        }
+
+        impl<'a> ::core::ops::Sub<&'a Self> for $group {
+            type Output = Self;
+
+            fn sub(mut self, rhs: &'a Self) -> Self {
+                self -= rhs;
+                self
+            }
+        }
+
+        impl ::commonware_math::algebra::Additive for $group {
+            fn zero() -> Self {
+                Self(<Self as $crate::group::kernel::Group>::IDENTITY)
+            }
+
+            fn double(&mut self) {
+                *self =
+                    $crate::group::kernel::Kernel::dispatch($crate::group::kernel::Double(*self));
+            }
+
+            /// Multiplies by the little-endian integer `bits_le` of any length, in time independent
+            /// of its value.
+            fn scale(&self, bits_le: &[u64]) -> Self {
+                $crate::group::kernel::Kernel::dispatch($crate::group::kernel::Multiply {
+                    element: *self,
+                    scalar: $crate::group::Scalar::from_words_wide(bits_le),
+                })
+            }
+        }
+
+        impl<'a> ::core::ops::MulAssign<&'a $crate::group::Scalar> for $group {
+            fn mul_assign(&mut self, rhs: &'a $crate::group::Scalar) {
+                *self = $crate::group::kernel::Kernel::dispatch($crate::group::kernel::Multiply {
+                    element: *self,
+                    scalar: *rhs,
+                });
+            }
+        }
+
+        impl<'a> ::core::ops::Mul<&'a $crate::group::Scalar> for $group {
+            type Output = Self;
+
+            fn mul(mut self, rhs: &'a $crate::group::Scalar) -> Self {
+                self *= rhs;
+                self
+            }
+        }
+
+        impl ::commonware_math::algebra::Space<$crate::group::Scalar> for $group {
+            /// Returns the sum of the points times their scalars, in variable time.
+            ///
+            /// The scalars must be public, as Lagrange coefficients and batch-verification weights
+            /// are: the running time and memory accesses depend on them. A parallel strategy may
+            /// split the points into batches of at least 256, so fewer than 512 points always run
+            /// on the calling thread.
+            fn msm(
+                points: &[Self],
+                scalars: &[$crate::group::Scalar],
+                strategy: &impl ::commonware_parallel::Strategy,
+            ) -> Self {
+                $crate::group::msm::batched(points, scalars, strategy)
+            }
+        }
+
+        impl ::commonware_math::algebra::CryptoGroup for $group {
+            type Scalar = $crate::group::Scalar;
+
+            fn generator() -> Self {
+                Self($generator)
+            }
+        }
+
+        impl $group {
+            /// Returns whether this is the identity.
+            pub(crate) fn is_identity(&self) -> bool {
+                self.0[2] == [0; _]
+            }
+
+            /// Returns the sum of the elements, as when aggregating keys or signatures.
+            ///
+            /// Costs less per element than adding the elements one at a time with `+`.
+            pub fn sum(elements: &[Self]) -> Self {
+                $crate::group::kernel::Kernel::dispatch($crate::group::kernel::Sum(elements))
+            }
+
+            /// Multiplies each element by the scalar at the same index, in place, in time
+            /// independent of the scalars' values.
+            ///
+            /// Elements beyond the scalars are unchanged, and scalars beyond the elements are
+            /// ignored. Costs less per element than multiplying the elements one at a time with
+            /// `*`.
+            pub fn mul_each(elements: &mut [Self], scalars: &[$crate::group::Scalar]) {
+                $crate::group::kernel::Kernel::dispatch($crate::group::kernel::MultiplyEach {
+                    elements,
+                    scalars,
+                });
+            }
+        }
+
+        /// Fuzzing support for this group.
+        #[cfg(any(test, feature = "fuzz"))]
+        mod fuzz {
+            use super::$group;
+            use ::arbitrary::{Arbitrary, Unstructured};
+            use ::std::{sync::LazyLock, vec::Vec};
+            use $crate::group::{
+                Scalar,
+                fuzz::{self as shared, Element},
+            };
+
+            /// The small multiples of the generator.
+            static MULTIPLES: LazyLock<Vec<$group>> = LazyLock::new(shared::table);
+
+            impl<'a> Arbitrary<'a> for $group {
+                fn arbitrary(u: &mut Unstructured<'a>) -> ::arbitrary::Result<Self> {
+                    Ok(shared::element(u)?.0)
+                }
+            }
+
+            impl Element for $group {
+                fn eigenvalue() -> Scalar {
+                    $eigenvalue
+                }
+
+                fn multiples() -> &'static [Self] {
+                    &MULTIPLES
+                }
+
+                fn sum(elements: &[Self]) -> Self {
+                    Self::sum(elements)
+                }
+
+                fn mul_each(elements: &mut [Self], scalars: &[Scalar]) {
+                    Self::mul_each(elements, scalars);
+                }
+            }
+        }
+    };
+}
+
 mod g1;
 mod g2;
 mod kernel;

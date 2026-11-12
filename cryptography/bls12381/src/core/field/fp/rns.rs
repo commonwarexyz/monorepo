@@ -72,10 +72,10 @@ use parameters::{
 };
 
 /// Number of moduli in each basis.
-pub const MODULI: usize = 8;
+const MODULI: usize = 8;
 
 /// Number of residues in an element: the first basis, then the second.
-pub const RESIDUES: usize = 2 * MODULI;
+const RESIDUES: usize = 2 * MODULI;
 
 /// Bits of each modulus and of each digit of a loaded integer.
 const BITS: u32 = 50;
@@ -87,7 +87,7 @@ const WORD: u32 = 52;
 const MASK: u64 = (1 << WORD) - 1;
 
 /// Largest integer bound of any value, in units of `p`.
-pub const LIMIT: u64 = 1 << 11;
+const LIMIT: u64 = 1 << 11;
 
 /// Limbs of the signed representation of [`montgomery::invert`] that hold the modulus with two
 /// spare bits.
@@ -104,14 +104,14 @@ const MODULUS_N0: u64 = montgomery::negated_inverse(MODULUS[0]);
 const LIFT: u64 = 2 * MODULI as u64;
 
 /// Largest integer bound, in units of `p^2`, of a sum of products that `Field::reduce` accepts.
-pub const BUDGET: u64 = M_OVER_P;
+const BUDGET: u64 = M_OVER_P;
 
 /// Integer bound, in units of `p`, of a value reduced from a sum within [`BUDGET`].
-pub const REDUCED: u64 = 1 + LIFT;
+const REDUCED: u64 = 1 + LIFT;
 
 /// Bias of `Field::product_sub`, in units of `p^2`: the largest bound of a subtrahend, which covers
 /// [`SUM_PRODUCTS`] products of factors summing at most two reduced values.
-pub const SUB_BIAS: u64 = SUM_PRODUCTS as u64 * (2 * REDUCED) * (2 * REDUCED);
+const SUB_BIAS: u64 = SUM_PRODUCTS as u64 * (2 * REDUCED) * (2 * REDUCED);
 
 /// Most terms a sum of products may hold.
 const TERMS: u64 = 1 << 10;
@@ -643,7 +643,7 @@ impl<S: X86V4C> Rns<S> {
     ///
     /// Each residue must be at most twice its modulus.
     #[inline(always)]
-    pub fn from_residues(simd: S, residues: &[u64; RESIDUES], bound: u64) -> Self {
+    fn from_residues(simd: S, residues: &[u64; RESIDUES], bound: u64) -> Self {
         let (m, n) = residues.split_at(MODULI);
         Self {
             m: simd.u64_load(m),
@@ -656,7 +656,7 @@ impl<S: X86V4C> Rns<S> {
     /// without any conversion, for a value bounded by `bound * p`.
     #[cfg(any(test, feature = "fuzz"))]
     #[inline(always)]
-    pub fn to_residues(self, simd: S, bound: u64) -> [u64; RESIDUES] {
+    fn to_residues(self, simd: S, bound: u64) -> [u64; RESIDUES] {
         self.bound.assert_le(bound);
         let mut residues = [[0; RESIDUES]];
         Field::store_raw::<LIMIT>(self, simd, &mut residues);

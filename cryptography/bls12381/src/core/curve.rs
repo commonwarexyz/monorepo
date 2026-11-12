@@ -8,6 +8,10 @@ use commonware_simd::Simd;
 pub mod g1;
 pub mod g2;
 
+/// `|x|`, the magnitude of the BLS parameter `x = -|x|` of BLS12-381, from which the base field
+/// modulus, the group order `r = x^4 - x^2 + 1`, the endomorphisms, and the pairing derive.
+pub const X_ABS: u64 = 0xd201_0000_0001_0000;
+
 /// Projective points of one group, one per lane of a base field representation.
 pub trait Points<S: Simd>: Copy {
     /// Canonical projective coordinates of one point.
@@ -71,7 +75,7 @@ pub mod fuzz {
 
     /// A curve `y^2 = x^3 + b`, with reference arithmetic over its coordinate field and the
     /// formulas under test.
-    pub(crate) trait Curve {
+    pub trait Curve {
         /// Name of the curve in failure messages.
         const NAME: &'static str;
 

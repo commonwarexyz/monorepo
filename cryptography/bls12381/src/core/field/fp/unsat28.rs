@@ -42,7 +42,7 @@ use commonware_simd::{Neon, Operation, Simd};
 use core::hint::black_box;
 
 /// Number of limbs in a field element.
-pub const LIMBS: usize = 14;
+const LIMBS: usize = 14;
 
 /// Bits per carried limb.
 const LIMB_BITS: u32 = 28;
@@ -53,7 +53,7 @@ const MASK: u32 = (1 << LIMB_BITS) - 1;
 /// Largest integer bound of any value, in units of `p`.
 ///
 /// Because `p < 2^381`, `LIMIT * p < 2^392` and `p / 2^392 < 1 / LIMIT`.
-pub const LIMIT: u64 = {
+const LIMIT: u64 = {
     assert!(MODULUS[WORDS - 1] < 1 << 61);
     1 << (LIMBS as u32 * LIMB_BITS - 381)
 };
@@ -63,7 +63,7 @@ pub const LIMIT: u64 = {
 /// The multiplier accepts any 32-bit limbs, but a product column must stay below `2^64`: it sums
 /// at most [`LIMBS`] products of multiplicand limbs below `SLACK * 2^28`, [`LIMBS`] reduction
 /// products of 28-bit factors, and a carry below `2^36`.
-pub const SLACK: u64 = {
+const SLACK: u64 = {
     let slack: u64 = 4;
     assert!(slack <= LIMB_LIMIT);
     let products = (slack * slack + 1) as u128 * LIMBS as u128;
@@ -75,7 +75,7 @@ pub const SLACK: u64 = {
 ///
 /// Limbs stay below `15 * 2^28`, so each still fits its 32-bit lane after receiving a carry,
 /// which is at most `15`.
-pub const LIMB_LIMIT: u64 = (1 << (32 - LIMB_BITS)) - 1;
+const LIMB_LIMIT: u64 = (1 << (32 - LIMB_BITS)) - 1;
 
 /// The modulus `p` in limbs.
 const P: [u32; LIMBS] = limbs_from_words(MODULUS);
