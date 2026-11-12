@@ -28,6 +28,15 @@ Document public APIs clearly. Use `//!` for module docs, `///` for items, and in
 
 ## Tests and validation
 
+### Toolchain policy
+
+- Floating `stable`: builds and tests must pass before merging.
+- Pinned MSRV: must pass before merging; the version lives in `Cargo.toml`.
+- Floating `nightly`: informational; report and investigate failures.
+- Clippy/rustfmt: pin when needed to avoid lint and formatting churn. Keep their versions centralized in the `justfile` for local checks and CI.
+
+Compiler upgrades are inputs CI should test immediately so we catch compatibility regressions when Rust releases ship.
+
 Use `just` commands, which run tests through `nextest`. Start with the narrowest useful check:
 
 ```bash
