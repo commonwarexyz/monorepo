@@ -3,7 +3,13 @@
 use super::harness::*;
 use crate::multimmit::marshal::{Error, OutputIndex};
 use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _};
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 #[test]
 fn a_node_delivers_its_staged_blocks_in_proven_order() {
@@ -30,6 +36,55 @@ fn a_node_delivers_its_staged_blocks_in_proven_order() {
             })
             .await;
         assert_eq!(progress.delivered.get(), expected.len() as u64);
+    });
+}
+
+#[test]
+fn a_progress_subscription_waits_for_progress() {
+    runner(42).start(|context| async move {
+        let mut harness = Harness::new(context.child("harness"), 42, 1).await;
+        harness.applications[0].set_auto(false);
+        harness.start(0).await;
+        harness.script.certify([2, 1]);
+        let mailbox = harness.mailbox(0);
+        harness.script.stage(&mailbox, 0).await;
+        harness.settle(Duration::from_millis(50)).await;
+        let initial = mailbox.progress().await.unwrap();
+
+        // Nothing changes, so the subscription stays pending.
+        let answered = Arc::new(AtomicBool::new(false));
+        let subscription = context.child("subscriber").spawn({
+            let mailbox = mailbox.clone();
+            let answered = Arc::clone(&answered);
+            move |_| async move {
+                let progress = mailbox.subscribe_progress(initial).await;
+                answered.store(true, Ordering::SeqCst);
+                progress
+            }
+        });
+        harness.settle(Duration::from_millis(300)).await;
+        assert!(!answered.load(Ordering::SeqCst));
+
+        // A proof advances progress and answers it.
+        harness.script.prove(&mailbox, 0);
+        let progress = subscription.await.unwrap().unwrap();
+        assert_ne!(progress, initial);
+        assert!(progress.proven > initial.proven || progress.delivered > initial.delivered);
+
+        // A subscription from a stale progress answers at once with the current one.
+        let current = mailbox.subscribe_progress(initial).await.unwrap();
+        assert_eq!(current, mailbox.progress().await.unwrap());
+
+        // Only an acknowledgement advances the acknowledged output.
+        let expected = harness.script.ordered();
+        harness.wait_delivered(0, expected.len()).await;
+        let mut progress = mailbox.progress().await.unwrap();
+        assert_eq!(progress.acknowledged.get(), 0);
+        harness.applications[0].acknowledge_next();
+        while progress.acknowledged.get() == 0 {
+            progress = mailbox.subscribe_progress(progress).await.unwrap();
+        }
+        assert_eq!(progress.acknowledged.get(), 1);
     });
 }
 
