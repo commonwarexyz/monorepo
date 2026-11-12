@@ -486,10 +486,14 @@ impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
     ///
     /// Recovery keeps exactly the checkpointed state. Each section below `section` is adopted at
     /// its validated terminal boundary, `section` is truncated to `index size`, and everything
-    /// after it is removed. A prune interrupted between its index and value removals can leave
-    /// value sections older than the oldest retained index section, and recovery removes them too.
-    /// A missing or damaged boundary the checkpoint covers fails init with [Error::Corruption], and
-    /// interior damage below a boundary surfaces lazily as read errors.
+    /// after it is removed without being opened. A prune interrupted between its index and value
+    /// removals can leave value sections older than the oldest retained index section, and
+    /// recovery removes them too.
+    ///
+    /// A missing or damaged boundary the checkpoint covers fails init with [Error::Corruption],
+    /// and interior damage below a boundary surfaces lazily as read errors. Every blob name in
+    /// the index and value partitions must still decode as a section number, including those
+    /// after the checkpoint.
     ///
     /// Callers must only provide a checkpoint that was durably synced before it was published. The
     /// empty checkpoint `(0, 0)` opens empty storage without creating or writing any blob.
@@ -918,7 +922,12 @@ impl<E: Context, I: Record, V: CodecShared> Recovery<E, I, V> {
         }
     }
 
-    /// Finish marker-aware startup recovery and return the tracked journal.
+    /// Returns the journal.
+    ///
+    /// Fails with [Error::ReplayFailed] when the recovery was not fully drained, yielded an
+    /// error, or was interrupted. Otherwise each section is durably truncated at its first
+    /// invalid entry, values no retained entry references are released, and the retained
+    /// lengths are staged as the next markers.
     pub async fn finish(self) -> Result<Oversized<E, I, V>, Error> {
         if self.in_progress || self.interrupted || self.validation.failed {
             return Err(Error::ReplayFailed);
@@ -2594,7 +2603,8 @@ mod tests {
         });
     }
 
-    /// The tracked startup replay passes the caller's read options to every backing index read.
+    /// The tracked startup replay passes the caller's read options to every index read it makes
+    /// once the index writers are open.
     #[test_traced]
     fn test_oversized_replay_propagates_read_options() {
         let executor = deterministic::Runner::default();
