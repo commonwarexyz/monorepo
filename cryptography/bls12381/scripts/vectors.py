@@ -228,7 +228,7 @@ def pairing(p, q):
     """Returns the cube of the optimal ate pairing of p in G1 and q in G2.
 
     The addition chain of the final exponentiation in src/core/pairing.rs computes the cube, which
-    is as bilinear and as far from degenerate as the pairing itself, since 3 does not divide r.
+    is bilinear and nondegenerate like the pairing itself, since 3 does not divide r.
     """
     f = FP12_ONE
     t = q
@@ -306,7 +306,7 @@ pub const G2_MULTIPLES: [([u8; Scalar::BYTES], [[u8; FP2_BYTES]; 2]); {len(SCALA
 {emit_multiples("G2", Fp2, G2)}
 ];
 
-/// The pairing of the generators.
+/// The pairing of the generators, as the crate computes it: the cube of the optimal ate pairing.
 pub const PAIRING: [u8; FP12_BYTES] = {hex_literal(fp12_hex(e), "")};
 """
 
