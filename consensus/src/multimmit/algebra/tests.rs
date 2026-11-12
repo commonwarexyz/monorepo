@@ -234,8 +234,8 @@ fn extension_ancestry_matches_full_vote_paths() {
                     body,
                 )
                 .unwrap();
-                for chain in 0..config.chains() {
-                    full.insert(&reference.paths[chain]).unwrap();
+                for path in reference.paths.iter().take(config.chains()) {
+                    full.insert(path).unwrap();
                 }
                 paths.validate_extensions(&extensions).unwrap();
                 paths.index_extensions(&mut extensions).unwrap();

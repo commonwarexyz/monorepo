@@ -82,6 +82,11 @@ pub(crate) enum Message<H: Hasher, S: Scheme, B: Body<H>> {
     Progress {
         reply: Reply<MarshalProgress<H::Digest>>,
     },
+    /// Return progress once it differs from `since`.
+    SubscribeProgress {
+        since: MarshalProgress<H::Digest>,
+        reply: Reply<MarshalProgress<H::Digest>>,
+    },
 }
 
 /// Most verified L-QCs the feed holds; older ones are dropped first.

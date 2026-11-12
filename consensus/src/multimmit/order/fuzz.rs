@@ -192,9 +192,7 @@ pub(crate) fn exercise(input: &[u8]) {
         let commitment = record.commitment::<Sha256>();
         // The symbolic expansion yields the same dense sequence, also when resumed from the cut
         // it reached part way through.
-        let fact = Arc::new(
-            SweepFact::new(frontier(&target), proposed_heights.clone(), settled.clone()).unwrap(),
-        );
+        let fact = Arc::new(SweepFact::new(frontier(&target), proposed_heights, settled).unwrap());
         let record = Arc::new(record);
         let end = order_cut
             .sweep(&fact, &lanes)
