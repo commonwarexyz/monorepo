@@ -301,6 +301,8 @@ where
     floor_waiters: Vec<floor::Waiter<S, H::Digest>>,
     /// Certificate requests waiting for answers.
     certificate_waiters: Vec<custody::CertificateWaiter<S, H::Digest>>,
+    /// Progress subscriptions waiting for progress to differ from theirs.
+    progress_waiters: Vec<custody::ProgressWaiter<H::Digest>>,
 }
 
 impl<E, H, S, B, P, R, V, A> Ledger<E, H, S, B, P, R, V, A>
@@ -395,6 +397,7 @@ where
             install: None,
             floor_waiters: Vec::new(),
             certificate_waiters: Vec::new(),
+            progress_waiters: Vec::new(),
             limits,
             meta,
             context,
@@ -511,6 +514,7 @@ where
         self.drive_custody();
         self.drive_storage()?;
         self.drive_meta();
+        self.drive_progress();
         Ok(())
     }
 
