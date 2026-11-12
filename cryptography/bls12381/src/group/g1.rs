@@ -35,8 +35,9 @@ impl Group for G1 {
 
     const IDENTITY: Coordinates = IDENTITY;
 
-    // The lanes' sums cost additions of their own, and their pass over every lane costs as much
-    // whether the lanes are full or not, so a few elements finish sooner one at a time.
+    // Up to these counts, residues, which hold one element at a time, finish sooner than Unsat49:
+    // a pass of Unsat49 costs the same however many of its lanes hold elements, and its sum ends
+    // with additions across the lanes.
     const SUM_BATCH: Option<usize> = Some(MAX_LANES);
     const MULTIPLY_BATCH: Option<usize> = Some(8);
 
@@ -123,7 +124,8 @@ impl Additive for G1 {
         *self = Double(*self).dispatch();
     }
 
-    /// Multiplies by an integer of any length without branching on its value.
+    /// Multiplies by the little-endian integer `bits_le` of any length, in time independent of
+    /// its value.
     fn scale(&self, bits_le: &[u64]) -> Self {
         Multiply {
             element: *self,
