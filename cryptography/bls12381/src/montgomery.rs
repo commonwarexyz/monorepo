@@ -29,8 +29,7 @@ pub(crate) const fn is_below<const N: usize>(value: &[u64; N], modulus: &[u64; N
     borrow == 1
 }
 
-/// Returns `value - modulus` when `value >= modulus`, where `carry` extends `value` with one
-/// more word.
+/// Returns `v mod modulus` for `v = value + carry 2^(64 N) < 2 modulus`.
 pub(crate) const fn subtract_modulus<const N: usize>(
     value: [u64; N],
     carry: u64,
@@ -166,8 +165,8 @@ const LIMB: u32 = 62;
 const LIMB_MASK: u64 = (1 << LIMB) - 1;
 
 /// Division steps one batch of [`invert`] takes: the transition matrix of a batch starts
-/// scaled by `8`, so its entries stay within `2^62` in magnitude and its determinant is
-/// `2^62`.
+/// scaled by `8`, so it ends scaled by `2^62`, its entries stay within `2^62` in magnitude,
+/// and its determinant is `2^65`.
 const STEPS: u32 = 59;
 
 /// Returns `m^(-1) mod 2^62` for an odd modulus word `m`.
@@ -252,8 +251,8 @@ const fn divsteps(mut zeta: i64, f0: u64, g0: u64) -> (i64, [i64; 4]) {
     (zeta, [u as i64, v as i64, q as i64, r as i64])
 }
 
-/// Applies the transition matrix to `(f, g)`, whose low 62 bits of the images are zero, and divides
-/// by `2^62`.
+/// Sets `(f, g)` to `(u f + v g, q f + r g) / 2^62` for the transition matrix `[u, v, q, r]`,
+/// whose numerators [`divsteps`] makes divisible by `2^62`.
 const fn update_fg<const L: usize>(f: &mut [i64; L], g: &mut [i64; L], [u, v, q, r]: [i64; 4]) {
     let mut cf = u as i128 * f[0] as i128 + v as i128 * g[0] as i128;
     let mut cg = q as i128 * f[0] as i128 + r as i128 * g[0] as i128;
@@ -498,7 +497,8 @@ pub mod fuzz {
             remainder(&difference(MODULUS, &a)),
             "-{a:x?}"
         );
-        // A Montgomery product divides by 2^384, so it times 2^384 is the product.
+        // A Montgomery product divides by 2^384, so the Montgomery product times 2^384 is
+        // congruent to the product.
         for a in [a, wide] {
             let mut shifted = [0; 2 * WORDS];
             shifted[WORDS..].copy_from_slice(&mul(&a, &b, &MODULUS, reference::INV));
