@@ -65,6 +65,14 @@ impl<F: Family, E: Context, D: Digest> Frontier<F, E, D> {
         self.write((location, pins, true)).await
     }
 
+    /// Durably record genesis, discarding the boundary and any incomplete sync.
+    pub(crate) async fn reset(self) -> Result<Self, Error> {
+        if self.record() == Record::default() {
+            return Ok(self);
+        }
+        self.write(Record::default()).await
+    }
+
     /// Remove the durable frontier.
     pub(crate) async fn destroy(self) -> Result<(), Error> {
         Ok(self.metadata.destroy().await?)

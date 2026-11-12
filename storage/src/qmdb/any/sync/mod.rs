@@ -146,6 +146,13 @@ where
         Ok(self)
     }
 
+    async fn discard_local_state(
+        context: Self::Context,
+        config: &Self::Config,
+    ) -> Result<(), qmdb::Error<F>> {
+        Ok(authenticated::discard_frontier::<F, _, H, S>(context, &config.merkle).await?)
+    }
+
     async fn local_pinned_nodes(
         context: Self::Context,
         config: &Self::Config,

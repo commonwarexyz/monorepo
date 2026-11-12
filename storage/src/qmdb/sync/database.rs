@@ -56,11 +56,12 @@ impl<C: Clone + Send + Sync + 'static, S: Strategy> Config for crate::qmdb::comp
 /// A database that [`sync`](super::sync) can build from operations fetched from a [`Source`].
 ///
 /// Every authenticated QMDB variant implements this trait, and callers drive it through
-/// [`sync`](super::sync): the engine calls [`Self::local_pinned_nodes`] when a sync journal left
-/// on disk already reaches the target, calls [`Self::mark_sync_incomplete`] before appending its
-/// first fetched operation, fetches and verifies the remaining operations, builds the database with
-/// [`Self::from_sync_result`], checks [`Self::ops_root`] against the target, and only then calls
-/// [`Self::persist_sync_result`].
+/// [`sync`](super::sync): the engine calls [`Self::discard_local_state`] when the sync journal
+/// left on disk holds no operation of the target's range and [`Self::local_pinned_nodes`] when
+/// it already reaches the target, calls [`Self::mark_sync_incomplete`] before appending its first
+/// fetched operation to a nonempty journal, fetches and verifies the remaining operations, builds
+/// the database with [`Self::from_sync_result`], checks [`Self::ops_root`] against the target, and
+/// only then calls [`Self::persist_sync_result`].
 ///
 /// [`Source`]: super::Source
 pub trait Database: Sized + Send {
@@ -92,7 +93,9 @@ pub trait Database: Sized + Send {
     /// [`Self::persist_sync_result`] records the synced state.
     ///
     /// Appended operations follow the local ones the sync keeps, which it verifies only at the end.
-    /// Databases whose journal holds nothing across a restart must explicitly return `Ok(())`.
+    /// The engine skips the mark for a journal that starts empty at zero, whose operations are all
+    /// verified against the target. Databases whose journal holds nothing across a restart must
+    /// explicitly return `Ok(())`.
     fn mark_sync_incomplete(
         context: Self::Context,
         config: &Self::Config,
@@ -116,6 +119,18 @@ pub trait Database: Sized + Send {
     fn persist_sync_result(
         self,
     ) -> impl Future<Output = Result<Self, crate::qmdb::Error<Self::Family>>> + Send;
+
+    /// Durably discard persisted state derived from the operations of the sync journal.
+    ///
+    /// The engine calls this when the sync journal it opens holds no operation of the target's
+    /// range, before it appends any fetched operation. State derived from operations the journal
+    /// held earlier would otherwise be read as describing the operations fetched in their place.
+    /// Implementations with no persisted state that would be read that way must explicitly
+    /// return `Ok(())`.
+    fn discard_local_state(
+        context: Self::Context,
+        config: &Self::Config,
+    ) -> impl Future<Output = Result<(), crate::qmdb::Error<Self::Family>>> + Send;
 
     /// Return pinned nodes for the target computed from local state, if it can provide them.
     ///

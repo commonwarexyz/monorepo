@@ -10,7 +10,7 @@ use commonware_conformance::conformance_tests;
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    BufMut, Supervisor as _,
+    BufMut, ReadOptions, Supervisor as _,
     buffer::paged::CacheRef,
     conformance::{StorageConformance, StorageWorkload},
 };
@@ -18,6 +18,7 @@ use commonware_utils::{NZU16, NZU64, NZUsize};
 use core::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 use oversized::Record;
 use rand::RngExt as _;
+use std::collections::BTreeMap;
 
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(1024);
 const REPLAY_BUFFER: NonZeroUsize = NZUsize!(1024);
@@ -178,8 +179,14 @@ impl StorageWorkload for SegmentedFixedWorkload {
             page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: WRITE_BUFFER,
         };
-        let mut journal =
-            segmented_fixed::Journal::<_, u64>::init(context.child("journal"), config).await?;
+        let mut journal = segmented_fixed::Journal::<_, u64>::preflight_floors(
+            context.child("journal"),
+            config,
+            &BTreeMap::new(),
+        )
+        .await?
+        .finish()
+        .await?;
 
         let items_count = context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4);
         let mut data_to_write = vec![0u64; items_count];
@@ -210,7 +217,10 @@ impl<const COMPRESSED: bool> StorageWorkload for SegmentedGlobWorkload<COMPRESSE
             codec_config: (RangeCfg::new(0..256), ()),
             write_buffer: WRITE_BUFFER,
         };
-        let mut journal = glob::Glob::<_, Vec<u8>>::init(context.child("journal"), config).await?;
+        let mut journal: glob::Glob<_, Vec<u8>> =
+            glob::Recovery::init(context.child("journal"), config)
+                .await?
+                .finish();
 
         let items_count = context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4);
         let mut data_to_write = vec![Vec::new(); items_count];
@@ -243,10 +253,15 @@ impl<const COMPRESSED: bool> StorageWorkload for SegmentedVariableWorkload<COMPR
             write_buffer: WRITE_BUFFER,
             compression: COMPRESSED.then_some(3),
             codec_config: (RangeCfg::new(0..256), ()),
+            replay_buffer: REPLAY_BUFFER,
         };
-        let mut journal =
-            segmented_variable::Journal::<_, Vec<u8>>::init(context.child("journal"), config)
-                .await?;
+        let mut journal = segmented_variable::Journal::<_, Vec<u8>>::init(
+            context.child("journal"),
+            config,
+            ReadOptions::default(),
+        )
+        .await?
+        .finish()?;
 
         let items_count = context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4);
         let mut data_to_write = vec![Vec::new(); items_count];
@@ -330,9 +345,12 @@ impl<const COMPRESSED: bool> StorageWorkload for SegmentedOversizedWorkload<COMP
             compression: COMPRESSED.then_some(3),
             codec_config: (RangeCfg::new(0..256), ()),
         };
-        let mut journal =
-            oversized::Oversized::<_, TestEntry, Vec<u8>>::init(context.child("journal"), config)
-                .await?;
+        let mut journal = oversized::Oversized::<_, TestEntry, Vec<u8>>::init_with_checkpoint(
+            context.child("journal"),
+            config,
+            (0, 0),
+        )
+        .await?;
 
         let items_count = context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4);
         let mut data_to_write = vec![Vec::new(); items_count];

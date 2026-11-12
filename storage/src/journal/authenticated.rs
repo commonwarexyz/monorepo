@@ -65,7 +65,7 @@ use core::{
     num::{NonZeroU64, NonZeroUsize},
     ops::Range,
 };
-use futures::{Stream, TryFutureExt as _, try_join};
+use futures::Stream;
 use thiserror::Error;
 use tracing::{debug, warn};
 
@@ -820,16 +820,16 @@ where
     /// Destroy the authenticated journal, removing all data from disk.
     #[boxed]
     pub async fn destroy(self) -> Result<(), Error<F>> {
-        // `try_join!` contains an await boundary, so destructure first to avoid
-        // stack growth from retaining the entire `self` in the future.
+        // Destructure before the first await boundary to avoid stack growth from retaining the
+        // entire `self` in the future.
         let Self {
             journal, frontier, ..
         } = self;
-        try_join!(
-            journal.destroy().map_err(Error::Journal),
-            frontier.destroy().map_err(Error::Journal),
-        )?;
 
+        // The journal is the source of truth, so it goes first. Reopening an empty journal
+        // discards whatever frontier remains beside it.
+        journal.destroy().await?;
+        frontier.destroy().await?;
         Ok(())
     }
 
@@ -1043,6 +1043,13 @@ where
         hasher: StandardHasher<H>,
     ) -> Result<Journal<F, E, C, H, S>, Error<F>> {
         let (journal, _) = journal.prune(*merkle.bounds().start).await?;
+
+        // Record genesis over a frontier that [Journal::prepare] discarded.
+        let frontier = if *merkle.bounds().start == 0 {
+            frontier.reset().await?
+        } else {
+            frontier
+        };
         Ok(Journal {
             journal,
             merkle,
@@ -1128,8 +1135,10 @@ where
 
     /// Recover a journal whose last matching item ends at or below `max_size`.
     ///
-    /// Initialization durably discards the suffix before returning. A cap below retained
-    /// history, or pruned history with no matching retained item, returns a pruning error.
+    /// Initialization durably discards the suffix before returning. When the journal retains
+    /// its first item and no item matches at or below `max_size`, it is emptied and its frontier
+    /// discarded, whatever that frontier recorded. A cap below retained history, or pruned
+    /// history with no matching retained item, returns a pruning error.
     #[boxed]
     pub async fn init_at_most(
         context: E,
@@ -1163,35 +1172,44 @@ where
     ) -> Result<Recovery<F, E, C, H, S>, Error<F>> {
         let frontier =
             Frontier::open(context.child("frontier"), merkle_cfg.partition.clone()).await?;
-        if frontier.sync_incomplete() {
-            return Err(Error::IncompleteSync);
-        }
-        let (boundary, pins) = frontier.boundary();
-        let merkle_context = context.child("merkle");
-        let merkle = Tree::new(boundary, pins, &merkle_cfg, &merkle_context)?;
-
         let journal = C::recover(context.child("journal"), journal_cfg, max_size).await?;
         let bounds = journal.bounds();
-        let boundary = *boundary;
-        if boundary < bounds.start
-            || (boundary > bounds.end && max_size.is_none_or(|max| max >= boundary))
-        {
-            return Err(merkle::Error::DataCorrupted("frontier outside operation journal").into());
-        }
 
         // An unbounded reopen preserves a fully pruned journal's append position. Other
         // selections need a retained matching item, except for empty genesis.
-        let selected_end = if max_size.is_none() && boundary == bounds.end {
+        let (boundary, pins) = frontier.boundary();
+        let fully_pruned = max_size.is_none() && *boundary == bounds.end;
+        let selected_end = if fully_pruned {
             bounds.end
         } else {
-            let selected_end = journal
+            journal
                 .last_matching(max_size.unwrap_or(u64::MAX), predicate)
-                .await?;
-            if boundary != 0 && selected_end <= boundary {
-                return Err(JournalError::ItemPruned(boundary).into());
-            }
-            selected_end
+                .await?
         };
+
+        // A selection that is empty at position zero leaves nothing to authenticate, so the
+        // frontier beside it is discarded, whatever it recorded. [Recovery::assemble] records
+        // genesis once the emptied journal is durable.
+        let (boundary, pins) = if bounds.start == 0 && selected_end == 0 {
+            (Location::new(0), Vec::new())
+        } else {
+            if frontier.sync_incomplete() {
+                return Err(Error::IncompleteSync);
+            }
+            if *boundary < bounds.start
+                || (*boundary > bounds.end && max_size.is_none_or(|max| max >= *boundary))
+            {
+                return Err(
+                    merkle::Error::DataCorrupted("frontier outside operation journal").into(),
+                );
+            }
+            if !fully_pruned && *boundary != 0 && selected_end <= *boundary {
+                return Err(JournalError::ItemPruned(*boundary).into());
+            }
+            (boundary, pins)
+        };
+        let merkle_context = context.child("merkle");
+        let merkle = Tree::new(boundary, pins, &merkle_cfg, &merkle_context)?;
         Ok(Recovery {
             context: context.child("replay"),
             journal,
@@ -1529,6 +1547,25 @@ where
     Ok(())
 }
 
+/// Durably reset the frontier under `config` to genesis before a state sync appends operations
+/// in place of every operation the journal held.
+pub(crate) async fn discard_frontier<F, E, H, S>(
+    context: E,
+    config: &Config<S>,
+) -> Result<(), Error<F>>
+where
+    F: Family,
+    E: Context,
+    H: Hasher,
+    S: Strategy,
+{
+    Frontier::<F, E, H::Digest>::open(context, config.partition.clone())
+        .await?
+        .reset()
+        .await?;
+    Ok(())
+}
+
 /// The digests pinned at `location`, computed from the local frontier if its rebuilt root matches
 /// `expected_root`. Returns `None` if the frontier cannot cover `location` or its root differs.
 pub(crate) async fn pinned_nodes_from_frontier<F, E, C, H, S>(
@@ -1593,6 +1630,7 @@ mod tests {
         journal::contiguous::{
             fixed::{Config as JConfig, Journal as ContiguousJournal},
             tests::replay_items,
+            variable::{Config as VConfig, Journal as VariableJournal},
         },
         merkle::{
             Bagging::{BackwardFold, ForwardFold},
@@ -1610,7 +1648,7 @@ mod tests {
     use commonware_macros::{test_collect_traces, test_traced};
     use commonware_parallel::{Rayon, Sequential, mocks::Explorer, rayon::ThreadPoolBuilder};
     use commonware_runtime::{
-        Runner as _, Strategizer as _, Supervisor as _,
+        Error as RuntimeError, Runner as _, Storage as _, Strategizer as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
         mocks::{
@@ -3005,8 +3043,9 @@ mod tests {
         deterministic::Runner::default().start(incomplete_sync_refuses_to_open::<mmb::Family>);
     }
 
-    /// A frontier whose pins don't match its boundary, or whose boundary is not a valid location,
-    /// fails the open instead of panicking. An invalid location fails to decode.
+    /// A frontier beside retained operations whose pins don't match its boundary, or whose boundary
+    /// is not a valid location, fails the open instead of panicking. An invalid location fails to
+    /// decode.
     #[test]
     fn test_malformed_frontier_fails_open() {
         deterministic::Runner::default().start(|context| async move {
@@ -3018,6 +3057,8 @@ mod tests {
             ];
             for (index, (boundary, pins)) in records.into_iter().enumerate() {
                 let suffix = format!("malformed-frontier-{index}");
+                let journal = create_journal_with_ops::<F>(context.child("ops"), &suffix, 10);
+                drop(journal.await);
                 let frontier = Frontier::<F, _, Digest>::open(
                     context.child("write"),
                     merkle_config(&suffix).partition,
@@ -5036,5 +5077,399 @@ mod tests {
     #[test]
     fn test_fully_pruned_authenticated_reopens_mmb() {
         deterministic::Runner::default().start(fully_pruned_authenticated_reopens::<mmb::Family>);
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5668.
+    ///
+    /// A destroy dropped while the operation journal's clear is still being staged has removed
+    /// nothing, so the pruned journal reopens at its last commit.
+    #[test_traced("INFO")]
+    fn issue_5668_regression_destroy_stages_journal_clear_before_removal() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Commit and prune, so the retained operations depend on the frontier's pins.
+            let pending = PendingSyncs::default();
+            let setup = async {
+                let mut journal =
+                    open_delayed_journal(&context, "first", "destroy_staged", &pending)
+                        .await
+                        .unwrap();
+                for i in 0..30 {
+                    (journal, _) = journal
+                        .append(&create_operation::<mmr::Family>(i))
+                        .await
+                        .unwrap();
+                }
+                (journal, _) = journal
+                    .append(&TestOp::<mmr::Family>::Commit(None, Location::new(0)))
+                    .await
+                    .unwrap();
+                journal = journal.sync().await.unwrap();
+                (journal, _) = journal.prune(Location::new(20)).await.unwrap();
+                journal.sync().await.unwrap()
+            };
+            let journal = drive_pending_syncs(&pending, setup).await;
+            let bounds = journal.bounds();
+            let root = journal.root(0).unwrap();
+            assert!(bounds.start > 0);
+
+            // Park the first durability operation of destroy and drop the destroy there.
+            pending.arm();
+            {
+                let destroy = journal.destroy();
+                futures::pin_mut!(destroy);
+                assert!(futures::poll!(destroy.as_mut()).is_pending());
+            }
+
+            // The unfinished clear is not durable, so the last commit must reopen.
+            let journal = TestJournal::<mmr::Family>::new(
+                context.child("second"),
+                merkle_config("destroy_staged"),
+                journal_config("destroy_staged"),
+                |op: &TestOp<mmr::Family>| op.is_commit(),
+                ForwardFold,
+            )
+            .await
+            .expect("a destroy that staged nothing must reopen");
+            assert_eq!(journal.bounds(), bounds);
+            assert_eq!(journal.root(0).unwrap(), root);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Create variable journal configuration for tests.
+    fn variable_journal_config(suffix: &str) -> VConfig<()> {
+        VConfig {
+            partition: format!("journal-{suffix}"),
+            items_per_section: NZU64!(7),
+            compression: None,
+            codec_config: (),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            write_buffer: NZUsize!(1024),
+            replay_buffer: NZUsize!(1024),
+        }
+    }
+
+    /// Where an interrupted destroy stopped, in the order destroy reaches each outcome.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Interrupted {
+        /// Destroy stopped before the operation journal's clear was staged, and the journal
+        /// reopens at its last commit.
+        Unchanged,
+        /// Destroy stopped while removing the operation journal, and the journal reopens empty.
+        InJournal,
+        /// Destroy stopped after removing the operation journal, while removing the frontier,
+        /// and the journal reopens empty.
+        InFrontier,
+        /// Destroy completed despite the injected failures.
+        Completed,
+    }
+
+    /// Returns whether `partition` exists in `context`'s storage.
+    async fn partition_exists(context: &Context, partition: &str) -> bool {
+        match context.scan(partition).await {
+            Ok(_) => true,
+            Err(RuntimeError::PartitionMissing(_)) => false,
+            Err(err) => panic!("scan of {partition} must succeed: {err}"),
+        }
+    }
+
+    /// Interrupt the destroy of a twice-committed, pruned journal with injected sync and removal
+    /// failures, then reopen it and report where destroy stopped.
+    ///
+    /// `journal_partitions` names every partition of the operation journal configured by
+    /// `journal_cfg`. Destroy removes them before the frontier.
+    fn interrupted_destroy_reopens<F, C>(
+        seed: u64,
+        journal_cfg: C::Config,
+        journal_partitions: &[String],
+    ) -> Interrupted
+    where
+        F: Family + PartialEq,
+        C: Backing<Context, Item = TestOp<F>>,
+    {
+        deterministic::Runner::seeded(seed).start(|context| async move {
+            // Record the digest of empty storage. A completed destroy must restore it.
+            let empty = context.storage_audit();
+
+            let merkle_cfg = merkle_config("interrupted-destroy");
+            let open = |context| {
+                Journal::<F, Context, C, Sha256, Sequential>::new(
+                    context,
+                    merkle_cfg.clone(),
+                    journal_cfg.clone(),
+                    |op: &TestOp<F>| op.is_commit(),
+                    ForwardFold,
+                )
+            };
+
+            // Commit twice around a prune, so the frontier holds a boundary and pins that the
+            // retained operations cannot rebuild.
+            let ops: Vec<TestOp<F>> = (0..102u8)
+                .map(|i| match i {
+                    50 => TestOp::<F>::Commit(None, Location::new(0)),
+                    101 => TestOp::<F>::Commit(None, Location::new(40)),
+                    _ => create_operation::<F>(i),
+                })
+                .collect();
+            let mut journal = open(context.child("first")).await.unwrap();
+            let fresh_root = journal.root(0).unwrap();
+            for op in &ops[..51] {
+                (journal, _) = journal.append(op).await.unwrap();
+            }
+            journal = journal.sync().await.unwrap();
+            (journal, _) = journal.prune(Location::new(40)).await.unwrap();
+            for op in &ops[51..] {
+                (journal, _) = journal.append(op).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+            let bounds = journal.bounds();
+            let root = journal.root(0).unwrap();
+            assert!(bounds.start > 0 && bounds.end == 102);
+
+            // Fail a sample of syncs and removals so destroy stops at varying depths, from the
+            // operation journal's staged clear through the frontier's removal.
+            context.storage_fault_config().write().sync_rate = Some(probability!(0.2));
+            context.storage_fault_config().write().remove_rate = Some(probability!(0.05));
+            let result = journal.destroy().await;
+            context.storage_fault_config().write().sync_rate = None;
+            context.storage_fault_config().write().remove_rate = None;
+            if result.is_ok() {
+                assert_eq!(context.storage_audit(), empty, "seed {seed}");
+                return Interrupted::Completed;
+            }
+
+            // Removing its last partition is the last step of the operation journal's removal,
+            // so destroy finished it exactly when all its partitions are gone.
+            let mut journal_removed = true;
+            for partition in journal_partitions {
+                journal_removed &= !partition_exists(&context, partition).await;
+            }
+
+            // The reopened journal is exactly the last commit or empty.
+            let mut journal = open(context.child("second"))
+                .await
+                .unwrap_or_else(|err| panic!("seed {seed} must reopen: {err}"));
+            let outcome = if journal.bounds() == bounds {
+                assert!(
+                    !journal_removed,
+                    "seed {seed} reopened at its last commit without its operation journal"
+                );
+                assert_eq!(journal.root(0).unwrap(), root, "seed {seed}");
+                for pos in bounds {
+                    let index = usize::try_from(pos).expect("position must fit in usize");
+                    assert_eq!(journal.read(pos).await.unwrap(), ops[index]);
+                }
+                Interrupted::Unchanged
+            } else {
+                assert_eq!(journal.bounds(), 0..0, "seed {seed}");
+                assert_eq!(journal.root(0).unwrap(), fresh_root, "seed {seed}");
+
+                // An emptied journal keeps nothing of its past, so other operations committed
+                // to it reopen under their own root.
+                for i in 150..190u8 {
+                    (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
+                }
+                (journal, _) = journal
+                    .append(&TestOp::<F>::Commit(None, Location::new(0)))
+                    .await
+                    .unwrap();
+                journal = journal.sync().await.unwrap();
+                let reused = journal.root(0).unwrap();
+                drop(journal);
+                journal = open(context.child("third")).await.unwrap();
+                assert_eq!(journal.bounds(), 0..41, "seed {seed}");
+                assert_eq!(journal.root(0).unwrap(), reused, "seed {seed}");
+                if journal_removed {
+                    Interrupted::InFrontier
+                } else {
+                    Interrupted::InJournal
+                }
+            };
+
+            // A retried destroy completes and leaves no blob behind.
+            journal.destroy().await.unwrap();
+            assert_eq!(context.storage_audit(), empty, "seed {seed}");
+            outcome
+        })
+    }
+
+    /// Sweep seeds and require that destroy stopped at each of its outcomes.
+    fn interrupted_destroy_reopens_all_seeds<F, C>(
+        journal_cfg: C::Config,
+        journal_partitions: &[String],
+    ) where
+        F: Family + PartialEq,
+        C: Backing<Context, Item = TestOp<F>>,
+    {
+        // Each seed fails a different sample of syncs and removals.
+        let outcomes: Vec<_> = (0..64u64)
+            .map(|seed| {
+                interrupted_destroy_reopens::<F, C>(seed, journal_cfg.clone(), journal_partitions)
+            })
+            .collect();
+
+        // A stage no seed interrupts is a stage whose recovery this sweep does not exercise.
+        for outcome in [
+            Interrupted::Unchanged,
+            Interrupted::InJournal,
+            Interrupted::InFrontier,
+            Interrupted::Completed,
+        ] {
+            assert!(outcomes.contains(&outcome), "a seed must reach {outcome:?}");
+        }
+    }
+
+    /// A fixed operation journal that keeps few blobs once pruned, and its partitions.
+    fn fixed_destroy_config() -> (JConfig, Vec<String>) {
+        let mut cfg = journal_config("interrupted-destroy");
+        cfg.items_per_blob = NZU64!(32);
+        let partition = &cfg.partition;
+        let partitions = vec![
+            format!("{partition}-blobs"),
+            format!("{partition}-metadata"),
+        ];
+        (cfg, partitions)
+    }
+
+    /// A variable operation journal that keeps few blobs once pruned, and its partitions.
+    fn variable_destroy_config() -> (VConfig<()>, Vec<String>) {
+        let mut cfg = variable_journal_config("interrupted-destroy");
+        cfg.items_per_section = NZU64!(32);
+        let partition = &cfg.partition;
+        let partitions = vec![
+            format!("{partition}_data"),
+            format!("{partition}_offsets-blobs"),
+            format!("{partition}_offsets-metadata"),
+        ];
+        (cfg, partitions)
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5668.
+    ///
+    /// A destroy interrupted at any point leaves a journal over a fixed operation journal that
+    /// reopens at its last commit or empty, and that a retried destroy removes.
+    #[test]
+    fn issue_5668_regression_interrupted_destroy_reopens_fixed_mmr() {
+        let (cfg, partitions) = fixed_destroy_config();
+        interrupted_destroy_reopens_all_seeds::<
+            mmr::Family,
+            ContiguousJournal<Context, TestOp<mmr::Family>>,
+        >(cfg, &partitions);
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5668.
+    ///
+    /// A destroy interrupted at any point leaves a journal over a fixed operation journal that
+    /// reopens at its last commit or empty, and that a retried destroy removes.
+    #[test]
+    fn issue_5668_regression_interrupted_destroy_reopens_fixed_mmb() {
+        let (cfg, partitions) = fixed_destroy_config();
+        interrupted_destroy_reopens_all_seeds::<
+            mmb::Family,
+            ContiguousJournal<Context, TestOp<mmb::Family>>,
+        >(cfg, &partitions);
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5668.
+    ///
+    /// A destroy interrupted at any point leaves a journal over a variable operation journal that
+    /// reopens at its last commit or empty, and that a retried destroy removes.
+    #[test]
+    fn issue_5668_regression_interrupted_destroy_reopens_variable_mmr() {
+        let (cfg, partitions) = variable_destroy_config();
+        interrupted_destroy_reopens_all_seeds::<
+            mmr::Family,
+            VariableJournal<Context, TestOp<mmr::Family>>,
+        >(cfg, &partitions);
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5668.
+    ///
+    /// A destroy interrupted at any point leaves a journal over a variable operation journal that
+    /// reopens at its last commit or empty, and that a retried destroy removes.
+    #[test]
+    fn issue_5668_regression_interrupted_destroy_reopens_variable_mmb() {
+        let (cfg, partitions) = variable_destroy_config();
+        interrupted_destroy_reopens_all_seeds::<
+            mmb::Family,
+            VariableJournal<Context, TestOp<mmb::Family>>,
+        >(cfg, &partitions);
+    }
+
+    /// A bounded open that selects no item empties the journal and discards a frontier recorded
+    /// above the journal's start. A cap that selects a commit below the frontier's boundary still
+    /// fails and changes nothing.
+    #[test_traced]
+    fn test_init_at_most_without_match_empties_journal_beside_frontier() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let fresh =
+                create_empty_journal::<mmr::Family>(context.child("fresh"), "no-match-fresh").await;
+            let fresh_root = fresh.root(0).unwrap();
+            fresh.destroy().await.unwrap();
+            let open_at_most = |context: Context, suffix: &'static str, max_size: u64| {
+                TestJournal::<mmr::Family>::init_at_most(
+                    context,
+                    merkle_config(suffix),
+                    journal_config(suffix),
+                    max_size,
+                    |op: &TestOp<mmr::Family>| op.is_commit(),
+                    ForwardFold,
+                )
+            };
+
+            for (suffix, max_size) in [("no-match-one", 1), ("no-match-zero", 0)] {
+                // Commit twice to a log that starts at zero, then record a frontier above the
+                // log's start, as pruning does before it deletes operations.
+                let mut journal =
+                    create_empty_journal::<mmr::Family>(context.child("first"), suffix).await;
+                for i in 0..10u8 {
+                    let op = match i {
+                        1 | 9 => TestOp::<mmr::Family>::Commit(None, Location::new(0)),
+                        _ => create_operation::<mmr::Family>(i),
+                    };
+                    (journal, _) = journal.append(&op).await.unwrap();
+                }
+                journal = journal.sync().await.unwrap();
+                let boundary = Location::new(8);
+                let pins = journal.pinned_nodes_at(boundary).await.unwrap();
+                journal.frontier = journal.frontier.set(boundary, pins).await.unwrap();
+                drop(journal);
+
+                // The first commit ends at two, below the frontier's boundary, and the frontier
+                // keeps it.
+                assert!(matches!(
+                    open_at_most(context.child("below_boundary"), suffix, 3).await,
+                    Err(Error::Journal(JournalError::ItemPruned(8)))
+                ));
+                let recovery = TestJournal::<mmr::Family>::prepare(
+                    context.child("unchanged"),
+                    merkle_config(suffix),
+                    journal_config(suffix),
+                    None,
+                    |op: &TestOp<mmr::Family>| op.is_commit(),
+                    ForwardFold,
+                )
+                .await
+                .unwrap();
+                assert_eq!(recovery.bounds(), 8..10);
+                drop(recovery);
+
+                // No commit ends at or below the cap, so the journal is emptied and the frontier
+                // discarded.
+                let journal = open_at_most(context.child("no_match"), suffix, max_size)
+                    .await
+                    .expect("a bounded open that selects no item must succeed");
+                assert_eq!(journal.bounds(), 0..0);
+                assert_eq!(journal.root(0).unwrap(), fresh_root);
+                drop(journal);
+                let journal =
+                    create_empty_journal::<mmr::Family>(context.child("reopened"), suffix).await;
+                assert_eq!(journal.bounds(), 0..0);
+                assert_eq!(journal.root(0).unwrap(), fresh_root);
+                journal.destroy().await.unwrap();
+            }
+        });
     }
 }

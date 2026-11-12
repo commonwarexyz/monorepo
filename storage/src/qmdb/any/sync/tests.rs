@@ -1538,6 +1538,10 @@ macro_rules! db_any_harness_methods {
             db.destroy().await.unwrap();
         }
 
+        async fn try_destroy(db: Self::Db) -> Result<(), $crate::qmdb::Error<Self::Family>> {
+            db.destroy().await
+        }
+
         async fn db_sync(db: Self::Db) -> Self::Db {
             db.sync().await.unwrap()
         }
