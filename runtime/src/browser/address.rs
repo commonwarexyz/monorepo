@@ -420,4 +420,114 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_read_refuses_digest_that_is_not_sha256() {
+        let description = description(&["1 1 udp 2113937151 192.0.2.4 50000 typ host".to_string()]);
+        let read = Address::read(&description);
+        assert!(read.is_some());
+
+        // A browser may write the name of the algorithm in either case.
+        let upper = description.replace("a=fingerprint:sha-256", "a=fingerprint:SHA-256");
+        assert_eq!(Address::read(&upper), read);
+
+        // An address does not say which algorithm made its fingerprint, and a description of it
+        // always names SHA-256.
+        let other = description.replace("a=fingerprint:sha-256", "a=fingerprint:sha-512");
+        assert_eq!(Address::read(&other), None);
+    }
+
+    #[test]
+    fn test_address_lists_every_kind_of_socket() {
+        let endpoint = format!("{}:abcd:{}", "0f".repeat(32), "A".repeat(22));
+        for sockets in [
+            "203.0.113.7:51413".to_string(),
+            "[2001:db8::7]:51413".to_string(),
+            "4f1c0a8e-6a52-4b1e-9d0c-3c5a1b2e7f90.local:51413".to_string(),
+            format!(
+                "203.0.113.7:1,[2001:db8::7]:65535,{}.local:9",
+                "a".repeat(63)
+            ),
+            ["203.0.113.7:51413"; 16].join(","),
+        ] {
+            let address = format!("{endpoint},{sockets}");
+            assert_eq!(address.parse::<Address>().unwrap().to_string(), address);
+        }
+
+        // The longest address parses: the longest username and password, and sixteen sockets of
+        // the greatest length.
+        let socket = format!("{}.local:65535", "a".repeat(63));
+        let address = format!(
+            "{}:{}:{},{}",
+            "0f".repeat(32),
+            "a+/9".repeat(64),
+            "A".repeat(256),
+            [socket.as_str(); 16].join(",")
+        );
+        assert_eq!(address.len(), Address::MAX_SIZE);
+        assert_eq!(address.parse::<Address>().unwrap().to_string(), address);
+    }
+
+    #[test]
+    fn test_malformed_addresses_are_refused() {
+        let fingerprint = "0f".repeat(32);
+        let password = "A".repeat(22);
+        let endpoint = format!("{fingerprint}:abcd:{password}");
+        let socket = "203.0.113.7:51413";
+        let malformed = [
+            String::new(),
+            "not an address".into(),
+            // An address lists between one and sixteen sockets.
+            endpoint.clone(),
+            format!("{endpoint},"),
+            format!("{endpoint},{}", [socket; 17].join(",")),
+            // The fingerprint is 64 hexadecimal characters.
+            format!("{}:abcd:{password},{socket}", "0f".repeat(31)),
+            format!("{}:abcd:{password},{socket}", "0f".repeat(33)),
+            format!("{}:abcd:{password},{socket}", "0g".repeat(32)),
+            format!("{}:abcd:{password},{socket}", "0F".repeat(32)),
+            format!("0x{}:abcd:{password},{socket}", "0f".repeat(31)),
+            format!("0x{fingerprint}:abcd:{password},{socket}"),
+            format!(" {fingerprint}:abcd:{password},{socket}"),
+            // The username and password have bounded lengths and hold no character that could
+            // begin another line of a description.
+            format!("{fingerprint}:abc:{password},{socket}"),
+            format!("{fingerprint}:{}:{password},{socket}", "a".repeat(257)),
+            format!("{fingerprint}:abcd:{},{socket}", "A".repeat(21)),
+            format!("{fingerprint}:abcd:{},{socket}", "A".repeat(257)),
+            format!("{fingerprint}:ab d:{password},{socket}"),
+            format!("{fingerprint}:abc\u{e9}:{password},{socket}"),
+            format!("{fingerprint}:abcd\r\na=ice-lite:{password},{socket}"),
+            format!("{fingerprint}:abcd:{password} ,{socket}"),
+            format!("{fingerprint}:abcd:{password}\r\na=ice-lite,{socket}"),
+            format!("{fingerprint}:abcd:{password}:more,{socket}"),
+            format!("{fingerprint}:abcd,{socket}"),
+            // A socket is a port at an IP address or at a name announced on the local network.
+            format!("{endpoint},203.0.113.7"),
+            format!("{endpoint},203.0.113.7:0"),
+            format!("{endpoint},203.0.113.7:65536"),
+            format!("{endpoint},example.com:51413"),
+            format!("{endpoint},.local:51413"),
+            format!("{endpoint},a.local:0"),
+            format!("{endpoint},{}.local:51413", "a".repeat(64)),
+            format!("{endpoint},a b.local:51413"),
+            format!("{endpoint},a.local:51413\r\na=ice-lite"),
+            format!("{endpoint},{socket},"),
+            // No address is longer than `Address::MAX_SIZE`.
+            format!("{endpoint},{}", "9".repeat(Address::MAX_SIZE)),
+            // An address has one spelling.
+            format!("{endpoint},203.0.113.7:051413"),
+            format!("{endpoint},203.0.113.7:+51413"),
+            format!("{endpoint},a.local:051413"),
+            format!("{endpoint},[203.0.113.7]:51413"),
+            format!("{endpoint},2001:db8::7:51413"),
+            format!("{endpoint},[2001:DB8::7]:51413"),
+            format!("{endpoint},[2001:db8:0:0:0:0:0:7]:51413"),
+            format!("{endpoint},[fe80::7%4]:51413"),
+            format!("{endpoint},[a.local]:51413"),
+        ];
+        for address in malformed {
+            assert!(address.parse::<Address>().is_err(), "{address:?}");
+        }
+    }
 }
