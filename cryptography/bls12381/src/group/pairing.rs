@@ -123,8 +123,8 @@ impl MultiPairing<'_> {
     /// Returns the product of the Miller loops of the pairs without an identity, as its canonical
     /// encoding, or `None` when there are none.
     ///
-    /// Up to [`SHARED`] lanes of pairs share their squarings, and the lanes of their product
-    /// multiply into one element.
+    /// Up to [`SHARED`] groups of [`Field::LANES`] pairs, one pair per lane, share their
+    /// squarings, and the lanes of their product multiply into one element.
     // Debug builds keep this a call so that each representation's frame stays separate.
     #[cfg_attr(not(debug_assertions), inline(always))]
     fn miller_loops<S: Simd, F: Field<S>>(self, simd: S) -> Option<[u8; BYTES]> {

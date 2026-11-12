@@ -79,7 +79,7 @@ const FROM_LANES: [u64; LIMBS] = {
     limbs
 };
 
-/// Splits a little-endian 64-bit integer below `2^384` into 49-bit limbs.
+/// Splits an integer below `2^384`, given as little-endian 64-bit words, into 49-bit limbs.
 const fn limbs_from_words(words: [u64; WORDS]) -> [u64; LIMBS] {
     super::limbs_from_words::<LIMBS, LIMB_BITS>(words)
 }
@@ -167,7 +167,8 @@ impl<S: Simd> Unsat49<S> {
         // Product scanning: column k sums the low halves of a_i b_j and q_i p_j with i + j = k
         // and the high halves with i + j = k - 1, so only one column's accumulators are live.
         // High halves have weight 2^52 = 2^3 * 2^49, so they are shifted once per column. A
-        // column receives at most 32 terms below 2^52 plus a carry, so nothing overflows.
+        // column sums at most 16 low halves and 16 high halves, each below 2^52, plus a carry
+        // below 2^11, so it stays below 2^56 + 2^3 * 2^56 + 2^11 < 2^60.
         let (a, b) = (self.limbs, rhs.limbs);
         let zero = simd.u64_splat(0);
         let mut q = [zero; LIMBS];
@@ -426,7 +427,7 @@ impl<S: Simd> Field<S> for Unsat49<S> {
 
     #[inline(always)]
     fn product_sub<const K: u64>(simd: S, a: Self::Product, b: Self::Product) -> Self::Product {
-        // The subtrahend must be below Kp; carrying covers limb borrows.
+        // The subtrahend must be below (K - 1) * p; carrying brings its limbs within the bias.
         a.sub::<K>(simd, b.carry(simd))
     }
 
@@ -445,7 +446,8 @@ impl<S: Simd> Field<S> for Unsat49<S> {
         product.carry(simd)
     }
 
-    /// Carries, then multiplies by one in Montgomery form, which is below `p`.
+    /// Carries, then multiplies by `R mod p`, one in Montgomery form. The value is below `R` and
+    /// `R mod p < p`, so the product is below `R mod p + p < 2p`.
     #[inline(always)]
     fn reduce_tight(simd: S, product: Self::Product) -> Self {
         product
@@ -499,12 +501,12 @@ pub mod fuzz {
         type Value<S: Simd> = Unsat49<S>;
     }
 
-    /// A formula over [`Unsat49`] values lifted to bounds drawn from the input, with distinct
-    /// elements in every lane, on an emulated backend drawn from the input.
+    /// A formula over [`Unsat49`] values lifted to bounds drawn from the input, with independently
+    /// drawn elements in every lane, on an emulated backend drawn from the input.
     #[derive(Clone, Copy, Debug, Arbitrary)]
     pub enum Plan {
-        /// Checks additions, subtractions and negations with every bias, doublings, and stores, up
-        /// to the integer limit.
+        /// Checks additions, subtractions and negations with drawn biases, doublings, and stores,
+        /// up to the integer limit.
         Linear,
         /// Checks products of values up to the integer limit, of sums of [`SLACK`] values, of
         /// values readied from static limb bounds, and of repeated doublings.
