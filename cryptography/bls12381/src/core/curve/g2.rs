@@ -13,26 +13,6 @@
 //! Raw coordinates hold each lane of a point in the representation's own form, through
 //! [`Field::store_raw`] with bound [`BOUND`], so storing and loading them costs no conversion and
 //! loaded raw coordinates satisfy the coordinate bounds.
-//!
-//! # How the formulas keep their bounds
-//!
-//! Multiplications by `3b = 12 (1 + i)` scale a factor by `12` before a product and multiply the
-//! product by `1 + i`, which only rearranges its
-//! [signed sums](crate::core::field::arithmetic::Signed). Scaling before the product keeps
-//! positional bounds small, since a positional product divides its factors' bounds by `2048`.
-//! Products whose factors are sums or scaled values use [`Fp2::product_schoolbook`], whose
-//! positional bounds stay below Karatsuba's for such factors.
-//!
-//! Each reduction uses the smallest positional bias covering its negative sums for coordinates
-//! within [`BOUND`], and each value subtraction the smallest bias covering its subtrahend in every
-//! representation. Inside a formula, values reach integer bounds of at most `384` and positional
-//! limb bounds of at most `12`, and wide sums of products reach at most `334848`.
-//!
-//! # Kernels
-//!
-//! Conversions and formulas ([`load`](Points::load), [`store`](Points::store),
-//! [`endomorphism`](Points::endomorphism), [`add`](Points::add), and [`double`](Points::double))
-//! run as their own kernels, so callers share one copy.
 
 use crate::core::{
     curve::Points,
@@ -68,13 +48,12 @@ pub const GENERATOR: Coordinates = [
 ];
 
 /// Largest integer bound of a coordinate component, in units of `p`.
-///
-/// The positional representations return at most `32` from the reduction of [`Point::add`]'s `Y`
-/// coordinate, and residues reduce to at most `17`.
+// The positional representations return at most 32 from the reduction of the Y coordinate of
+// Point::add, and residues reduce to at most 17.
 pub const BOUND: u64 = 32;
 
 /// `c` such that `c i = (1 + i)^(-(p - 1) / 3)`, the coefficient of the untwisted Frobenius
-/// map on `X` (RFC 9380, Appendix G.3), which is purely imaginary.
+/// map on `X` (RFC 9380, Appendix G.3). The coefficient is purely imaginary.
 const PSI_X: [u8; fp::BYTES] = fp::encode([
     0x8bfd_0000_0000_aaad,
     0x4094_27eb_4f49_fffd,
@@ -117,6 +96,19 @@ pub struct Point<F> {
     pub z: Fp2<F>,
 }
 
+// Multiplications by 3b = 12 (1 + i) scale a factor by 12 before a product and multiply the
+// product by 1 + i, which only rearranges its signed sums (Signed). Scaling before the product
+// keeps positional bounds small, since a positional product divides its factors' bounds by 2048.
+// Products whose factors are sums or scaled values use Fp2::product_schoolbook, whose positional
+// bounds stay below Karatsuba's for such factors.
+//
+// Each reduction uses the smallest positional bias covering its negative sums for coordinates
+// within BOUND, and each value subtraction the smallest bias covering its subtrahend in every
+// representation. Inside a formula, values reach integer bounds of at most 384 and positional
+// limb bounds of at most 12, and wide sums of products reach at most 334848.
+//
+// load, store, endomorphism, add, and double each run as their own kernel through
+// Simd::execute, so that their callers share one copy.
 impl<S: Simd, F: Field<S>> Points<S> for Point<F> {
     type Coordinates = Coordinates;
     type Raw = [[F::Raw; 2]; 3];
@@ -375,8 +367,8 @@ impl<F> Point<F> {
     }
 }
 
-/// The first stage of an addition: the ready coordinates of both points and, for Karatsuba's
-/// cross terms, the products `X1 X2`, `Y1 Y2`, `Z1 Z2`, and `3b Z1 Z2`.
+/// The first stage of an addition: the ready coordinates of both points and the products
+/// `X1 X2`, `Y1 Y2`, `Z1 Z2`, and `3b Z1 Z2`.
 pub(crate) struct Addition<F, S: Simd>
 where
     F: Field<S>,
@@ -395,8 +387,8 @@ where
 {
     /// Readies the coordinates and forms the shared products.
     ///
-    /// Under [`Field::SCHOOLBOOK`] the cross terms take their own products, so the products of
-    /// coordinates are left unused and unformed.
+    /// Under [`Field::SCHOOLBOOK`] the cross terms take their own products, so `Z1 Z2` goes
+    /// unused.
     #[inline(always)]
     pub(crate) fn new(simd: S, lhs: Point<F>, rhs: Point<F>) -> Self {
         let a = [

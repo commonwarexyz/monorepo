@@ -8,35 +8,12 @@
 //!
 //! # Inputs
 //!
-//! Points are affine and must lie in the prime-order subgroups, other than the identity, which has
-//! no affine coordinates: callers handle pairs with an identity, which contribute one. A pair whose
-//! G1 coordinates are both zero is not a pair of points, but its lines have no terms in `w`, so its
-//! Miller loop is an element of `Fp2`, which the final exponentiation maps to one. Such a pair fills
-//! a lane's unused slots, given a G2 point, such as the generator, whose lines have nonzero
-//! constant terms.
+//! Points are affine and must lie in the prime-order subgroups. The identity has no affine
+//! coordinates, so callers must handle pairs that contain it: such a pair contributes one.
 //!
-//! # How it works
-//!
-//! The Miller loop runs on the twist `y^2 = x^3 + 4 (1 + i)` of G2 in the projective coordinates
-//! of [`Point`], with affine inputs, and evaluates each line as the sparse element
-//! `l0 + l2 w^2 + l3 w^3` of `Fp12`. Lines are scaled by factors in `Fp2` that the final
-//! exponentiation removes. The final exponentiation splits into the easy part
-//! `(p^6 - 1) (p^2 + 1)`, which lands in the cyclotomic subgroup, and the hard part, an addition
-//! chain over the curve parameter `z = -0xd201000000010000` (see "Faster Squaring in the
-//! Cyclotomic Subgroup of Sixth Degree Extensions", Granger and Scott, 2010, and the chain of the
-//! zkcrypto `pairing` crate).
-//!
-//! # Bounds
-//!
-//! The points of the Miller loop satisfy the [coordinate bounds of G2](crate::core::curve::g2), and
-//! its lines the bounds of [`Fp12::mul_by_line`]: every line component has limb bound `1` and
-//! integer bound at most [`LINE_COMPONENT_BOUND`], below [`LINE_BOUND`]. Every element of `Fp12`
-//! satisfies the [element bounds](crate::core::field::fp12).
-//!
-//! # Kernels
-//!
-//! Each step of the Miller loop runs as its own kernel, so the loop calls one copy, and updates its
-//! point in place, so that the loop copies nothing.
+//! A pair of the G1 coordinates `(0, 0)`, which are not a point, and a G2 point whose lines have
+//! nonzero constant terms, such as the generator, contributes one after the final exponentiation.
+//! Such a pair fills a lane's unused slots.
 
 use crate::core::{
     curve::g2::{self, Addition, Point},
@@ -57,7 +34,7 @@ pub type G1Affine = [[u8; FP_BYTES]; 2];
 /// Affine coordinates `[x, y]` of a G2 point as big-endian extension elements.
 pub type G2Affine = [[u8; FP2_BYTES]; 2];
 
-/// `|z|`, the absolute value of the curve parameter.
+/// `|z|`, the absolute value of the curve parameter `z = -0xd201000000010000`.
 const Z: u64 = 0xd201_0000_0001_0000;
 
 /// `|z| / 2`.
@@ -67,6 +44,10 @@ const HALF_Z: u64 = Z / 2;
 pub const SHARED: usize = 8;
 
 /// Largest integer bound of a component of a line of the Miller loop, in units of `p`.
+// The points of the Miller loop satisfy the coordinate bounds of G2, and its lines the bounds of
+// Fp12::mul_by_line: every line component has limb bound 1 and integer bound at most
+// LINE_COMPONENT_BOUND, below LINE_BOUND. Every element of Fp12 satisfies the element bounds of
+// the fp12 module.
 const LINE_COMPONENT_BOUND: u64 = 61;
 const _: () = assert!(LINE_COMPONENT_BOUND <= LINE_BOUND);
 
@@ -121,6 +102,8 @@ impl<F> Pair<F> {
 /// Every group of up to [`SHARED`] pairs shares its squarings. The result is only defined up to the
 /// factors that [`final_exponentiation`] removes.
 pub fn miller_loop<S: Simd, F: Field<S>>(simd: S, pairs: &[Pair<F>]) -> Fp12<F> {
+    // A pair with G1 coordinates (0, 0) has lines without terms in w, so its Miller loop is an
+    // element of Fp2, which the final exponentiation maps to one.
     let mut chunks = pairs.chunks(SHARED);
     let Some(first) = chunks.next() else {
         return Fp12::one(simd);
@@ -136,6 +119,11 @@ pub fn miller_loop<S: Simd, F: Field<S>>(simd: S, pairs: &[Pair<F>]) -> Fp12<F> 
 ///
 /// This is the Miller function of `|z|`, conjugated because `z` is negative.
 fn shared_miller_loop<S: Simd, F: Field<S>>(simd: S, pairs: &[Pair<F>]) -> Fp12<F> {
+    // The loop runs on the twist y^2 = x^3 + 4 (1 + i) of G2 in the projective coordinates of
+    // Point, with affine inputs, and evaluates each line as the sparse element
+    // l0 + l2 w^2 + l3 w^3 of Fp12. Lines are scaled by factors in Fp2 that the final
+    // exponentiation removes. Each step runs as its own kernel, so the loop calls one copy, and
+    // updates its point in place, so that the loop copies nothing.
     debug_assert!(!pairs.is_empty() && pairs.len() <= SHARED);
     let mut points = [pairs[0].q; SHARED];
     for (point, pair) in points.iter_mut().zip(pairs) {
@@ -282,7 +270,8 @@ pub fn final_exponentiation<S: Simd, F: Field<S>>(simd: S, f: Fp12<F>) -> Fp12<F
     easy.mul(simd, &inverse);
 
     // The hard part: an addition chain over z that computes the cube of
-    // easy^((p^4 - p^2 + 1) / r).
+    // easy^((p^4 - p^2 + 1) / r) (see "Faster Squaring in the Cyclotomic Subgroup of Sixth Degree
+    // Extensions", Granger and Scott, 2010, and the chain of the zkcrypto pairing crate).
     let mut y0 = easy;
     y0.cyclotomic_square(simd);
     let mut y1 = raise_to_z(simd, y0);
@@ -348,7 +337,7 @@ pub mod fuzz {
     /// A fuzzing operation on the pairing.
     #[derive(Clone, Copy, Debug, Arbitrary)]
     pub enum Plan {
-        /// Check that the final exponentiation of any elements is multiplicative, maps zero to
+        /// Checks that the final exponentiation of any elements is multiplicative, maps zero to
         /// zero and the subfield `Fp6` (so every line scaling factor) to one, and maps nonzero
         /// elements into the cyclotomic subgroup, where the Frobenius map raises to the power
         /// `z`, as it does on the target group since `p = z mod r`.
@@ -445,7 +434,7 @@ pub mod fuzz {
                 .test(|u| Plan::FinalExponentiation.run(u));
         }
 
-        /// Cases of [`minifuzz_final_exponentiation`] that run however long they take.
+        /// Least number of cases [`minifuzz_final_exponentiation`] runs, even past its time limit.
         const MIN_ITERATIONS: u64 = 10;
 
         /// Checks, in debug builds, that steps from points at the coordinate bounds return points

@@ -1,8 +1,7 @@
 //! Debug-only upper bounds for nonnegative arithmetic intermediates.
 //!
-//! Bounds use caller-chosen units. Arithmetic contexts supply their own input limits,
-//! subtraction biases, and output bounds after reduction. This counter does not inspect
-//! field values or perform reductions.
+//! Callers choose the units of a bound and supply input limits, subtraction biases, and the
+//! output bounds of reductions. The counter does not inspect field values or perform reductions.
 //!
 //! With debug assertions disabled, the counter is zero-sized and its operations are no-ops.
 //! Arguments to these operations are still evaluated by the caller.
@@ -27,7 +26,8 @@ impl DebugCounter {
         }
     }
 
-    /// Bounds `a + bias - b` by `a + bias`, checking that `b` is at most `bias`.
+    /// Sets this bound `a` to `a + bias`, which bounds `x + bias - y` for `x <= a` and
+    /// `y <= b`, where `b` is the bound of `rhs`. Requires `b <= bias`.
     ///
     /// The check shows that the represented integer stays nonnegative. Limb and residue
     /// constraints remain for the caller to check.
