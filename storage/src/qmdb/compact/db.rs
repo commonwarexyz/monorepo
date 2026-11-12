@@ -387,7 +387,7 @@ where
 
     /// Create a new speculative batch of operations with this database as its parent.
     pub fn new_batch(&self) -> UnmerkleizedBatch<F, H, O, S> {
-        UnmerkleizedBatch::new(self, self.commitment())
+        UnmerkleizedBatch::new(self)
     }
 
     /// Create an owned merkleized batch representing the current applied state.
@@ -675,7 +675,7 @@ where
     O: Operation<F>,
     S: Strategy,
 {
-    fn new<E>(db: &Db<F, E, O, H, S>, base: Commitment<F, H::Digest>) -> Self
+    fn new<E>(db: &Db<F, E, O, H, S>) -> Self
     where
         E: Context,
     {
@@ -685,7 +685,7 @@ where
             parent: None,
             metadata: None,
             inactivity_floor: db.inactivity_floor(),
-            base,
+            base: db.commitment(),
         }
     }
 

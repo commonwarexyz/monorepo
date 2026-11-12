@@ -4,7 +4,8 @@ use crate::{
     merkle::{Family, Location},
     qmdb::{
         self,
-        keyless::{Db, Metrics, Operation, operation::OperationCodec},
+        keyless::{Db, Operation, operation::OperationCodec},
+        metrics::Metrics,
         sync,
     },
 };
