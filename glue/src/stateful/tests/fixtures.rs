@@ -14,7 +14,7 @@ use commonware_consensus::{
     types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
-    Digested, Digestible as _,
+    Digestible as _,
     certificate::{ConstantProvider, mocks::Fixture},
     ed25519,
     sha256::Digest as Sha256Digest,
@@ -33,44 +33,13 @@ use commonware_utils::{
     sync::Mutex,
     vec::NonEmptyVec,
 };
-use std::{
-    collections::{BTreeMap, VecDeque},
-    num::NonZeroUsize,
-    sync::Arc,
-};
+use std::{collections::VecDeque, num::NonZeroUsize, sync::Arc};
 
-/// Builds a source through `tip` whose bodies remain owned by the caller.
-///
-/// Keep the supplied blocks alive while acquisition should succeed. Missing or dropped bodies
-/// are unavailable, and the digests of supplied bodies stay resident.
-pub(crate) fn blocks<B: Block>(tip: Height, bodies: &[Arc<B>]) -> Blocks<B> {
-    let entries = Arc::new(
-        bodies
-            .iter()
-            .filter(|block| block.height() <= tip)
-            .map(|block| (block.height(), (block.digest(), Arc::downgrade(block))))
-            .collect::<BTreeMap<_, _>>(),
-    );
-    let digests = entries.clone();
-    Blocks::new(
-        tip,
-        NZUsize!(8),
-        move |height| digests.get(&height).map(|(digest, _)| *digest),
-        move |height| {
-            let block = entries
-                .get(&height)
-                .and_then(|(digest, body)| Some(Digested::precomputed(body.upgrade()?, *digest)));
-            async move { block }
-        },
-    )
-}
-
-/// Pairs `parent` with a source through its height that acquires only `parent`, while the caller
-/// keeps it alive.
+/// Pairs `parent` with a source through its height whose acquisitions never complete.
 pub(crate) fn ancestry<B: Block>(parent: &Arc<B>) -> Ancestry<B> {
     Ancestry {
         parent: digested_shared(parent),
-        blocks: blocks(parent.height(), std::slice::from_ref(parent)),
+        blocks: pending_blocks(parent.height()),
     }
 }
 

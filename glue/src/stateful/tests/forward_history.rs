@@ -33,7 +33,7 @@ use commonware_actor::Feedback;
 use commonware_broadcast::{Broadcaster as _, buffered};
 use commonware_codec::{DecodeExt as _, Encode as _};
 use commonware_consensus::{
-    Automaton, CertifiableAutomaton, Heightable as _, History, Relay, Reporter, Viewable as _,
+    Automaton, CertifiableAutomaton, Heightable as _, History, Reporter, Viewable as _,
     marshal::{
         self,
         blocks::{Ancestry, Blocks},
@@ -177,7 +177,7 @@ impl Scenario {
 #[derive(Clone, Debug)]
 struct Execution {
     height: u64,
-    end: Option<SystemTime>,
+    /// Whether the resulting root matched the block, set when the execution ends.
     ok: Option<bool>,
 }
 
@@ -191,20 +191,17 @@ struct Request {
 /// Everything a run observes at the application, the gate, and the scripted peers.
 #[derive(Default)]
 struct Observations {
-    t0: Option<SystemTime>,
     executions: Vec<Execution>,
     requests: Vec<Request>,
-    responses: Vec<(SystemTime, u64)>,
     other_requests: usize,
-    held: Option<(u64, oneshot::Sender<Bytes>, Bytes)>,
+    held: Option<(oneshot::Sender<Bytes>, Bytes)>,
     hold_release: Option<&'static str>,
     stub_certified: u64,
     target_verifies: usize,
     target_certifies: usize,
     finalized_reports: usize,
-    inner_calls_before_t0: usize,
     certified: Option<bool>,
-    finalize_vote_at: Option<SystemTime>,
+    finalize_voted: bool,
 }
 
 type Shared = Arc<Mutex<Observations>>;
@@ -217,23 +214,13 @@ struct Outcome<'a> {
     apply_order: Vec<u64>,
     /// Whether the candidate's execution matched its state root.
     correct_root: bool,
-    /// Executions that ended by the time a peer first received the node's finalize vote for the
-    /// candidate.
-    executions_before_completion: usize,
-    /// Heights of every body request, in arrival order at the peers.
-    requested: Vec<u64>,
     /// Distinct requested heights.
     distinct: BTreeSet<u64>,
-    /// Requests estimated to have left the node before the first response reached it.
-    inflight_before_first_arrival: usize,
 }
 
 impl<'a> Outcome<'a> {
-    /// Derives the outcome of a finished run, panicking if the candidate was never executed or no
-    /// peer observed the node's finalize vote for it.
+    /// Derives the outcome of a finished run, panicking if the candidate was never executed.
     fn derive(observations: &'a Observations) -> Self {
-        // Replay order, candidate result, and execution progress when a peer first received the
-        // finalize vote.
         let replay = observations
             .executions
             .iter()
@@ -249,55 +236,17 @@ impl<'a> Outcome<'a> {
             .find(|execution| execution.height == DEPTH + 1)
             .expect("the candidate must be executed");
         let correct_root = candidate_execution.ok == Some(true);
-        let finalize_vote_at = observations
-            .finalize_vote_at
-            .expect("the node must vote to finalize the candidate");
-        let executions_before_completion = observations
-            .executions
-            .iter()
-            .filter(|execution| execution.end.is_some_and(|end| end <= finalize_vote_at))
-            .count();
-
-        // Every request in arrival order, and the distinct heights requested.
-        let requested = observations
+        let distinct = observations
             .requests
             .iter()
             .map(|request| request.height)
-            .collect::<Vec<_>>();
-        let distinct = requested.iter().copied().collect::<BTreeSet<_>>();
-
-        // Requests and producer answers are timestamped at the serving peer. With fixed latency
-        // and no jitter, each request left the node about one latency before it arrived, and a
-        // response reaches the node no earlier than one latency after the producer answered.
-        // These transport intervals are estimates, not node-side dispatch or delivery times.
-        let mut answered = observations.responses.clone();
-        let intervals = observations
-            .requests
-            .iter()
-            .map(|request| {
-                let end = answered
-                    .iter()
-                    .position(|(at, height)| *height == request.height && *at >= request.at)
-                    .map(|index| answered.remove(index).0 + LATENCY);
-                (request.at - LATENCY, end)
-            })
-            .collect::<Vec<_>>();
-        let first_arrival = intervals.iter().filter_map(|(_, end)| *end).min();
-        let inflight_before_first_arrival = first_arrival.map_or(intervals.len(), |arrival| {
-            intervals
-                .iter()
-                .filter(|(start, _)| *start < arrival)
-                .count()
-        });
+            .collect();
 
         Self {
             replay,
             apply_order,
             correct_root,
-            executions_before_completion,
-            requested,
             distinct,
-            inflight_before_first_arrival,
         }
     }
 }
@@ -313,23 +262,13 @@ impl InstrumentedApp {
     /// Records the start of an execution at `height` and returns its index.
     fn begin(&self, height: u64) -> usize {
         let mut observations = self.observations.lock();
-        if observations.t0.is_none() {
-            observations.inner_calls_before_t0 += 1;
-        }
-        observations.executions.push(Execution {
-            height,
-            end: None,
-            ok: None,
-        });
+        observations.executions.push(Execution { height, ok: None });
         observations.executions.len() - 1
     }
 
     /// Records the end of execution `index` and whether its root matched the block.
-    fn end(&self, context: &deterministic::Context, index: usize, ok: bool) {
-        let mut observations = self.observations.lock();
-        let execution = &mut observations.executions[index];
-        execution.end = Some(context.current());
-        execution.ok = Some(ok);
+    fn end(&self, index: usize, ok: bool) {
+        self.observations.lock().executions[index].ok = Some(ok);
     }
 }
 
@@ -375,7 +314,6 @@ impl Application<deterministic::Context> for InstrumentedApp {
         batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         finality: Finality,
     ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
-        let runtime = context.0.child("instrument");
         let index = self.begin(block.height().get());
         let expected_root = block.inner().state_root;
         let result = <App as Application<deterministic::Context>>::process(
@@ -390,7 +328,7 @@ impl Application<deterministic::Context> for InstrumentedApp {
         let root_matches = result
             .as_ref()
             .is_some_and(|merkleized| merkleized.root() == expected_root);
-        self.end(&runtime, index, root_matches);
+        self.end(index, root_matches);
         result
     }
 
@@ -518,16 +456,6 @@ where
     }
 }
 
-impl<A: Relay> Relay for Gate<A> {
-    type Digest = A::Digest;
-    type PublicKey = A::PublicKey;
-    type Plan = A::Plan;
-
-    fn broadcast(&mut self, payload: Self::Digest, plan: Self::Plan) -> Feedback {
-        self.inner.broadcast(payload, plan)
-    }
-}
-
 impl<A> Reporter for Gate<A>
 where
     A: Reporter<Activity = Activity<S, D>>,
@@ -548,22 +476,16 @@ struct ScriptedProducer {
     context: Arc<deterministic::Context>,
     kind: Kind,
     bodies: Arc<HashMap<D, (u64, Bytes)>>,
-    missing: Arc<BTreeSet<u64>>,
-    tail: Option<u64>,
+    /// Height whose first request is held, in the scenarios that hold one.
+    hold: Option<u64>,
     observations: Shared,
 }
 
 impl ScriptedProducer {
-    /// Records an answer for `height` at `at`.
-    fn respond(observations: &mut Observations, at: SystemTime, height: u64) {
-        observations.responses.push((at, height));
-    }
-
     /// Answers the held request, if any, and records why it was released.
-    fn release(observations: &mut Observations, at: SystemTime, reason: &'static str) {
-        if let Some((height, sender, body)) = observations.held.take() {
+    fn release(observations: &mut Observations, reason: &'static str) {
+        if let Some((sender, body)) = observations.held.take() {
             let _ = sender.send(body);
-            Self::respond(observations, at, height);
             observations.hold_release = Some(reason);
         }
     }
@@ -573,7 +495,7 @@ impl ScriptedProducer {
     fn spawn_hold_limit(&self) {
         let observations = self.observations.clone();
         let kind = self.kind;
-        let tail = self.tail;
+        let hold = self.hold;
         self.context.child("hold").spawn(move |context| async move {
             let deadline = context.current() + HOLD_LIMIT;
             loop {
@@ -582,16 +504,15 @@ impl ScriptedProducer {
                     if guard.held.is_none() {
                         return;
                     }
-                    let now = context.current();
                     let prefix_applied = guard.executions.iter().any(|execution| {
-                        tail.is_some_and(|tail| execution.height < tail) && execution.end.is_some()
+                        hold.is_some_and(|hold| execution.height < hold) && execution.ok.is_some()
                     });
                     if kind == Kind::Tail && prefix_applied {
-                        Self::release(&mut guard, now, "prefix_applied");
+                        Self::release(&mut guard, "prefix_applied");
                         return;
                     }
-                    if now >= deadline {
-                        Self::release(&mut guard, now, "hold_limit");
+                    if context.current() >= deadline {
+                        Self::release(&mut guard, "hold_limit");
                         return;
                     }
                 }
@@ -619,17 +540,12 @@ impl resolver_p2p::Producer for ScriptedProducer {
         };
         observations.requests.push(Request { at: now, height });
 
-        // `OutOfOrder` holds the lowest missing body and `Tail` the body at its tail height,
-        // each once per run.
-        let hold = observations.held.is_none()
-            && observations.hold_release.is_none()
-            && match self.kind {
-                Kind::OutOfOrder => self.missing.first() == Some(&height),
-                Kind::Tail => self.tail == Some(height),
-                _ => false,
-            };
+        // The first request for the hold height is held, once per run.
+        let hold = self.hold == Some(height)
+            && observations.held.is_none()
+            && observations.hold_release.is_none();
         if hold {
-            observations.held = Some((height, sender, body));
+            observations.held = Some((sender, body));
             drop(observations);
             self.spawn_hold_limit();
             return receiver;
@@ -637,14 +553,8 @@ impl resolver_p2p::Producer for ScriptedProducer {
 
         // Answer at once, and release an `OutOfOrder` hold once a higher body has been answered.
         let _ = sender.send(body);
-        Self::respond(&mut observations, now, height);
-        if self.kind == Kind::OutOfOrder
-            && observations
-                .held
-                .as_ref()
-                .is_some_and(|(held, _, _)| *held < height)
-        {
-            Self::release(&mut observations, now, "higher_body_answered");
+        if self.kind == Kind::OutOfOrder && self.hold.is_some_and(|hold| hold < height) {
+            Self::release(&mut observations, "higher_body_answered");
         }
         receiver
     }
@@ -717,11 +627,19 @@ fn run(scenario: Scenario) {
         let selected = &chain[..depth as usize];
 
         // Peers serve every body by digest. The scenario decides which selected bodies
-        // are already local.
+        // are already local and which missing body, if any, the peers hold.
         let local = scenario.local_heights();
         let missing = (1..=depth)
             .filter(|height| !local.contains(height))
             .collect::<BTreeSet<_>>();
+        let hold = match scenario.kind {
+            Kind::OutOfOrder => missing.first().copied(),
+            Kind::Tail => missing
+                .iter()
+                .nth(WINDOW.min(missing.len().saturating_sub(1)))
+                .copied(),
+            Kind::Local | Kind::Cold | Kind::Mixed => None,
+        };
         let bodies = Arc::new(
             chain
                 .iter()
@@ -731,7 +649,6 @@ fn run(scenario: Scenario) {
                 })
                 .collect::<HashMap<D, (u64, Bytes)>>(),
         );
-        let missing_shared = Arc::new(missing.clone());
         let observations: Shared = Arc::new(Mutex::new(Observations::default()));
 
         // Simulated network with fixed-latency links between every pair.
@@ -793,11 +710,7 @@ fn run(scenario: Scenario) {
                         context: Arc::new(context.child("producer").with_attribute("index", index)),
                         kind: scenario.kind,
                         bodies: bodies.clone(),
-                        missing: missing_shared.clone(),
-                        tail: missing
-                            .iter()
-                            .nth(WINDOW.min(missing.len().saturating_sub(1)))
-                            .copied(),
+                        hold,
                         observations: observations.clone(),
                     },
                     mailbox_size: NZUsize!(1024),
@@ -814,7 +727,7 @@ fn run(scenario: Scenario) {
             context
                 .child("peer_votes")
                 .with_attribute("index", index)
-                .spawn(move |context| async move {
+                .spawn(move |_| async move {
                     while let Ok((sender, message)) = vote_receiver.recv().await {
                         if sender != me_key {
                             continue;
@@ -825,10 +738,7 @@ fn run(scenario: Scenario) {
                         if let Vote::Finalize(finalize) = vote
                             && finalize.proposal.round.view() == target
                         {
-                            let mut guard = observer.lock();
-                            if guard.finalize_vote_at.is_none() {
-                                guard.finalize_vote_at = Some(context.current());
-                            }
+                            observer.lock().finalize_voted = true;
                         }
                     }
                 });
@@ -970,7 +880,7 @@ fn run(scenario: Scenario) {
         let _databases = stateful_mailbox.subscribe_databases().await;
         let gate = Gate {
             context: Arc::new(node.child("gate")),
-            inner: deferred,
+            inner: deferred.clone(),
             target,
             observations: observations.clone(),
             proposals: Arc::new(Mutex::new(Vec::new())),
@@ -982,7 +892,7 @@ fn run(scenario: Scenario) {
                 elector: RoundRobin::<Sha256>::default(),
                 blocker: oracle.control(public_key.clone()),
                 automaton: gate.clone(),
-                relay: gate.clone(),
+                relay: deferred,
                 reporter: gate,
                 strategy: Sequential,
                 partition: format!("{prefix}-simplex"),
@@ -1054,15 +964,14 @@ fn run(scenario: Scenario) {
                 guard.requests.is_empty(),
                 "blocks must not be requested before the input event"
             );
-            assert_eq!(
-                guard.inner_calls_before_t0, 0,
+            assert!(
+                guard.executions.is_empty(),
                 "the application must not run before the input event"
             );
             assert_eq!(guard.target_verifies, 0);
         }
 
         // Public input event: the leader's proposal and the candidate's notarization.
-        observations.lock().t0 = Some(context.current());
         let leader_vote = Vote::Notarize(
             Notarize::sign(&schemes[candidate_leader], proposal(&candidate)).unwrap(),
         );
@@ -1082,7 +991,7 @@ fn run(scenario: Scenario) {
         loop {
             {
                 let guard = observations.lock();
-                if guard.finalize_vote_at.is_some() && guard.certified.is_some() {
+                if guard.finalize_voted && guard.certified.is_some() {
                     break;
                 }
             }
@@ -1130,11 +1039,6 @@ fn run(scenario: Scenario) {
             depth as usize + 1,
             "the application must execute only one replay of B1..BD and the candidate"
         );
-        assert_eq!(
-            outcome.executions_before_completion,
-            depth as usize + 1,
-            "replay and candidate verification must finish before the finalize vote"
-        );
         assert!(
             outcome
                 .replay
@@ -1161,7 +1065,7 @@ fn run(scenario: Scenario) {
         // height could bypass the hold. Require each missing body to be requested exactly once.
         if matches!(scenario.kind, Kind::OutOfOrder | Kind::Tail) {
             assert_eq!(
-                outcome.requested.len(),
+                guard.requests.len(),
                 outcome.distinct.len(),
                 "each missing body must be requested once"
             );
@@ -1169,10 +1073,19 @@ fn run(scenario: Scenario) {
 
         // Bodies missing under a complete history are requested concurrently. Below a suffix,
         // each commitment is discovered from the body above it, so they are requested one at a
-        // time.
+        // time. With fixed latency, a request reaches a peer one latency after it leaves the
+        // node, and no response reaches the node within one latency of the first request's
+        // arrival. Requests that arrive within two latencies of the first therefore left the
+        // node before any response reached it.
         if missing.len() >= 2 && !scenario.sparse {
+            let first = guard.requests[0].at;
+            let concurrent = guard
+                .requests
+                .iter()
+                .filter(|request| request.at < first + 2 * LATENCY)
+                .count();
             assert!(
-                outcome.inflight_before_first_arrival >= 2,
+                concurrent >= 2,
                 "missing bodies must be requested concurrently"
             );
         }

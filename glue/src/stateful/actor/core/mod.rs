@@ -524,7 +524,7 @@ mod tests {
                     (context.child("proposal"), TestBlock::new(1, 1).context()),
                     Ancestry {
                         parent: digested(TestBlock::new(0, 0)),
-                        blocks: fixtures::blocks(Height::zero(), &[]),
+                        blocks: fixtures::pending_blocks(Height::zero()),
                     },
                     (),
                 ) => {

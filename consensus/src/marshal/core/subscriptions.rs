@@ -363,13 +363,27 @@ mod tests {
         assert!(!subscriptions.notify(&block));
     }
 
-    /// Cleanup removes a canceled finalized waiter, though no block arrives at its height.
+    /// Cleanup removes a canceled finalized waiter and keeps an open one at the same height for its
+    /// delivery. A height whose only waiter cancels loses its entry, though no block arrives there.
     #[test]
     fn finalized_retain_open_drops_canceled_waiters() {
-        // A registered waiter cancels.
+        // Two waiters register at one height, and one cancels.
         let mut subscriptions = Finalized::<TestVariant>::new();
+        let block = block(5, 50);
+        let (canceled, canceled_receiver) = oneshot::channel();
+        let (open, open_receiver) = oneshot::channel();
+        subscriptions.insert(Span::none(), block.height(), canceled);
+        subscriptions.insert(Span::none(), block.height(), open);
+        drop(canceled_receiver);
+
+        // Cleanup keeps the open waiter, and the delivery answers it.
+        subscriptions.retain_open();
+        assert!(subscriptions.notify(&block));
+        assert_receives(open_receiver, &block);
+
+        // A registered waiter cancels.
         let (response, receiver) = oneshot::channel();
-        subscriptions.insert(Span::none(), Height::new(5), response);
+        subscriptions.insert(Span::none(), block.height(), response);
         drop(receiver);
 
         // Cleanup removes the waiter and leaves no entry for its height.

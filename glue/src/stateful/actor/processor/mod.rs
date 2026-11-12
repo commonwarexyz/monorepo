@@ -3597,8 +3597,9 @@ mod tests {
         });
     }
 
-    /// A source that exposes no digests leaves recovery to start just above the finalized block,
-    /// acquiring each missing ancestor once and caching every block through the target.
+    /// A source that selects no digest at the height the search misses leaves recovery to start
+    /// just above the finalized block, acquiring each missing ancestor once and caching every
+    /// block through the target.
     #[test]
     fn execution_rebuild_pending_starts_above_anchor_when_source_selects_no_digest() {
         deterministic::Runner::timed(std::time::Duration::from_secs(5)).start(
@@ -3617,24 +3618,11 @@ mod tests {
                 // ancestors of the target.
                 harness.stage_pending_child(&block1, View::new(5)).await;
 
-                // The source serves every block and selects no digest, so the search cannot
-                // learn the digest it misses and recovery starts above the branch anchor.
-                let bodies: BTreeMap<_, _> = [&block2, &block3]
-                    .into_iter()
-                    .map(|block| (block.height(), block.clone()))
-                    .collect();
-                let fetches = Arc::new(AtomicUsize::new(0));
-                let counted = fetches.clone();
-                let source = Blocks::new(
-                    block4.height(),
-                    NZUsize!(8),
-                    |_| None,
-                    move |height| {
-                        counted.fetch_add(1, Ordering::SeqCst);
-                        let block = bodies.get(&height).cloned();
-                        async move { block.map(digested) }
-                    },
-                );
+                // The source serves block2 and block3 and selects no digest below the target's
+                // parent, so the search cannot learn the digest it misses and recovery starts
+                // above the branch anchor.
+                let provider = ScriptedSource::default();
+                provider.push([Some(block2.clone()), Some(block3.clone())]);
 
                 // Recovery acquires block2 and block3 once each and caches every block through
                 // the target.
@@ -3642,7 +3630,7 @@ mod tests {
                     .processor
                     .rebuild_pending(
                         harness.context_cell.as_present(),
-                        source,
+                        provider.source(&block4),
                         digested(block4.clone()),
                     )
                     .await;
@@ -3650,7 +3638,7 @@ mod tests {
                 for block in [&block2, &block3, &block4] {
                     assert!(harness.processor.pending_contains(&block.digest()));
                 }
-                assert_eq!(fetches.load(Ordering::SeqCst), 2);
+                assert_eq!(provider.fetches(), 2);
             },
         );
     }

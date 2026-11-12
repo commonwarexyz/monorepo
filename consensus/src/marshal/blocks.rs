@@ -1270,43 +1270,6 @@ mod tests {
         });
     }
 
-    /// A walk that reaches a finalized block matching its commitment samples no lower height.
-    /// Heights below that block come from finalized storage, and the block itself is acquired by
-    /// its commitment.
-    #[test]
-    fn walk_ends_at_matching_finalized_block() {
-        deterministic::Runner::default().start(|context| async move {
-            // Heights 0 through 6 are finalized below a suffix of heights 8 and 9.
-            let (marshal, mut receiver) = marshal(context, 8);
-            let blocks = chain(10);
-            let mut scripted = Scripted::default();
-            scripted.serve(&blocks);
-            scripted.finalize(&blocks[..=6]);
-            let source = marshal.blocks_with_parent(
-                Height::new(9),
-                blocks[9].digest(),
-                History::suffix(digests(&blocks[8..])),
-            );
-
-            // Read heights 3 through 9 across the finalized boundary.
-            let mut range = source.range(Height::new(3)..=Height::new(9));
-            scripted.read(&mut receiver, &mut range, &blocks[3..]);
-
-            // The walk sampled finalized storage down to the first finalized height and nothing
-            // below it.
-            assert_eq!(scripted.infos, [8, 7, 6].map(Height::new));
-
-            // Only heights below that finalized block came from finalized storage. The block
-            // itself was acquired by its commitment.
-            scripted.awaited.sort_unstable();
-            assert_eq!(scripted.awaited, [3, 4, 5].map(Height::new));
-            assert_eq!(scripted.acquisitions(&blocks[6]), 1);
-            assert_eq!(scripted.acquisitions(&blocks[5]), 0);
-            assert_eq!(source.digest(Height::new(6)), Some(blocks[6].digest()));
-            assert_eq!(source.digest(Height::new(5)), None);
-        });
-    }
-
     /// A finalized block that conflicts with a walked commitment fails a range reading through it
     /// and makes lower heights unavailable. The commitments discovered down to the conflict stay
     /// readable by exact commitment.

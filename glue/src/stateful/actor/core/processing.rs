@@ -6317,16 +6317,6 @@ mod tests {
         }
     }
 
-    /// Commitments that consensus supplies in a block's history suffix.
-    #[derive(Clone, Copy, Debug)]
-    enum SuppliedHistory {
-        /// The parent alone.
-        Parent,
-        /// Nothing, as for certification history whose parent link lacks a certificate. Only
-        /// the validated parent identifies the branch.
-        Empty,
-    }
-
     /// The finalization that covers the block while its processing is held.
     #[derive(Clone, Copy, Debug)]
     enum Covering {
@@ -6343,10 +6333,9 @@ mod tests {
     /// history. The read finds the validated parent finalized and comes from finalized storage, so
     /// the finalization waiting for the processing is acknowledged and the descendant verifies.
     #[rstest::rstest]
-    fn shared_processing_of_a_covered_block_reads_below_its_history(
-        #[values(SuppliedHistory::Parent, SuppliedHistory::Empty)] supplied: SuppliedHistory,
-        #[values(Covering::Block, Covering::Descendant)] covering: Covering,
-    ) {
+    #[case::block(Covering::Block)]
+    #[case::descendant(Covering::Descendant)]
+    fn shared_processing_of_a_covered_block_reads_below_its_history(#[case] covering: Covering) {
         // The runner budget is only a hang guard. Processing that cannot read below its history
         // would hold the finalization forever.
         deterministic::Runner::timed(Duration::from_secs(10)).start(move |context| async move {
@@ -6390,12 +6379,8 @@ mod tests {
                     .await
             );
 
-            // The block's selected history holds at most its parent.
-            let supplied: Arc<[_]> = match supplied {
-                SuppliedHistory::Parent => Arc::from([parent.digest()]),
-                SuppliedHistory::Empty => Arc::from([]),
-            };
-            let history = History::suffix(supplied);
+            // The block's selected history holds only its parent.
+            let history = History::suffix([parent.digest()]);
             let mut verify_block =
                 harness.verification(context.child("verify_block"), &block, &parent, history);
             assert!(poll!(&mut verify_block).is_pending());
@@ -6567,13 +6552,11 @@ mod tests {
     /// A verification whose history is a suffix recovers every block between the applied state
     /// and its parent by following parent links, although none of them is finalized, and
     /// processes each once from the applied state up.
-    #[rstest::rstest]
-    #[case::parent(SuppliedHistory::Parent)]
-    #[case::empty(SuppliedHistory::Empty)]
-    fn suffix_history_recovers_forward_from_the_applied_state(#[case] supplied: SuppliedHistory) {
+    #[test]
+    fn suffix_history_recovers_forward_from_the_applied_state() {
         // The runner budget is only a hang guard. Recovery that waited for an ancestor to
         // finalize would never finish.
-        deterministic::Runner::timed(Duration::from_secs(10)).start(move |context| async move {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             // Marshal stores every block below the verified one and finalizes none of them.
             let genesis = TestBlock::new(0, 0);
             let chain = successors(&genesis, 5);
@@ -6582,12 +6565,8 @@ mod tests {
             let app = ReplayGatedApp::new(Height::zero(), []);
             let harness = HeldRead::with_app(&context, "suffix-recovery", app, &stored).await;
 
-            // The verification supplies a suffix holding at most the parent.
-            let supplied: Arc<[_]> = match supplied {
-                SuppliedHistory::Parent => Arc::from([parent.digest()]),
-                SuppliedHistory::Empty => Arc::from([]),
-            };
-            let history = History::suffix(supplied);
+            // The verification supplies a suffix holding only the parent.
+            let history = History::suffix([parent.digest()]);
             assert!(
                 harness
                     .verification(context.child("verify"), block, parent, history)

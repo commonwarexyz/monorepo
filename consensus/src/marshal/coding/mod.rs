@@ -656,15 +656,6 @@ mod tests {
         chain
     }
 
-    /// Returns the commitments from genesis through the tip of `chain`, for use as an anchored
-    /// history.
-    fn selected_chain(chain: &[(Round, TestCodedBlock)]) -> Arc<[TestCommitment]> {
-        std::iter::once(genesis_coding_commitment(&genesis_block()))
-            .chain(chain.iter().map(|(_, block)| block.commitment()))
-            .collect::<Vec<_>>()
-            .into()
-    }
-
     /// An exact-commitment delivery decodes under the coding configuration its commitment names,
     /// even one consensus rejects at the proposal boundary. Without trust evidence, marshal
     /// recomputes the root and neither stores nor finalizes the block.
@@ -1921,8 +1912,7 @@ mod tests {
             // 0-19), so the boundary block below chains onto height 18.
             let mut parent = genesis.digest();
             let mut last_view = View::zero();
-            let mut last_commitment = genesis_coding_commitment(&genesis);
-            let mut selected = vec![last_commitment];
+            let mut last_commitment = genesis_commitment();
 
             // Capture a genuinely-chained non-boundary block (height 10) so Test 2
             // can re-propose one that validates cleanly under its own embedded
@@ -1939,7 +1929,6 @@ mod tests {
                 let block = make_coding_block(ctx.clone(), parent, Height::new(i), i * 100);
                 let coded_block = encode_block(block.clone(), coding_config);
                 last_commitment = coded_block.commitment();
-                selected.push(last_commitment);
                 if i == 10 {
                     non_boundary = Some((View::new(i), last_commitment));
                 }
@@ -1966,8 +1955,6 @@ mod tests {
             );
             let coded_boundary = encode_block(boundary_block.clone(), coding_config);
             let boundary_commitment = coded_boundary.commitment();
-            selected.push(boundary_commitment);
-            let selected: Arc<[TestCommitment]> = selected.into();
             shards.discovered(
                 boundary_commitment,
                 boundary_context.leader.clone(),
@@ -1998,7 +1985,7 @@ mod tests {
                 .verify(
                     reproposal_context.clone(),
                     boundary_commitment,
-                    History::anchored(selected.clone()),
+                    History::suffix([boundary_commitment]),
                 )
                 .await;
             assert!(
@@ -2024,7 +2011,7 @@ mod tests {
                 .certify(
                     reproposal_round,
                     boundary_commitment,
-                    History::anchored(selected.clone()),
+                    History::suffix([boundary_commitment]),
                 )
                 .await;
             assert!(
@@ -2046,9 +2033,9 @@ mod tests {
             };
             let repeated_verify = marshaled
                 .verify(
-                    repeated_reproposal_context.clone(),
+                    repeated_reproposal_context,
                     boundary_commitment,
-                    History::anchored(selected.clone()),
+                    History::suffix([boundary_commitment]),
                 )
                 .await;
             assert!(
@@ -2059,7 +2046,7 @@ mod tests {
                 .certify(
                     repeated_reproposal_round,
                     boundary_commitment,
-                    History::anchored(selected.clone()),
+                    History::suffix([boundary_commitment]),
                 )
                 .await;
             assert!(
@@ -2084,9 +2071,9 @@ mod tests {
             // registered before calling certify.
             let shard_validity = marshaled
                 .verify(
-                    invalid_reproposal_context.clone(),
+                    invalid_reproposal_context,
                     non_boundary_commitment,
-                    History::anchored(&selected[..=10]),
+                    History::suffix([non_boundary_commitment]),
                 )
                 .await;
             assert!(
@@ -2099,7 +2086,7 @@ mod tests {
                 .certify(
                     invalid_reproposal_round,
                     non_boundary_commitment,
-                    History::anchored(&selected[..=10]),
+                    History::suffix([non_boundary_commitment]),
                 )
                 .await;
             assert!(
@@ -2123,7 +2110,7 @@ mod tests {
                 .verify(
                     cross_epoch_reproposal_context.clone(),
                     boundary_commitment,
-                    History::anchored(selected.clone()),
+                    History::suffix([boundary_commitment]),
                 )
                 .await;
             assert!(
@@ -2136,7 +2123,7 @@ mod tests {
                 .certify(
                     cross_epoch_reproposal_round,
                     boundary_commitment,
-                    History::anchored(selected.clone()),
+                    History::suffix([boundary_commitment]),
                 )
                 .await;
             assert!(
@@ -2176,6 +2163,7 @@ mod tests {
             .await;
 
             let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
 
             let setup = CodingHarness::setup_validator(
                 context.child("validator").with_attribute("index", 0),
@@ -2203,9 +2191,19 @@ mod tests {
             let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
             // Store a mid-epoch block in core marshal without opening shard reconstruction.
-            let chain = coding_chain(participants[1].clone(), 5);
-            let selected = selected_chain(&chain);
-            let (original_round, coded_block) = chain.last().unwrap().clone();
+            let original_round = Round::new(Epoch::new(0), View::new(5));
+            let original_context = CodingCtx {
+                round: original_round,
+                leader: participants[1].clone(),
+                parent: (View::new(4), genesis_commitment()),
+            };
+            let block = make_coding_block(
+                original_context,
+                Sha256::hash(&[b"parent"]),
+                Height::new(5),
+                500,
+            );
+            let coded_block: TestCodedBlock = encode_block(block.clone(), coding_config);
             let commitment = coded_block.commitment();
             assert!(marshal.verified(original_round, coded_block.clone()).await);
             assert!(shards.get(commitment).await.is_none());
@@ -2221,9 +2219,9 @@ mod tests {
             let assigned = shards.subscribe_assigned_shard_verified(commitment);
             let verdict = marshaled
                 .verify(
-                    reproposal_context.clone(),
+                    reproposal_context,
                     commitment,
-                    History::anchored(selected.clone()),
+                    History::suffix([commitment]),
                 )
                 .await;
             assert!(!verdict.expect("re-proposal verdict missing"));
@@ -2311,15 +2309,23 @@ mod tests {
                 }
             };
 
-            // Build the chain through the epoch boundary block, store it in core marshal (the
-            // durable backstop), and cache the boundary block in the shard engine.
+            // Build the epoch boundary block, store it in core marshal (the durable
+            // backstop), and cache it in the shard engine.
             let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);
-            let chain = coding_chain(me.clone(), boundary_height.get());
-            let selected = selected_chain(&chain);
-            for (round, block) in &chain[..chain.len() - 1] {
-                assert!(marshal.verified(*round, block.clone()).await);
-            }
-            let (boundary_round, coded_boundary) = chain.last().unwrap().clone();
+            let boundary_round = Round::new(Epoch::new(0), View::new(boundary_height.get()));
+            let boundary_context = CodingCtx {
+                round: boundary_round,
+                leader: me.clone(),
+                parent: (View::new(boundary_height.get() - 1), genesis_commitment()),
+            };
+            let boundary_block = make_coding_block(
+                boundary_context.clone(),
+                Sha256::hash(&[b"parent"]),
+                boundary_height,
+                1900,
+            );
+            let coded_boundary: TestCodedBlock =
+                encode_block(boundary_block.clone(), coding_config);
             let boundary_commitment = coded_boundary.commitment();
             assert!(
                 marshal
@@ -2345,9 +2351,9 @@ mod tests {
             };
             let verdict = marshaled
                 .verify(
-                    reproposal_context.clone(),
+                    reproposal_context,
                     boundary_commitment,
-                    History::anchored(selected.clone()),
+                    History::suffix([boundary_commitment]),
                 )
                 .await;
             assert!(
@@ -2383,7 +2389,7 @@ mod tests {
             ));
 
             let block = marshal
-                .acquire(boundary_commitment)
+                .subscribe(boundary_commitment)
                 .await
                 .expect("core block subscription closed after shard eviction");
             assert_eq!(block.commitment(), boundary_commitment);
@@ -2392,7 +2398,7 @@ mod tests {
                 .certify(
                     reproposal_round,
                     boundary_commitment,
-                    History::anchored(selected.clone()),
+                    History::suffix([boundary_commitment]),
                 )
                 .await;
             assert!(
@@ -2443,7 +2449,6 @@ mod tests {
             let v1_shards = v1_setup.extra;
 
             let chain = coding_chain(participants[0].clone(), BLOCKS_PER_EPOCH.get() - 1);
-            let selected = selected_chain(&chain);
             let (original_round, coded_block) = chain.last().unwrap().clone();
             let commitment = coded_block.commitment();
 
@@ -2475,7 +2480,7 @@ mod tests {
                 .verify(
                     reproposal_context.clone(),
                     commitment,
-                    History::anchored(selected.clone()),
+                    History::suffix([commitment]),
                 )
                 .await;
             assert!(
@@ -2601,6 +2606,7 @@ mod tests {
             .await;
 
             let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
 
             let setup = CodingHarness::setup_validator(
                 context.child("validator").with_attribute("index", 0),
@@ -2623,12 +2629,29 @@ mod tests {
             };
             let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
+            let genesis_ctx = CodingCtx {
+                round: Round::zero(),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
+
             // Build a valid boundary re-proposal, but keep it unavailable until
             // after the optimistic verify receiver has been dropped.
             let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);
-            let chain = coding_chain(me.clone(), boundary_height.get());
-            let selected = selected_chain(&chain);
-            let (boundary_round, coded_boundary) = chain.last().unwrap().clone();
+            let boundary_round = Round::new(Epoch::zero(), View::new(boundary_height.get()));
+            let boundary_context = CodingCtx {
+                round: boundary_round,
+                leader: me.clone(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let boundary_block = make_coding_block(
+                boundary_context,
+                genesis.digest(),
+                boundary_height,
+                boundary_height.get() * 100,
+            );
+            let coded_boundary = encode_block(boundary_block.clone(), coding_config);
             let boundary_commitment = coded_boundary.commitment();
             let reproposal_round = Round::new(Epoch::zero(), View::new(boundary_height.get() + 1));
             let reproposal_context = CodingCtx {
@@ -2639,9 +2662,9 @@ mod tests {
 
             // Start verify, then drop the receiver before the block is available.
             let verify_rx = marshaled.verify(
-                reproposal_context.clone(),
+                reproposal_context,
                 boundary_commitment,
-                History::anchored(selected.clone()),
+                History::suffix([boundary_commitment]),
             );
             drop(verify_rx);
             context.sleep(Duration::from_millis(10)).await;
@@ -2654,7 +2677,7 @@ mod tests {
             let certify_rx = marshaled.certify(
                 reproposal_round,
                 boundary_commitment,
-                History::anchored(selected.clone()),
+                History::suffix([boundary_commitment]),
             );
             select! {
                 result = certify_rx => {
@@ -6276,6 +6299,7 @@ mod tests {
             .await;
 
             let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
 
             let setup = CodingHarness::setup_validator(
                 context.child("validator").with_attribute("index", 0),
@@ -6287,12 +6311,27 @@ mod tests {
             let marshal = setup.mailbox;
             let shards = setup.extra;
 
+            let genesis_ctx = CodingCtx {
+                round: Round::zero(),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
+            let genesis_parent_commitment = genesis_coding_commitment(&genesis);
+
             // Seed the boundary block at the re-proposal round, where the
             // pre-crash relay broadcast of the re-proposal persisted it.
             let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);
-            let chain = coding_chain(me.clone(), boundary_height.get());
-            let selected = selected_chain(&chain);
-            let (_, coded_boundary) = chain.last().unwrap().clone();
+            let boundary_round = Round::new(Epoch::zero(), View::new(boundary_height.get()));
+            let boundary_ctx = CodingCtx {
+                round: boundary_round,
+                leader: default_leader(),
+                parent: (View::zero(), genesis_parent_commitment),
+            };
+            let boundary_block =
+                make_coding_block(boundary_ctx, genesis.digest(), boundary_height, 1900);
+            let coded_boundary: CodedBlock<_, ReedSolomon<Sha256>, Sha256> =
+                encode_block(boundary_block.clone(), coding_config);
             let boundary_commitment = coded_boundary.commitment();
             let round = Round::new(Epoch::zero(), View::new(boundary_height.get() + 1));
             assert!(marshal.verified(round, coded_boundary).await);
@@ -6319,7 +6358,7 @@ mod tests {
             let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
             let commitment = marshaled
-                .propose(ctx.clone(), History::anchored(selected.clone()))
+                .propose(ctx, History::suffix([boundary_commitment]))
                 .await
                 .expect("propose must return a commitment");
             assert_eq!(
@@ -6328,8 +6367,7 @@ mod tests {
             );
 
             let _ = marshaled.broadcast(commitment, Plan::Propose { round });
-            let certify_rx =
-                marshaled.certify(round, commitment, History::anchored(selected.clone()));
+            let certify_rx = marshaled.certify(round, commitment, History::suffix([commitment]));
             select! {
                 result = certify_rx => {
                     assert!(
