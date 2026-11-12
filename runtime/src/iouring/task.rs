@@ -2454,7 +2454,11 @@ mod loom_tests {
     /// A backlog behind a busy worker reaches a peer that is searching,
     /// parking, or parked when the push that queues [`KICK`] runnables kicks.
     /// Blocking the owner until a stolen task runs makes a lost kick deadlock.
-    fn backlog_behind_a_busy_worker(make_pool: MakePool, bound: usize) {
+    ///
+    /// With `drain_owner`, worker zero then runs only what its run queue still
+    /// holds, while its peer goes on through its worker loop. Otherwise it
+    /// resumes its own worker loop.
+    fn backlog_behind_a_busy_worker(make_pool: MakePool, bound: usize, drain_owner: bool) {
         let mut builder = loom::model::Builder::new();
         builder.preemption_bound = Some(bound);
         builder.check(move || {
@@ -2479,7 +2483,17 @@ mod loom_tests {
             let mut ready = pool.queue(0).owner();
             let handles = enqueue_raising(&pool, &set, &mut ready, &ran, KICK);
             wait_ran(&ran);
-            work(&pool, &set, &mut ready, &p0, 0, &completed, KICK, false);
+
+            // A peer has already run a task. The owner drains its remainder
+            // while its peer finishes its own work, or runs on as a worker.
+            if drain_owner {
+                while let Some(runnable) = ready.pop() {
+                    complete(&pool, &set, runnable, &completed, KICK);
+                }
+            } else {
+                work(&pool, &set, &mut ready, &p0, 0, &completed, KICK, false);
+            }
+
             thief.join().unwrap();
             for task in handles {
                 assert_eq!(refs(&task.state), 1);
@@ -2834,15 +2848,15 @@ mod loom_tests {
     /// The backlog model with claims rounded down, at three preemptions.
     #[test]
     fn test_backlog_behind_a_busy_worker_is_stolen() {
-        backlog_behind_a_busy_worker(pool_rounding_down, 3);
+        backlog_behind_a_busy_worker(pool_rounding_down, 3, false);
     }
 
     /// The backlog model on ordinary run queues, whose thieves also steal a
-    /// lone runnable, before the kick or after the first steal, at two
-    /// preemptions.
+    /// lone runnable, before the kick or after the first steal, at four
+    /// preemptions. After a peer runs a task, the owner drains its queue.
     #[test]
     fn test_backlog_behind_a_busy_worker_is_stolen_with_lone_steals() {
-        backlog_behind_a_busy_worker(pool, 2);
+        backlog_behind_a_busy_worker(pool, 4, true);
     }
 
     /// The hand-on model with claims rounded down, at two preemptions.
@@ -2883,25 +2897,31 @@ mod loom_tests {
     /// The claim model on ordinary run queues, where the woken peer and
     /// worker zero also race for the lone runnable that the peer's first
     /// steal leaves, at one preemption.
-    #[test]
-    fn test_claim_after_search_cas_hands_on_before_a_blocking_poll_with_lone_steals() {
-        for delayed in [false, true] {
-            for dropping in [false, true] {
-                claim_after_search_cas(pool, 1, KICK, delayed, dropping);
-            }
-        }
+    #[rstest]
+    #[case::prompt_return(false, false)]
+    #[case::prompt_drop(false, true)]
+    #[case::delayed_return(true, false)]
+    #[case::delayed_drop(true, true)]
+    fn test_claim_after_search_cas_hands_on_before_a_blocking_poll_with_lone_steals(
+        #[case] delayed: bool,
+        #[case] dropping: bool,
+    ) {
+        claim_after_search_cas(pool, 1, KICK, delayed, dropping);
     }
 
     /// The claim model on ordinary run queues with a lone runnable as its
     /// backlog, at two preemptions. The claimed look took its count for that
     /// runnable, which the peer that the last return wakes then steals.
-    #[test]
-    fn test_claim_after_search_cas_hands_on_a_lone_runnable_before_a_blocking_poll() {
-        for delayed in [false, true] {
-            for dropping in [false, true] {
-                claim_after_search_cas(pool, 2, 1, delayed, dropping);
-            }
-        }
+    #[rstest]
+    #[case::prompt_return(false, false)]
+    #[case::prompt_drop(false, true)]
+    #[case::delayed_return(true, false)]
+    #[case::delayed_drop(true, true)]
+    fn test_claim_after_search_cas_hands_on_a_lone_runnable_before_a_blocking_poll(
+        #[case] delayed: bool,
+        #[case] dropping: bool,
+    ) {
+        claim_after_search_cas(pool, 2, 1, delayed, dropping);
     }
 
     /// The run-after model with claims rounded down, at two preemptions.
