@@ -81,7 +81,8 @@ where
 ///
 /// A key must be set at most once across the database history.
 ///
-/// Use [super::fixed::Db] or [super::variable::Db] for concrete instantiations.
+/// Use [fixed::Db](super::fixed::Db) or [variable::Db](super::variable::Db) for concrete
+/// instantiations.
 pub struct Db<
     F: Family,
     E: Context,
@@ -98,15 +99,15 @@ pub struct Db<
     pub(super) journal: authenticated::Journal<F, E, C, H, S>,
 
     /// Cached canonical operations root.
-    pub(crate) root: H::Digest,
+    pub(super) root: H::Digest,
 
     /// The location of the [Operation::Set] of every key set at or after the inactivity floor
     /// the snapshot was built from, excluding pruned locations.
-    pub(crate) snapshot: Index<T>,
+    pub(super) snapshot: Index<T>,
 
     /// The inactivity floor declared by the last committed batch.
     /// Operations before this location are considered inactive by the application.
-    pub(crate) inactivity_floor_loc: Location<F>,
+    pub(super) inactivity_floor_loc: Location<F>,
 
     /// Metrics for this database.
     pub(super) metrics: Metrics<E>,
@@ -132,7 +133,6 @@ where
     }
 }
 
-// Shared read-only functionality.
 impl<F, E, K, V, C, H, T, S> Db<F, E, K, V, C, H, T, S>
 where
     F: Family,

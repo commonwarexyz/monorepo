@@ -144,22 +144,6 @@ where
     H: Hasher,
     Operation<F, V>: EncodeShared,
 {
-    /// Create a batch from the DB (no parent chain).
-    pub(super) fn new<E, C>(keyless: &Db<F, E, V, C, H, S>) -> Self
-    where
-        E: Context,
-        C: Mutable<Item = Operation<F, V>>,
-    {
-        Self {
-            journal_batch: keyless.journal.new_batch(),
-            appends: Vec::new(),
-            parent: None,
-            metadata: None,
-            inactivity_floor: keyless.inactivity_floor_loc,
-            base: keyless.commitment(),
-        }
-    }
-
     /// The location that the next appended value will be placed at.
     pub fn size(&self) -> Location<F> {
         self.base.size + self.appends.len() as u64
@@ -633,7 +617,14 @@ where
 {
     /// Create a new speculative batch of operations with this database as its parent.
     pub fn new_batch(&self) -> UnmerkleizedBatch<F, H, V, S> {
-        UnmerkleizedBatch::new(self)
+        UnmerkleizedBatch {
+            journal_batch: self.journal.new_batch(),
+            appends: Vec::new(),
+            parent: None,
+            metadata: None,
+            inactivity_floor: self.inactivity_floor_loc,
+            base: self.commitment(),
+        }
     }
 
     /// Create an initial [`MerkleizedBatch`] from the DB's current state.

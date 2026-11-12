@@ -119,24 +119,6 @@ where
     H: Hasher,
     Operation<F, K, V>: EncodeShared,
 {
-    /// Create a batch from the DB (no parent chain).
-    pub(super) fn new<E, C, T>(immutable: &Db<F, E, K, V, C, H, T, S>) -> Self
-    where
-        E: Context,
-        C: Mutable<Item = Operation<F, K, V>>,
-        C::Item: EncodeShared,
-        T: Translator,
-    {
-        Self {
-            journal_batch: immutable.journal.new_batch(),
-            mutations: BTreeMap::new(),
-            parent: None,
-            metadata: None,
-            inactivity_floor: immutable.inactivity_floor_loc,
-            base: immutable.commitment(),
-        }
-    }
-
     /// Set the metadata recorded in this batch's commit. Defaults to `None` and is not inherited by
     /// child batches.
     pub fn with_metadata(mut self, metadata: impl Into<Option<V::Value>>) -> Self {
@@ -633,7 +615,14 @@ where
 {
     /// Create a new speculative batch of operations with this database as its parent.
     pub fn new_batch(&self) -> UnmerkleizedBatch<F, H, K, V, S> {
-        UnmerkleizedBatch::new(self)
+        UnmerkleizedBatch {
+            journal_batch: self.journal.new_batch(),
+            mutations: BTreeMap::new(),
+            parent: None,
+            metadata: None,
+            inactivity_floor: self.inactivity_floor_loc,
+            base: self.commitment(),
+        }
     }
 
     /// Create an initial [`MerkleizedBatch`] from the DB's current state.
