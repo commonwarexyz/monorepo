@@ -1077,7 +1077,7 @@ pub(super) async fn compute_grafted_root<
 
 /// Resolve each bitmap chunk's covering ops-tree node, returning
 /// `(chunk_idx, chunk_ops_digest, chunk)` triples ready for
-/// [`grafting::graft_chunk_digests`].
+/// [`grafting::grafted_leaf_digests`].
 ///
 /// Callers must pass only **graftable** chunks (those whose h=G ancestor has already been born in
 /// the ops tree). Each graftable chunk has exactly one covering ops node at height G, looked up via
@@ -1153,7 +1153,7 @@ pub(super) async fn build_grafted_tree<
         start: pruned_chunks,
         roots: inputs.iter().map(|(_, digest, _)| *digest).collect(),
     };
-    let leaves = grafting::graft_chunk_digests::<H, _, N>(strategy, inputs);
+    let leaves = grafting::grafted_leaf_digests::<H, _, N>(strategy, inputs);
 
     // Build the base grafted tree: either from pruned components or empty.
     let mut grafted_tree = if pruned_chunks > 0 {
