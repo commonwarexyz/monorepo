@@ -1218,14 +1218,14 @@ pub mod tests {
     impl Pool {
         /// A pool and its parkers as [`Pool::new`] builds them, with lone
         /// runnables stealable at once, whose shared run queues claim half
-        /// rounded down (see [`LocalQueue::shared_rounding_down`]).
+        /// rounded down (see [`LocalQueue::round_down`]).
         #[cfg(feature = "loom")]
         pub(crate) fn rounding_down(workers: usize) -> (Self, Vec<Parker>) {
             let (mut pool, parkers) = Self::new(workers, Duration::ZERO);
             if pool.workers() > 1 {
-                pool.queues = (0..pool.workers())
-                    .map(|_| LocalQueue::shared_rounding_down())
-                    .collect();
+                for queue in pool.queues.iter_mut() {
+                    queue.round_down();
+                }
             }
             (pool, parkers)
         }

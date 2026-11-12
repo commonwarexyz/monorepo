@@ -920,19 +920,14 @@ pub mod tests {
             self.0.tail.store(real as u32, Ordering::Release);
         }
 
-        /// An empty shared queue whose claims take half the backlog rounded
-        /// down, so a lone value is never claimed or reported stealable. Its
-        /// owner pops as every shared owner does. Without lone claims, broad
-        /// models of the idle protocol have far fewer interleavings and stay
-        /// within their preemption bounds, while focused models cover lone
-        /// claims on ordinary queues.
+        /// Make a fresh shared queue claim half the backlog rounded down,
+        /// so a lone value is never claimed or reported stealable. The queue
+        /// must have no other handle yet.
         #[cfg(feature = "loom")]
-        pub(crate) fn shared_rounding_down() -> Self {
-            let mut queue = Self::shared();
-            Arc::get_mut(&mut queue.0)
+        pub(crate) fn round_down(&mut self) {
+            Arc::get_mut(&mut self.0)
                 .expect("a new queue has no other handle")
                 .round_down = true;
-            queue
         }
 
         /// Claim the oldest `count` values as a thief paused after its claim
