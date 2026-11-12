@@ -523,6 +523,11 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// or the consensus engine cancels the request. Abstaining is not represented by a
         /// special return value.
         ///
+        /// Calls are independent. Several can be outstanding for the same round, for
+        /// conflicting blocks or for the same block. Never let one call cancel or replace
+        /// another, and key any work they share on the context and block, never on the round
+        /// alone.
+        ///
         /// This future may be cancelled before it completes. Implementations must be
         /// cancellation-safe.
         fn verify(

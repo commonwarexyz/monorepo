@@ -34,6 +34,11 @@
 //! that the block's embedded context matches the consensus context before allowing the block to be
 //! certified. If certification fails, the voter can still emit a nullify vote to advance the view.
 //!
+//! A certificate can form for a block this participant was never asked to verify. Certification
+//! then recovers the block and verifies it under its embedded context, so the application can be
+//! asked to verify more than one block of a round. Certifying a block stops the verification of
+//! any conflicting block of its round, since at most one block of a round is notarized.
+//!
 //! # Usage
 //!
 //! Wrap your [`Application`] implementation with [`Marshaled::new`] and provide it to your
