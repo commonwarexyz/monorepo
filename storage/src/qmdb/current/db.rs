@@ -947,7 +947,8 @@ pub(super) fn combine_roots<H: Hasher>(
     }
 }
 
-/// Gather the components that bind an ops root to a canonical [Db] root using memory-resident nodes.
+/// Gather the components that bind an ops root to a canonical [Db] root using
+/// memory-resident nodes.
 ///
 /// See the [Root structure](super) section in the module documentation.
 ///
