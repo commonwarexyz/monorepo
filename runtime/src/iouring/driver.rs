@@ -15,8 +15,8 @@
 //!
 //! Dropping a local or forwarded observer cancels reads and network operations.
 //! Queued requests can finish immediately, while in-flight requests need a cancellation
-//! SQE and must await their operation CQE. Writes and syncs continue through all
-//! follow-up SQEs after their observers are dropped.
+//! SQE and must await their operation CQE. Writes, syncs, and resizes continue through
+//! all follow-up SQEs after their observers are dropped.
 //!
 //! Cancellations stage first, followed by operations in FIFO order and wake-poll
 //! rearming. The operation limit excludes cancellation and wake SQEs. A full SQ
@@ -268,7 +268,8 @@ impl Driver {
         }
     }
 
-    /// Clear local and forwarded observation before draining retained writes and syncs.
+    /// Clear local and forwarded observation before draining retained writes, syncs, and
+    /// resizes.
     pub fn close(&mut self, deferred: &mut Deferred) {
         for id in self.state.waiters.close(deferred) {
             self.state.cancel(id, deferred);
