@@ -28,8 +28,8 @@ pub(crate) const MODULUS: [u64; WORDS] = [
     0x1a01_11ea_397f_e69a,
 ];
 
-/// Largest lane count of any backend.
-pub(crate) const MAX_LANES: usize = 8;
+/// Largest count of 64-bit lanes of any backend.
+pub(crate) const MAX_U64_LANES: usize = 8;
 
 /// The encoding of one.
 pub(crate) const ONE: [u8; BYTES] = encode([1, 0, 0, 0, 0, 0]);
