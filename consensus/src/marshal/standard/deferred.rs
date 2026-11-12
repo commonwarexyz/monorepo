@@ -820,6 +820,10 @@ where
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.deferred.certify", level = "info", skip_all, fields(round = %round, digest = %digest))]
     async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
+        // A notarization for this digest rules out every other proposal of the round,
+        // so stop verifying them.
+        self.gates.discard_conflicting(round, digest);
+
         // Attempt to retrieve the existing certification gate task for this round/digest.
         let task = self.gates.claim(round, digest, |block, ack| {
             self.marshal.verified_deferred(round, block, ack)
@@ -1423,6 +1427,91 @@ mod tests {
                     panic!("certify should resolve after verification is released");
                 },
             }
+        });
+    }
+
+    /// Certifying one proposal of a round stops the verification of a conflicting
+    /// proposal of the same round that was verified locally.
+    ///
+    /// An equivocating leader sends this validator proposal A while the rest of the
+    /// network notarizes proposal B. Optimistic verification of A has already handed
+    /// its application verification to the certification gate, which the voter cannot
+    /// cancel. Once B is certified, A can never be notarized, so its verification is
+    /// unnecessary work.
+    #[test_traced("WARN")]
+    fn certify_drops_conflicting_verification() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+                1024 * 1024,
+            )
+            .await;
+
+            let me = participants[0].clone();
+            let setup = StandardHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let buffer = setup.extra;
+
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
+            let (mock_app, verify_started, release_verify): (GatedVerifyingApp<B, S>, _, _) =
+                GatedVerifyingApp::new();
+            let mut marshaled = Deferred::new(
+                context.child("deferred"),
+                mock_app,
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+            );
+
+            let parent = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let parent_digest = parent.digest();
+            let round = Round::new(Epoch::zero(), View::new(2));
+            let ctx = Ctx {
+                round,
+                leader: me,
+                parent: (View::new(1), parent_digest),
+            };
+            let a = B::new::<Sha256>(ctx.clone(), parent_digest, Height::new(2), 200);
+            let b = B::new::<Sha256>(ctx.clone(), parent_digest, Height::new(2), 201);
+            let (a_digest, b_digest) = (a.digest(), b.digest());
+            assert_ne!(a_digest, b_digest);
+            for block in [parent, a, b] {
+                assert!(
+                    buffer
+                        .broadcast(commonware_p2p::Recipients::Some(vec![]), ready(block))
+                        .accepted()
+                );
+            }
+
+            // Optimistic verification of A hands its application verification to the gate.
+            let optimistic_rx = marshaled.verify(ctx, a_digest).await;
+            assert!(optimistic_rx.await.expect("optimistic verify should resolve"));
+            verify_started
+                .await
+                .expect("verify should reach the gated application");
+            assert!(!release_verify.is_closed());
+
+            // B of the same round is notarized and certified.
+            let _certify_rx = marshaled.certify(round, b_digest).await;
+            context.sleep(Duration::from_millis(10)).await;
+
+            assert!(
+                release_verify.is_closed(),
+                "verification of A continues after B of the same round was certified"
+            );
         });
     }
 
