@@ -147,6 +147,17 @@ test *args:
     fi
     cargo nextest run "$@"
 
+# Run the browser runtime and whisper tests in headless Chrome. Requires a wasm-bindgen-cli of
+# the version in Cargo.lock and CHROMEDRIVER set to a chromedriver that matches the installed
+# Chrome.
+test-browser *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner
+    export WASM_BINDGEN_TEST_WEBDRIVER_JSON="{{ justfile_directory() }}/.github/webdriver.json"
+    cargo test --target wasm32-unknown-unknown -p commonware-runtime --features browser --test browser "$@"
+    cargo test --target wasm32-unknown-unknown -p commonware-whisper --test browser "$@"
+
 # Run loom tests
 test-loom *args='':
     #!/usr/bin/env bash

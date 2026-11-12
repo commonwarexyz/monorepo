@@ -1,0 +1,35 @@
+[package]
+name = "commonware-whisper"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Send encrypted messages directly to another browser using commonware-runtime and commonware-stream."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/whisper"
+documentation = "https://docs.rs/commonware-whisper"
+
+[lints]
+workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+bytes.workspace = true
+commonware-codec.workspace = true
+commonware-cryptography.workspace = true
+commonware-formatting.workspace = true
+commonware-macros.workspace = true
+commonware-math.workspace = true
+commonware-runtime = { workspace = true, features = ["browser"] }
+commonware-stream.workspace = true
+commonware-utils.workspace = true
+js-sys.workspace = true
+thiserror.workspace = true
+wasm-bindgen.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test.workspace = true
+
+[lib]
+bench = false
+crate-type = ["cdylib", "rlib"]

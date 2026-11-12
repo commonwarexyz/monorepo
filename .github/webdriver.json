@@ -1,0 +1,8 @@
+{
+  "goog:chromeOptions": {
+    "args": [
+      "--allow-loopback-in-peer-connection",
+      "--disable-features=WebRtcHideLocalIpsWithMdns"
+    ]
+  }
+}

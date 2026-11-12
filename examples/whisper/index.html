@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" href="data:," />
+    <title>commonware-whisper</title>
+    <style>
+      body {
+        font-family: ui-monospace, monospace;
+        max-width: 44rem;
+        margin: 2rem auto;
+        padding: 0 1rem;
+      }
+      textarea,
+      input {
+        box-sizing: border-box;
+        width: 100%;
+        font: inherit;
+      }
+      code {
+        word-break: break-all;
+      }
+      #log {
+        min-height: 8rem;
+        padding: 0;
+        list-style: none;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>commonware-whisper</h1>
+    <p>You are <code id="me">...</code></p>
+    <section id="pairing">
+      <p>
+        <button id="invite">Create invite</button>
+        or submit the invite another page created.
+      </p>
+      <p>
+        <label for="outgoing">Pass this to the other page</label>
+        <textarea id="outgoing" rows="5" readonly></textarea>
+        <button id="copy">Copy</button>
+      </p>
+      <p>
+        <label for="incoming">What the other page passed you</label>
+        <textarea id="incoming" rows="5" maxlength="32896"></textarea>
+        <button id="submit">Submit</button>
+      </p>
+    </section>
+    <section id="chat" hidden>
+      <p>Connected to <code id="peer"></code></p>
+      <ul id="log"></ul>
+      <form id="compose">
+        <input id="message" autocomplete="off" placeholder="Message" maxlength="1024" />
+        <button>Send</button>
+      </form>
+    </section>
+    <p id="status" role="status">Loading...</p>
+    <script type="module">
+      // STUN servers tell each page its public address, so pages on different networks can
+      // connect. No message passes through them. Without one, the pages must share a device or
+      // local network.
+      const STUN_SERVERS = ["stun:stun.cloudflare.com:3478"];
+
+      const element = (id) => document.getElementById(id);
+      const status = (text) => (element("status").textContent = text);
+      const log = (who, text) => {
+        const line = document.createElement("li");
+        line.textContent = who + ": " + text;
+        element("log").append(line);
+      };
+
+      // Follow the session through the events it reports.
+      const listener = (event, detail) => {
+        switch (event) {
+          case "identity":
+            element("me").textContent = detail;
+            status("");
+            break;
+          case "invite":
+            element("outgoing").value = detail;
+            status("Pass the invite to the other page, then submit its reply.");
+            break;
+          case "reply":
+            element("outgoing").value = detail;
+            element("incoming").value = "";
+            element("invite").disabled = true;
+            status("Pass the reply to the other page.");
+            break;
+          case "connected":
+            element("peer").textContent = detail;
+            element("pairing").hidden = true;
+            element("chat").hidden = false;
+            status("");
+            break;
+          case "message":
+            log("them", detail);
+            break;
+          case "error":
+            status(detail);
+            break;
+          case "closed":
+            status("Session over: " + detail + ". Reload to start another.");
+            break;
+        }
+      };
+
+      // Load the module the README builds.
+      let whisper;
+      try {
+        const { default: init, Whisper } = await import("./pkg/commonware_whisper.js");
+        await init();
+        whisper = new Whisper(STUN_SERVERS, listener);
+      } catch (error) {
+        status("Could not load the page's module. Build it as the README describes.");
+        throw error;
+      }
+
+      // The session refuses a request while it is busy or after it ends.
+      const request = (run) => {
+        try {
+          run();
+          return true;
+        } catch (error) {
+          status(error.message);
+          return false;
+        }
+      };
+      element("invite").addEventListener("click", () => {
+        if (request(() => whisper.invite())) {
+          element("invite").disabled = true;
+          status("Creating invite...");
+        }
+      });
+      element("submit").addEventListener("click", () => {
+        if (request(() => whisper.signal(element("incoming").value.trim()))) {
+          status("Connecting...");
+        }
+      });
+      element("copy").addEventListener("click", async () => {
+        // The clipboard is only available to pages served securely or from this device.
+        try {
+          await navigator.clipboard.writeText(element("outgoing").value);
+          status("Copied.");
+        } catch {
+          element("outgoing").select();
+          status("Copy the selected text.");
+        }
+      });
+      element("compose").addEventListener("submit", (event) => {
+        event.preventDefault();
+        const message = element("message").value;
+        if (message && request(() => whisper.send(message))) {
+          log("you", message);
+          element("message").value = "";
+        }
+      });
+    </script>
+  </body>
+</html>

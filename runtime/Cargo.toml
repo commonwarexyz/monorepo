@@ -46,6 +46,25 @@ crossbeam-utils.workspace = true
 io-uring.workspace = true
 once_cell = { workspace = true, features = ["std"] }
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = { workspace = true, optional = true }
+wasm-bindgen = { workspace = true, optional = true }
+web-sys = { workspace = true, optional = true, features = [
+	"MessageEvent",
+	"RtcConfiguration",
+	"RtcDataChannel",
+	"RtcDataChannelInit",
+	"RtcDataChannelState",
+	"RtcDataChannelType",
+	"RtcIceGatheringState",
+	"RtcIceServer",
+	"RtcPeerConnection",
+	"RtcPeerConnectionState",
+	"RtcSdpType",
+	"RtcSessionDescription",
+	"RtcSessionDescriptionInit",
+] }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]
 # Enable the JS backend for transitive dependencies that use getrandom on WASM.
 version = "0.4.3"
@@ -68,10 +87,15 @@ tokio = { workspace = true, features = ["full"] }
 
 [dev-dependencies]
 clap = { workspace = true, features = ["derive"] }
-commonware-allocator = { workspace = true, features = ["mimalloc"] }
 commonware-parallel = { workspace = true, features = ["test-utils"] }
 rstest.workspace = true
 serde_json.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+commonware-allocator = { workspace = true, features = ["mimalloc"] }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test.workspace = true
 
 [features]
 default = []
@@ -82,6 +106,8 @@ arbitrary = [
 	"dep:arbitrary",
 	"dep:commonware-conformance",
 ]
+# Compiles the browser runtime on wasm32 targets.
+browser = [ "dep:js-sys", "dep:wasm-bindgen", "dep:web-sys" ]
 external = [ "pin-project" ]
 loom = [ "dep:loom" ]
 # Exports mimalloc's statistics as runtime metrics when commonware-allocator's

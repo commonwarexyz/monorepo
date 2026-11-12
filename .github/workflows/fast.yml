@@ -686,6 +686,43 @@ jobs:
     - name: Build storage
       run: cargo rustc --target wasm32-unknown-unknown --release --manifest-path storage/Cargo.toml --crate-type cdylib && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_storage.wasm"
 
+  Browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Configure swap
+      uses: ./.github/actions/swap
+    - name: Run setup
+      uses: ./.github/actions/setup
+      with:
+        components: clippy
+        targets: wasm32-unknown-unknown
+        kache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        kache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        kache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        kache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+    # The test runner must have the version of wasm-bindgen the tests are built with.
+    - name: Read wasm-bindgen version
+      id: wasm-bindgen
+      run: echo "version=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)" >> "$GITHUB_OUTPUT"
+    - name: Install just and wasm-bindgen
+      uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+      with:
+        tool: just@1.43.0,wasm-bindgen-cli@${{ steps.wasm-bindgen.outputs.version }}
+    # Lint covers the other crates on native targets, so only the browser code is linted here.
+    - name: Clippy
+      run: |
+        cargo clippy --no-deps --target wasm32-unknown-unknown -p commonware-runtime --features browser --lib --test browser -- -D warnings
+        cargo clippy --no-deps --target wasm32-unknown-unknown -p commonware-whisper --all-targets -- -D warnings
+    - name: Docs
+      run: cargo doc --target wasm32-unknown-unknown --no-deps --document-private-items -p commonware-runtime --features commonware-runtime/browser -p commonware-whisper
+      env:
+        RUSTDOCFLAGS: -D warnings
+    - name: Test
+      run: CHROMEDRIVER="$CHROMEWEBDRIVER/chromedriver" just test-browser
+
   no_std:
     runs-on: ubuntu-latest
     timeout-minutes: 30
