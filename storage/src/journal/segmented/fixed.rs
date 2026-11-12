@@ -968,10 +968,12 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Recovery<E, A> {
     }
 
     /// Returns the next `(section, position, item)`, or `None` once every section is
-    /// exhausted. A recovery from [Journal::preflight_restore] has no item to return.
+    /// exhausted. A recovery from [Journal::preflight_restore] has no item to return: this
+    /// returns `None` without opening a writer.
     ///
-    /// The first call opens the writers, which may discard a torn tail page. Nothing is modified
-    /// before it, and an error opening them ends the replay.
+    /// For a recovery from [Journal::preflight_floors], the first call opens the writers and may
+    /// discard a torn tail page. Nothing is modified before it, and an error opening them ends
+    /// the replay.
     ///
     /// An error ends the section that produced it, and iteration continues with the next section.
     /// Errors while mutating storage to repair a section end the replay. Dropping a pending call
