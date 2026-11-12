@@ -2030,7 +2030,6 @@ name = "commonware-cryptography-bls12381"
 version = "2026.11.0"
 dependencies = [
  "arbitrary",
- "blst",
  "bytes",
  "commonware-allocator",
  "commonware-codec",
