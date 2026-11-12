@@ -2556,7 +2556,7 @@ fn test_shutdown_cancels_tasks_before_destruction() {
                             },
                             MetricHandle::new(gauge.clone()),
                             context.shared.panicker.clone(),
-                            tree.clone(),
+                            tree,
                         );
                         let shared = context.shared.clone();
                         let pool = Arc::downgrade(&shared.pool);

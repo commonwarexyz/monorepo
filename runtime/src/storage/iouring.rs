@@ -362,17 +362,15 @@ impl Shared {
         if let Some(error) = self.tracker.failure() {
             return Err(error);
         }
-        if !self.tracker.is_dirty() {
-            #[cfg(test)]
-            self.tracker.skip_sync();
-            return Ok(false);
-        }
+        let dirty = self.tracker.is_dirty();
         #[cfg(test)]
-        if let Some(error) = self.pending.take_flush_failure() {
+        if !dirty {
+            self.tracker.skip_sync();
+        } else if let Some(error) = self.pending.take_flush_failure() {
             self.tracker.poison(&error);
             return Err(error);
         }
-        Ok(true)
+        Ok(dirty)
     }
 
     /// Settle a write's mutation debt from the outcome the ring observed.
