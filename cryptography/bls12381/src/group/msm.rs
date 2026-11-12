@@ -42,14 +42,14 @@ const PIPPENGER_WIDTHS: RangeInclusive<u32> = 2..=12;
 const PIPPENGER_CHUNK: NonZeroUsize = NonZeroUsize::new(256).unwrap();
 
 /// Estimated cost of an addition of points, in units of [`Method::cost`].
-const ADD_COST: usize = 10;
+const ADD_COST: u64 = 10;
 
 /// Estimated cost of a doubling, which takes about two thirds of an addition's products.
-const DOUBLE_COST: usize = 7;
+const DOUBLE_COST: u64 = 7;
 
 /// Estimated cost of a negation or an endomorphism, a few products reduced one after another,
 /// which overlap less than a formula's.
-const IMAGE_COST: usize = 4;
+const IMAGE_COST: u64 = 4;
 
 /// Bits that the signed digits of a whole scalar cover: scalars lie below `r < 2^255`, so the
 /// top digit absorbs the carry.
@@ -96,29 +96,33 @@ impl Method {
 
     /// Returns the estimated cost of the method, counting the additions, doublings, negations, and
     /// endomorphisms of points on all lanes at once.
-    const fn cost<G: Group>(self, count: usize, lanes: usize) -> usize {
+    // The estimate is a u64 so that no count of elements that fits in memory overflows it where
+    // usize has 32 bits.
+    const fn cost<G: Group>(self, count: usize, lanes: usize) -> u64 {
+        let (count, lanes) = (count as u64, lanes as u64);
         match self {
             Self::Straus { width, split } => {
                 // Each group of lanes builds a table of its multiples, the images of every
                 // entry, and their negations, then adds one entry per component and window.
                 let (components, windows) = Self::shape::<G>(width, split);
+                let (components, windows) = (components as u64, windows as u64);
                 let groups = count.div_ceil(lanes);
                 let entries = 1 << (width - 1);
                 ADD_COST * groups * (entries - 1 + components * windows)
                     + IMAGE_COST * groups * (2 * components - 1) * entries
-                    + DOUBLE_COST * width as usize * windows
+                    + DOUBLE_COST * width as u64 * windows
             }
             Self::Pippenger { width, .. } => {
                 // Each group of windows adds every image of every element and sums the buckets
                 // in two running sums, then shifts the accumulated windows by `width * lanes`
                 // bits.
-                let components = G::COMPONENTS;
-                let groups = windows::<G>(width).div_ceil(lanes);
+                let components = G::COMPONENTS as u64;
+                let groups = (windows::<G>(width) as u64).div_ceil(lanes);
                 let buckets = 1 << (width - 1);
                 let images = count.div_ceil(lanes);
                 ADD_COST * groups * (count * components + 2 * buckets)
                     + IMAGE_COST * images * (2 * components - 1)
-                    + DOUBLE_COST * width as usize * lanes * groups
+                    + DOUBLE_COST * width as u64 * lanes * groups
             }
         }
     }
