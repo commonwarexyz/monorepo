@@ -1174,12 +1174,9 @@ where
         }
     }
 
-    /// Start an empty [`Walked`] at this batch's first location. `capacity` bounds the operations
-    /// the batch emits before its floor walk. The walk appends its moves and the commit after
-    /// them, so `ops` reserves as much room again. That holds the moves of a [`Proportional`]
-    /// walk unless the batch deletes more keys than it creates, and a larger walk grows `ops` to
-    /// exactly what it needs. Building it here keeps its locations on the base that
-    /// [`peek_uncommitted`](Self::peek_uncommitted) reads them back with.
+    /// Start an empty [`Walked`] at this batch's first location, reserving `capacity` mutations,
+    /// as many floor moves, and the trailing commit. Building it here keeps its locations on the
+    /// base that [`peek_uncommitted`](Self::peek_uncommitted) reads them back with.
     fn walked(&self, capacity: usize) -> Walked<F, U> {
         Walked {
             base: self.base_state.size,
