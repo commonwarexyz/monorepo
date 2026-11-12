@@ -6,23 +6,13 @@
 //!
 //! See [Db] for the main database type.
 
+pub use crate::qmdb::any::unordered::variable::{Operation, Update};
 use crate::{
-    Context,
     index::unordered::Index,
-    journal::contiguous::variable::Journal,
-    merkle::{Graftable, Location},
-    qmdb::{
-        Error,
-        any::{VariableValue, unordered::variable::Operation, value::VariableEncoding},
-        current::VariableConfig as Config,
-        operation::Key,
-    },
-    translator::Translator,
+    journal::contiguous::variable::{Config as JournalConfig, Journal},
+    merkle::Location,
+    qmdb::{current, value::VariableEncoding},
 };
-use commonware_codec::Read;
-use commonware_cryptography::Hasher;
-use commonware_parallel::Strategy;
-use commonware_runtime::Spawner;
 
 pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
     F,
@@ -36,40 +26,23 @@ pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
     S,
 >;
 
-impl<
-    F: Graftable,
-    E: Context + Spawner,
-    K: Key,
-    V: VariableValue,
-    H: Hasher,
-    T: Translator,
-    const N: usize,
-    S: Strategy,
-> Db<F, E, K, V, H, T, N, S>
-where
-    Operation<F, K, V>: Read,
-{
-    /// Initializes a [Db] from the given `config`.
-    /// The configured [`Strategy`] is used to parallelize merkleization.
-    /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
-    /// while `None` selects the latest retained state. Initialization fails with
-    /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity floor,
-    /// and with [Error::Journal] ([`crate::journal::Error::ItemPruned`]) if the selected commit
-    /// itself has been pruned.
-    pub async fn init(
-        context: E,
-        config: Config<T, <Operation<F, K, V> as Read>::Cfg, S>,
-        max_size: Option<Location<F>>,
-    ) -> Result<Self, Error<F>> {
-        crate::qmdb::current::init(context, config, max_size).await
-    }
-}
+/// Configuration for a [Db].
+pub type Config<T, C, S> = current::Config<T, JournalConfig<C>, S>;
 
 pub mod partitioned {
-    //! A variant of [super] that uses a partitioned index for the snapshot.
+    //! A variant of [super] that uses a partitioned index for the snapshot, dividing the key space
+    //! into `2^(P*8)` partitions. See [Any's counterpart] for when to use one.
+    //!
+    //! See [Db] for the generic type, or use the convenience aliases:
+    //! - [p256::Db] for 256 partitions (P=1)
+    //! - [p64k::Db] for 65,536 partitions (P=2)
+    //!
+    //! [Any's counterpart]: crate::qmdb::any::unordered::variable::partitioned
 
     use super::*;
+    pub use super::{Operation, Update};
     use crate::index::partitioned::unordered::Index;
+    use core::num::NonZeroUsize;
 
     /// A partitioned variant of [super::Db].
     ///
@@ -90,34 +63,21 @@ pub mod partitioned {
             S,
         >;
 
-    impl<
-        F: Graftable,
-        E: Context + Spawner,
-        K: Key,
-        V: VariableValue,
-        H: Hasher,
-        T: Translator,
-        const P: usize,
-        const N: usize,
-        S: Strategy,
-    > Db<F, E, K, V, H, T, P, N, S>
-    where
-        Operation<F, K, V>: Read,
-    {
-        /// Initializes a [Db] from the given `config`.
-        /// The configured [`Strategy`] is used to parallelize merkleization.
-        /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
-        /// while `None` selects the latest retained state. Initialization fails with
-        /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity
-        /// floor, and with [Error::Journal] ([`crate::journal::Error::ItemPruned`]) if the selected
-        /// commit itself has been pruned.
-        pub async fn init(
-            context: E,
-            config: Config<T, <Operation<F, K, V> as Read>::Cfg, S, core::num::NonZeroUsize>,
-            max_size: Option<Location<F>>,
-        ) -> Result<Self, Error<F>> {
-            crate::qmdb::current::init(context, config, max_size).await
-        }
+    /// Configuration for a [Db].
+    pub type Config<T, C, S> = current::Config<T, JournalConfig<C>, S, NonZeroUsize>;
+
+    /// Convenience type aliases for 256 partitions (P=1).
+    pub mod p256 {
+        /// Variable-value DB with 256 partitions.
+        pub type Db<F, E, K, V, H, T, const N: usize, S> = super::Db<F, E, K, V, H, T, 1, N, S>;
+        pub use super::Config;
+    }
+
+    /// Convenience type aliases for 65,536 partitions (P=2).
+    pub mod p64k {
+        /// Variable-value DB with 65,536 partitions.
+        pub type Db<F, E, K, V, H, T, const N: usize, S> = super::Db<F, E, K, V, H, T, 2, N, S>;
+        pub use super::Config;
     }
 }
 
@@ -126,13 +86,10 @@ mod test {
     use super::*;
     use crate::{
         mmr,
-        qmdb::{
-            current::{tests::variable_config, unordered::tests as shared},
-            floor::Proportional,
-        },
+        qmdb::current::{tests::variable_config, unordered::tests as shared},
         translator::TwoCap,
     };
-    use commonware_cryptography::{Sha256, sha256::Digest};
+    use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
 
@@ -150,7 +107,7 @@ mod test {
 
     /// Return a [Db] database initialized with a variable config.
     async fn open_db(context: deterministic::Context, partition_prefix: String) -> CurrentTest {
-        let cfg = variable_config::<TwoCap>(&partition_prefix, &context);
+        let cfg = variable_config::<TwoCap>(&partition_prefix);
         CurrentTest::init(context, cfg, None).await.unwrap()
     }
 
@@ -191,17 +148,17 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Configure the operation codec for variable-length keys.
-            let base = variable_config::<TwoCap>("vec-keys", &context);
-            let cfg = crate::qmdb::current::VariableConfig {
-                merkle_config: base.merkle_config.clone(),
-                journal_config: crate::journal::contiguous::variable::Config {
-                    partition: base.journal_config.partition.clone(),
-                    items_per_section: base.journal_config.items_per_section,
+            let base = variable_config::<TwoCap>("vec-keys");
+            let cfg = Config {
+                merkle: base.merkle.clone(),
+                log: crate::journal::contiguous::variable::Config {
+                    partition: base.log.partition.clone(),
+                    items_per_section: base.log.items_per_section,
                     compression: None,
                     codec_config: (((0..).into(), ()), ()),
-                    page_cache: base.journal_config.page_cache.clone(),
-                    write_buffer: base.journal_config.write_buffer,
-                    replay_buffer: base.journal_config.replay_buffer,
+                    page_cache: base.log.page_cache.clone(),
+                    write_buffer: base.log.write_buffer,
+                    replay_buffer: base.log.replay_buffer,
                 },
                 grafted_metadata_partition: base.grafted_metadata_partition.clone(),
                 translator: TwoCap,
@@ -219,18 +176,18 @@ mod test {
             let merkleized = db
                 .new_batch()
                 .write(key.clone(), Some(value))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
             let db = db.commit().await.unwrap();
             assert_eq!(db.get(&key).await.unwrap().unwrap(), value);
             let root = db.root();
-            let proof = db.key_value_proof(key.clone()).await.unwrap();
-            assert!(VecKeyTest::verify_key_value_proof(
+            let (proof, proved_value) = db.key_value_proof(&key).await.unwrap();
+            assert_eq!(proved_value, value);
+            assert!(proof.verify::<Sha256, VariableEncoding<Digest>, _>(
                 key.clone(),
-                value,
-                &proof,
+                proved_value,
                 &root
             ));
             drop(db);

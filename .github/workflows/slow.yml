@@ -18,7 +18,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   FUZZ_VERSION: 0.12.0
-  NIGHTLY_VERSION: nightly-2026-06-21
+  NIGHTLY_VERSION: nightly-2026-08-20
 
 jobs:
   # Draft pull requests skip this workflow; it runs once the pull request is ready for review.
@@ -39,6 +39,19 @@ jobs:
           - package: commonware-storage
             test_flags: "--features test-traits"
             lint_flags: "--cfg full_bench"
+            partition: "1/4"
+          - package: commonware-storage
+            test_flags: "--features test-traits"
+            lint_flags: "--cfg full_bench"
+            partition: "2/4"
+          - package: commonware-storage
+            test_flags: "--features test-traits"
+            lint_flags: "--cfg full_bench"
+            partition: "3/4"
+          - package: commonware-storage
+            test_flags: "--features test-traits"
+            lint_flags: "--cfg full_bench"
+            partition: "4/4"
           - package: commonware-coding
             test_flags: ""
             lint_flags: ""
@@ -47,6 +60,9 @@ jobs:
             test_flags: ""
             lint_flags: ""
             partition: "2/2"
+          - package: commonware-glue
+            test_flags: ""
+            lint_flags: ""
           - package: commonware-math
             test_flags: ""
             lint_flags: ""
@@ -63,10 +79,10 @@ jobs:
       with:
         additional-cache-key: ${{ matrix.package }}-${{ matrix.test_flags || 'default' }}-${{ matrix.lint_flags || 'default' }}
         rust-cache-save: ${{ startsWith(matrix.partition || '1/1', '1/') }}
-        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        kache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        kache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        kache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        kache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Install just
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
@@ -83,6 +99,7 @@ jobs:
       matrix:
         include:
           - fuzz_dir: broadcast/fuzz
+          - fuzz_dir: clearing/fuzz
           - fuzz_dir: codec/fuzz
           - fuzz_dir: coding/fuzz
           - fuzz_dir: collector/fuzz
@@ -123,11 +140,11 @@ jobs:
           - fuzz_dir: storage/fuzz
             partition: "8/8"
           - fuzz_dir: simd/fuzz
-          # Apple Silicon has SHA-2 without SVE.
+          # Apple Silicon has SHA-2 and SHA-3 without SVE.
           - fuzz_dir: simd/fuzz
-            os: macos-15
+            os: macos-latest
             simd-backend: neon
-            cpu-features: "neon sha2 !sve !sve2"
+            cpu-features: "neon sha2 sha3"
           - fuzz_dir: stream/fuzz
           - fuzz_dir: utils/fuzz
             partition: "1/2"
@@ -146,10 +163,10 @@ jobs:
         additional-toolchain: ${{ env.NIGHTLY_VERSION }}
         additional-cache-key: ${{ matrix.fuzz_dir }}-${{ matrix.os || 'ubuntu-latest' }}
         rust-cache-save: ${{ startsWith(matrix.partition || '1/1', '1/') }}
-        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        kache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        kache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        kache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        kache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Get Rust version
       id: rust-version
       run: echo "rust_version=$(rustc +${{ env.NIGHTLY_VERSION }} --version)" >> "$GITHUB_OUTPUT"
@@ -217,10 +234,10 @@ jobs:
         toolchain: ${{ env.NIGHTLY_VERSION }}
         components: miri
         rust-cache-save: ${{ matrix.partition == 1 }}
-        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        kache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        kache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        kache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        kache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Install miri
       run: cargo miri setup
     - name: Install just & nextest
@@ -228,7 +245,9 @@ jobs:
       with:
         tool: just@1.43.0,cargo-nextest@0.9.133
     - name: Run miri tests
-      run: just miri -p commonware-runtime --features iouring --partition hash:${{matrix.partition}}/12
+      run: |
+        just miri -p commonware-runtime -p commonware-utils -p commonware-p2p --partition slice:${{matrix.partition}}/12
+        just miri-lenient -p commonware-parallel --partition slice:${{matrix.partition}}/12
 
   Unsafe-Tests-Gate:
     name: "Unsafe-Tests"
@@ -255,9 +274,9 @@ jobs:
       matrix:
         include:
           - name: x86_64
-            os: ubuntu-latest
+            os: ubuntu-latest-16
           - name: arm64
-            os: ubuntu-24.04-arm
+            os: ubuntu-26.04-arm
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
@@ -266,10 +285,10 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
       with:
-        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        kache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        kache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        kache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        kache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Install just & nextest
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
@@ -304,7 +323,7 @@ jobs:
           - name: x86_64
             os: ubuntu-latest
           - name: arm64
-            os: ubuntu-24.04-arm
+            os: ubuntu-26.04-arm
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
@@ -323,7 +342,7 @@ jobs:
       run: >-
         cargo-nextest nextest run --archive-file "$RUNNER_TEMP/conformance.tar.zst"
         --workspace-remap "$GITHUB_WORKSPACE" --profile conformance
-        --partition hash:${{ matrix.partition }}/8
+        --partition slice:${{ matrix.partition }}/8
     - name: Check fixtures are unchanged
       run: git diff --exit-code
 

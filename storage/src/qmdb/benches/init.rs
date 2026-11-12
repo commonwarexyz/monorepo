@@ -39,7 +39,7 @@ cfg_if::cfg_if! {
 
 /// Populate, prune, and sync a database (used in setup phase).
 #[boxed]
-async fn populate_and_sync<F: Family, C: DbAny<F, Key = Digest>>(
+async fn populate_and_sync<F: Family, C: DbAny<Family = F, Key = Digest>>(
     db: C,
     elements: u64,
     operations: u64,
@@ -216,7 +216,7 @@ fn bench_store_init(c: &mut Criterion) {
                                     make_var_value,
                                 )
                                 .await;
-                                let floor = db.inactivity_floor_loc();
+                                let floor = db.inactivity_floor();
                                 let db = db.prune(floor).await.unwrap();
                                 db.sync().await.unwrap();
                             },
@@ -227,7 +227,7 @@ fn bench_store_init(c: &mut Criterion) {
                     // Measure init time at this cache size.
                     b.to_async(&runner).iter_custom(move |iters| async move {
                         let ctx = context::get::<Context>();
-                        let mut cfg = store_cfg(&ctx);
+                        let mut cfg = store_cfg();
                         cfg.init_cache = cache_size;
                         let start = std::time::Instant::now();
                         for _ in 0..iters {

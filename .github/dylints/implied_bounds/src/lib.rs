@@ -227,11 +227,14 @@ fn declared<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId, clause: Clause<'tcx>) -
         ty::ClauseKind::TypeOutlives(pred) => pred.0,
         _ => return None,
     };
-    let &ty::Alias(ty::AliasTy {
-        kind: ty::Projection { def_id: assoc },
-        args,
-        ..
-    }) = self_ty.kind()
+    let &ty::Alias(
+        _,
+        ty::AliasTy {
+            kind: ty::Projection { def_id: assoc },
+            args,
+            ..
+        },
+    ) = self_ty.kind()
     else {
         return None;
     };
@@ -398,13 +401,13 @@ fn check_predicates(cx: &LateContext<'_>, def_id: LocalDefId) {
     {
         return;
     }
-    let predicates = tcx.explicit_predicates_of(def_id);
-    let parent: Vec<Clause<'_>> = predicates
+    let clauses = tcx.explicit_clauses_of(def_id);
+    let parent: Vec<Clause<'_>> = clauses
         .parent
         .map(|parent| {
-            tcx.predicates_of(parent)
+            tcx.clauses_of(parent)
                 .instantiate_identity(tcx)
-                .predicates
+                .clauses
                 .into_iter()
                 .map(|c| c.skip_norm_wip())
                 .collect()
@@ -421,7 +424,7 @@ fn check_predicates(cx: &LateContext<'_>, def_id: LocalDefId) {
         generics: tcx.hir_get_generics(def_id),
         list,
     };
-    report(cx, predicates.predicates, &parent, Some(def_id), written);
+    report(cx, clauses.clauses, &parent, Some(def_id), written);
 }
 
 /// Checks the declared bounds of the associated type `def_id`.

@@ -58,9 +58,15 @@ fix: fix-clippy fix-fmt fix-toml-fmt fix-features
 test-benches crate test_flags='' lint_flags='':
     #!/usr/bin/env bash
     set -euo pipefail
+    # The name lint needs lint_flags, which make listing the benchmarks its own build, so only the
+    # first partition lints. The others list with the run's flags, a build the benchmarks reuse.
     # Color codes would split the `Running` lines parsed below.
-    list=$(RUSTFLAGS="{{ lint_flags }}" cargo test --color never --benches -p {{ crate }} {{ test_flags }} -- --list 2>&1)
-    echo "$list" | python3 .github/scripts/lint_benchmark_names.py -
+    if [[ "{{ partition }}" == 1/* ]]; then
+        list=$(RUSTFLAGS="{{ lint_flags }}" cargo test --color never --benches -p {{ crate }} {{ test_flags }} -- --list 2>&1)
+        echo "$list" | python3 .github/scripts/lint_benchmark_names.py -
+    else
+        list=$(cargo test --color never --benches -p {{ crate }} {{ test_flags }} -- --list 2>&1)
+    fi
     all=$(echo "$list" | sed -n 's|.*Running .*/deps/\(.*\)-[a-f0-9]*).*|\1|p')
     if [ -z "$all" ]; then
         echo "error: no benchmark binaries found for {{ crate }}" >&2
@@ -124,6 +130,21 @@ benchmark-tracking mode='generate' *args='':
 
 # Run tests
 test *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Outside CI, skip the io_uring tests when io_uring is unavailable, as in
+    # containers with the default seccomp profile or under QEMU user emulation.
+    if [ "$(uname -s)" = Linux ] && [ -z "${CI:-}" ] && ! error=$(python3 .github/scripts/check_io_uring.py); then
+        # The check prints why io_uring is unavailable, so no output means python3 itself failed.
+        [ -n "$error" ] || exit 1
+        echo "warning: io_uring is unavailable ($error), skipping tests whose names contain 'iouring'" >&2
+        echo "warning: to run them in a container, allow io_uring_setup, io_uring_enter, and io_uring_register in its seccomp profile" >&2
+        separator=false
+        for arg in "$@"; do
+            if [ "$arg" = -- ]; then separator=true; fi
+        done
+        if $separator; then set -- "$@" --skip iouring; else set -- "$@" -- --skip iouring; fi
+    fi
     cargo nextest run "$@"
 
 # Run loom tests
@@ -165,8 +186,10 @@ cooldown:
     ./.github/scripts/check_dependency_cooldown.sh
 
 # Run custom Dylint lints
+#
+# Enables `commonware-utils/analysis`, which a benchmark requires, so that `benchmark_allocator` checks it.
 dylint:
-    cargo {{ nightly_version }} dylint --all --workspace -- --all-targets
+    cargo {{ nightly_version }} dylint --all --workspace -- --all-targets --features commonware-utils/analysis
 
 # Run all fuzz tests in a given directory.
 #
@@ -178,9 +201,15 @@ fuzz fuzz_dir max_time='60' max_mem='4000':
     if [ -z "$targets" ]; then
         exit 0
     fi
-    # Build every target in one cargo invocation before fuzzing. Each target is
+    # Build this partition's targets in one cargo invocation before fuzzing. Each target is
     # its own sanitizer-instrumented binary, so building inside the run loop
     # serializes the links against the fuzz sessions while most cores sit idle.
+    # cargo-fuzz builds one target or all of them, so until this recipe exits the
+    # manifest lists only this partition's targets.
+    manifest={{fuzz_dir}}/Cargo.toml
+    cp "$manifest" "$manifest.orig"
+    trap 'mv "$manifest.orig" "$manifest"' EXIT
+    python3 .github/scripts/keep_fuzz_targets.py "$manifest" $targets
     cargo {{nightly_version}} fuzz build --fuzz-dir {{fuzz_dir}}
     for target in $targets; do
         cargo {{nightly_version}} fuzz run $target --fuzz-dir {{fuzz_dir}} -- -max_total_time={{max_time}} -rss_limit_mb={{max_mem}}
@@ -197,7 +226,11 @@ udeps:
 
 # Run the tests in the `miri` test group under Miri (optionally filtered: just miri -p commonware-runtime iobuf::)
 miri *args='':
-    MIRIFLAGS="-Zmiri-disable-isolation" cargo miri nextest run --profile miri --lib {{ args }}
+    MIRIFLAGS="-Zmiri-disable-isolation" cargo miri nextest run --profile miri --lib --no-tests=warn {{ args }}
+
+# Like `miri`, under Tree Borrows with the leak check off, for crates whose dependencies fail `miri` (crossbeam-epoch)
+miri-lenient *args='':
+    MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-tree-borrows -Zmiri-ignore-leaks" cargo miri nextest run --profile miri --lib --no-tests=warn {{ args }}
 
 # Run zepter feature checks
 check-features:

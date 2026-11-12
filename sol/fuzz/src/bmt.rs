@@ -38,7 +38,7 @@ pub(crate) enum Command {
         #[arg(long)]
         seed: u64,
     },
-    /// Build at most 1,000,000 leaves and prove comma-separated indices in input order.
+    /// Build at most 1,000,000 leaves and prove comma-separated ascending indices.
     GenerateMulti {
         #[arg(long)]
         leaves: u32,
@@ -247,7 +247,7 @@ fn check<H: Hasher>(mode: Mode, encoded: &[u8]) -> bool {
         Mode::Single => {
             elements.len() == 1
                 && proof
-                    .verify_element_inclusion::<H>(&elements[0], start, &root)
+                    .verify_element_inclusion::<H>(start, &elements[0], &root)
                     .is_ok()
         }
         Mode::Range => proof
@@ -265,8 +265,8 @@ fn check<H: Hasher>(mode: Mode, encoded: &[u8]) -> bool {
             else {
                 return false;
             };
-            let elements: Vec<_> = elements.into_iter().zip(positions).collect();
-            proof.verify_multi_inclusion::<H>(&elements, &root).is_ok()
+            let elements = positions.into_iter().zip(elements);
+            proof.verify_multi_inclusion::<H>(elements, &root).is_ok()
         }
     }
 }
@@ -344,9 +344,10 @@ mod tests {
                 }
             }
         }
-        let output = generate::<H>(11, 0, vec![10, 2, 7, 0], 42, Mode::Multi).unwrap();
-        assert_eq!(output.indices, [10, 2, 7, 0]);
+        let output = generate::<H>(11, 0, vec![0, 2, 7, 10], 42, Mode::Multi).unwrap();
+        assert_eq!(output.indices, [0, 2, 7, 10]);
         assert!(check::<H>(Mode::Multi, &encode(&output)));
+        assert!(generate::<H>(11, 0, vec![10, 2, 7, 0], 42, Mode::Multi).is_err());
         assert!(generate::<H>(11, 0, vec![2, 2], 42, Mode::Multi).is_err());
         let mut duplicate = output;
         duplicate.indices[1] = duplicate.indices[0];
@@ -463,7 +464,7 @@ mod tests {
                 "--leaves",
                 "11",
                 "--indices",
-                "10,2,0",
+                "0,2,10",
                 "--seed",
                 "42",
             ],
@@ -525,7 +526,7 @@ mod tests {
                 "--leaves",
                 "11",
                 "--indices",
-                "10,2,0",
+                "0,2,10",
                 "--seed",
                 "42",
             ],
@@ -588,7 +589,7 @@ mod tests {
                 "--leaves",
                 "11",
                 "--indices",
-                "10,2,0",
+                "0,2,10",
                 "--seed",
                 "42",
             ],

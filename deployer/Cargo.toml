@@ -23,7 +23,7 @@ aws = [
 	"clap",
 	"commonware-cryptography",
 	"commonware-macros/std",
-	"commonware-utils",
+	"commonware-utils/std",
 	"futures",
 	"reqwest",
 	"serde_yaml",
@@ -56,6 +56,7 @@ uuid = { workspace = true, features = ["v4"], optional = true }
 
 [dev-dependencies]
 aws-smithy-runtime-api.workspace = true
+serde_yaml.workspace = true
 
 [package.metadata.cargo-udeps.ignore]
 # This dependency is exercised only by tests behind the nondefault `aws` feature.

@@ -6,7 +6,7 @@
 use arbitrary::Arbitrary;
 use commonware_codec::Encode;
 use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
-use commonware_parallel::{Manual, Rayon, Strategy as _};
+use commonware_parallel::mocks::{self, Explorer};
 use commonware_storage::merkle::{
     Bagging::ForwardFold,
     Error, Family as MerkleFamily, Location,
@@ -15,7 +15,6 @@ use commonware_storage::merkle::{
     mem::Mem,
     mmb, mmr,
 };
-use commonware_utils::NZUsize;
 use core::num::NonZeroUsize;
 use libfuzzer_sys::fuzz_target;
 use std::sync::Arc;
@@ -42,7 +41,7 @@ struct FuzzInput {
     operations: Vec<Operation>,
 }
 
-type Split = Manual<Rayon>;
+type Split = Explorer;
 type Batch<F> = UnmerkleizedBatch<F, Digest, Split>;
 /// Merkleized batches not yet applied, oldest first.
 type Chain<F> = Vec<Arc<MerkleizedBatch<F, Digest, Split>>>;
@@ -67,20 +66,14 @@ fn reference_root<F: MerkleFamily>(hasher: &Standard<Sha256>, leaves: &[Digest])
     for &leaf in leaves {
         batch = batch.add_leaf_digest(leaf);
     }
-    batch
-        .merkleize(&empty, hasher)
-        .root(&empty, hasher, 0)
-        .unwrap()
+    batch.merkleize(&empty, hasher).root(hasher, 0).unwrap()
 }
 
 fn fuzz_family<F: MerkleFamily>(input: &FuzzInput) {
     let hasher = Standard::<Sha256>::new(ForwardFold);
-    // One thread, but `Manual` skips the adaptive policy, so work splits whenever it can.
+    // One thread, but the explorer takes the most parallel shape, so work splits whenever it can.
     let parallelism = NonZeroUsize::new(usize::from(input.parallelism % 8) + 1).unwrap();
-    let strategy = Rayon::new(NZUsize!(1))
-        .unwrap()
-        .with_parallelism(parallelism)
-        .manual();
+    let strategy = Explorer::parallel(&mocks::inline(parallelism));
 
     let mut leaves: Vec<Digest> = (0..input.committed)
         .map(|i| Sha256::hash(&[&[i]]))
@@ -106,7 +99,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput) {
         |batch: Batch<F>, base: &Mem<F, Digest>, chain: &mut Chain<F>, leaves: &[Digest]| {
             let merkleized = batch.merkleize(base, &hasher);
             assert_eq!(
-                merkleized.root(base, &hasher, 0).unwrap(),
+                merkleized.root(&hasher, 0).unwrap(),
                 reference_root::<F>(&hasher, leaves),
                 "root mismatch with {} leaves",
                 leaves.len()

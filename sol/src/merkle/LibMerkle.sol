@@ -23,7 +23,7 @@ pragma solidity ^0.8.15;
 /// only inactive preceding peaks and collapse active following peaks into one suffix.
 /// Every supplied digest must be consumed.
 ///
-/// Multiproofs pair selected leaf indices with elements and strictly increasing
+/// Multiproofs pair strictly ascending leaf indices with elements and strictly increasing
 /// physical witness positions with digests. They authenticate the exact union of
 /// single-leaf witnesses, including those derivable from the selected elements.
 /// Each shared ancestor is reconstructed once.
@@ -52,7 +52,7 @@ library LibMerkle {
     }
 
     /// @dev Witness array addresses use the input location selected by `cd`.
-    /// `cursor` and `end` bound sorted unique `(index, digest)` pairs in temporary memory.
+    /// `cursor` and `end` bound strictly ascending `(index, digest)` pairs in temporary memory.
     struct MultiProof {
         uint256 keys;
         uint256 digests;
@@ -217,8 +217,9 @@ library LibMerkle {
         assembly ("memory-safe") { mstore(0x40, free) }
     }
 
-    /// @dev Verify sparse raw elements with strictly increasing physical witness positions.
-    /// Temporary sorted elements and peaks are cleared before restoring the entry memory pointer.
+    /// @dev Verify raw elements at strictly ascending indices with strictly increasing physical witness positions.
+    /// Invalid bounds and unordered or repeated indices return false.
+    /// Temporary pairs and peaks are cleared before restoring the entry memory pointer.
     /// `indices` and `elements` address `count` words. `positions` and `digests` address `proofCount` words.
     /// Callers supply valid array extents in the input location selected by `cd`.
     function verifyMulti(
@@ -255,7 +256,7 @@ library LibMerkle {
     }
 
     /// @dev Verify positioned leaf digests in memory against a backward-folded root.
-    /// Indices and witnesses are in calldata. Duplicate locations must carry equal digests.
+    /// Indices and witnesses are in calldata. Invalid bounds and unordered or repeated indices return false.
     /// Every physical witness is authenticated. Input arrays remain unchanged.
     /// Temporary pairs and peaks are cleared before returning.
     function verifyMultiPrehashed(
@@ -1076,11 +1077,10 @@ library LibMerkle {
         uint256 peaks = pairs + count * 64;
         uint256 end = peaks + _levels(leaves, belt) * 32;
         assembly ("memory-safe") { mstore(0x40, end) }
-        (uint256 unique, bool ok) = _multiElements(p, leaves, indices, elements, count, pairs, prehashed);
-        if (ok) {
+        if (_multiElements(p, leaves, indices, elements, count, pairs, prehashed)) {
             p.cursor = pairs;
-            p.end = pairs + unique * 64;
-            valid = _reconstructMulti(p, root, leaves, unique, peaks, backward, inactive);
+            p.end = peaks;
+            valid = _reconstructMulti(p, root, leaves, count, peaks, backward, inactive);
         }
         assembly ("memory-safe") {
             for { let q := free } lt(q, end) { q := add(q, 0x20) } { mstore(q, 0) }
@@ -1088,7 +1088,8 @@ library LibMerkle {
         }
     }
 
-    /// @dev Sort selected elements and check duplicate values before hashing raw leaves.
+    /// @dev Hash selected leaves into `(index, digest)` pairs at `pairs`.
+    /// An index that is out of range or not greater than the previous one returns false before its leaf is hashed.
     /// Positioned digests are loaded from memory and retained without another hash.
     function _multiElements(
         MultiProof memory p,
@@ -1098,61 +1099,35 @@ library LibMerkle {
         uint256 count,
         uint256 pairs,
         bool prehashed
-    ) private view returns (uint256 unique, bool ok) {
+    ) private view returns (bool) {
         unchecked {
             if (p.belt) {
                 for (uint256 i = 1; i < p.length; ++i) {
                     // forge-lint: disable-next-line(boolean-cst)
-                    if (_load(p.keys + (i - 1) * 32, p.cd) >= _load(p.keys + i * 32, p.cd)) return (0, false);
+                    if (_load(p.keys + (i - 1) * 32, p.cd) >= _load(p.keys + i * 32, p.cd)) return false;
                 }
             }
-            bool sorted = true;
-            uint256 previous = 0;
+
+            // `next` is the smallest index the next pair may use.
+            uint256 next = 0;
             for (uint256 i; i < count; ++i) {
                 uint256 index = _load(indices + i * 32, p.cd);
                 // forge-lint: disable-next-line(boolean-cst)
-                if (index >= n) return (0, false);
-                if (index < previous) sorted = false;
-                previous = index;
-                uint256 element = _load(data + i * 32, p.cd && !prehashed);
-                assembly ("memory-safe") {
-                    let slot := add(pairs, shl(6, i))
-                    mstore(slot, index)
-                    mstore(add(slot, 0x20), element)
-                }
-            }
-            if (!sorted) LibMerkle.sortPairs(pairs, count);
-            bytes32 previousElement = bytes32(0);
-            for (uint256 i; i < count; ++i) {
-                uint256 index;
-                bytes32 element;
-                assembly ("memory-safe") {
-                    let slot := add(pairs, shl(6, i))
-                    index := mload(slot)
-                    element := mload(add(slot, 0x20))
-                }
-                if (unique != 0 && index == previous) {
-                    // forge-lint: disable-next-line(boolean-cst)
-                    if (element != previousElement) return (0, false);
-                    continue;
-                }
+                if (index >= n || index < next) return false;
+                next = index + 1;
+                bytes32 element = bytes32(_load(data + i * 32, p.cd && !prehashed));
                 uint256 nodePosition = 0;
                 if (!prehashed) nodePosition = LibMerkle.position(LibMerkle.peak(index, 1, p.belt), 1, p.belt);
-                assembly ("memory-safe") {
-                    let slot := add(pairs, shl(6, unique))
-                    mstore(slot, index)
-                }
                 bytes32 digest =
                     prehashed ? element : LibMerkle.hashSlice(bytes32(nodePosition), element, 0x18, 0x28, p.hasher);
                 assembly ("memory-safe") {
-                    mstore(add(add(pairs, shl(6, unique)), 0x20), digest)
+                    let slot := add(pairs, shl(6, i))
+                    mstore(slot, index)
+                    mstore(add(slot, 0x20), digest)
                 }
-                previous = index;
-                previousElement = element;
-                ++unique;
             }
             // forge-lint: disable-next-line(boolean-cst)
-            return (unique, true);
+            return true;
         }
     }
 
@@ -1193,7 +1168,7 @@ library LibMerkle {
 
     /// @dev A child is a required redundant witness exactly when its sibling contains selected leaves.
     /// Disjoint subtrees are consumed directly from the proof. Selected leaves use their computed hashes.
-    /// `p.cursor` advances through sorted unique pairs and always points past every visited leaf.
+    /// `p.cursor` advances through strictly ascending pairs and always points past every visited leaf.
     /// The left witness must be consumed before visiting the right child to preserve proof order.
     function _multiSubtree(MultiProof memory p, uint256 pos, uint256 w, uint256 cursor)
         private
@@ -1478,49 +1453,6 @@ library LibMerkle {
                     }
                     acc := fold(acc, suffix, hasher)
                 }
-            }
-        }
-    }
-
-    /// @dev Sort `count` allocated `(uint256 index, bytes32 value)` pairs in place.
-    /// Heapsort bounds work for arbitrary input order and moves each index with its value.
-    function sortPairs(uint256 pairs, uint256 count) internal pure {
-        assembly ("memory-safe") {
-            /// @dev Restore the max-heap below one displaced pair.
-            function sift(base, slot, size) {
-                let key := mload(add(base, shl(6, slot)))
-                let value := mload(add(add(base, shl(6, slot)), 0x20))
-                for { let child := add(shl(1, slot), 1) } lt(child, size) { child := add(shl(1, slot), 1) } {
-                    if lt(add(child, 1), size) {
-                        if lt(mload(add(base, shl(6, child))), mload(add(base, shl(6, add(child, 1))))) {
-                            child := add(child, 1)
-                        }
-                    }
-                    let source := add(base, shl(6, child))
-                    if iszero(lt(key, mload(source))) { break }
-                    let target := add(base, shl(6, slot))
-                    mstore(target, mload(source))
-                    mstore(add(target, 0x20), mload(add(source, 0x20)))
-                    slot := child
-                }
-                let target := add(base, shl(6, slot))
-                mstore(target, key)
-                mstore(add(target, 0x20), value)
-            }
-            for { let i := shr(1, count) } i { } {
-                i := sub(i, 1)
-                sift(pairs, i, count)
-            }
-            for { let size := count } gt(size, 1) { } {
-                size := sub(size, 1)
-                let last := add(pairs, shl(6, size))
-                let key := mload(pairs)
-                let value := mload(add(pairs, 0x20))
-                mstore(pairs, mload(last))
-                mstore(add(pairs, 0x20), mload(add(last, 0x20)))
-                mstore(last, key)
-                mstore(add(last, 0x20), value)
-                sift(pairs, 0, size)
             }
         }
     }

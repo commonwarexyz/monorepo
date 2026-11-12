@@ -42,7 +42,9 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
     /// Create a [ProofStore] from a [Proof] of inclusion of the provided range of elements from
     /// the structure with root `root`, using the bagging carried by `hasher`. The resulting store
     /// can be used to generate range proofs over any sub-range of the original range. Returns an
-    /// error if the proof is invalid or could not be verified against the given root.
+    /// error if the proof is invalid or could not be verified against the given root. `elements`
+    /// must yield consecutive elements from `start_loc`, and a `len()` that differs from the
+    /// number yielded is rejected.
     ///
     /// The fold prefix accumulator from the proof is stored internally so that sub-range proofs
     /// with different fold prefix boundaries can be generated without requiring individual peak
@@ -50,8 +52,8 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
     pub fn new<H, E>(
         hasher: &H,
         proof: &Proof<F, D>,
-        elements: &[E],
         start_loc: Location<F>,
+        elements: impl IntoIterator<Item = E, IntoIter: ExactSizeIterator>,
         root: &D,
     ) -> Result<Self, Error<F>>
     where
@@ -59,8 +61,8 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
         E: AsRef<[u8]>,
     {
         let bagging = hasher.root_bagging();
-        let digests =
-            proof.verify_range_inclusion_and_extract_digests(hasher, elements, start_loc, root)?;
+        let (digests, elements_len) =
+            proof.verify_range_inclusion_and_count(hasher, start_loc, elements, root)?;
         let map: AHashMap<Position<F>, D> = digests.into_iter().collect();
 
         let size = Position::try_from(proof.leaves)?;
@@ -68,7 +70,7 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
         // Count peaks in the fold prefix using the same leaf-coverage logic that proof
         // construction uses. Some families (for example MMB) do not order peaks by position.
         let end_loc = start_loc
-            .checked_add(elements.len() as u64)
+            .checked_add(elements_len as u64)
             .ok_or(Error::LocationOverflow(F::MAX_LEAVES))?;
         let bp = Blueprint::<F>::new(
             proof.leaves,
@@ -189,7 +191,7 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
         Ok(acc)
     }
 
-    /// Return a multi proof for the elements corresponding to the given locations.
+    /// Return a multi proof for the elements at the given strictly ascending locations.
     ///
     /// Since multi-proofs require individual node digests (not fold accumulators), callers must
     /// supply any peak digests that the source proof did not preserve individually:
@@ -206,6 +208,8 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
     ///
     /// # Errors
     ///
+    /// - [`Error::DuplicateLocation`] or [`Error::UnsortedLocation`] if a requested location
+    ///   repeats or precedes the location before it.
     /// - [`Error::CompressedDigest`] if a required digest sits inside a backward-fold suffix
     ///   accumulator and was not supplied via `peaks`. The caller can recover by supplying it.
     /// - [`Error::ElementPruned`] if a required digest is genuinely unavailable.
@@ -264,17 +268,12 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
 /// Returns [Error::RangeOutOfBounds] if any location in `range` > `merkle.size()`
 /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
 /// Returns [Error::Empty] if the requested range is empty
-pub async fn range_proof<
-    F: Family,
-    D: Digest,
-    H: Hasher<F, Digest = D>,
-    S: Storage<F, Digest = D>,
->(
+pub async fn range_proof<F: Family, H: Hasher<F>, S: Storage<F, Digest = H::Digest>>(
     hasher: &H,
     merkle: &S,
     range: Range<Location<F>>,
     inactive_peaks: usize,
-) -> Result<Proof<F, D>, Error<F>> {
+) -> Result<Proof<F, H::Digest>, Error<F>> {
     let leaves = Location::try_from(merkle.size())?;
     historical_range_proof(hasher, merkle, leaves, range, inactive_peaks).await
 }
@@ -291,18 +290,13 @@ pub async fn range_proof<
 /// Returns [Error::RangeOutOfBounds] if any location in `range` > `leaves`
 /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
 /// Returns [Error::Empty] if the requested range is empty
-pub async fn historical_range_proof<
-    F: Family,
-    D: Digest,
-    H: Hasher<F, Digest = D>,
-    S: Storage<F, Digest = D>,
->(
+pub async fn historical_range_proof<F: Family, H: Hasher<F>, S: Storage<F, Digest = H::Digest>>(
     hasher: &H,
     merkle: &S,
     leaves: Location<F>,
     range: Range<Location<F>>,
     inactive_peaks: usize,
-) -> Result<Proof<F, D>, Error<F>> {
+) -> Result<Proof<F, H::Digest>, Error<F>> {
     let plan = RangePlan::new(leaves, range)?;
     let positions = plan.positions();
     let blueprint = Blueprint::from_plan(plan, inactive_peaks, hasher.root_bagging())?;
@@ -311,26 +305,26 @@ pub async fn historical_range_proof<
     blueprint.build_proof(hasher, inactive_peaks, |pos| fetched.get(&pos).copied())
 }
 
-/// Return an inclusion proof for the elements at the specified locations. This is analogous to
-/// range_proof but supports non-contiguous locations.
+/// Return an inclusion proof for the elements at the specified strictly ascending locations. This
+/// is analogous to range_proof but supports non-contiguous locations.
 ///
 /// The proof commits to `inactive_peaks`. Fetches the digests at [multi_proof_positions] with
 /// [Storage::get_nodes].
 ///
-/// The order of positions does not affect the output (sorted internally).
-///
 /// # Errors
 ///
 /// Returns [Error::LocationOverflow] if any location in `locations` > [Family::MAX_LEAVES]
-/// Returns [Error::RangeOutOfBounds] if any location in `locations` > `merkle.size()`
+/// Returns [Error::RangeOutOfBounds] if any location is at or beyond the tree's leaf count
 /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
 /// Returns [Error::Empty] if locations is empty
 /// Returns [Error::InvalidProof] if `inactive_peaks` exceeds the number of peaks
-pub async fn multi_proof<F: Family, D: Digest, S: Storage<F, Digest = D>>(
+/// Returns [Error::DuplicateLocation] if a location repeats the location before it
+/// Returns [Error::UnsortedLocation] if a location precedes the location before it
+pub async fn multi_proof<F: Family, S: Storage<F>>(
     merkle: &S,
     inactive_peaks: usize,
     locations: &[Location<F>],
-) -> Result<Proof<F, D>, Error<F>> {
+) -> Result<Proof<F, S::Digest>, Error<F>> {
     let size = merkle.size();
     let leaves = Location::try_from(size)?;
     let positions = multi_proof_positions(leaves, locations)?;
@@ -416,8 +410,8 @@ mod tests {
                 let proof_store = ProofStore::new(
                     &hasher,
                     &range_proof,
-                    &elements[range.to_usize_range()],
                     range_start,
+                    &elements[range.to_usize_range()],
                     &root,
                 )
                 .unwrap();
@@ -434,8 +428,8 @@ mod tests {
                         proof_store.range_proof(&hasher, sub_range.clone()).unwrap();
                     assert!(sub_range_proof.verify_range_inclusion(
                         &hasher,
-                        &elements[sub_range.to_usize_range()],
                         sub_range.start,
+                        &elements[sub_range.to_usize_range()],
                         &root
                     ));
                     subrange_start += 1;
@@ -474,8 +468,8 @@ mod tests {
             let proof_store = ProofStore::new(
                 &hasher,
                 &range_proof,
-                &elements[range.to_usize_range()],
                 range.start,
+                &elements[range.to_usize_range()],
                 &root,
             )
             .unwrap();
@@ -488,8 +482,8 @@ mod tests {
                     assert!(
                         sub_proof.verify_range_inclusion(
                             &hasher,
-                            &elements[sub_range.to_usize_range()],
                             sub_range.start,
+                            &elements[sub_range.to_usize_range()],
                             &root
                         ),
                         "sub-proof should verify for range {start}..{end}"
@@ -524,8 +518,8 @@ mod tests {
             let proof_store = ProofStore::new(
                 &hasher,
                 &range_proof,
-                &elements[range.to_usize_range()],
                 range.start,
+                &elements[range.to_usize_range()],
                 &root,
             )
             .unwrap();
@@ -537,8 +531,8 @@ mod tests {
                     assert!(
                         sub_proof.verify_range_inclusion(
                             &hasher,
-                            &elements[sub_range.to_usize_range()],
                             sub_range.start,
+                            &elements[sub_range.to_usize_range()],
                             &root
                         ),
                         "sub-proof should verify for MMB range {start}..{end}"
@@ -575,8 +569,8 @@ mod tests {
             let proof_store = ProofStore::new(
                 &hasher,
                 &proof,
-                &elements[range.to_usize_range()],
                 range.start,
+                &elements[range.to_usize_range()],
                 &root,
             )
             .unwrap();
@@ -584,8 +578,8 @@ mod tests {
             let same_range_proof = proof_store.range_proof(&hasher, range.clone()).unwrap();
             assert!(same_range_proof.verify_range_inclusion(
                 &hasher,
-                &elements[range.to_usize_range()],
                 range.start,
+                &elements[range.to_usize_range()],
                 &root
             ));
             assert!(matches!(
@@ -633,8 +627,8 @@ mod tests {
             let proof_store = ProofStore::new(
                 &hasher,
                 &range_proof,
-                &elements[range.to_usize_range()],
                 range.start,
+                &elements[range.to_usize_range()],
                 &root)
             .unwrap();
 
@@ -646,8 +640,8 @@ mod tests {
                     assert!(
                         sub_proof.verify_range_inclusion(
                             &hasher,
-                            &elements[sub_range.to_usize_range()],
                             sub_range.start,
+                            &elements[sub_range.to_usize_range()],
                             &root),
                         "sub-proof should verify for MMB range {start}..{end} with split_backward({inactive_peaks})"
                     );
@@ -687,7 +681,7 @@ mod tests {
             let target = vec![MmbLocation::new(0)];
             let selected: Vec<_> = target
                 .iter()
-                .map(|&loc| (elements[*loc as usize], loc))
+                .map(|&loc| (loc, elements[*loc as usize]))
                 .collect();
 
             // Direct multi-proof with the full witness verifies.
@@ -704,8 +698,8 @@ mod tests {
             let proof_store = ProofStore::new(
                 &hasher,
                 &range_proof,
-                &elements[range.to_usize_range()],
                 range.start,
+                &elements[range.to_usize_range()],
                 &root,
             )
             .unwrap();

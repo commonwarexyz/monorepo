@@ -13,7 +13,7 @@ use commonware_cryptography::{Sha256, sha256};
 use commonware_math::algebra::Random as _;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    BLOB_PAGE_SIZE, BufferPooler, Supervisor as _,
+    BLOB_PAGE_SIZE, Supervisor as _,
     benchmarks::{context, tokio},
     buffer::paged::{CacheRef, page_size},
     tokio::{Config, Context},
@@ -43,7 +43,7 @@ const N_LEAVES: [usize; 2] = [10_000, 100_000];
 #[cfg(full_bench)]
 const N_LEAVES: [usize; 3] = [10_000, 100_000, 1_000_000];
 
-fn merkle_cfg(ctx: &impl BufferPooler, family: &str) -> full::Config<Sequential> {
+fn merkle_cfg(family: &str) -> full::Config<Sequential> {
     full::Config {
         journal_partition: format!("journal-bench-flush-{family}"),
         metadata_partition: format!("metadata-bench-flush-{family}"),
@@ -51,7 +51,7 @@ fn merkle_cfg(ctx: &impl BufferPooler, family: &str) -> full::Config<Sequential>
         write_buffer: WRITE_BUFFER_SIZE,
         replay_buffer: REPLAY_BUFFER_SIZE,
         strategy: Sequential,
-        page_cache: CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
@@ -74,7 +74,7 @@ fn bench_flush_family<F: Family>(c: &mut Criterion, family: &'static str) {
                     let mut merkle = full::Merkle::<F, _, sha256::Digest, _>::init(
                         ctx.child(family),
                         &hasher,
-                        merkle_cfg(&ctx, family),
+                        merkle_cfg(family),
                     )
                     .await
                     .unwrap();

@@ -2,24 +2,19 @@
 //!
 //! These variants maintain the lexicographic-next active key for each active key, enabling
 //! exclusion proofs via [ExclusionProof](proof::constant::ExclusionProof). This adds overhead
-//! compared to [super::unordered] variants.
+//! compared to [super::unordered] variants. Their translator must implement
+//! [OrderedTranslator](crate::translator::OrderedTranslator).
 //!
 //! Variants:
 //! - [fixed]: Variant optimized for values of fixed size.
 //! - [variable]: Variant for values of variable size.
 
-pub mod db;
+pub(crate) mod db;
 pub mod fixed;
 pub mod proof;
-#[cfg(any(test, feature = "test-traits"))]
-mod test_trait_impls;
 pub mod variable;
 
-/// Wire tag for [proof::constant::ExclusionProof::KeyValue].
-pub const KEY_VALUE_CONTEXT: u8 = 0;
-
-/// Wire tag for [proof::constant::ExclusionProof::Commit].
-pub const COMMIT_CONTEXT: u8 = 1;
+pub use crate::qmdb::any::ordered::{Operation, Update};
 
 #[cfg(test)]
 pub mod tests {
@@ -37,18 +32,16 @@ pub mod tests {
         qmdb::{
             Error,
             any::{
-                ValueEncoding,
                 ordered::{Operation, Update},
                 traits::{DbAny, UnmerkleizedBatch as _},
-                value::{FixedEncoding, VariableEncoding},
             },
             current::{
                 BitmapPrunedBits,
                 proof::{RangeProof, constant::OperationProof},
                 tests::apply_random_ops,
             },
-            floor::Proportional,
             store::tests::{TestKey, TestValue},
+            value::{FixedEncoding, ValueEncoding, VariableEncoding},
         },
         translator::OneCap,
     };
@@ -87,16 +80,16 @@ pub mod tests {
     pub async fn test_build_small_close_reopen<F, C, Fn, Fut>(context: Context, mut open_db: Fn)
     where
         F: Graftable,
-        C: DbAny<F> + BitmapPrunedBits,
+        C: DbAny<Family = F> + BitmapPrunedBits,
         C::Key: TestKey,
-        <C as DbAny<F>>::Value: TestValue,
+        C::Value: TestValue,
         Fn: FnMut(Context, String) -> Fut,
         Fut: Future<Output = C>,
     {
         let partition = "build-small".to_string();
         let db: C = open_db(context.child("first"), partition.clone()).await;
-        assert_eq!(db.inactivity_floor_loc(), Location::<F>::new(0));
-        assert_eq!(db.oldest_retained(), 0);
+        assert_eq!(db.inactivity_floor(), Location::<F>::new(0));
+        assert_eq!(db.bounds().start, Location::<F>::new(0));
         let root0 = db.root();
         drop(db);
         let db: C = open_db(context.child("second"), partition.clone()).await;
@@ -105,12 +98,12 @@ pub mod tests {
 
         // Add one key.
         let k1: C::Key = TestKey::from_seed(0);
-        let v1: <C as DbAny<F>>::Value = TestValue::from_seed(10);
+        let v1: C::Value = TestValue::from_seed(10);
         assert!(db.get(&k1).await.unwrap().is_none());
         let merkleized = db
             .new_batch()
             .write(k1, Some(v1.clone()))
-            .merkleize(&db, None, &mut Proportional)
+            .merkleize(&db)
             .await
             .unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
@@ -129,11 +122,12 @@ pub mod tests {
 
         // Delete that one key.
         assert!(db.get(&k1).await.unwrap().is_some());
-        let metadata: <C as DbAny<F>>::Value = TestValue::from_seed(1);
+        let metadata: C::Value = TestValue::from_seed(1);
         let merkleized = db
             .new_batch()
             .write(k1, None)
-            .merkleize(&db, Some(metadata.clone()), &mut Proportional)
+            .with_metadata(Some(metadata.clone()))
+            .merkleize(&db)
             .await
             .unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
@@ -148,11 +142,7 @@ pub mod tests {
 
         // Repeated delete of same key should fail (key already deleted).
         assert!(db.get(&k1).await.unwrap().is_none());
-        let merkleized = db
-            .new_batch()
-            .merkleize(&db, None, &mut Proportional)
-            .await
-            .unwrap();
+        let merkleized = db.new_batch().merkleize(&db).await.unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         let root3 = db.root();
@@ -169,7 +159,7 @@ pub mod tests {
         let merkleized = db
             .new_batch()
             .write(k1, Some(v1))
-            .merkleize(&db, None, &mut Proportional)
+            .merkleize(&db)
             .await
             .unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
@@ -189,7 +179,7 @@ pub mod tests {
         C: Mutable<Item = Operation<F, Digest, V>>,
         V: ValueEncoding<Value = Digest>,
         Operation<F, Digest, V>: Codec,
-        TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
+        TestDb<F, C, V>: DbAny<Family = F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
         Fn: FnMut(Context, String) -> Fut + 'static,
         Fut: Future<Output = TestDb<F, C, V>>,
     {
@@ -204,17 +194,18 @@ pub mod tests {
             let merkleized = db
                 .new_batch()
                 .write(k, Some(v1))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
 
             let (_, op_loc) = db.any.get_with_loc(&k).await.unwrap().unwrap();
-            let proof = db.key_value_proof(k).await.unwrap();
+            let (proof, proved_value) = db.key_value_proof(&k).await.unwrap();
+            assert_eq!(proved_value, v1);
 
             // Proof should be verifiable against current root.
             let root = db.root();
-            assert!(proof.verify::<Sha256, V>(k, v1, &root));
+            assert!(proof.verify::<Sha256, V>(k, proved_value, &root));
 
             let v2 = Sha256::fill(0xA2);
             // Proof should not verify against a different value.
@@ -228,7 +219,7 @@ pub mod tests {
             let merkleized = db
                 .new_batch()
                 .write(k, Some(v2))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
@@ -238,8 +229,9 @@ pub mod tests {
             assert!(!proof.verify::<Sha256, V>(k, v2, &root));
 
             // But the new value should verify against a new proof.
-            let proof = db.key_value_proof(k).await.unwrap();
-            assert!(proof.verify::<Sha256, V>(k, v2, &root));
+            let (proof, proved_value) = db.key_value_proof(&k).await.unwrap();
+            assert_eq!(proved_value, v2);
+            assert!(proof.verify::<Sha256, V>(k, proved_value, &root));
 
             // Old value will not verify against new proof.
             assert!(!proof.verify::<Sha256, V>(k, v1, &root));
@@ -255,15 +247,14 @@ pub mod tests {
                 },
                 next_key: k,
             };
-            // This proof should verify using verify_range_proof which does not check activity
+            // This proof should verify using RangeProof::verify, which does not check activity
             // status.
             let op = Operation::Update(Update {
                 key: k,
                 value: v1,
                 next_key: k,
             });
-            assert!(TestDb::<F, C, V>::verify_range_proof(
-                &proof_inactive.proof.range_proof,
+            assert!(proof_inactive.proof.range_proof.verify::<Sha256, _, _>(
                 proof_inactive.proof.loc,
                 &[op],
                 &[proof_inactive.proof.chunk],
@@ -325,7 +316,7 @@ pub mod tests {
         C: Mutable<Item = Operation<F, Digest, V>>,
         V: ValueEncoding<Value = Digest>,
         Operation<F, Digest, V>: Codec,
-        TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
+        TestDb<F, C, V>: DbAny<Family = F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
         Fn: FnMut(Context, String) -> Fut + 'static,
         Fut: Future<Output = TestDb<F, C, V>>,
     {
@@ -342,8 +333,7 @@ pub mod tests {
                 partial_chunk_digest: None,
                 ops_root: Digest::EMPTY,
             };
-            assert!(!TestDb::<F, C, V>::verify_range_proof(
-                &proof,
+            assert!(!proof.verify::<Sha256, Operation<F, Digest, V>, 32>(
                 Location::<F>::new(0),
                 &[],
                 &[],
@@ -353,11 +343,7 @@ pub mod tests {
             let db = apply_random_ops::<F, TestDb<F, C, V>>(200, true, context.next_u64(), db)
                 .await
                 .unwrap();
-            let merkleized = db
-                .new_batch()
-                .merkleize(&db, None, &mut Proportional)
-                .await
-                .unwrap();
+            let merkleized = db.new_batch().merkleize(&db).await.unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
             let root = db.root();
 
@@ -365,25 +351,19 @@ pub mod tests {
             // retained op to tip.
             let max_ops = 4;
             let end_loc = db.bounds().end;
-            let start_loc = db.any.inactivity_floor_loc();
+            let start_loc = db.any.inactivity_floor();
 
             for loc in *start_loc..*end_loc {
                 let loc = Location::<F>::new(loc);
                 let (proof, ops, chunks) = db.range_proof(loc, NZU64!(max_ops)).await.unwrap();
                 assert!(
-                    TestDb::<F, C, V>::verify_range_proof(&proof, loc, &ops, &chunks, &root),
+                    proof.verify::<Sha256, _, _>(loc, &ops, &chunks, &root),
                     "failed to verify range at start_loc {start_loc}",
                 );
                 // Proof should not verify if we include extra chunks.
                 let mut chunks_with_extra = chunks.clone();
                 chunks_with_extra.push(chunks[chunks.len() - 1]);
-                assert!(!TestDb::<F, C, V>::verify_range_proof(
-                    &proof,
-                    loc,
-                    &ops,
-                    &chunks_with_extra,
-                    &root,
-                ));
+                assert!(!proof.verify::<Sha256, _, _>(loc, &ops, &chunks_with_extra, &root));
             }
 
             db.destroy().await.unwrap();
@@ -400,7 +380,7 @@ pub mod tests {
         C: Mutable<Item = Operation<F, Digest, V>>,
         V: ValueEncoding<Value = Digest>,
         Operation<F, Digest, V>: Codec,
-        TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
+        TestDb<F, C, V>: DbAny<Family = F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
         Fn: FnMut(Context, String) -> Fut + 'static,
         Fut: Future<Output = TestDb<F, C, V>>,
     {
@@ -411,20 +391,16 @@ pub mod tests {
             let db = apply_random_ops::<F, TestDb<F, C, V>>(500, true, context.next_u64(), db)
                 .await
                 .unwrap();
-            let merkleized = db
-                .new_batch()
-                .merkleize(&db, None, &mut Proportional)
-                .await
-                .unwrap();
+            let merkleized = db.new_batch().merkleize(&db).await.unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
             let root = db.root();
 
             // Confirm bad keys produce the expected error.
             let bad_key = Sha256::fill(0xAA);
-            let res = db.key_value_proof(bad_key).await;
+            let res = db.key_value_proof(&bad_key).await;
             assert!(matches!(res, Err(Error::KeyNotFound)));
 
-            let start = *db.inactivity_floor_loc();
+            let start = *db.inactivity_floor();
             for i in start..db.any.bitmap.len() {
                 if !db.any.bitmap.get_bit(i) {
                     continue;
@@ -434,10 +410,11 @@ pub mod tests {
                 let op = db.any.log.read(*Location::<F>::new(i)).await.unwrap();
                 let (key, value) = match op {
                     Operation::Update(key_data) => (key_data.key, key_data.value),
-                    Operation::CommitFloor(_, _) => continue,
-                    _ => unreachable!("expected update or commit floor operation"),
+                    Operation::Commit(_, _) => continue,
+                    _ => unreachable!("expected update or commit operation"),
                 };
-                let proof = db.key_value_proof(key).await.unwrap();
+                let (proof, proved_value) = db.key_value_proof(&key).await.unwrap();
+                assert_eq!(proved_value, value);
                 let max_digests = proof.proof.range_proof.proof.digests.len();
                 let encoded = proof.encode();
                 let proof = dynamic::KeyValueProof::<F, Digest, Digest>::decode_cfg(
@@ -448,7 +425,7 @@ pub mod tests {
                 assert_eq!(proof.encode(), encoded);
 
                 // Proof should validate against the current value and correct root.
-                assert!(proof.verify::<Sha256, V>(key, value, &root));
+                assert!(proof.verify::<Sha256, V>(key, proved_value, &root));
                 // Proof should fail against the wrong value. Use hash instead of fill to ensure
                 // the value differs from any key/value created by TestKey::from_seed (which uses
                 // fill patterns).
@@ -480,7 +457,7 @@ pub mod tests {
         C: Mutable<Item = Operation<F, Digest, V>>,
         V: ValueEncoding<Value = Digest>,
         Operation<F, Digest, V>: Codec,
-        TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
+        TestDb<F, C, V>: DbAny<Family = F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
         Fn: FnMut(Context, String) -> Fut + 'static,
         Fut: Future<Output = TestDb<F, C, V>>,
     {
@@ -497,7 +474,7 @@ pub mod tests {
                 let merkleized = db
                     .new_batch()
                     .write(k, Some(v))
-                    .merkleize(&db, None, &mut Proportional)
+                    .merkleize(&db)
                     .await
                     .unwrap();
                 db = db.apply_batch(merkleized).await.unwrap();
@@ -505,9 +482,10 @@ pub mod tests {
                 let root = db.root();
 
                 // Create a proof for the current value of k.
-                let proof = db.key_value_proof(k).await.unwrap();
+                let (proof, proved_value) = db.key_value_proof(&k).await.unwrap();
+                assert_eq!(proved_value, v);
                 assert!(
-                    proof.verify::<Sha256, V>(k, v, &root),
+                    proof.verify::<Sha256, V>(k, proved_value, &root),
                     "proof of update {i} failed to verify"
                 );
                 // Ensure the proof does NOT verify if we use the previous value.
@@ -558,7 +536,7 @@ pub mod tests {
         Operation<F, Digest, V>: Codec,
         Update<Digest, V>: Codec,
         <Update<Digest, V> as Read>::Cfg: Default,
-        TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
+        TestDb<F, C, V>: DbAny<Family = F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
         Fn: FnMut(Context, String) -> Fut + 'static,
         Fut: Future<Output = TestDb<F, C, V>>,
     {
@@ -580,7 +558,7 @@ pub mod tests {
             let merkleized = db
                 .new_batch()
                 .write(key_exists_1, Some(v1))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
@@ -612,7 +590,7 @@ pub mod tests {
             let merkleized = db
                 .new_batch()
                 .write(key_exists_2, Some(v2))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
@@ -655,7 +633,7 @@ pub mod tests {
                 .new_batch()
                 .write(key_exists_1, None)
                 .write(key_exists_2, None)
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
@@ -902,8 +880,8 @@ pub mod tests {
         use crate::{
             merkle::{mmb, mmr},
             qmdb::{
-                any::value::{FixedEncoding, VariableEncoding},
                 current::ordered::proof::{constant, dynamic},
+                value::{FixedEncoding, VariableEncoding},
             },
         };
         use commonware_codec::conformance::CodecConformance;

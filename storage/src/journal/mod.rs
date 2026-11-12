@@ -39,7 +39,7 @@ pub enum Error {
     SectionOutOfRange(u64),
     #[error("offset overflow")]
     OffsetOverflow,
-    #[error("replay interrupted during repair")]
+    #[error("replay interrupted")]
     ReplayInterrupted,
     #[error("replay failed")]
     ReplayFailed,

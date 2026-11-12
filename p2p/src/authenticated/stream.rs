@@ -2,7 +2,7 @@
 
 #[cfg(test)]
 use commonware_cryptography::Signer;
-use commonware_runtime::{BufferPooler, Clock, Sink, Stream};
+use commonware_runtime::{Clock, Sink, Stream};
 #[cfg(test)]
 use commonware_stream::SakeCups;
 use commonware_stream::Upgrader;
@@ -46,7 +46,7 @@ impl<U: Upgrader> Config<U> {
         sink: O,
     ) -> impl Future<Output = Result<(U::Sender<I, O>, U::Receiver<I, O>), U::Error>> + Send
     where
-        C: BufferPooler + Clock + CryptoRng,
+        C: Clock + CryptoRng,
         I: Stream,
         O: Sink,
     {
@@ -73,7 +73,7 @@ impl<U: Upgrader> Config<U> {
         sink: O,
     ) -> impl Future<Output = Result<(U::PublicKey, U::Sender<I, O>, U::Receiver<I, O>), U::Error>> + Send
     where
-        C: BufferPooler + Clock + CryptoRng,
+        C: Clock + CryptoRng,
         I: Stream,
         O: Sink,
         B: FnOnce(U::PublicKey) -> F + Send,

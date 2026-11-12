@@ -46,7 +46,6 @@ use tracing::{debug, info};
 
 type Scheme = bls12381_threshold::Scheme<PublicKey, MinSig>;
 
-#[allow(clippy::large_enum_variant)]
 enum Message<D: Digest> {
     PutBlock {
         incoming: inbound::PutBlock<D>,

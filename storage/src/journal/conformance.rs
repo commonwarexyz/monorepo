@@ -10,7 +10,7 @@ use commonware_conformance::conformance_tests;
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    BufMut, BufferPooler, Supervisor as _,
+    BufMut, Supervisor as _,
     buffer::paged::CacheRef,
     conformance::{StorageConformance, StorageWorkload},
 };
@@ -43,10 +43,7 @@ fn fill_variable_item<const COMPRESSED: bool>(
     }
 }
 
-fn authenticated_merkle_config(
-    prefix: &str,
-    pooler: &impl BufferPooler,
-) -> crate::merkle::full::Config<Sequential> {
+fn authenticated_merkle_config(prefix: &str) -> crate::merkle::full::Config<Sequential> {
     crate::merkle::full::Config {
         journal_partition: format!("{prefix}-merkle-journal"),
         metadata_partition: format!("{prefix}-merkle-metadata"),
@@ -54,15 +51,15 @@ fn authenticated_merkle_config(
         write_buffer: WRITE_BUFFER,
         replay_buffer: REPLAY_BUFFER,
         strategy: Sequential,
-        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
-fn authenticated_journal_config(prefix: &str, pooler: &impl BufferPooler) -> fixed::Config {
+fn authenticated_journal_config(prefix: &str) -> fixed::Config {
     fixed::Config {
         partition: format!("{prefix}-journal"),
         items_per_blob: NZU64!(11),
-        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         write_buffer: WRITE_BUFFER,
         replay_buffer: REPLAY_BUFFER,
     }
@@ -80,8 +77,8 @@ where
     let mut journal =
         authenticated::Journal::<F, _, fixed::Journal<_, u64>, Sha256, Sequential>::new(
             context.child("authenticated"),
-            authenticated_merkle_config(&prefix, &context),
-            authenticated_journal_config(&prefix, &context),
+            authenticated_merkle_config(&prefix),
+            authenticated_journal_config(&prefix),
             |_| true,
             crate::merkle::Bagging::ForwardFold,
         )
@@ -116,7 +113,7 @@ impl StorageWorkload for ContiguousFixedWorkload {
         let config = fixed::Config {
             partition: format!("contiguous-fixed-conformance-{seed}"),
             items_per_blob: ITEMS_PER_BLOB,
-            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: WRITE_BUFFER,
             replay_buffer: REPLAY_BUFFER,
         };
@@ -146,7 +143,7 @@ impl<const COMPRESSED: bool> StorageWorkload for ContiguousVariableWorkload<COMP
         let config = variable::Config {
             partition: format!("contiguous-variable-conformance-{seed}"),
             items_per_section: ITEMS_PER_BLOB,
-            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: WRITE_BUFFER,
             replay_buffer: REPLAY_BUFFER,
             compression: COMPRESSED.then_some(3),
@@ -180,7 +177,7 @@ impl StorageWorkload for SegmentedFixedWorkload {
     ) -> Result<(), Self::Error> {
         let config = segmented_fixed::Config {
             partition: format!("segmented-fixed-conformance-{seed}"),
-            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: WRITE_BUFFER,
         };
         let mut journal =
@@ -244,7 +241,7 @@ impl<const COMPRESSED: bool> StorageWorkload for SegmentedVariableWorkload<COMPR
     ) -> Result<(), Self::Error> {
         let config = segmented_variable::Config {
             partition: format!("segmented-variable-conformance-{seed}"),
-            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: WRITE_BUFFER,
             compression: COMPRESSED.then_some(3),
             codec_config: (RangeCfg::new(0..256), ()),
@@ -328,7 +325,7 @@ impl<const COMPRESSED: bool> StorageWorkload for SegmentedOversizedWorkload<COMP
         let config = oversized::Config {
             index_partition: format!("segmented-oversized-index-conformance-{seed}"),
             value_partition: format!("segmented-oversized-value-conformance-{seed}"),
-            index_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            index_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             index_write_buffer: WRITE_BUFFER,
             value_write_buffer: WRITE_BUFFER,
             replay_buffer: REPLAY_BUFFER,

@@ -1073,7 +1073,6 @@ impl<G: Read> Read for Setup<G> {
 ///
 /// This contains the committed values, their Pedersen blindings, and the
 /// internal left, right, and output wire values.
-#[allow(dead_code)]
 pub struct Witness<F> {
     values: Vec<F>,
     blinding: Vec<F>,
@@ -1172,7 +1171,6 @@ impl<G: EncodeSize> EncodeSize for Claim<G> {
 /// to a [`Circuit`].
 ///
 /// See [`prove`] and [`verify`].
-#[allow(dead_code)]
 #[derive(Clone)]
 pub struct Proof<F, G> {
     m_big: G,

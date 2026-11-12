@@ -36,7 +36,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     Clock, IoBuf, Runner, Spawner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
-use commonware_utils::{FuzzRng, NZU16, NZU32, NZUsize, probability};
+use commonware_utils::{FuzzRng, NZDuration, NZU16, NZU32, NZUsize, probability};
 use futures::future::join_all;
 pub use simplex::{
     SimplexBls12381MinPk, SimplexBls12381MinSig, SimplexBls12381MultisigMinPk,
@@ -440,7 +440,8 @@ where
         leader_timeout,
         certification_timeout,
         timeout_retry: Duration::from_secs(10),
-        fetch_timeout: Duration::from_secs(1),
+        fetch_timeout: NZDuration!(Duration::from_secs(1)),
+        fetch_retry_delay: Duration::from_millis(100),
         view_retention: Delta::new(10),
         skip: SkipPolicy::Enabled {
             timeout: Duration::from_secs(11),
@@ -448,7 +449,7 @@ where
         },
         replay_buffer: NZUsize!(1024 * 1024),
         write_buffer: NZUsize!(1024 * 1024),
-        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         strategy: Sequential,
         forward: ForwardPolicy::Disabled,
         track_historical_votes: false,
@@ -689,7 +690,8 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_millis(1_500),
                 timeout_retry: Duration::from_secs(10),
-                fetch_timeout: Duration::from_secs(1),
+                fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                fetch_retry_delay: Duration::from_millis(100),
                 view_retention: Delta::new(10),
                 skip: SkipPolicy::Enabled {
                     timeout: Duration::from_secs(11),
@@ -697,7 +699,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 },
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&primary_context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
                 forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,

@@ -7,13 +7,10 @@ use crate::stateful::{
     db::{Anchor, TipUpdate},
 };
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
-use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_utils::channel::oneshot;
-use rand_core::Rng;
 
 pub(crate) enum Message<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     Retarget {
@@ -24,7 +21,6 @@ where
 
 impl<E, A> Overflow<Message<E, A>> for Option<Message<E, A>>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     fn is_empty(&self) -> bool {
@@ -47,7 +43,6 @@ where
 // awaits each update before sending the next, so a live response is never dropped.
 impl<E, A> Policy for Message<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     type Overflow = Option<Self>;
@@ -60,7 +55,6 @@ where
 /// Ingress mailbox for the [`Syncer`](super::Syncer) actor.
 pub struct Mailbox<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     sender: Sender<Message<E, A>>,
@@ -68,7 +62,6 @@ where
 
 impl<E, A> Mailbox<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     pub const fn new(sender: Sender<Message<E, A>>) -> Self {

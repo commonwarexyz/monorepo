@@ -1,0 +1,501 @@
+//! Openings of one key in a sorted list committed with a binary Merkle tree.
+
+use bytes::BufMut;
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_cryptography::{Digest, Hasher};
+use commonware_storage::bmt::{Proof, Tree};
+use thiserror::Error;
+
+/// An opening does not verify.
+#[derive(Debug, Error)]
+#[error("invalid opening")]
+pub struct InvalidOpening;
+
+/// Tag of [Lookup::Member] in the encoding.
+const MEMBER: u8 = 0;
+
+/// Tag of [Lookup::NonMember] in the encoding.
+const NON_MEMBER: u8 = 1;
+
+/// Opens the value bound to one key in a list that is strictly increasing by key and committed with
+/// a binary Merkle tree.
+///
+/// Each leaf is bound to its position and the root binds the number of entries, so an opening also
+/// proves whether an entry is the first or last. An opening is sound only under the root of a
+/// sorted list, because an unsorted list can prove a present key absent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Lookup<K, V, D: Digest> {
+    /// The key is present.
+    Member {
+        /// Position of the key's entry.
+        position: u32,
+        /// Value bound to the key.
+        value: V,
+        /// Opening of the entry.
+        proof: Proof<D>,
+    },
+    /// The key is absent.
+    NonMember {
+        /// Position at which the key would be inserted.
+        position: u32,
+        /// Entry preceding `position`, unless the key precedes every entry.
+        lower: Option<(K, V)>,
+        /// Entry at `position`, unless the key follows every entry.
+        upper: Option<(K, V)>,
+        /// Opening of the neighbors present, or of the empty list.
+        proof: Proof<D>,
+    },
+}
+
+impl<K: Ord + Clone, V: Clone, D: Digest> Lookup<K, V, D> {
+    /// Opens `key` in `entries`. The entries must be strictly increasing by key and committed by
+    /// `tree`.
+    pub(crate) fn new(entries: &[(K, V)], tree: &Tree<D>, key: &K) -> Self {
+        let narrow = |index: usize| {
+            u32::try_from(index).expect("the tree must commit at most u32::MAX entries")
+        };
+        let open = |start: u32, end: u32| {
+            tree.range_proof(start, end)
+                .expect("entries must be committed by the tree")
+        };
+        match entries.binary_search_by(|(candidate, _)| candidate.cmp(key)) {
+            Ok(index) => {
+                let position = narrow(index);
+                Self::Member {
+                    position,
+                    value: entries[index].1.clone(),
+                    proof: open(position, position),
+                }
+            }
+            Err(index) => {
+                let position = narrow(index);
+                let lower = index.checked_sub(1).map(|index| entries[index].clone());
+                let upper = entries.get(index).cloned();
+                let proof = match (&lower, &upper) {
+                    (None, None) => Proof::default(),
+                    (Some(_), Some(_)) => open(position - 1, position),
+                    (Some(_), None) => open(position - 1, position - 1),
+                    (None, Some(_)) => open(position, position),
+                };
+                Self::NonMember {
+                    position,
+                    lower,
+                    upper,
+                    proof,
+                }
+            }
+        }
+    }
+
+    /// Verifies the opening of `key` under `root`, where `leaf` computes an entry's leaf.
+    ///
+    /// Returns the value bound to `key`, or `None` if the opening proves it absent.
+    pub(crate) fn verify<H: Hasher<Digest = D>>(
+        &self,
+        root: &D,
+        key: &K,
+        leaf: impl Fn(&K, &V) -> D,
+    ) -> Result<Option<&V>, InvalidOpening> {
+        match self {
+            Self::Member {
+                position,
+                value,
+                proof,
+            } => {
+                proof
+                    .verify_element_inclusion::<H>(*position, &leaf(key, value), root)
+                    .map_err(|_| InvalidOpening)?;
+                Ok(Some(value))
+            }
+            Self::NonMember {
+                position,
+                lower,
+                upper,
+                proof,
+            } => {
+                // The key lies strictly between its neighbors, and an entry is missing only because
+                // the key precedes the first entry or follows the last one. An empty list has
+                // neither neighbor, and only the empty proof opens its root.
+                let count = proof.leaf_count;
+                if lower.is_some() != (*position > 0)
+                    || upper.is_some() != (*position < count)
+                    || lower.as_ref().is_some_and(|(lower, _)| lower >= key)
+                    || upper.as_ref().is_some_and(|(upper, _)| upper <= key)
+                {
+                    return Err(InvalidOpening);
+                }
+                let mut elements = Vec::with_capacity(2);
+                if let Some((lower, value)) = lower {
+                    elements.push((*position - 1, leaf(lower, value)));
+                }
+                if let Some((upper, value)) = upper {
+                    elements.push((*position, leaf(upper, value)));
+                }
+                proof
+                    .verify_multi_inclusion::<H>(&elements, root)
+                    .map_err(|_| InvalidOpening)?;
+                Ok(None)
+            }
+        }
+    }
+}
+
+impl<K: Write, V: Write, D: Digest> Write for Lookup<K, V, D> {
+    fn write(&self, buf: &mut impl BufMut) {
+        match self {
+            Self::Member {
+                position,
+                value,
+                proof,
+            } => {
+                MEMBER.write(buf);
+                position.write(buf);
+                value.write(buf);
+                proof.write(buf);
+            }
+            Self::NonMember {
+                position,
+                lower,
+                upper,
+                proof,
+            } => {
+                NON_MEMBER.write(buf);
+                position.write(buf);
+                lower.write(buf);
+                upper.write(buf);
+                proof.write(buf);
+            }
+        }
+    }
+}
+
+impl<K: EncodeSize, V: EncodeSize, D: Digest> EncodeSize for Lookup<K, V, D> {
+    fn encode_size(&self) -> usize {
+        u8::SIZE
+            + match self {
+                Self::Member {
+                    position,
+                    value,
+                    proof,
+                } => position.encode_size() + value.encode_size() + proof.encode_size(),
+                Self::NonMember {
+                    position,
+                    lower,
+                    upper,
+                    proof,
+                } => {
+                    position.encode_size()
+                        + lower.encode_size()
+                        + upper.encode_size()
+                        + proof.encode_size()
+                }
+            }
+    }
+}
+
+impl<K: Read<Cfg = ()>, V: Read<Cfg = ()>, D: Digest> Read for Lookup<K, V, D> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        match u8::read(buf)? {
+            MEMBER => Ok(Self::Member {
+                position: u32::read(buf)?,
+                value: V::read(buf)?,
+                proof: Proof::read_cfg(buf, &1)?,
+            }),
+            NON_MEMBER => Ok(Self::NonMember {
+                position: u32::read(buf)?,
+                lower: Option::<(K, V)>::read_cfg(buf, &((), ()))?,
+                upper: Option::<(K, V)>::read_cfg(buf, &((), ()))?,
+                proof: Proof::read_cfg(buf, &2)?,
+            }),
+            tag => Err(CodecError::InvalidEnum(tag)),
+        }
+    }
+}
+
+/// Draws an arbitrary proof with at most four siblings.
+#[cfg(feature = "arbitrary")]
+pub(crate) fn arbitrary_proof<'a, D>(
+    u: &mut arbitrary::Unstructured<'a>,
+) -> arbitrary::Result<Proof<D>>
+where
+    D: Digest + arbitrary::Arbitrary<'a>,
+{
+    let siblings = u.int_in_range(0..=4)?;
+    Ok(Proof {
+        leaf_count: u.arbitrary()?,
+        siblings: (0..siblings)
+            .map(|_| u.arbitrary())
+            .collect::<arbitrary::Result<_>>()?,
+    })
+}
+
+#[cfg(feature = "arbitrary")]
+impl<'a, K, V, D> arbitrary::Arbitrary<'a> for Lookup<K, V, D>
+where
+    K: arbitrary::Arbitrary<'a>,
+    V: arbitrary::Arbitrary<'a>,
+    D: Digest + arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let position = u.arbitrary()?;
+        let proof = arbitrary_proof(u)?;
+        if u.arbitrary()? {
+            Ok(Self::Member {
+                position,
+                value: u.arbitrary()?,
+                proof,
+            })
+        } else {
+            Ok(Self::NonMember {
+                position,
+                lower: u.arbitrary()?,
+                upper: u.arbitrary()?,
+                proof,
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_codec::{DecodeExt as _, Encode as _};
+    use commonware_cryptography::{Sha256, sha256::Digest};
+    use commonware_storage::bmt::{Builder, MAX_LEVELS};
+
+    type TestLookup = Lookup<u64, u64, Digest>;
+
+    /// Returns the leaf committing to `key` and `value`.
+    fn leaf(key: &u64, value: &u64) -> Digest {
+        Sha256::hash(&[&key.to_be_bytes(), &value.to_be_bytes()])
+    }
+
+    /// Returns `count` entries with keys 10, 20, ... and their tree.
+    fn list(count: u64) -> (Vec<(u64, u64)>, Tree<Digest>) {
+        let entries: Vec<_> = (1..=count).map(|i| (10 * i, i)).collect();
+        let mut builder = Builder::<Sha256>::new(entries.len());
+        for (key, value) in &entries {
+            builder.add(&leaf(key, value));
+        }
+        (entries, builder.build())
+    }
+
+    /// Verifies `lookup` as an opening of `key` under `root`, and returns the value it opens.
+    fn verify(lookup: &TestLookup, key: u64, root: &Digest) -> Result<Option<u64>, InvalidOpening> {
+        lookup
+            .verify::<Sha256>(root, &key, leaf)
+            .map(|value| value.copied())
+    }
+
+    /// Every key, present or absent, opens and verifies under the root.
+    #[test]
+    fn test_opens_every_key() {
+        for count in 0..=6 {
+            let (entries, tree) = list(count);
+            let root = tree.root();
+            for (key, value) in &entries {
+                let lookup = TestLookup::new(&entries, &tree, key);
+                assert!(matches!(lookup, Lookup::Member { .. }));
+                assert_eq!(verify(&lookup, *key, &root).unwrap(), Some(*value));
+            }
+            for key in (0..=count).map(|i| 10 * i + 5) {
+                let lookup = TestLookup::new(&entries, &tree, &key);
+                assert!(matches!(lookup, Lookup::NonMember { .. }));
+                assert_eq!(verify(&lookup, key, &root).unwrap(), None);
+            }
+        }
+    }
+
+    /// A member opening verifies only for its own value, position, key, and root.
+    #[test]
+    fn test_rejects_tampered_members() {
+        let (entries, tree) = list(4);
+        let root = tree.root();
+        let lookup = TestLookup::new(&entries, &tree, &20);
+        let Lookup::Member {
+            position,
+            value,
+            proof,
+        } = lookup.clone()
+        else {
+            panic!("key must be present");
+        };
+        for tampered in [
+            Lookup::Member {
+                position,
+                value: value + 1,
+                proof: proof.clone(),
+            },
+            Lookup::Member {
+                position: position + 1,
+                value,
+                proof,
+            },
+        ] {
+            assert!(matches!(verify(&tampered, 20, &root), Err(InvalidOpening)));
+        }
+        assert!(matches!(verify(&lookup, 30, &root), Err(InvalidOpening)));
+        assert!(matches!(
+            verify(&lookup, 20, &list(5).1.root()),
+            Err(InvalidOpening)
+        ));
+    }
+
+    /// A non-member opening verifies only for a key strictly between its neighbors, with every
+    /// neighbor its position requires.
+    #[test]
+    fn test_rejects_tampered_non_members() {
+        let (entries, tree) = list(4);
+        let root = tree.root();
+
+        // An opening between two neighbors only proves keys strictly between them absent.
+        let lookup = TestLookup::new(&entries, &tree, &25);
+        for key in [20, 30, 15, 35] {
+            assert!(matches!(verify(&lookup, key, &root), Err(InvalidOpening)));
+        }
+        let Lookup::NonMember {
+            position,
+            lower,
+            upper,
+            proof,
+        } = lookup
+        else {
+            panic!("key must be absent");
+        };
+        assert_eq!((lower.unwrap().0, upper.unwrap().0), (20, 30));
+
+        // Neighbors must be present unless the key precedes or follows every entry, so a present
+        // key cannot be proven absent with one neighbor and that neighbor's own proof.
+        for (key, tampered) in [
+            (
+                30,
+                Lookup::NonMember {
+                    position: 2,
+                    lower: Some(entries[1]),
+                    upper: None,
+                    proof: tree.proof(1).unwrap(),
+                },
+            ),
+            (
+                20,
+                Lookup::NonMember {
+                    position: 2,
+                    lower: None,
+                    upper: Some(entries[2]),
+                    proof: tree.proof(2).unwrap(),
+                },
+            ),
+        ] {
+            assert!(matches!(verify(&tampered, key, &root), Err(InvalidOpening)));
+        }
+
+        // Neighbors must sit at the claimed position, and a list with entries does not open as
+        // empty.
+        for tampered in [
+            Lookup::NonMember {
+                position: position + 1,
+                lower,
+                upper,
+                proof: proof.clone(),
+            },
+            Lookup::NonMember {
+                position,
+                lower: upper,
+                upper: lower,
+                proof,
+            },
+            Lookup::NonMember {
+                position: 0,
+                lower: None,
+                upper: None,
+                proof: Proof::default(),
+            },
+        ] {
+            assert!(matches!(verify(&tampered, 25, &root), Err(InvalidOpening)));
+        }
+
+        // A present key cannot be proven absent with the neighbors of a nearby absent key.
+        let lookup = TestLookup::new(&entries, &tree, &5);
+        assert!(matches!(verify(&lookup, 10, &root), Err(InvalidOpening)));
+        let lookup = TestLookup::new(&entries, &tree, &45);
+        assert!(matches!(verify(&lookup, 40, &root), Err(InvalidOpening)));
+    }
+
+    /// The empty list opens every key as absent, and its opening verifies under no other root.
+    #[test]
+    fn test_empty_list() {
+        let (entries, tree) = list(0);
+        let lookup = TestLookup::new(&entries, &tree, &5);
+        assert_eq!(verify(&lookup, 5, &tree.root()).unwrap(), None);
+        assert!(matches!(
+            verify(&lookup, 5, &list(1).1.root()),
+            Err(InvalidOpening)
+        ));
+    }
+
+    /// The opening of an absent key between two entries proves both neighbors. In this list the
+    /// neighbors sit at positions 2^17 - 1 and 2^17, and that proof holds more siblings than a
+    /// single path can hold. The opening still round-trips and verifies.
+    #[test]
+    fn test_opens_absent_key_across_subtrees() {
+        // The lower neighbor is the last entry of the tree's left half. Its path within that half
+        // has 17 siblings. The right half holds enough entries that the upper neighbor's path
+        // within it has 16 siblings.
+        let (entries, tree) = list((1 << 17) + (1 << 15) + 1);
+        let key = 10 * (1 << 17) + 5;
+        let lookup = TestLookup::new(&entries, &tree, &key);
+        let Lookup::NonMember {
+            position,
+            lower,
+            upper,
+            proof,
+        } = &lookup
+        else {
+            panic!("key must be absent");
+        };
+        assert_eq!(*position, 1 << 17);
+        assert!(
+            lower.is_some() && upper.is_some(),
+            "the key must have both neighbors"
+        );
+        assert!(
+            proof.siblings.len() > MAX_LEVELS,
+            "the proof must hold more siblings than one path"
+        );
+
+        // The opening encodes and decodes back to itself, and it proves the key absent.
+        assert_eq!(TestLookup::decode(lookup.encode()).unwrap(), lookup);
+        assert_eq!(verify(&lookup, key, &tree.root()).unwrap(), None);
+    }
+
+    /// Openings round-trip, and a tag naming neither variant is refused.
+    #[test]
+    fn test_codec() {
+        let (entries, tree) = list(3);
+        for key in [5, 10, 25, 30, 35] {
+            let lookup = TestLookup::new(&entries, &tree, &key);
+            let decoded = TestLookup::decode(lookup.encode()).unwrap();
+            assert_eq!(decoded, lookup);
+        }
+
+        // The opening of an empty list round-trips, and a tag naming neither variant is refused.
+        let (entries, tree) = list(0);
+        let lookup = TestLookup::new(&entries, &tree, &5);
+        assert_eq!(TestLookup::decode(lookup.encode()).unwrap(), lookup);
+        let mut mistagged = lookup.encode().to_vec();
+        mistagged[0] = 2;
+        assert!(TestLookup::decode(mistagged).is_err());
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Lookup<u64, u64, Digest>>,
+        }
+    }
+}

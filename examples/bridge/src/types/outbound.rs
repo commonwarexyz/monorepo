@@ -9,7 +9,6 @@ use commonware_runtime::BufMut;
 ///
 /// These responses correspond to the results of the operations requested by `Inbound` messages.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(clippy::large_enum_variant)]
 pub enum Outbound<D: Digest> {
     /// Indicates the success or failure of a `Put` operation,
     /// or if a `Get` operation found the requested item.

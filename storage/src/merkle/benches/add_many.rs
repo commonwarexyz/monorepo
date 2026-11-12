@@ -2,7 +2,7 @@
 
 use bytes::Bytes;
 use commonware_cryptography::{Sha256, sha256};
-use commonware_parallel::{Rayon, Sequential, Strategy};
+use commonware_parallel::{Rayon, Sequential, Strategy, rayon::ThreadPoolBuilder};
 use commonware_storage::merkle::{
     self, Bagging::ForwardFold, Family, batch::MerkleizedBatch, mem::Mem,
 };
@@ -93,7 +93,7 @@ fn bench_uniform(c: &mut Criterion) {
     let hasher = StandardHasher::<Sha256>::new(ForwardFold);
     let mmr = committed::<commonware_storage::mmr::Family>(&hasher);
     let mmb = committed::<commonware_storage::mmb::Family>(&hasher);
-    let rayon = Rayon::new(NZUsize!(WORKERS)).unwrap();
+    let rayon = Rayon::new(ThreadPoolBuilder::new(NZUsize!(WORKERS))).unwrap();
     let mut rng = test_rng();
     for n in ITEMS {
         let items: Vec<Bytes> = (0..n).map(|_| item(&mut rng, SMALL)).collect();
@@ -106,7 +106,7 @@ fn bench_uniform(c: &mut Criterion) {
 fn bench_skewed(c: &mut Criterion) {
     let hasher = StandardHasher::<Sha256>::new(ForwardFold);
     let mmr = committed::<commonware_storage::mmr::Family>(&hasher);
-    let rayon = Rayon::new(NZUsize!(WORKERS)).unwrap();
+    let rayon = Rayon::new(ThreadPoolBuilder::new(NZUsize!(WORKERS))).unwrap();
     let mut rng = test_rng();
     let cases: [(&str, usize, IsLarge); 4] = [
         ("clustered", MIB, |i| i < CLUSTERED),

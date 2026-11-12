@@ -4,6 +4,7 @@ use crate::{
     qmdb::sync::{Journal, Target},
     translator::Translator,
 };
+use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::range::NonEmptyRange;
@@ -11,7 +12,10 @@ use std::{future::Future, num::NonZeroU64};
 
 /// Database configuration that can produce the configuration for its sync journal.
 pub trait Config {
+    /// Configuration for the journal the sync engine fills before building the database.
     type JournalConfig;
+
+    /// Return the configuration for the sync journal.
     fn journal_config(&self) -> Self::JournalConfig;
 }
 
@@ -19,7 +23,7 @@ impl<T: Translator, J: Clone, S: Strategy, B> Config for crate::qmdb::any::Confi
     type JournalConfig = J;
 
     fn journal_config(&self) -> Self::JournalConfig {
-        self.journal_config.clone()
+        self.log.clone()
     }
 }
 
@@ -45,15 +49,37 @@ impl<C: Clone + Send + Sync + 'static, S: Strategy> Config for crate::qmdb::comp
     fn journal_config(&self) -> Self::JournalConfig {}
 }
 
+/// A database that [`sync`](super::sync) can build from operations fetched from a [`Source`].
+///
+/// Every authenticated QMDB variant implements this trait, and callers drive it through
+/// [`sync`](super::sync): the engine calls [`Self::local_pinned_nodes`] when a sync journal left
+/// on disk already reaches the target, fetches and verifies the remaining operations, builds the
+/// database with [`Self::from_sync_result`], checks [`Self::ops_root`] against the target, and only
+/// then calls [`Self::persist_sync_result`].
+///
+/// [`Source`]: super::Source
 pub trait Database: Sized + Send {
+    /// The Merkle family of the operations log.
     type Family: Family;
-    type Op: Send + Sync;
+
+    /// The operation type stored in the log.
+    type Op: Encode + Send + Sync;
+
+    /// The journal the engine fills with fetched operations.
     type Journal: Journal<Self::Family, Context = Self::Context, Op = Self::Op>;
+
+    /// The database configuration, which also configures the sync journal.
     type Config: Config<JournalConfig = <Self::Journal as Journal<Self::Family>>::Config>;
+
+    /// The digest type of the database's root.
     type Digest: Digest;
+
+    /// The runtime context the database is built in.
     type Context: commonware_runtime::Storage
         + commonware_runtime::Clock
         + commonware_runtime::Metrics;
+
+    /// The hasher producing [`Self::Digest`].
     type Hasher: commonware_cryptography::Hasher<Digest = Self::Digest>;
 
     /// Build a database from the journal and pinned nodes populated by the sync engine.
@@ -68,8 +94,9 @@ pub trait Database: Sized + Send {
 
     /// Persist any state that must remain provisional until the engine verifies the rebuilt root.
     ///
-    /// The engine calls this only after [`Self::root`] matches the requested target. Implementations
-    /// that persist everything in [`Self::from_sync_result`] must explicitly return `Ok(self)`.
+    /// The engine calls this only after [`Self::ops_root`] matches the requested target.
+    /// Implementations that persist everything in [`Self::from_sync_result`] must explicitly
+    /// return `Ok(self)`.
     fn persist_sync_result(
         self,
     ) -> impl Future<Output = Result<Self, crate::qmdb::Error<Self::Family>>> + Send;
@@ -87,8 +114,10 @@ pub trait Database: Sized + Send {
         journal: &Self::Journal,
     ) -> impl Future<Output = Result<Option<Vec<Self::Digest>>, crate::qmdb::Error<Self::Family>>> + Send;
 
-    /// Get the root digest of the database for verification
-    fn root(&self) -> Self::Digest;
+    /// Return the operations root the engine compares against the target.
+    ///
+    /// For [`current`](crate::qmdb::current), this differs from the canonical database root.
+    fn ops_root(&self) -> Self::Digest;
 }
 
 /// Whether a completed sync journal's `bounds` cover `range`: retained data reaches back to
@@ -155,11 +184,11 @@ mod tests {
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
+        Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range, range::NonEmptyRange};
 
-    fn merkle_config(pooler: &impl BufferPooler) -> full::Config<Sequential> {
+    fn merkle_config() -> full::Config<Sequential> {
         full::Config {
             journal_partition: "local-pins-journal".into(),
             metadata_partition: "local-pins-metadata".into(),
@@ -167,7 +196,7 @@ mod tests {
             write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
             strategy: Sequential,
-            page_cache: CacheRef::from_pooler(pooler, NZU16!(111), NZUsize!(5)),
+            page_cache: CacheRef::new(NZU16!(111), NZUsize!(5)),
         }
     }
 
@@ -193,7 +222,7 @@ mod tests {
     fn local_pinned_nodes_treats_reset_journal_as_unavailable() {
         deterministic::Runner::default().start(|context| async move {
             let hasher = crate::qmdb::hasher::<Sha256>();
-            let config = merkle_config(&context);
+            let config = merkle_config();
             let mut merkle = full::Merkle::<MmrFamily, _, Digest, Sequential>::init(
                 context.child("init"),
                 &hasher,

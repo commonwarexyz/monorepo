@@ -142,11 +142,7 @@ fn fuzz(data: FuzzInput) {
             translator: EightCap,
             metadata_partition: "test-metadata".into(),
             key_partition: "test-key".into(),
-            key_page_cache: CacheRef::from_pooler(
-                &context,
-                PAGE_SIZE,
-                PAGE_CACHE_SIZE,
-            ),
+            key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             value_partition: "test-value".into(),
             items_per_section: NZU64!(1024),
             key_write_buffer: NZUsize!(1024),

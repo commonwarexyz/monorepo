@@ -45,7 +45,7 @@ impl Cursor {
 
     /// Returns whether a specific position has been acknowledged.
     pub(super) fn is_acked(&self, position: u64) -> bool {
-        position < self.ack_floor || self.acked_above.get(&position).is_some()
+        position < self.ack_floor || self.acked_above.get(position).is_some()
     }
 
     /// Read the next unacknowledged item from `items`, returning its position and value.
@@ -62,7 +62,7 @@ impl Cursor {
         }
 
         // Fast-forward past the ack range containing read_pos (if any).
-        if let Some((_, end)) = self.acked_above.get(&self.read_pos) {
+        if let Some((_, end)) = self.acked_above.get(self.read_pos) {
             self.read_pos = end.saturating_add(1);
         }
 
@@ -98,7 +98,7 @@ impl Cursor {
         }
 
         // Already acked (above floor)
-        if self.acked_above.get(&position).is_some() {
+        if self.acked_above.get(position).is_some() {
             return Ok(());
         }
 
@@ -106,7 +106,7 @@ impl Cursor {
         if position == self.ack_floor {
             // Advance floor, consuming any contiguous acked items
             let next = position + 1;
-            let final_floor = match self.acked_above.get(&next) {
+            let final_floor = match self.acked_above.get(next) {
                 Some((_, end)) => end + 1,
                 None => next,
             };
@@ -138,7 +138,7 @@ impl Cursor {
         }
 
         // Determine final floor: either up_to, or past any contiguous acked range at up_to
-        let final_floor = match self.acked_above.get(&up_to) {
+        let final_floor = match self.acked_above.get(up_to) {
             Some((_, end)) => end + 1,
             None => up_to,
         };
