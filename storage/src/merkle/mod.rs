@@ -168,6 +168,15 @@ pub trait Family: Copy + Debug + Default + Send + Sync + 'static {
     /// instance of this family (i.e., it is not a position that would appear in a structure of any
     /// size).
     fn pos_to_height(pos: Position<Self>) -> u32;
+
+    /// Return how many leaves, starting with its leftmost leaf, must be appended before a node at
+    /// `height` is created. A node whose leftmost leaf is `leaf_start` exists once the structure
+    /// has `leaf_start + birth_offset(height)` leaves.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the offset does not fit in a `u64`.
+    fn birth_offset(height: u32) -> u64;
 }
 
 /// Pending-chunk slot for Merkle families that do not carry a pending chunk (e.g. MMR).
@@ -304,7 +313,7 @@ pub trait Graftable: Family {
     /// For families without delayed merging (e.g. MMR), a node exists as soon as all leaves
     /// in its span have been appended. For families with delayed merging (e.g. MMB), the
     /// node is created some number of leaf insertions _after_ its last leaf, so the birth
-    /// size is larger. The MMB override accounts for this delay.
+    /// size is larger. The birth size is the node's leftmost leaf plus [`Family::birth_offset`].
     ///
     /// This is used by the grafted-tree pruning logic to determine when a chunk-pair's
     /// parent has been born in the ops tree, which controls when it is safe to prune the
@@ -315,8 +324,9 @@ pub trait Graftable: Family {
     /// Panics if `height` is excessively large (e.g., `>= 63`), or if arithmetic overflows.
     fn peak_birth_size(pos: Position<Self>, height: u32) -> u64 {
         let leftmost = *Self::leftmost_leaf(pos, height);
-        let width = 1u64.checked_shl(height).expect("height excessively large");
-        leftmost.checked_add(width).expect("birth size overflow")
+        leftmost
+            .checked_add(Self::birth_offset(height))
+            .expect("birth size overflow")
     }
 }
 

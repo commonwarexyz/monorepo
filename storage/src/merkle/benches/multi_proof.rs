@@ -1,4 +1,4 @@
-use crate::common::{N_LEAVES, SAMPLE_SIZE, multi_samples};
+use crate::common::{SAMPLE_SIZE, multi_samples, n_leaves};
 use commonware_storage::merkle::{Family, verification};
 use criterion::{Criterion, criterion_group};
 use futures::executor::block_on;
@@ -6,7 +6,7 @@ use std::hint::black_box;
 
 /// Times multi-proof generation without verification.
 fn bench_multi_proof_family<F: Family>(c: &mut Criterion, family: &str) {
-    for n in N_LEAVES {
+    for &n in n_leaves() {
         let (mem, _, samples) = multi_samples::<F>(n);
         let locations: Vec<_> = samples.into_iter().map(|(loc, _)| loc).collect();
         c.bench_function(

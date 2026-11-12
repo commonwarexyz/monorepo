@@ -1,3 +1,4 @@
+use commonware_bench::Inputs;
 use commonware_codec::EncodeSize as _;
 use commonware_cryptography::bls12381::dkg::golden::{
     self, DealerLog, Info, PrivateKey, PublicKey, Setup, SignedDealerLog,
@@ -13,20 +14,20 @@ const BENCH_NAMESPACE: &[u8] = b"bench";
 
 // One dealer is enough: Golden DKG cost scales with the number of receivers,
 // not the number of dealers.
-cfg_if::cfg_if! {
-    if #[cfg(full_bench)] {
-        const RECEIVERS: &[u32] = &[5, 10, 15, 20, 25];
-        const MAX_RECEIVERS: u32 = 25;
-    } else {
-        const RECEIVERS: &[u32] = &[5, 10, 25];
-        const MAX_RECEIVERS: u32 = 25;
+fn receivers() -> &'static [u32] {
+    match Inputs::current() {
+        Inputs::Smoke => &[5],
+        Inputs::Standard => &[5, 10, 25],
+        Inputs::Full => &[5, 10, 15, 20, 25],
     }
 }
 
 /// Cached eVRF setup, sized for the largest configuration we benchmark.
 /// Building it is expensive, so we share one across all benches.
-static SETUP: LazyLock<Setup> =
-    LazyLock::new(|| Setup::new(NonZeroU32::new(MAX_RECEIVERS).unwrap()));
+static SETUP: LazyLock<Setup> = LazyLock::new(|| {
+    let max = *receivers().iter().max().unwrap();
+    Setup::new(NonZeroU32::new(max).unwrap())
+});
 
 /// A Golden DKG scenario with one dealer and `n` receivers.
 struct Bench {
@@ -55,7 +56,7 @@ impl Bench {
 /// Time for a dealer to produce a [`SignedDealerLog`] addressed to `n` receivers.
 fn bench_deal(c: &mut Criterion) {
     let mut rng = test_rng();
-    for &n in RECEIVERS {
+    for &n in receivers() {
         let bench = Bench::new(&mut rng, n);
         c.bench_function(&format!("{}::deal/n={}", module_path!(), n), |b| {
             b.iter_batched(
@@ -78,7 +79,7 @@ fn bench_deal(c: &mut Criterion) {
 /// linear check via `golden::observe`.
 fn bench_verify(c: &mut Criterion) {
     let mut rng = test_rng();
-    for &n in RECEIVERS {
+    for &n in receivers() {
         let bench = Bench::new(&mut rng, n);
         let signed = bench.deal(&mut rng);
         c.bench_function(&format!("{}::verify/n={}", module_path!(), n), |b| {
@@ -102,7 +103,7 @@ fn bench_verify(c: &mut Criterion) {
 /// `coding/src/benches/bench_size.rs`.
 fn bench_dealing_size(_c: &mut Criterion) {
     let mut rng = test_rng();
-    for &n in RECEIVERS {
+    for &n in receivers() {
         let bench = Bench::new(&mut rng, n);
         let signed = bench.deal(&mut rng);
         println!(

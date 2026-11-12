@@ -1,4 +1,5 @@
 use super::utils::{append_random, init};
+use commonware_bench::Inputs;
 use commonware_runtime::{
     Runner, Supervisor as _,
     benchmarks::{context, tokio},
@@ -7,14 +8,16 @@ use commonware_runtime::{
 use criterion::{Criterion, criterion_group};
 use std::time::{Duration, Instant};
 
-#[cfg(not(full_bench))]
-const ITEMS: [u64; 1] = [10_000];
-#[cfg(full_bench)]
-const ITEMS: [u64; 4] = [10_000, 50_000, 100_000, 500_000];
+fn n_items() -> &'static [u64] {
+    match Inputs::current() {
+        Inputs::Full => &[10_000, 50_000, 100_000, 500_000],
+        _ => &[10_000],
+    }
+}
 
 fn bench_restart(c: &mut Criterion) {
     let cfg = Config::default();
-    for items in ITEMS {
+    for &items in n_items() {
         // Populate the freezer with random keys
         let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
         let checkpoint = builder.start(|ctx| async move {

@@ -7,8 +7,10 @@
 commonware_macros::stability_scope!(ALPHA {
     use std::{
         collections::BTreeMap,
+        ffi::OsString,
         future::Future,
         hint::black_box,
+        sync::LazyLock,
         time::{Duration, Instant},
     };
     #[cfg(feature = "gungraun")]
@@ -16,6 +18,55 @@ commonware_macros::stability_scope!(ALPHA {
 
     /// Environment variable containing a JSONL file for custom benchmark metrics.
     pub const METRICS_PATH_ENV: &str = "COMMONWARE_BENCH_METRICS_PATH";
+
+    /// The inputs a benchmark runs with.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum Inputs {
+        /// The smallest inputs that still run every benchmark, used under `cargo test`, where
+        /// Criterion runs each benchmark once without measuring it.
+        Smoke,
+        /// The inputs `cargo bench` measures.
+        Standard,
+        /// The largest inputs, selected with `COMMONWARE_BENCH_FULL=1` (`just bench-full`).
+        Full,
+    }
+
+    impl Inputs {
+        /// Returns the inputs for this benchmark run.
+        ///
+        /// [`Inputs::Full`] when `COMMONWARE_BENCH_FULL=1` is set. Otherwise [`Inputs::Smoke`]
+        /// under `cargo test` and [`Inputs::Standard`] under `cargo bench`. Like Criterion, it
+        /// decides from the binary's arguments (`cargo bench` passes `--bench`), and `--list`
+        /// gets [`Inputs::Standard`] so listings name the measured inputs.
+        pub fn current() -> Self {
+            static CURRENT: LazyLock<Inputs> = LazyLock::new(|| {
+                if std::env::var_os("COMMONWARE_BENCH_FULL").is_some_and(|value| value == "1") {
+                    Inputs::Full
+                } else if criterion_test_mode(std::env::args_os().skip(1)) {
+                    Inputs::Smoke
+                } else {
+                    Inputs::Standard
+                }
+            });
+            *CURRENT
+        }
+    }
+
+    /// Mirrors the mode selection in Criterion's `configure_from_args`, where arguments after
+    /// `--` are filters.
+    fn criterion_test_mode(args: impl IntoIterator<Item = OsString>) -> bool {
+        let (mut bench, mut test, mut list) = (false, false, false);
+        for arg in args {
+            match arg.to_str() {
+                Some("--") => break,
+                Some("--bench") => bench = true,
+                Some("--test") => test = true,
+                Some("--list") => list = true,
+                _ => {}
+            }
+        }
+        !list && (!bench || test)
+    }
 
     /// A named benchmark configuration shared by Criterion and Gungraun.
     #[derive(Clone, Debug, Eq, PartialEq)]
@@ -175,7 +226,29 @@ commonware_macros::stability_scope!(ALPHA {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Benchmark, Metric};
+    use crate::{Benchmark, Metric, criterion_test_mode};
+    use std::ffi::OsString;
+
+    #[test]
+    fn detects_criterion_test_mode() {
+        let cases: &[(&[&str], bool)] = &[
+            (&[], true),
+            (&["--verbose"], true),
+            (&["--bench"], false),
+            (&["--bench", "--test"], true),
+            (&["--list"], false),
+            (&["--bench", "--list"], false),
+            (&["--bench", "--profile-time", "5"], false),
+            (&["--profile-time", "5"], true),
+            (&["--", "--bench"], true),
+            (&["--bench", "--", "--test"], false),
+            (&["--bench", "--", "--list"], false),
+        ];
+        for &(args, expected) in cases {
+            let mode = criterion_test_mode(args.iter().map(OsString::from));
+            assert_eq!(mode, expected, "{args:?}");
+        }
+    }
 
     #[test]
     fn formats_dynamic_name() {
