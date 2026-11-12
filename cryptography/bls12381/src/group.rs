@@ -171,7 +171,11 @@ pub mod fuzz {
                 width: u.int_in_range(2..=WIDEST)?,
                 split: u.arbitrary()?,
             }),
-            _ => Some(msm::Method::Pippenger(u.int_in_range(2..=WIDEST)?)),
+            // Chunks shorter than the slices split the elements between several.
+            _ => Some(msm::Method::Pippenger {
+                width: u.int_in_range(2..=WIDEST)?,
+                chunk: NonZeroUsize::new(u.int_in_range(1..=SLICE)?).expect("at least one"),
+            }),
         })
     }
 
@@ -318,7 +322,7 @@ pub mod fuzz {
                             let crossover = (1..)
                                 .find(|&n| {
                                     let method = msm::Method::choose::<G>(n, lanes);
-                                    matches!(method, msm::Method::Pippenger(_))
+                                    matches!(method, msm::Method::Pippenger { .. })
                                 })
                                 .expect("Pippenger's method costs less for many elements");
                             crossover - u.int_in_range(0..=1)?
