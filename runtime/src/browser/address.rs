@@ -91,17 +91,19 @@ impl FromStr for Socket {
 
 /// Where an [Endpoint](super::Endpoint) can be reached and what a page needs to connect to it.
 ///
-/// An address holds the fingerprint of the certificate its endpoint proves, the username and
-/// password that authenticate checks sent to the endpoint, and up to sixteen sockets the
-/// endpoint can be reached at. It is written as those parts in order, joined by the characters
-/// shown under them.
+/// An address holds up to sixteen sockets its endpoint can be reached at. It also holds the
+/// fingerprint of a certificate, a username, and a password. The endpoint's browser makes
+/// those three for this one connection, and a browser connects only to an endpoint whose
+/// three it was given. They say nothing about who runs the page. A page that must know who it
+/// reached authenticates it over the connection.
+///
+/// An address is written as its parts in order, joined by the characters shown under them.
 ///
 /// ```text
-///  proves the endpoint
-///         | authenticate checks sent to it
-///         |                |                           where it can be reached
-///         |                |                                      |
-///   .-----^-----. .--------^--------. .---------------------------^----------------------------.
+///  made by its browser for this one connection
+///                   |                                  where it can be reached
+///                   |                                             |
+///   .---------------^---------------. .---------------------------^----------------------------.
 ///  +-------------+------+------------+------------------+--------------------+------------------+
 ///  | fingerprint | user |  password  |      socket      |       socket       |      socket      |
 ///  +-------------+------+------------+------------------+--------------------+------------------+

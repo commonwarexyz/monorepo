@@ -2,13 +2,40 @@
 //! `commonware-runtime` and `commonware-stream`.
 //!
 //! Every page has a contact, which holds its public key and the address of an endpoint it has
-//! bound. A contact is written in hexadecimal, two characters for every byte.
+//! bound. The key says who the page is, and the page proves it once connected. The address says
+//! where the page's browser can be reached and holds what that browser requires of a caller. A
+//! contact is written in hexadecimal, two characters for every byte.
 //!
 //! ```text
 //!  +---------------------+--------+---------------------+
 //!  |     public key      | length |  address, as text   |
 //!  +---------------------+--------+---------------------+
 //!    c5e7fa2d...02d72b67    8102    34663463...33303336
+//! ```
+//!
+//! The runtime makes the connection from the address alone. The key goes to
+//! `commonware-stream`, which proves over that connection that the other page holds it.
+//!
+//! ```text
+//!                                contact, passed by the users
+//!                      +--------------------+---------------------------+
+//!                      |     public key     |          address          |
+//!                      +--------------------+---------------------------+
+//!                                 |                       |
+//!                                 |                       v
+//!                                 |           +-----------------------+
+//!  commonware-runtime             |           |    Endpoint::dial     |     makes the connection
+//!                                 |           +-----------------------+
+//!                                 |                       |
+//!              the key to expect  |                 Sink, Stream
+//!                                 |                       |
+//!                                 v                       v
+//!                      +------------------------------------------------+
+//!  commonware-stream   |            handshake proves the key            |   says who is there
+//!                      +------------------------------------------------+
+//!                                              |
+//!                                              v
+//!                                      encrypted messages
 //! ```
 //!
 //! Two pages connect once each dials the contact of the other. The users pass the contacts
