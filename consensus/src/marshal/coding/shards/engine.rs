@@ -133,6 +133,25 @@
 //!   (equivocation) while the commitment awaits quorum results in blocking.
 //!   Exact duplicates are silently ignored.
 //!
+//! Each shard is classified by its index. The local participant is this node
+//! when it is a participant, and its assigned shard is the one at its own index.
+//! A gossip shard is at its sender's index. For example, participant 2 awaits a
+//! block that participant 0 proposed, and its record has no leader:
+//!
+//! ```text
+//!                                         buffer               record
+//!                                                           +-----------+
+//!   0 --- shard 2, the assigned shard --------------------->| checked   |--> gossiped
+//!   1 --- shard 1, a gossip shard ------------------------->| held      |
+//!   1 --- shard 3, any other index -----> waits             |           |
+//!                                                           +-----------+
+//! ```
+//!
+//! Once the leader is known, the third shard, if still buffered, is ingested and
+//! gets its sender blocked. A non-participant has no index of its own. Its
+//! assigned shard is the leader's gossip shard, and it is treated as assigned
+//! only once the leader is known.
+//!
 //! Peers found violating these rules are blocked via the [`Blocker`] trait.
 //! The width rule is enforced on receipt of every shard. The other rules are
 //! applied while a commitment is actively tracked in reconstruction state.
