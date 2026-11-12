@@ -2,9 +2,9 @@
 //!
 //! [`miller_loop`] maps pairs of a G1 point and a G2 point to elements of `Fp12`, and
 //! [`final_exponentiation`] maps those to the target group, so their composition is the pairing.
-//! Products of pairings share one final exponentiation, which is how signatures are verified: a
-//! pairing check asks whether such a product is one. A lane's Miller loop over several pairs
-//! shares its squarings among them, and [`Fp12::product_of_lanes`] multiplies the lanes.
+//! A product of pairings needs one final exponentiation, so a pairing check, which asks whether
+//! such a product is one, exponentiates once. A lane's Miller loop over several pairs shares its
+//! squarings among them, and [`Fp12::product_of_lanes`] multiplies the lanes.
 //!
 //! # Inputs
 //!
@@ -155,8 +155,8 @@ fn shared_miller_loop<S: Simd, F: Field<S>>(simd: S, pairs: &[Pair<F>]) -> Fp12<
 /// [`Points::double`](crate::core::curve::Points::double)'s.
 #[cfg_attr(not(debug_assertions), inline(always))]
 fn double_step<S: Simd, F: Field<S>>(simd: S, t: &mut Point<F>, pair: &Pair<F>) -> [Fp2<F>; 3] {
-    // With the curve equation, 3 x^3 - 2 y^2 z becomes z (y^2 - 3b z^2), and scaling the tangent
-    // by -2 y z^2 / z leaves the line above. Its values join the stages of the doubling: x^2
+    // The tangent at (x / z, y / z), scaled by -2 y z, is the line above once the curve equation
+    // turns 3 x^3 - 2 y^2 z into z (y^2 - 3b z^2). Its values join the stages of the doubling: x^2
     // reduces with the first stage and the last two coefficients with the coordinates.
     simd.execute(
         #[inline(always)]
@@ -338,14 +338,14 @@ pub mod fuzz {
     #[derive(Clone, Copy, Debug, Arbitrary)]
     pub enum Plan {
         /// Checks that the final exponentiation of any elements is multiplicative, maps zero to
-        /// zero and the subfield `Fp6` (so every line scaling factor) to one, and maps nonzero
-        /// elements into the cyclotomic subgroup, where the Frobenius map raises to the power
-        /// `z`, as it does on the target group since `p = z mod r`.
+        /// zero and the subfield `Fp6` (so every line scaling factor) to one, and maps each
+        /// nonzero element to an `x` with `conj(x) x = 1` and `x^p = x^z`, as on the target
+        /// group, where `p = z mod r`.
         FinalExponentiation,
     }
 
     impl Plan {
-        /// Runs the operation using the remaining input.
+        /// Runs the check on the remaining input.
         pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
             match self {
                 Self::FinalExponentiation => final_exponentiations(u),

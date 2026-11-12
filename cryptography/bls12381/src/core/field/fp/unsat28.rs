@@ -109,7 +109,8 @@ const FOLD_RECIPROCAL: u32 = {
 /// Offset that [`Unsat28::fold`] adds to every limb but the top one and removes, as `2^12` units,
 /// from the limb above, so that no limb difference goes negative.
 const FOLD_OFFSET: u64 = {
-    // A multiple of p below 2^11 times a 28-bit limb of p stays below the offset.
+    // k * p_j, for k below LIMIT = 2^11 and a 28-bit limb p_j of p, stays below the offset less
+    // the 2^12 units it removes from the limb above.
     assert!((LIMIT as u128 * MASK as u128) < (1 << 40) - (1 << 12));
     1 << 40
 };
@@ -136,7 +137,7 @@ const fn narrow(wide: [u64; LIMBS]) -> [u32; LIMBS] {
     limbs
 }
 
-/// Splits a little-endian 64-bit integer below `2^384` into 28-bit limbs.
+/// Splits an integer below `2^384`, given as little-endian 64-bit words, into 28-bit limbs.
 const fn limbs_from_words(words: [u64; WORDS]) -> [u32; LIMBS] {
     narrow(super::limbs_from_words::<LIMBS, LIMB_BITS>(words))
 }
@@ -246,8 +247,8 @@ impl<S: Simd> Unsat28<S> {
         bound.assert_le(LIMIT);
 
         // Product scanning: column k sums a_i b_j and q_i p_j with i + j = k, so only one
-        // column's accumulators are live. Each column occupies two 64-bit vectors, one per half
-        // of the lanes, as the widening multiplication returns them, and SLACK bounds every
+        // column's accumulators are live. Each column occupies HALVES 64-bit vectors, one per
+        // half of the lanes, as the widening multiplication returns them, and SLACK bounds every
         // column below 2^64.
         let (a, b) = (self.limbs, rhs.limbs);
         let mut q = [simd.u32_splat(0); LIMBS];
@@ -652,7 +653,7 @@ impl<S: Simd> Field<S> for Unsat28<S> {
 
     #[inline(always)]
     fn product_sub<const K: u64>(simd: S, a: Self::Product, b: Self::Product) -> Self::Product {
-        // The subtrahend must be below Kp; carrying covers limb borrows.
+        // The subtrahend must be below (K - 1) * p; carrying brings its limbs within the bias.
         a.sub::<K>(simd, b.carry(simd))
     }
 
@@ -723,12 +724,12 @@ pub mod fuzz {
         type Value<S: Simd> = Unsat28<S>;
     }
 
-    /// A formula over [`Unsat28`] values lifted to bounds drawn from the input, with distinct
-    /// elements in every lane, on an emulated backend drawn from the input.
+    /// A formula over [`Unsat28`] values lifted to bounds drawn from the input, with independently
+    /// drawn elements in every lane, on an emulated backend drawn from the input.
     #[derive(Clone, Copy, Debug, Arbitrary)]
     pub enum Plan {
-        /// Checks additions, subtractions and negations with every bias, doublings, and stores, up
-        /// to the integer limit.
+        /// Checks additions, subtractions and negations with drawn biases, doublings, and stores,
+        /// up to the integer limit.
         Linear,
         /// Checks products of values up to the integer limit, of sums of [`SLACK`] values, of
         /// values readied from static limb bounds, and of doublings carried at the limb limit.
@@ -821,8 +822,8 @@ pub mod fuzz {
         }
 
         /// Returns limbs that are zero but for a top limb one less than that of `(LIMIT - 1) p`,
-        /// and the element they represent. A multiple estimated from the top limb of `p` alone
-        /// exceeds the value it covers.
+        /// and the element they represent. Dividing their top limb by the top limb of `p` alone
+        /// gives a multiple of `p` that exceeds their value.
         fn largest_top() -> ([u32; LIMBS], Element) {
             let top = super::super::super::multiple::<LIMBS, LIMB_BITS>(LIMIT - 1)[LIMBS - 1] - 1;
             let mut limbs = [0; LIMBS];

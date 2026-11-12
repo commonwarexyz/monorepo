@@ -398,12 +398,12 @@ pub mod fuzz {
     /// An arithmetic, limb conversion, or inversion check on the base field modulus.
     #[derive(Clone, Copy, Debug, Arbitrary)]
     pub enum Plan {
-        /// Check that addition, negation, and multiplication match schoolbook arithmetic reduced
+        /// Checks that addition, negation, and multiplication match schoolbook arithmetic reduced
         /// by binary long division, which share no code with them.
         Arithmetic,
-        /// Check that an integer below `2^382` survives conversion to signed limbs and back.
+        /// Checks that an integer below `2^382` survives conversion to signed limbs and back.
         LimbsRoundTrip,
-        /// Check that inversion returns the canonical inverse of a nonzero element, and zero
+        /// Checks that inversion returns the canonical inverse of a nonzero element, and zero
         /// for zero.
         Inversions,
     }

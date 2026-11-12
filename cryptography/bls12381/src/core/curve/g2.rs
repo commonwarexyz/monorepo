@@ -259,8 +259,8 @@ impl<S: Simd, F: Field<S>> Points<S> for Point<F> {
         // elliptic curves" (2016). Each cross term is a schoolbook product of sums less the two
         // known products, or the two products accumulated for Field::SCHOOLBOOK, and 3b Z1 Z2
         // comes from one more product, so that Y1 Y2 + 3b Z1 Z2 and Y1 Y2 - 3b Z1 Z2 each take one
-        // reduction. That leaves thirteen extension products, reduced in two stages of six and
-        // three values.
+        // reduction. That leaves thirteen extension products, or fifteen for Field::SCHOOLBOOK,
+        // reduced in two stages of six and three values.
         simd.execute(
             #[inline(always)]
             move |simd: S| {

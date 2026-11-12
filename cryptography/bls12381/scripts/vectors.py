@@ -246,8 +246,9 @@ def pairing(p, q):
 
 
 def fp12_hex(a):
-    # An element is (c0 + c1 v + c2 v^2) + (c3 + c4 v + c5 v^2) w with v = w^2, encoded from the
-    # highest coefficient of the w part down.
+    # a[k] is the coefficient of w^k, so with v = w^2 the element is
+    # (a0 + a2 v + a4 v^2) + (a1 + a3 v + a5 v^2) w. The encoding writes the w part, then the
+    # constant part, each from the highest power of v down.
     order = [5, 3, 1, 4, 2, 0]
     return "".join(Fp2.hex(a[k]) for k in order)
 
