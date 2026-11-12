@@ -10,10 +10,10 @@
 //! Value operations apply the [`Fp2`] rule to each coefficient. Products take no subtraction bias,
 //! and each states what it requires of its factors.
 //!
-//! Every coefficient of a product is a signed sum of at most nine extension products' sums, so
-//! for eager representations each positive and each negative sum has limb bound at most `9`.
-//! Products of products accumulate them, after [`carry_product`](Fp6::carry_product) where the sums
-//! would exceed the limb limits. [`reduce_tight::<K>`](Fp6::reduce_tight) reduces each
+//! In every component of a product, the positive sum and the negative sum each hold at most nine
+//! base field products, so for eager representations each has limb bound at most `9`. Formulas
+//! that add or subtract several products call [`carry_product`](Fp6::carry_product) first where
+//! the sums would exceed the limb limits. [`reduce_tight::<K>`](Fp6::reduce_tight) reduces each
 //! coefficient as [`Fp2::reduce_tight`] does, under the same requirements on each component's
 //! sums.
 //!
@@ -64,7 +64,7 @@ pub struct Fp6<T> {
 impl<F> Fp6<F> {
     /// Loads up to one element per lane, filling the remaining lanes with `fill`.
     ///
-    /// Interprets each component modulo `p` and returns the base field's initial bounds.
+    /// Interprets each component modulo `p` and returns the bounds of [`Field::load`].
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn load<S: Simd>(simd: S, elements: &[[u8; BYTES]], fill: &[u8; BYTES]) -> Self
     where
@@ -149,8 +149,8 @@ impl<F> Fp6<F> {
 
     /// Forms the product `self * rhs` with six extension products.
     ///
-    /// Every component of both factors must have limb bound `1`, and sums of two components must
-    /// fit the value limits.
+    /// Every component of both factors must have limb bound `1`, and sums of two coefficients
+    /// must fit the value limits.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn product<S: Simd>(&self, simd: S, rhs: &Self) -> Product<F, S>
     where
