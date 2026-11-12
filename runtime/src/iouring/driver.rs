@@ -31,10 +31,11 @@
 //! deadlines live in a driver-local [`Deadlines`], unlinked as soon as their
 //! request completes or is cancelled.
 //!
-//! The ring uses SINGLE_ISSUER and DEFER_TASKRUN. Unfinished requests need a
-//! GETEVENTS enter even when tasks keep the worker busy. An idle turn may defer
-//! that enter to [`Driver::park`]. Control SQEs carry no request resources and
-//! may remain until later I/O service or ring teardown.
+//! The ring uses SINGLE_ISSUER and DEFER_TASKRUN, and the kernel consumes SQEs
+//! in ring order without an SQ index array (NO_SQARRAY). Unfinished requests
+//! need a GETEVENTS enter even when tasks keep the worker busy. An idle turn
+//! may defer that enter to [`Driver::park`]. Control SQEs carry no request
+//! resources and may remain until later I/O service or ring teardown.
 //!
 //! Parking arms the worker's [`Parker`] and blocks only while its word
 //! still carries the sequence the worker observed before checking its sources.
@@ -43,6 +44,12 @@
 //! the kernel queues the wait fails its compare. A wait stays live across parks
 //! until its CQE is reaped. See [`super::idle`] for how pool worker
 //! selection fits with this wait.
+//!
+//! A blocking park counts as waiting for I/O only while storage operations are
+//! in flight. A park with only network operations or the ring futex wait in
+//! flight passes NO_IOWAIT, so it does not show as iowait in CPU and pressure
+//! statistics, while storage waits keep the kernel's iowait accounting and its
+//! frequency boost on wake.
 //!
 //! # Cleanup
 //!
@@ -66,6 +73,7 @@ use commonware_utils::{channel::oneshot, sync::OwnedAsyncMutexGuard};
 use futures::{Stream, future::BoxFuture, stream::FuturesUnordered};
 use io_uring::{
     EnterFlags, IoUring,
+    cqueue::CompletionQueue,
     opcode::AsyncCancel,
     squeue::SubmissionQueue,
     types::{CancelBuilder, SubmitArgs, Timespec},
@@ -143,6 +151,8 @@ enum Enter {
         /// When to stop waiting, or `None` to wait without a bound. A
         /// deadline that already passed does not sleep.
         deadline: Option<Instant>,
+        /// Whether a blocking wait counts as waiting for I/O.
+        iowait: bool,
     },
 }
 
@@ -155,9 +165,12 @@ impl Driver {
         assert!(cfg.size > 0 && cfg.size.is_power_of_two() && cfg.size <= 32_768);
 
         // Deferred task work runs during GETEVENTS, supplied by service or park.
+        // Staging fills the SQ in ring order, so the ring needs no SQ index
+        // array.
         let ring = IoUring::builder()
             .setup_single_issuer()
             .setup_defer_taskrun()
+            .setup_no_sqarray()
             .build(cfg.size)?;
         let size = cfg.size as usize;
 
@@ -305,7 +318,7 @@ impl Driver {
     ) -> io::Result<bool> {
         // Finish posted work before expiring requests, then install new
         // deadlines.
-        self.state.reap(&mut self.ring, deferred);
+        self.state.reap(self.ring.completion(), deferred);
         self.state.advance_timeouts(now, deferred);
         self.state.register_deadlines(now, deferred);
         self.state.poll_acquisitions(deferred);
@@ -335,13 +348,15 @@ impl Driver {
         let service_kernel = !self.is_empty()
             && (!defer_kernel_service || !deferred.is_empty() || self.has_pending_submissions());
 
-        if service_kernel {
-            Self::enter(&mut self.ring, Enter::TaskWork)?;
-        }
-
         // New CQEs can complete requests or end the ring futex wait, which the
-        // next blocking park then queues again.
-        self.state.reap(&mut self.ring, deferred);
+        // next blocking park then queues again. A task-work enter returns the
+        // CQ it already checked for dropped completions.
+        let completion = if service_kernel {
+            Self::enter(&mut self.ring, Enter::TaskWork)?
+        } else {
+            self.ring.completion()
+        };
+        self.state.reap(completion, deferred);
 
         #[cfg(test)]
         tests::after_service(&self.ring, &self.state, deferred)?;
@@ -404,21 +419,23 @@ impl Driver {
             self.state.ring_wait_needed = false;
         }
 
-        Self::enter(&mut self.ring, Enter::Wait { deadline })?;
+        // The ring futex wait is a control SQE and never counts as storage.
+        let iowait = self.state.waiters.storage_in_flight() != 0;
+        Self::enter(&mut self.ring, Enter::Wait { deadline, iowait })?;
         Ok(true)
     }
 
     /// Submit queued SQEs, then do what `mode` asks of the kernel.
     ///
-    /// The caller reaps the CQ afterwards. A timeout or a transient error
+    /// Returns the CQ for the caller to reap. A timeout or a transient error
     /// (`EINTR`, `EAGAIN`, `EBUSY`) returns `Ok` because the next service
     /// turn retries, so `Ok` does not mean the kernel consumed the SQ or posted
     /// a completion. Other errors are permanent, and once the kernel has
     /// dropped a completion every enter fails with `EBADR`.
-    fn enter(ring: &mut IoUring, mut mode: Enter) -> io::Result<()> {
+    fn enter(ring: &mut IoUring, mut mode: Enter) -> io::Result<CompletionQueue<'_>> {
         #[cfg(test)]
         if matches!(mode, Enter::Flush) && tests::stall_flush(ring) {
-            return Ok(());
+            return Ok(ring.completion());
         }
 
         // Read the clock once, right before the syscall. A wait for one
@@ -428,6 +445,7 @@ impl Driver {
         let mut timeout = Duration::ZERO;
         if let Enter::Wait {
             deadline: Some(deadline),
+            ..
         } = mode
         {
             timeout = deadline.saturating_duration_since(Instant::now());
@@ -436,55 +454,80 @@ impl Driver {
             }
         }
 
-        let result = match mode {
-            // The crate adds GETEVENTS when the CQ has overflowed, so the kernel
-            // also moves its overflow backlog into the CQ.
-            Enter::Flush => ring.submit(),
+        // Submit exactly the published SQEs. An enter that submits fewer SQEs
+        // than it was asked to returns before GETEVENTS, so a larger count
+        // would turn every wait into an immediate return.
+        let (to_submit, overflowed) = {
+            let submission = ring.submission();
+            let to_submit = u32::try_from(submission.len()).expect("SQ length must fit u32");
+            (to_submit, submission.cq_overflow())
+        };
+
+        // The ring uses neither SQPOLL nor IOPOLL, so no enter needs SQ_WAKEUP,
+        // and GETEVENTS is needed only to run deferred task work, to wait, or
+        // to move overflowed completions into the CQ.
+        let mut flags = EnterFlags::empty();
+        let mut min_complete = 0;
+        let timespec;
+        let mut args = None;
+        match mode {
+            // GETEVENTS also moves the kernel's overflow backlog into the CQ,
+            // which a flush needs only after the CQ has overflowed.
+            Enter::Flush => {
+                if overflowed {
+                    flags |= EnterFlags::GETEVENTS;
+                }
+            }
             // GETEVENTS with no minimum completion count runs a batch of
             // deferred task work and returns, as liburing's
             // `io_uring_submit_and_get_events` does. Newer kernels bound the
             // batch and leave the rest for a later enter.
-            Enter::TaskWork => {
-                let to_submit =
-                    u32::try_from(ring.submission().len()).expect("SQ length must fit u32");
-                // SAFETY: `to_submit` counts only entries already published to
-                // the SQ, whose resources stay alive until their CQEs, and no
-                // argument pointer is passed.
-                unsafe {
-                    ring.submitter().enter::<libc::sigset_t>(
-                        to_submit,
-                        0,
-                        EnterFlags::GETEVENTS.bits(),
-                        None,
-                    )
+            Enter::TaskWork => flags |= EnterFlags::GETEVENTS,
+            Enter::Wait { deadline, iowait } => {
+                flags |= EnterFlags::GETEVENTS;
+                min_complete = 1;
+
+                // EXT_ARG bounds the wait without reserving an SQE for a
+                // timeout. It passes no signal mask.
+                if deadline.is_some() {
+                    timespec = Timespec::new()
+                        .sec(timeout.as_secs())
+                        .nsec(timeout.subsec_nanos());
+                    args = Some(SubmitArgs::new().timespec(&timespec));
+                    flags |= EnterFlags::EXT_ARG;
+                }
+
+                // The kernel counts a blocking enter as iowait whenever the
+                // thread has submitted to a ring before, whatever it waits for.
+                if !iowait {
+                    flags |= EnterFlags::NO_IOWAIT;
                 }
             }
-            Enter::Wait { deadline: None } => ring.submit_and_wait(1),
-            Enter::Wait { deadline: Some(_) } => {
-                // EXT_ARG bounds the wait without reserving an SQE for a timeout.
-                let ts = Timespec::new()
-                    .sec(timeout.as_secs())
-                    .nsec(timeout.subsec_nanos());
-                let args = SubmitArgs::new().timespec(&ts);
-                match ring.submitter().submit_with_args(1, &args) {
-                    // This timeout bounds the enter. Request expiry belongs to
-                    // the wheel.
-                    Err(err) if err.raw_os_error() == Some(libc::ETIME) => Ok(0),
-                    result => result,
-                }
-            }
+        }
+
+        #[cfg(test)]
+        tests::record_enter(min_complete, flags);
+
+        // SAFETY: `to_submit` counts only entries already published to the SQ,
+        // whose resources stay alive until their CQEs. `args` and the
+        // `timespec` it points to outlive the call. Without EXT_ARG no argument
+        // pointer is passed.
+        let result = unsafe {
+            ring.submitter()
+                .enter(to_submit, min_complete, flags.bits(), args.as_ref())
         };
 
         // A transient error falls through and returns `Ok`, so the caller
         // reaps before retrying. An immediate retry here could spin while the
         // kernel needs CQ space to make further progress.
-        if let Err(err) = result
-            && !matches!(
-                err.raw_os_error(),
-                Some(libc::EINTR | libc::EAGAIN | libc::EBUSY)
-            )
-        {
-            return Err(err);
+        if let Err(err) = result {
+            match err.raw_os_error() {
+                Some(libc::EINTR | libc::EAGAIN | libc::EBUSY) => {}
+                // A timeout bounds only a timed wait. Request expiry belongs
+                // to the wheel.
+                Some(libc::ETIME) if args.is_some() => {}
+                _ => return Err(err),
+            }
         }
 
         // The kernel reports a dropped completion only once, and only from an
@@ -496,13 +539,16 @@ impl Driver {
         // enter. Every later enter fails too, since the driver cannot tell
         // which request lost its completion and a drain would otherwise wait
         // for it forever.
-        let dropped = ring.completion().overflow() != 0;
         #[cfg(test)]
-        let dropped = dropped || tests::drop_completion(ring);
+        let injected = tests::drop_completion(ring);
+        let completion = ring.completion();
+        let dropped = completion.overflow() != 0;
+        #[cfg(test)]
+        let dropped = dropped || injected;
         if dropped {
             return Err(io::Error::from_raw_os_error(libc::EBADR));
         }
-        Ok(())
+        Ok(completion)
     }
 }
 
@@ -784,10 +830,10 @@ impl State {
     }
 
     /// Reap every posted CQE without invoking observer callbacks.
-    fn reap(&mut self, ring: &mut IoUring, deferred: &mut Deferred) {
+    fn reap(&mut self, completion: CompletionQueue<'_>, deferred: &mut Deferred) {
         // Dropping this CQ view returns the consumed slots to the kernel.
         // Observer callbacks remain deferred until the worker borrow ends.
-        for cqe in ring.completion() {
+        for cqe in completion {
             self.handle_cqe(cqe.user_data(), cqe.result(), deferred);
         }
     }
@@ -852,7 +898,7 @@ pub mod tests {
             park::tests::{handles, unpark_when_armed, wait_until_armed, wake},
             request::{
                 Cache, DIRECT_ALIGN, IOVEC_BATCH_SIZE, ReadAtRequest, RecvRequest, RequestOutput,
-                SyncRequest, WriteAtRequest, WriteAtState,
+                ResizeRequest, SyncRequest, WriteAtRequest, WriteAtState,
             },
             wheel::BUDGET,
         },
@@ -900,6 +946,9 @@ pub mod tests {
         /// Callback run once at the end of this thread's next service turn
         /// that leaves a durability request waiting for its permit.
         static WHILE_ACQUIRING: Cell<Option<Box<dyn FnOnce()>>> = const { Cell::new(None) };
+
+        /// Minimum completion count and flags of this thread's latest enter.
+        static LAST_ENTER: Cell<Option<(u32, EnterFlags)>> = const { Cell::new(None) };
     }
 
     /// Clear an unused injection when its test scope exits or unwinds.
@@ -942,6 +991,11 @@ pub mod tests {
     /// counter.
     pub fn drop_completion(ring: &IoUring) -> bool {
         take_fault(ring, Fault::DropCompletion)
+    }
+
+    /// Remember an enter's arguments for assertions on the calling thread.
+    pub fn record_enter(min_complete: u32, flags: EnterFlags) {
+        LAST_ENTER.set(Some((min_complete, flags)));
     }
 
     /// Fail service when retired resources are awaiting deferred cleanup, and
@@ -1880,7 +1934,7 @@ pub mod tests {
                 harness
                     .driver
                     .state
-                    .reap(&mut harness.driver.ring, &mut harness.deferred);
+                    .reap(harness.driver.ring.completion(), &mut harness.deferred);
                 assert!(matches!(
                     probe.try_lock(),
                     Err(fs::TryLockError::WouldBlock)
@@ -3256,6 +3310,99 @@ pub mod tests {
         harness.drain();
     }
 
+    /// A blocking park counts as iowait only while a storage operation is in
+    /// flight, including a cancelled one whose operation CQE has not arrived.
+    #[test]
+    fn test_blocking_wait_counts_as_iowait_only_with_storage_in_flight() {
+        let mut harness = Harness::new(4);
+        let (directory, file) = make_file("iowait");
+
+        // Return whether a timed park that blocks passes NO_IOWAIT.
+        let no_iowait = |harness: &mut Harness| {
+            assert!(harness.park(0, Some(Instant::now() + TIMED_WAIT)).unwrap());
+            let (min_complete, flags) = LAST_ENTER.get().unwrap();
+            assert_eq!(min_complete, 1);
+            flags.contains(EnterFlags::NO_IOWAIT)
+        };
+
+        // A receive without data keeps only network I/O in flight.
+        let (left, _right) = UnixStream::pair().unwrap();
+        harness.admit(recv(left, 1, None), 0);
+        harness.service();
+        assert!(no_iowait(&mut harness));
+
+        // A read kept out of the kernel stands in for one in flight.
+        let read = harness.stage(
+            Request::ReadAt(ReadAtRequest::new(
+                file.clone(),
+                0,
+                IoBufMut::zeroed(1),
+                Cache::Enabled,
+            )),
+            None,
+            1,
+        );
+        assert!(!no_iowait(&mut harness));
+
+        // Cancellation leaves the read in flight until its operation CQE,
+        // also after the kernel acknowledges the cancellation.
+        harness.orphan(read);
+        harness.service();
+        assert!(harness.driver.state.waiters.is_in_flight(read));
+        assert!(!no_iowait(&mut harness));
+        harness
+            .driver
+            .state
+            .handle_cqe(CANCEL_USER_DATA, 0, &mut harness.deferred);
+        assert_eq!(harness.driver.state.waiters.storage_in_flight(), 1);
+        assert!(!no_iowait(&mut harness));
+        harness.simulated_completion(read, -libc::ECANCELED);
+        assert!(no_iowait(&mut harness));
+
+        // A resize counts as storage until its operation CQE.
+        file.tracker.write();
+        let resize = harness.stage(Request::Resize(ResizeRequest::new(file, 0)), None, 2);
+        assert!(!no_iowait(&mut harness));
+        harness.simulated_completion(resize, 0);
+        assert!(no_iowait(&mut harness));
+
+        // A park whose deadline already passed does not block.
+        assert!(harness.park(0, Some(Instant::now())).unwrap());
+        let (min_complete, flags) = LAST_ENTER.get().unwrap();
+        assert_eq!(min_complete, 0);
+        assert!(!flags.contains(EnterFlags::NO_IOWAIT));
+
+        harness.drain();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A flush adds GETEVENTS while the CQ has overflowed, so the kernel moves
+    /// overflowed completions into the CQ once reaping makes room.
+    #[test]
+    fn test_flush_moves_overflowed_completions_into_the_cq() {
+        let mut harness = Harness::new(1);
+        let cq_entries = harness.driver.ring.params().cq_entries() as usize;
+
+        // Each NOP completes inline during its flush. One more than the CQ
+        // holds leaves a completion in the kernel's overflow list.
+        for _ in 0..=cq_entries {
+            harness.fill_with_control();
+            Driver::enter(&mut harness.driver.ring, Enter::Flush).unwrap();
+        }
+        assert!(harness.driver.ring.submission().cq_overflow());
+
+        // Reaping the full CQ makes room for the overflowed completion.
+        assert_eq!(harness.driver.ring.completion().count(), cq_entries);
+        assert!(harness.driver.ring.submission().cq_overflow());
+
+        // With nothing to submit, the flush still enters for the overflow.
+        Driver::enter(&mut harness.driver.ring, Enter::Flush).unwrap();
+        assert!(!harness.driver.ring.submission().cq_overflow());
+        assert_eq!(harness.driver.ring.completion().count(), 1);
+
+        harness.drain();
+    }
+
     #[test]
     fn test_enter_distinguishes_timeout_from_failure() {
         let mut harness = Harness::new(1);
@@ -3268,9 +3415,11 @@ pub mod tests {
             Enter::TaskWork,
             Enter::Wait {
                 deadline: Some(Instant::now() + TIMED_WAIT),
+                iowait: false,
             },
             Enter::Wait {
                 deadline: Some(Instant::now()),
+                iowait: false,
             },
         ] {
             Driver::enter(&mut harness.driver.ring, enter).unwrap();
@@ -3282,21 +3431,27 @@ pub mod tests {
         let results = [
             Enter::Flush,
             Enter::TaskWork,
-            Enter::Wait { deadline: None },
+            Enter::Wait {
+                deadline: None,
+                iowait: false,
+            },
             Enter::Wait {
                 deadline: Some(Instant::now() + Duration::from_secs(1)),
+                iowait: false,
             },
             Enter::Wait {
                 deadline: Some(Instant::now()),
+                iowait: false,
             },
         ]
-        .map(|enter| Driver::enter(&mut harness.driver.ring, enter));
+        .map(|enter| Driver::enter(&mut harness.driver.ring, enter).err());
         std::mem::forget(harness.driver);
 
         // Every enter path must preserve a permanent error. Forget the closed
         // ring before asserting so a failure cannot try to close its FD again.
-        for result in results {
-            assert_eq!(result.unwrap_err().raw_os_error(), Some(libc::EBADF));
+        for error in results {
+            let error = error.expect("enter on a closed ring succeeded");
+            assert_eq!(error.raw_os_error(), Some(libc::EBADF));
         }
     }
 

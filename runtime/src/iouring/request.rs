@@ -218,6 +218,14 @@ impl Request {
         matches!(self, Self::WriteAt(_) | Self::Sync(_) | Self::Resize(_))
     }
 
+    /// Return whether this request reads, writes, syncs, or resizes a file.
+    pub const fn is_storage(&self) -> bool {
+        match self {
+            Self::ReadAt(_) | Self::WriteAt(_) | Self::Sync(_) | Self::Resize(_) => true,
+            Self::Send(_) | Self::Recv(_) | Self::Connect(_) | Self::Poll(_) => false,
+        }
+    }
+
     /// Gate shared by every durability operation on this open.
     pub fn durability(&self) -> Option<&Arc<AsyncMutex<()>>> {
         match self {
