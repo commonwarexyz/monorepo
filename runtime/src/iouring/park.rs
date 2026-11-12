@@ -665,6 +665,11 @@ pub mod tests {
         word(unparker) & WAITER != 0
     }
 
+    /// Wake an armed wait without advancing the notification sequence.
+    pub fn wake_spuriously(unparker: &Unparker) {
+        unparker.futex_wake();
+    }
+
     /// Read the word without acquiring producer memory.
     fn word(unparker: &Unparker) -> u32 {
         unparker.word.load(Ordering::Relaxed)
