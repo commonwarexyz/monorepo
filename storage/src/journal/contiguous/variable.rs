@@ -11279,12 +11279,12 @@ mod tests {
         });
     }
 
-    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5668.
     ///
     /// A destroy interrupted at any point leaves a journal that reopens as a crash would recover it
     /// or as a fresh journal, and that a retried destroy removes.
     #[test_traced]
-    fn pr_5651_regression_variable_interrupted_destroy_reopens() {
+    fn issue_5668_regression_variable_interrupted_destroy_reopens() {
         let (mut unchanged, mut emptied) = (0, 0);
         for seed in 0..32u64 {
             let executor = deterministic::Runner::seeded(seed);

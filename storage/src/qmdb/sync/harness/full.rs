@@ -1141,12 +1141,12 @@ impl<H: SyncTestHarness> InterruptedDestroy<H> {
     }
 }
 
-/// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+/// Regression test for https://github.com/commonwarexyz/monorepo/issues/5669.
 ///
 /// A sync into storage whose destroy stopped after emptying the log completes with the target's
 /// roots, and the synced state survives a reopen. The cases vary whether the target's range
 /// starts at zero and whether the Merkle structure left behind ends before or after the target.
-pub(crate) fn pr_5651_regression_sync_after_interrupted_destroy<H: SyncTestHarness>(
+pub(crate) fn issue_5669_regression_sync_after_interrupted_destroy<H: SyncTestHarness>(
     pruned: bool,
     ahead: bool,
 ) where
@@ -1356,40 +1356,40 @@ macro_rules! sync_tests {
                 crate::qmdb::sync::harness::test_sync_source_fails::<$harness>();
             }
 
-            /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+            /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5669.
             #[rstest]
             #[case::genesis_merkle_behind(false, false)]
             #[case::genesis_merkle_ahead(false, true)]
             #[case::pruned_merkle_behind(true, false)]
             #[case::pruned_merkle_ahead(true, true)]
-            fn pr_5651_regression_sync_after_interrupted_destroy(
+            fn issue_5669_regression_sync_after_interrupted_destroy(
                 #[case] pruned: bool,
                 #[case] ahead: bool,
             ) {
-                crate::qmdb::sync::harness::pr_5651_regression_sync_after_interrupted_destroy::<
+                crate::qmdb::sync::harness::issue_5669_regression_sync_after_interrupted_destroy::<
                     $harness,
                 >(pruned, ahead);
             }
 
-            /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+            /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5669.
             #[rstest]
             #[case::genesis_partial(false, false)]
             #[case::genesis_fetched(false, true)]
             #[case::pruned_partial(true, false)]
             #[case::pruned_fetched(true, true)]
-            fn pr_5651_regression_sync_restart_after_destroy(
+            fn issue_5669_regression_sync_restart_after_destroy(
                 #[case] pruned: bool,
                 #[case] fetched: bool,
             ) {
-                crate::qmdb::sync::engine::tests::pr_5651_regression_sync_restart_after_destroy::<
+                crate::qmdb::sync::engine::tests::issue_5669_regression_sync_restart_after_destroy::<
                     $harness,
                 >(pruned, fetched);
             }
 
-            /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+            /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5669.
             #[test_traced("WARN")]
-            fn pr_5651_regression_open_after_stopped_sync() {
-                crate::qmdb::sync::engine::tests::pr_5651_regression_open_after_stopped_sync::<
+            fn issue_5669_regression_open_after_stopped_sync() {
+                crate::qmdb::sync::engine::tests::issue_5669_regression_open_after_stopped_sync::<
                     $harness,
                 >();
             }

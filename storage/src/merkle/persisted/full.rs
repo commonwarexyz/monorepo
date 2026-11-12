@@ -1393,22 +1393,22 @@ mod tests {
         merkle.destroy().await.unwrap();
     }
 
-    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5668.
     ///
     /// A failed sync that nobody observed surfaces at destroy before the metadata of an MMR is
     /// removed.
     #[test]
-    fn pr_5651_regression_destroy_observes_failed_sync_before_removal_mmr() {
+    fn issue_5668_regression_destroy_observes_failed_sync_before_removal_mmr() {
         deterministic::Runner::default()
             .start(destroy_observes_failed_sync_before_removal::<mmr::Family>);
     }
 
-    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5668.
     ///
     /// A failed sync that nobody observed surfaces at destroy before the metadata of an MMB is
     /// removed.
     #[test]
-    fn pr_5651_regression_destroy_observes_failed_sync_before_removal_mmb() {
+    fn issue_5668_regression_destroy_observes_failed_sync_before_removal_mmb() {
         deterministic::Runner::default()
             .start(destroy_observes_failed_sync_before_removal::<mmb::Family>);
     }

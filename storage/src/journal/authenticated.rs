@@ -4292,12 +4292,12 @@ mod tests {
         deterministic::Runner::default().start(fully_pruned_authenticated_reopens::<mmb::Family>);
     }
 
-    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5668.
     ///
     /// A failed Merkle sync that nobody observed surfaces at destroy before anything is removed, so
     /// the journal reopens at its last commit.
     #[test_traced("INFO")]
-    fn pr_5651_regression_destroy_observes_failed_merkle_sync_before_removal() {
+    fn issue_5668_regression_destroy_observes_failed_merkle_sync_before_removal() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Commit and prune, so the Merkle metadata holds a boundary and pins. Commit again,
@@ -4363,12 +4363,12 @@ mod tests {
         });
     }
 
-    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5668.
     ///
     /// A destroy dropped while the operation journal's clear is still being staged has removed
     /// nothing, so the pruned journal reopens at its last commit.
     #[test_traced("INFO")]
-    fn pr_5651_regression_destroy_stages_journal_clear_before_removal() {
+    fn issue_5668_regression_destroy_stages_journal_clear_before_removal() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Commit and prune, so the retained operations cannot rebuild the Merkle structure.
@@ -4632,12 +4632,12 @@ mod tests {
         (cfg, partitions)
     }
 
-    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5668.
     ///
     /// A destroy interrupted at any point leaves a journal over a fixed operation journal that
     /// reopens at its last commit or empty, and that a retried destroy removes.
     #[test]
-    fn pr_5651_regression_interrupted_destroy_reopens_fixed_mmr() {
+    fn issue_5668_regression_interrupted_destroy_reopens_fixed_mmr() {
         let (cfg, partitions) = fixed_destroy_config();
         interrupted_destroy_reopens_all_seeds::<
             mmr::Family,
@@ -4645,12 +4645,12 @@ mod tests {
         >(cfg, &partitions);
     }
 
-    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5668.
     ///
     /// A destroy interrupted at any point leaves a journal over a fixed operation journal that
     /// reopens at its last commit or empty, and that a retried destroy removes.
     #[test]
-    fn pr_5651_regression_interrupted_destroy_reopens_fixed_mmb() {
+    fn issue_5668_regression_interrupted_destroy_reopens_fixed_mmb() {
         let (cfg, partitions) = fixed_destroy_config();
         interrupted_destroy_reopens_all_seeds::<
             mmb::Family,
@@ -4658,12 +4658,12 @@ mod tests {
         >(cfg, &partitions);
     }
 
-    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5668.
     ///
     /// A destroy interrupted at any point leaves a journal over a variable operation journal that
     /// reopens at its last commit or empty, and that a retried destroy removes.
     #[test]
-    fn pr_5651_regression_interrupted_destroy_reopens_variable_mmr() {
+    fn issue_5668_regression_interrupted_destroy_reopens_variable_mmr() {
         let (cfg, partitions) = variable_destroy_config();
         interrupted_destroy_reopens_all_seeds::<
             mmr::Family,
@@ -4671,12 +4671,12 @@ mod tests {
         >(cfg, &partitions);
     }
 
-    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5668.
     ///
     /// A destroy interrupted at any point leaves a journal over a variable operation journal that
     /// reopens at its last commit or empty, and that a retried destroy removes.
     #[test]
-    fn pr_5651_regression_interrupted_destroy_reopens_variable_mmb() {
+    fn issue_5668_regression_interrupted_destroy_reopens_variable_mmb() {
         let (cfg, partitions) = variable_destroy_config();
         interrupted_destroy_reopens_all_seeds::<
             mmb::Family,

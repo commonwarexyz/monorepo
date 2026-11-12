@@ -2334,44 +2334,44 @@ mod tests {
         (cfg, stages)
     }
 
-    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5668.
     ///
     /// A destroy interrupted at any point leaves a database over a fixed log that reopens at its
     /// last commit or as a new database, and that a retried destroy removes.
     #[test]
-    fn pr_5651_regression_interrupted_destroy_reopens_fixed_mmr() {
+    fn issue_5668_regression_interrupted_destroy_reopens_fixed_mmr() {
         let (cfg, stages) = fixed_destroy_config();
         interrupted_destroy_reopens_all_seeds(&stages, |ctx| MmrDb::init(ctx, cfg.clone(), None));
     }
 
-    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5668.
     ///
     /// A destroy interrupted at any point leaves a database over a fixed log that reopens at its
     /// last commit or as a new database, and that a retried destroy removes.
     #[test]
-    fn pr_5651_regression_interrupted_destroy_reopens_fixed_mmb() {
+    fn issue_5668_regression_interrupted_destroy_reopens_fixed_mmb() {
         let (cfg, stages) = fixed_destroy_config();
         interrupted_destroy_reopens_all_seeds(&stages, |ctx| MmbDb::init(ctx, cfg.clone(), None));
     }
 
-    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5668.
     ///
     /// A destroy interrupted at any point leaves a database over a variable log that reopens at its
     /// last commit or as a new database, and that a retried destroy removes.
     #[test]
-    fn pr_5651_regression_interrupted_destroy_reopens_variable_mmr() {
+    fn issue_5668_regression_interrupted_destroy_reopens_variable_mmr() {
         let (cfg, stages) = variable_destroy_config();
         interrupted_destroy_reopens_all_seeds(&stages, |ctx| {
             VariableDb::<mmr::Family>::init(ctx, cfg.clone(), None)
         });
     }
 
-    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5668.
     ///
     /// A destroy interrupted at any point leaves a database over a variable log that reopens at its
     /// last commit or as a new database, and that a retried destroy removes.
     #[test]
-    fn pr_5651_regression_interrupted_destroy_reopens_variable_mmb() {
+    fn issue_5668_regression_interrupted_destroy_reopens_variable_mmb() {
         let (cfg, stages) = variable_destroy_config();
         interrupted_destroy_reopens_all_seeds(&stages, |ctx| {
             VariableDb::<mmb::Family>::init(ctx, cfg.clone(), None)

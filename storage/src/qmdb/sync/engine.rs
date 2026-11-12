@@ -1251,13 +1251,13 @@ pub(crate) mod tests {
         });
     }
 
-    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5669.
     ///
     /// A sync into storage whose destroy stopped after emptying the log is stopped once fetched
     /// operations are durable in its journal, and the sync that restarts over that journal
     /// completes with the target's roots. The cases vary whether the target's range starts at
     /// zero and whether the first sync stops with the range partly or wholly fetched.
-    pub(crate) fn pr_5651_regression_sync_restart_after_destroy<H: SyncTestHarness>(
+    pub(crate) fn issue_5669_regression_sync_restart_after_destroy<H: SyncTestHarness>(
         pruned: bool,
         fetched: bool,
     ) where
@@ -1316,13 +1316,13 @@ pub(crate) mod tests {
         });
     }
 
-    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5669.
     ///
     /// A sync into storage whose destroy stopped after emptying the log is stopped once a commit
     /// of the target is durable in its journal, and opening the database then recovers the
     /// target's state at that commit. The destroyed database was pruned, so what it derived from
     /// its operations includes Merkle pins and, where the database grafts a bitmap, pruned chunks.
-    pub(crate) fn pr_5651_regression_open_after_stopped_sync<H: SyncTestHarness>()
+    pub(crate) fn issue_5669_regression_open_after_stopped_sync<H: SyncTestHarness>()
     where
         Arc<DbOf<H>>: SourceFor<DbOf<H>>,
     {
