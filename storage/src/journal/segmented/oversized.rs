@@ -1731,7 +1731,7 @@ mod tests {
             let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
             oversized.index = oversized
                 .index
-                .test_reopen_section(1, chunk)
+                .test_reopen_at_most(1, chunk)
                 .await
                 .expect("Failed to truncate index");
             oversized.index = oversized.index.sync(1).await.expect("Failed to sync index");
@@ -1790,7 +1790,7 @@ mod tests {
             let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
             oversized.index = oversized
                 .index
-                .test_reopen_section(1, chunk)
+                .test_reopen_at_most(1, chunk)
                 .await
                 .expect("Failed to truncate index");
             oversized.index = oversized.index.sync(1).await.expect("Failed to sync index");

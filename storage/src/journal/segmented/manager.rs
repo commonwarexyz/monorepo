@@ -9,7 +9,7 @@ use commonware_runtime::{
     Blob, Error as RError, Handle, Metrics, Storage,
     buffer::{
         Write,
-        paged::{CacheRef, Recovery as PagedRecovery},
+        paged::{CHECKSUM_SIZE, CacheRef, Recovery as PagedRecovery},
     },
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
@@ -18,7 +18,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, btree_map::Entry},
     future::Future,
     mem::take,
-    num::NonZeroUsize,
+    num::{NonZeroU16, NonZeroUsize},
 };
 use tracing::debug;
 
@@ -40,6 +40,46 @@ pub(super) fn section_from_name(name: &[u8]) -> Result<u64, Error> {
         .try_into()
         .map_err(|_| Error::InvalidBlobName(hex(name)))?;
     Ok(u64::from_be_bytes(section))
+}
+
+/// Remove sections and whole pages above a ceiling before opening exclusive recovery owners.
+/// The containing page remains intact for checksum validation and exact logical truncation.
+pub(super) async fn truncate_paged_tail<E: Storage>(
+    context: &E,
+    partition: &str,
+    page_size: NonZeroU16,
+    section: u64,
+    end: u64,
+) -> Result<(), Error> {
+    let mut sections = stored_names(context, partition)
+        .await?
+        .iter()
+        .map(|name| section_from_name(name))
+        .collect::<Result<Vec<_>, _>>()?;
+    sections.sort_unstable();
+    for stored in sections.into_iter().rev() {
+        if stored > section {
+            context
+                .remove(partition, Some(&stored.to_be_bytes()))
+                .await?;
+            continue;
+        }
+        if stored == section {
+            let (blob, size) = context.open(partition, &stored.to_be_bytes()).await?;
+
+            // An unrepresentable physical ceiling excludes no representable blob bytes.
+            let page_size = u64::from(page_size.get());
+            let ceiling = end
+                .div_ceil(page_size)
+                .saturating_mul(page_size + CHECKSUM_SIZE);
+            if ceiling < size {
+                blob.resize(ceiling).await?;
+                blob.sync().await?;
+            }
+        }
+        break;
+    }
+    Ok(())
 }
 
 /// A minimal [`Blob`] wrapper for [`Manager`].
@@ -681,13 +721,16 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use commonware_runtime::{
-        BlobVersion, Clock as _, Name, Runner as _, Spawner as _, Supervisor, deterministic,
+        BlobVersion, Clock as _, Name, ReadOptions, Runner as _, Spawner as _, Supervisor,
+        WriteOptions,
+        buffer::paged::Writer,
+        deterministic,
         telemetry::metrics::{Metric, Registered},
     };
-    use commonware_utils::{channel::oneshot, sync::Mutex};
+    use commonware_utils::{NZU16, channel::oneshot, sync::Mutex};
     use futures::{
         FutureExt as _,
         future::{BoxFuture, Shared},
@@ -699,6 +742,67 @@ mod tests {
             atomic::{AtomicUsize, Ordering},
         },
     };
+
+    /// Materialize a crash that retains new page bytes but loses their checksum lengths.
+    pub(in super::super) async fn seed_torn_suffix<E: Storage>(
+        context: &E,
+        partition: &str,
+        section: u64,
+        page: &[u8],
+        suffix_pages: usize,
+    ) {
+        // Seed one acknowledged page whose physical encoding can prefix the crash image.
+        let physical = page.len() + CHECKSUM_SIZE as usize;
+        let source = format!("{partition}-source");
+        let (raw, size) = context.open(&source, b"source").await.unwrap();
+        let raw = Arc::new(raw);
+        let cache = CacheRef::new(
+            (page.len() as u16).try_into().unwrap(),
+            commonware_utils::NZUsize!(4),
+        );
+        let writer = Writer::new(Arc::clone(&raw), size, 2 * page.len(), cache)
+            .await
+            .unwrap();
+        let (writer, _) = writer.append(page).await.unwrap();
+        let writer = writer.sync().await.unwrap();
+        let acknowledged = raw
+            .read_at(0, physical, ReadOptions::default())
+            .await
+            .unwrap()
+            .coalesce();
+
+        // The empty tip and page-aligned direct append issue one unsynced write wholly beyond
+        // the acknowledged page. The raw handle shares the writer's open and observes those bytes.
+        let (writer, _) = writer
+            .append_owned(page.repeat(suffix_pages).into())
+            .await
+            .unwrap();
+        let mut image = raw
+            .read_at(0, physical * (suffix_pages + 1), ReadOptions::default())
+            .await
+            .unwrap()
+            .coalesce()
+            .as_ref()
+            .to_vec();
+        assert_eq!(&image[..physical], acknowledged.as_ref());
+        drop(writer);
+        drop(raw);
+
+        // Clear the unacknowledged pages' length slots to model torn checksum publication.
+        for page_index in 1..=suffix_pages {
+            let footer = page_index * physical + page.len();
+            image[footer..footer + 2].fill(0);
+            image[footer + 6..footer + 8].fill(0);
+        }
+        let (blob, _) = context
+            .open(partition, &section.to_be_bytes())
+            .await
+            .unwrap();
+        blob.write_at(0, image, WriteOptions::default())
+            .await
+            .unwrap();
+        blob.sync().await.unwrap();
+    }
 
     impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         pub fn test_configuration(&self) -> (E, String, F) {
@@ -1044,6 +1148,37 @@ mod tests {
             // Both opened sections survive in the manager and in storage. The plain context lists
             // names in ascending order.
             assert_eq!(manager.sections().collect::<Vec<_>>(), vec![1, 2]);
+            assert_eq!(
+                context.scan("test").await.unwrap(),
+                vec![1u64.to_be_bytes().to_vec(), 2u64.to_be_bytes().to_vec()]
+            );
+        });
+    }
+
+    #[test]
+    fn test_truncate_paged_tail_removes_sections_newest_first() {
+        deterministic::Runner::default().start(|context| async move {
+            // Create empty stored sections on both sides of the target.
+            for section in [1u64, 2, 5, 6, 7] {
+                context.open("test", &section.to_be_bytes()).await.unwrap();
+            }
+
+            // List names newest-first. Walking this listing backward without a sort would reach
+            // section 1 first and stop before removing anything above the target.
+            let removals = Removals::default();
+            let reversed = Reversed {
+                inner: context.child("reversed"),
+                removals: removals.clone(),
+            };
+
+            // End 0 gives a physical ceiling of zero bytes for any page size and target section 2
+            // is empty, so no resize runs. The call changes storage only by removing sections.
+            truncate_paged_tail(&reversed, "test", NZU16!(64), 2, 0)
+                .await
+                .unwrap();
+
+            // Every section above the target is removed newest-first and the rest are retained.
+            assert_eq!(*removals.lock(), removed(&[7, 6, 5]));
             assert_eq!(
                 context.scan("test").await.unwrap(),
                 vec![1u64.to_be_bytes().to_vec(), 2u64.to_be_bytes().to_vec()]
