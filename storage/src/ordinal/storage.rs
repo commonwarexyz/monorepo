@@ -323,6 +323,11 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
     async fn put(mut self: Box<Self>, index: u64, value: V) -> Result<Box<Self>, Error> {
         self.puts.inc();
 
+        // A stored record is never rewritten in place, so a torn write cannot damage it.
+        if self.intervals.get(index).is_some() {
+            return Ok(self);
+        }
+
         // Merge the record into the section's buffer when it fits. Otherwise take the section's
         // writer, or open one when the section has none.
         let items_per_blob = self.config.items_per_blob.get();
@@ -534,8 +539,7 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
 
     /// Add a value at the specified index (pending until sync).
     ///
-    /// An index that already holds a record is overwritten in place. A crash before the next
-    /// sync can leave that record invalid, so the earlier value is not preserved.
+    /// Indices are unique: if the index already holds a record, put does nothing and returns.
     pub async fn put(mut self, index: u64, value: V) -> Result<Self, Error> {
         self.0 = self.0.put(index, value).await?;
         Ok(self)

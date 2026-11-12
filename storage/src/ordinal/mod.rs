@@ -10,6 +10,7 @@
 //! - Each record: `[V][crc32(V)]` where V is an [commonware_utils::Array]
 //! - Index N is at file offset: `N * RECORD_SIZE`
 //! - A [crate::rmap::RMap] tracks which indices have been written (and which are missing)
+//! - A record is written once: [Ordinal::put] ignores an index that already holds one
 //!
 //! # File Organization
 //!
@@ -218,6 +219,46 @@ mod tests {
                 .expect("Failed to get data")
                 .expect("Data not found");
             assert_eq!(retrieved, value);
+        });
+    }
+
+    #[test_traced]
+    fn test_put_existing_index_is_ignored() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test-ordinal".into(),
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+            };
+            let mut store =
+                Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone(), None)
+                    .await
+                    .unwrap();
+            let first = FixedBytes::new([1u8; 32]);
+            store = store.put(7, first.clone()).await.unwrap();
+
+            // A later put to the index is ignored, whether or not the first is synced.
+            store = store.put(7, FixedBytes::new([2u8; 32])).await.unwrap();
+            assert_eq!(store.get(7).await.unwrap(), Some(first.clone()));
+            store = store.sync().await.unwrap();
+            store = store.put(7, FixedBytes::new([3u8; 32])).await.unwrap();
+            assert_eq!(store.get(7).await.unwrap(), Some(first.clone()));
+            drop(store.sync().await.unwrap());
+
+            // The stored record is the first one.
+            let mut committed = BitMap::zeroes(DEFAULT_ITEMS_PER_BLOB);
+            committed.set(7, true);
+            let committed = Some(committed);
+            let store = Ordinal::<_, FixedBytes<32>>::init(
+                context.child("second"),
+                cfg,
+                Some(BTreeMap::from([(0, &committed)])),
+            )
+            .await
+            .unwrap();
+            assert_eq!(store.get(7).await.unwrap(), Some(first));
         });
     }
 
