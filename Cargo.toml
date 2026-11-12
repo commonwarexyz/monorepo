@@ -98,6 +98,11 @@ large_futures = "warn"
 # to avoid triggering this method make the code worse.
 suspicious_op_assign_impl = "allow"
 
+# cargo-udeps checks unused dependencies, so disable Cargo's built-in checks.
+[workspace.lints.cargo]
+unused_dependencies = "allow"
+unused_workspace_dependencies = "allow"
+
 [workspace.dependencies]
 ahash = { version = "0.8.12", default-features = false }
 anyhow = { version = "1.0.103", default-features = false }

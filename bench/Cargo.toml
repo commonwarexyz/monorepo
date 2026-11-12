@@ -1,6 +1,7 @@
 [package]
 name = "commonware-bench"
 edition.workspace = true
+rust-version.workspace = true
 publish = true
 autobins = false
 version.workspace = true

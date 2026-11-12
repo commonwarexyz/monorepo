@@ -769,6 +769,7 @@ jobs:
     name: "Build (toolchain: ${{ matrix.toolchain }}, partition: ${{ matrix.partition.name }})"
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    continue-on-error: ${{ matrix.toolchain == 'nightly' }}
     strategy:
       fail-fast: false
       matrix:
@@ -822,6 +823,11 @@ jobs:
         run: rustc --version
       - name: Check feature powerset
         run: RUSTFLAGS="-D warnings" just hack ${{ matrix.partition.args }} check
+      - name: Report nightly failure
+        if: failure() && matrix.toolchain == 'nightly'
+        run: |
+          echo "::warning::Floating nightly failed; investigate the compiler compatibility failure."
+          echo "Floating nightly failed for ${{ matrix.partition.name }}. Review this job's logs and investigate before the next stable release." >> "$GITHUB_STEP_SUMMARY"
 
   Build-Gate:
     name: "Builds"
