@@ -533,6 +533,9 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     }
 
     /// Add a value at the specified index (pending until sync).
+    ///
+    /// An index that already holds a record is overwritten in place. A crash before the next
+    /// sync can leave that record invalid, so the earlier value is not preserved.
     pub async fn put(mut self, index: u64, value: V) -> Result<Self, Error> {
         self.0 = self.0.put(index, value).await?;
         Ok(self)
