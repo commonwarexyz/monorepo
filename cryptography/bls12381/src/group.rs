@@ -99,8 +99,9 @@ pub mod fuzz {
             .collect()
     }
 
-    /// Draws an element with its discrete logarithm: mostly a small multiple of the generator or
-    /// its negation, which cost nothing to draw, and otherwise an arbitrary multiple.
+    /// Draws an element with its discrete logarithm: in 13 of 16 cases the identity or `+-k G`
+    /// for `k <= MULTIPLES`, read from [`Element::multiples`], and otherwise an arbitrary
+    /// multiple.
     pub fn element<G: Element>(u: &mut Unstructured<'_>) -> arbitrary::Result<(G, Scalar)> {
         let small = |u: &mut Unstructured<'_>| {
             let k = u.int_in_range(0..=MULTIPLES)?;

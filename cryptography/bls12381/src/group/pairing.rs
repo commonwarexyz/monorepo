@@ -35,7 +35,12 @@ impl GT {
     /// The identity, `e(P, 0)` for any `P`.
     pub const ONE: Self = Self(fp12::ONE);
 
-    /// Returns the canonical encoding, a big-endian element of the degree-12 extension.
+    /// Returns the canonical encoding, 576 bytes.
+    ///
+    /// The encoding writes an element of `Fp12 = Fp6[w] / (w^2 - v)` as `c1` then `c0`, an
+    /// element of `Fp6 = Fp2[v] / (v^3 - (1 + i))` as `c2`, `c1`, then `c0`, an element of
+    /// `Fp2 = Fp[i] / (i^2 + 1)` as `c1` then `c0`, and an element of the base field as 48
+    /// big-endian bytes.
     pub const fn to_bytes(&self) -> [u8; BYTES] {
         self.0
     }
@@ -240,8 +245,8 @@ impl Kernel for Pairings<'_> {
 ///
 /// One inversion serves every pair, as Montgomery's trick: the G1 denominators and the norms of
 /// the G2 denominators multiply up in turn, the total inverts, and each inverse unwinds from the
-/// total with the running products. Runs as its own kernel, so that the conversions have the
-/// backend's instructions.
+/// total with the running products. Runs its body through [`Simd::execute`], so that the body
+/// inlines into the backend's target-feature scope.
 #[cfg_attr(not(debug_assertions), inline(always))]
 fn to_affine<S: Simd, F: Field<S>>(
     simd: S,
@@ -335,7 +340,7 @@ pub mod fuzz {
 
     impl<'a> Arbitrary<'a> for GT {
         fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-            // A small power of the generator, which costs a few multiplications.
+            // A power of the generator below the 256th, which costs at most 16 multiplications.
             let exponent: u8 = u.arbitrary()?;
             let mut power = Self::ONE;
             for bit in (0..u8::BITS).rev() {

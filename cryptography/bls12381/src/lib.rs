@@ -3,16 +3,18 @@
 //!
 //! # Usage
 //!
-//! The types implement the algebra traits of [`commonware_math::algebra`]; import the traits
-//! whose methods you call:
+//! Operators need no imports and take their right operand by reference: `a + &b`, `a - &b`, and
+//! `-a` in [`G1`], [`G2`], and [`Scalar`]; `p * &k` for an element `p` of [`G1`] or [`G2`] and
+//! a [`Scalar`] `k`; `a * &b` in [`Scalar`] and [`GT`]; and `==`. The other operations are
+//! methods of the algebra traits of [`commonware_math::algebra`]; import the traits whose methods
+//! you call:
 //!
-//! - [`G1`] and [`G2`]: [`CryptoGroup`] for the generator, [`Additive`] for `+`, `-`, and
-//!   [`Additive::zero`], and [`Space<Scalar>`][Space] for `*` by a [`Scalar`] and for
-//!   [`Space::msm`].
-//! - [`Scalar`]: [`Field`] and [`FieldNTT`] for arithmetic and roots of unity, and [`Random`]
-//!   for sampling. [`Scalar::from_bytes`] and [`Scalar::to_bytes`] convert the canonical
-//!   big-endian encoding.
-//! - [`GT`]: [`Multiplicative`] for `*`, with identity [`GT::ONE`].
+//! - [`G1`] and [`G2`]: [`CryptoGroup::generator`], [`Additive::zero`], [`Additive::double`],
+//!   [`Additive::scale`], and [`Space::msm`].
+//! - [`Scalar`]: [`Field::inv`], [`Ring::exp`], [`Multiplicative::square`], [`FieldNTT`] for
+//!   roots of unity, and [`Random::random`] for sampling. The inherent [`Scalar::from_bytes`]
+//!   and [`Scalar::to_bytes`] convert the canonical big-endian encoding.
+//! - [`GT`]: [`Multiplicative::square`]. [`GT::ONE`] is the identity.
 //!
 //! Operations over slices cost less per element than the same operation repeated on single
 //! elements, so prefer them when the inputs are available together:
@@ -42,11 +44,13 @@
 //! does not decode elements of [`G1`] or [`G2`] from bytes.
 //!
 //! Multiplication of an element by a scalar (`*`, [`Additive::scale`], and `mul_each`) runs
-//! in time independent of the scalar's value, as does arithmetic in [`Scalar`]. [`Space::msm`]
-//! runs in variable time: its running time and memory accesses depend on the scalars, which must
-//! therefore be public, as Lagrange coefficients in threshold recovery and random weights in batch
-//! verification are. The pairing functions skip pairs that contain an identity element, so their
-//! running time depends on which inputs are the identity.
+//! in time independent of the scalar's value, as does arithmetic in [`Scalar`] except
+//! [`Ring::exp`] and [`Additive::scale`] on a [`Scalar`], whose running time depends on the
+//! exponent or multiplier. [`Space::msm`] runs in variable time: its running time and memory
+//! accesses depend on the scalars, which must therefore be public, as Lagrange coefficients in
+//! threshold recovery and random weights in batch verification are. The pairing functions skip
+//! pairs that contain an identity element, so their running time depends on which inputs are the
+//! identity.
 //!
 //! # Example
 //!
@@ -82,16 +86,16 @@
 //! - `std` (default): links the standard library; without it the crate is `no_std`.
 //! - `fuzz`: exposes the module `fuzz` of fuzzing operations.
 //!
-//! [`Additive`]: commonware_math::algebra::Additive
 //! [`Additive::zero`]: commonware_math::algebra::Additive::zero
+//! [`Additive::double`]: commonware_math::algebra::Additive::double
 //! [`Additive::scale`]: commonware_math::algebra::Additive::scale
-//! [`CryptoGroup`]: commonware_math::algebra::CryptoGroup
-//! [`Field`]: commonware_math::algebra::Field
+//! [`CryptoGroup::generator`]: commonware_math::algebra::CryptoGroup::generator
+//! [`Field::inv`]: commonware_math::algebra::Field::inv
 //! [`FieldNTT`]: commonware_math::algebra::FieldNTT
-//! [`Multiplicative`]: commonware_math::algebra::Multiplicative
-//! [`Random`]: commonware_math::algebra::Random
+//! [`Multiplicative::square`]: commonware_math::algebra::Multiplicative::square
+//! [`Random::random`]: commonware_math::algebra::Random::random
+//! [`Ring::exp`]: commonware_math::algebra::Ring::exp
 //! [`Space::msm`]: commonware_math::algebra::Space::msm
-//! [Space]: commonware_math::algebra::Space
 
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 

@@ -35,7 +35,8 @@ impl Group for G2 {
 
     const IDENTITY: Coordinates = IDENTITY;
 
-    // Products in the quadratic extension take fewer multiplies in residues than in the lanes.
+    // Residues finish every count sooner than Unsat49: a product in the quadratic extension takes
+    // fewer multiply instructions in residues than in the lanes of Unsat49.
     const SUM_BATCH: Option<usize> = None;
     const MULTIPLY_BATCH: Option<usize> = None;
 
@@ -124,7 +125,8 @@ impl Additive for G2 {
         *self = Double(*self).dispatch();
     }
 
-    /// Multiplies by an integer of any length without branching on its value.
+    /// Multiplies by the little-endian integer `bits_le` of any length, in time independent of
+    /// its value.
     fn scale(&self, bits_le: &[u64]) -> Self {
         Multiply {
             element: *self,

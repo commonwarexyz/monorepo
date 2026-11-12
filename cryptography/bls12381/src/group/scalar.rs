@@ -169,7 +169,8 @@ const fn divide<const N: usize, const D: usize, const R: usize, const W: usize>(
 /// An element of the scalar field.
 ///
 /// Arithmetic and encoding run in time independent of the operands' values. Decoding reveals
-/// only whether its input is canonical.
+/// only whether its input is canonical. [`Ring::exp`] and [`Additive::scale`] run in time that
+/// depends on their integer argument.
 // Holds the canonical Montgomery representative: the value times 2^256, reduced below r.
 #[derive(Clone, Copy)]
 pub struct Scalar([u64; WORDS]);
@@ -187,7 +188,7 @@ impl Scalar {
     /// One.
     pub const ONE: Self = Self(R);
 
-    /// Converts a small integer into the field.
+    /// Converts an integer below `2^64` into the field.
     pub const fn from_u64(value: u64) -> Self {
         Self(montgomery::mul(&[value, 0, 0, 0], &R2, &MODULUS, INV))
     }
@@ -210,8 +211,9 @@ impl Scalar {
     /// Reduces a little-endian integer of any length modulo the group order, without branching
     /// on its words.
     pub(crate) fn from_words_wide(words: &[u64]) -> Self {
-        // Each chunk of four words enters Montgomery form by one multiplication, which accepts a
-        // left operand below 2^256 when the right one is below r, and shifts the sum so far.
+        // Horner's rule in base 2^256 from the most significant chunk: sum = sum 2^256 + chunk.
+        // Montgomery multiplication by R^2 converts each chunk of four words, since it accepts a
+        // left operand below 2^256 when the right one is below r.
         let mut sum = Self::ZERO;
         for chunk in words.chunks(WORDS).rev() {
             let mut padded = [0; WORDS];
@@ -486,7 +488,8 @@ impl FieldNTT for Scalar {
 }
 
 impl Random for Scalar {
-    /// Samples a uniform scalar by reducing 512 random bits.
+    /// Samples a scalar within statistical distance `2^-256` of uniform, by reducing 512 bits
+    /// drawn from `rng`.
     fn random(mut rng: impl CryptoRng) -> Self {
         let mut bytes = [0u8; Self::WIDE_BYTES];
         rng.fill_bytes(&mut bytes);
