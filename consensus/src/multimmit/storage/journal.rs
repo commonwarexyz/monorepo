@@ -32,7 +32,7 @@ use commonware_cryptography::Digest;
 use commonware_runtime::{Handle, Metrics, ReadOptions, Storage, buffer::paged::CacheRef};
 use commonware_storage::journal::{
     Error as StorageError,
-    segmented::variable::{Config as StorageConfig, Journal, Replay},
+    segmented::variable::{Config as StorageConfig, Journal, Recovery},
 };
 use commonware_utils::NZUsize;
 use core::num::NonZeroUsize;
@@ -272,10 +272,12 @@ where
         config: Config,
         covered: Cursor,
     ) -> Result<SuffixReplay<E, S, D>, JournalError> {
-        let journal = Journal::init(context, Self::storage_config(&config)).await?;
-        let replay = journal
-            .replay(0, 0, config.replay_buffer, ReadOptions::default())
-            .await?;
+        let replay = Journal::init(
+            context,
+            Self::storage_config(&config),
+            ReadOptions::default(),
+        )
+        .await?;
         Ok(SuffixReplay {
             replay,
             config,
@@ -296,6 +298,7 @@ where
             },
             page_cache: config.page_cache.clone(),
             write_buffer: config.write_buffer,
+            replay_buffer: config.replay_buffer,
         }
     }
 
@@ -395,7 +398,7 @@ where
 
 /// Streaming reader over the journal records a checkpoint does not cover.
 pub(crate) struct SuffixReplay<E: Storage + Metrics, S: Scheme, D: Digest> {
-    replay: Replay<E, JournalRecord<S, D>>,
+    replay: Recovery<E, JournalRecord<S, D>>,
     config: Config,
     covered: Cursor,
     cursor: Cursor,
@@ -969,14 +972,13 @@ mod tests {
                 previous: Cursor::new(1),
                 events: Arc::new(Vec::new()),
             };
-            let raw: Journal<_, TestRecord> =
-                Journal::init(context.child("inject"), TestJournal::storage_config(&cfg))
-                    .await
-                    .unwrap();
-            let mut replay = raw
-                .replay(0, 0, cfg.replay_buffer, ReadOptions::default())
-                .await
-                .unwrap();
+            let mut replay = Journal::<_, TestRecord>::init(
+                context.child("inject"),
+                TestJournal::storage_config(&cfg),
+                ReadOptions::default(),
+            )
+            .await
+            .unwrap();
             while let Some(record) = replay.next().await {
                 record.unwrap();
             }

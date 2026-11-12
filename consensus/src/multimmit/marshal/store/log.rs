@@ -145,7 +145,7 @@ impl<E: Context, C: Clone + Send + Sync + 'static> Opener<E, C> {
         if !self.named {
             remove_partitions(&self.context, &self.partitions).await?;
         }
-        let mut replay = Journal::<E, I, V>::init_with_metadata(
+        let mut replay = Journal::<E, I, V>::init_with_markers(
             self.context,
             self.config,
             self.markers,
@@ -168,7 +168,7 @@ impl<E: Context, C: Clone + Send + Sync + 'static> Opener<E, C> {
                 .ok_or(Error::Inconsistent("log value location overflows"))?;
             rows.push(row);
         }
-        Ok((replay.finish_tracked().await?, rows))
+        Ok((replay.finish().await?, rows))
     }
 }
 

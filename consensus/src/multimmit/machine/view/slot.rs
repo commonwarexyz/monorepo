@@ -258,7 +258,7 @@ mod tests {
                             let active = transition == ViewTransition::Active;
                             let mut actual = before.clone();
                             let result = actual.apply(input.clone());
-                            let mut expected = before.clone();
+                            let mut expected = before;
                             match (input, result) {
                                 (SlotInput::Propose(block), Ok(true)) => {
                                     assert!(active && proposal.is_none());
