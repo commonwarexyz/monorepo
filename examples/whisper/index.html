@@ -33,18 +33,14 @@
     <p>You are <code id="me">...</code></p>
     <section id="pairing">
       <p>
-        <button id="invite">Create invite</button>
-        or submit the invite another page created.
-      </p>
-      <p>
-        <label for="outgoing">Pass this to the other page</label>
+        <label for="outgoing">Your contact, to pass to the other page</label>
         <textarea id="outgoing" rows="5" readonly></textarea>
-        <button id="copy">Copy</button>
+        <button id="copy" disabled>Copy</button>
       </p>
       <p>
-        <label for="incoming">What the other page passed you</label>
-        <textarea id="incoming" rows="5" maxlength="32896"></textarea>
-        <button id="submit">Submit</button>
+        <label for="incoming">The contact the other page passed you</label>
+        <textarea id="incoming" rows="5" maxlength="3716"></textarea>
+        <button id="dial" disabled>Dial</button>
       </p>
     </section>
     <section id="chat" hidden>
@@ -75,17 +71,13 @@
         switch (event) {
           case "identity":
             element("me").textContent = detail;
-            status("");
+            status("Finding where this page can be reached...");
             break;
-          case "invite":
+          case "contact":
             element("outgoing").value = detail;
-            status("Pass the invite to the other page, then submit its reply.");
-            break;
-          case "reply":
-            element("outgoing").value = detail;
-            element("incoming").value = "";
-            element("invite").disabled = true;
-            status("Pass the reply to the other page.");
+            element("copy").disabled = false;
+            element("dial").disabled = false;
+            status("Pass your contact to the other page, and dial the contact it passes you.");
             break;
           case "connected":
             element("peer").textContent = detail;
@@ -97,9 +89,13 @@
             log("them", detail);
             break;
           case "error":
+            element("dial").disabled = false;
             status(detail);
             break;
           case "closed":
+            for (const control of document.querySelectorAll("button, input, textarea")) {
+              control.disabled = true;
+            }
             status("Session over: " + detail + ". Reload to start another.");
             break;
         }
@@ -126,15 +122,10 @@
           return false;
         }
       };
-      element("invite").addEventListener("click", () => {
-        if (request(() => whisper.invite())) {
-          element("invite").disabled = true;
-          status("Creating invite...");
-        }
-      });
-      element("submit").addEventListener("click", () => {
-        if (request(() => whisper.signal(element("incoming").value.trim()))) {
-          status("Connecting...");
+      element("dial").addEventListener("click", () => {
+        if (request(() => whisper.dial(element("incoming").value.trim()))) {
+          element("dial").disabled = true;
+          status("Dialing. The pages connect once the other page dials your contact.");
         }
       });
       element("copy").addEventListener("click", async () => {

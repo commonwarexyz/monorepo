@@ -1,33 +1,44 @@
 //! Connections between pages over WebRTC data channels.
 //!
 //! The two halves of a connection share its JavaScript objects, and tasks hold the halves. The
-//! callbacks the browser invokes and the promises of the steps that negotiate a connection are
-//! not [Send]. They stay in the task that drives the attempt:
+//! callbacks the browser invokes and the promises of the steps that establish a connection are
+//! not [Send]. They stay in the task that drives the endpoint:
 //!
 //! ```text
 //!  tasks (Send)                              driver task (not Send)
 //!  ------------                              ----------------------
 //!  Sink ----+                                Driver
 //!           +--> Arc<Connection> <-- weak -- callbacks for events and messages
-//!  Stream --+      RtcPeerConnection         promise of each negotiation step
+//!  Stream --+      RtcPeerConnection         promise of each step
 //!                  RtcDataChannel
 //!                  Mutex<State>  -- drop --> callbacks released
 //! ```
 //!
 //! Every callback except the one for messages only wakes whoever waits on the connection. That
-//! is the driver while it negotiates, a pending read, or a pending send. Each then reads what
-//! changed from the browser itself.
+//! is the driver until the connection opens, a pending read, or a pending send. Each then reads
+//! what changed from the browser itself.
+//!
+//! # Endpoints
+//!
+//! A browser connects two pages once each has given it a description of its own end and a
+//! description of the other. Every endpoint describes itself with an offer, which depends on
+//! nothing the other page says. Its [Address] holds the parts of that offer the other page
+//! cannot know in advance. A page that dials an address rebuilds from it the answer the
+//! endpoint there would have given to the page's own offer, so neither page waits for the
+//! other to describe itself. Both pages offered, so their addresses decide which endpoint
+//! begins the handshake that secures the connection.
 
-use super::Config;
+use super::{Address, Config};
 use crate::{Error, IoBufs};
 use bytes::{Buf as _, BytesMut};
 use commonware_macros::select;
 use commonware_utils::{Widen, channel::oneshot, sync::Mutex};
 use js_sys::{
-    Array, ArrayBuffer, Uint8Array,
+    Array, ArrayBuffer, Reflect, Uint8Array,
     futures::{JsFuture, spawn_local},
 };
 use std::{
+    cmp::Ordering,
     future::poll_fn,
     mem,
     sync::{Arc, Weak},
@@ -57,7 +68,7 @@ const HIGH_WATERMARK: u32 = 1024 * 1024;
 /// Number of unsent bytes at which a waiting send resumes.
 const LOW_WATERMARK: u32 = 256 * 1024;
 
-/// Outcome of a connection attempt.
+/// Outcome of dialing an address.
 type Connected = Result<(Sink, Stream), Error>;
 
 /// Wakes a task whose waker was taken while holding a lock.
@@ -67,11 +78,10 @@ fn wake(waker: Option<Waker>) {
     }
 }
 
-/// Logs why the browser refused a step of a connection attempt and returns
-/// [Error::ConnectionFailed].
-fn failed(err: JsValue) -> Error {
-    debug!(?err, "connection failed");
-    Error::ConnectionFailed
+/// Logs why the browser refused a step and returns the error its caller reports.
+fn refused(err: JsValue, reported: Error) -> Error {
+    debug!(?err, ?reported, "browser refused");
+    reported
 }
 
 /// Bytes a connection received, and the tasks waiting for it to change.
@@ -114,6 +124,20 @@ impl Connection {
             self.peer.connection_state(),
             RtcPeerConnectionState::Failed | RtcPeerConnectionState::Closed
         )
+    }
+
+    /// Returns whether the handshake that secures the connection failed or the other page
+    /// ended the connection before the data channel opened. Nothing repairs either.
+    fn unsecured(&self) -> bool {
+        // The handshake runs in a transport that `web-sys` does not describe, so its state is
+        // read by name.
+        let state = Reflect::get(&self.peer, &"sctp".into())
+            .and_then(|sctp| Reflect::get(&sctp, &"transport".into()))
+            .and_then(|transport| Reflect::get(&transport, &"state".into()));
+        state
+            .ok()
+            .and_then(|state| state.as_string())
+            .is_some_and(|state| state == "failed" || state == "closed")
     }
 
     /// Closes the data channel and the peer connection.
@@ -302,15 +326,7 @@ impl Driver {
         .await
     }
 
-    /// Applies the other page's description.
-    async fn remote(&self, kind: RtcSdpType, sdp: &str) -> Result<(), JsValue> {
-        let description = RtcSessionDescriptionInit::new(kind);
-        description.set_sdp(sdp);
-        JsFuture::from(self.connection.peer.set_remote_description(&description)).await?;
-        Ok(())
-    }
-
-    /// Creates an offer and applies it as this page's description.
+    /// Creates an offer and applies it as the description of this page's end.
     async fn offer(&self) -> Result<(), JsValue> {
         let peer = &self.connection.peer;
         let offer = JsFuture::from(peer.create_offer()).await?;
@@ -318,17 +334,8 @@ impl Driver {
         Ok(())
     }
 
-    /// Creates the answer to another page's offer and applies it as this page's description.
-    async fn answer(&self, offer: &str) -> Result<(), JsValue> {
-        self.remote(RtcSdpType::Offer, offer).await?;
-        let peer = &self.connection.peer;
-        let answer = JsFuture::from(peer.create_answer()).await?;
-        JsFuture::from(peer.set_local_description(answer.unchecked_ref())).await?;
-        Ok(())
-    }
-
-    /// Returns this page's description once it lists every address the page can be reached at.
-    /// The other page then needs nothing but this description.
+    /// Returns the description of this page's end once it lists every socket the page can be
+    /// reached at.
     async fn described(&self) -> Result<String, JsValue> {
         self.wait(|connection| {
             let gathered = connection.peer.ice_gathering_state() == RtcIceGatheringState::Complete;
@@ -342,18 +349,33 @@ impl Driver {
             .ok_or(JsValue::NULL)
     }
 
+    /// Applies `answer` as the description of the other page's end.
+    async fn answered(&self, answer: &str) -> Result<(), JsValue> {
+        let description = RtcSessionDescriptionInit::new(RtcSdpType::Answer);
+        description.set_sdp(answer);
+        JsFuture::from(self.connection.peer.set_remote_description(&description)).await?;
+        Ok(())
+    }
+
     /// Waits for the data channel to open.
+    ///
+    /// The other page may not have dialed yet. A browser that has given up on an address that
+    /// stayed silent can still connect once the page there reaches it, so the connection
+    /// failing does not end the wait. A closed channel or a failed handshake does.
     async fn opened(&self) -> Result<(), Error> {
-        self.wait(|connection| {
-            if connection.finished() {
-                return Some(Err(Error::ConnectionFailed));
+        self.wait(|connection| match connection.channel.ready_state() {
+            RtcDataChannelState::Open => Some(Ok(())),
+            RtcDataChannelState::Closing | RtcDataChannelState::Closed => {
+                Some(Err(Error::ConnectionFailed))
             }
-            (connection.channel.ready_state() == RtcDataChannelState::Open).then_some(Ok(()))
+            _ => connection
+                .unsecured()
+                .then_some(Err(Error::ConnectionFailed)),
         })
         .await
     }
 
-    /// Reports the outcome of the attempt. If the channel opened, hands the connection to its
+    /// Reports the outcome of the dial. If the channel opened, hands the connection to its
     /// halves and holds the callbacks until both halves are dropped.
     async fn finish(self, opened: Result<(), Error>, connected: oneshot::Sender<Connected>) {
         let Self {
@@ -363,7 +385,7 @@ impl Driver {
             _on_message,
         } = self;
 
-        // A failed attempt has no connection to hand over.
+        // A failed dial has no connection to hand over.
         if let Err(err) = opened {
             let _ = connected.send(Err(err));
             return;
@@ -389,60 +411,66 @@ impl Driver {
     }
 }
 
-/// What a connection attempt starts from.
-enum Role {
-    /// Offers a connection, then waits for the answer on this channel.
-    Offer(oneshot::Receiver<String>),
-    /// Answers this offer.
-    Answer(String),
-}
-
-/// Drives a connection attempt until it fails, is abandoned, or connects and has both halves of
-/// the connection dropped.
+/// Drives an endpoint until it fails, is abandoned, or connects and has both halves of the
+/// connection dropped.
 async fn drive(
     config: Config,
-    role: Role,
-    mut described: oneshot::Sender<Result<String, Error>>,
+    mut bound: oneshot::Sender<Result<Address, Error>>,
+    dialed: oneshot::Receiver<Address>,
     mut connected: oneshot::Sender<Connected>,
 ) {
-    // Start the attempt. Each of these steps finishes promptly, and the browser never settles
-    // one whose connection closes under it, so none is abandoned midway.
+    // Describe this page's end. Each of these steps finishes promptly, and the browser never
+    // settles one whose connection closes under it, so none is abandoned midway.
     let started = async {
         let driver = Driver::new(&config)?;
-        match &role {
-            Role::Offer(_) => driver.offer().await?,
-            Role::Answer(offer) => driver.answer(offer).await?,
-        }
+        driver.offer().await?;
         Ok(driver)
     };
     let driver = match started.await {
         Ok(driver) => driver,
         Err(err) => {
-            let _ = described.send(Err(failed(err)));
+            let _ = bound.send(Err(refused(err, Error::BindFailed)));
             return;
         }
     };
 
-    // Describe this page, unless the caller stops waiting for the description.
+    // Learn where the endpoint can be reached, unless the caller stops waiting for it.
     let description = select! {
-        _ = described.closed() => return,
-        description = driver.described() => description.map_err(failed),
+        _ = bound.closed() => return,
+        description = driver.described() => description,
     };
-    let undescribed = description.is_err();
-    if described.send(description).is_err() || undescribed {
+    let address = description
+        .map_err(|err| refused(err, Error::BindFailed))
+        .and_then(|description| Address::read(&description).ok_or(Error::BindFailed));
+    let (local, section) = match address {
+        Ok(address) => address,
+        Err(err) => {
+            let _ = bound.send(Err(err));
+            return;
+        }
+    };
+    if bound.send(Ok(local.clone())).is_err() {
         return;
     }
 
-    // An offer continues with the other page's answer. The answer's sender is dropped if the
-    // caller abandons the attempt.
-    if let Role::Offer(answered) = role {
-        let Ok(answer) = answered.await else {
-            return;
-        };
-        if let Err(err) = driver.remote(RtcSdpType::Answer, &answer).await {
-            let _ = connected.send(Err(failed(err)));
+    // Wait for the address to dial. Its sender is dropped if the caller abandons the endpoint.
+    let Ok(remote) = dialed.await else {
+        return;
+    };
+
+    // Both pages offered, so their addresses decide which endpoint begins the handshake that
+    // secures the connection. An endpoint cannot dial itself.
+    let active = match remote.cmp(&local) {
+        Ordering::Less => true,
+        Ordering::Greater => false,
+        Ordering::Equal => {
+            let _ = connected.send(Err(Error::ConnectionFailed));
             return;
         }
+    };
+    if let Err(err) = driver.answered(&remote.answer(&section, active)).await {
+        let _ = connected.send(Err(refused(err, Error::ConnectionFailed)));
+        return;
     }
 
     // Wait for the channel to open, unless the caller stops waiting for the connection.
@@ -453,61 +481,48 @@ async fn drive(
     driver.finish(opened, connected).await;
 }
 
-/// Begins a connection for [super::Context::offer].
-pub(super) async fn offer(config: Config) -> Result<(String, Offering), Error> {
-    let (described, description) = oneshot::channel();
-    let (answer, answered) = oneshot::channel();
+/// Opens an endpoint for [super::Context::bind].
+pub(super) async fn bind(config: Config) -> Result<Endpoint, Error> {
+    let (bound, address) = oneshot::channel();
+    let (remote, dialed) = oneshot::channel();
     let (connected, connection) = oneshot::channel();
-    spawn_local(drive(config, Role::Offer(answered), described, connected));
-    let offer = description.await.map_err(|_| Error::ConnectionFailed)??;
-    Ok((offer, Offering { answer, connection }))
+    spawn_local(drive(config, bound, dialed, connected));
+    let address = address.await.map_err(|_| Error::BindFailed)??;
+    Ok(Endpoint {
+        address,
+        remote,
+        connection,
+    })
 }
 
-/// Accepts a connection for [super::Context::answer].
-pub(super) async fn answer(config: Config, offer: String) -> Result<(String, Answering), Error> {
-    let (described, description) = oneshot::channel();
-    let (connected, connection) = oneshot::channel();
-    spawn_local(drive(config, Role::Answer(offer), described, connected));
-    let answer = description.await.map_err(|_| Error::ConnectionFailed)??;
-    Ok((answer, Answering { connection }))
-}
-
-/// A connection begun with [Context::offer](super::Context::offer) that awaits the other
-/// page's answer.
+/// One end of a connection that is yet to be made, opened with
+/// [Context::bind](super::Context::bind).
 ///
-/// Dropping it abandons the connection.
-pub struct Offering {
-    answer: oneshot::Sender<String>,
+/// The page at the other end dials this endpoint's [Address], and this page dials that page's
+/// address with [Endpoint::dial]. Dropping the endpoint closes it.
+pub struct Endpoint {
+    address: Address,
+    remote: oneshot::Sender<Address>,
     connection: oneshot::Receiver<Connected>,
 }
 
-impl Offering {
-    /// Complete the connection with the `answer` the other page returned from
-    /// [Context::answer](super::Context::answer).
-    ///
-    /// Callers must enforce a deadline. Dropping the returned future abandons the connection.
-    pub async fn connect(self, answer: String) -> Result<(Sink, Stream), Error> {
-        self.answer
-            .send(answer)
-            .map_err(|_| Error::ConnectionFailed)?;
-        self.connection.await.map_err(|_| Error::ConnectionFailed)?
+impl Endpoint {
+    /// Returns the address the other page dials to reach this endpoint.
+    pub const fn address(&self) -> &Address {
+        &self.address
     }
-}
 
-/// A connection accepted with [Context::answer](super::Context::answer) that awaits the
-/// other page.
-///
-/// Dropping it abandons the connection.
-pub struct Answering {
-    connection: oneshot::Receiver<Connected>,
-}
-
-impl Answering {
-    /// Complete the connection once the other page has passed this page's answer to
-    /// [Offering::connect].
+    /// Connect to the endpoint at `address`.
     ///
-    /// Callers must enforce a deadline. Dropping the returned future abandons the connection.
-    pub async fn connect(self) -> Result<(Sink, Stream), Error> {
+    /// The pages connect once the page that owns that endpoint has dialed this endpoint's
+    /// address too. Either page may dial first. The dial fails if `address` is this endpoint's
+    /// own, or once the endpoint it reaches proves another certificate than `address` names.
+    ///
+    /// Callers must enforce a deadline. Dropping the returned future closes the endpoint.
+    pub async fn dial(self, address: Address) -> Result<(Sink, Stream), Error> {
+        self.remote
+            .send(address)
+            .map_err(|_| Error::ConnectionFailed)?;
         self.connection.await.map_err(|_| Error::ConnectionFailed)?
     }
 }

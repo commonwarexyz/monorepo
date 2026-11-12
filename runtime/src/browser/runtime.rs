@@ -1,6 +1,6 @@
 use super::{
     timer::Timer,
-    webrtc::{self, Answering, Offering},
+    webrtc::{self, Endpoint},
 };
 use crate::{
     Clock, Error, Execution, Handle, METRICS_PREFIX, Name, child_label, prefixed_name,
@@ -49,10 +49,10 @@ impl Metrics {
 /// Configuration for the `browser` runtime.
 #[derive(Clone, Debug)]
 pub struct Config {
-    /// URLs of the STUN servers a connection asks for its public address, such as
+    /// URLs of the STUN servers an endpoint asks for its public address, such as
     /// `stun:stun.example.com:3478`.
     ///
-    /// Without one, a description lists only the addresses of the device's own network
+    /// Without one, an address lists only the sockets of the device's own network
     /// interfaces. Unless one of those is public, other networks cannot reach the page.
     ///
     /// Defaults to none.
@@ -213,7 +213,7 @@ impl Runner {
 /// Implementation of [crate::Spawner], [crate::Clock], and [crate::Metrics] for the
 /// `browser` runtime.
 ///
-/// [Context::offer] and [Context::answer] connect it to other pages.
+/// [Context::bind] opens the endpoints that connect it to other pages.
 pub struct Context {
     name: String,
     attributes: Vec<(String, String)>,
@@ -227,25 +227,12 @@ impl Context {
         &self.executor.metrics
     }
 
-    /// Begin a connection to another page.
+    /// Open an endpoint that connects this page to one other page.
     ///
-    /// Returns an offer for the other page to pass to [Context::answer], along with the
-    /// pending connection. [Offering::connect] completes it with that page's answer.
-    pub fn offer(
-        &self,
-    ) -> impl Future<Output = Result<(String, Offering), Error>> + Send + 'static + use<> {
-        webrtc::offer(self.executor.cfg.clone())
-    }
-
-    /// Accept a connection another page began with [Context::offer].
-    ///
-    /// Returns an answer for the other page to pass to [Offering::connect], along with the
-    /// pending connection. [Answering::connect] completes it once that page has done so.
-    pub fn answer(
-        &self,
-        offer: String,
-    ) -> impl Future<Output = Result<(String, Answering), Error>> + Send + 'static + use<> {
-        webrtc::answer(self.executor.cfg.clone(), offer)
+    /// The endpoint's [Address](super::Address) tells the other page how to reach this one.
+    /// [Endpoint::dial] connects the pages once this page has the other page's address.
+    pub fn bind(&self) -> impl Future<Output = Result<Endpoint, Error>> + Send + 'static + use<> {
+        webrtc::bind(self.executor.cfg.clone())
     }
 }
 

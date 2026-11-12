@@ -41,23 +41,26 @@
 //!
 //! # Connecting
 //!
-//! Two pages connect by exchanging one description each. A description lists the addresses its
-//! page can be reached at. The application carries each description to the other page however
-//! it likes, such as through a server both pages know or in a string their users pass along.
+//! A page cannot accept a connection from a page it knows nothing about, so two pages connect
+//! by dialing each other. Each binds an [Endpoint] and gives its [Address] to the other. An
+//! address depends on nothing the other page says. The application carries the two addresses
+//! in either order and however it likes, such as through a server both pages know or in a
+//! string their users pass along.
 //!
 //! ```text
 //!  Page A                                                  Page B
 //!    |                                                       |
-//!    |  Context::offer                                       |
-//!    |------------------------ offer ----------------------->|  carried by the application
-//!    |                                       Context::answer |
-//!    |<----------------------- answer -----------------------|  carried by the application
-//!    |  Offering::connect                 Answering::connect |
+//!    |  Context::bind                          Context::bind |
+//!    |---------------------- address A --------------------->|  carried by the application
+//!    |<--------------------- address B ----------------------|  carried by the application
+//!    |  Endpoint::dial(address B)  Endpoint::dial(address A) |
 //!    |                                                       |
 //!    |<============== Sink and Stream to each other ========>|  direct between the browsers
 //! ```
 //!
-//! Without a STUN server, a description lists only the addresses of the device's own network
+//! An endpoint connects to one other endpoint. A page binds one for every page it connects to.
+//!
+//! Without a STUN server, an address lists only the sockets of the device's own network
 //! interfaces. Unless one of those is public, they reach the page only from the same device or
 //! local network. A page behind a NAT learns its public address from a STUN server named in
 //! its [Config]. A STUN server reports the address a request arrived from and carries none of
@@ -66,14 +69,20 @@
 //! The runtime contacts no server unless one is configured. It never relays a connection, so
 //! pages whose networks keep them from reaching each other directly cannot connect.
 //!
-//! A STUN server that does not respond can delay a description by tens of seconds. The other
-//! page may never complete the exchange. No step has a deadline of its own, so callers must put
-//! one on each step. Dropping a step abandons the connection.
+//! Either page may dial first, and the first to dial waits for the other. A browser stops
+//! sending to an address that has not answered for some seconds, and a NAT soon forgets the
+//! path a page opened through it. Pages behind NATs should therefore dial at about the same
+//! time. A dial fails once the endpoint it reached proves another certificate than the address
+//! names.
+//!
+//! A STUN server that does not respond can delay [Context::bind] by tens of seconds, and the
+//! other page may never dial. Neither step has a deadline of its own, so callers must put one
+//! on each. Dropping an endpoint or a pending dial closes the endpoint.
 //!
 //! # Connections
 //!
 //! A connection is an ordered, reliable stream of bytes that the browsers encrypt. Each browser
-//! authenticates the other only by the description its page received. A page that must know who
+//! authenticates the other only by the address its page dialed. A page that must know who
 //! it reached has to authenticate it over the connection.
 //!
 //! WebRTC gives a page no way to slow down a peer that sends faster than the page reads. A
@@ -103,16 +112,16 @@
 //! ```no_run
 //! use commonware_runtime::{IoBuf, Sink as _, Stream as _, browser};
 //!
-//! # async fn exchange(_offer: String) -> String { unimplemented!() }
+//! # async fn exchange(_address: &browser::Address) -> browser::Address { unimplemented!() }
 //! # async fn example() {
 //! browser::Runner::default()
 //!     .start(|context| async move {
-//!         // Describe this page and learn the other page's answer.
-//!         let (offer, offering) = context.offer().await.unwrap();
-//!         let answer = exchange(offer).await;
+//!         // Give the other page this page's address and learn its address.
+//!         let endpoint = context.bind().await.unwrap();
+//!         let address = exchange(endpoint.address()).await;
 //!
-//!         // Connect and greet the other page.
-//!         let (mut sink, mut stream) = offering.connect(answer).await.unwrap();
+//!         // Dial the other page, which dials this one, and greet it.
+//!         let (mut sink, mut stream) = endpoint.dial(address).await.unwrap();
 //!         sink.send(IoBuf::from(b"hello")).await.unwrap();
 //!         let _reply = stream.recv(5).await.unwrap();
 //!     })
@@ -123,8 +132,10 @@
 #[cfg(target_feature = "atomics")]
 compile_error!("the browser runtime runs on one thread and cannot be built with atomics");
 
+mod address;
+pub use address::{Address, InvalidAddress};
 mod runtime;
 pub use runtime::*;
 mod timer;
 mod webrtc;
-pub use webrtc::{Answering, Offering, Sink, Stream};
+pub use webrtc::{Endpoint, Sink, Stream};

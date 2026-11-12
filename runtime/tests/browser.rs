@@ -5,7 +5,7 @@
 use commonware_macros::select;
 use commonware_runtime::{
     Clock, Error, IoBuf, IoBufs, Metrics, Sink as _, Spawner, Stream as _, Supervisor,
-    browser::{Config, Context, Runner, Sink, Stream},
+    browser::{Address, Config, Context, Runner, Sink, Stream},
 };
 use commonware_utils::{channel::oneshot, sync::Mutex};
 use futures::{FutureExt as _, future::pending, poll};
@@ -18,27 +18,28 @@ use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
 
 wasm_bindgen_test_configure!(run_in_browser);
 
-/// Longest a connection attempt between two contexts of one page may take.
+/// Longest two contexts of one page may take to connect.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Both halves of one side of a connection.
 type Halves = (Sink, Stream);
 
-/// Connects two contexts, returning the halves of the offering side then the answering side.
-async fn connect(offerer: &Context, answerer: &Context) -> (Halves, Halves) {
+/// Connects two contexts, returning the halves of the first one's side then the second's.
+async fn connect(first: &Context, second: &Context) -> (Halves, Halves) {
     let attempt = {
-        let (offer, answer) = (offerer.offer(), answerer.child("answer"));
+        let (a, b) = (first.bind(), second.bind());
         async move {
-            let (offer, offering) = offer.await.expect("offer must succeed");
-            let (answer, answering) = answer.answer(offer).await.expect("answer must succeed");
-            let (offered, answered) = futures::join!(offering.connect(answer), answering.connect());
+            let (a, b) = futures::join!(a, b);
+            let (a, b) = (a.expect("first must bind"), b.expect("second must bind"));
+            let (a_address, b_address) = (a.address().clone(), b.address().clone());
+            let (a, b) = futures::join!(a.dial(b_address), b.dial(a_address));
             (
-                offered.expect("offering side must connect"),
-                answered.expect("answering side must connect"),
+                a.expect("first must connect"),
+                b.expect("second must connect"),
             )
         }
     };
-    offerer
+    first
         .timeout(CONNECT_TIMEOUT, attempt)
         .await
         .expect("pages must connect before the deadline")
@@ -520,7 +521,7 @@ async fn test_receive_buffer_bounds_unread_bytes() {
     const BUFFER: usize = 64 * 1024;
     const LEN: usize = 1024 * 1024;
 
-    // Only the answering side has a small buffer.
+    // Only the second page has a small buffer.
     Runner::default()
         .start(|a| async move {
             Runner::new(Config::new().with_receive_buffer_size(BUFFER))
@@ -574,8 +575,8 @@ async fn test_dropped_stream_discards_received_bytes() {
         .start(|a| async move {
             Runner::new(Config::new().with_receive_buffer_size(BUFFER))
                 .start(|b| async move {
-                    // Nothing reads what the offering side sends, yet the connection stays
-                    // open past the buffer.
+                    // Nothing reads what the first page sends, yet the connection stays open
+                    // past the buffer.
                     let ((mut a_sink, mut a_stream), (mut b_sink, b_stream)) =
                         connect(&a, &b).await;
                     drop(b_stream);
@@ -591,40 +592,261 @@ async fn test_dropped_stream_discards_received_bytes() {
 }
 
 #[wasm_bindgen_test]
-async fn test_invalid_descriptions_fail() {
+async fn test_address_survives_being_written() {
     Runner::default()
         .start(|context| async move {
-            // A step given a malformed description fails.
+            let endpoint = context.bind().await.unwrap();
+            let address = endpoint.address();
+            assert_eq!(address.to_string().parse::<Address>().unwrap(), *address);
+
+            // Every endpoint has an address of its own.
+            let other = context.bind().await.unwrap();
+            assert_ne!(other.address(), address);
+        })
+        .await;
+}
+
+#[wasm_bindgen_test]
+fn test_address_lists_every_kind_of_socket() {
+    let endpoint = format!("{}:abcd:{}", "0f".repeat(32), "A".repeat(22));
+    for sockets in [
+        "203.0.113.7:51413".to_string(),
+        "[2001:db8::7]:51413".to_string(),
+        "4f1c0a8e-6a52-4b1e-9d0c-3c5a1b2e7f90.local:51413".to_string(),
+        format!(
+            "203.0.113.7:1,[2001:db8::7]:65535,{}.local:9",
+            "a".repeat(63)
+        ),
+        ["203.0.113.7:51413"; 16].join(","),
+    ] {
+        let address = format!("{endpoint},{sockets}");
+        assert_eq!(address.parse::<Address>().unwrap().to_string(), address);
+    }
+
+    // The longest address parses: the longest username and password, and sixteen sockets of
+    // the greatest length.
+    let socket = format!("{}.local:65535", "a".repeat(63));
+    let address = format!(
+        "{}:{}:{},{}",
+        "0f".repeat(32),
+        "a+/9".repeat(64),
+        "A".repeat(256),
+        [socket.as_str(); 16].join(",")
+    );
+    assert_eq!(address.len(), Address::MAX_SIZE);
+    assert_eq!(address.parse::<Address>().unwrap().to_string(), address);
+}
+
+#[wasm_bindgen_test]
+fn test_malformed_addresses_are_refused() {
+    let fingerprint = "0f".repeat(32);
+    let password = "A".repeat(22);
+    let endpoint = format!("{fingerprint}:abcd:{password}");
+    let socket = "203.0.113.7:51413";
+    let malformed = [
+        String::new(),
+        "not an address".into(),
+        // An address lists between one and sixteen sockets.
+        endpoint.clone(),
+        format!("{endpoint},"),
+        format!("{endpoint},{}", [socket; 17].join(",")),
+        // The fingerprint is 64 hexadecimal characters.
+        format!("{}:abcd:{password},{socket}", "0f".repeat(31)),
+        format!("{}:abcd:{password},{socket}", "0f".repeat(33)),
+        format!("{}:abcd:{password},{socket}", "0g".repeat(32)),
+        format!("{}:abcd:{password},{socket}", "0F".repeat(32)),
+        format!("0x{}:abcd:{password},{socket}", "0f".repeat(31)),
+        format!("0x{fingerprint}:abcd:{password},{socket}"),
+        format!(" {fingerprint}:abcd:{password},{socket}"),
+        // The username and password have bounded lengths and hold no character that could
+        // begin another line of a description.
+        format!("{fingerprint}:abc:{password},{socket}"),
+        format!("{fingerprint}:{}:{password},{socket}", "a".repeat(257)),
+        format!("{fingerprint}:abcd:{},{socket}", "A".repeat(21)),
+        format!("{fingerprint}:abcd:{},{socket}", "A".repeat(257)),
+        format!("{fingerprint}:ab d:{password},{socket}"),
+        format!("{fingerprint}:abc\u{e9}:{password},{socket}"),
+        format!("{fingerprint}:abcd\r\na=ice-lite:{password},{socket}"),
+        format!("{fingerprint}:abcd:{password} ,{socket}"),
+        format!("{fingerprint}:abcd:{password}\r\na=ice-lite,{socket}"),
+        format!("{fingerprint}:abcd:{password}:more,{socket}"),
+        format!("{fingerprint}:abcd,{socket}"),
+        // A socket is a port at an IP address or at a name announced on the local network.
+        format!("{endpoint},203.0.113.7"),
+        format!("{endpoint},203.0.113.7:0"),
+        format!("{endpoint},203.0.113.7:65536"),
+        format!("{endpoint},example.com:51413"),
+        format!("{endpoint},.local:51413"),
+        format!("{endpoint},a.local:0"),
+        format!("{endpoint},{}.local:51413", "a".repeat(64)),
+        format!("{endpoint},a b.local:51413"),
+        format!("{endpoint},a.local:51413\r\na=ice-lite"),
+        format!("{endpoint},{socket},"),
+        // An address has one spelling.
+        format!("{endpoint},203.0.113.7:051413"),
+        format!("{endpoint},203.0.113.7:+51413"),
+        format!("{endpoint},a.local:051413"),
+        format!("{endpoint},[203.0.113.7]:51413"),
+        format!("{endpoint},2001:db8::7:51413"),
+        format!("{endpoint},[2001:DB8::7]:51413"),
+        format!("{endpoint},[2001:db8:0:0:0:0:0:7]:51413"),
+        format!("{endpoint},[fe80::7%4]:51413"),
+        format!("{endpoint},[a.local]:51413"),
+    ];
+    for address in malformed {
+        assert!(address.parse::<Address>().is_err(), "{address:?}");
+    }
+}
+
+#[wasm_bindgen_test]
+async fn test_endpoint_cannot_dial_itself() {
+    Runner::default()
+        .start(|context| async move {
+            let endpoint = context.bind().await.unwrap();
+            let address = endpoint.address().clone();
             assert!(matches!(
-                context.answer("not an offer".into()).await,
-                Err(Error::ConnectionFailed)
-            ));
-            let (_, offering) = context.offer().await.unwrap();
-            assert!(matches!(
-                offering.connect("not an answer".into()).await,
-                Err(Error::ConnectionFailed)
+                context
+                    .timeout(CONNECT_TIMEOUT, endpoint.dial(address))
+                    .await,
+                Ok(Err(Error::ConnectionFailed))
             ));
         })
         .await;
 }
 
 #[wasm_bindgen_test]
-async fn test_abandoned_attempts_do_not_block_others() {
+async fn test_first_dial_waits_for_second() {
     Runner::default()
         .start(|context| async move {
-            // Abandon an offer, an unpolled offer, an answer, and a pending connection.
-            let (offer, offering) = context.offer().await.unwrap();
-            drop(context.offer());
-            let (_, answering) = context.answer(offer).await.unwrap();
+            let a = context.bind().await.unwrap();
+            let b = context.bind().await.unwrap();
+            let (a_address, b_address) = (a.address().clone(), b.address().clone());
+
+            // The first page to dial keeps waiting while the second has not dialed.
+            let mut first = pin!(a.dial(b_address));
+            select! {
+                _ = context.sleep(Duration::from_millis(500)) => {},
+                _ = &mut first => panic!("a dial must not complete alone"),
+            }
+
+            // Both connect once the second page dials.
+            let both = async { futures::join!(first, b.dial(a_address)) };
+            let (first, second) = select! {
+                _ = context.sleep(CONNECT_TIMEOUT) => panic!("pages must connect"),
+                both = both => both,
+            };
+            let ((mut a_sink, _a_stream), (_b_sink, mut b_stream)) =
+                (first.unwrap(), second.unwrap());
+            a_sink.send(IoBuf::from(b"ok")).await.unwrap();
+            assert_eq!(b_stream.recv(2).await.unwrap().coalesce(), b"ok");
+        })
+        .await;
+}
+
+#[wasm_bindgen_test]
+async fn test_first_dial_outlasts_silent_address() {
+    // How long the first page dials alone. A browser gives up on an address that has stayed
+    // silent for less than this.
+    const SILENCE: Duration = Duration::from_secs(17);
+
+    Runner::default()
+        .start(|context| async move {
+            let a = context.bind().await.unwrap();
+            let b = context.bind().await.unwrap();
+            let a_address = a.address().clone();
+
+            // Nothing answers at the only socket the first page is given for the second, as
+            // when a NAT drops whatever arrives before the page behind it has dialed. The
+            // port is one a browser sends to: it ignores sockets at low ports.
+            let b_address = b.address().to_string();
+            let (b_endpoint, _) = b_address.split_once(',').unwrap();
+            let silent = format!("{b_endpoint},192.0.2.1:50000").parse().unwrap();
+            let mut first = pin!(a.dial(silent));
+            select! {
+                _ = context.sleep(SILENCE) => {},
+                _ = &mut first => panic!("a dial must not complete alone"),
+            }
+
+            // The second page reaches the first once it dials, and both connect.
+            let both = async { futures::join!(first, b.dial(a_address)) };
+            let (first, second) = select! {
+                _ = context.sleep(CONNECT_TIMEOUT) => panic!("pages must connect"),
+                both = both => both,
+            };
+            let ((mut a_sink, _a_stream), (_b_sink, mut b_stream)) =
+                (first.unwrap(), second.unwrap());
+            a_sink.send(IoBuf::from(b"ok")).await.unwrap();
+            assert_eq!(b_stream.recv(2).await.unwrap().coalesce(), b"ok");
+        })
+        .await;
+}
+
+#[wasm_bindgen_test]
+async fn test_dial_fails_when_certificate_differs() {
+    Runner::default()
+        .start(|context| async move {
+            let a = context.bind().await.unwrap();
+            let b = context.bind().await.unwrap();
+            let a_address = a.address().clone();
+
+            // The first page dials the second at an address whose fingerprint ends in another
+            // character, which the certificate of the second page does not match.
+            let b_address = b.address().to_string();
+            let (fingerprint, rest) = b_address.split_at(64);
+            let last = if fingerprint.ends_with('0') { '1' } else { '0' };
+            let forged = format!("{}{last}{rest}", &fingerprint[..63]);
+
+            // The browsers reach each other and then refuse to connect.
+            let (first, second) = futures::join!(
+                context.timeout(CONNECT_TIMEOUT, a.dial(forged.parse().unwrap())),
+                context.timeout(CONNECT_TIMEOUT, b.dial(a_address)),
+            );
+            assert!(matches!(first, Ok(Err(Error::ConnectionFailed))));
+            assert!(matches!(second, Ok(Err(Error::ConnectionFailed))));
+        })
+        .await;
+}
+
+#[wasm_bindgen_test]
+async fn test_endpoint_connects_only_to_address_it_dialed() {
+    Runner::default()
+        .start(|context| async move {
+            let a = context.bind().await.unwrap();
+            let b = context.bind().await.unwrap();
+            let c = context.bind().await.unwrap();
+
+            // The second page dials the first, but the first dials a third page that never
+            // dials. Neither dial connects.
+            let (a_address, c_address) = (a.address().clone(), c.address().clone());
+            let wait = Duration::from_secs(2);
+            let (first, second) = futures::join!(
+                context.timeout(wait, a.dial(c_address)),
+                context.timeout(wait, b.dial(a_address)),
+            );
+            assert!(!matches!(first, Ok(Ok(_))));
+            assert!(!matches!(second, Ok(Ok(_))));
+        })
+        .await;
+}
+
+#[wasm_bindgen_test]
+async fn test_abandoned_endpoints_do_not_block_others() {
+    Runner::default()
+        .start(|context| async move {
+            // Abandon an endpoint, an unpolled bind, and a pending dial.
+            let abandoned = context.bind().await.unwrap();
+            let address = abandoned.address().clone();
+            drop(abandoned);
+            drop(context.bind());
+            let pending = context.bind().await.unwrap();
             assert!(matches!(
                 context
-                    .timeout(Duration::from_millis(50), answering.connect())
+                    .timeout(Duration::from_millis(50), pending.dial(address))
                     .await,
                 Err(Error::Timeout)
             ));
-            drop(offering);
 
-            // A new attempt still connects.
+            // New endpoints still connect.
             let ((mut a_sink, _a_stream), (_b_sink, mut b_stream)) =
                 connect(&context, &context).await;
             a_sink.send(IoBuf::from(b"ok")).await.unwrap();

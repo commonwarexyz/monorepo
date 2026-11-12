@@ -155,6 +155,8 @@ test-browser *args:
     set -euo pipefail
     export CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner
     export WASM_BINDGEN_TEST_WEBDRIVER_JSON="{{ justfile_directory() }}/.github/webdriver.json"
+    # Seconds each test binary may take. Some tests wait for the browser to give up on a peer.
+    export WASM_BINDGEN_TEST_TIMEOUT=120
     cargo test --target wasm32-unknown-unknown -p commonware-runtime --features browser --test browser "$@"
     cargo test --target wasm32-unknown-unknown -p commonware-whisper --test browser "$@"
 
