@@ -4,6 +4,7 @@ env_nightly_version := env("NIGHTLY_VERSION", "nightly")
 nightly_version := if env_nightly_version != "" { "+" + env_nightly_version } else { "" }
 clippy_version := "1.100.0"
 rustfmt_version := "nightly-2026-11-12"
+dylint_version := `sed -n 's/^channel = "\(.*\)"/\1/p' .github/dylints/rust-toolchain`
 rustfmt := env("RUSTFMT", "rustfmt")
 partition := "1/1"
 
@@ -196,8 +197,12 @@ cooldown:
 # Run custom Dylint lints
 #
 # Enables `commonware-utils/analysis`, which a benchmark requires, so that `benchmark_allocator` checks it.
-dylint:
-    cargo {{ nightly_version }} dylint --all --workspace -- --all-targets --features commonware-utils/analysis
+dylint: install-dylint-toolchain
+    cargo +{{ dylint_version }} dylint --all --workspace -- --all-targets --features commonware-utils/analysis
+
+# Install the compiler and components pinned for the custom lints
+install-dylint-toolchain:
+    rustup toolchain install {{ dylint_version }} --profile minimal --component rustc-dev --component llvm-tools-preview
 
 # Run all fuzz tests in a given directory.
 #
