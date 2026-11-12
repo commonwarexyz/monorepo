@@ -1,5 +1,7 @@
 //! Different variants of the BLS signature scheme.
 
+#[stability(ALPHA)]
+use super::group::FixedBase;
 use super::{
     Error,
     group::{
@@ -14,8 +16,9 @@ use bytes::BufMut;
 use commonware_codec::{
     Buf, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
 };
+use commonware_macros::stability;
 use commonware_math::algebra::{Additive, CryptoGroup, HashToGroup, Space};
-use commonware_parallel::Strategy;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::Participant;
 use core::{
     fmt::{Debug, Formatter},
@@ -43,6 +46,10 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
         + Hash
         + Copy;
 
+    /// Precomputed multiples of fixed public keys, built by [`Self::precompute_publics`].
+    #[stability(ALPHA)]
+    type PublicTable: Send + Sync;
+
     /// The domain separator tag (DST) for a proof of possession.
     const PROOF_OF_POSSESSION: DST;
 
@@ -67,8 +74,42 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
         strategy: &impl Strategy,
     ) -> Result<(), Error>;
 
+    /// Verifies `signature` against pairings of corresponding public keys and message hashes.
+    ///
+    /// Empty inputs, inputs with different lengths, and identity signatures are invalid.
+    #[stability(ALPHA)]
+    fn verify_pairing_product(
+        publics: &[Self::Public],
+        hms: &[Self::Signature],
+        signature: &Self::Signature,
+        strategy: &impl Strategy,
+    ) -> Result<(), Error>;
+
     /// Compute the pairing `e(G1, G2) -> GT`.
     fn pairing(public: &Self::Public, signature: &Self::Signature) -> GT;
+
+    /// Precomputes a row of `2^(wbits - 1)` multiples for each of `publics`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `wbits` is outside `2..=MAX_FIXED_BASE_WBITS`, any key is the identity, or the
+    /// table size overflows `usize`.
+    #[stability(ALPHA)]
+    fn precompute_publics(publics: &[Self::Public], wbits: usize) -> Self::PublicTable;
+
+    /// Returns `sum scalar * publics[index]` over `entries`, for the `publics` a table was
+    /// precomputed from.
+    ///
+    /// # Warning
+    ///
+    /// This function may be variable time in the scalars: use it only with public scalars, such as
+    /// batch-verification weights.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an index is out of range.
+    #[stability(ALPHA)]
+    fn mul_public_table(table: &Self::PublicTable, entries: &[(usize, Scalar)]) -> Self::Public;
 }
 
 /// A [Variant] with a public key of type [G1] and a signature of type [G2].
@@ -78,6 +119,9 @@ pub struct MinPk {}
 impl Variant for MinPk {
     type Public = G1;
     type Signature = G2;
+
+    #[stability(ALPHA)]
+    type PublicTable = <G1 as FixedBase>::Table;
 
     const PROOF_OF_POSSESSION: DST = G2_PROOF_OF_POSSESSION;
     const MESSAGE: DST = G2_MESSAGE;
@@ -94,7 +138,13 @@ impl Variant for MinPk {
         if signature == &Self::Signature::zero() {
             return Err(Error::InvalidSignature);
         }
-        if !G2::multi_pairing_check(&[*hm], &[*public], signature, &-G1::generator()) {
+        if !G2::multi_pairing_check(
+            &[*hm],
+            &[*public],
+            signature,
+            &-G1::generator(),
+            &Sequential,
+        ) {
             return Err(Error::InvalidSignature);
         }
         Ok(())
@@ -150,7 +200,24 @@ impl Variant for MinPk {
             || G2::msm(signatures, &scalars, par),
             || par.map_collect_vec(publics.iter().zip(scalars.iter()), |(&pk, s)| pk * s),
         );
-        if !G2::multi_pairing_check(hms, &scaled_pks, &s_agg, &-G1::generator()) {
+        if !G2::multi_pairing_check(hms, &scaled_pks, &s_agg, &-G1::generator(), par) {
+            return Err(Error::InvalidSignature);
+        }
+        Ok(())
+    }
+
+    #[stability(ALPHA)]
+    fn verify_pairing_product(
+        publics: &[Self::Public],
+        hms: &[Self::Signature],
+        signature: &Self::Signature,
+        strategy: &impl Strategy,
+    ) -> Result<(), Error> {
+        if publics.is_empty()
+            || publics.len() != hms.len()
+            || signature == &Self::Signature::zero()
+            || !G2::multi_pairing_check(hms, publics, signature, &-G1::generator(), strategy)
+        {
             return Err(Error::InvalidSignature);
         }
         Ok(())
@@ -171,6 +238,16 @@ impl Variant for MinPk {
 
         GT::from_blst_fp12(result)
     }
+
+    #[stability(ALPHA)]
+    fn precompute_publics(publics: &[Self::Public], wbits: usize) -> Self::PublicTable {
+        G1::precompute(publics, wbits)
+    }
+
+    #[stability(ALPHA)]
+    fn mul_public_table(table: &Self::PublicTable, entries: &[(usize, Scalar)]) -> Self::Public {
+        G1::mul_table(table, entries)
+    }
 }
 
 impl Debug for MinPk {
@@ -187,6 +264,9 @@ impl Variant for MinSig {
     type Public = G2;
     type Signature = G1;
 
+    #[stability(ALPHA)]
+    type PublicTable = <G2 as FixedBase>::Table;
+
     const PROOF_OF_POSSESSION: DST = G1_PROOF_OF_POSSESSION;
     const MESSAGE: DST = G1_MESSAGE;
 
@@ -202,7 +282,13 @@ impl Variant for MinSig {
         if signature == &Self::Signature::zero() {
             return Err(Error::InvalidSignature);
         }
-        if !G1::multi_pairing_check(&[*hm], &[*public], signature, &-G2::generator()) {
+        if !G1::multi_pairing_check(
+            &[*hm],
+            &[*public],
+            signature,
+            &-G2::generator(),
+            &Sequential,
+        ) {
             return Err(Error::InvalidSignature);
         }
         Ok(())
@@ -258,7 +344,24 @@ impl Variant for MinSig {
             || G1::msm(signatures, &scalars, par),
             || par.map_collect_vec(hms.iter().zip(scalars.iter()), |(&hm, s)| hm * s),
         );
-        if !G1::multi_pairing_check(&scaled_hms, publics, &s_agg, &-G2::generator()) {
+        if !G1::multi_pairing_check(&scaled_hms, publics, &s_agg, &-G2::generator(), par) {
+            return Err(Error::InvalidSignature);
+        }
+        Ok(())
+    }
+
+    #[stability(ALPHA)]
+    fn verify_pairing_product(
+        publics: &[Self::Public],
+        hms: &[Self::Signature],
+        signature: &Self::Signature,
+        strategy: &impl Strategy,
+    ) -> Result<(), Error> {
+        if publics.is_empty()
+            || publics.len() != hms.len()
+            || signature == &Self::Signature::zero()
+            || !G1::multi_pairing_check(hms, publics, signature, &-G2::generator(), strategy)
+        {
             return Err(Error::InvalidSignature);
         }
         Ok(())
@@ -278,6 +381,16 @@ impl Variant for MinSig {
         }
 
         GT::from_blst_fp12(result)
+    }
+
+    #[stability(ALPHA)]
+    fn precompute_publics(publics: &[Self::Public], wbits: usize) -> Self::PublicTable {
+        G2::precompute(publics, wbits)
+    }
+
+    #[stability(ALPHA)]
+    fn mul_public_table(table: &Self::PublicTable, entries: &[(usize, Scalar)]) -> Self::Public {
+        G2::mul_table(table, entries)
     }
 }
 
@@ -418,6 +531,28 @@ mod tests {
     fn test_batch_verify_rejects_identity_entry() {
         batch_verify_rejects_identity_entry::<MinPk>();
         batch_verify_rejects_identity_entry::<MinSig>();
+    }
+
+    fn verify_pairing_product_rejects_identity_signature<V: Variant>() {
+        // Opposite keys on one message cancel, so only the identity signature completes the
+        // product.
+        let (_, public) = ops::keypair::<_, V>(&mut test_rng());
+        let hm = ops::hash_with_namespace::<V>(V::MESSAGE, b"test", b"message");
+        assert!(matches!(
+            V::verify_pairing_product(
+                &[public, -public],
+                &[hm, hm],
+                &V::Signature::zero(),
+                &Sequential,
+            ),
+            Err(Error::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn test_verify_pairing_product_rejects_identity_signature() {
+        verify_pairing_product_rejects_identity_signature::<MinPk>();
+        verify_pairing_product_rejects_identity_signature::<MinSig>();
     }
 
     fn batch_verify_rejects_malleability<V: Variant>() {

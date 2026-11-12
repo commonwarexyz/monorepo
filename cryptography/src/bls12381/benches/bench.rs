@@ -4,6 +4,7 @@ use criterion::criterion_main;
 mod aggregate_verify_same_message;
 mod aggregate_verify_same_signer;
 mod batch_to_affine;
+mod batch_verify_claims;
 mod batch_verify_same_signer;
 mod combine_public_keys;
 mod combine_signatures;
@@ -12,6 +13,7 @@ mod evaluate_point;
 mod hash_to_curve;
 mod msm;
 mod multisig_optimistic_assemble;
+mod sas_verify_claims;
 mod scheme_batch_verify_same_message;
 mod scheme_batch_verify_same_signer;
 mod signature_generation;
@@ -29,6 +31,7 @@ mod utils;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 criterion_main!(
+    sas_verify_claims::benches,
     batch_to_affine::benches,
     dkg::golden::benches,
     dkg::feldman_desmedt::benches,
@@ -39,6 +42,7 @@ criterion_main!(
     combine_signatures::benches,
     signature_generation::benches,
     signature_verification::benches,
+    batch_verify_claims::benches,
     batch_verify_same_signer::benches,
     aggregate_verify_same_message::benches,
     aggregate_verify_same_signer::benches,

@@ -14,6 +14,10 @@ hash = "f631238a016fb44fd2dee9eeb5bd20fc5052f33434810599b8ba6535e2ad8e97"
 n_cases = 65536
 hash = "ad245f64a57c96036599647eaf509937173e9de01503a9e6494f29571191ade1"
 
+["commonware_cryptography::bls12381::certificate::sas::tests::conformance::CodecConformance<Certificate<MinSig>>"]
+n_cases = 65536
+hash = "ad245f64a57c96036599647eaf509937173e9de01503a9e6494f29571191ade1"
+
 ["commonware_cryptography::bls12381::certificate::threshold::tests::conformance::CodecConformance<Certificate<MinSig>>"]
 n_cases = 65536
 hash = "ba2d888e6d1050e6a361aa79430c1bb03d90eb8e74b9715b1d7d01c35a495e1d"
@@ -97,6 +101,22 @@ hash = "683a309d5fefb8e0ab6778c22e66bd43e139c5f56204df932fd81052792adf4b"
 ["commonware_cryptography::bls12381::primitives::ops::aggregate::tests::conformance::CodecConformance<Signature<MinSig>>"]
 n_cases = 65536
 hash = "ba2d888e6d1050e6a361aa79430c1bb03d90eb8e74b9715b1d7d01c35a495e1d"
+
+["commonware_cryptography::bls12381::primitives::ops::sas::tests::conformance::CodecConformance<PrivateKey>"]
+n_cases = 65536
+hash = "2e208b55e58eb67da807beff6c09734c3316a3b5b2fb04b3b2f38ac18687ff72"
+
+["commonware_cryptography::bls12381::primitives::ops::sas::tests::conformance::CodecConformance<ProofOfKnowledge>"]
+n_cases = 65536
+hash = "0edf970520d1e0efac2de61bb67829930820b1be723dffb3c96a7e0c1cdf3579"
+
+["commonware_cryptography::bls12381::primitives::ops::sas::tests::conformance::CodecConformance<PublicKey<MinPk>>"]
+n_cases = 1024
+hash = "a3efb3e23c98b79569e9c6bf96c3767342cc4f9970b150cd7b04fb8b2e0e4aa7"
+
+["commonware_cryptography::bls12381::primitives::ops::sas::tests::conformance::CodecConformance<PublicKey<MinSig>>"]
+n_cases = 1024
+hash = "7baff886d019b02c14d29ec56eea17570fcf9f4c280f449cd91bb7bb9fcf6b30"
 
 ["commonware_cryptography::bls12381::primitives::variant::tests::conformance::CodecConformance<PartialSignature<MinPk>>"]
 n_cases = 65536
