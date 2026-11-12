@@ -2,6 +2,9 @@ set positional-arguments := true
 
 env_nightly_version := env("NIGHTLY_VERSION", "nightly")
 nightly_version := if env_nightly_version != "" { "+" + env_nightly_version } else { "" }
+# Pin lint and formatting rules independently of the compiler used for builds and tests.
+clippy_version := "1.100.0"
+rustfmt_version := "nightly-2026-11-12"
 rustfmt := env("RUSTFMT", "rustfmt")
 partition := "1/1"
 
@@ -22,9 +25,14 @@ build *args='':
 # Runs pre-flight lints + tests before making a pull-request
 pre-pr: lint test-docs test
 
+# Install the pinned tools used by CI and local lint checks
+install-lint-toolchains:
+    rustup toolchain install {{ clippy_version }} --profile minimal --component clippy
+    rustup toolchain install {{ rustfmt_version }} --profile minimal --component rustfmt
+
 # Fixes the formatting of the workspace
 fix-fmt *args='':
-    find . -path ./target -prune -o -name '*.rs' -type f -print0 | xargs -0 {{ rustfmt }} {{ nightly_version }} --edition 2024 {{ args }}
+    find . -path ./target -prune -o -name '*.rs' -type f -print0 | xargs -0 {{ rustfmt }} +{{ rustfmt_version }} --edition 2024 {{ args }}
 
 # Fixes the formatting of the `Cargo.toml` files in the workspace
 fix-toml-fmt:
@@ -40,11 +48,11 @@ check-fmt:
 
 # Run clippy lints
 clippy *args='':
-    cargo clippy --all-targets $@ -- -D warnings
+    cargo +{{ clippy_version }} clippy --all-targets $@ -- -D warnings
 
 # Fix clippy lints
 fix-clippy *args='':
-    cargo clippy --all-targets --fix --allow-dirty $@
+    cargo +{{ clippy_version }} clippy --all-targets --fix --allow-dirty $@
 
 # Runs all lints (fmt, clippy, docs, features, toml, custom, publish order, and stability)
 lint: check-fmt check-toml-fmt clippy check-docs check-features dylint check-publish-order check-stability
