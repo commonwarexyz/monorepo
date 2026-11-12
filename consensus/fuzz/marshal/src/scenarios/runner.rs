@@ -53,7 +53,9 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_p2p::simulated::{Link, Oracle};
-use commonware_runtime::{Clock, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
+use commonware_runtime::{
+    Clock, ReadOptions, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
+};
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::{FuzzRng, NZUsize, probability};
 use futures::future::{join_all, select_all};
@@ -291,7 +293,7 @@ where
                 if nodes[idx].is_none() {
                     continue;
                 }
-                let mut journal = Journal::<_, Artifact<SchemeOf<P>, Sha256Digest>>::init(
+                let mut replay = Journal::<_, Artifact<SchemeOf<P>, Sha256Digest>>::init(
                     context.child("journal_seed").with_attribute("index", idx),
                     JConfig {
                         partition: format!("scenario-{idx}"),
@@ -299,10 +301,18 @@ where
                         codec_config: schemes[idx].certificate_codec_config(),
                         page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                         write_buffer: NZUsize!(1024 * 1024),
+                        replay_buffer: NZUsize!(1024 * 1024),
                     },
+                    ReadOptions::DONT_CACHE,
                 )
                 .await
                 .expect("failed to initialize seeded voter journal");
+                while let Some(artifact) = replay.next().await {
+                    artifact.expect("failed to replay seeded voter journal");
+                }
+                let mut journal = replay
+                    .finish()
+                    .expect("failed to replay seeded voter journal");
                 for notarization in &handoff.engine_journal {
                     let view = notarization.round().view();
                     let artifact = Artifact::Notarization(notarization.clone());
