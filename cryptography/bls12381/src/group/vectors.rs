@@ -114,7 +114,7 @@ pub const G2_MULTIPLES: [([u8; Scalar::BYTES], [[u8; FP2_BYTES]; 2]); 4] = [
     ),
 ];
 
-/// The pairing of the generators.
+/// The pairing of the generators, as the crate computes it: the cube of the optimal ate pairing.
 pub const PAIRING: [u8; FP12_BYTES] = hex!(
     "0f41e58663bf08cf068672cbd01a7ec73baca4d72ca93544deff686bfd6df543d48eaa24afe47e1efde449383b676631"
     "04c581234d086a9902249b64728ffd21a189e87935a954051c7cdba7b3872629a4fafc05066245cb9108f0242d0fe3ef"

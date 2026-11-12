@@ -73,8 +73,10 @@ MODULI_N = (
     1125899906842597,
     1125899906842589,
 )
-# A square root of the lane constant that lets the Montgomery lane product absorb the CRT
-# weights of the first basis, so the reduction needs no quotient correction ("no-k").
+# QR satisfies QR^2 * (-P * 2^52 * (M / q)) = 1 mod q for every modulus q of the first basis, as
+# build() asserts. First-basis residues of integers x and y carry the factor 2^52 * QR, so their
+# product times 2^(-52) is already the CRT digit, modulo q, of the Montgomery quotient
+# -x y / P mod M: the reduction needs no multiplication by CRT weights.
 QR = int(
     "1764464526391023609719698959639504118661371030573300677125606932387184635588659624517358062862068369090674362610896848484"
 )
@@ -301,7 +303,8 @@ def validate_model(tables: Tables) -> None:
         cases.extend(tuple(rng.randrange(maximum + 1) for maximum in maxima) for _ in range(100))
         return cases
 
-    # The no-k reduction lifts the quotient by at most 2 * LANES multiples of M.
+    # The reduction converts the quotient without estimating its multiple of M ("no-k"), which
+    # adds at most 2 * LANES multiples of M.
     reduce_maxima = tuple(2 * modulus for modulus in MODULI_M)
     for values in domain(reduce_maxima):
         lift = check_conversion(
@@ -543,7 +546,8 @@ pub(super) const EXPAND: Conversion = {emit_conversion(tables.expand)};
 /// The conversion of a canonical integer, in {BITS}-bit digits, into the second basis.
 pub(super) const TO_RNS: Conversion = {emit_conversion(tables.to_rns)};
 
-/// Second-basis CRT weights modulo `p`, divided by `M` and scaled by `2^{64 * WORDS}`.
+/// Second-basis CRT weights times `M * 2^(-52)` modulo `N`, which removes the residue scale,
+/// then reduced modulo `p`, divided by `M`, and scaled by `2^{64 * WORDS}`.
 pub(super) const TO_CANONICAL: [[u64; WORDS]; MODULI] = {fmt_matrix(tables.to_canonical, '')};
 
 /// `-N mod p`, scaled like [`TO_CANONICAL`].

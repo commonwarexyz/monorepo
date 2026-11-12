@@ -397,7 +397,8 @@ pub(super) const TO_RNS: Conversion = Conversion {
     ],
 };
 
-/// Second-basis CRT weights modulo `p`, divided by `M` and scaled by `2^384`.
+/// Second-basis CRT weights times `M * 2^(-52)` modulo `N`, which removes the residue scale,
+/// then reduced modulo `p`, divided by `M`, and scaled by `2^384`.
 pub(super) const TO_CANONICAL: [[u64; WORDS]; MODULI] = [
     [
         0xad968922d2ae928f,

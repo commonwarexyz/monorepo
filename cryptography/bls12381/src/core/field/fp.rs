@@ -321,7 +321,7 @@ pub(crate) mod testing {
         Ok(reference::decode(&bytes(u)?))
     }
 
-    /// An emulated backend. Together they cover every lane count and algorithm path that dispatch
+    /// An emulated backend. The variants cover every lane count and algorithm path that dispatch
     /// can select.
     #[derive(Clone, Copy, Debug)]
     pub(crate) enum Backend {
@@ -536,8 +536,8 @@ pub(crate) mod testing {
     /// `bound * p` whose low limbs all hold their largest value.
     ///
     /// The top limb is `bound * t - 1` for the top limb `t` of `p`, so the limbs hold
-    /// `bound * t * 2^shift - 1`, which is below `bound * p` and, since `t` exceeds any bound,
-    /// at least `(bound - 1) * p`.
+    /// `bound * t * 2^(BITS * (N - 1)) - 1`, which is below `bound * p` and, since `t` exceeds
+    /// `bound`, at least `(bound - 1) * p`.
     pub(crate) fn widest<const N: usize, const BITS: u32>(bound: u64) -> Element {
         let mask = (1 << BITS) - 1;
         let top = bound * multiple::<N, BITS>(1)[N - 1] - 1;
