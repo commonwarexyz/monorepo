@@ -28,7 +28,6 @@ zeroize.workspace = true
 
 [dev-dependencies]
 arbitrary = { workspace = true, features = [ "derive" ] }
-blst.workspace = true
 commonware-allocator = { workspace = true, features = [ "mimalloc" ] }
 commonware-codec = { workspace = true, features = [ "arbitrary" ] }
 commonware-conformance.workspace = true

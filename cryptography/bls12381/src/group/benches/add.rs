@@ -1,4 +1,4 @@
-//! Adding two elements, compared with blst.
+//! Adding two elements.
 //!
 //! One addition uses one lane, so this measures latency; [`sum`](super::sum) measures the
 //! throughput of additions.
@@ -11,14 +11,10 @@ use std::hint::black_box;
 fn bench<C: Curve>(c: &mut Criterion) {
     let mut group = c.benchmark_group(module_path!());
     let scalars = scalars(2, 3);
-    let (a, b) = (C::multiple(&scalars[0]), C::multiple(&scalars[1]));
+    let (a, b) = (C::generator() * &scalars[0], C::generator() * &scalars[1]);
     group.throughput(Throughput::Elements(1));
-    group.bench_function(
-        format!("curve={} impl=commonware n=1", C::NAME),
-        |bencher| bencher.iter(|| black_box(black_box(a.0) + black_box(&b.0))),
-    );
-    group.bench_function(format!("curve={} impl=blst n=1", C::NAME), |bencher| {
-        bencher.iter(|| black_box(C::blst_add(black_box(&a.1), black_box(&b.1))))
+    group.bench_function(format!("curve={} n=1", C::NAME), |bencher| {
+        bencher.iter(|| black_box(black_box(a) + black_box(&b)))
     });
     group.finish();
 }

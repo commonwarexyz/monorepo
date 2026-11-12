@@ -1,8 +1,7 @@
 //! Benchmarks of the group operations.
 //!
-//! The benchmarks compare the public API with blst on the same inputs: addition, doubling,
-//! multiplication by a scalar, sums, and multi-scalar multiplications in G1 and G2, and single
-//! and multiple pairings.
+//! The benchmarks measure addition, doubling, multiplication by a scalar, sums, and multi-scalar
+//! multiplications in G1 and G2, and single and multiple pairings.
 
 use commonware_allocator::mimalloc;
 use criterion::criterion_main;
