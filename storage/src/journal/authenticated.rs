@@ -4687,9 +4687,9 @@ mod tests {
     }
 
     /// A bounded open that selects no item empties the journal. An empty Merkle structure needs
-    /// none of the nodes pruning removed, so the open succeeds beside a pruned structure. A cap
-    /// that selects a commit below the structure's pruning boundary still fails and changes
-    /// nothing.
+    /// none of the nodes pruning removed, so the open succeeds beside a structure whose node
+    /// journal has lost its first blob. A cap that selects a commit below the structure's pruning
+    /// boundary still fails and changes nothing.
     #[test_traced]
     fn test_init_at_most_without_match_empties_journal_beside_pruned_merkle() {
         let executor = deterministic::Runner::default();
@@ -4712,24 +4712,28 @@ mod tests {
             for (suffix, max_size) in [("no-match-one", 1), ("no-match-zero", 0)] {
                 // Commit twice to a log that starts at zero, then prune the Merkle structure
                 // above the log's start, as a state sync that starts inside the first log
-                // section does.
+                // section does. The boundary lies past the first blob of the node journal, so
+                // pruning removes that blob.
                 let mut journal =
                     create_empty_journal::<mmr::Family>(context.child("first"), suffix).await;
-                for i in 0..6u8 {
+                for i in 0..10u8 {
                     let op = match i {
-                        1 | 5 => TestOp::<mmr::Family>::Commit(None, Location::new(0)),
+                        1 | 9 => TestOp::<mmr::Family>::Commit(None, Location::new(0)),
                         _ => create_operation::<mmr::Family>(i),
                     };
                     (journal, _) = journal.append(&op).await.unwrap();
                 }
                 journal = journal.sync().await.unwrap();
-                journal.merkle = journal.merkle.prune(Location::new(4)).await.unwrap();
+                journal.merkle = journal.merkle.prune(Location::new(8)).await.unwrap();
                 journal = journal.sync().await.unwrap();
                 let bounds = journal.bounds();
+                let merkle_bounds = journal.merkle.bounds();
                 let root = journal.root(0).unwrap();
                 drop(journal);
 
-                // The first commit ends at two, below the structure's pruning boundary.
+                // The first commit ends at two, below the structure's pruning boundary. The
+                // structure keeps its boundary, and the first leaf is still gone from the node
+                // journal.
                 assert!(matches!(
                     open_at_most(context.child("below_boundary"), suffix, 3).await,
                     Err(Error::Merkle(merkle::Error::ElementPruned(_)))
@@ -4737,7 +4741,16 @@ mod tests {
                 let journal =
                     create_empty_journal::<mmr::Family>(context.child("unchanged"), suffix).await;
                 assert_eq!(journal.bounds(), bounds);
+                assert_eq!(journal.merkle.bounds(), merkle_bounds);
                 assert_eq!(journal.root(0).unwrap(), root);
+                assert!(
+                    journal
+                        .merkle
+                        .get_node(Position::new(0))
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
                 drop(journal);
 
                 // No commit ends at or below the cap, so the journal and the structure are
