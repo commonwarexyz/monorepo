@@ -147,13 +147,13 @@ const fn multiple<const N: usize, const BITS: u32>(k: u64) -> [u64; N] {
     limbs
 }
 
-/// Returns `k * p` in `N` limbs of `BITS` bits, with twice `2^BITS` moved from each limb into
-/// the one below it.
+/// Returns `k * p` in `N` limbs of `BITS` bits, with `2` taken from every limb above the bottom
+/// and `2 * 2^BITS` added to the limb below it.
 ///
 /// Every limb but the top one is then at least twice `2^BITS`, so subtracting a value whose limbs
 /// are at most twice those of a carried value never borrows from them. The top limb is two less
-/// than that of `k * p`, which still covers the top limb of such a value below `(k - 1) * p`:
-/// the two differ by more than `p`, which exceeds three units of the top limb.
+/// than that of `k * p` and still covers the top limb of such a value below `(k - 1) * p`:
+/// `k * p` exceeds that value by more than `p`, which exceeds three units of the top limb.
 const fn bias<const N: usize, const BITS: u32>(k: u64) -> [u64; N] {
     assert!(k >= 1);
     // p exceeds three units of the top limb, whose weight is at least 2^320.
@@ -295,8 +295,8 @@ pub(crate) mod testing {
     /// Bits of the Montgomery radix `R = 2^392` of every positional representation.
     const R_BITS: u32 = 392;
 
-    /// `2^(-392) mod p`: a Montgomery multiplication divides by `2^384`, so dividing one by it
-    /// twice and multiplying by `2^376` leaves `2^(-392)`.
+    /// `2^(-392) mod p`, computed as `mont(mont(1, 1), 2^376)` with
+    /// `mont(a, b) = a * b * 2^(-384) mod p`.
     const R_INVERSE: Element = {
         let half = montgomery::mul(&reference::ONE, &reference::ONE, &MODULUS, reference::INV);
         montgomery::mul(&half, &power_of_two(384 - 8), &MODULUS, reference::INV)
@@ -412,7 +412,7 @@ pub(crate) mod testing {
         }
     }
 
-    /// Returns the lane count of a representation.
+    /// Kernel that returns the lane count of a representation.
     struct Lanes;
 
     impl Kernel for Lanes {
@@ -815,8 +815,8 @@ pub(crate) mod testing {
         })
     }
 
-    /// Checks a formula of `formulas` on distinct lifted elements in every lane against the
-    /// reference.
+    /// Checks a formula of `formulas` on independently drawn lifted elements in every lane against
+    /// the reference.
     fn check_formulas<S: Simd, F: Positional<S>>(
         simd: S,
         formulas: Formulas,

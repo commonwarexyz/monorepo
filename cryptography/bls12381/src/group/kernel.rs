@@ -60,9 +60,8 @@ pub trait Kernel: Sized {
 
     /// Runs the operation on the best available backend.
     fn dispatch(self) -> Self::Output {
-        /// Runs a kernel in the representation chosen for the backend: on x86v4c, residues, except
-        /// for kernels that prefer wide lanes, such as the sums and multiples of many elements of
-        /// G1, whose base field products the 64-bit lanes finish sooner; 32-bit lanes elsewhere.
+        /// Runs a kernel in residues on x86v4c, or in 64-bit lanes when the kernel prefers wide
+        /// lanes, as sums and multiples of many elements of G1 do; elsewhere, in 32-bit lanes.
         struct Run<K>(K);
 
         impl<S: Simd, K: Kernel> Operation<S> for Run<K> {

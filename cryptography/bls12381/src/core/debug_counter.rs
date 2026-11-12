@@ -4,7 +4,7 @@
 //! output bounds of reductions. The counter does not inspect field values or perform reductions.
 //!
 //! With debug assertions disabled, the counter is zero-sized and its operations are no-ops.
-//! Arguments to these operations are still evaluated by the caller.
+//! The caller still evaluates their arguments.
 
 /// A conservative, inclusive upper bound that is checked only in debug builds.
 ///

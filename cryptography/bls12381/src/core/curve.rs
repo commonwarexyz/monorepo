@@ -262,8 +262,8 @@ pub mod fuzz {
             negate: u64,
         },
         /// Checks that the endomorphism maps `s`, the addend `a`, and `s + a` onto the curve,
-        /// moves every point other than the identity, and maps `s + a` to the sum of the
-        /// other two images.
+        /// maps every point other than the identity to neither itself nor its negation, and maps
+        /// `s + a` to the sum of the other two images.
         Endomorphism,
     }
 
@@ -448,7 +448,7 @@ pub mod fuzz {
     }
 
     impl Plan {
-        /// Runs the operation using the remaining input.
+        /// Runs the check on the remaining input.
         pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
             check_any(u, self)
         }

@@ -171,7 +171,7 @@ pub mod fuzz {
                 width: u.int_in_range(2..=WIDEST)?,
                 split: u.arbitrary()?,
             }),
-            // Chunks shorter than the slices split the elements between several.
+            // A chunk shorter than the slice splits the elements between several chunks.
             _ => Some(msm::Method::Pippenger {
                 width: u.int_in_range(2..=WIDEST)?,
                 chunk: NonZeroUsize::new(u.int_in_range(1..=SLICE)?).expect("at least one"),

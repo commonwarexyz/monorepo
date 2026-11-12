@@ -280,8 +280,8 @@ impl<F> Fp12<F> {
             #[cfg_attr(not(debug_assertions), inline(always))]
             |k| {
                 let k = DEGREE[k];
-                // Coefficient k sums a_j b_(k - j), where b_(k - j) for j above k is the twisted
-                // coefficient of w^(k + 6 - j).
+                // Coefficient k sums a_j b_(k - j), where for j above k the factor is
+                // twisted[k + 5 - j] = (1 + i) b_(k + 6 - j).
                 let mut sum = a[0].product(simd, b[k]);
                 unroll::<5>(
                     #[inline(always)]
@@ -341,7 +341,7 @@ impl<F> Fp12<F> {
             #[cfg_attr(not(debug_assertions), inline(always))]
             |k| {
                 // Coefficient k sums a_j a_l over pairs whose degrees add to k, or to k + 6 with
-                // the twisted coefficient t[l - 1] of w^(l + 6) in place of a_l.
+                // t[l - 1] = (1 + i) a_l in place of a_l.
                 match DEGREE[k] {
                     0 => {
                         let sum = acc(simd, a[0].square_product::<K, S>(simd), d[1], t[4]);
@@ -436,7 +436,7 @@ impl<F> Fp12<F> {
         ))
     }
 
-    /// Squares in place an element of the cyclotomic subgroup, where `self^(p^6 + 1) = 1`.
+    /// Squares in place an element of the cyclotomic subgroup, where `self^(p^4 - p^2 + 1) = 1`.
     ///
     /// The result is unspecified outside the subgroup.
     #[cfg_attr(not(debug_assertions), inline(always))]
@@ -700,9 +700,9 @@ fn from_degree<T>([a0, a1, a2, a3, a4, a5]: [Fp2<T>; 6]) -> Fp12<T> {
 /// The degree in `w` of each coefficient in the order of [`from_storage`].
 const DEGREE: [usize; 6] = [0, 2, 4, 1, 3, 5];
 
-/// Returns the coefficients of `w^7, ..., w^11` of an element with the given coefficients of
-/// `1, w, ..., w^5`: those of `w, ..., w^5` times `w^6 = 1 + i`, carried, with the bias `K`
-/// covering their imaginary components.
+/// Returns `(1 + i) a_l` for `l` from `1` to `5`, given the coefficients `a_l` of
+/// `1, w, ..., w^5`: the factor that replaces `a_l` in a product whose degree reaches
+/// `w^6 = 1 + i`. The results are carried, with the bias `K` covering their imaginary components.
 #[inline(always)]
 fn twist<const K: u64, S: Simd, F: Field<S>>(simd: S, a: &[Fp2<F>; 6]) -> [Fp2<F>; 5] {
     let mut twisted = [a[1]; 5];
@@ -976,22 +976,22 @@ pub mod fuzz {
     /// A fuzzing operation on `Fp12` and its subfield `Fp6`.
     #[derive(Clone, Copy, Debug, Arbitrary)]
     pub enum Plan {
-        /// Check that a chain of multiplications, squarings, line multiplications, conjugations,
+        /// Checks that a chain of multiplications, squarings, line multiplications, conjugations,
         /// Frobenius maps, and inversions of elements at their bounds matches the reference after
         /// every step, with inverses checked by their defining property.
         Chain,
-        /// Check that a chain of cyclotomic squarings and conjugations of elements of the
+        /// Checks that a chain of cyclotomic squarings and conjugations of elements of the
         /// cyclotomic subgroup matches the reference after every step.
         CyclotomicChain,
-        /// Check that the products, squares, sparse products, and inverses of `Fp6` match the
+        /// Checks that the products, squares, sparse products, and inverses of `Fp6` match the
         /// reference in the embedding of `Fp6` in `Fp12`.
         Subfield,
-        /// Check that the product of lanes is the reference product of every lane's element.
+        /// Checks that the product of lanes is the reference product of every lane's element.
         ProductOfLanes,
     }
 
     impl Plan {
-        /// Runs the operation using the remaining input.
+        /// Runs the check on the remaining input.
         pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
             match self {
                 Self::Chain => chain(u, false),
@@ -1009,8 +1009,8 @@ pub mod fuzz {
         Ok(lanes - u.int_in_range(0..=lanes - 1)?)
     }
 
-    /// Draws an element with canonical components: mostly any element, otherwise zero, one, or an
-    /// element of `Fp2` or `Fp6`.
+    /// Draws an element with canonical components: any element in half of the draws, otherwise
+    /// zero, one, an element of `Fp2`, or an element of `Fp6`.
     pub(crate) fn element(u: &mut Unstructured<'_>) -> arbitrary::Result<Element> {
         let mut a = reference::ZERO;
         match u.int_in_range(0..=7u8)? {

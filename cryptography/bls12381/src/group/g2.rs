@@ -24,12 +24,10 @@ use core::{
 /// An element of G2, the subgroup of prime order `r` of the curve `y^2 = x^3 + 4 (1 + i)` over
 /// the quadratic extension.
 ///
-/// Equal elements can hold different projective coordinates, so compare elements with `==`
-/// rather than through their `Debug` output.
-///
 /// `Debug` prints the projective coordinates, which depend on the operations that produced the
-/// element and not only on its value. The coordinates of a multiple by a secret scalar can
-/// reveal information about the scalar, so do not log such an element through `Debug`.
+/// element and not only on its value: compare elements with `==`, not through their `Debug`
+/// output. The coordinates of a multiple by a secret scalar can reveal information about the
+/// scalar, so do not log such an element through `Debug`.
 #[derive(Clone, Copy)]
 pub struct G2(Coordinates);
 

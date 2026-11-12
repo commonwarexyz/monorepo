@@ -257,7 +257,8 @@ fn straus<S: Simd, F: Field<S>, G: Group>(
         let mut multiple = base;
         for k in 0..entries {
             if k % 2 == 1 {
-                // k + 1 is even, so double the multiple by (k + 1) / 2.
+                // k + 1 is even, so double entry (k - 1) / 2, which holds (k + 1) / 2 times the
+                // base.
                 let half = (k - 1) / 2;
                 multiple = outlined_double(
                     simd,
@@ -319,8 +320,8 @@ fn straus<S: Simd, F: Field<S>, G: Group>(
 /// Returns the sum of the elements times their scalars by Pippenger's method.
 ///
 /// Lane `l` of group `g` takes window `g * F::LANES + l` of every component of every scalar,
-/// and sums each element's image into its own bucket for the digit's magnitude, negated for a
-/// negative digit, so the lanes never touch the same bucket. Buckets stay in raw form, and each
+/// and adds each element's image, negated for a negative digit, to the lane's bucket for the
+/// digit's magnitude; no two lanes share a bucket. Buckets stay in raw form, and each
 /// addition gathers one bucket per lane. The elements enter `chunk` at a time, each chunk into
 /// the buckets of every group, so the images of one chunk are all that is held beside the
 /// buckets. Running sums over the buckets weight each by its magnitude, and the groups

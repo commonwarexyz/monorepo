@@ -678,7 +678,7 @@ pub mod fuzz {
     }
 
     impl Plan {
-        /// Runs the operation using the remaining input.
+        /// Runs the check on the remaining input.
         pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
             testing::check_any(u, self)
         }
