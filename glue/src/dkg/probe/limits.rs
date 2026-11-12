@@ -2,7 +2,10 @@
 
 use super::wire::Message;
 use commonware_codec::Read;
-use commonware_consensus::{BoundedBlock, marshal::core::Variant, simplex::scheme::Scheme};
+use commonware_consensus::{
+    BoundedBlock,
+    simplex::{marshal::core::Variant, scheme::Scheme},
+};
 
 /// Returns an upper bound on the payloads the probe [`Actor`](super::Actor) sends for committees
 /// of at most `participants` members and blocks decoded under `block_codec_config`.
