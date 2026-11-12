@@ -23,18 +23,32 @@ type Outcomes = BTreeMap<Key, Result<Slot<Nonced>, Vec<Rejection<Key>>>>;
 
 const KEYS: u8 = 8;
 const DEFAULT_BALANCE: u64 = 100;
+const MAX_NONCE: u8 = 3;
 const MAX_BLOCKS: usize = 8;
 const MAX_TRANSFERS: usize = 24;
 const MAX_CHANGES: usize = 4;
+
+/// Bytes of the stream a session is sampled from, enough for all but the longest sessions, and
+/// of the stream's tail that seeds the runtime.
+const STREAM_BYTES: usize = 1 << 12;
+const ENTROPY_BYTES: usize = 32;
 
 /// Bulk batches straddle the 8,192 transfers past which a plan hashes in batches, and start at
 /// 2,048 transfers, enough touches for a smaller plan to offer its deduplication to the strategy.
 /// Spread over two-byte keys, the largest plan the 32,768 keys past which settling splits.
 const MIN_BULK_TRANSFERS: usize = 1 << 11;
-const MAX_BULK_TRANSFERS: usize = 1 << 15;
+const MAX_BULK_TRANSFERS: usize = 1 << 14;
+
+/// The sparsest bulk batch keeps the changes of one transfer in 512.
+const MAX_BULK_STRIDE_BITS: u32 = 9;
 
 /// A one-worker pool runs split batches one after another, so a split run replays exactly.
 static POOL: LazyLock<Rayon> = LazyLock::new(|| inline(TASKS));
+
+/// Nonces stay small, so an effect often names the nonce its account expects.
+fn nonce(u: &mut Unstructured<'_>) -> arbitrary::Result<u8> {
+    u.int_in_range(0..=MAX_NONCE)
+}
 
 fn amount(u: &mut Unstructured<'_>) -> arbitrary::Result<u64> {
     Ok(match u.int_in_range(0..=9)? {
@@ -62,7 +76,7 @@ impl Default for Nonced {
 
 #[derive(Arbitrary, Clone, Copy, Debug)]
 enum Effect {
-    Nonce(u8),
+    Nonce(#[arbitrary(with = nonce)] u8),
     Floor(#[arbitrary(with = amount)] u64),
     Burn,
     ConsumeAndRefuse,
@@ -152,11 +166,25 @@ impl From<&ChangeInput> for Change<Effect> {
 
 type TransferInput = Vec<(u8, ChangeInput)>;
 
+/// Samples a batch of at most [`MAX_TRANSFERS`] transfers. A batch settles only if every change
+/// in it does, so a short batch is sampled as often as a long one.
+fn batch(u: &mut Unstructured<'_>) -> arbitrary::Result<Vec<TransferInput>> {
+    let max = MAX_TRANSFERS >> u.int_in_range(0..=3)?;
+    (0..u.int_in_range(0..=max)?)
+        .map(|_| {
+            (0..u.int_in_range(0..=MAX_CHANGES)?)
+                .map(|_| u.arbitrary())
+                .collect()
+        })
+        .collect()
+}
+
 #[derive(Arbitrary, Debug)]
 struct AccountInput {
     key: u8,
     #[arbitrary(with = amount)]
     balance: u64,
+    #[arbitrary(with = nonce)]
     nonce: u8,
 }
 
@@ -170,18 +198,43 @@ enum Block {
 impl<'a> Arbitrary<'a> for Block {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
         Ok(match u.int_in_range(0..=15)? {
-            0 => Self::Bulk(u.arbitrary()?),
-            1..=7 => Self::Verify(u.arbitrary()?),
-            _ => Self::Build(u.arbitrary()?),
+            0 => Self::Bulk(batch(u)?),
+            1..=7 => Self::Verify(batch(u)?),
+            _ => Self::Build(batch(u)?),
         })
     }
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Debug)]
 struct FuzzInput {
     accounts: Vec<AccountInput>,
     blocks: Vec<Block>,
     entropy: Entropy,
+}
+
+impl<'a> Arbitrary<'a> for FuzzInput {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        // libFuzzer starts from inputs of a few bytes and lengthens them slowly, and a session
+        // sampled from so few bytes would hold no transfer. The input's head therefore seeds a
+        // fixed-size stream of [`FuzzRng`] output that the rest of the input overwrites from its
+        // start, so every input, even an empty one, samples whole blocks, and a byte mutated
+        // past the head changes only what is sampled from it.
+        let stream = commonware_glue_fuzz::input::stream(u, STREAM_BYTES)?;
+        let (session, entropy) = stream.split_at(stream.len() - ENTROPY_BYTES);
+        let u = &mut Unstructured::new(session);
+
+        let accounts = (0..u.int_in_range(0..=KEYS)?)
+            .map(|_| u.arbitrary())
+            .collect::<arbitrary::Result<_>>()?;
+        let blocks = (0..u.int_in_range(1..=MAX_BLOCKS)?)
+            .map(|_| u.arbitrary())
+            .collect::<arbitrary::Result<_>>()?;
+        Ok(Self {
+            accounts,
+            blocks,
+            entropy: Unstructured::new(entropy).arbitrary()?,
+        })
+    }
 }
 
 fn key(n: u8, offset: u16) -> Key {
@@ -192,30 +245,36 @@ fn transfer(changes: &TransferInput, offset: u16) -> Multi {
     Multi(
         changes
             .iter()
-            .take(MAX_CHANGES)
             .map(|(n, change)| (key(*n, offset), change.into()))
             .collect(),
     )
 }
 
 fn transfers(inputs: &[TransferInput]) -> Vec<Multi> {
-    inputs
-        .iter()
-        .take(MAX_TRANSFERS)
-        .map(|changes| transfer(changes, 0))
-        .collect()
+    inputs.iter().map(|changes| transfer(changes, 0)).collect()
 }
 
 /// Repeats `inputs` into a batch of thousands of transfers, shifting each transfer's keys by a
-/// random offset so the batch spreads over every key.
+/// random offset so the batch spreads over every key. A long batch of many touches takes as long
+/// to check as thousands of small ones, so a short batch is sampled as often as a long one and
+/// all but one transfer in a random stride lose their changes. A long batch may then hold few
+/// touches and leave shards without a key or an effect.
 fn bulk(inputs: &[TransferInput], rng: &mut impl Rng) -> Vec<Multi> {
-    let len = rng.random_range(MIN_BULK_TRANSFERS..=MAX_BULK_TRANSFERS);
+    let halvings = (MAX_BULK_TRANSFERS / MIN_BULK_TRANSFERS).ilog2();
+    let max = MAX_BULK_TRANSFERS >> rng.random_range(0..=halvings);
+    let len = rng.random_range(MIN_BULK_TRANSFERS..=max);
+    let stride = 1 << rng.random_range(0..=MAX_BULK_STRIDE_BITS);
     inputs
         .iter()
-        .take(MAX_TRANSFERS)
         .cycle()
         .take(len)
-        .map(|changes| transfer(changes, rng.random()))
+        .map(|changes| {
+            if rng.random_ratio(1, stride) {
+                transfer(changes, rng.random())
+            } else {
+                Multi(Vec::new())
+            }
+        })
         .collect()
 }
 
@@ -486,7 +545,7 @@ fn fuzz(input: FuzzInput) {
             .collect();
 
         check_unseeded();
-        for block in input.blocks.iter().take(MAX_BLOCKS) {
+        for block in &input.blocks {
             let settled = match block {
                 Block::Verify(inputs) => verify(&db, &transfers(inputs), &mut context),
                 Block::Bulk(inputs) => {

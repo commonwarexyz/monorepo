@@ -121,9 +121,11 @@ cargo +nightly fuzz run --fuzz-dir consensus/fuzz/simplex simplex_cert_mock \
 ### `structures` (`--fuzz-dir consensus/fuzz/structures`)
 
 - `attributable_map`
+- `automaton_defaults`
 - `simplex_elector`
 - `simplex_messages`
 - `simplex_reporter_filtering`
+- `simplex_threshold_vrf`
 
 ### `aggregation` (`--fuzz-dir consensus/fuzz/aggregation`)
 

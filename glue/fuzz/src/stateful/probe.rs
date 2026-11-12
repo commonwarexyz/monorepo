@@ -42,20 +42,20 @@ use super::{
     backend::{Any, Backend as _},
     input::{ProbeEvent, StatefulProbeFuzzInput},
     marshal::Standard as StandardMarshal,
+    observe::{Acking, Observed, ObservedBlocker, Witness, certify, inject, prefix},
     runner::{self, Reportable},
     stack::{TEST_QUOTA, archive_config},
 };
-use commonware_actor::Feedback;
 use commonware_consensus::{
-    Epochable as _, Reporter,
+    Epochable as _,
     marshal::{
-        self, Start, Update,
+        self, Start,
         core::{Actor as MarshalActor, Mailbox as MarshalMailbox},
         mocks::block::ready,
         resolver::p2p as marshal_resolver,
         standard::Standard,
     },
-    simplex::types::{Activity, Context, Finalization, Finalize, Proposal},
+    simplex::types::{Context, Finalization, Proposal},
     types::{Epoch, Epocher as _, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
@@ -66,11 +66,8 @@ use commonware_cryptography::{
 use commonware_glue::stateful::probe::{Config as ProbeConfig, Mailbox as ProbeMailbox, Probe};
 use commonware_macros::select;
 use commonware_p2p::{
-    BlockedSubscription, Blocker, Recipients, Sender as _,
-    simulated::{
-        Config as NetworkConfig, Control, Link, Network as SimulatedNetwork, Oracle, Receiver,
-        Sender,
-    },
+    Recipients, Sender as _,
+    simulated::{Config as NetworkConfig, Link, Network as SimulatedNetwork, Oracle, Sender},
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{
@@ -78,17 +75,12 @@ use commonware_runtime::{
 };
 use commonware_storage::archive::prunable;
 use commonware_utils::{
-    Acknowledgement as _, Faults, FuzzRng, N3f1, NZDuration, NZU64, NZUsize,
+    Faults, FuzzRng, N3f1, NZDuration, NZU64, NZUsize,
     channel::oneshot::{self, error::TryRecvError},
-    non_empty, probability,
+    probability,
     sync::Mutex,
 };
-use std::{
-    fmt,
-    num::{NonZeroU64, NonZeroUsize},
-    sync::Arc,
-    time::Duration,
-};
+use std::{fmt, num::NonZeroU64, sync::Arc, time::Duration};
 
 /// Label this driver reports under.
 const TARGET: &str = "glue-stateful-probe";
@@ -415,73 +407,15 @@ impl Ledger {
     }
 }
 
-/// A probe's receiver. The discovering probe's records every delivery in the
-/// ledger at the moment the actor takes it; a source's records nothing.
-struct Observed {
-    inner: Receiver<PublicKey>,
-    ledger: Option<Ledger>,
-}
-
-impl fmt::Debug for Observed {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Observed")
-            .field("inner", &self.inner)
-            .finish()
-    }
-}
-
-impl commonware_p2p::Receiver for Observed {
-    type Error = commonware_p2p::simulated::Error;
-    type PublicKey = PublicKey;
-
-    fn capacity(&self) -> NonZeroUsize {
-        self.inner.capacity()
+/// The ledger witnesses the discovering probe: every message it takes and
+/// every block it places, in its own order.
+impl Witness for Ledger {
+    fn delivered(&self, peer: &PublicKey, bytes: &[u8]) {
+        self.note_delivery(peer.clone(), bytes.to_vec());
     }
 
-    async fn recv(&mut self) -> Result<commonware_p2p::Message<PublicKey>, Self::Error> {
-        let (peer, bytes) = self.inner.recv().await?;
-        if let Some(ledger) = &self.ledger {
-            ledger.note_delivery(peer.clone(), bytes.as_ref().to_vec());
-        }
-        Ok((peer, bytes))
-    }
-}
-
-/// The discovering probe's blocker: records every block in the ledger against
-/// the delivery being processed, then places it on the simulated network.
-#[derive(Clone)]
-struct ObservedBlocker {
-    inner: Control<PublicKey, deterministic::Context>,
-    ledger: Ledger,
-}
-
-impl Blocker for ObservedBlocker {
-    type PublicKey = PublicKey;
-
-    // The probe has already logged the block it places; this only forwards it.
-    #[allow(clippy::disallowed_methods)]
-    fn block(&mut self, peer: PublicKey) -> Feedback {
-        self.ledger.note_block(peer.clone());
-        self.inner.block(peer)
-    }
-
-    fn blocked(&mut self) -> BlockedSubscription<PublicKey> {
-        self.inner.blocked()
-    }
-}
-
-/// Acknowledges every block marshal delivers; the sources run no application.
-#[derive(Clone)]
-struct Acking;
-
-impl Reporter for Acking {
-    type Activity = Update<ProbeBlock>;
-
-    fn report(&mut self, activity: Self::Activity) -> Feedback {
-        if let Update::Block(_, ack) = activity {
-            ack.acknowledge();
-        }
-        Feedback::Ok
+    fn blocked(&self, peer: &PublicKey) {
+        self.note_block(peer.clone());
     }
 }
 
@@ -755,7 +689,7 @@ impl Harness {
                 },
             )
             .await;
-            drop(marshal_actor.start_unbuffered(Acking, resolver));
+            drop(marshal_actor.start_unbuffered(Acking::<ProbeBlock>::default(), resolver));
 
             // Seed a source's marshal with its finalized history before any
             // discovery begins, and record exactly what it holds.
@@ -787,14 +721,8 @@ impl Harness {
                     }
                 })
             };
-            let receiver = Observed {
-                inner: receiver,
-                ledger: (index == 0).then(|| ledger.clone()),
-            };
-            let blocker = ObservedBlocker {
-                inner: oracle.control(identity.clone()),
-                ledger: ledger.clone(),
-            };
+            let receiver = Observed::new(receiver, (index == 0).then(|| ledger.clone()));
+            let blocker = ObservedBlocker::new(oracle.control(identity.clone()), ledger.clone());
             let (probe, mailbox) = Probe::new(ProbeConfig {
                 context: node.child("probe"),
                 provider: provider.clone(),
@@ -1397,16 +1325,6 @@ fn counted_since_last_request(
         })
 }
 
-/// A strict prefix of a captured response, possibly empty.
-fn prefix(bytes: &[u8], keep: u8) -> Vec<u8> {
-    let keep = if bytes.is_empty() {
-        0
-    } else {
-        usize::from(keep) % bytes.len()
-    };
-    bytes[..keep].to_vec()
-}
-
 /// A finalized history sources are seeded from.
 struct Chain {
     blocks: Vec<ProbeBlock>,
@@ -1453,39 +1371,26 @@ impl Chain {
             parent: block.context.parent.0,
             payload: block.digest(),
         };
-        let finalizes: Vec<_> = schemes
-            .iter()
-            .map(|scheme| Finalize::sign(scheme, proposal.clone()).expect("sign finalize"))
-            .collect();
-        Finalization::from_finalizes(&schemes[0], non_empty![@finalizes.iter()], &Sequential)
-            .expect("assemble finalization")
+        certify(schemes, proposal)
     }
 
     /// Inject the finalized block at `height` into a source's marshal, so it
     /// stores and serves the finalization.
     async fn inject(&self, marshal: &Marshal, height: usize) {
-        let block = self.blocks[height].clone();
-        let finalization = self.finalizations[height].clone();
-        let round = finalization.round();
-        assert!(
-            marshal.verified(round, ready(block)).await,
-            "marshal must persist the seeded block"
-        );
-        let _ = marshal.clone().report(Activity::Finalization(finalization));
-        assert!(
-            marshal
-                .get_finalization(Height::new(height as u64))
-                .await
-                .is_some(),
-            "marshal must store the seeded finalization"
-        );
+        inject(
+            marshal,
+            Height::new(height as u64),
+            ready(self.blocks[height].clone()),
+            self.finalizations[height].clone(),
+        )
+        .await;
     }
 }
 
 /// Assert the receiver and sender traits are in scope.
 const _: fn() = || {
     fn assert_receiver<R: commonware_p2p::Receiver<PublicKey = PublicKey>>() {}
-    assert_receiver::<Observed>();
+    assert_receiver::<Observed<Ledger>>();
     fn assert_sender<S: commonware_p2p::Sender<PublicKey = PublicKey>>() {}
     assert_sender::<RawSender>();
 };

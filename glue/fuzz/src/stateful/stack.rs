@@ -58,7 +58,7 @@ use commonware_utils::{NZDuration, NZU32, NZU64, NZUsize};
 use std::{num::NonZeroU64, time::Duration};
 
 /// Per-peer rate whose burst also sizes every simulated channel's receiver capacity.
-pub(super) const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_024));
+pub(crate) const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_024));
 
 /// Channel ids. Each identity registers all seven; the compromised identity's
 /// are split before they reach an engine.
@@ -116,7 +116,7 @@ pub(super) const SYNC_CONFIG: SyncEngineConfig = SyncEngineConfig {
 };
 
 /// Prunable archive configuration for marshal's finalization and block stores.
-pub(super) fn archive_config<C>(
+pub(crate) fn archive_config<C>(
     prefix: &str,
     name: &str,
     page_cache: CacheRef,

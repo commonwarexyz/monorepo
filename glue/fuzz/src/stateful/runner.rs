@@ -34,14 +34,29 @@ use commonware_utils::{
     sync::{Mutex, Once},
 };
 use rand::RngExt as _;
-use std::{collections::BTreeSet, fmt, marker::PhantomData, panic, sync::Arc, time::Duration};
+use std::{
+    cell::{Cell, RefCell},
+    collections::BTreeSet,
+    fmt,
+    marker::PhantomData,
+    num::NonZeroUsize,
+    panic,
+    sync::Arc,
+    time::Duration,
+};
+#[cfg(feature = "dkg")]
+use std::{
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 /// Environment variable enabling the per-run report.
 const REPORT_ENV: &str = "GLUE_FUZZ_LOG";
 
 /// Every directed link stays up for the whole run. A driver that partitions the
 /// network does so by splitting channels, never by manipulating links.
-const LINK: Link = Link {
+pub(crate) const LINK: Link = Link {
     latency: Duration::from_millis(10),
     jitter: Duration::from_millis(1),
     success_rate: probability!(1.0),
@@ -151,15 +166,156 @@ impl fmt::Display for RunReport {
 /// input.
 static IN_FLIGHT: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 
+/// The structured controls of the run in flight, for an input whose tape
+/// does not determine the run on its own.
+static CONTROLS: Mutex<String> = Mutex::new(String::new());
+
+/// A panic recorded inside a [`tolerating`] scope.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Panic {
+    /// The engine whose task raised the panic, or `None` if the task belongs
+    /// to no engine.
+    pub(crate) engine: Option<usize>,
+    /// Where the panic was raised and what it said.
+    pub(crate) message: String,
+}
+
+thread_local! {
+    /// The panics raised on this thread while a [`tolerating`] scope is open
+    /// on it, or `None` outside one.
+    static RECORDED: RefCell<Option<Vec<Panic>>> = const { RefCell::new(None) };
+
+    /// The engine whose task this thread is polling, if the task belongs to
+    /// one.
+    static RUNNING: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+/// Marks what this thread is running until dropped: a task of one engine, or
+/// code that belongs to no engine.
+struct Running {
+    previous: Option<usize>,
+}
+
+impl Running {
+    fn enter(engine: Option<usize>) -> Self {
+        Self {
+            previous: RUNNING.replace(engine),
+        }
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        RUNNING.set(self.previous);
+    }
+}
+
+/// A future whose panics are attributed to one engine, or to no engine.
+///
+/// The attribution covers every poll of the future and its drop, which is
+/// where the state of an aborted task is released.
+#[cfg(feature = "dkg")]
+struct Attributed<Fut> {
+    engine: Option<usize>,
+    /// Present until the future is dropped.
+    future: Option<Pin<Box<Fut>>>,
+}
+
+#[cfg(feature = "dkg")]
+impl<Fut: Future> Future for Attributed<Fut> {
+    type Output = Fut::Output;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let _running = Running::enter(this.engine);
+        this.future
+            .as_mut()
+            .expect("the future is present until it is dropped")
+            .as_mut()
+            .poll(cx)
+    }
+}
+
+#[cfg(feature = "dkg")]
+impl<Fut> Drop for Attributed<Fut> {
+    fn drop(&mut self) {
+        let _running = Running::enter(self.engine);
+        self.future = None;
+    }
+}
+
+/// The future `start` returns, run so that a panic it raises is attributed
+/// to `engine`.
+///
+/// The attribution covers `start` itself, every poll of the future, and its
+/// drop. The deterministic runtime runs every task on the thread that started
+/// it, so one thread-local mark names the engine whose task is running.
+#[cfg(feature = "dkg")]
+pub(crate) fn attributed<Fut: Future>(
+    engine: usize,
+    start: impl FnOnce() -> Fut,
+) -> impl Future<Output = Fut::Output> {
+    let future = {
+        let _running = Running::enter(Some(engine));
+        Box::pin(start())
+    };
+    Attributed {
+        engine: Some(engine),
+        future: Some(future),
+    }
+}
+
+/// Run `run` attributed to no engine, whatever task calls it.
+///
+/// This is for harness code an engine's task calls into, so that a panic in
+/// it is never taken for the engine's.
+pub(crate) fn unattributed<T>(run: impl FnOnce() -> T) -> T {
+    let _running = Running::enter(None);
+    run()
+}
+
+/// `future`, run attributed to no engine, whatever task awaits it.
+///
+/// This is for a future of the harness that an engine's task awaits: where
+/// [`unattributed`] covers one call, this covers every poll of the future
+/// and its drop.
+#[cfg(feature = "dkg")]
+pub(crate) fn unattributed_future<Fut: Future>(future: Fut) -> impl Future<Output = Fut::Output> {
+    Attributed {
+        engine: None,
+        future: Some(Box::pin(future)),
+    }
+}
+
 /// Print the reproducing input before the process aborts.
 ///
 /// The hook is installed ahead of libFuzzer's, which prints and aborts, so
-/// anything queued after it would never reach the terminal.
+/// anything queued after it would never reach the terminal. Inside a
+/// [`tolerating`] scope a panic is only recorded.
 fn install_input_panic_hook() {
     static HOOK: Once = Once::new();
     HOOK.call_once(|| {
         let previous = panic::take_hook();
         panic::set_hook(Box::new(move |info| {
+            let recorded = RECORDED.with(|recorded| {
+                recorded
+                    .borrow_mut()
+                    .as_mut()
+                    .map(|panics| {
+                        panics.push(Panic {
+                            engine: RUNNING.get(),
+                            message: info.to_string(),
+                        })
+                    })
+                    .is_some()
+            });
+            if recorded {
+                return;
+            }
+            let controls = CONTROLS.lock().clone();
+            if !controls.is_empty() {
+                eprintln!("Panicked with input: {controls}");
+            }
             let tape = IN_FLIGHT.lock().clone();
             if !tape.is_empty() {
                 eprintln!("Panicked with raw_bytes: {tape:?}");
@@ -169,9 +325,31 @@ fn install_input_panic_hook() {
     });
 }
 
+/// Run `run` with every panic raised on this thread recorded instead of
+/// reported, and return what it returned, or the payload of the panic that
+/// left it, together with the recorded panics.
+///
+/// This is for a run whose runtime catches the panics of its tasks because
+/// some of them are tolerated. Under libFuzzer every panic aborts the process
+/// from the panic hook, before the runtime can catch it, so while `run`
+/// executes the hook only records. The caller judges what was recorded: the
+/// deterministic runtime polls every task on the thread that started it, so
+/// the record holds exactly the panics of the run, each with the engine its
+/// task was [`attributed`] to.
+#[cfg(feature = "dkg")]
+pub(crate) fn tolerating<T>(run: impl FnOnce() -> T) -> (std::thread::Result<T>, Vec<Panic>) {
+    install_input_panic_hook();
+    RECORDED.with(|recorded| *recorded.borrow_mut() = Some(Vec::new()));
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(run));
+    let recorded = RECORDED
+        .with(|recorded| recorded.borrow_mut().take())
+        .unwrap_or_default();
+    (result, recorded)
+}
+
 /// A run report every driver produces: printable, and able to say whether the
 /// run checked anything.
-pub(super) trait Reportable: fmt::Display {
+pub(crate) trait Reportable: fmt::Display {
     /// Whether the run's checks compared something.
     fn measured(&self) -> bool;
 
@@ -188,8 +366,20 @@ impl Reportable for RunReport {
 }
 
 /// Announce the run in flight and report the result the way a fuzz target does.
-pub(super) fn report<R: Reportable>(raw_bytes: &[u8], run: impl FnOnce() -> R) {
+pub(crate) fn report<R: Reportable>(raw_bytes: &[u8], run: impl FnOnce() -> R) {
+    report_input(&"", raw_bytes, run);
+}
+
+/// Like [`report`], for an input whose tape does not determine the run on its
+/// own: `controls` describes the rest of the input and is printed with the
+/// tape. An empty description prints nothing.
+pub(crate) fn report_input<R: Reportable>(
+    controls: &impl fmt::Display,
+    raw_bytes: &[u8],
+    run: impl FnOnce() -> R,
+) {
     install_input_panic_hook();
+    *CONTROLS.lock() = controls.to_string();
     IN_FLIGHT.lock().clear();
     IN_FLIGHT.lock().extend_from_slice(raw_bytes);
     let report = run();
@@ -209,25 +399,34 @@ pub(super) struct Cluster<M: Marshal> {
     pub(super) genesis: Block<M>,
 }
 
-/// Derive the identities and their mock schemes, start the simulated network
-/// with every directed link up, and build the shared genesis block.
-pub(super) async fn setup<B: Backend, M: Marshal>(
-    context: &mut deterministic::Context,
-) -> Cluster<M> {
-    let fixture = commonware_consensus::simplex::mocks::scheme::fixture_with::<false, true, true, _>(
-        context,
-        NAMESPACE,
-        NUM_IDENTITIES,
-    );
-    let participants: Arc<[PublicKey]> = fixture.participants.clone().into();
+/// Start the simulated network over `participants` with every directed link
+/// up. Blocking a peer does not disconnect it, so a run keeps exploring after
+/// a block.
+pub(crate) async fn network(
+    context: &deterministic::Context,
+    participants: &[PublicKey],
+) -> Oracle<PublicKey, deterministic::Context> {
+    network_with(context, participants, LINK, NZUsize!(1)).await
+}
 
+/// Like [`network`], with every directed link under the conditions of `link`
+/// and the network keeping the `tracked_peer_sets` newest peer sets. A run
+/// whose engines track a new peer set per epoch needs more than one, so that
+/// the initial set of every participant stays connected until that many
+/// epochs have passed.
+pub(crate) async fn network_with(
+    context: &deterministic::Context,
+    participants: &[PublicKey],
+    link: Link,
+    tracked_peer_sets: NonZeroUsize,
+) -> Oracle<PublicKey, deterministic::Context> {
     let (network, oracle) = SimulatedNetwork::new_with_peers(
         context.child("network"),
         NetworkConfig {
             max_size: 1024 * 1024,
             max_peers_per_set: NZUsize!(participants.len()),
             disconnect_on_block: false,
-            tracked_peer_sets: NZUsize!(1),
+            tracked_peer_sets,
         },
         participants.iter().cloned(),
     )
@@ -239,11 +438,26 @@ pub(super) async fn setup<B: Backend, M: Marshal>(
                 continue;
             }
             oracle
-                .add_link(sender.clone(), receiver.clone(), LINK)
+                .add_link(sender.clone(), receiver.clone(), link.clone())
                 .await
                 .expect("link must be installed");
         }
     }
+    oracle
+}
+
+/// Derive the identities and their mock schemes, start the simulated network
+/// with every directed link up, and build the shared genesis block.
+pub(super) async fn setup<B: Backend, M: Marshal>(
+    context: &mut deterministic::Context,
+) -> Cluster<M> {
+    let fixture = commonware_consensus::simplex::mocks::scheme::fixture_with::<false, true, true, _>(
+        context,
+        NAMESPACE,
+        NUM_IDENTITIES,
+    );
+    let participants: Arc<[PublicKey]> = fixture.participants.clone().into();
+    let oracle = network(context, &participants).await;
 
     // Every engine starts from the same block with no finalized floor.
     let genesis = Block::genesis(participants[0].clone(), B::initial());
@@ -418,7 +632,7 @@ pub(super) fn retention_window<B: Backend, M: Marshal>(
 ///
 /// The events are executed one at a time by a single task, which is what
 /// enforces that at most one correct identity is ever down.
-pub(super) fn restart_schedule(
+pub(crate) fn restart_schedule(
     rng: &mut FuzzRng,
     count: u8,
     nodes: usize,

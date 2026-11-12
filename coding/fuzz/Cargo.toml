@@ -10,13 +10,18 @@ cargo-fuzz = true
 
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
+bytes.workspace = true
+commonware-codec.workspace = true
 commonware-cryptography.workspace = true
-commonware-parallel = { workspace = true, features = ["std"] }
-commonware-utils.workspace = true
+commonware-parallel = { workspace = true, features = ["std", "test-utils"] }
+commonware-runtime.workspace = true
+commonware-utils = { workspace = true, features = ["arbitrary"] }
 libfuzzer-sys.workspace = true
+rand_core.workspace = true
 
 [dependencies.commonware-coding]
 path = ".."
+features = ["arbitrary"]
 
 [lib]
 bench = false
@@ -24,6 +29,13 @@ bench = false
 [[bin]]
 name = "reed_solomon"
 path = "fuzz_targets/reed_solomon.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "reed_solomon_scheme"
+path = "fuzz_targets/reed_solomon_scheme.rs"
 test = false
 doc = false
 bench = false
