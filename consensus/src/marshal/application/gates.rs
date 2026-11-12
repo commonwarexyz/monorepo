@@ -65,8 +65,11 @@ struct Inner<D: Digest, B> {
 /// proposal holds the block itself until consensus locks it in with a propose
 /// broadcast via [`crate::Relay::broadcast`] (or certification demands
 /// durability first), keeping marshal's mailbox free of any propose-time
-/// handshake. The wrapper that owns these gates prunes stale entries when
-/// consensus reports a finalization (see [`retain_after`](Self::retain_after)).
+/// handshake.
+///
+/// [`claim`](Self::claim) drops a gate when certification claims its round for another
+/// block, and [`retain_after`](Self::retain_after) drops it once consensus finalizes its
+/// round or a later one.
 #[derive(Clone)]
 pub(crate) struct Gates<D: Digest, B> {
     inner: Arc<Mutex<Inner<D, B>>>,
@@ -151,6 +154,10 @@ impl<D: Digest, B: Clone> Gates<D, B> {
     /// proposal are therefore removed under one lock, so the returned gate waits on an ack
     /// that `persist` receives here or that the lock-in broadcast already took. A later stage
     /// of the same block only leaves entries that pruning discards.
+    ///
+    /// Consensus certifies at most one block per round, so the gates registered for the
+    /// round's other blocks can never be claimed. Dropping them here closes their senders, so
+    /// the tasks behind them can stop.
     pub(crate) fn claim(
         &self,
         round: Round,
@@ -162,27 +169,21 @@ impl<D: Digest, B: Clone> Gates<D, B> {
 
             // Certification consumes the staged entry but is not a send, so the block's sent
             // mark, if any, stays for a later stage of the same block.
-            (
+            let claimed = (
                 inner.certifications.remove(&(round, digest)),
                 inner.proposals.remove(&(round, digest)),
-            )
+            );
+
+            // No certification can claim the round's other gates.
+            inner
+                .certifications
+                .retain(|(gate_round, _), _| *gate_round != round);
+            claimed
         };
         if let Some(Staged { block, ack }) = staged {
             persist(block, ack);
         }
         gate
-    }
-
-    /// Drops the certification gates of `round` for any digest other than `digest`.
-    ///
-    /// A notarization for `digest` means no other proposal of the round can be notarized, so
-    /// their gates can never be claimed. Dropping a gate closes its task, which stops the
-    /// verification feeding it.
-    pub(crate) fn discard_conflicting(&self, round: Round, digest: D) {
-        self.inner
-            .lock()
-            .certifications
-            .retain(|(r, d), _| *r != round || *d == digest);
     }
 
     /// Discards all entries and sent marks whose round is at or before `finalized_round` and
@@ -698,6 +699,40 @@ mod tests {
                 "the claimed gate must belong to the persisted proposal",
             );
         });
+    }
+
+    /// Certification claims its round. The gates registered for the round's other blocks are
+    /// dropped, whether or not the certified block registered a gate, and other rounds keep
+    /// theirs.
+    #[test]
+    fn test_claim_releases_other_gates_of_round() {
+        for certified_has_gate in [true, false] {
+            let gates = TestGates::new();
+            let certified = Sha256::hash(&[b"certified"]);
+            let conflicting = Sha256::hash(&[b"conflicting"]);
+            let (_certified_tx, certified_rx) = oneshot::channel();
+            let (conflicting_tx, conflicting_rx) = oneshot::channel();
+            let (later_tx, later_rx) = oneshot::channel();
+            if certified_has_gate {
+                gates.insert(round(1), certified, certified_rx);
+            }
+            gates.insert(round(1), conflicting, conflicting_rx);
+            gates.insert(round(2), conflicting, later_rx);
+
+            let gate = gates.claim(round(1), certified, |_, _| {
+                unreachable!("a claim must not persist a proposal that was never staged")
+            });
+
+            assert_eq!(gate.is_some(), certified_has_gate);
+            assert!(
+                conflicting_tx.is_closed(),
+                "a gate for another block of the certified round must be dropped"
+            );
+            assert!(
+                !later_tx.is_closed(),
+                "a gate of another round must be kept"
+            );
+        }
     }
 
     /// Sending a staged block keeps it staged and marks it sent. Staging the same block for the

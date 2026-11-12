@@ -21,6 +21,11 @@
 //! latency). Once a certificate is formed, we wait on the verification result in [`CertifiableAutomaton::certify`]
 //! before voting to finalize (ensuring no invalid blocks are admitted to the canonical chain).
 //!
+//! A certificate can form for a block this validator was never asked to verify. Certification
+//! then fetches the block and verifies it under its embedded context, so the application can be
+//! asked to verify more than one block of a round. Certifying a block stops the verification of
+//! any conflicting block of its round, since at most one block of a round is notarized.
+//!
 //! A validator whose verification stays pending has already voted to notarize the block but
 //! withholds its finalize vote. Peers that voted to finalize cannot nullify the view, so once
 //! `f+1` honest peers have voted to finalize, the view cannot be nullified, and the pending
@@ -633,7 +638,7 @@ where
         // active fetch. Register the wait before publishing the gate so it receives the buffered
         // block or is waiting when recovery delivers it.
         let block_request = marshal.subscribe_by_digest(digest, DigestFallback::Wait);
-        let (task_tx, task_rx) = oneshot::channel();
+        let (mut task_tx, task_rx) = oneshot::channel();
         self.gates.insert(round, digest, task_rx);
 
         let (mut tx, rx) = oneshot::channel();
@@ -659,11 +664,20 @@ where
                     )
                 });
 
-                // Stop waiting for the block if consensus drops the verification request.
+                // Stop waiting for the block if consensus drops the verification request or
+                // `Gates` drops the certification gate. Consensus uses no verdict from this
+                // request after either.
                 let block = select! {
                     _ = tx.closed() => {
                         debug!(
                             reason = "consensus dropped receiver",
+                            "skipping optimistic verification"
+                        );
+                        return;
+                    },
+                    _ = task_tx.closed() => {
+                        debug!(
+                            reason = "certification gate dropped",
                             "skipping optimistic verification"
                         );
                         return;
@@ -750,7 +764,8 @@ where
                 //
                 // Once the optimistic verdict is delivered, the certification
                 // gate owns the deferred work. Nullification keeps that gate
-                // alive, while finalization drops it.
+                // alive. Finalization drops it, and so does certification of a
+                // conflicting block of the round.
                 let deferred_rx = marshaled
                     .deferred_verify(context, block, parent_request, Stage::Verified);
                 tx.send_lossy(true);
@@ -820,10 +835,6 @@ where
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.deferred.certify", level = "info", skip_all, fields(round = %round, digest = %digest))]
     async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
-        // A notarization for this digest rules out every other proposal of the round,
-        // so stop verifying them.
-        self.gates.discard_conflicting(round, digest);
-
         // Attempt to retrieve the existing certification gate task for this round/digest.
         let task = self.gates.claim(round, digest, |block, ack| {
             self.marshal.verified_deferred(round, block, ack)
@@ -893,7 +904,9 @@ mod tests {
                     TestHarness, V, default_leader, make_raw_block,
                     setup_network_with_participants,
                 },
-                verifying::{GatedVerifyingApp, MockVerifyingApp},
+                verifying::{
+                    GatedVerifyingApp, MockVerifyingApp, RecordingVerifyingApp, Verification,
+                },
             },
             standard::tests::ready,
         },
@@ -908,7 +921,10 @@ mod tests {
     };
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
-    use commonware_utils::{NZUsize, channel::fallible::OneshotExt};
+    use commonware_utils::{
+        NZUsize,
+        channel::{fallible::OneshotExt, oneshot::error::TryRecvError},
+    };
     use std::time::Duration;
 
     #[test_traced("INFO")]
@@ -1430,16 +1446,22 @@ mod tests {
         });
     }
 
-    /// Certifying one proposal of a round stops the verification of a conflicting
-    /// proposal of the same round that was verified locally.
-    ///
-    /// An equivocating leader sends this validator proposal A while the rest of the
-    /// network notarizes proposal B. Optimistic verification of A has already handed
-    /// its application verification to the certification gate, which the voter cannot
-    /// cancel. Once B is certified, A can never be notarized, so its verification is
-    /// unnecessary work.
-    #[test_traced("WARN")]
-    fn certify_drops_conflicting_verification() {
+    /// How far verification of a block has progressed when a conflicting block of its round
+    /// is certified.
+    #[derive(Clone, Copy, Debug)]
+    enum Progress {
+        /// The block has not arrived, so the optimistic verdict is still pending.
+        AwaitingBlock,
+        /// The optimistic verdict was delivered and the deferred work waits for the parent.
+        AwaitingParent,
+        /// The application is verifying the block.
+        Verifying,
+    }
+
+    /// A leader that equivocates sends this validator block A while the rest of the network
+    /// notarizes block B of the same round. Certifying B claims the round, so the application
+    /// must not start verifying A afterwards and must stop if it already started.
+    fn certify_releases_conflicting_verification(progress: Progress) {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture {
@@ -1459,60 +1481,110 @@ mod tests {
             let setup = StandardHarness::setup_validator(
                 context.child("validator").with_attribute("index", 0),
                 &mut oracle,
-                me.clone(),
+                me,
                 ConstantProvider::new(schemes[0].clone()),
             )
             .await;
             let marshal = setup.mailbox;
             let buffer = setup.extra;
 
-            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
-            let (mock_app, verify_started, release_verify): (GatedVerifyingApp<B, S>, _, _) =
-                GatedVerifyingApp::new();
+            let application: RecordingVerifyingApp<B, S> = RecordingVerifyingApp::new();
             let mut marshaled = Deferred::new(
                 context.child("deferred"),
-                mock_app,
+                application.clone(),
                 marshal.clone(),
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
             );
 
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let parent = make_raw_block(genesis.digest(), Height::new(1), 100);
             let parent_digest = parent.digest();
             let round = Round::new(Epoch::zero(), View::new(2));
             let ctx = Ctx {
                 round,
-                leader: me,
+                leader: participants[1].clone(),
                 parent: (View::new(1), parent_digest),
             };
             let a = B::new::<Sha256>(ctx.clone(), parent_digest, Height::new(2), 200);
             let b = B::new::<Sha256>(ctx.clone(), parent_digest, Height::new(2), 201);
             let (a_digest, b_digest) = (a.digest(), b.digest());
             assert_ne!(a_digest, b_digest);
-            for block in [parent, a, b] {
+
+            // Deliver everything except the block that verification of A must wait for.
+            let (available, withheld) = match progress {
+                Progress::AwaitingBlock => (vec![parent, b], Some(a)),
+                Progress::AwaitingParent => (vec![a, b], Some(parent)),
+                Progress::Verifying => (vec![parent, a, b], None),
+            };
+            let deliver = |block: B| {
                 assert!(
                     buffer
                         .broadcast(commonware_p2p::Recipients::Some(vec![]), ready(block))
                         .accepted()
                 );
+            };
+            available.into_iter().for_each(&deliver);
+
+            // Consensus asks to verify A, the proposal the leader sent this validator.
+            let mut verify_a = marshaled.verify(ctx, a_digest).await;
+            context.sleep(Duration::from_millis(10)).await;
+            let (optimistic, started) = match progress {
+                Progress::AwaitingBlock => (Err(TryRecvError::Empty), vec![]),
+                Progress::AwaitingParent => (Ok(true), vec![]),
+                Progress::Verifying => (Ok(true), vec![Verification::Started(a_digest)]),
+            };
+            assert_eq!(verify_a.try_recv(), optimistic);
+            assert_eq!(application.observed(), started);
+
+            // B is notarized, so consensus asks to certify it.
+            let certify_b = marshaled.certify(round, b_digest).await;
+            context.sleep(Duration::from_millis(10)).await;
+            if matches!(progress, Progress::AwaitingBlock) {
+                assert_eq!(
+                    verify_a.try_recv(),
+                    Err(TryRecvError::Closed),
+                    "the wait for a block that lost its round must end"
+                );
             }
 
-            // Optimistic verification of A hands its application verification to the gate.
-            let optimistic_rx = marshaled.verify(ctx, a_digest).await;
-            assert!(optimistic_rx.await.expect("optimistic verify should resolve"));
-            verify_started
-                .await
-                .expect("verify should reach the gated application");
-            assert!(!release_verify.is_closed());
+            // Whatever A was waiting for arrives.
+            withheld.into_iter().for_each(&deliver);
+            context.sleep(Duration::from_millis(100)).await;
 
-            // B of the same round is notarized and certified.
-            let _certify_rx = marshaled.certify(round, b_digest).await;
-            context.sleep(Duration::from_millis(10)).await;
-
+            let observed = application.observed();
+            let expected = if started.is_empty() {
+                vec![Verification::Started(b_digest)]
+            } else {
+                vec![
+                    Verification::Started(a_digest),
+                    Verification::Cancelled(a_digest),
+                    Verification::Started(b_digest),
+                ]
+            };
             assert!(
-                release_verify.is_closed(),
-                "verification of A continues after B of the same round was certified"
+                observed.len() == expected.len()
+                    && expected
+                        .iter()
+                        .all(|verification| observed.contains(verification)),
+                "the application must observe exactly {expected:?}, observed {observed:?}"
             );
+            drop((verify_a, certify_b));
         });
+    }
+
+    #[test_traced("WARN")]
+    fn test_certify_releases_conflicting_verification_awaiting_block() {
+        certify_releases_conflicting_verification(Progress::AwaitingBlock);
+    }
+
+    #[test_traced("WARN")]
+    fn test_certify_releases_conflicting_verification_awaiting_parent() {
+        certify_releases_conflicting_verification(Progress::AwaitingParent);
+    }
+
+    #[test_traced("WARN")]
+    fn test_certify_releases_conflicting_verification_in_flight() {
+        certify_releases_conflicting_verification(Progress::Verifying);
     }
 
     /// A boundary re-proposal stores the parent block itself at the
