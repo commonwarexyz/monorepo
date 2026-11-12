@@ -10,7 +10,7 @@ use commonware_conformance::conformance_tests;
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    BufMut, Supervisor as _,
+    BufMut, ReadOptions, Supervisor as _,
     buffer::paged::CacheRef,
     conformance::{StorageConformance, StorageWorkload},
 };
@@ -255,10 +255,15 @@ impl<const COMPRESSED: bool> StorageWorkload for SegmentedVariableWorkload<COMPR
             write_buffer: WRITE_BUFFER,
             compression: COMPRESSED.then_some(3),
             codec_config: (RangeCfg::new(0..256), ()),
+            replay_buffer: REPLAY_BUFFER,
         };
-        let mut journal =
-            segmented_variable::Journal::<_, Vec<u8>>::init(context.child("journal"), config)
-                .await?;
+        let mut journal = segmented_variable::Journal::<_, Vec<u8>>::init(
+            context.child("journal"),
+            config,
+            ReadOptions::default(),
+        )
+        .await?
+        .finish()?;
 
         let items_count = context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4);
         let mut data_to_write = vec![Vec::new(); items_count];
