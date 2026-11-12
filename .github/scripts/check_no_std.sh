@@ -20,7 +20,7 @@ for package in "${no_std_packages[@]}"; do
     --rm \
     -v `pwd`:/workdir \
     -w="/workdir" \
-    "$image" cargo +nightly build -p "$package" -Zbuild-std=core,alloc --no-default-features --target "$target" --release)
+    "$image" cargo +nightly build -p "$package" -Zbuild-std=core,alloc --no-default-features --target "$target" --release --message-format=json-render-diagnostics)
   pretty_cmd="${build_cmd[*]}"
   if [ -n "$CI" ]; then
     echo "::group::${pretty_cmd}"
@@ -28,8 +28,16 @@ for package in "${no_std_packages[@]}"; do
     printf "\n%s:\n  %s\n" "$package" "$pretty_cmd"
   fi
 
-  RUSTFLAGS="${base_rustflags} -D warnings" "${build_cmd[@]}"
-  du -h "target/${target}/release/lib${package//-/_}.rlib"
+  RUSTFLAGS="${base_rustflags} -D warnings" "${build_cmd[@]}" |
+    jq -r --arg name "${package//-/_}" '
+      select(.reason == "compiler-artifact" and .target.name == $name)
+      | .filenames[]
+      | select(endswith(".rlib"))
+      | sub("^/workdir/"; "")
+    ' |
+    while IFS= read -r artifact; do
+      du -h "$artifact"
+    done
 
   if [ -n "$CI" ]; then
     echo "::endgroup::"
