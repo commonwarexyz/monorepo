@@ -1,6 +1,8 @@
 //! The scalar field of BLS12-381: integers modulo the prime order `r` of G1 and G2.
 
 use crate::montgomery;
+use bytes::BufMut;
+use commonware_codec::{Buf, Error, FixedSize, Read, ReadExt as _, Write};
 use commonware_math::algebra::{Additive, Field, FieldNTT, Multiplicative, Object, Random, Ring};
 use core::{
     fmt,
@@ -8,6 +10,7 @@ use core::{
 };
 use rand_core::CryptoRng;
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
+use zeroize::{Zeroize, Zeroizing};
 
 /// Number of 64-bit words in a scalar.
 const WORDS: usize = 4;
@@ -171,6 +174,13 @@ const fn divide<const N: usize, const D: usize, const R: usize, const W: usize>(
 /// Arithmetic and encoding run in time independent of the operands' values. Decoding reveals
 /// only whether its input is canonical. [`Ring::exp`] and [`Additive::scale`] run in time that
 /// depends on their integer argument.
+///
+/// The codec traits read and write the canonical big-endian encoding of [`Self::to_bytes`], and
+/// reading rejects an integer that is not below the group order.
+///
+/// A scalar is `Copy` and does not clear its memory when dropped. Clear a secret scalar with
+/// [`Zeroize::zeroize`], or hold it in a [`Zeroizing`], and avoid copying it. `Debug` does not
+/// print the value.
 // Holds the canonical Montgomery representative: the value times 2^256, reduced below r.
 #[derive(Clone, Copy)]
 pub struct Scalar([u64; WORDS]);
@@ -335,11 +345,32 @@ impl Scalar {
 
 impl fmt::Debug for Scalar {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Scalar(0x")?;
-        for word in self.to_words().iter().rev() {
-            write!(f, "{word:016x}")?;
-        }
-        f.write_str(")")
+        f.write_str("Scalar([REDACTED])")
+    }
+}
+
+impl Zeroize for Scalar {
+    fn zeroize(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl FixedSize for Scalar {
+    const SIZE: usize = Self::BYTES;
+}
+
+impl Write for Scalar {
+    fn write(&self, buf: &mut impl BufMut) {
+        Zeroizing::new(self.to_bytes()).write(buf);
+    }
+}
+
+impl Read for Scalar {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, Error> {
+        let bytes = Zeroizing::new(<[u8; Self::BYTES]>::read(buf)?);
+        Self::from_bytes(&bytes).ok_or(Error::Invalid("Scalar", "not below the group order"))
     }
 }
 
@@ -491,8 +522,8 @@ impl Random for Scalar {
     /// Samples a scalar within statistical distance `2^-256` of uniform, by reducing 512 bits
     /// drawn from `rng`.
     fn random(mut rng: impl CryptoRng) -> Self {
-        let mut bytes = [0u8; Self::WIDE_BYTES];
-        rng.fill_bytes(&mut bytes);
+        let mut bytes = Zeroizing::new([0u8; Self::WIDE_BYTES]);
+        rng.fill_bytes(&mut bytes[..]);
         Self::from_bytes_wide(&bytes)
     }
 }
@@ -502,6 +533,7 @@ impl Random for Scalar {
 pub mod fuzz {
     use super::*;
     use arbitrary::{Arbitrary, Unstructured};
+    use commonware_codec::{Copying, DecodeExt as _, Encode as _};
     use commonware_math::algebra::test_suites;
     use std::vec::Vec;
 
@@ -536,8 +568,8 @@ pub mod fuzz {
         /// Checks the laws of a field with roots of unity, and that doubling and squaring agree
         /// with addition and multiplication.
         Field,
-        /// Checks that scalars round-trip through their encodings, and that exactly the integers
-        /// below the order decode.
+        /// Checks that scalars round-trip through their encodings, that exactly the integers
+        /// below the order decode, and that the codec agrees with the byte encoding.
         Encoding,
         /// Checks that integers of any length reduce to the value of their digits.
         Wide,
@@ -601,8 +633,12 @@ pub mod fuzz {
                         u64::from_be_bytes(bytes[end - 8..end].try_into().unwrap())
                     });
                     assert_eq!(Scalar::from_words(words), decoded);
+                    assert_eq!(Scalar::decode(Copying(&bytes)).ok(), decoded);
+                    let length = u.int_in_range(0..=Scalar::BYTES - 1)?;
+                    assert!(Scalar::decode(Copying(&bytes[..length])).is_err());
                     if let Some(decoded) = decoded {
                         assert_eq!(decoded.to_bytes(), bytes);
+                        assert_eq!(decoded.encode()[..], bytes);
                         let mut wide = [0; Scalar::WIDE_BYTES];
                         wide[Scalar::BYTES..].copy_from_slice(&bytes);
                         assert_eq!(decoded, Scalar::from_bytes_wide(&wide));
@@ -750,11 +786,27 @@ pub mod fuzz {
         }
 
         #[test]
-        fn debug_shows_canonical_integer() {
+        fn debug_hides_the_value() {
             assert_eq!(
                 format!("{:?}", Scalar::from_u64(0xabc)),
-                "Scalar(0x0000000000000000000000000000000000000000000000000000000000000abc)"
+                "Scalar([REDACTED])"
             );
+        }
+
+        #[test]
+        fn zeroize_clears_the_value() {
+            let mut scalar = Scalar::from_u64(0xabc);
+            scalar.zeroize();
+            assert_eq!(scalar.0, [0; WORDS]);
+        }
+
+        mod conformance {
+            use super::Scalar;
+            use commonware_codec::conformance::CodecConformance;
+
+            commonware_conformance::conformance_tests! {
+                CodecConformance<Scalar>,
+            }
         }
 
         #[test]

@@ -15,6 +15,8 @@ workspace = true
 
 [dependencies]
 arbitrary = { workspace = true, optional = true }
+bytes.workspace = true
+commonware-codec.workspace = true
 commonware-formatting.workspace = true
 commonware-macros.workspace = true
 commonware-math.workspace = true
@@ -22,11 +24,14 @@ commonware-parallel.workspace = true
 commonware-simd.workspace = true
 rand_core.workspace = true
 subtle.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 arbitrary = { workspace = true, features = [ "derive" ] }
 blst.workspace = true
 commonware-allocator = { workspace = true, features = [ "mimalloc" ] }
+commonware-codec = { workspace = true, features = [ "arbitrary" ] }
+commonware-conformance.workspace = true
 commonware-invariants.workspace = true
 commonware-math = { workspace = true, features = [ "arbitrary" ] }
 commonware-parallel = { workspace = true, features = [ "std", "test-utils" ] }
@@ -51,10 +56,13 @@ fuzz = [
 	"std",
 ]
 std = [
+	"bytes/std",
+	"commonware-codec/std",
 	"commonware-formatting/std",
 	"commonware-macros/std",
 	"commonware-math/std",
 	"commonware-parallel/std",
 	"commonware-simd/std",
 	"subtle/std",
+	"zeroize/std",
 ]
