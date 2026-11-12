@@ -7,7 +7,6 @@ use commonware_storage::merkle::{
     self, Bagging::ForwardFold, Family, Location, LocationRangeExt as _, mem::Mem,
 };
 use commonware_utils::test_rng;
-use futures::executor::block_on;
 use rand::{RngExt as _, seq::IndexedRandom};
 use std::ops::Range;
 
@@ -36,7 +35,7 @@ fn build<F: Family>(n: usize) -> (Mem<F, sha256::Digest>, sha256::Digest, Vec<sh
     let mut mem = Mem::<F, _>::new();
     let mut elements = Vec::with_capacity(n);
     let mut sampler = test_rng();
-    block_on(async {
+    {
         let batch = {
             let mut batch = mem.new_batch();
             for _ in 0..n {
@@ -47,7 +46,7 @@ fn build<F: Family>(n: usize) -> (Mem<F, sha256::Digest>, sha256::Digest, Vec<sh
             batch.merkleize(&mem, &hasher)
         };
         mem.apply_batch(&batch).unwrap();
-    });
+    }
     let root = mem.root(&hasher, 0).unwrap();
     (mem, root, elements)
 }

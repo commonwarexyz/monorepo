@@ -4,7 +4,6 @@ use commonware_math::algebra::Random as _;
 use commonware_storage::merkle::{self, Bagging::ForwardFold, Family, mem::Mem};
 use commonware_utils::test_rng;
 use criterion::{BatchSize, Criterion, criterion_group};
-use futures::executor::block_on;
 
 type StandardHasher<H> = merkle::hasher::Standard<H>;
 
@@ -30,19 +29,17 @@ fn bench_append_family<F: Family>(c: &mut Criterion, family: &str) {
             b.iter_batched(
                 || make_elements(n),
                 |elements| {
-                    block_on(async {
-                        let h = StandardHasher::<Sha256>::new(ForwardFold);
-                        let mut mem = Mem::<F, _>::new();
-                        let batch = {
-                            let mut batch = mem.new_batch();
-                            for digest in &elements {
-                                batch = batch.add(&h, digest);
-                            }
-                            batch.merkleize(&mem, &h)
-                        };
-                        mem.apply_batch(&batch).unwrap();
-                        mem
-                    })
+                    let h = StandardHasher::<Sha256>::new(ForwardFold);
+                    let mut mem = Mem::<F, _>::new();
+                    let batch = {
+                        let mut batch = mem.new_batch();
+                        for digest in &elements {
+                            batch = batch.add(&h, digest);
+                        }
+                        batch.merkleize(&mem, &h)
+                    };
+                    mem.apply_batch(&batch).unwrap();
+                    mem
                 },
                 BatchSize::LargeInput,
             );
