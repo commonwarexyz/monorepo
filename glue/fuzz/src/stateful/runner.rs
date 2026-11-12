@@ -2,7 +2,8 @@
 //! restart, the measurement point, and the run report.
 //!
 //! A run ends when every correct node has applied the required number of
-//! heights past the adversarial prefix, or when its bounded timeout expires.
+//! heights past the last round its driver scripts, or when its bounded timeout
+//! expires.
 //! Completion is keyed on application rather than on delivery, because the
 //! database commitment I2 compares is written only once the batch is applied.
 //! Progress is never asserted: a cluster that stalls simply stops at the

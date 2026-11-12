@@ -7,9 +7,10 @@
 
 use super::{
     MAX_ADVANCE_STEPS, MAX_EXTRA_HEIGHTS, MAX_JOIN_AFTER, MAX_JOINER_CRASH_STEPS,
-    MAX_MAINTENANCE_INTERVAL, MAX_MINIMUM_EPOCH, MAX_POST_HEIGHTS, MAX_PROBE_EVENTS,
-    MAX_RAW_PAYLOAD, MAX_REQUIRED_HEIGHTS, MAX_RETAINED_BLOCKS, MAX_SERVED_HEIGHTS,
-    MAX_SOURCE_HEIGHT, MAX_SYNC_BATCH, MAX_TERM_LENGTH, NUM_SOURCES, app::FaultArming,
+    MAX_MAINTENANCE_INTERVAL, MAX_MINIMUM_EPOCH, MAX_POST_HEIGHTS, MAX_PREFIX_ROUNDS,
+    MAX_PROBE_EVENTS, MAX_RAW_PAYLOAD, MAX_REQUIRED_HEIGHTS, MAX_RETAINED_BLOCKS,
+    MAX_SERVED_HEIGHTS, MAX_SOURCE_HEIGHT, MAX_SYNC_BATCH, MAX_TERM_LENGTH, NUM_SOURCES,
+    app::FaultArming,
 };
 use arbitrary::Arbitrary;
 use commonware_consensus::types::TermLength;
@@ -34,6 +35,18 @@ pub(crate) fn tape(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Vec
     }
 }
 
+/// Draws, beside one for each length of the prefix, that script every round.
+const WHOLE_RUN_DRAWS: u8 = 4;
+
+/// Draw the adversarial prefix of a twins run: the number of leading rounds
+/// the twins scenario scripts, or `None` if it scripts every round.
+pub(crate) fn prefix(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Option<u8>> {
+    // Every length is as likely as any other, and one draw in five scripts
+    // every round.
+    let sample = u.int_in_range(0..=MAX_PREFIX_ROUNDS + WHOLE_RUN_DRAWS - 1)?;
+    Ok((sample < MAX_PREFIX_ROUNDS).then_some(sample + 1))
+}
+
 /// One run of the stateful twins target.
 #[derive(Clone)]
 pub struct StatefulTwinsFuzzInput {
@@ -41,9 +54,13 @@ pub struct StatefulTwinsFuzzInput {
     pub case_selector: u16,
     /// Repeat one partition pattern across the adversarial prefix.
     pub sustained: bool,
+    /// The adversarial prefix: the leading rounds the twins scenario scripts,
+    /// from 1 to 16, or `None` if it scripts every round and the run has no
+    /// synchronous suffix.
+    pub prefix: Option<u8>,
     /// Which deviations the faulty application may take.
     pub faults: FaultArming,
-    /// Heights past the adversarial prefix each correct node must deliver
+    /// Heights each correct node must deliver, past the script's last round,
     /// before the run ends.
     pub required_heights: u8,
     /// Leader term length. A term longer than one view makes the scenario's
@@ -59,6 +76,7 @@ impl fmt::Debug for StatefulTwinsFuzzInput {
         f.debug_struct("StatefulTwinsFuzzInput")
             .field("case_selector", &self.case_selector)
             .field("sustained", &self.sustained)
+            .field("prefix", &self.prefix)
             .field("faults", &self.faults)
             .field("required_heights", &self.required_heights)
             .field("term_length", &self.term_length)
@@ -71,6 +89,7 @@ impl fmt::Debug for StatefulTwinsFuzzInput {
 struct TwinsControls {
     case_selector: u16,
     sustained: bool,
+    prefix: Option<u8>,
     faults: FaultArming,
     required_heights: u8,
     term_length: TermLength,
@@ -80,6 +99,7 @@ impl TwinsControls {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let case_selector = u.arbitrary()?;
         let sustained = u.arbitrary()?;
+        let prefix = prefix(u)?;
 
         // Every deviation stays armed unless the input turns it off, so the
         // adversary keeps its reach as the surrounding axes mutate.
@@ -96,6 +116,7 @@ impl TwinsControls {
         Ok(Self {
             case_selector,
             sustained,
+            prefix,
             faults,
             required_heights,
             term_length,
@@ -108,6 +129,7 @@ impl Arbitrary<'_> for StatefulTwinsFuzzInput {
         let TwinsControls {
             case_selector,
             sustained,
+            prefix,
             faults,
             required_heights,
             term_length,
@@ -117,6 +139,7 @@ impl Arbitrary<'_> for StatefulTwinsFuzzInput {
         Ok(Self {
             case_selector,
             sustained,
+            prefix,
             faults,
             required_heights,
             term_length,

@@ -148,8 +148,9 @@ pub(crate) const NAMESPACE: &[u8] = b"glue_fuzz_stateful";
 /// Identities in the validator set. Quorum is three of four.
 pub(crate) const NUM_IDENTITIES: u32 = 4;
 
-/// Adversarial twins rounds before the synchronous suffix.
-pub(crate) const PREFIX_ROUNDS: usize = 3;
+/// Most adversarial twins rounds a run may script before its synchronous
+/// suffix. A run may also script every round and have no suffix.
+pub(crate) const MAX_PREFIX_ROUNDS: u8 = 16;
 
 /// Upper bound on the suffix heights a run may require. The exact number
 /// is drawn per run; reaching it is not required, since the run is also bounded.

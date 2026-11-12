@@ -8,7 +8,10 @@ use super::{
     COMMITTEE, DkgMask, MAX_EPOCHS, RESHARE_IDENTITIES,
     input::{STREAM_BYTES, sharing_mode},
 };
-use crate::{input::stream, stateful::input::tape};
+use crate::{
+    input::stream,
+    stateful::input::{prefix, tape},
+};
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_cryptography::bls12381::primitives::sharing::Mode;
 use std::fmt;
@@ -55,6 +58,10 @@ pub struct DkgReshareFuzzInput {
     /// Repeat one partition pattern across the adversarial prefix of every
     /// epoch.
     pub sustained: bool,
+    /// The adversarial prefix: the leading views of every epoch the twins
+    /// scenario partitions, from 1 to 16, or `None` if it partitions every
+    /// view.
+    pub prefix: Option<u8>,
     /// Epochs the run is asked to complete, from one to three.
     pub epochs: u8,
     /// Which half each other identity exchanges ceremony messages with, for
@@ -79,6 +86,7 @@ impl fmt::Debug for DkgReshareFuzzInput {
         f.debug_struct("DkgReshareFuzzInput")
             .field("case_selector", &self.case_selector)
             .field("sustained", &self.sustained)
+            .field("prefix", &self.prefix)
             .field("epochs", &self.epochs)
             .field("masks", &self.masks)
             .field("sharing_mode", &self.sharing_mode)
@@ -96,6 +104,7 @@ impl Arbitrary<'_> for DkgReshareFuzzInput {
         Ok(Self {
             case_selector: u.arbitrary()?,
             sustained: u.arbitrary()?,
+            prefix: prefix(u)?,
             epochs: u.int_in_range(1..=MAX_EPOCHS)?,
             masks: u.arbitrary()?,
             sharing_mode: sharing_mode(u)?,
@@ -109,6 +118,7 @@ impl Arbitrary<'_> for DkgReshareFuzzInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stateful::MAX_PREFIX_ROUNDS;
 
     fn decode(bytes: &[u8]) -> DkgReshareFuzzInput {
         DkgReshareFuzzInput::arbitrary(&mut Unstructured::new(bytes)).unwrap()
@@ -127,6 +137,9 @@ mod tests {
         let any = |holds: &dyn Fn(&DkgReshareFuzzInput) -> bool| sessions.iter().any(holds);
         assert!(any(&|session| session.sustained));
         assert!(any(&|session| !session.sustained));
+        for prefix in (1..=MAX_PREFIX_ROUNDS).map(Some).chain([None]) {
+            assert!(any(&|session| session.prefix == prefix));
+        }
         for epochs in 1..=MAX_EPOCHS {
             assert!(any(&|session| session.epochs == epochs));
         }

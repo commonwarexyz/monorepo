@@ -4,9 +4,9 @@
 //! compromised identity runs two, sharing its key, each on its own storage
 //! partitions and with its own secret store, so the two halves deal
 //! differently under one identity. Its Simplex, marshal, and dissemination
-//! channels are split per view by the selected twins scenario for the first
-//! views of the chain, and its DKG channel is split by the input's mask for
-//! the whole ceremony.
+//! channels are split per view by the selected twins scenario for the prefix
+//! the input draws, the first views of the chain or every view, and its DKG
+//! channel is split by the input's mask for the whole ceremony.
 //!
 //! The run ends when every correct engine has reported its completion or the
 //! bounded timeout expires, and the invariants are checked over whatever was
@@ -38,7 +38,7 @@ use super::{
     store::Secrets,
 };
 use crate::stateful::{
-    network::select_case,
+    network::TwinsScript,
     runner::{Panic, network},
 };
 use commonware_consensus::types::Epoch;
@@ -170,10 +170,11 @@ async fn run(
     let committee = Set::from_iter_dedup(participants.iter().cloned());
     let oracle = network(&context, &participants).await;
 
-    // Draw the twins scenario from the tape.
-    let (compromised, scenario) = select_case(
+    // Draw the twins script from the tape.
+    let (compromised, script) = TwinsScript::select(
         entropy,
         participants.len(),
+        input.prefix,
         input.sustained,
         input.case_selector,
     )?;
@@ -222,7 +223,7 @@ async fn run(
     let node_context = context
         .child("compromised")
         .with_attribute("index", compromised);
-    let split = Twins::new(participants.clone(), scenario, MAX_SUPPORTED_MODE);
+    let split = Twins::new(participants.clone(), script, MAX_SUPPORTED_MODE);
     let mask = Mask::new(&participants, compromised, input.mask);
     let child = |label| node_context.child(label);
     let (votes, votes_secondary) = halve(child("votes_split"), raw.votes, split.votes());
@@ -306,7 +307,7 @@ mod tests {
     use crate::{
         dkg::{
             DkgMask, Side,
-            fixtures::{self, contradicted, tape},
+            fixtures::{self, PREFIX, contradicted, tape},
         },
         stateful::runner::tolerating,
     };
@@ -324,6 +325,7 @@ mod tests {
         DkgBootstrapFuzzInput {
             case_selector,
             sustained,
+            prefix: PREFIX,
             mask,
             sharing_mode,
             raw_bytes: tape(seed.into()),
@@ -360,6 +362,22 @@ mod tests {
             ));
             println!("{report}");
             assert_eq!(report.counts.correct_nodes, 3);
+        }
+    }
+
+    /// The scenario may partition any number of leading views, or every
+    /// view.
+    #[test]
+    fn every_length_of_prefix_runs() {
+        for prefix in [Some(1), Some(9), Some(16), None] {
+            for sustained in [false, true] {
+                let report = run_dkg_bootstrap(DkgBootstrapFuzzInput {
+                    prefix,
+                    ..input(5, sustained, SPLIT, Mode::NonZeroCounter, 3)
+                });
+                println!("{prefix:?} sustained={sustained} {report}");
+                assert_eq!(report.counts.correct_nodes, 3);
+            }
         }
     }
 

@@ -7,8 +7,8 @@
 //! vote, certificate, and resolver channels by epoch, so each message on them
 //! carries its epoch before the Simplex message; the view is read from the
 //! message behind that prefix. And every epoch runs its own Simplex engine
-//! from view one, so the scenario's partition applies to the first views of
-//! every epoch.
+//! from view one, so the scenario's partition applies to the prefix of every
+//! epoch: its first views, or all of them.
 //!
 //! The DKG channel is multiplexed by epoch as well. Each ceremony has its own
 //! [`Mask`], selected by the epoch a message carries in its channel prefix. A
@@ -22,22 +22,20 @@
 use super::{
     Digest, DkgMask, PublicKey,
     app::{BLOCK_CFG, Block},
-    network::{Mask, harness, split},
+    network::{Mask, TERM, harness, split},
     scheme::Scheme,
 };
 use crate::stateful::{
     network::{
-        Routing, backfill_routing, certificate_routing, simplex_resolver_routing, vote_routing,
+        Routing, TwinsScript, backfill_routing, certificate_routing, simplex_resolver_routing,
+        vote_routing,
     },
     runner::unattributed,
 };
 use commonware_codec::Decode as _;
 use commonware_consensus::{
     CertifiableBlock as _,
-    simplex::{
-        elector::{self, Elector, RoundRobin, RoundRobinElector, Scheduled, Terms},
-        mocks::twins::Scenario,
-    },
+    simplex::elector::{self, Elector, RoundRobin, RoundRobinElector, Scheduled, Terms},
     types::{Participant, Round},
 };
 use commonware_cryptography::Sha256;
@@ -84,14 +82,14 @@ fn block_routing(message: &IoBuf) -> Routing {
 #[derive(Clone)]
 pub(super) struct Twins {
     participants: Arc<[PublicKey]>,
-    scenario: Scenario,
+    script: TwinsScript,
 }
 
 impl Twins {
-    pub(super) const fn new(participants: Arc<[PublicKey]>, scenario: Scenario) -> Self {
+    pub(super) const fn new(participants: Arc<[PublicKey]>, script: TwinsScript) -> Self {
         Self {
             participants,
-            scenario,
+            script,
         }
     }
 
@@ -103,7 +101,7 @@ impl Twins {
     ) -> (impl SplitForwarder<PublicKey>, impl SplitRouter<PublicKey>) {
         split(
             self.participants.clone(),
-            self.scenario.clone(),
+            self.script.clone(),
             move |message: &IoBuf| simplex_routing(channel, message),
         )
     }
@@ -111,7 +109,7 @@ impl Twins {
     pub(super) fn backfill(&self) -> (impl SplitForwarder<PublicKey>, impl SplitRouter<PublicKey>) {
         split(
             self.participants.clone(),
-            self.scenario.clone(),
+            self.script.clone(),
             backfill_routing,
         )
     }
@@ -121,7 +119,7 @@ impl Twins {
     ) -> (impl SplitForwarder<PublicKey>, impl SplitRouter<PublicKey>) {
         split(
             self.participants.clone(),
-            self.scenario.clone(),
+            self.script.clone(),
             block_routing,
         )
     }
@@ -184,26 +182,27 @@ impl Masks {
     }
 }
 
-/// Leader election that follows the scenario's scripted leaders for the first
-/// views of every epoch and rotates afterwards.
+/// Leader election that follows the script's leaders for the views of every
+/// epoch the script reaches and rotates afterwards.
 ///
-/// The scenario names its leaders among all the identities of the run, while
+/// The script names its leaders among all the identities of the run, while
 /// an epoch's committee is a subset of them. A scripted leader that is in the
 /// committee leads its view; a view whose scripted leader is outside the
 /// committee falls back to the rotation, as every view past the script does.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(super) struct Scripted {
+    script: TwinsScript,
     leaders: Arc<[PublicKey]>,
 }
 
 impl Scripted {
-    /// The leaders `scenario` scripts among `identities`.
-    pub(super) fn new(scenario: &Scenario, identities: &[PublicKey]) -> Self {
+    /// The leaders `script` names among `identities`.
+    pub(super) fn new(script: &TwinsScript, identities: &[PublicKey]) -> Self {
         Self {
-            leaders: scenario
-                .rounds()
-                .iter()
-                .map(|round| identities[round.leader()].clone())
+            script: script.clone(),
+            leaders: script
+                .leaders()
+                .map(|leader| identities[leader].clone())
                 .collect(),
         }
     }
@@ -216,6 +215,7 @@ impl elector::Config<Scheme> for Scripted {
         // The elector is built and asked inside an engine's task and is the
         // harness's code, not the engine's.
         unattributed(|| ScriptedElector {
+            script: self.script,
             leaders: self
                 .leaders
                 .iter()
@@ -230,8 +230,9 @@ impl elector::Config<Scheme> for Scripted {
 }
 
 /// [`Scripted`] for one epoch's committee.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(super) struct ScriptedElector {
+    script: TwinsScript,
     /// The committee position of each scripted view's leader, if the leader
     /// is in the committee.
     leaders: Arc<[Option<Participant>]>,
@@ -247,13 +248,11 @@ impl Elector<Scheme> for ScriptedElector {
 
     fn elect(&self, round: Round, (): ()) -> Participant {
         unattributed(|| {
-            // View one is the first scripted view of an epoch.
-            let scripted = round
-                .view()
-                .term_index(self.terms().length())
-                .checked_sub(1)
-                .and_then(|index| usize::try_from(index).ok())
-                .and_then(|index| self.leaders.get(index).copied().flatten());
+            let scripted = self
+                .script
+                .place(round.view(), TERM)
+                .and_then(|place| usize::try_from(place).ok())
+                .and_then(|place| self.leaders.get(place).copied().flatten());
             scripted.unwrap_or_else(|| self.fallback.elect(round, ()))
         })
     }
@@ -263,7 +262,10 @@ impl Elector<Scheme> for ScriptedElector {
 mod tests {
     use super::*;
     use crate::{
-        dkg::{MockGroup, RESHARE_NAMESPACE, Side, fixtures::identities},
+        dkg::{
+            MockGroup, RESHARE_NAMESPACE, Side,
+            fixtures::{PREFIX, identities},
+        },
         stateful::network::select_case,
     };
     use commonware_codec::{Encode as _, varint::UInt};
@@ -368,9 +370,10 @@ mod tests {
     #[test]
     fn scripted_leader_leads_when_in_the_committee() {
         let identities = identities();
-        let (_, scenario) = select_case(vec![7; 64], identities.len(), false, 3)
+        let (_, script) = TwinsScript::select(vec![7; 64], identities.len(), PREFIX, false, 3)
             .expect("the generator yields cases");
-        let scripted = Scripted::new(&scenario, &identities);
+        let leaders: Vec<usize> = script.leaders().collect();
+        let scripted = Scripted::new(&script, &identities);
         let rotation = |committee: &Set<PublicKey>| {
             elector::Config::<Scheme>::build(RoundRobin::<Sha256>::default(), committee)
         };
@@ -387,26 +390,39 @@ mod tests {
             let elector = elector::Config::<Scheme>::build(scripted.clone(), &committee);
             let fallback = rotation(&committee);
             for epoch in 0..2 {
-                for (index, scripted) in scenario.rounds().iter().enumerate() {
+                for (index, scripted) in leaders.iter().enumerate() {
                     let round = Round::new(Epoch::new(epoch), View::new(index as u64 + 1));
                     let leader = elector.elect(round, ());
-                    if scripted.leader() == outsider {
+                    if *scripted == outsider {
                         assert_eq!(leader, fallback.elect(round, ()));
                     } else {
-                        assert_eq!(
-                            committee[usize::from(leader)],
-                            identities[scripted.leader()]
-                        );
+                        assert_eq!(committee[usize::from(leader)], identities[*scripted]);
                     }
                 }
 
                 // Past the script the rotation leads.
-                let round = Round::new(
-                    Epoch::new(epoch),
-                    View::new(scenario.rounds().len() as u64 + 1),
-                );
+                let round = Round::new(Epoch::new(epoch), View::new(leaders.len() as u64 + 1));
                 assert_eq!(elector.elect(round, ()), fallback.elect(round, ()));
             }
+        }
+    }
+
+    #[test]
+    fn script_without_a_prefix_names_the_leader_of_every_view() {
+        let identities = identities();
+        let (_, script) = TwinsScript::select(vec![7; 64], identities.len(), None, false, 3)
+            .expect("the generator yields cases");
+        let leaders: Vec<usize> = script.leaders().collect();
+        let scripted = Scripted::new(&script, &identities);
+        let committee = Set::from_iter_dedup(identities.iter().cloned());
+        let elector = elector::Config::<Scheme>::build(scripted, &committee);
+        for view in 1..=3 * leaders.len() as u64 {
+            let round = Round::new(Epoch::new(1), View::new(view));
+            let scripted = leaders[(view as usize - 1) % leaders.len()];
+            assert_eq!(
+                committee[usize::from(elector.elect(round, ()))],
+                identities[scripted]
+            );
         }
     }
 
@@ -553,9 +569,11 @@ mod tests {
     #[test]
     fn scenario_partitions_the_first_views_of_every_epoch() {
         let identities: Arc<[PublicKey]> = identities().into();
-        let (compromised, scenario) = select_case(vec![3; 64], identities.len(), false, 5)
+        let (compromised, scenario) = select_case(vec![3; 64], identities.len(), 3, false, 5)
             .expect("the generator yields cases");
-        let twins = Twins::new(identities.clone(), scenario.clone());
+        let (_, script) = TwinsScript::select(vec![3; 64], identities.len(), PREFIX, false, 5)
+            .expect("the generator yields cases");
+        let twins = Twins::new(identities.clone(), script);
         let (forward, route) = twins.simplex(Simplex::Votes);
         let schemes = committee();
         let vote = |epoch: u64, view: u64| {

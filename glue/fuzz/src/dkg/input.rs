@@ -7,7 +7,10 @@
 //! harness. The tape is never printed in `Debug` output.
 
 use super::COMMITTEE;
-use crate::{input::stream, stateful::input::tape};
+use crate::{
+    input::stream,
+    stateful::input::{prefix, tape},
+};
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_cryptography::bls12381::primitives::sharing::Mode;
 use commonware_p2p::simulated::Link;
@@ -74,6 +77,9 @@ pub struct DkgBootstrapFuzzInput {
     pub case_selector: u16,
     /// Repeat one partition pattern across the adversarial prefix.
     pub sustained: bool,
+    /// The adversarial prefix: the leading views the twins scenario
+    /// partitions, from 1 to 16, or `None` if it partitions every view.
+    pub prefix: Option<u8>,
     /// Which half each other identity exchanges ceremony messages with.
     pub mask: DkgMask,
     /// How the ceremony assigns evaluation points to participants.
@@ -87,6 +93,7 @@ impl fmt::Debug for DkgBootstrapFuzzInput {
         f.debug_struct("DkgBootstrapFuzzInput")
             .field("case_selector", &self.case_selector)
             .field("sustained", &self.sustained)
+            .field("prefix", &self.prefix)
             .field("mask", &self.mask)
             .field("sharing_mode", &self.sharing_mode)
             .field("raw_bytes_len", &self.raw_bytes.len())
@@ -101,6 +108,7 @@ impl Arbitrary<'_> for DkgBootstrapFuzzInput {
         Ok(Self {
             case_selector: u.arbitrary()?,
             sustained: u.arbitrary()?,
+            prefix: prefix(u)?,
             mask: u.arbitrary()?,
             sharing_mode: sharing_mode(u)?,
             raw_bytes: tape(u)?,
@@ -309,6 +317,7 @@ impl Arbitrary<'_> for DkgBootstrapRestartsFuzzInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stateful::MAX_PREFIX_ROUNDS;
 
     fn decode(bytes: &[u8]) -> DkgBootstrapFuzzInput {
         DkgBootstrapFuzzInput::arbitrary(&mut Unstructured::new(bytes)).unwrap()
@@ -335,6 +344,12 @@ mod tests {
             .collect();
         assert!(sessions.iter().any(|session| session.1));
         assert!(sessions.iter().any(|session| !session.1));
+        for prefix in (1..=MAX_PREFIX_ROUNDS).map(Some).chain([None]) {
+            assert!(
+                (0..=255u8).any(|byte| decode(&[byte]).prefix == prefix),
+                "no short input draws the prefix {prefix:?}"
+            );
+        }
         assert!(sessions.iter().any(|session| session.2 == DkgMask::WHOLE));
         assert!(sessions.iter().any(|session| session.2 != DkgMask::WHOLE));
         assert!(

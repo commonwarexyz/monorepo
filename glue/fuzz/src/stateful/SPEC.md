@@ -33,11 +33,14 @@ Used throughout this document with exactly these meanings.
   identity may exchange messages with, drawn from the twins case generator in
   `commonware_consensus::simplex::mocks::twins`.
 - **Prefix** — the scripted adversarial part of a run: the leading rounds for which the twins
-  scenario prescribes a partition.
-- **Suffix** — the part of a run after the prefix, during which the scenario prescribes no
-  partition and the network is whole.
+  scenario prescribes a partition. A round is one leader term. The input chooses the prefix: from
+  1 to 16 rounds, or no bound, in which case the scenario prescribes a partition for every round
+  of the run by starting over whenever its 16 rounds end.
+- **Suffix** — the part of a run after a bounded prefix, during which the scenario prescribes no
+  partition and the network is whole. A run whose prefix has no bound has no suffix.
 - **Measurement point** — the point at which the invariants in §8 are checked: the end of the
-  suffix, or the run's bounded timeout, whichever comes first.
+  suffix, or the run's bounded timeout, whichever comes first. A run without a suffix ends once
+  the required heights are applied past the first 16 rounds, or at the timeout.
 - **Pending tip** — a merkleized database batch Stateful holds in memory, keyed by block digest,
   representing the speculative state of one fork.
 - **Lazy recovery** — Stateful's reconstruction of a missing pending tip by walking back the block
@@ -159,8 +162,8 @@ produces, and on whether a block verifies.
   simulated duration, and allocated storage so execution remains suitable for continuous fuzzing
   and meets any applicable throughput floor in §10. Within a target, each bound MUST be fixed
   across all selected scenarios and database adapters; no configuration may receive relaxed
-  limits. Cluster suffix heights and leader term length MAY vary with the fuzz input only within
-  those fixed bounds.
+  limits. The prefix, cluster suffix heights, and leader term length MAY vary with the fuzz input
+  only within those fixed bounds.
 - **R14 — Deterministic execution.** Every target MUST reproduce the same behavior and observations
   from the same input. Scheduling and randomized choices MUST depend only on the input bytes and
   execute under the deterministic runtime, without entropy-backed randomness or wall-clock time.
@@ -321,8 +324,14 @@ and is not itself a requirement. The target names in §5.2 are normative (R1, R2
 
 The existing infrastructure must be reused as much as possible.
 
-- SimplexCertMock and the twins scenario generator and elector, from
-  `commonware_consensus::simplex::mocks`, behind the consensus `mocks` feature.
+- SimplexCertMock and the twins scenario generator, from
+  `commonware_consensus::simplex::mocks`, behind the consensus `mocks` feature. The generator
+  counts the scenarios of a length exactly and cannot count a sampled scenario of more than about
+  twelve rounds, so a prefix of more than 8 rounds is scripted by two generated scenarios, the
+  second drawn from entropy of its own; a sustained scenario is generated whole at any length.
+  Leader election follows the script through the harness's own elector, which names the leader
+  of every scripted round, across both scenarios and each time the script starts over, and asks
+  the round-robin elector in every other round.
 - The simulated network and its split-channel plumbing, from `commonware_p2p::simulated`.
 - The deterministic runtime and its storage, from `commonware_runtime::deterministic`.
 - The database-set traits and QMDB adapters in `glue::stateful::db`, and the QMDB implementations
@@ -385,13 +394,17 @@ Every target MUST use its bounded, deterministic structure below.
    standard and coding targets differ only in the marshal variant every engine runs; under the
    coding marshal the dissemination channel carries shards, which name no view and so reach both
    halves.
-2. **Prefix.** The engines execute the selected bounded Twins scenario while the secondary half's
-   faulty application is active.
-3. **Suffix.** After the scripted prefix, the network is whole and both compromised halves address
-   every identity.
-4. **Measurement.** The run ends when every correct node applies the required suffix heights or the
-   bounded timeout expires. I1-I4 and I6 are checked over everything observed. A stalled run is not
-   a liveness failure.
+2. **Prefix.** The engines execute the selected Twins scenario for the prefix the input draws,
+   1 to 16 rounds or every round of the run, while the secondary half's faulty application is
+   active.
+3. **Suffix.** After a bounded prefix, the network is whole and both compromised halves address
+   every identity. A run whose prefix has no bound has no suffix: the compromised identity's
+   halves stay partitioned, and the three correct identities exchange every message among
+   themselves.
+4. **Measurement.** The run ends when every correct node applies the required heights past the
+   script's last round, or the bounded timeout expires. Without a bound that is past the first 16
+   rounds. I1-I4 and I6 are checked over everything observed. A stalled run is not a liveness
+   failure.
 
 Twins observations MUST be keyed by engine because the compromised halves share an identity.
 

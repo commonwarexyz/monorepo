@@ -60,6 +60,10 @@ pub(super) fn decode<I: for<'a> Arbitrary<'a>>(bytes: &[u8]) -> I {
     I::arbitrary(&mut Unstructured::new(bytes)).expect("every input decodes")
 }
 
+/// The adversarial prefix of a Twins run with a fixed input: the first three
+/// views of every epoch.
+pub(super) const PREFIX: Option<u8> = Some(3);
+
 /// Links that only delay.
 pub(super) const CLEAN: LinkControls = LinkControls {
     latency_ms: 10,

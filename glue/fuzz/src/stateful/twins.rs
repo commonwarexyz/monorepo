@@ -2,8 +2,11 @@
 //!
 //! The compromised identity runs two full node stacks sharing one signing key,
 //! its channels split per view by the selected twins scenario, with the correct
-//! application on the primary half and the faulty one on the secondary. Crashes
-//! belong to the restart driver, which runs a cluster of four correct nodes.
+//! application on the primary half and the faulty one on the secondary. The
+//! input draws the adversarial prefix: the scenario scripts the first 1 to 16
+//! leader terms and a synchronous suffix follows, or it scripts every term and
+//! the run has no suffix. Crashes belong to the restart driver, which runs a
+//! cluster of four correct nodes.
 //!
 //! The driver runs once over the standard marshal and, as a separate target,
 //! once over the coding marshal, where blocks reach marshal as erasure-coded
@@ -11,27 +14,23 @@
 //! `Deferred`. The scenario, the applications, and the invariants are the same.
 
 use super::{
-    NUM_IDENTITIES, PREFIX_ROUNDS, RUN_TIMEOUT,
+    NUM_IDENTITIES, RUN_TIMEOUT,
     app::{Block, CorrectApp, FaultSchedule, FaultyApp},
     backend::{Any, Backend},
     input::StatefulTwinsFuzzInput,
     invariants::EngineObservations,
     marshal::Marshal,
     network::{
-        backfill_forwarder, backfill_router, broadcast_forwarder, broadcast_router,
-        certificate_forwarder, certificate_router, resolver_forwarder, resolver_router,
-        select_case, shared_router, vote_forwarder, vote_router,
+        Scripted, TwinsScript, backfill_forwarder, backfill_router, broadcast_forwarder,
+        broadcast_router, certificate_forwarder, certificate_router, resolver_forwarder,
+        resolver_router, shared_router, vote_forwarder, vote_router,
     },
     runner::{self, CorrectEngine, NodeConfig, Outcome, RunReport},
     stack::{
         EngineChannels, EngineConfig, SYNC_CONFIG, register_channels, round_robin, spawn_engine,
     },
 };
-use commonware_consensus::{
-    marshal::{ancestry::BlockProvider, core::Mailbox as MarshalMailbox},
-    simplex::mocks::twins,
-    types::View,
-};
+use commonware_consensus::marshal::{ancestry::BlockProvider, core::Mailbox as MarshalMailbox};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Runner as _, Supervisor as _, deterministic};
 use commonware_utils::FuzzRng;
@@ -110,17 +109,18 @@ where
     let cluster = runner::setup::<B, M>(&mut context).await;
     let participants = cluster.participants.clone();
 
-    // Draw the twins scenario from the tape.
-    let Some((compromised, scenario)) = select_case(
+    // Draw the twins script from the tape.
+    let Some((compromised, scenario)) = TwinsScript::select(
         entropy.clone(),
         participants.len(),
+        input.prefix,
         input.sustained,
         input.case_selector,
     ) else {
         return RunReport::skipped(target, B::NAME, M::NAME, Outcome::NoCase);
     };
     let term_length = input.term_length;
-    let elector = twins::Elector::new(round_robin(term_length), &scenario, participants.len());
+    let elector = Scripted::new(round_robin(term_length), scenario.clone());
 
     let observations: Vec<EngineObservations> = (0..NUM_ENGINES)
         .map(|_| EngineObservations::new())
@@ -283,11 +283,12 @@ where
         secondary_channels,
     ));
 
-    // The scenario scripts a partition for each of its rounds and prescribes
-    // none afterwards, at which point both halves address every identity.
-    // Counting only heights past that boundary keeps a run from finishing
-    // before every scripted round has been traversed.
-    let scripted_through = View::new(PREFIX_ROUNDS as u64 * term_length.get());
+    // The script prescribes a partition for each of its rounds. A script with
+    // a prefix prescribes none afterwards, at which point both halves address
+    // every identity; one without starts over. Counting only heights past the
+    // script's last round keeps a run from finishing before every scripted
+    // round has been traversed.
+    let scripted_through = scenario.scripted_through(term_length);
     let waiters = runner::waiters(
         &context,
         &correct,
@@ -325,6 +326,9 @@ mod tests {
         decline_proposal: true,
     };
 
+    /// The adversarial prefix of a fixed input: the first three rounds.
+    const PREFIX: Option<u8> = Some(3);
+
     /// The compromised identity deviates only at the message layer.
     const NO_FAULTS: FaultArming = FaultArming {
         reject_verification: false,
@@ -350,6 +354,7 @@ mod tests {
         StatefulTwinsFuzzInput {
             case_selector,
             sustained,
+            prefix: PREFIX,
             faults,
             required_heights,
             term_length: TermLength::new(NZU32!(term_length)),
@@ -394,6 +399,29 @@ mod tests {
                 #[test]
                 fn long_terms_hold_invariants() {
                     measured(input(3, true, ALL_FAULTS, 2, 4, 7));
+                }
+
+                /// The scenario may script any number of leading rounds, or
+                /// every round.
+                #[test]
+                fn every_length_of_prefix_runs() {
+                    for (prefix, sustained, term_length) in [
+                        (Some(1), false, 1),
+                        (Some(16), false, 1),
+                        (Some(9), true, 2),
+                        (None, false, 1),
+                        (None, true, 2),
+                    ] {
+                        let report = $run(StatefulTwinsFuzzInput {
+                            prefix,
+                            ..input(1, sustained, ALL_FAULTS, 1, term_length, 3)
+                        });
+                        println!("{prefix:?} sustained={sustained}: {report}");
+                        assert!(
+                            report.counts.correct_nodes > 0,
+                            "prefix {prefix:?} observed no correct node: {report}"
+                        );
+                    }
                 }
 
                 /// The target explores a scenario per case selector; every one

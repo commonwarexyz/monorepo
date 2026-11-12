@@ -11,10 +11,11 @@
 //! partitions and with its own secret store; both stores start with the
 //! identity's share of the first output, if it has one. Its Simplex, marshal,
 //! and dissemination channels are split per view by the selected twins
-//! scenario for the first views of every epoch, its DKG channel is split by
-//! the input's mask for each epoch's ceremony, and its secondary half runs the
-//! faulty application. The scenario's scripted leaders lead the views they
-//! are scripted for in every epoch whose committee holds them.
+//! scenario for the prefix the input draws, the first views of every epoch or
+//! every view, its DKG channel is split by the input's mask for each epoch's
+//! ceremony, and its secondary half runs the faulty application. The
+//! scenario's scripted leaders lead the views they are scripted for in every
+//! epoch whose committee holds them.
 //!
 //! The run ends when every correct engine has processed the last boundary
 //! block of the selected epochs, when a correct engine stops, or when the
@@ -45,7 +46,7 @@ use super::{
     store::Secrets,
 };
 use crate::stateful::{
-    network::{select_case, shared_router},
+    network::{TwinsScript, shared_router},
     runner::{LINK, Panic, network_with},
 };
 use commonware_consensus::types::Epoch;
@@ -200,10 +201,11 @@ async fn run(
     let participants: Arc<[PublicKey]> = public_keys(&signers);
     let oracle = network_with(&context, &participants, LINK, TRACKED_PEER_SETS).await;
 
-    // Draw the twins scenario from the tape.
-    let (compromised, scenario) = select_case(
+    // Draw the twins script from the tape.
+    let (compromised, script) = TwinsScript::select(
         entropy.clone(),
         participants.len(),
+        input.prefix,
         input.sustained,
         input.case_selector,
     )?;
@@ -231,7 +233,7 @@ async fn run(
         .map(|engine| Secrets::dealt(session.share(identity_of(engine))))
         .collect();
     let records: Vec<Records> = (0..=SECONDARY_ENGINE).map(|_| Records::default()).collect();
-    let elector = Scripted::new(&scenario, &participants);
+    let elector = Scripted::new(&script, &participants);
     let config = |engine: usize, partition: String| Config {
         signer: session.signers[identity_of(engine)].clone(),
         partition,
@@ -282,7 +284,7 @@ async fn run(
     let node_context = context
         .child("compromised")
         .with_attribute("index", compromised);
-    let split = Twins::new(participants.clone(), scenario);
+    let split = Twins::new(participants.clone(), script);
     let masks = Masks::new(&participants, compromised, &input.masks);
     let child = |label| node_context.child(label);
     let (votes, votes_secondary) = halve(
@@ -411,7 +413,7 @@ mod tests {
     use super::*;
     use crate::dkg::{
         DkgMask, MAX_EPOCHS, Rotation, Side,
-        fixtures::{self, ROTATE, STAY, contradicted, decode, tape},
+        fixtures::{self, PREFIX, ROTATE, STAY, contradicted, decode, tape},
         reshare_input::ROTATIONS,
     };
     use commonware_cryptography::bls12381::primitives::sharing::Mode;
@@ -437,6 +439,7 @@ mod tests {
         DkgReshareFuzzInput {
             case_selector,
             sustained: case_selector % 2 == 1,
+            prefix: PREFIX,
             epochs,
             masks,
             sharing_mode: if seed.is_multiple_of(2) {
@@ -523,6 +526,20 @@ mod tests {
     fn split_masks_hold_invariants() {
         for seed in 0..3 {
             measured(input(7 + u16::from(seed), 2, SPLIT, ROTATE, seed));
+        }
+    }
+
+    /// The scenario may partition any number of leading views of every
+    /// epoch, or every view.
+    #[test]
+    fn every_length_of_prefix_runs() {
+        for (prefix, case_selector) in [(Some(1), 0), (Some(16), 2), (None, 0), (None, 1)] {
+            let report = run_dkg_reshare(DkgReshareFuzzInput {
+                prefix,
+                ..input(case_selector, 1, SPLIT, ROTATE, 1)
+            });
+            println!("{prefix:?} case {case_selector}: {report}");
+            assert_eq!(report.counts.correct_nodes, 4);
         }
     }
 
@@ -613,11 +630,21 @@ mod tests {
     }
 
     /// Inputs as libFuzzer first produces them decode to whole sessions that
-    /// hold the invariants.
+    /// hold the invariants. A ceremony may fail under a long prefix, which
+    /// can script the leaders of a whole epoch, so a run is held to having
+    /// ended a ceremony either way.
     #[test]
     fn short_inputs_hold_invariants() {
         for byte in [0x00u8, 0x5a, 0xa9, 0xff] {
-            measured(decode(&[byte]));
+            let input: DkgReshareFuzzInput = decode(&[byte]);
+            let prefix = input.prefix;
+            let report = run_dkg_reshare(input);
+            println!("{prefix:?}: {report}");
+            assert_eq!(report.counts.correct_nodes, 4);
+            assert!(
+                report.counts.successes + report.counts.failures > 0,
+                "no ceremony ended: {report}"
+            );
         }
     }
 

@@ -7,6 +7,9 @@
 //! classification of each channel's messages is defined here, because it
 //! depends on the chain's scheme and block.
 //!
+//! Which views a scenario partitions is the run's [`TwinsScript`]: the first views
+//! of an epoch, as many as the input's prefix says, or every view.
+//!
 //! The DKG channel carries dealings and acks, which name an epoch and no view,
 //! so no scenario applies to it. It is split by the [`Mask`] instead: each
 //! other identity exchanges ceremony messages with the primary half, the
@@ -15,16 +18,14 @@
 use super::{COMMITTEE, Digest, DkgMask, MockGroup, PublicKey, Side, stack::Endpoint};
 use crate::stateful::{
     network::{
-        Routing, backfill_routing, certificate_routing, forwarder, router,
+        Routing, TwinsScript, backfill_routing, certificate_routing, forwarder, router,
         simplex_resolver_routing, vote_routing,
     },
     runner::unattributed,
 };
 use commonware_codec::{Decode as _, Read};
 use commonware_consensus::{
-    CertifiableBlock as _,
-    simplex::{mocks::twins::Scenario, scheme::ed25519::Scheme},
-    types::TermLength,
+    CertifiableBlock as _, simplex::scheme::ed25519::Scheme, types::TermLength,
 };
 use commonware_cryptography::{bls12381::primitives::sharing::ModeVersion, certificate::Verifier};
 use commonware_glue::dkg::bootstrap::Block;
@@ -39,8 +40,9 @@ use std::sync::Arc;
 /// Codec configuration for decoding the bootstrap chain's certificates.
 type CertificateCfg = <<Scheme as Verifier>::Certificate as Read>::Cfg;
 
-/// The leader term of the bootstrap chain, whose elector rotates every view.
-const TERM: TermLength = TermLength::ONE;
+/// The leader term of the chains of this harness, whose electors rotate
+/// every view, so that one scripted round is one view.
+pub(super) const TERM: TermLength = TermLength::ONE;
 
 /// Classify a message on the bootstrap chain's dissemination channel: a bare
 /// block, whose embedded consensus context names its round.
@@ -81,20 +83,20 @@ pub(super) fn halve<F: SplitForwarder<PublicKey>>(
 
 /// Both halves of a channel whose messages `classify` assigns to views, on a
 /// chain whose leader rotates every view: the outbound half and the inbound
-/// half of the twins split under `scenario`.
+/// half of the twins split under `script`.
 pub(super) fn split(
     participants: Arc<[PublicKey]>,
-    scenario: Scenario,
+    script: TwinsScript,
     classify: impl Fn(&IoBuf) -> Routing + Send + Sync + Clone + 'static,
 ) -> (impl SplitForwarder<PublicKey>, impl SplitRouter<PublicKey>) {
     (
         harness(forwarder(
             participants.clone(),
-            scenario.clone(),
+            script.clone(),
             TERM,
             classify.clone(),
         )),
-        router(participants, scenario, TERM, classify),
+        router(participants, script, TERM, classify),
     )
 }
 
@@ -102,7 +104,7 @@ pub(super) fn split(
 #[derive(Clone)]
 pub(super) struct Twins {
     participants: Arc<[PublicKey]>,
-    scenario: Scenario,
+    script: TwinsScript,
     certificates: CertificateCfg,
     max_supported_mode: ModeVersion,
 }
@@ -110,7 +112,7 @@ pub(super) struct Twins {
 impl Twins {
     pub(super) fn new(
         participants: Arc<[PublicKey]>,
-        scenario: Scenario,
+        script: TwinsScript,
         max_supported_mode: ModeVersion,
     ) -> Self {
         // Only the bound on a certificate's size depends on the scheme
@@ -120,7 +122,7 @@ impl Twins {
                 .certificate_codec_config();
         Self {
             participants,
-            scenario,
+            script,
             certificates,
             max_supported_mode,
         }
@@ -131,7 +133,7 @@ impl Twins {
         &self,
         classify: impl Fn(&IoBuf) -> Routing + Send + Sync + Clone + 'static,
     ) -> (impl SplitForwarder<PublicKey>, impl SplitRouter<PublicKey>) {
-        split(self.participants.clone(), self.scenario.clone(), classify)
+        split(self.participants.clone(), self.script.clone(), classify)
     }
 
     pub(super) fn votes(&self) -> (impl SplitForwarder<PublicKey>, impl SplitRouter<PublicKey>) {
