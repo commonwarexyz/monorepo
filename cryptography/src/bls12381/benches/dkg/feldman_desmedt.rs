@@ -1,3 +1,4 @@
+use commonware_bench::Inputs;
 use commonware_cryptography::{
     Signer as _,
     bls12381::{
@@ -106,13 +107,17 @@ impl Bench {
 }
 
 // Configure contributors based on context
-cfg_if::cfg_if! {
-    if #[cfg(full_bench)] {
-        const CONTRIBUTORS: &[u32] = &[5, 10, 20, 50, 100, 250, 500];
-        const CONCURRENCY: &[usize] = &[1, 4, 8];
-    } else {
-        const CONTRIBUTORS: &[u32] = &[5, 10, 20, 50];
-        const CONCURRENCY: &[usize] = &[1];
+fn contributors() -> &'static [u32] {
+    match Inputs::current() {
+        Inputs::Full => &[5, 10, 20, 50, 100, 250, 500],
+        _ => &[5, 10, 20, 50],
+    }
+}
+
+fn concurrency_levels() -> &'static [usize] {
+    match Inputs::current() {
+        Inputs::Full => &[1, 4, 8],
+        _ => &[1],
     }
 }
 
@@ -123,10 +128,10 @@ fn bench_dkg(c: &mut Criterion, reshare: bool) {
         "_recovery"
     };
     let mut rng = test_rng();
-    for &n in CONTRIBUTORS {
+    for &n in contributors() {
         let t = N3f1::quorum(n);
         let bench = Bench::new(&mut rng, reshare, n);
-        for &concurrency in CONCURRENCY {
+        for &concurrency in concurrency_levels() {
             let strategy = Rayon::new(ThreadPoolBuilder::new(NZUsize!(concurrency))).unwrap();
             c.bench_function(
                 &format!(

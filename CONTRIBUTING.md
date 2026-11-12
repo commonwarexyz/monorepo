@@ -124,6 +124,22 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DE
 criterion_main!(operation_name::benches);
 ```
 
+### Inputs
+
+A benchmark picks its inputs by matching on `commonware_bench::Inputs::current()`, which needs `commonware-bench.workspace = true` in the crate's dev-dependencies. `cargo bench` measures the `Standard` inputs, and `just bench-full` (`COMMONWARE_BENCH_FULL=1 cargo bench`) measures the `Full` ones. CI runs `cargo test --benches` instead, which selects `Smoke`: Criterion runs each benchmark once without measuring it, but the benchmark's setup still builds its inputs, so a benchmark with slow setup uses smaller inputs there. Put every input that varies in the benchmark name.
+
+```rust
+use commonware_bench::Inputs;
+
+fn sizes() -> &'static [usize] {
+    match Inputs::current() {
+        Inputs::Smoke => &[1_000],
+        Inputs::Standard => &[1_000, 100_000],
+        Inputs::Full => &[1_000, 100_000, 10_000_000],
+    }
+}
+```
+
 ### Naming
 
 CI enforces names with `.github/scripts/lint_benchmark_names.py`:

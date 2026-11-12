@@ -1,3 +1,4 @@
+use commonware_bench::Inputs;
 use commonware_cryptography::{Sha256, sha256};
 use commonware_math::algebra::Random as _;
 use commonware_runtime::{
@@ -24,14 +25,16 @@ enum Mode {
 /// returns start diminishing.
 const THREADS: NonZeroUsize = NZUsize!(8);
 
-#[cfg(not(full_bench))]
-const N_LEAVES: [usize; 1] = [100_000];
-#[cfg(full_bench)]
-const N_LEAVES: [usize; 4] = [100_000, 1_000_000, 5_000_000, 10_000_000];
+fn n_leaves() -> &'static [usize] {
+    match Inputs::current() {
+        Inputs::Full => &[100_000, 1_000_000, 5_000_000, 10_000_000],
+        _ => &[100_000],
+    }
+}
 
 fn bench_update_family<F: Family>(c: &mut Criterion, runner: &tokio::Runner, family: &str) {
     for updates in [1_000_000, 100_000] {
-        for leaves in N_LEAVES {
+        for &leaves in n_leaves() {
             for mode in [Mode::BatchedSerial, Mode::BatchedParallel] {
                 c.bench_function(
                     &format!(

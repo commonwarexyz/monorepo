@@ -1,4 +1,4 @@
-use crate::common::{N_LEAVES, SAMPLE_SIZE, StandardHasher, single_samples};
+use crate::common::{SAMPLE_SIZE, StandardHasher, n_leaves, single_samples};
 use commonware_cryptography::Sha256;
 use commonware_storage::merkle::{Bagging::ForwardFold, Family};
 use criterion::{BatchSize, Criterion, criterion_group};
@@ -7,7 +7,7 @@ use std::hint::black_box;
 
 /// Times single-leaf proof generation without verification.
 fn bench_proof_family<F: Family>(c: &mut Criterion, family: &str) {
-    for n in N_LEAVES {
+    for &n in n_leaves() {
         c.bench_function(
             &format!(
                 "{}/n={n} samples={SAMPLE_SIZE} family={family}",
