@@ -1,4 +1,4 @@
-//! Doubling an element, compared with blst.
+//! Doubling an element.
 //!
 //! One doubling uses one lane, so this measures latency.
 
@@ -9,20 +9,14 @@ use std::hint::black_box;
 
 fn bench<C: Curve>(c: &mut Criterion) {
     let mut group = c.benchmark_group(module_path!());
-    let (a, blst_a) = C::multiple(&scalars(1, 4)[0]);
+    let a = C::generator() * &scalars(1, 4)[0];
     group.throughput(Throughput::Elements(1));
-    group.bench_function(
-        format!("curve={} impl=commonware n=1", C::NAME),
-        |bencher| {
-            bencher.iter(|| {
-                let mut doubled = black_box(a);
-                doubled.double();
-                black_box(doubled)
-            })
-        },
-    );
-    group.bench_function(format!("curve={} impl=blst n=1", C::NAME), |bencher| {
-        bencher.iter(|| black_box(C::blst_double(black_box(&blst_a))))
+    group.bench_function(format!("curve={} n=1", C::NAME), |bencher| {
+        bencher.iter(|| {
+            let mut doubled = black_box(a);
+            doubled.double();
+            black_box(doubled)
+        })
     });
     group.finish();
 }
