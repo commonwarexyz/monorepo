@@ -18,7 +18,6 @@ use crate::{
             operation::{Operation, update::Update},
         },
         current::{
-            batch::BitmapBatch,
             grafting,
             proof::{OpsRootWitness, RangeProof, RangeProofSpec, constant::OperationProof},
         },
@@ -396,15 +395,6 @@ where
         merkle::batch::MerkleizedBatch::from_mem_with_strategy(
             &self.grafted_tree,
             self.strategy.clone(),
-        )
-    }
-
-    /// Create a new speculative batch of operations with this database as its parent.
-    pub fn new_batch(&self) -> super::batch::UnmerkleizedBatch<F, H, U, N, S> {
-        super::batch::UnmerkleizedBatch::new(
-            self.any.new_batch(),
-            self.grafted_snapshot(),
-            BitmapBatch::Base(Arc::clone(&self.any.bitmap)),
         )
     }
 

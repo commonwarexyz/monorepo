@@ -284,18 +284,6 @@ where
     H: Hasher,
     Operation<F, U>: Codec,
 {
-    pub(super) const fn new(
-        inner: any::batch::UnmerkleizedBatch<F, H, U, S>,
-        grafted_parent: Arc<merkle::batch::MerkleizedBatch<F, H::Digest, S>>,
-        bitmap_parent: BitmapBatch<N>,
-    ) -> Self {
-        Self {
-            inner,
-            grafted_parent,
-            bitmap_parent,
-        }
-    }
-
     /// Set the metadata recorded in this batch's commit. Defaults to `None` and is not inherited by
     /// child batches. Carries over to the batch returned by [`Self::stage`].
     pub fn with_metadata(mut self, metadata: impl Into<Option<U::Value>>) -> Self {
@@ -1263,11 +1251,11 @@ where
     where
         H: Hasher<Digest = D>,
     {
-        UnmerkleizedBatch::new(
-            self.inner.new_batch::<H>(),
-            Arc::clone(&self.grafted),
-            self.bitmap.trim_committed(),
-        )
+        UnmerkleizedBatch {
+            inner: self.inner.new_batch::<H>(),
+            grafted_parent: Arc::clone(&self.grafted),
+            bitmap_parent: self.bitmap.trim_committed(),
+        }
     }
 
     /// Return the operations-tree frontier at this batch's first operation, with the order, errors,
@@ -1391,6 +1379,15 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
+    /// Create a new speculative batch of operations with this database as its parent.
+    pub fn new_batch(&self) -> UnmerkleizedBatch<F, H, U, N, S> {
+        UnmerkleizedBatch {
+            inner: self.any.new_batch(),
+            grafted_parent: self.grafted_snapshot(),
+            bitmap_parent: BitmapBatch::Base(Arc::clone(&self.any.bitmap)),
+        }
+    }
+
     /// Create a [`MerkleizedBatch`] with no operations at the DB's current state.
     ///
     /// Once the DB moves to another state, reads through it return [`Error::StaleRead`] and
