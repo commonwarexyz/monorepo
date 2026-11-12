@@ -1155,7 +1155,8 @@ where
         let frontier =
             Frontier::open(context.child("frontier"), merkle_cfg.partition.clone()).await?;
         let (boundary, pins) = frontier.boundary();
-        let merkle = Tree::new(boundary, pins, &merkle_cfg, &context.child("merkle"))?;
+        let merkle_context = context.child("merkle");
+        let merkle = Tree::new(boundary, pins, &merkle_cfg, &merkle_context)?;
 
         let journal = C::recover(context.child("journal"), journal_cfg, max_size).await?;
         let bounds = journal.bounds();
