@@ -71,7 +71,7 @@ pub(crate) type SingleDatabaseSet<E> = Shared<Qmdb<E>>;
 pub(super) fn qmdb_config(prefix: &str, page_cache: CacheRef) -> fixed::Config<TwoCap, Sequential> {
     fixed::Config {
         merkle: MerkleConfig {
-            partition: format!("{prefix}-qmdb-merkle"),
+            partition: format!("{prefix}-qmdb-mmr-metadata"),
             replay_buffer: IO_BUFFER_SIZE,
             replay_concurrency: NZUsize!(2),
             strategy: Sequential,

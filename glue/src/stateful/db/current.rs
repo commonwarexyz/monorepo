@@ -1214,7 +1214,7 @@ mod tests {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         CurrentConfig {
             merkle: MerkleConfig {
-                partition: format!("stateful-current-merkle-{suffix}"),
+                partition: format!("stateful-current-metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
@@ -1241,7 +1241,7 @@ mod tests {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         CurrentConfig {
             merkle: MerkleConfig {
-                partition: format!("stateful-current-merkle-{suffix}"),
+                partition: format!("stateful-current-metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 replay_concurrency: NZUsize!(2),
                 strategy: Sequential,

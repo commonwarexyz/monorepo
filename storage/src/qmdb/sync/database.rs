@@ -243,41 +243,60 @@ mod tests {
         }
     }
 
+    type KeylessDb = keyless::fixed::Db<MmrFamily, deterministic::Context, U64, Sha256, Sequential>;
+
+    /// A keyless config whose partitions end with `suffix`.
+    fn keyless_config(suffix: &str) -> keyless::fixed::Config<Sequential> {
+        let mut config = keyless::Config {
+            merkle: merkle_config(),
+            log: journal_config(),
+        };
+        config.merkle.partition.push_str(suffix);
+        config.log.partition.push_str(suffix);
+        config
+    }
+
+    /// A synced keyless database with one commit at `floor` per entry of `commits`, each
+    /// appending that entry's values.
+    async fn keyless_db(
+        context: deterministic::Context,
+        config: keyless::fixed::Config<Sequential>,
+        floor: u64,
+        commits: &[&[u64]],
+    ) -> KeylessDb {
+        let mut db = KeylessDb::init(context, config, None).await.unwrap();
+        for values in commits {
+            let mut batch = db.new_batch();
+            for &value in *values {
+                batch = batch.append(U64::new(value));
+            }
+            let batch = batch
+                .with_inactivity_floor(Location::new(floor))
+                .merkleize(&db)
+                .await
+                .unwrap();
+            db = db.apply_batch(batch).await.unwrap();
+        }
+        db.sync().await.unwrap()
+    }
+
     /// When the local journal covers the target start, a sync keeps the earlier operations until
     /// it records the new boundary, even if the source fails. A sync to a target the local
     /// operations already authenticate rebuilds the pins from them without asking the source.
     #[test]
     fn sync_keeps_operations_until_the_boundary_moves() {
         deterministic::Runner::default().start(|context| async move {
-            type Db =
-                keyless::fixed::Db<MmrFamily, deterministic::Context, U64, Sha256, Sequential>;
-            let config = keyless::Config {
-                merkle: merkle_config(),
-                log: journal_config(),
-            };
-
             // Create 51 operations ending in a commit whose inactivity floor is 30.
-            let mut db = Db::init(context.child("create"), config.clone(), None)
-                .await
-                .unwrap();
-            let mut batch = db.new_batch();
-            for value in 0..49 {
-                batch = batch.append(U64::new(value));
-            }
-            let batch = batch
-                .with_inactivity_floor(Location::new(30))
-                .merkleize(&db)
-                .await
-                .unwrap();
-            db = db.apply_batch(batch).await.unwrap();
-            let db = db.sync().await.unwrap();
+            let config = keyless_config("");
+            let values: Vec<u64> = (0..49).collect();
+            let db = keyless_db(context.child("create"), config.clone(), 30, &[&values]).await;
             let root = db.root();
             assert_eq!(db.bounds(), Location::new(0)..Location::new(51));
             drop(db);
 
             // The frontier is still at 0, behind the target start 30.
             let sync_to = |label, end| {
-                sync::sync::<Db, _>(Config {
+                sync::sync::<KeylessDb, _>(Config {
                     context: context.child(label),
                     source: FailSource::<MmrFamily, Op, Digest>::new(),
                     target: Target {
@@ -300,7 +319,7 @@ mod tests {
                 sync_to("failed", 60).await,
                 Err(sync::Error::Source(_))
             ));
-            let db = Db::init(context.child("after_failure"), config.clone(), None)
+            let db = KeylessDb::init(context.child("after_failure"), config.clone(), None)
                 .await
                 .unwrap();
             assert_eq!(db.bounds(), Location::new(0)..Location::new(51));
@@ -314,7 +333,7 @@ mod tests {
             assert_eq!(db.bounds(), Location::new(30)..Location::new(51));
             assert_eq!(db.root(), root);
             drop(db);
-            let db = Db::init(context.child("reopen"), config, None)
+            let db = KeylessDb::init(context.child("reopen"), config, None)
                 .await
                 .unwrap();
             assert_eq!(db.root(), root);
@@ -345,31 +364,10 @@ mod tests {
             // Build a local and a source database in separate partitions. Each holds one append
             // at location 1 with a distinct value and a commit at 2, so they share a size of 3 but
             // differ in root.
-            type Db =
-                keyless::fixed::Db<MmrFamily, deterministic::Context, U64, Sha256, Sequential>;
-            let local_config = keyless::Config {
-                merkle: merkle_config(),
-                log: journal_config(),
-            };
-            let mut source_config = local_config.clone();
-            source_config.merkle.partition.push_str("-source");
-            source_config.log.partition.push_str("-source");
-            let populate = |label: &'static str, config, value| {
-                let context = context.child(label);
-                async move {
-                    let db = Db::init(context, config, None).await.unwrap();
-                    let batch = db
-                        .new_batch()
-                        .append(U64::new(value))
-                        .with_inactivity_floor(Location::new(0))
-                        .merkleize(&db)
-                        .await
-                        .unwrap();
-                    db.apply_batch(batch).await.unwrap().sync().await.unwrap()
-                }
-            };
-            let local = populate("local", local_config.clone(), 11).await;
-            let source_db = populate("source", source_config, 22).await;
+            let local_config = keyless_config("");
+            let local = keyless_db(context.child("local"), local_config.clone(), 0, &[&[11]]).await;
+            let source_config = keyless_config("-source");
+            let source_db = keyless_db(context.child("source"), source_config, 0, &[&[22]]).await;
             assert_eq!(local.bounds(), Location::new(0)..Location::new(3));
             assert_ne!(local.root(), source_db.root());
             drop(local);
@@ -388,7 +386,7 @@ mod tests {
                 .0;
             let source = SequenceSource::new(vec![response]);
             let observed = source.clone();
-            let db = sync::sync::<Db, _>(Config {
+            let db = sync::sync::<KeylessDb, _>(Config {
                 context: context.child("sync"),
                 source,
                 target: Target {
@@ -410,7 +408,7 @@ mod tests {
             assert_eq!(db.root(), root);
             assert_eq!(observed.take_verdicts().await, vec![true]);
             drop(db);
-            let reopened = Db::init(context.child("reopen"), local_config, None)
+            let reopened = KeylessDb::init(context.child("reopen"), local_config, None)
                 .await
                 .unwrap();
             assert_eq!(reopened.root(), root);
@@ -423,42 +421,20 @@ mod tests {
     #[test]
     fn interrupted_sync_after_reset_is_retried() {
         deterministic::Runner::default().start(|context| async move {
-            type Db =
-                keyless::fixed::Db<MmrFamily, deterministic::Context, U64, Sha256, Sequential>;
-            let local_config = keyless::Config {
-                merkle: merkle_config(),
-                log: journal_config(),
-            };
-            let mut source_config = local_config.clone();
-            source_config.merkle.partition.push_str("-source");
-            source_config.log.partition.push_str("-source");
-
             // The local database ends at 3, before the target's start at 30.
-            let populate = |label: &'static str, config, values: u64| {
-                let context = context.child(label);
-                async move {
-                    let db = Db::init(context, config, None).await.unwrap();
-                    let mut batch = db.new_batch();
-                    for value in 0..values {
-                        batch = batch.append(U64::new(value));
-                    }
-                    let batch = batch
-                        .with_inactivity_floor(Location::new(0))
-                        .merkleize(&db)
-                        .await
-                        .unwrap();
-                    db.apply_batch(batch).await.unwrap().sync().await.unwrap()
-                }
-            };
-            drop(populate("local", local_config.clone(), 1).await);
-            let source_db = Arc::new(populate("source", source_config, 39).await);
+            let local_config = keyless_config("");
+            drop(keyless_db(context.child("local"), local_config.clone(), 0, &[&[0]]).await);
+            let source_config = keyless_config("-source");
+            let values: Vec<u64> = (0..39).collect();
+            let source_db = keyless_db(context.child("source"), source_config, 0, &[&values]).await;
+            let source_db = Arc::new(source_db);
             let target = Target {
                 root: source_db.root(),
                 range: non_empty_range!(Location::new(30), Location::new(41)),
             };
             // A source that fails every request interrupts the sync after the reset.
             assert!(matches!(
-                sync::sync::<Db, _>(Config {
+                sync::sync::<KeylessDb, _>(Config {
                     context: context.child("failed"),
                     source: FailSource::<MmrFamily, Op, Digest>::new(),
                     target: target.clone(),
@@ -474,13 +450,13 @@ mod tests {
                 Err(sync::Error::Source(_))
             ));
             assert!(
-                Db::init(context.child("reopen"), local_config.clone(), None)
+                KeylessDb::init(context.child("reopen"), local_config.clone(), None)
                     .await
                     .is_err()
             );
 
             // Retrying the sync records the target's boundary, and the database opens again.
-            let db = sync::sync::<Db, _>(Config {
+            let db = sync::sync::<KeylessDb, _>(Config {
                 context: context.child("retry"),
                 source: source_db,
                 target: target.clone(),
@@ -496,7 +472,7 @@ mod tests {
             .unwrap();
             assert_eq!(db.root(), target.root);
             drop(db);
-            let db = Db::init(context.child("after_retry"), local_config, None)
+            let db = KeylessDb::init(context.child("after_retry"), local_config, None)
                 .await
                 .unwrap();
             assert_eq!(db.root(), target.root);
@@ -513,34 +489,17 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             // The local and source databases hold the same commits at 0, 2 and 4, and different
             // values at 1 and 3.
-            type Db =
-                keyless::fixed::Db<MmrFamily, deterministic::Context, U64, Sha256, Sequential>;
-            let local_config = keyless::Config {
-                merkle: merkle_config(),
-                log: journal_config(),
-            };
-            let mut source_config = local_config.clone();
-            source_config.merkle.partition.push_str("-source");
-            source_config.log.partition.push_str("-source");
-            let populate = |label: &'static str, config, values: [u64; 2]| {
-                let context = context.child(label);
-                async move {
-                    let mut db = Db::init(context, config, None).await.unwrap();
-                    for value in values {
-                        let batch = db
-                            .new_batch()
-                            .append(U64::new(value))
-                            .with_inactivity_floor(Location::new(0))
-                            .merkleize(&db)
-                            .await
-                            .unwrap();
-                        db = db.apply_batch(batch).await.unwrap();
-                    }
-                    db.sync().await.unwrap()
-                }
-            };
-            let local = populate("local", local_config.clone(), [11, 13]).await;
-            let source_db = populate("source", source_config, [22, 24]).await;
+            let local_config = keyless_config("");
+            let local = keyless_db(
+                context.child("local"),
+                local_config.clone(),
+                0,
+                &[&[11], &[13]],
+            );
+            let local = local.await;
+            let source_config = keyless_config("-source");
+            let source_db = keyless_db(context.child("source"), source_config, 0, &[&[22], &[24]]);
+            let source_db = source_db.await;
             let local_root = local.root();
             assert_eq!(local.bounds(), Location::new(0)..Location::new(5));
             drop(local);
@@ -556,7 +515,7 @@ mod tests {
                 .await
                 .unwrap()
                 .0;
-            let result = sync::sync::<Db, _>(Config {
+            let result = sync::sync::<KeylessDb, _>(Config {
                 context: context.child("sync"),
                 source: SequenceSource::new(vec![response]),
                 target: Target {
@@ -578,45 +537,12 @@ mod tests {
             ));
 
             // The local frontier and operations are untouched.
-            let reopened = Db::init(context.child("reopen"), local_config, None)
+            let reopened = KeylessDb::init(context.child("reopen"), local_config, None)
                 .await
                 .unwrap();
             assert_eq!(reopened.bounds(), Location::new(0)..Location::new(5));
             assert_eq!(reopened.root(), local_root);
         });
-    }
-
-    type KeylessDb = keyless::fixed::Db<MmrFamily, deterministic::Context, U64, Sha256, Sequential>;
-
-    /// A keyless config whose partitions end with `suffix`.
-    fn keyless_config(suffix: &str) -> keyless::fixed::Config<Sequential> {
-        let mut config = keyless::Config {
-            merkle: merkle_config(),
-            log: journal_config(),
-        };
-        config.merkle.partition.push_str(suffix);
-        config.log.partition.push_str(suffix);
-        config
-    }
-
-    /// A synced keyless database with one commit, at floor zero, after each of `values`.
-    async fn keyless_db(
-        context: deterministic::Context,
-        config: keyless::fixed::Config<Sequential>,
-        values: &[u64],
-    ) -> KeylessDb {
-        let mut db = KeylessDb::init(context, config, None).await.unwrap();
-        for &value in values {
-            let batch = db
-                .new_batch()
-                .append(U64::new(value))
-                .with_inactivity_floor(Location::new(0))
-                .merkleize(&db)
-                .await
-                .unwrap();
-            db = db.apply_batch(batch).await.unwrap();
-        }
-        db.sync().await.unwrap()
     }
 
     /// Serves requests that start before `limit` from `inner`, and fails the rest.
@@ -648,9 +574,16 @@ mod tests {
             // The databases hold the same commits at 0, 2 and 4 and different values at 1 and 3,
             // and the source continues to 9.
             let local_config = keyless_config("");
-            drop(keyless_db(context.child("local"), local_config.clone(), &[11, 13]).await);
+            let local = keyless_db(
+                context.child("local"),
+                local_config.clone(),
+                0,
+                &[&[11], &[13]],
+            );
+            drop(local.await);
             let source_config = keyless_config("-source");
-            let source_db = keyless_db(context.child("source"), source_config, &[22, 24, 26, 28]);
+            let commits: [&[u64]; 4] = [&[22], &[24], &[26], &[28]];
+            let source_db = keyless_db(context.child("source"), source_config, 0, &commits);
             let source_db = Arc::new(source_db.await);
             let target = Target {
                 root: source_db.root(),
@@ -689,9 +622,10 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             // The local database is the first 3 operations of the source's 9.
             let local_config = keyless_config("");
-            drop(keyless_db(context.child("local"), local_config.clone(), &[22]).await);
+            drop(keyless_db(context.child("local"), local_config.clone(), 0, &[&[22]]).await);
             let source_config = keyless_config("-source");
-            let source_db = keyless_db(context.child("source"), source_config, &[22, 24, 26, 28]);
+            let commits: [&[u64]; 4] = [&[22], &[24], &[26], &[28]];
+            let source_db = keyless_db(context.child("source"), source_config, 0, &commits);
             let source_db = Arc::new(source_db.await);
             let target = Target {
                 root: source_db.root(),

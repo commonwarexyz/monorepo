@@ -547,7 +547,7 @@ mod tests {
         let page_cache = CacheRef::new(NZU16!(101), NZUsize!(11));
         fixed::Config {
             merkle: MerkleConfig {
-                partition: format!("stateful-immutable-merkle-{suffix}"),
+                partition: format!("stateful-immutable-metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 replay_concurrency: NZUsize!(2),
                 strategy: Sequential,

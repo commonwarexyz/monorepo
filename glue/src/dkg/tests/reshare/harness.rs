@@ -1144,7 +1144,7 @@ impl EngineDefinition for ReshareEngine {
 
         let db_config = fixed::Config {
             merkle: MerkleConfig {
-                partition: format!("{partition_prefix}-qmdb-merkle"),
+                partition: format!("{partition_prefix}-qmdb-mmr-metadata"),
                 replay_buffer: IO_BUFFER_SIZE,
                 replay_concurrency: NZUsize!(2),
                 strategy: Sequential,

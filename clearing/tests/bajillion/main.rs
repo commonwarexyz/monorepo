@@ -256,7 +256,7 @@ fn config_for<O: commonware_cryptography::PublicKey>(
 ) -> Config<O, EightCap, Sequential> {
     let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(8));
     let merkle = |name: String| MerkleConfig {
-        partition: format!("{name}-merkle"),
+        partition: format!("{name}-merkle-metadata"),
         replay_buffer: NZUsize!(1024),
         replay_concurrency: NZUsize!(2),
         strategy: Sequential,

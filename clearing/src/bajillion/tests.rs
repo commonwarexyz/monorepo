@@ -211,7 +211,7 @@ pub(crate) fn queue(epoch: Epoch, deposits: &[(u64, u64)], forced: &[(u64, u64)]
 fn journals(name: &str) -> (MerkleConfig<Sequential>, JournalConfig) {
     let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(8));
     let merkle = MerkleConfig {
-        partition: format!("{name}-merkle"),
+        partition: format!("{name}-merkle-metadata"),
         replay_buffer: NZUsize!(1024),
         replay_concurrency: NZUsize!(2),
         strategy: Sequential,

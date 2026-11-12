@@ -577,7 +577,7 @@ mod tests {
 
     fn full_merkle_config() -> MerkleConfig<Sequential> {
         MerkleConfig {
-            partition: "stateful-full-merkle".into(),
+            partition: "stateful-full-metadata".into(),
             replay_buffer: NZUsize!(1024),
             replay_concurrency: NZUsize!(2),
             strategy: Sequential,

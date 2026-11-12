@@ -272,19 +272,12 @@ impl ChunkPlan {
 
 /// Hashes the operations of one replay chunk, given in position order.
 pub(crate) struct ChunkHasher<F: Family, H: Hasher<F>> {
-    /// The leaves of the chunk.
     chunk: Range<u64>,
-    /// Whether the chunk is a whole aligned subtree.
     is_subtree: bool,
-    /// See [ChunkPlan::height].
     height: u32,
-    /// See [ChunkPlan::min_height].
     min_height: u32,
-    /// Hashes the leaves and, for a subtree, the nodes above them.
     hasher: H,
-    /// The digests of the operations pushed so far.
     leaves: Vec<H::Digest>,
-    /// Scratch for each operation's encoding.
     encoded: Vec<u8>,
 }
 
@@ -680,8 +673,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
     {
         self.check_replay_end(journal.as_ref(), end)?;
 
-        // Each spawned task reads and hashes one chunk. It holds the journal and a `released`
-        // sender, and returns the chunk's digests. Returns false once every chunk is spawned.
+        // Spawn a task that reads and hashes the next chunk, or return false if none is left.
         let plan = self.chunk_plan(end, height);
         let buffer = self.replay_buffer;
         let mut chunks = plan.chunks();
@@ -702,7 +694,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
             true
         };
 
-        // Start up to `replay_concurrency` chunks. `pending` holds them in position order.
+        // `pending` holds the running chunks in position order.
         let mut pending = VecDeque::new();
         for _ in 0..self.replay_concurrency.get() {
             if !spawn_next(&mut pending) {
@@ -778,13 +770,11 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
             ));
         }
 
-        // The tree grows by the subtree's leaves. `initial` is its size before.
         let width = 1u64 << subtree.height;
         let initial = self.size();
         let leaves = Location::new(subtree.start + width);
 
-        // Record every resident node born by the new end. A node in the subtree is read from it,
-        // and a node above its root is hashed from its children. `computed` holds those hashes.
+        // Record the resident nodes born by the new end, hashing those above the subtree's root.
         let mut computed = BTreeMap::new();
         let Self { mem, resident, .. } = &mut self;
         resident.extend_with(F::location_to_position(leaves), |h, ordinal| {
@@ -880,6 +870,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
             })
             .collect::<Result<Vec<_>, _>>()?;
         Arc::make_mut(&mut self.mem).skip_to(leaves, peaks)?;
+        self.update_metrics();
         Ok(self)
     }
 
