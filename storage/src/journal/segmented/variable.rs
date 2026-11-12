@@ -893,8 +893,7 @@ impl<E: Storage + Metrics, V: CodecShared> Recovery<E, V> {
     /// Returns the journal.
     ///
     /// Fails with [Error::ReplayFailed] when the recovery was not fully drained, yielded an
-    /// error, or was interrupted. The journal is then destroyed and the owner must initialize
-    /// again.
+    /// error, or was interrupted.
     pub fn finish(self) -> Result<Journal<E, V>, Error> {
         if self.in_progress || self.errored || !self.finished {
             return Err(Error::ReplayFailed);

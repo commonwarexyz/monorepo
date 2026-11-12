@@ -1084,8 +1084,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Recovery<E, A> {
     /// Returns the journal.
     ///
     /// A recovery from [Journal::preflight_floors] fails with [Error::ReplayFailed] when it was
-    /// not fully drained, yielded an error, or was interrupted. The journal is then destroyed and
-    /// the owner must initialize again. Storage without any section has nothing to drain.
+    /// not fully drained, yielded an error, or was interrupted. Storage without any section has
+    /// nothing to drain.
     ///
     /// A recovery from [Journal::preflight_restore] opens the sections through its checkpoint,
     /// truncates the checkpoint section, and removes every later section unread. The truncation

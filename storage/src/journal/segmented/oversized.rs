@@ -921,10 +921,9 @@ impl<E: Context, I: Record, V: CodecShared> Recovery<E, I, V> {
     /// Returns the journal.
     ///
     /// Fails with [Error::ReplayFailed] when the recovery was not fully drained, yielded an
-    /// error, or was interrupted. The journal is then destroyed and the owner must initialize
-    /// again. Otherwise each section is durably truncated at its first invalid entry, values no
-    /// retained entry references are released, and the retained lengths are staged as the next
-    /// markers.
+    /// error, or was interrupted. Otherwise each section is durably truncated at its first
+    /// invalid entry, values no retained entry references are released, and the retained
+    /// lengths are staged as the next markers.
     pub async fn finish(self) -> Result<Oversized<E, I, V>, Error> {
         if self.in_progress || self.interrupted || self.validation.failed {
             return Err(Error::ReplayFailed);
