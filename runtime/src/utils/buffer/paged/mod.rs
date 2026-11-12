@@ -38,6 +38,12 @@
 //! the one with the larger `len` is considered authoritative. Partial-page shrink first makes
 //! the shorter checksum durable in the alternate slot, then invalidates the old longer checksum.
 //!
+//! A torn write can leave part of a checksum in the slot it targeted, beside the bytes that
+//! checksum covered. The next rewrite of the page targets the same slot, so a second torn write
+//! could complete that checksum and revalidate bytes past the page's valid length. Opening a blob
+//! for writing therefore zeroes that slot on a partial last page when it is neither zero nor the
+//! checksum of a prefix of the page's valid bytes.
+//!
 //! A _full_ page is one whose crc stores a len equal to the logical page size. Otherwise the page
 //! is called _partial_. All pages in a blob are full except for the very last page, which can be
 //! full or partial. A partial page's durable prefix remains recoverable while it is rewritten.
@@ -385,6 +391,20 @@ impl Checksum {
             return None;
         }
         Some(ActiveChecksum::new(slot, len, crc))
+    }
+
+    /// Whether the slot of physical page `buf` not holding `active` is zeroed or holds the
+    /// checksum of a prefix of the bytes `active` covers. Other content may be part of a checksum
+    /// over later bytes of the page, and a torn write to the slot could complete it.
+    fn other_slot_is_inert(buf: &[u8], active: &ActiveChecksum) -> bool {
+        let crc_start_idx = buf.len() - Self::SIZE;
+        let mut crc_bytes = Copying(&buf[crc_start_idx..]);
+        let crc_record = Self::read(&mut crc_bytes).expect("CRC record must decode");
+        let slot = active.slot.other();
+        crc_record.get_slot(slot) == (0, 0)
+            || crc_record
+                .validate_slot(slot, buf, crc_start_idx)
+                .is_some_and(|checksum| checksum.len <= active.len)
     }
 
     /// Return one checksum slot without considering authority.

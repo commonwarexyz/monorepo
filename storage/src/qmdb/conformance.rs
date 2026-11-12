@@ -228,12 +228,15 @@ fn immutable_variable_config(
     }
 }
 
-fn compact_witness_config(suffix: &str) -> crate::journal::contiguous::variable::Config<()> {
+fn compact_witness_config<C>(
+    suffix: &str,
+    codec_config: C,
+) -> crate::journal::contiguous::variable::Config<C> {
     crate::journal::contiguous::variable::Config {
         partition: format!("{suffix}-compact-witness"),
         items_per_section: NZU64!(64),
         compression: None,
-        codec_config: (),
+        codec_config,
         page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         write_buffer: NZUsize!(1024),
         replay_buffer: NZUsize!(1024),
@@ -243,8 +246,7 @@ fn compact_witness_config(suffix: &str) -> crate::journal::contiguous::variable:
 fn immutable_fixed_compact_config(suffix: &str) -> immutable::fixed::CompactConfig<Sequential> {
     immutable::CompactConfig {
         strategy: Sequential,
-        witness: compact_witness_config(suffix),
-        commit_codec_config: (),
+        witness: compact_witness_config(suffix, ()),
     }
 }
 
@@ -253,8 +255,7 @@ fn immutable_variable_compact_config(
 ) -> immutable::variable::CompactConfig<((), ()), Sequential> {
     immutable::CompactConfig {
         strategy: Sequential,
-        witness: compact_witness_config(suffix),
-        commit_codec_config: ((), ()),
+        witness: compact_witness_config(suffix, ((), ())),
     }
 }
 
@@ -337,8 +338,7 @@ mod tests {
     fn keyless_fixed_compact_config(suffix: &str) -> keyless::fixed::CompactConfig<Sequential> {
         keyless::CompactConfig {
             strategy: Sequential,
-            witness: compact_witness_config(suffix),
-            commit_codec_config: (),
+            witness: compact_witness_config(suffix, ()),
         }
     }
 
@@ -347,8 +347,7 @@ mod tests {
     ) -> keyless::variable::CompactConfig<(commonware_codec::RangeCfg<usize>, ()), Sequential> {
         keyless::CompactConfig {
             strategy: Sequential,
-            witness: compact_witness_config(suffix),
-            commit_codec_config: ((0..=10000usize).into(), ()),
+            witness: compact_witness_config(suffix, ((0..=10000usize).into(), ())),
         }
     }
 

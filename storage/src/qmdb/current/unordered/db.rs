@@ -52,7 +52,7 @@ where
         key: &K,
     ) -> Result<(KeyValueProof<F, H::Digest, N>, V::Value), Error<F>> {
         let op_loc = self.any.get_with_loc(key).await?;
-        let Some((value, loc)) = op_loc else {
+        let Some((Update(_, value), loc)) = op_loc else {
             return Err(Error::<F>::KeyNotFound);
         };
         let proof = self.operation_proof(loc).await?;

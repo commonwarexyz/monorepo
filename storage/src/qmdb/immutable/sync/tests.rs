@@ -140,7 +140,7 @@ pub(crate) mod harnesses {
         merkle::{Family, mmb, mmr},
         qmdb::value::ValueEncoding,
     };
-    use commonware_codec::{EncodeShared, Read};
+    use commonware_codec::{CodecShared, EncodeShared, Read};
     use commonware_cryptography::Hasher as _;
     use commonware_parallel::Sequential;
 
@@ -459,22 +459,18 @@ pub(crate) mod harnesses {
         }
     }
 
-    fn compact_config<C>(
-        suffix: &str,
-        commit_codec_config: C,
-    ) -> immutable::CompactConfig<C, Sequential> {
+    fn compact_config<C>(suffix: &str, codec_config: C) -> immutable::CompactConfig<C, Sequential> {
         immutable::CompactConfig {
             strategy: Sequential,
             witness: crate::journal::contiguous::variable::Config {
                 partition: format!("compact-{suffix}-witness"),
                 items_per_section: NZU64!(64),
                 compression: None,
-                codec_config: (),
+                codec_config,
                 page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
-            commit_codec_config,
         }
     }
 
@@ -492,7 +488,7 @@ pub(crate) mod harnesses {
     where
         F: Family,
         V: ValueEncoding,
-        BaseOperation<F, V>: EncodeShared + Read,
+        BaseOperation<F, V>: CodecShared,
     {
         let mut batch = db.new_batch();
         for (loc, value) in (*db.size()..).zip(values) {
@@ -524,7 +520,7 @@ pub(crate) mod harnesses {
         db.apply_batch(batch).await.unwrap()
     }
 
-    async fn compact_import<F, V>(
+    fn compact_import<F, V>(
         ctx: deterministic::Context,
         config: &immutable::CompactConfig<<BaseOperation<F, V> as Read>::Cfg, Sequential>,
         last_commit_loc: Location<F>,
@@ -534,19 +530,9 @@ pub(crate) mod harnesses {
     where
         F: Family,
         V: ValueEncoding,
-        BaseOperation<F, V>: EncodeShared + Read,
+        BaseOperation<F, V>: CodecShared,
     {
-        let journal =
-            crate::journal::contiguous::variable::Journal::init(ctx, config.witness.clone())
-                .await?;
-        CompactDb::init_from_sync(
-            config.strategy.clone(),
-            journal,
-            config.commit_codec_config.clone(),
-            last_commit_loc,
-            pinned_nodes,
-            op,
-        )
+        CompactDb::init_from_sync(ctx, config.clone(), last_commit_loc, pinned_nodes, op)
     }
 
     fn commit_with_floor<F: Family, V: ValueEncoding>(
@@ -603,7 +589,7 @@ pub(crate) mod harnesses {
             pinned_nodes: Vec<sha256::Digest>,
             op: CompactOpOf<Self>,
         ) -> Result<Self::Db, qmdb::Error<F>> {
-            compact_import(ctx, config, last_commit_loc, pinned_nodes, op).await
+            compact_import(ctx, config, last_commit_loc, pinned_nodes, op)
         }
 
         async fn destroy(db: Self::Db) {
@@ -721,7 +707,7 @@ pub(crate) mod harnesses {
             pinned_nodes: Vec<sha256::Digest>,
             op: CompactOpOf<Self>,
         ) -> Result<Self::Db, qmdb::Error<F>> {
-            compact_import(ctx, config, last_commit_loc, pinned_nodes, op).await
+            compact_import(ctx, config, last_commit_loc, pinned_nodes, op)
         }
 
         async fn destroy(db: Self::Db) {
