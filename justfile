@@ -2,7 +2,6 @@ set positional-arguments := true
 
 env_nightly_version := env("NIGHTLY_VERSION", "nightly")
 nightly_version := if env_nightly_version != "" { "+" + env_nightly_version } else { "" }
-# Pin lint and formatting rules independently of the compiler used for builds and tests.
 clippy_version := "1.100.0"
 rustfmt_version := "nightly-2026-11-12"
 rustfmt := env("RUSTFMT", "rustfmt")
