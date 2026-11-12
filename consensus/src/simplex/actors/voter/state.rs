@@ -1,4 +1,7 @@
-use super::{super::Kind, round::Round};
+use super::{
+    super::Kind,
+    round::{Round, VerifyRequest},
+};
 use crate::{
     Viewable,
     simplex::{
@@ -1164,10 +1167,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// Missing ancestry is requested from the proposal's elected leader
     /// (see [`Self::resolve_ancestry`] for when an error justifies a fetch).
     ///
-    /// A proposal whose certification was requested still has its ancestry
-    /// resolved, since the certificates fetched for it can advance the view.
-    /// [`Round::request_verify`] then refuses the request, so the proposal is
-    /// not returned as [`Verify::Ready`].
+    /// A proposal whose certification was requested is never verified (see
+    /// [`VerifyRequest::Withhold`]). Its ancestry is still resolved, since the
+    /// certificates fetched for it can advance the view.
     pub fn try_verify(&mut self) -> Verify<S, D> {
         // Bound the scan as in [`Self::try_propose`].
         // Ascending order gives the current view precedence over optimistic work.
@@ -1225,11 +1227,16 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                     };
                 }
             };
+
+            // Claim the round's single verification request. The claim retires the round from
+            // later scans, and so from the invalid proposal timeout above, even when the request
+            // is withheld because certification of the round was requested.
             let Some(round) = self.views.get_mut(&view) else {
                 continue;
             };
-            if !round.request_verify() {
-                continue;
+            match round.request_verify() {
+                VerifyRequest::Send => {}
+                VerifyRequest::Withhold | VerifyRequest::Skip => continue,
             }
             round.set_verifying(proposal.clone(), parent_payload);
             return Verify::Ready(
@@ -3876,8 +3883,8 @@ mod tests {
     }
 
     /// Once a proposal's certification is requested, its missing parent notarization is still
-    /// requested from the proposal's leader, but the proposal is not returned for verification
-    /// after its ancestry resolves.
+    /// requested from the proposal's leader. When its ancestry resolves, its verification request
+    /// is claimed without being sent, and the same scan returns the next view's proposal.
     #[test]
     fn try_verify_only_resolves_ancestry_once_certification_requested() {
         let runtime = deterministic::Runner::default();
@@ -3933,12 +3940,24 @@ mod tests {
                         && target == leader
             ));
 
-            // Certifying the parent resolves the ancestry, and nothing is sent for verification.
+            // Certifying the parent resolves the ancestry.
             let parent = fetch_proposal(2, 1, 43);
             let notarization = build_notarization(&verifier, &schemes, &parent);
             assert!(state.add_notarization(notarization).0);
             assert!(state.certified(View::new(2), true).is_some());
             assert_eq!(state.parent_payload(&child), Ok(parent.payload));
+
+            // The leader proposes view 7 on the notarized view 6.
+            let successor = fetch_proposal(7, 6, 45);
+            assert!(state.set_proposal(View::new(7), &successor));
+
+            // One scan claims view 6's request without sending it and returns view 7's proposal.
+            assert!(state.views[&View::new(6)].pending_verification().is_some());
+            let Verify::Ready(_, proposal) = state.try_verify() else {
+                panic!("the scan must reach view 7");
+            };
+            assert_eq!(proposal, successor);
+            assert!(state.views[&View::new(6)].pending_verification().is_none());
             assert!(matches!(state.try_verify(), Verify::Wait));
         });
     }
