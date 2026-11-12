@@ -2389,6 +2389,10 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// The discarded suffix is durably removed before success. Subsequent appends may exceed
     /// the cap. A cap below the retained start returns [Error::ItemPruned].
+    ///
+    /// Data and offsets blobs that hold only positions at or above the cap are removed without
+    /// being opened. Every blob name in their partitions must still decode as a blob index,
+    /// including those above the cap.
     pub async fn init_at_most(
         context: E,
         cfg: Config<V::Cfg>,

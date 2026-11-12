@@ -428,9 +428,10 @@ impl<E: Storage + Metrics, V: CodecShared> std::fmt::Debug for Journal<E, V> {
 impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// Open through `(section, logical byte end)` and remove later sections.
     ///
-    /// An end inside an item rounds down. All retained data is validated before returning. Payload
-    /// reads stop at the page containing the bound, but every section name is validated, including
-    /// names above it.
+    /// An end inside an item rounds down. All retained data is validated before returning.
+    /// Nothing above the page containing the bound is read, and later sections are removed
+    /// without being opened. Every blob name in the partition must still decode as a section
+    /// number, including those above the bound.
     pub async fn init_at_most(
         context: E,
         cfg: Config<V::Cfg>,

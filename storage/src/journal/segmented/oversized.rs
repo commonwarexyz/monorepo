@@ -486,10 +486,14 @@ impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
     ///
     /// Recovery keeps exactly the checkpointed state. Each section below `section` is adopted at
     /// its validated terminal boundary, `section` is truncated to `index size`, and everything
-    /// after it is removed. A prune interrupted between its index and value removals can leave
-    /// value sections older than the oldest retained index section, and recovery removes them too.
-    /// A missing or damaged boundary the checkpoint covers fails init with [Error::Corruption], and
-    /// interior damage below a boundary surfaces lazily as read errors.
+    /// after it is removed without being opened. A prune interrupted between its index and value
+    /// removals can leave value sections older than the oldest retained index section, and
+    /// recovery removes them too.
+    ///
+    /// A missing or damaged boundary the checkpoint covers fails init with [Error::Corruption],
+    /// and interior damage below a boundary surfaces lazily as read errors. Every blob name in
+    /// the index and value partitions must still decode as a section number, including those
+    /// after the checkpoint.
     ///
     /// Callers must only provide a checkpoint that was durably synced before it was published. The
     /// empty checkpoint `(0, 0)` opens empty storage without creating or writing any blob.

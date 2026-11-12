@@ -1651,6 +1651,10 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// A cap above the recovered end preserves that end. A cap below the retained start returns
     /// [Error::ItemPruned]. Successful initialization durably discards the suffix. Subsequent
     /// appends may exceed the cap.
+    ///
+    /// Blobs that hold only positions at or above the cap are removed without being opened.
+    /// Every blob name in the partition must still decode as a blob index, including those above
+    /// the cap.
     pub async fn init_at_most(context: E, cfg: Config, max_size: u64) -> Result<Self, Error> {
         let checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
         let recovery = Recovery::<E, A>::open(context, cfg, checkpoint, Some(max_size)).await?;

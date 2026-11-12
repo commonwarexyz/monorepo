@@ -504,9 +504,10 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
     /// Open through `(section, logical byte end)` and remove later sections.
     ///
-    /// An end inside an item rounds down. All retained data is validated before returning. Payload
-    /// reads stop at the page containing the bound, but every section name is validated, including
-    /// names above it.
+    /// An end inside an item rounds down. All retained data is validated before returning.
+    /// Nothing above the page containing the bound is read, and later sections are removed
+    /// without being opened. Every blob name in the partition must still decode as a section
+    /// number, including those above the bound.
     pub async fn init_at_most(
         context: E,
         cfg: Config,
@@ -603,7 +604,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// `size` is the logical byte size of `section` and must be a multiple of
     /// [Self::CHUNK_SIZE]. The checkpoint proves the retained items, so the recovery replays
     /// nothing: [Recovery::finish] durably truncates `section` to `size` bytes and removes every
-    /// later section.
+    /// later section without opening it. Every blob name in the partition must still decode as a
+    /// section number, including those of later sections.
     pub async fn preflight_restore(
         context: E,
         cfg: Config,
