@@ -263,6 +263,10 @@ commonware_macros::stability_scope!(BETA {
         }
     }
 });
+commonware_macros::stability_scope!(ALPHA {
+    pub mod amount;
+    pub use amount::Amount;
+});
 commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     pub mod rng;
     pub use rng::sys_rng;

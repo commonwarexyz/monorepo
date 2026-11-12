@@ -7,6 +7,7 @@ use crate::common::{
     Digest, StoreDb, define_fixed_variants, define_vec_variants, gen_random_kv,
     gen_store_random_kv, make_fixed_value, make_var_value, open_store_db, store_cfg,
 };
+use commonware_bench::Inputs;
 use commonware_macros::boxed;
 use commonware_runtime::{
     Runner as _, Supervisor as _,
@@ -26,14 +27,14 @@ const COMMIT_FREQUENCY: u32 = 10_000;
 /// baseline), and a reasonably sized cache that covers the bench's working set.
 const CACHE_SIZES: [Option<NonZeroUsize>; 2] = [None, Some(NZUsize!(1 << 18))];
 
-cfg_if::cfg_if! {
-    if #[cfg(not(full_bench))] {
-        const CASES: [(u64, u64); 1] = [(NUM_ELEMENTS, NUM_OPERATIONS)];
-    } else {
-        const CASES: [(u64, u64); 2] = [
+fn cases() -> &'static [(u64, u64)] {
+    match Inputs::current() {
+        Inputs::Smoke => &[(1_000, 10_000)],
+        Inputs::Standard => &[(NUM_ELEMENTS, NUM_OPERATIONS)],
+        Inputs::Full => &[
             (NUM_ELEMENTS, NUM_OPERATIONS),
             (NUM_ELEMENTS * 3, NUM_OPERATIONS * 3),
-        ];
+        ],
     }
 }
 
@@ -71,7 +72,7 @@ define_fixed_variants! {
 
 fn bench_fixed_value_init(c: &mut Criterion) {
     let cfg = Config::default();
-    for (elements, operations) in CASES {
+    for &(elements, operations) in cases() {
         for &variant in FIXED_VARIANTS {
             // Populated lazily on the first sample of the first matched cache size, then reused by
             // every cache size for this variant (all read the same on-disk database).
@@ -136,7 +137,7 @@ define_vec_variants! {
 
 fn bench_var_value_init(c: &mut Criterion) {
     let cfg = Config::default();
-    for (elements, operations) in CASES {
+    for &(elements, operations) in cases() {
         for &variant in VEC_VARIANTS {
             // Populated lazily on the first sample of the first matched cache size, then reused by
             // every cache size for this variant (all read the same on-disk database).
@@ -190,7 +191,7 @@ fn bench_var_value_init(c: &mut Criterion) {
 /// Benchmark reopening a populated unauthenticated store at each init cache size.
 fn bench_store_init(c: &mut Criterion) {
     let cfg = Config::default();
-    for (elements, operations) in CASES {
+    for &(elements, operations) in cases() {
         // Populated lazily on the first sample of the first matched cache size, then reused by
         // every cache size (all read the same on-disk database).
         let mut initialized = false;

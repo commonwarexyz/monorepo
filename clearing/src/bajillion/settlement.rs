@@ -1,0 +1,415 @@
+//! Balances and payouts that a close settles.
+
+use super::{Amount, Amounts, Deposit, Epoch, ForcedWithdrawal, Withdrawal};
+use bytes::BufMut;
+use commonware_codec::{
+    Buf, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write, varint::UInt,
+};
+use commonware_cryptography::PublicKey;
+use commonware_utils::iter::zip_eq;
+use std::collections::HashMap;
+use thiserror::Error;
+
+/// Why a flow does not settle on a balance.
+#[derive(Debug, Error)]
+pub enum FlowError {
+    /// The balance would go negative.
+    #[error("negative balance")]
+    Overdraft,
+    /// A total, the balance, or the number of payouts does not fit.
+    #[error("arithmetic overflow")]
+    Overflow,
+}
+
+/// An exact sum of amounts that may exceed the largest amount.
+///
+/// The sum is `low` plus `carries` times one more than the largest amount, so a close settles
+/// whenever every balance it settles fits before its payout, however large its gross flows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Total<A: Amount> {
+    low: A,
+    carries: u64,
+}
+
+impl<A: Amount> Total<A> {
+    pub(crate) const ZERO: Self = Self::new(A::ZERO);
+
+    pub(crate) const fn new(amount: A) -> Self {
+        Self {
+            low: amount,
+            carries: 0,
+        }
+    }
+
+    /// Returns the sum of `self` and `other`, or `None` if the carries overflow.
+    pub(crate) fn add(self, other: Self) -> Option<Self> {
+        let (low, carry) = self.low.overflowing_add(other.low);
+        let carries = self
+            .carries
+            .checked_add(other.carries)?
+            .checked_add(u64::from(carry))?;
+        Some(Self { low, carries })
+    }
+
+    /// Returns `self` less `other`, or `None` if the difference is negative.
+    pub(crate) fn sub(self, other: Self) -> Option<Self> {
+        let (low, borrow) = self.low.overflowing_sub(other.low);
+        let carries = self
+            .carries
+            .checked_sub(other.carries)?
+            .checked_sub(u64::from(borrow))?;
+        Some(Self { low, carries })
+    }
+
+    /// Returns the sum as an amount, or `None` if it exceeds the largest amount.
+    pub(crate) fn get(self) -> Option<A> {
+        (self.carries == 0).then_some(self.low)
+    }
+}
+
+impl<A: Amount> Write for Total<A> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.low.write(buf);
+        UInt(self.carries).write(buf);
+    }
+}
+
+impl<A: Amount> EncodeSize for Total<A> {
+    fn encode_size(&self) -> usize {
+        A::SIZE + UInt(self.carries).encode_size()
+    }
+}
+
+impl<A: Amount> Read for Total<A> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        Ok(Self {
+            low: A::read(buf)?,
+            carries: UInt::read(buf)?.into(),
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<A: Amount> arbitrary::Arbitrary<'_> for Total<A>
+where
+    A: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            low: u.arbitrary()?,
+            carries: u.arbitrary()?,
+        })
+    }
+}
+
+/// What an account holds and is paid once its [Flow] settles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Settled<A: Amount> {
+    /// Balance left after the payout.
+    pub balance: A,
+    /// Amount paid out.
+    pub payout: A,
+}
+
+/// Funds moving into and out of one account in the close of an epoch.
+///
+/// Each part is an exact sum, so it may exceed the largest amount even when the balance it settles
+/// fits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Flow<A: Amount> {
+    /// Epoch of the close.
+    epoch: Epoch,
+    /// Incoming payments and processed deposits.
+    credit: Total<A>,
+    /// Outgoing payments.
+    debit: Total<A>,
+    /// Requested forced and soft withdrawals.
+    withdraw: Total<A>,
+}
+
+impl<A: Amount> Flow<A> {
+    /// Returns a flow of the close of `epoch` that moves nothing.
+    const fn zero(epoch: Epoch) -> Self {
+        Self {
+            epoch,
+            credit: Total::ZERO,
+            debit: Total::ZERO,
+            withdraw: Total::ZERO,
+        }
+    }
+
+    /// Returns the epoch of the close.
+    pub const fn epoch(&self) -> Epoch {
+        self.epoch
+    }
+
+    /// Settles the flow on the account's `previous` balance. The payout is the lesser of the
+    /// settled balance and the amount requested.
+    pub fn settle(&self, previous: A) -> Result<Settled<A>, FlowError> {
+        let settled = Total::new(previous)
+            .add(self.credit)
+            .ok_or(FlowError::Overflow)?
+            .sub(self.debit)
+            .ok_or(FlowError::Overdraft)?
+            .get()
+            .ok_or(FlowError::Overflow)?;
+        let payout = self
+            .withdraw
+            .get()
+            .map_or(settled, |requested| requested.min(settled));
+        let balance = settled
+            .checked_sub(payout)
+            .expect("payout must be at most the balance");
+        Ok(Settled { balance, payout })
+    }
+}
+
+impl<A: Amount> Write for Flow<A> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.epoch.write(buf);
+        self.credit.write(buf);
+        self.debit.write(buf);
+        self.withdraw.write(buf);
+    }
+}
+
+impl<A: Amount> EncodeSize for Flow<A> {
+    fn encode_size(&self) -> usize {
+        Epoch::SIZE
+            + self.credit.encode_size()
+            + self.debit.encode_size()
+            + self.withdraw.encode_size()
+    }
+}
+
+impl<A: Amount> Read for Flow<A> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        Ok(Self {
+            epoch: Epoch::read(buf)?,
+            credit: Total::read(buf)?,
+            debit: Total::read(buf)?,
+            withdraw: Total::read(buf)?,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<A: Amount> arbitrary::Arbitrary<'_> for Flow<A>
+where
+    A: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            epoch: u.arbitrary()?,
+            credit: u.arbitrary()?,
+            debit: u.arbitrary()?,
+            withdraw: u.arbitrary()?,
+        })
+    }
+}
+
+/// The effects of a close.
+pub(crate) struct Settlement<P: PublicKey, A: Amount> {
+    /// The new balance of each account in [Flows::accounts] order, or `None` if it does not change.
+    pub(crate) balances: Vec<Option<A>>,
+    /// Amount paid out to each withdrawing account.
+    pub(crate) payouts: Amounts<P, A>,
+}
+
+/// The flows of a close, aggregated per account.
+pub(crate) struct Flows<P: PublicKey, A: Amount> {
+    /// Flow of every account the close touches, in account order.
+    flows: Vec<(P, Flow<A>)>,
+}
+
+impl<P: PublicKey, A: Amount> Flows<P, A> {
+    /// Aggregates the payments, soft withdrawals, deposits, and forced withdrawals of the close of
+    /// `epoch`, given each sender's payment map in `rows`. A total gains at most one carry per
+    /// amount added, so no close that fits in memory overflows one.
+    pub(crate) fn new<'a>(
+        epoch: Epoch,
+        rows: impl IntoIterator<Item = (&'a P, &'a Amounts<P, A>)>,
+        withdrawals: &[Withdrawal<P, A>],
+        deposits: &[Deposit<P, A>],
+        forced_withdrawals: &[ForcedWithdrawal<P, A>],
+    ) -> Self {
+        let mut flows = HashMap::<P, Flow<A>>::new();
+        for (sender, payments) in rows {
+            let mut paid = Total::ZERO;
+            for (receiver, amount) in payments.iter() {
+                let amount = Total::new(amount);
+                add(&mut flows, epoch, receiver, |flow| &mut flow.credit, amount);
+                paid = paid
+                    .add(amount)
+                    .expect("a close must sum fewer than 2^64 amounts");
+            }
+            add(&mut flows, epoch, sender, |flow| &mut flow.debit, paid);
+        }
+        for deposit in deposits {
+            let amount = Total::new(deposit.amount);
+            add(
+                &mut flows,
+                epoch,
+                &deposit.account,
+                |flow| &mut flow.credit,
+                amount,
+            );
+        }
+        let forced = forced_withdrawals
+            .iter()
+            .map(|withdrawal| (&withdrawal.account, withdrawal.amount));
+        let soft = withdrawals
+            .iter()
+            .map(|withdrawal| (&withdrawal.account, withdrawal.amount));
+        for (account, amount) in forced.chain(soft) {
+            let amount = Total::new(amount);
+            add(
+                &mut flows,
+                epoch,
+                account,
+                |flow| &mut flow.withdraw,
+                amount,
+            );
+        }
+        let mut flows: Vec<_> = flows.into_iter().collect();
+        flows.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+        Self { flows }
+    }
+
+    /// Returns every account the close touches, in account order.
+    pub(crate) fn accounts(&self) -> impl ExactSizeIterator<Item = &P> {
+        self.flows.iter().map(|(account, _)| account)
+    }
+
+    /// Returns the flow of every account the close touches, in account order.
+    pub(crate) fn into_flows(self) -> Vec<(P, Flow<A>)> {
+        self.flows
+    }
+
+    /// Settles the flows on top of `balances`, the previous balance of each account in
+    /// [Self::accounts] order.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `balances` does not hold one balance per account.
+    pub(crate) fn settle(
+        &self,
+        balances: impl IntoIterator<Item = A>,
+    ) -> Result<Settlement<P, A>, FlowError> {
+        let mut changed = Vec::with_capacity(self.flows.len());
+        let mut payouts = Vec::new();
+        for ((account, flow), previous) in zip_eq(&self.flows, balances) {
+            let Settled { balance, payout } = flow.settle(previous)?;
+            changed.push((balance != previous).then_some(balance));
+            if payout != A::ZERO {
+                payouts.push((account.clone(), payout));
+            }
+        }
+        Ok(Settlement {
+            balances: changed,
+            payouts: Amounts::from_sorted(payouts).map_err(|_| FlowError::Overflow)?,
+        })
+    }
+}
+
+/// Adds `amount` to the total `field` selects in `account`'s flow of the close of `epoch`.
+fn add<P: PublicKey, A: Amount>(
+    flows: &mut HashMap<P, Flow<A>>,
+    epoch: Epoch,
+    account: &P,
+    field: impl FnOnce(&mut Flow<A>) -> &mut Total<A>,
+    amount: Total<A>,
+) {
+    let total = field(
+        flows
+            .entry(account.clone())
+            .or_insert_with(|| Flow::zero(epoch)),
+    );
+    *total = total
+        .add(amount)
+        .expect("a close must sum fewer than 2^64 amounts");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bajillion::tests::account;
+    use commonware_codec::{DecodeExt as _, Encode as _};
+    use commonware_cryptography::ed25519::PublicKey;
+
+    /// Flows whose credits and debits exceed the largest amount settle exactly and round-trip.
+    #[test]
+    fn test_flows_round_trip_beyond_the_largest_amount() {
+        // Alice pays herself and bob the largest amount each and deposits it too, so her credits
+        // and debits each exceed the largest amount while her balance does not change.
+        let [alice, bob] = [account(0), account(1)];
+        let payments = Amounts::new([(alice.clone(), u64::MAX), (bob.clone(), u64::MAX)]).unwrap();
+        let deposit = Deposit {
+            account: alice.clone(),
+            amount: u64::MAX,
+        };
+        let flows = Flows::new(2, [(&alice, &payments)], &[], &[deposit], &[]).into_flows();
+        let flow = |account: &PublicKey| {
+            flows
+                .iter()
+                .find(|(candidate, _)| candidate == account)
+                .map(|(_, flow)| *flow)
+                .unwrap()
+        };
+        let (paying, paid) = (flow(&alice), flow(&bob));
+        assert_eq!((paying.credit.carries, paying.debit.carries), (1, 1));
+        assert_eq!(
+            paying.settle(5).unwrap(),
+            Settled {
+                balance: 5,
+                payout: 0
+            }
+        );
+        assert_eq!(
+            paid.settle(0).unwrap(),
+            Settled {
+                balance: u64::MAX,
+                payout: 0
+            }
+        );
+
+        // Every flow round trips.
+        for flow in [paying, paid] {
+            assert_eq!(Flow::<u64>::decode(flow.encode()).unwrap(), flow);
+        }
+    }
+
+    /// A requested total beyond the largest amount pays out the whole balance.
+    #[test]
+    fn test_payout_is_capped_by_the_balance_beyond_the_largest_amount() {
+        // Alice holds 10 and is forced to withdraw the largest amount and 3 more in one close, so
+        // her requested total exceeds the largest amount while its low part is only 2.
+        let alice = account(0);
+        let forced = [u64::MAX, 3].map(|amount| ForcedWithdrawal {
+            account: alice.clone(),
+            amount,
+        });
+        let flows = Flows::new(2, std::iter::empty(), &[], &[], &forced).into_flows();
+        assert_eq!(
+            flows[0].1.settle(10).unwrap(),
+            Settled {
+                balance: 0,
+                payout: 10
+            }
+        );
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Flow<u64>>,
+        }
+    }
+}

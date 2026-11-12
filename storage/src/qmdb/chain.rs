@@ -27,7 +27,9 @@ use crate::{
     merkle::{Family, Location},
     qmdb::Error,
 };
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_cryptography::Digest;
+use commonware_runtime::BufMut;
 use core::iter;
 use std::{
     ops::Deref,
@@ -92,6 +94,43 @@ impl<F: Family, D: Digest> PartialEq for Commitment<F, D> {
 }
 
 impl<F: Family, D: Digest> Eq for Commitment<F, D> {}
+
+impl<F: Family, D: Digest> Write for Commitment<F, D> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.size.write(buf);
+        self.root.write(buf);
+    }
+}
+
+impl<F: Family, D: Digest> EncodeSize for Commitment<F, D> {
+    fn encode_size(&self) -> usize {
+        self.size.encode_size() + self.root.encode_size()
+    }
+}
+
+impl<F: Family, D: Digest> Read for Commitment<F, D> {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        Ok(Self {
+            size: Location::read(buf)?,
+            root: D::read(buf)?,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<F: Family, D: Digest> arbitrary::Arbitrary<'_> for Commitment<F, D>
+where
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            size: u.arbitrary()?,
+            root: u.arbitrary()?,
+        })
+    }
+}
 
 /// Position and inactivity-floor state for a merkleized QMDB batch.
 #[derive(Clone)]
@@ -264,6 +303,7 @@ pub(crate) fn validate_merkleize_floor<F: Family>(
 mod tests {
     use super::*;
     use crate::merkle::mmr;
+    use commonware_codec::{DecodeExt as _, Encode as _};
     use commonware_cryptography::sha256;
     use std::sync::{Arc, Weak};
 
@@ -283,6 +323,39 @@ mod tests {
         Commitment {
             size: Location::new(size),
             root: D::from([marker; 32]),
+        }
+    }
+
+    /// A commitment encodes as its size's varint and its root, and decoding refuses a size above
+    /// the family's maximum leaf count.
+    #[test]
+    fn commitment_round_trips_and_refuses_a_size_beyond_the_family() {
+        let commitment = state(14, 14);
+        let encoded = commitment.encode();
+        assert_eq!(encoded.len(), commitment.encode_size());
+        assert_eq!(encoded[0], 14);
+        assert_eq!(&encoded[1..], commitment.root.as_ref());
+        assert_eq!(Commitment::<F, D>::decode(encoded).unwrap(), commitment);
+
+        let beyond = Commitment {
+            size: F::MAX_LEAVES + 1,
+            root: commitment.root,
+        };
+        assert!(matches!(
+            Commitment::<F, D>::decode(beyond.encode()),
+            Err(CodecError::Invalid("Location", _))
+        ));
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use crate::merkle::mmb;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Commitment<mmr::Family, sha256::Digest>>,
+            CodecConformance<Commitment<mmb::Family, sha256::Digest>>,
         }
     }
 

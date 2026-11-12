@@ -1614,6 +1614,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_failed_creation_over_torn_header_recreates() {
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_torn_header_{}", random_suffix()));
+        let storage = Storage::new(Config::new(storage_directory.clone(), Layout::ALL));
+        shared::check_failed_creation_over_torn_header(&storage, &storage.pending).await;
+        drop(storage);
+        let _ = std::fs::remove_dir_all(storage_directory);
+    }
+
+    #[tokio::test]
     async fn test_remove_live_dirty_owner_leaves_no_debt() {
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_remove_live_{}", random_suffix()));

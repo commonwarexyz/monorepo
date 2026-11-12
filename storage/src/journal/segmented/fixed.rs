@@ -1209,7 +1209,7 @@ mod tests {
             fail_pending_syncs, release_pending_syncs,
         },
     };
-    use commonware_utils::{NZU16, NZUsize};
+    use commonware_utils::{NZU16, NZUsize, Widen};
     use core::num::NonZeroU16;
     use std::{
         ops::RangeInclusive,
@@ -2012,6 +2012,40 @@ mod tests {
                 .await
                 .expect("failed to open");
             assert_eq!(blob_size, 8 * 28);
+        });
+    }
+
+    #[test_traced]
+    fn test_segmented_fixed_restore_rejects_damaged_earlier_boundary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = lazy_recovery_cfg("segmented-fixed-restore-earlier-boundary");
+            seed(&context, &cfg, 0..=1).await;
+
+            // Tear the terminal page of the section below the checkpoint section.
+            let (blob, size) = context
+                .open(&cfg.partition, &0u64.to_be_bytes())
+                .await
+                .expect("failed to open");
+            blob.resize(size - 1).await.expect("failed to truncate");
+            blob.sync().await.expect("failed to sync");
+            drop(blob);
+
+            // The checkpoint covers every earlier section whole, so one without a valid terminal
+            // boundary is committed damage that restore reports and leaves untouched.
+            let result = Journal::<_, u64>::preflight_restore(
+                context.child("restore"),
+                cfg.clone(),
+                1,
+                16 * Widen::<u64>::widen(u64::SIZE),
+            )
+            .await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
+            let (_, blob_size) = context
+                .open(&cfg.partition, &0u64.to_be_bytes())
+                .await
+                .expect("failed to open");
+            assert_eq!(blob_size, size - 1);
         });
     }
 

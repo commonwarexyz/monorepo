@@ -7,7 +7,8 @@ use crate::{
     },
     qmdb::{
         self, Error,
-        immutable::{self, Metrics, Operation},
+        immutable::{self, Operation},
+        metrics::Metrics,
         operation::Key,
         sync,
         value::ValueEncoding,
@@ -96,7 +97,7 @@ where
             crate::qmdb::find_inactivity_floor_at::<F, _>(&journal.journal, size).await?;
 
         // Replay the log from the inactivity floor to build the index.
-        let index = immutable::build_index(
+        let index = immutable::db::build_index(
             context.child("index"),
             db_config.translator,
             inactivity_floor_loc,

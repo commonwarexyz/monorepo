@@ -1,4 +1,4 @@
-use crate::common::{N_LEAVES, SAMPLE_SIZE, StandardHasher, range_samples};
+use crate::common::{SAMPLE_SIZE, StandardHasher, n_leaves, range_samples};
 use commonware_cryptography::Sha256;
 use commonware_storage::merkle::{Bagging::ForwardFold, Family};
 use criterion::{BatchSize, Criterion, criterion_group};
@@ -6,7 +6,7 @@ use futures::executor::block_on;
 
 /// Times range proof verification, with the proofs generated in setup.
 fn bench_verify_many_elements_family<F: Family>(c: &mut Criterion, family: &str) {
-    for n in N_LEAVES {
+    for &n in n_leaves() {
         for range in [2, 5, 10, 25, 50, 100, 250, 500, 1_000, 5_000] {
             c.bench_function(
                 &format!(

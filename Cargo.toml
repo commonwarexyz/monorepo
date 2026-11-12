@@ -4,6 +4,7 @@ members = [
     "allocator",
     "bench",
     "broadcast",
+    "clearing",
     "codec",
     "codec/macros",
     "coding",
@@ -38,6 +39,7 @@ members = [
 
     # Fuzz builds
     "broadcast/fuzz",
+    "clearing/fuzz",
     "codec/fuzz",
     "coding/fuzz",
     "collector/fuzz",
@@ -75,7 +77,7 @@ homepage = "https://commonware.xyz"
 rust-version = "1.95.0"
 
 [workspace.lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)', 'cfg(huge_bench)', 'cfg(benchmark_tracking)', 'cfg(generate_conformance_tests)', 'cfg(commonware_stability_BETA)', 'cfg(commonware_stability_GAMMA)', 'cfg(commonware_stability_DELTA)', 'cfg(commonware_stability_EPSILON)', 'cfg(commonware_stability_RESERVED)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(benchmark_tracking)', 'cfg(generate_conformance_tests)', 'cfg(commonware_stability_BETA)', 'cfg(commonware_stability_GAMMA)', 'cfg(commonware_stability_DELTA)', 'cfg(commonware_stability_EPSILON)', 'cfg(commonware_stability_RESERVED)'] }
 unused_must_use = "deny"
 rust_2018_idioms = { level = "deny", priority = -1 }
 warnings = "deny"
@@ -127,6 +129,7 @@ commonware-actor = { version = "2026.10.0", path = "actor" }
 commonware-allocator = { version = "2026.10.0", path = "allocator", default-features = false }
 commonware-bench = { version = "2026.10.0", path = "bench" }
 commonware-broadcast = { version = "2026.10.0", path = "broadcast" }
+commonware-clearing = { version = "2026.10.0", path = "clearing" }
 commonware-codec = { version = "2026.10.0", path = "codec", default-features = false }
 commonware-codec-macros = { version = "2026.10.0", path = "codec/macros" }
 commonware-coding = { version = "2026.10.0", path = "coding" }
@@ -206,12 +209,14 @@ rand_distr = "0.6.0"
 ratatui = "0.30.2"
 reqwest = "0.13.4"
 rstest = "0.26.1"
+ruint = { version = "1.20.0", default-features = false }
 serde = "1.0.228"
 serde_json = "1.0.150"
 serde_yaml = "0.9.34"
 sha2 = { version = "0.11.0", default-features = false }
 sha3 = { version = "0.11.0", default-features = false }
 shlex = "2.0.1"
+stateright = "0.31.0"
 subtle = { version = "2.6.1", default-features = false }
 syn = "2.0.119"
 sysinfo = "0.39.6"

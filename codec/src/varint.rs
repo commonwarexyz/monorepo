@@ -11,6 +11,8 @@
 //!
 //! `usize` and `isize` are omitted to prevent behavior from depending on the target architecture.
 //!
+//! [Uint](crate::Uint) encodes the same way at any width.
+//!
 //! # Usage Example
 //!
 //! ```rust
@@ -31,6 +33,7 @@
 
 use crate::{Buf, EncodeSize, Error, FixedSize, MaxEncodeSize, Read, Write};
 use bytes::BufMut;
+use commonware_macros::stability;
 use core::{fmt::Debug, mem::size_of};
 use sealed::{SPrim, UPrim};
 
@@ -101,7 +104,7 @@ impl<U: UPrim> Decoder<U> {
     #[inline]
     pub fn new() -> Self {
         Self {
-            result: U::from(0),
+            result: U::from_u8(0),
             bits_read: 0,
         }
     }
@@ -114,7 +117,7 @@ impl<U: UPrim> Decoder<U> {
     /// - `Err(InvalidVarint)` if the varint is malformed (overflow or invalid encoding)
     #[inline]
     pub fn feed(&mut self, byte: u8) -> Result<Option<U>, Error> {
-        let max_bits = U::SIZE * BITS_PER_BYTE;
+        let max_bits = U::BITS;
 
         // If this is not the first byte, but the byte is completely zero, we have an invalid
         // varint. This is because this byte has no data bits and no continuation, so there was no
@@ -140,7 +143,7 @@ impl<U: UPrim> Decoder<U> {
         }
 
         // Write the 7 bits of data to the result.
-        self.result |= U::from(byte & DATA_BITS_MASK) << self.bits_read;
+        self.result |= U::from_u8(byte & DATA_BITS_MASK) << self.bits_read;
 
         // Check if complete (continuation bit not set)
         if byte & CONTINUATION_BIT_MASK == 0 {
@@ -157,10 +160,9 @@ mod sealed {
     use super::*;
     use core::ops::{BitOrAssign, Shl, ShrAssign};
 
-    /// A trait for unsigned integer primitives that can be varint encoded.
+    /// A trait for unsigned integers that can be varint encoded.
     pub trait UPrim:
         Copy
-        + From<u8>
         + Sized
         + FixedSize
         + ShrAssign<usize>
@@ -169,8 +171,14 @@ mod sealed {
         + PartialOrd
         + Debug
     {
+        /// Number of bits in the integer.
+        const BITS: usize;
+
+        /// Returns the integer holding `byte`. The byte must fit the integer's width.
+        fn from_u8(byte: u8) -> Self;
+
         /// Returns the number of leading zeros in the integer.
-        fn leading_zeros(self) -> u32;
+        fn leading_zeros(self) -> usize;
 
         /// Returns the least significant byte of the integer.
         fn as_u8(self) -> u8;
@@ -180,9 +188,16 @@ mod sealed {
     macro_rules! impl_uint {
         ($type:ty) => {
             impl UPrim for $type {
+                const BITS: usize = size_of::<$type>() * BITS_PER_BYTE;
+
                 #[inline(always)]
-                fn leading_zeros(self) -> u32 {
-                    self.leading_zeros()
+                fn from_u8(byte: u8) -> Self {
+                    Self::from(byte)
+                }
+
+                #[inline(always)]
+                fn leading_zeros(self) -> usize {
+                    self.leading_zeros() as usize
                 }
 
                 #[inline(always)]
@@ -196,6 +211,32 @@ mod sealed {
     impl_uint!(u32);
     impl_uint!(u64);
     impl_uint!(u128);
+
+    #[stability(ALPHA)]
+    impl<const BITS: usize, const LIMBS: usize> UPrim for crate::Uint<BITS, LIMBS> {
+        const BITS: usize = BITS;
+
+        #[inline(always)]
+        fn from_u8(byte: u8) -> Self {
+            let mut limbs = [0; LIMBS];
+            if let Some(limb) = limbs.first_mut() {
+                *limb = u64::from(byte);
+            }
+            Self::from_limbs(limbs)
+        }
+
+        #[inline(always)]
+        fn leading_zeros(self) -> usize {
+            Self::leading_zeros(&self)
+        }
+
+        #[inline(always)]
+        fn as_u8(self) -> u8 {
+            self.as_limbs()
+                .first()
+                .map_or(0, |limb| limb.to_le_bytes()[0])
+        }
+    }
 
     /// A trait for signed integer primitives that can be converted to and from unsigned integer
     /// primitives of the equivalent size.
@@ -258,8 +299,8 @@ mod sealed {
     impl_sint!(i128, u128);
 }
 
-/// An ergonomic wrapper to allow for encoding and decoding of primitive unsigned integers as
-/// varints rather than the default fixed-width integers.
+/// An ergonomic wrapper to allow for encoding and decoding of unsigned integers as varints rather
+/// than the default fixed-width integers.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct UInt<U: UPrim>(pub U);
 
@@ -277,6 +318,13 @@ macro_rules! impl_varuint_into {
     };
 }
 impl_varuint_into!(u16, u32, u64, u128);
+
+#[stability(ALPHA)]
+impl<const BITS: usize, const LIMBS: usize> From<UInt<Self>> for crate::Uint<BITS, LIMBS> {
+    fn from(val: UInt<Self>) -> Self {
+        val.0
+    }
+}
 
 impl<U: UPrim> Write for UInt<U> {
     fn write(&self, buf: &mut impl BufMut) {
@@ -313,6 +361,15 @@ impl_varuint_max!(
     u64 => MAX_U64_VARINT_SIZE,
     u128 => MAX_U128_VARINT_SIZE,
 );
+
+#[stability(ALPHA)]
+impl<const BITS: usize, const LIMBS: usize> MaxEncodeSize for UInt<crate::Uint<BITS, LIMBS>> {
+    const MAX_ENCODE_SIZE: usize = if BITS == 0 {
+        1
+    } else {
+        BITS.div_ceil(DATA_BITS_PER_BYTE)
+    };
+}
 
 #[cfg(feature = "arbitrary")]
 impl<U: UPrim> arbitrary::Arbitrary<'_> for UInt<U>
@@ -377,22 +434,41 @@ where
 
 /// Encodes an unsigned integer as a varint
 fn write<T: UPrim>(value: T, buf: &mut impl BufMut) {
-    let continuation_threshold = T::from(CONTINUATION_BIT_MASK);
-    if value < continuation_threshold {
-        // Fast path for small values (common case for lengths).
-        // `as_u8()` does not truncate the value or leave a continuation bit.
+    // A width of at most seven bits holds only values that take one byte, and cannot hold the
+    // continuation threshold.
+    if T::BITS <= DATA_BITS_PER_BYTE {
         buf.put_u8(value.as_u8());
         return;
     }
 
-    // Stage the encoded bytes on the stack so the buffer receives a single bulk write.
+    // Fast path for small values (common case for lengths). `as_u8()` does not truncate such a
+    // value or leave a continuation bit.
+    let continuation_threshold = T::from_u8(CONTINUATION_BIT_MASK);
+    if value < continuation_threshold {
+        buf.put_u8(value.as_u8());
+        return;
+    }
+
+    // Stage the encoded bytes on the stack so the buffer receives bulk writes. The stage holds the
+    // longest primitive encoding, and only an integer whose encoding can be longer flushes a full
+    // stage. Whether a type's encoding can be longer is a constant, so the primitives' loop
+    // carries no flush.
     let mut bytes = [0u8; MAX_U128_VARINT_SIZE];
+    let flushes = T::BITS.div_ceil(DATA_BITS_PER_BYTE) > bytes.len();
     let mut len = 0;
     let mut val = value;
     while val >= continuation_threshold {
+        if flushes && len == bytes.len() {
+            buf.put_slice(&bytes);
+            len = 0;
+        }
         bytes[len] = val.as_u8() | CONTINUATION_BIT_MASK;
         len += 1;
-        val >>= 7;
+        val >>= DATA_BITS_PER_BYTE;
+    }
+    if flushes && len == bytes.len() {
+        buf.put_slice(&bytes);
+        len = 0;
     }
     bytes[len] = val.as_u8();
     buf.put_slice(&bytes[..=len]);
@@ -404,14 +480,15 @@ fn write<T: UPrim>(value: T, buf: &mut impl BufMut) {
 /// - The varint is invalid (too long or malformed)
 /// - The buffer ends while reading
 fn read<T: UPrim>(buf: &mut impl Buf) -> Result<T, Error> {
-    // Fast path for single-byte values.
+    // Fast path for single-byte values. A width below seven bits cannot hold all of them, so its
+    // byte goes to the decoder.
     let mut byte = buf.try_get_u8().map_err(|_| Error::EndOfBuffer)?;
-    if byte & CONTINUATION_BIT_MASK == 0 {
-        return Ok(T::from(byte));
+    if byte & CONTINUATION_BIT_MASK == 0 && T::BITS >= DATA_BITS_PER_BYTE {
+        return Ok(T::from_u8(byte));
     }
 
-    // The decoder enforces canonical encodings and rejects overflow for multi-byte values,
-    // starting with the byte already read.
+    // The decoder enforces canonical encodings and rejects overflow, starting with the byte
+    // already read.
     let mut decoder = Decoder::<T>::new();
     loop {
         if let Some(value) = decoder.feed(byte)? {
@@ -423,9 +500,7 @@ fn read<T: UPrim>(buf: &mut impl Buf) -> Result<T, Error> {
 
 /// Calculates the number of bytes needed to encode an unsigned integer as a varint.
 fn size<T: UPrim>(value: T) -> usize {
-    let total_bits = size_of::<T>() * 8;
-    let leading_zeros = value.leading_zeros() as usize;
-    let data_bits = total_bits - leading_zeros;
+    let data_bits = T::BITS - value.leading_zeros();
     usize::max(1, data_bits.div_ceil(DATA_BITS_PER_BYTE))
 }
 
@@ -447,7 +522,7 @@ fn size_signed<S: SPrim>(value: S) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Copying, DecodeExt, Encode, error::Error};
+    use crate::{Copying, DecodeExt, Encode, ReadExt, U256, Uint, error::Error};
     use bytes::{Buf as _, Bytes};
 
     #[test]
@@ -501,6 +576,131 @@ mod tests {
         let mut buf = Bytes::from_static(&[0xFF, 0x00]);
         let result = read::<u64>(&mut buf);
         assert!(matches!(result, Err(Error::InvalidVarint(u64::SIZE))));
+    }
+
+    /// A wide integer's varint is the same bytes as a primitive's for the values both hold, and
+    /// its widest values stage past the primitive buffer.
+    #[test]
+    fn test_uint_round_trips_at_any_width() {
+        // A value that fits a `u64` encodes as the primitive does and decodes back.
+        for value in [0u64, 1, 127, 128, 300, 0x3FFF, 0x4000, u64::MAX] {
+            let wide = UInt(U256::from(value)).encode();
+            assert_eq!(wide, UInt(value).encode());
+            assert_eq!(UInt::<U256>::decode(wide).unwrap().0, U256::from(value));
+        }
+
+        // The value at bit 139 fills the staging buffer exactly before its final byte.
+        let filling = U256::from_limbs([0, 0, 1 << 11, 0]);
+        let beyond = U256::from_limbs([u64::MAX, 1, 0, 1 << 63]);
+        for value in [filling, beyond, U256::MAX] {
+            let encoded = UInt(value).encode();
+            assert_eq!(encoded.len(), UInt(value).encode_size());
+            assert_eq!(UInt::<U256>::decode(encoded).unwrap().0, value);
+        }
+        assert_eq!(
+            UInt(U256::MAX).encode_size(),
+            <UInt<U256> as MaxEncodeSize>::MAX_ENCODE_SIZE
+        );
+        assert_eq!(<UInt<U256> as MaxEncodeSize>::MAX_ENCODE_SIZE, 37);
+
+        // A bit beyond the width, a trailing zero byte, and a truncated encoding are refused.
+        let mut bytes = UInt(U256::MAX).encode().to_vec();
+        *bytes.last_mut().unwrap() |= 0x10;
+        assert!(matches!(
+            UInt::<U256>::decode(Copying(&bytes)),
+            Err(Error::InvalidVarint(32))
+        ));
+        assert!(matches!(
+            UInt::<U256>::decode(Copying(&[0xFF, 0x00])),
+            Err(Error::InvalidVarint(32))
+        ));
+        assert!(matches!(
+            UInt::<U256>::decode(Copying(&[0xFF; 36])),
+            Err(Error::EndOfBuffer)
+        ));
+    }
+
+    /// Widths that are not a multiple of eight bits bound their encodings by their exact width.
+    #[test]
+    fn test_uint_partial_widths() {
+        // Eight bits spill their top bit into a second byte. That byte holds nothing more.
+        type U8 = Uint<8, 1>;
+        assert_eq!(UInt(U8::MAX).encode().as_ref(), [0xFF, 0x01]);
+        assert_eq!(
+            UInt::<U8>::decode(Copying(&[0xFF, 0x01])).unwrap().0,
+            U8::MAX
+        );
+        assert!(matches!(
+            UInt::<U8>::decode(Copying(&[0xFF, 0x02])),
+            Err(Error::InvalidVarint(1))
+        ));
+
+        // Thirty-six bits leave one bit for a sixth byte.
+        type U36 = Uint<36, 1>;
+        assert_eq!(<UInt<U36> as MaxEncodeSize>::MAX_ENCODE_SIZE, 6);
+        let encoded = UInt(U36::MAX).encode();
+        assert_eq!(encoded.len(), 6);
+        assert_eq!(UInt::<U36>::decode(encoded).unwrap().0, U36::MAX);
+        assert!(matches!(
+            UInt::<U36>::decode(Copying(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x1F])),
+            Err(Error::InvalidVarint(5))
+        ));
+
+        // A width that is a multiple of seven bits fills its last byte, and a continuation there
+        // is refused before another byte is read.
+        type U14 = Uint<14, 1>;
+        assert_eq!(UInt(U14::MAX).encode().as_ref(), [0xFF, 0x7F]);
+        assert_eq!(
+            UInt::<U14>::decode(Copying(&[0xFF, 0x7F])).unwrap().0,
+            U14::MAX
+        );
+        let mut buf = Bytes::from_static(&[0xFF, 0xFF, 0x01]);
+        assert!(matches!(
+            UInt::<U14>::read(&mut buf),
+            Err(Error::InvalidVarint(2))
+        ));
+        assert_eq!(buf.remaining(), 1);
+    }
+
+    /// A width of at most seven bits takes one byte, bounded by its exact width like any other.
+    #[test]
+    fn test_uint_narrow_widths() {
+        // A bit beyond the width and a continuation are refused.
+        type U4 = Uint<4, 1>;
+        assert_eq!(<UInt<U4> as MaxEncodeSize>::MAX_ENCODE_SIZE, 1);
+        assert_eq!(UInt(U4::MAX).encode().as_ref(), [0x0F]);
+        assert_eq!(UInt::<U4>::decode(Copying(&[0x0F])).unwrap().0, U4::MAX);
+        for refused in [&[0x10][..], &[0x8F, 0x01]] {
+            assert!(matches!(
+                UInt::<U4>::decode(Copying(refused)),
+                Err(Error::InvalidVarint(1))
+            ));
+        }
+
+        // Seven bits fill the byte, so only a continuation is left to refuse.
+        type U7 = Uint<7, 1>;
+        assert_eq!(<UInt<U7> as MaxEncodeSize>::MAX_ENCODE_SIZE, 1);
+        assert_eq!(UInt(U7::MAX).encode().as_ref(), [0x7F]);
+        assert_eq!(UInt::<U7>::decode(Copying(&[0x7F])).unwrap().0, U7::MAX);
+        assert!(matches!(
+            UInt::<U7>::decode(Copying(&[0xFF, 0x01])),
+            Err(Error::InvalidVarint(1))
+        ));
+
+        // A width of zero bits holds only zero. Zero still takes a byte.
+        type U0 = Uint<0, 0>;
+        assert_eq!(<UInt<U0> as MaxEncodeSize>::MAX_ENCODE_SIZE, 1);
+        assert_eq!(UInt(U0::ZERO).encode_size(), 1);
+        assert_eq!(UInt(U0::ZERO).encode().as_ref(), [0x00]);
+        assert_eq!(UInt::<U0>::decode(Copying(&[0x00])).unwrap().0, U0::ZERO);
+        assert!(matches!(
+            UInt::<U0>::decode(Copying(&[0x01])),
+            Err(Error::InvalidVarint(0))
+        ));
+
+        // The byte-at-a-time decoder applies the same bound.
+        assert_eq!(Decoder::<U4>::new().feed(0x0F).unwrap(), Some(U4::MAX));
+        assert!(Decoder::<U4>::new().feed(0x10).is_err());
     }
 
     /// Core round-trip check, generic over any UPrim.
@@ -821,6 +1021,7 @@ mod tests {
             CodecConformance<UInt<u32>>,
             CodecConformance<UInt<u64>>,
             CodecConformance<UInt<u128>>,
+            CodecConformance<UInt<U256>>,
             CodecConformance<SInt<i16>>,
             CodecConformance<SInt<i32>>,
             CodecConformance<SInt<i64>>,

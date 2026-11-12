@@ -2358,6 +2358,16 @@ mod tests {
     }
 
     #[test]
+    fn test_failed_creation_over_torn_header_recreates() {
+        iouring::Runner::default().start(|_| async {
+            let (storage, storage_directory) = create_test_storage();
+            shared::check_failed_creation_over_torn_header(&storage, &storage.pending).await;
+            drop(storage);
+            let _ = std::fs::remove_dir_all(storage_directory);
+        });
+    }
+
+    #[test]
     fn test_durable_writes_need_no_reopen_sync() {
         iouring::Runner::default().start(|_| async {
             let (storage, storage_directory) = create_test_storage();

@@ -223,6 +223,10 @@ impl merkle::Family for Family {
         }
         true
     }
+
+    fn birth_offset(height: u32) -> u64 {
+        1u64.checked_shl(height).expect("height excessively large")
+    }
 }
 
 impl Graftable for Family {
@@ -866,9 +870,22 @@ mod tests {
                     *pos, next_pos,
                     "height-{h} subtree_root_position mismatch at leaf {leaf_idx}"
                 );
+                assert_eq!(
+                    leftmost + Family::birth_offset(h),
+                    leaf_idx + 1,
+                    "height-{h} birth_offset mismatch at leaf {leaf_idx}"
+                );
                 next_pos += 1;
             }
         }
+    }
+
+    #[test]
+    fn test_birth_offset() {
+        assert_eq!(Family::birth_offset(0), 1);
+        assert_eq!(Family::birth_offset(3), 8);
+        // The root of a full 2^62-leaf MMR is the tallest node that can exist.
+        assert_eq!(Family::birth_offset(62), *Family::MAX_LEAVES);
     }
 
     #[test]

@@ -1532,15 +1532,15 @@ mod tests {
             pending.arm();
             let cfg = test_config("marker-torn-tail", NZU64!(4), FourCap);
 
-            // Recovery must trust the marker-covered record, select the older checksum slot, and
-            // durably remove only the orphaned value suffix.
+            // Recovery must trust the marker-covered record, select the older checksum slot,
+            // durably zero the torn one, and durably remove only the orphaned value suffix.
             let archive = drive_pending_syncs(
                 &pending,
                 Archive::<_, _, FixedBytes<64>, i32>::init(delayed.child("reopen"), cfg.clone()),
             )
             .await
             .unwrap();
-            assert_eq!(pending.calls(), 1);
+            assert_eq!(pending.calls(), 2);
             assert_eq!(archive.last_index(), Some(0));
             assert_eq!(archive.ranges().collect::<Vec<_>>(), vec![(0, 0)]);
             assert_eq!(archive.get(Identifier::Index(0)).await.unwrap(), Some(10));

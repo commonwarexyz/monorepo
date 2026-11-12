@@ -37,6 +37,13 @@ pub mod bls12381;
     commonware_stability_EPSILON,
     commonware_stability_RESERVED
 )))] // BETA
+pub mod certificate;
+#[cfg(not(any(
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))] // BETA
 pub mod ed25519;
 #[cfg(not(any(
     commonware_stability_BETA,
@@ -85,7 +92,6 @@ commonware_macros::stability_scope!(BETA {
     pub mod secret;
     pub use crate::secret::Secret;
 
-    pub mod certificate;
     pub mod transcript;
 
     pub mod sha256;
