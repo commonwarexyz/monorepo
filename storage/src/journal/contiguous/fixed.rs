@@ -2339,8 +2339,9 @@ mod tests {
         buffer::paged::{Writer, corrupt_page},
         deterministic::{self, Context},
         mocks::{
-            DelayedSyncContext, PendingSyncs, RecordingContext, WriteFaultContext, WriteFaults,
-            drive_pending_syncs, fail_pending_syncs, next_pending_sync, release_pending_syncs,
+            DelayedSyncContext, MutationFaultContext, MutationFaults, PendingSyncs,
+            RecordingContext, WriteFaultContext, WriteFaults, drive_pending_syncs,
+            fail_pending_syncs, next_pending_sync, release_pending_syncs,
         },
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, probability};
@@ -4419,6 +4420,86 @@ mod tests {
             let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
+    }
+
+    /// A reset to a new size stopped before any one of its mutations leaves a journal that
+    /// reopens with its prior contents or empty at the new size, and that accepts appends.
+    #[test_traced]
+    fn test_interrupted_init_at_size_reopens() {
+        // New sizes below the retained items, among them, and past them, on and off a blob
+        // boundary.
+        for target in [0u64, 2, 8, 13, 15] {
+            // Stop the reset before its first mutation, then its second, and so on until one
+            // reset completes.
+            let mut interrupted = 0;
+            loop {
+                let faults = MutationFaults::default();
+                let (completed, checkpoint) = deterministic::Runner::default().start_and_recover({
+                    let faults = faults.clone();
+                    |context| async move {
+                        let context = MutationFaultContext {
+                            inner: context,
+                            faults: faults.clone(),
+                        };
+                        let cfg = test_cfg(NZU64!(5));
+                        let mut journal = Journal::<_, Digest>::init_at_size(
+                            context.child("first"),
+                            cfg.clone(),
+                            7,
+                        )
+                        .await
+                        .unwrap();
+                        for i in 7..12 {
+                            (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+                        }
+                        drop(journal.sync().await.unwrap());
+                        faults.allow(interrupted);
+                        Journal::<_, Digest>::init_at_size(context.child("reset"), cfg, target)
+                            .await
+                            .is_ok()
+                    }
+                });
+                let stopped = faults.failed();
+                let scenario = format!("new size {target}, stopped after {interrupted} mutations");
+                assert_eq!(completed, !stopped, "{scenario}");
+
+                deterministic::Runner::from(checkpoint).start(|context| async move {
+                    let cfg = test_cfg(NZU64!(5));
+                    let journal = Journal::<_, Digest>::init(context.child("reopen"), cfg.clone())
+                        .await
+                        .unwrap_or_else(|err| panic!("{scenario}: {err}"));
+                    let bounds = journal.bounds();
+                    if completed {
+                        assert_eq!(bounds, target..target, "{scenario}");
+                    } else {
+                        assert!(
+                            bounds == (7..12) || bounds == (target..target),
+                            "{scenario}: {bounds:?}"
+                        );
+                    }
+                    for i in bounds.clone() {
+                        assert_eq!(journal.read(i).await.unwrap(), test_digest(i), "{scenario}");
+                    }
+
+                    // An append lands at the end and survives another reopen.
+                    let (journal, position) = journal.append(&test_digest(99)).await.unwrap();
+                    assert_eq!(position, bounds.end, "{scenario}");
+                    drop(journal.sync().await.unwrap());
+                    let journal = Journal::<_, Digest>::init(context.child("again"), cfg)
+                        .await
+                        .unwrap_or_else(|err| panic!("{scenario}: {err}"));
+                    assert_eq!(journal.read(position).await.unwrap(), test_digest(99));
+                });
+                if !stopped {
+                    break;
+                }
+                interrupted += 1;
+            }
+
+            // A reset stages its intent, removes the stored blobs, creates the new tail and
+            // publishes it, so it can stop in at least three places.
+            assert!(interrupted >= 3, "new size {target}: {interrupted}");
+        }
     }
 
     /// A destroy interrupted at any point leaves a journal that reopens as a crash would recover
