@@ -306,6 +306,8 @@ mod tests {
         actor_handle: Option<Arc<Mutex<Option<Handle<()>>>>>,
         /// Views whose verification requests reached the mock application.
         verify_requests: Option<Arc<Mutex<Vec<View>>>>,
+        /// Verification response senders held by the test instead of answered.
+        held_verifications: Option<CertificationRequests>,
         /// Whether every mock application verification should fail.
         fail_verification: bool,
         certifier: mocks::application::Certifier<Sha256Digest>,
@@ -330,6 +332,7 @@ mod tests {
                 handoff: Handoff::Wait,
                 actor_handle: None,
                 verify_requests: None,
+                held_verifications: None,
                 fail_verification: false,
                 certifier: mocks::application::Certifier::Always,
             }
@@ -407,6 +410,11 @@ mod tests {
         if let Some(verify_requests) = verify_requests {
             actor.set_verify_observer(Box::new(move |context, _| {
                 verify_requests.lock().push(context.view());
+            }));
+        }
+        if let Some(held) = options.held_verifications {
+            actor.set_verify_holder(Box::new(move |context, response| {
+                held.lock().push((context.view(), response));
             }));
         }
         actor.start();
@@ -8046,6 +8054,93 @@ mod tests {
             assert!(
                 !reporter.notarizes.lock().contains_key(&target_view),
                 "verification completed after finalization must not emit a notarize vote"
+            );
+        });
+    }
+
+    /// A notarization for a conflicting proposal in the same view should cancel
+    /// the in-flight verification of the leader's proposal.
+    ///
+    /// The leader sends us proposal A and we request its verification. Before
+    /// the application answers, a notarization for a different proposal B in
+    /// the same view arrives. The slot is replaced by B and marked equivocated,
+    /// so any verdict for A is discarded on completion. The view does not
+    /// advance until B certifies, so the request for A is never dropped: the
+    /// application keeps working on a proposal that can no longer be notarized,
+    /// and the single verification slot stays occupied for as long as the
+    /// equivocating leader withholds A.
+    #[test_traced]
+    fn conflicting_notarization_cancels_inflight_verification() {
+        let n = 4;
+        let quorum = quorum(n);
+        let epoch = Epoch::new(333);
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, b"conflicting_notarization_cancels_verify", n);
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+            let elector = RoundRobin::<Sha256>::default();
+            let built_elector: RoundRobinElector<ed25519::Scheme> =
+                elector.clone().build(schemes[0].participants());
+            let leader_index =
+                usize::from(built_elector.elect(Round::new(epoch, View::new(1)), ()));
+            let local_index = (leader_index + 1) % schemes.len();
+            let held: CertificationRequests = Arc::new(Mutex::new(Vec::new()));
+            let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
+                &context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                VoterOptions {
+                    leader_timeout: Duration::from_secs(5),
+                    certification_timeout: Duration::from_secs(5),
+                    local_index,
+                    held_verifications: Some(held.clone()),
+                    // Certification of B never completes, so the view does not advance.
+                    certifier: Certifier::Pending,
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            let target_view = match batcher_receiver.recv().await.unwrap() {
+                batcher::Message::Update { current, .. } => current,
+                _ => panic!("expected initial update"),
+            };
+            assert_eq!(target_view, View::new(1));
+
+            // The leader's proposal A reaches us; verification is requested.
+            let parent = target_view.previous().unwrap_or(View::zero());
+            let a = Proposal::new(
+                Round::new(epoch, target_view),
+                parent,
+                Sha256::hash(&[b"proposal_a"]),
+            );
+            mailbox.proposal(a);
+            context.sleep(Duration::from_millis(10)).await;
+            assert_eq!(held.lock().len(), 1, "verification of A must be in flight");
+            assert!(!held.lock()[0].1.is_closed());
+
+            // A notarization for the leader's conflicting proposal B arrives.
+            let b = Proposal::new(
+                Round::new(epoch, target_view),
+                parent,
+                Sha256::hash(&[b"proposal_b"]),
+            );
+            let (_, notarization) = build_notarization(&schemes, &b, quorum);
+            mailbox.recovered(Certificate::Notarization(notarization));
+            context.sleep(Duration::from_millis(100)).await;
+
+            // A can no longer be notarized, so its verification should be canceled.
+            assert!(
+                held.lock()[0].1.is_closed(),
+                "verification of A is still in flight after a conflicting notarization"
             );
         });
     }
