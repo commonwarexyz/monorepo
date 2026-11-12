@@ -5,26 +5,14 @@
 //! gives the kernels their coordinates, their points in each representation, and the split of
 //! their scalars.
 //!
-//! # Dispatch
-//!
-//! [`Kernel::dispatch`] selects the backend at the boundary. The backend's profile then selects
-//! the base field representation: on x86v4c, residues, except for the sums and multiples of many
-//! elements of G1, whose base field products the 64-bit lanes finish sooner; 32-bit lanes
-//! elsewhere. Elements cross the boundary as canonical coordinates, so every kernel loads its
-//! inputs and stores its outputs, and loaded coordinates satisfy the bounds of the curve formulas.
+//! [`Kernel::dispatch`] selects the backend and the base field representation. Elements cross
+//! into a kernel as canonical coordinates, so every kernel loads its inputs and stores its
+//! outputs.
 //!
 //! Operations over slices of elements ([`Sum`], [`MultiplyEach`], and
-//! [`Msm`](super::msm::Msm)) hold one element per lane, so they amortize the boundary and fill
-//! every lane; the single-element operations use one lane, so their cost is the latency of one
-//! lane's formulas.
-//!
-//! # Multiplication
-//!
-//! Multiplications split each scalar by the group's endomorphism ([`Group::components`]) into
-//! two components of 128 bits in G1 and four of 64 bits in G2, so that the doublings they share
-//! cover a component rather than the whole scalar, at the cost of one image per component.
-//! [`multiply`] runs a fixed schedule and [`gather`] reads every table entry, so neither the
-//! operations nor the memory accesses depend on the scalar.
+//! [`Msm`](super::msm::Msm)) hold one element per lane, so they dispatch once for many elements
+//! and fill every lane; the single-element operations use one lane, so their cost is the latency
+//! of one lane's formulas.
 
 use super::Scalar;
 use crate::core::{
@@ -41,7 +29,8 @@ use core::fmt::Debug;
 /// Width in bits of the signed scalar windows of [`multiply`].
 const WINDOW_BITS: u32 = 5;
 
-/// Entries of a table of multiples: a signed window selects a multiple by `1` through this.
+/// Entries of a table of multiples: `1` through `TABLE` times the base, the magnitudes of the
+/// signed windows of [`WINDOW_BITS`] bits.
 const TABLE: usize = 1 << (WINDOW_BITS - 1);
 
 /// Most components a scalar splits into, by the endomorphism of G2.
@@ -59,8 +48,9 @@ pub trait Kernel: Sized {
     /// The result of the operation.
     type Output;
 
-    /// Returns whether the operation holds independent items in every lane of a 64-bit
-    /// representation, which then finishes them sooner than residues.
+    /// Returns whether the operation finishes sooner in a 64-bit representation than in residues.
+    ///
+    /// Defaults to `false`.
     fn prefers_wide_lanes(&self) -> bool {
         false
     }
@@ -70,7 +60,9 @@ pub trait Kernel: Sized {
 
     /// Runs the operation on the best available backend.
     fn dispatch(self) -> Self::Output {
-        /// Runs a kernel in the representation chosen for the backend.
+        /// Runs a kernel in the representation chosen for the backend: on x86v4c, residues, except
+        /// for kernels that prefer wide lanes, such as the sums and multiples of many elements of
+        /// G1, whose base field products the 64-bit lanes finish sooner; 32-bit lanes elsewhere.
         struct Run<K>(K);
 
         impl<S: Simd, K: Kernel> Operation<S> for Run<K> {
@@ -109,12 +101,12 @@ pub trait Group: Copy + Send + Sync {
     /// The identity.
     const IDENTITY: Self::Coordinates;
 
-    /// Most elements for which [`Sum`] still favors residues over the 64-bit lanes, or `None`
-    /// when residues finish every count sooner.
+    /// Largest number of elements that [`Sum`] runs in residues, which finish them sooner than
+    /// the 64-bit lanes, or `None` when residues finish every count sooner.
     const SUM_BATCH: Option<usize>;
 
-    /// Most elements for which [`MultiplyEach`] still favors residues over the 64-bit lanes, or
-    /// `None` when residues finish every count sooner.
+    /// Largest number of elements that [`MultiplyEach`] runs in residues, which finish them
+    /// sooner than the 64-bit lanes, or `None` when residues finish every count sooner.
     const MULTIPLY_BATCH: Option<usize>;
 
     /// Number of components [`Self::components`] splits a scalar into: the powers of the
@@ -126,10 +118,10 @@ pub trait Group: Copy + Send + Sync {
     const COMPONENT_BITS: u32;
 
     /// Splits a scalar `k` into components below `2^(COMPONENT_BITS - 1)`, as little-endian
-    /// words, such that, for the eigenvalue `e` of [`Points::endomorphism`], `k` is the sum
-    /// over components `c` of `components[c] (-e)^c`: the eigenvalue is the negation of the
-    /// base in both groups, so the odd components count negatively. Components beyond
-    /// [`Self::COMPONENTS`] are zero. Runs in time independent of the scalar.
+    /// words, such that `k` is the sum over components `c` of `components[c] (-e)^c`, for the
+    /// eigenvalue `e` of [`Points::endomorphism`].
+    ///
+    /// Components beyond [`Self::COMPONENTS`] are zero. Runs in time independent of the scalar.
     fn components(scalar: &Scalar) -> [[u64; 2]; MAX_COMPONENTS];
 
     /// Returns the element's coordinates.
@@ -294,6 +286,9 @@ fn multiply<S: Simd, P: Points<S>>(
         };
     }
     let mut result = identity;
+    // The endomorphism splits each scalar into two components of 128 bits in G1 and four of 64
+    // bits in G2, so the doublings cover one component rather than the whole scalar, at the cost
+    // of components - 1 endomorphism images per window.
     for window in (0..windows).rev() {
         let mut term = gather(simd, identity, &table, digits(components - 1, window));
         for c in (0..components - 1).rev() {
@@ -371,7 +366,7 @@ impl<G: Group> Kernel for Double<G> {
     }
 }
 
-/// Multiplies an element by a scalar, without branching on the scalar.
+/// Multiplies an element by a scalar, in time independent of the scalar.
 #[derive(Clone, Copy)]
 pub struct Multiply<G> {
     /// The element.
@@ -419,7 +414,8 @@ impl<G: Group> Kernel for Sum<'_, G> {
     }
 }
 
-/// Multiplies each element by the scalar at the same index, one element per lane.
+/// Multiplies each element by the scalar at the same index, one element per lane, in time
+/// independent of the scalars.
 pub struct MultiplyEach<'a, G> {
     /// The elements, replaced by their multiples.
     pub elements: &'a mut [G],

@@ -6,20 +6,16 @@
 //!
 //! # Roadmap
 //!
-//! Benchmarks to add, many for operations the crate does not implement yet. The ones of interest
-//! are the primitives needed for threshold signatures, multisignatures, and batch verification:
+//! Threshold signatures, multisignatures, and batch verification need pairing-product checks
+//! ([`multi_pairing`]), single and independent pairings ([`pairing`]), multi-scalar
+//! multiplication ([`msm`]), sums of points ([`sum`]), and variable-base scalar multiplication
+//! ([`mul`]), which the benchmarks above measure. Benchmarks to add, many for operations the
+//! crate does not implement yet:
 //!
-//! - Pairing-product checks: a multi-Miller loop followed by one final exponentiation,
-//!   especially for two terms (single-signature verification) and `n + 1` terms
-//!   (distinct-message aggregate verification).
-//! - Single pairings and multiple independent pairings, with Miller loops and final
-//!   exponentiation also measured separately.
-//! - Multi-scalar multiplication (MSM) in G1 and G2 for threshold reconstruction and
-//!   randomized batch verification.
-//! - Sums of points in G1 and G2 for signature and public-key aggregation.
+//! - Miller loops and final exponentiation measured separately.
 //! - Hash-to-G1 and hash-to-G2 for new messages.
-//! - Fixed-base and variable-base scalar multiplication in G1 and G2 for signing,
-//!   public-key derivation, and batch-verification weights.
+//! - Fixed-base scalar multiplication in G1 and G2 for signing, public-key derivation, and
+//!   batch-verification weights.
 //! - Compressed point decoding and subgroup validation for signatures and public keys
 //!   received from the network.
 //! - Batch conversion to affine coordinates for MSMs, pairings, and serialization.

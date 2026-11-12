@@ -52,10 +52,9 @@ pub trait Curve: CryptoGroup<Scalar = Scalar> + Copy {
     }
 
     /// Returns `count` distinct points, and the same points in blst.
-    ///
-    /// The points step from one multiple of the generator by another, so that preparing many
-    /// costs additions rather than multiplications.
     fn points(count: usize, seed: u64) -> (Vec<Self>, Vec<Self::Blst>) {
+        // The points step from one multiple of the generator by another, so that preparing many
+        // costs additions rather than multiplications.
         let scalars = scalars(2, seed);
         let (mut point, mut blst_point) = Self::multiple(&scalars[0]);
         let (step, blst_step) = Self::multiple(&scalars[1]);

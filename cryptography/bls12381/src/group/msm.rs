@@ -5,9 +5,8 @@
 //! of the strategy and adds the results. [`Msm`] takes the method that [`Method::choose`]
 //! estimates cheapest for its count and lane width.
 //!
-//! [`Msm`] converts each element once and keeps every intermediate point in the
-//! representation's own form, through raw coordinates. Both methods skip zero digits and index
-//! tables or buckets by the digits, so the operations and memory accesses depend on the scalars.
+//! The operations and memory accesses of both methods depend on the scalars, which must therefore
+//! be public.
 
 use super::{
     Scalar,
@@ -23,9 +22,9 @@ use commonware_parallel::Strategy;
 use commonware_simd::Simd;
 use core::{num::NonZeroUsize, ops::RangeInclusive};
 
-/// Fewest elements of [`batched`] that a parallel strategy gives one kernel. Every kernel pays
-/// for its own bucket sums and doublings, which cost about as much as adding a few hundred
-/// elements.
+/// Fewest elements of [`batched`] that a parallel strategy gives one kernel.
+// Every kernel pays for its own bucket sums and doublings, which cost about as much as adding a
+// few hundred elements.
 pub const MSM_BATCH: NonZeroUsize = NonZeroUsize::new(256).unwrap();
 
 /// Window widths that [`Method::choose`] considers for Straus's method.
@@ -57,8 +56,8 @@ type Raw<S, F, G> = <<G as Group>::Points<S, F> as Points<S>>::Raw;
 pub enum Method {
     /// Straus's method: each lane multiplies its own elements through tables of their multiples,
     /// sharing one chain of doublings. With `split`, the scalars split into their components
-    /// and the tables hold the images of every multiple, which halves the doublings at the cost
-    /// of the images: worthwhile for a few elements.
+    /// and the tables hold the images of every multiple, which divides the doublings by the
+    /// number of components at the cost of the images: worthwhile for a few elements.
     Straus { width: u32, split: bool },
     /// Pippenger's method: each lane sums one window of every component of every element into
     /// its own buckets.
@@ -221,8 +220,8 @@ fn prepare<S: Simd, F: Field<S>, G: Group>(
 /// Each lane holds one element of every group of [`Field::LANES`]. A group's table holds, for
 /// each component, the multiples of its elements' images by `1` through `2^(width - 1)` and
 /// their negations, so that each signed digit selects one entry per lane, and every window shares
-/// the doublings of one accumulator. Lanes whose digits are all zero in a window skip that
-/// window's addition.
+/// the doublings of one accumulator. A group skips a component's addition in a window where that
+/// component's digit is zero in every lane.
 #[cfg_attr(not(debug_assertions), inline(always))]
 fn straus<S: Simd, F: Field<S>, G: Group>(
     simd: S,
@@ -402,9 +401,6 @@ fn pippenger<S: Simd, F: Field<S>, G: Group>(
 /// Returns the sum of the elements times their scalars, in variable time.
 ///
 /// The scalars must be public: the operations and memory accesses depend on their digits.
-///
-/// Residues finish every count sooner than the 64-bit lanes, in both groups: the lanes' bucket
-/// sums move elements between lanes, which costs more than their wider products save.
 #[derive(Clone, Copy)]
 pub struct Msm<'a, G> {
     /// The elements.
@@ -415,12 +411,18 @@ pub struct Msm<'a, G> {
     pub method: Option<Method>,
 }
 
+// Kernel::prefers_wide_lanes keeps its default: residues finish every count sooner than the
+// 64-bit lanes, in both groups, because the lanes' bucket sums move elements between lanes, which
+// costs more than their wider products save.
 impl<G: Group> Kernel for Msm<'_, G> {
     type Output = G;
 
     // Debug builds keep this a call so that each representation's frame stays separate.
     #[cfg_attr(not(debug_assertions), inline(always))]
     fn run<S: Simd, F: Field<S>>(self, simd: S) -> G {
+        // Both methods convert each element once and keep every intermediate point in the
+        // representation's own form, through raw coordinates. They skip zero digits and index
+        // tables or buckets by the digits.
         let count = self.elements.len().min(self.scalars.len());
         if count == 0 {
             return G::from_coordinates(G::IDENTITY);
