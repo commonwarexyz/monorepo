@@ -12,11 +12,8 @@ use crate::aws::{
 };
 use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_macros::boxed;
-use commonware_utils::iter::zip_eq;
-use futures::{
-    future::try_join_all,
-    stream::{self, StreamExt, TryStreamExt},
-};
+use commonware_utils::{futures::try_join_all, iter::zip_eq};
+use futures::stream::{self, StreamExt, TryStreamExt};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs::File,
@@ -566,7 +563,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     let availability_zone_groups =
         select_availability_zone_groups(&config.instances, &region_resources)?;
 
-    // Create binary security groups (without monitoring IP - added later for parallel launch)
+    // Create binary security groups (the monitoring IP is added later for parallel launch)
     info!("creating binary security groups");
     let binary_sg_futures: Vec<_> = region_resources
         .iter()
@@ -741,6 +738,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 monitoring_storage_class,
                 config.monitoring.storage_iops,
                 config.monitoring.storage_throughput,
+                config.monitoring.bandwidth_weighting,
                 &key_name,
                 &monitoring_subnets,
                 &monitoring_az_support,
@@ -785,6 +783,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                     storage_class,
                     instance.storage_iops,
                     instance.storage_throughput,
+                    instance.bandwidth_weighting,
                     &key_name,
                     &subnets,
                     &az_support,
@@ -1536,7 +1535,7 @@ mod tests {
         RegionResources, grouped_subnets, run_launches, select_availability_zone_groups,
         select_group_availability_zone, validate_names, validate_storage_config,
     };
-    use crate::aws::{Config, Error, InstanceConfig, MonitoringConfig};
+    use crate::aws::{BandwidthWeighting, Config, Error, InstanceConfig, MonitoringConfig};
     use std::{
         collections::{BTreeSet, HashMap},
         sync::{
@@ -1562,6 +1561,7 @@ mod tests {
             storage_class: "gp3".to_string(),
             storage_iops: None,
             storage_throughput: None,
+            bandwidth_weighting: BandwidthWeighting::Default,
             binary: "binary".to_string(),
             config: "config.yaml".to_string(),
             profiling: false,
@@ -1584,6 +1584,7 @@ mod tests {
             storage_class: storage_class.to_string(),
             storage_iops,
             storage_throughput: None,
+            bandwidth_weighting: BandwidthWeighting::Default,
             dashboard: "dashboard.json".to_string(),
         }
     }

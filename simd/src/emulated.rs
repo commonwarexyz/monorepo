@@ -2,7 +2,9 @@
 //!
 //! These tokens select their corresponding operation paths without using native SIMD
 //! instructions. Vectors preserve lane order and wrapping arithmetic at each profile's
-//! width.
+//! width. That width is 64 bits for [`EmulatedScalar`], 128 bits for [`EmulatedNeon`] and
+//! [`EmulatedArmV9`], 256 bits for [`EmulatedX86V3`], and 512 bits for [`EmulatedX86V4C`].
+//! [`EmulatedScalar`] and [`EmulatedX86V3`] execute the portable path.
 //!
 //! # Examples
 //!
@@ -20,11 +22,13 @@ mod arm_v9;
 mod common;
 mod neon;
 mod scalar;
+mod x86_v3;
 mod x86_v4c;
 
 pub use arm_v9::EmulatedArmV9;
 pub use neon::EmulatedNeon;
 pub use scalar::EmulatedScalar;
+pub use x86_v3::EmulatedX86V3;
 pub use x86_v4c::EmulatedX86V4C;
 
 #[cfg(test)]
@@ -90,6 +94,7 @@ mod test_utils {
             bytes(simd, simd.u8_and(av, bv)),
             a.iter().zip(&b).map(|(x, y)| x & y).collect::<Vec<_>>()
         );
+        byte_operations(simd, &a, &b);
         fn byte_shift<S: Simd, const N: u32>(simd: S, a: &[u8]) {
             assert_eq!(
                 bytes(simd, simd.u8_shl::<N>(simd.u8_load(a))),
@@ -169,50 +174,62 @@ mod test_utils {
         assert!(catch_unwind(AssertUnwindSafe(|| simd.u32_rotate_right::<32>(av))).is_err());
         assert!(catch_unwind(AssertUnwindSafe(|| simd.u32_shl::<32>(av))).is_err());
         assert!(catch_unwind(AssertUnwindSafe(|| simd.u32_shr::<32>(av))).is_err());
-        // Rotate every possible source into lane zero, crossing every group boundary.
+
+        // Rotate every possible source into lane zero, crossing every group boundary. Each
+        // index is in range or offset from it by a whole multiple of the range.
         for source in 0..2 * S::U32_LANES {
-            let mut idx: Vec<usize> = (0..S::U32_LANES)
-                .map(|i| (source + i) % S::U32_LANES)
-                .collect();
-            idx.push(usize::MAX); // Inactive trailing indices are ignored.
-            assert_eq!(
-                words(simd, simd.u32_permute(av, &idx)),
-                idx[..S::U32_LANES]
-                    .iter()
-                    .map(|i| a[*i])
-                    .collect::<Vec<_>>()
-            );
-            let mut idx: Vec<usize> = (0..S::U32_LANES)
-                .map(|i| (source + i) % (2 * S::U32_LANES))
-                .collect();
-            idx.push(usize::MAX);
-            assert_eq!(
-                words(simd, simd.u32_permute2(av, bv, &idx)),
-                idx[..S::U32_LANES]
-                    .iter()
-                    .map(|i| if *i < a.len() { a[*i] } else { b[*i - a.len()] })
-                    .collect::<Vec<_>>()
-            );
-        }
-        for len in 0..S::U32_LANES {
-            let idx = vec![0; len];
-            assert!(catch_unwind(AssertUnwindSafe(|| simd.u32_permute(av, &idx))).is_err());
-            assert!(catch_unwind(AssertUnwindSafe(|| simd.u32_permute2(av, bv, &idx))).is_err());
-        }
-        for lane in 0..S::U32_LANES {
-            for invalid in [S::U32_LANES, usize::MAX] {
-                let mut idx = vec![0; S::U32_LANES];
-                idx[lane] = invalid;
-                assert!(catch_unwind(AssertUnwindSafe(|| simd.u32_permute(av, &idx))).is_err());
-                idx[lane] = if invalid == usize::MAX {
-                    invalid
-                } else {
-                    2 * S::U32_LANES
-                };
-                assert!(
-                    catch_unwind(AssertUnwindSafe(|| simd.u32_permute2(av, bv, &idx))).is_err()
+            for offset in [0, 1, 2, 3, 0x1000, u32::MAX / (2 * S::U32_LANES as u32)] {
+                let idx: Vec<u32> = (0..S::U32_LANES)
+                    .map(|i| {
+                        (((source + i) % S::U32_LANES) as u32)
+                            .wrapping_add(offset.wrapping_mul(S::U32_LANES as u32))
+                    })
+                    .collect();
+                assert_eq!(
+                    words(simd, simd.u32_permute(av, simd.u32_load(&idx))),
+                    idx.iter()
+                        .map(|i| a[*i as usize % S::U32_LANES])
+                        .collect::<Vec<_>>()
+                );
+                let idx: Vec<u32> = (0..S::U32_LANES)
+                    .map(|i| {
+                        (((source + i) % (2 * S::U32_LANES)) as u32)
+                            .wrapping_add(offset.wrapping_mul(2 * S::U32_LANES as u32))
+                    })
+                    .collect();
+                assert_eq!(
+                    words(simd, simd.u32_permute2(av, bv, simd.u32_load(&idx))),
+                    idx.iter()
+                        .map(|i| {
+                            let i = *i as usize % (2 * S::U32_LANES);
+                            if i < a.len() { a[i] } else { b[i - a.len()] }
+                        })
+                        .collect::<Vec<_>>()
                 );
             }
+        }
+
+        // Indices near the top of the u32 range reduce modulo the lane count.
+        for source in 0..2 * S::U32_LANES {
+            let idx: Vec<u32> = (0..S::U32_LANES)
+                .map(|i| u32::MAX - ((source + i) % (2 * S::U32_LANES)) as u32)
+                .collect();
+            let lanes = S::U32_LANES as u32;
+            assert_eq!(
+                words(simd, simd.u32_permute(av, simd.u32_load(&idx))),
+                idx.iter()
+                    .map(|i| a[(i % lanes) as usize])
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                words(simd, simd.u32_permute2(av, bv, simd.u32_load(&idx))),
+                idx.iter()
+                    .map(|i| {
+                        let i = (i % (2 * lanes)) as usize;
+                        if i < a.len() { a[i] } else { b[i - a.len()] }
+                    })
+                    .collect::<Vec<_>>()
+            );
         }
         assert_eq!(words(simd, av), a);
         assert_eq!(words(simd, bv), b);
@@ -319,6 +336,51 @@ mod test_utils {
             longs(simd, simd.u64_xor(av, bv)),
             a.iter().zip(&b).map(|(x, y)| x ^ y).collect::<Vec<_>>()
         );
+
+        // The second operand is complemented, so swapping operands changes the result.
+        assert_eq!(
+            longs(simd, simd.u64_andnot(av, bv)),
+            a.iter().zip(&b).map(|(x, y)| x & !y).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            longs(simd, simd.u64_andnot(bv, av)),
+            a.iter().zip(&b).map(|(x, y)| y & !x).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            longs(
+                simd,
+                simd.u64_andnot(simd.u64_splat(u64::MAX), simd.u64_splat(0))
+            ),
+            vec![u64::MAX; S::U64_LANES]
+        );
+        assert_eq!(
+            longs(
+                simd,
+                simd.u64_andnot(simd.u64_splat(0), simd.u64_splat(u64::MAX))
+            ),
+            vec![0; S::U64_LANES]
+        );
+        assert_eq!(
+            longs(simd, simd.u64_xor3(av, bv, simd.u64_load(&mask))),
+            (0..a.len())
+                .map(|i| a[i] ^ b[i] ^ mask[i])
+                .collect::<Vec<_>>()
+        );
+        macro_rules! long_rotations { ($($n:literal),*) => { $(
+            assert_eq!(longs(simd,simd.u64_rotate_left::<$n>(av)),a.iter().map(|x| x.rotate_left($n)).collect::<Vec<_>>());
+            assert_eq!(longs(simd,simd.u64_rotate_right::<$n>(av)),a.iter().map(|x| x.rotate_right($n)).collect::<Vec<_>>());
+        )* }; }
+        long_rotations!(
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45,
+            46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63
+        );
+        assert!(catch_unwind(AssertUnwindSafe(|| simd.u64_rotate_left::<64>(av))).is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| simd.u64_rotate_right::<64>(av))).is_err());
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| simd.u64_rotate_left::<{ u32::MAX }>(av))).is_err()
+        );
+        assert_eq!(longs(simd, av), a);
         assert_eq!(
             longs(simd, simd.u64_select(simd.u64_load(&mask), av, bv)),
             (0..a.len())
@@ -337,6 +399,220 @@ mod test_utils {
             }
         )* }; }
         lanes!(0, 1, 2, 3, 4, 5, 6, 7, 8, 64);
+
+        // Casts rely on all three element types sharing one vector width.
+        assert_eq!(S::U8_LANES, 4 * S::U32_LANES);
+        assert_eq!(S::U8_LANES, 8 * S::U64_LANES);
+        let mut patterns: Vec<Vec<u8>> = vec![
+            vec![0; S::U8_LANES],
+            vec![0xff; S::U8_LANES],
+            vec![0x80; S::U8_LANES],
+            (0..S::U8_LANES).map(|i| i as u8).collect(),
+            (0..S::U8_LANES).map(|i| !(i as u8)).collect(),
+        ];
+        for seed in 0..32u8 {
+            patterns.push(
+                (0..S::U8_LANES)
+                    .map(|i| {
+                        (i as u8)
+                            .wrapping_mul(73)
+                            .wrapping_add(seed.wrapping_mul(0x9d))
+                    })
+                    .collect(),
+            );
+        }
+        for pattern in patterns {
+            // Expected lanes shift each byte into place, so they hold on any host byte order.
+            let expected32: Vec<u32> = (0..S::U32_LANES)
+                .map(|i| {
+                    (0..4)
+                        .map(|j| u32::from(pattern[4 * i + j]) << (8 * j))
+                        .sum()
+                })
+                .collect();
+            let expected64: Vec<u64> = (0..S::U64_LANES)
+                .map(|i| {
+                    (0..8)
+                        .map(|j| u64::from(pattern[8 * i + j]) << (8 * j))
+                        .sum()
+                })
+                .collect();
+            let value = simd.u8_load(&pattern);
+            let as32 = simd.u8_as_u32(value);
+            let as64 = simd.u8_as_u64(value);
+            assert_eq!(words(simd, as32), expected32);
+            assert_eq!(longs(simd, as64), expected64);
+            assert_eq!(bytes(simd, simd.u32_as_u8(as32)), pattern);
+            assert_eq!(bytes(simd, simd.u64_as_u8(as64)), pattern);
+            assert_eq!(longs(simd, simd.u32_as_u64(as32)), expected64);
+            assert_eq!(words(simd, simd.u64_as_u32(as64)), expected32);
+            assert_eq!(
+                words(simd, simd.u64_as_u32(simd.u32_as_u64(as32))),
+                expected32
+            );
+            assert_eq!(
+                longs(simd, simd.u32_as_u64(simd.u64_as_u32(as64))),
+                expected64
+            );
+            assert_eq!(bytes(simd, simd.u32_as_u8(simd.u64_as_u32(as64))), pattern);
+            assert_eq!(bytes(simd, value), pattern);
+        }
+
+        // The even u32 lane of each pair is the low half of the u64 lane, and bytes within
+        // a splatted lane are stored least significant first.
+        let expected: Vec<u64> = (0..S::U64_LANES)
+            .map(|i| {
+                let low = 0x0100_0000u64 * (2 * i as u64 + 1) + 0x23 + i as u64;
+                let high = 0xdead_0000u64 + 2 * i as u64 + 1;
+                low + high * (1 << 32)
+            })
+            .collect();
+        let halves: Vec<u32> = expected
+            .iter()
+            .flat_map(|v| [(v % (1 << 32)) as u32, (v / (1 << 32)) as u32])
+            .collect();
+        let value = simd.u32_load(&halves);
+        assert_eq!(longs(simd, simd.u32_as_u64(value)), expected);
+        assert_eq!(
+            words(simd, simd.u64_as_u32(simd.u64_load(&expected))),
+            halves
+        );
+        assert_eq!(
+            bytes(simd, simd.u64_as_u8(simd.u64_splat(0x0807_0605_0403_0201))),
+            (0..S::U8_LANES)
+                .map(|i| (i % 8) as u8 + 1)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            bytes(simd, simd.u32_as_u8(simd.u32_splat(0x0403_0201))),
+            (0..S::U8_LANES)
+                .map(|i| (i % 4) as u8 + 1)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    fn byte_operations<S: Simd>(simd: S, a: &[u8], b: &[u8]) {
+        let lanes = S::U8_LANES;
+        let av = simd.u8_load(a);
+        let bv = simd.u8_load(b);
+
+        // Every index value, including all out-of-range ones, at several lane positions.
+        let table: [u8; 16] = core::array::from_fn(|i| 0x83u8.wrapping_add(i as u8 * 7));
+        let loaded = simd.u8_table_load(&table);
+        let indices: Vec<u8> = (0..=255).collect();
+        for shift in [0, 1, lanes / 2] {
+            let mut rotated = indices.clone();
+            rotated.rotate_left(shift);
+            for chunk in rotated.chunks_exact(lanes) {
+                assert_eq!(
+                    bytes(simd, simd.u8_table_lookup(loaded, simd.u8_load(chunk))),
+                    chunk
+                        .iter()
+                        .map(|i| table.get(usize::from(*i)).copied().unwrap_or(0))
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+
+        // Lane-wise arithmetic and comparisons match their scalar definitions in both
+        // operand orders.
+        fn binary(x: &[u8], y: &[u8], f: fn(u8, u8) -> u8) -> Vec<u8> {
+            x.iter().zip(y).map(|(x, y)| f(*x, *y)).collect()
+        }
+        fn mask(condition: bool) -> u8 {
+            if condition { u8::MAX } else { 0 }
+        }
+        let check = |x: &[u8], y: &[u8]| {
+            let xv = simd.u8_load(x);
+            let yv = simd.u8_load(y);
+            for (actual, expected) in [
+                (simd.u8_or(xv, yv), binary(x, y, |x, y| x | y)),
+                (simd.u8_add(xv, yv), binary(x, y, u8::wrapping_add)),
+                (simd.u8_sub(xv, yv), binary(x, y, u8::wrapping_sub)),
+                (
+                    simd.u8_add_saturating(xv, yv),
+                    binary(x, y, u8::saturating_add),
+                ),
+                (
+                    simd.u8_sub_saturating(xv, yv),
+                    binary(x, y, u8::saturating_sub),
+                ),
+                (simd.u8_min(xv, yv), binary(x, y, u8::min)),
+                (simd.u8_max(xv, yv), binary(x, y, u8::max)),
+                (simd.u8_eq(xv, yv), binary(x, y, |x, y| mask(x == y))),
+                (simd.u8_gt(xv, yv), binary(x, y, |x, y| mask(x > y))),
+            ] {
+                assert_eq!(bytes(simd, actual), expected);
+            }
+        };
+        check(a, b);
+        check(b, a);
+        check(a, a);
+
+        // Every pair of boundary values, with distinct pairs in neighboring lanes.
+        let boundaries = [0u8, 1, 0x0f, 0x10, 0x7f, 0x80, 0x81, 0xfe, 0xff];
+        let pairs: Vec<(u8, u8)> = boundaries
+            .iter()
+            .flat_map(|x| boundaries.iter().map(move |y| (*x, *y)))
+            .collect();
+        for start in 0..pairs.len() {
+            let (x, y): (Vec<u8>, Vec<u8>) =
+                (0..lanes).map(|i| pairs[(start + i) % pairs.len()]).unzip();
+            check(&x, &y);
+        }
+
+        let movemask = |x: &[u8]| (0..lanes).fold(0u64, |m, i| m | (u64::from(x[i] >> 7) << i));
+        assert_eq!(simd.u8_movemask(av), movemask(a));
+        assert_eq!(simd.u8_movemask(bv), movemask(b));
+        assert_eq!(simd.u8_movemask(simd.u8_splat(0x7f)), 0);
+        assert_eq!(
+            simd.u8_movemask(simd.u8_splat(0x80)),
+            u64::MAX >> (64 - lanes)
+        );
+        let eq = simd.u8_eq(av, simd.u8_and(av, bv));
+        assert_eq!(
+            simd.u8_movemask(eq),
+            (0..lanes).fold(0, |m, i| m | (u64::from(a[i] & b[i] == a[i]) << i))
+        );
+        assert!(!simd.u8_any(simd.u8_splat(0)));
+        assert!(!simd.u8_all(simd.u8_splat(0)));
+        assert!(simd.u8_any(simd.u8_splat(1)));
+        assert!(simd.u8_all(simd.u8_splat(1)));
+        for lane in 0..lanes {
+            for value in [1, 0x80, 0xff] {
+                // One nonzero lane, and one zero lane among nonzero lanes.
+                let mut one = vec![0; lanes];
+                one[lane] = value;
+                let one = simd.u8_load(&one);
+                assert!(simd.u8_any(one));
+                assert_eq!(simd.u8_all(one), lanes == 1);
+                assert_eq!(simd.u8_movemask(one), u64::from(value >> 7) << lane);
+                let mut hole = vec![value; lanes];
+                hole[lane] = 0;
+                let hole = simd.u8_load(&hole);
+                assert_eq!(simd.u8_any(hole), lanes > 1);
+                assert!(!simd.u8_all(hole));
+            }
+        }
+        assert_eq!(simd.u8_any(av), a.iter().any(|v| *v != 0));
+        assert_eq!(simd.u8_all(av), a.iter().all(|v| *v != 0));
+
+        let zipped: Vec<u8> = (0..2 * lanes)
+            .map(|j| if j % 2 == 0 { a[j / 2] } else { b[j / 2] })
+            .collect();
+        assert_eq!(bytes(simd, simd.u8_zip_lo(av, bv)), zipped[..lanes]);
+        assert_eq!(bytes(simd, simd.u8_zip_hi(av, bv)), zipped[lanes..]);
+        let joined: Vec<u8> = a.iter().chain(b).copied().collect();
+        let even: Vec<u8> = (0..lanes).map(|i| joined[2 * i]).collect();
+        let odd: Vec<u8> = (0..lanes).map(|i| joined[2 * i + 1]).collect();
+        assert_eq!(bytes(simd, simd.u8_unzip_even(av, bv)), even);
+        assert_eq!(bytes(simd, simd.u8_unzip_odd(av, bv)), odd);
+
+        // Unzipping a zipped pair recovers the inputs.
+        let lo = simd.u8_zip_lo(av, bv);
+        let hi = simd.u8_zip_hi(av, bv);
+        assert_eq!(bytes(simd, simd.u8_unzip_even(lo, hi)), a);
+        assert_eq!(bytes(simd, simd.u8_unzip_odd(lo, hi)), b);
     }
 
     pub fn basic_common<S: Simd>(simd: S) {
@@ -453,7 +729,7 @@ mod test_utils {
             assert_eq!(
                 bytes(
                     simd,
-                    simd.u8_table_lookup(simd.u8_load(&table), simd.u8_load(&idx))
+                    simd.u8_table_lookup(simd.u8_table(simd.u8_load(&table)), simd.u8_load(&idx))
                 ),
                 idx.iter()
                     .map(|i| table.get(*i as usize).copied().unwrap_or(0))
@@ -547,7 +823,7 @@ mod test_utils {
 
 #[cfg(test)]
 mod fixed4_tests {
-    use super::{EmulatedArmV9, EmulatedNeon, EmulatedScalar, EmulatedX86V4C};
+    use super::{EmulatedArmV9, EmulatedNeon, EmulatedScalar, EmulatedX86V3, EmulatedX86V4C};
     use crate::Simd;
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -679,6 +955,7 @@ mod fixed4_tests {
     #[test]
     fn emulated_fixed4_contracts() {
         contracts(EmulatedScalar);
+        contracts(EmulatedX86V3);
         contracts(EmulatedX86V4C);
         contracts(EmulatedNeon);
         contracts(EmulatedArmV9);
@@ -742,9 +1019,15 @@ mod fixed4_tests {
             }
         }
         #[cfg(target_arch = "x86_64")]
-        if let Some(simd) = crate::native::NativeX86V4C::new() {
-            contracts(simd);
-            native_consistency(simd);
+        {
+            if let Some(simd) = crate::native::NativeX86V4C::new() {
+                contracts(simd);
+                native_consistency(simd);
+            }
+            if let Some(simd) = crate::native::NativeX86V3::new() {
+                contracts(simd);
+                native_consistency(simd);
+            }
         }
     }
 }

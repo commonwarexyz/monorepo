@@ -1,7 +1,4 @@
-use crate::{
-    Ingress,
-    authenticated::{MAX_PAYLOAD_OVERHEAD, discovery::types::max_gossip_size},
-};
+use crate::{Ingress, authenticated::discovery::types};
 use commonware_cryptography::PublicKey;
 #[cfg(test)]
 use commonware_cryptography::{ChaCha20Poly1305, Signer};
@@ -62,15 +59,16 @@ where
 
     /// Maximum size allowed for an application payload passed to a sender.
     ///
-    /// The largest supported value is [`crate::authenticated::max_size::<U>()`]. The smallest is
-    /// [`Config::min_message_size`], which depends on [`Config::max_peers_per_set`] and
-    /// [`Config::peer_gossip_max_count`]. Peer discovery messages share each connection with
-    /// application payloads and must fit the same frame limit, so constructing a network with a
-    /// smaller value panics.
+    /// The largest supported value is [`crate::authenticated::max_size::<U>()`]. Peer discovery
+    /// messages share each connection with application payloads, so the network sizes its frames
+    /// for the larger of this value and the peer discovery message bound. That bound depends on
+    /// [`Config::max_peers_per_set`] and [`Config::peer_gossip_max_count`]. This value alone
+    /// bounds application payloads.
     ///
-    /// Sending a larger payload panics. Output from wrappers such as codecs and multiplexers is
-    /// part of the payload and counts toward this limit. A peer that sends a larger payload is
-    /// disconnected.
+    /// [`crate::max_message_size`] computes this value from the largest payload of each component
+    /// that sends on the network. Output from wrappers such as codecs and multiplexers is part of
+    /// the payload and counts toward this limit. Sending a larger payload panics, and a peer that
+    /// sends a larger payload is disconnected.
     ///
     /// Framing and transport overhead are added after this size check and do not count toward
     /// the limit, so the resulting network message will be larger.
@@ -172,24 +170,15 @@ impl<U: Upgrader> Config<U>
 where
     U::PublicKey: PublicKey,
 {
-    /// Returns the smallest [`Config::max_message_size`] that lets every peer discovery message
-    /// fit the connection's frame limit under this configuration's
-    /// [`Config::max_peers_per_set`] and [`Config::peer_gossip_max_count`].
-    ///
-    /// # Panics
-    ///
-    /// Panics if the size does not fit in a `u32`.
-    pub fn min_message_size(&self) -> u32 {
-        let max_peers_per_set = u64::try_from(self.max_peers_per_set.get())
-            .expect("maximum peers per set must fit in u64");
-        let max_gossip_size =
-            max_gossip_size::<U::PublicKey>(max_peers_per_set, self.peer_gossip_max_count);
-        let overhead = Widen::<usize>::widen(MAX_PAYLOAD_OVERHEAD);
-        u32::try_from(max_gossip_size.saturating_sub(overhead))
-            .expect("minimum message size must fit in u32")
+    /// Returns an upper bound on the encoded size of a peer discovery message under this
+    /// configuration's [`Config::max_peers_per_set`] and [`Config::peer_gossip_max_count`].
+    pub(crate) fn max_gossip_size(&self) -> usize {
+        let max_peers_per_set: u64 = Widen::widen(self.max_peers_per_set.get());
+        types::max_gossip_size::<U::PublicKey>(max_peers_per_set, self.peer_gossip_max_count)
     }
 
     /// Generates a configuration with reasonable defaults for usage in production.
+    #[allow(clippy::too_many_arguments)]
     pub fn recommended(
         handshake: U,
         namespace: &[u8],
@@ -198,6 +187,7 @@ where
         bootstrappers: Vec<Bootstrapper<U::PublicKey>>,
         max_peers_per_set: NonZeroUsize,
         max_message_size: u32,
+        mailbox_size: NonZeroUsize,
     ) -> Self {
         Self {
             handshake,
@@ -210,7 +200,7 @@ where
             allow_private_ips: false,
             max_message_size,
             max_peers_per_set,
-            mailbox_size: NZUsize!(1_000),
+            mailbox_size,
             send_batch_size: NZUsize!(8),
             synchrony_bound: Duration::from_secs(5),
             handshake_timeout: Duration::from_secs(5),
@@ -234,6 +224,7 @@ where
     /// # Warning
     ///
     /// It is not recommended to use this configuration in production.
+    #[allow(clippy::too_many_arguments)]
     pub fn local(
         handshake: U,
         namespace: &[u8],
@@ -242,6 +233,7 @@ where
         bootstrappers: Vec<Bootstrapper<U::PublicKey>>,
         max_peers_per_set: NonZeroUsize,
         max_message_size: u32,
+        mailbox_size: NonZeroUsize,
     ) -> Self {
         Self {
             handshake,
@@ -254,7 +246,7 @@ where
             allow_private_ips: true,
             max_message_size,
             max_peers_per_set,
-            mailbox_size: NZUsize!(1_000),
+            mailbox_size,
             send_batch_size: NZUsize!(8),
             synchrony_bound: Duration::from_secs(5),
             handshake_timeout: Duration::from_secs(5),
@@ -297,6 +289,7 @@ impl<C: Signer> Config<SakeCups<C, ChaCha20Poly1305>> {
             bootstrappers,
             NZUsize!(32),
             max_message_size,
+            NZUsize!(1_000),
         );
         config.peer_connection_cooldown = Duration::from_millis(250);
         config.allowed_handshake_rate_per_ip = Quota::per_second(NZU32!(128));

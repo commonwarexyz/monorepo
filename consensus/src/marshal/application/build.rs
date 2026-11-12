@@ -14,9 +14,8 @@ use crate::{
 };
 use commonware_cryptography::{Digest, Digested, PublicKey};
 use commonware_macros::select;
-use commonware_runtime::{Clock, Metrics, Spawner, telemetry::metrics::histogram::Timer};
+use commonware_runtime::{Clock, Spawner, telemetry::metrics::histogram::Timer};
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
-use rand_core::Rng;
 use std::future::Future;
 use tracing::{Instrument as _, Span, debug};
 
@@ -55,7 +54,7 @@ pub(crate) fn prepare<E, A, D, P, S, N, Fut, M, Seal>(
     seal: impl FnOnce(Digested<A::Block>, M) -> Seal + Send + 'static,
 ) -> oneshot::Receiver<Handoff<D>>
 where
-    E: Rng + Clock + Spawner + Metrics,
+    E: Spawner + Clock,
     A: Application<E, Context = Context<D, P>, Input = ()>,
     D: Digest,
     P: PublicKey,
@@ -174,7 +173,7 @@ pub(crate) fn propose<E, A, D, P, S, N, Fut, M, Seal>(
     seal: impl FnOnce(Digested<A::Block>, M) -> Seal + Send + 'static,
 ) -> oneshot::Receiver<D>
 where
-    E: Rng + Clock + Spawner + Metrics,
+    E: Spawner + Clock,
     A: Application<E, Context = Context<D, P>, Input = ()>,
     D: Digest,
     P: PublicKey,

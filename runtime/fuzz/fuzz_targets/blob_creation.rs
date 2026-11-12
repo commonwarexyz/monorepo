@@ -5,8 +5,8 @@
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::Crc32;
 use commonware_runtime::{
-    Blob, BlobVersion, BufferPooler, ReadOptions, Runner, Storage as _, WriteOptions,
-    deterministic, mocks::Storage,
+    Blob, BlobVersion, ReadOptions, Runner, Storage as _, WriteOptions, deterministic,
+    mocks::Storage,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -197,8 +197,8 @@ async fn assert_rejects(storage: &Storage, name: &[u8], blob_version: u16, image
 }
 
 fn fuzz(input: FuzzInput) {
-    deterministic::Runner::default().start(|context| async move {
-        let storage = Storage::new(context.storage_buffer_pool().clone());
+    deterministic::Runner::default().start(|_| async move {
+        let storage = Storage::new();
 
         // Create the canonical V1 region through the same storage path used in production: a
         // healed image must recreate exactly this, and it anchors the spec constants.

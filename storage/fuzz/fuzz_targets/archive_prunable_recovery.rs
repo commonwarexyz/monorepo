@@ -16,7 +16,7 @@ use arbitrary::Arbitrary;
 use commonware_codec::{Buf, Copying, DecodeExt as _, FixedSize, Read, ReadExt as _};
 use commonware_cryptography::Crc32;
 use commonware_runtime::{
-    Blob as _, BufferPooler, Handle, ReadOptions, Runner, Storage as _, Supervisor as _,
+    Blob as _, Handle, ReadOptions, Runner, Storage as _, Supervisor as _,
     buffer::paged::{CacheRef, page_len},
     deterministic::{self, PartialWriteMode, WriteConfig},
     mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs, release_pending_syncs},
@@ -101,16 +101,12 @@ impl FixedSize for IndexRecord {
 }
 
 /// Build the prunable archive configuration used by this target.
-fn config(
-    context: &impl BufferPooler,
-    items_per_section: NonZeroU64,
-) -> prunable::Config<EightCap, ()> {
+fn config(items_per_section: NonZeroU64) -> prunable::Config<EightCap, ()> {
     prunable::Config {
         translator: EightCap,
         metadata_partition: "archive-recovery-metadata".into(),
         key_partition: "archive-recovery-index".into(),
-        key_page_cache: CacheRef::from_pooler(
-            context,
+        key_page_cache: CacheRef::new(
             NonZeroU16::new(INDEX_PAGE_SIZE as u16).unwrap(),
             NZUsize!(8),
         ),
@@ -468,7 +464,7 @@ fn fuzz(input: FuzzInput) {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = config(&context, items_per_section);
+            let cfg = config(items_per_section);
             let mut archive =
                 prunable::Archive::<EightCap, _, Key, Value>::init(context.child("archive"), cfg)
                     .await
@@ -648,11 +644,7 @@ fn fuzz(input: FuzzInput) {
     // A failed recovery instance is abandoned. Its crash checkpoint must remain recoverable by
     // the same ordinary initialization path with faults disabled.
     let checkpoint = faulted_recovery(checkpoint, move |context| async move {
-        TestArchive::init(
-            context.child("faulted_recovery"),
-            config(&context, items_per_section),
-        )
-        .await
+        TestArchive::init(context.child("faulted_recovery"), config(items_per_section)).await
     });
 
     // Clean recovery: derive the expected view from the raw crash image, then verify the
@@ -661,7 +653,7 @@ fn fuzz(input: FuzzInput) {
     let ((expected, expected_index_sizes, expected_value_sizes), checkpoint) =
         deterministic::Runner::from(checkpoint).start_and_recover(move |context| async move {
             *context.storage_fault_config().write() = deterministic::FaultConfig::default();
-            let cfg = config(&context, items_per_section);
+            let cfg = config(items_per_section);
             let (expected, expected_index_sizes, expected_value_sizes) =
                 recover_expected(&context, &cfg, &recovery_intended).await;
             let archive = TestArchive::init(context.child("archive"), cfg.clone())
@@ -709,7 +701,7 @@ fn fuzz(input: FuzzInput) {
     // serves the full intended view across a sync and reopen.
     deterministic::Runner::from(checkpoint).start(move |context| async move {
         *context.storage_fault_config().write() = deterministic::FaultConfig::default();
-        let cfg = config(&context, items_per_section);
+        let cfg = config(items_per_section);
         let mut archive = TestArchive::init(context.child("archive"), cfg.clone())
             .await
             .expect("second recovery failed");

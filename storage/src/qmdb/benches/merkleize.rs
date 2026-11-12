@@ -12,12 +12,12 @@
 use crate::common::{
     CHUNK_SIZE, Digest, REPLAY_BUFFER_SIZE, WRITE_BUFFER_SIZE, seed_db, write_random_updates,
 };
-use commonware_bench::{Benchmark, Metric, Workload};
+use commonware_bench::{Benchmark, Inputs, Metric, Workload};
 use commonware_cryptography::Sha256;
 use commonware_macros::boxed;
 use commonware_parallel::Rayon;
 use commonware_runtime::{
-    BLOB_PAGE_SIZE, BufferPooler, Metrics as _, Strategizer, Supervisor as _,
+    BLOB_PAGE_SIZE, Metrics as _, Strategizer, Supervisor as _,
     benchmarks::{context, tokio},
     buffer::paged::{CacheRef, page_size},
     tokio::{Config, Context},
@@ -26,8 +26,13 @@ use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     merkle::{self, full},
     qmdb::{
-        any::traits::{DbAny, MerkleizedBatch, UnmerkleizedBatch as _},
-        floor::Proportional,
+        any::{
+            traits::{DbAny, MerkleizedBatch, UnmerkleizedBatch as _},
+            unordered::{fixed::Config as AnyFixedConfig, variable::Config as AnyVariableConfig},
+        },
+        current::unordered::{
+            fixed::Config as CurrentFixedConfig, variable::Config as CurrentVariableConfig,
+        },
     },
     translator::EightCap,
 };
@@ -288,7 +293,7 @@ pub(crate) const LARGE_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(16_384);
 const SMALL_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(32);
 const PARTITION: &str = "bench-merkleize";
 
-fn merkle_cfg(ctx: &(impl BufferPooler + Strategizer), pc: CacheRef) -> full::Config<Rayon> {
+fn merkle_cfg(ctx: &impl Strategizer, pc: CacheRef) -> full::Config<Rayon> {
     full::Config {
         journal_partition: format!("journal-{PARTITION}"),
         metadata_partition: format!("metadata-{PARTITION}"),
@@ -323,12 +328,12 @@ fn var_log_cfg(pc: CacheRef) -> VConfig<((), ())> {
 }
 
 pub(crate) fn any_fix_cfg_with_cache(
-    ctx: &(impl BufferPooler + Strategizer),
+    ctx: &impl Strategizer,
     pc: CacheRef,
-) -> commonware_storage::qmdb::any::FixedConfig<EightCap, Rayon> {
-    commonware_storage::qmdb::any::FixedConfig {
-        merkle_config: merkle_cfg(ctx, pc.clone()),
-        journal_config: fix_log_cfg(pc),
+) -> AnyFixedConfig<EightCap, Rayon> {
+    AnyFixedConfig {
+        merkle: merkle_cfg(ctx, pc.clone()),
+        log: fix_log_cfg(pc),
         translator: EightCap,
         init_cache: crate::common::INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
@@ -337,12 +342,12 @@ pub(crate) fn any_fix_cfg_with_cache(
 }
 
 fn any_var_cfg_with_cache(
-    ctx: &(impl BufferPooler + Strategizer),
+    ctx: &impl Strategizer,
     pc: CacheRef,
-) -> commonware_storage::qmdb::any::VariableConfig<EightCap, ((), ()), Rayon> {
-    commonware_storage::qmdb::any::VariableConfig {
-        merkle_config: merkle_cfg(ctx, pc.clone()),
-        journal_config: var_log_cfg(pc),
+) -> AnyVariableConfig<EightCap, ((), ()), Rayon> {
+    AnyVariableConfig {
+        merkle: merkle_cfg(ctx, pc.clone()),
+        log: var_log_cfg(pc),
         translator: EightCap,
         init_cache: crate::common::INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
@@ -351,12 +356,12 @@ fn any_var_cfg_with_cache(
 }
 
 pub(crate) fn cur_fix_cfg_with_cache(
-    ctx: &(impl BufferPooler + Strategizer),
+    ctx: &impl Strategizer,
     pc: CacheRef,
-) -> commonware_storage::qmdb::current::FixedConfig<EightCap, Rayon> {
-    commonware_storage::qmdb::current::FixedConfig {
-        merkle_config: merkle_cfg(ctx, pc.clone()),
-        journal_config: fix_log_cfg(pc),
+) -> CurrentFixedConfig<EightCap, Rayon> {
+    CurrentFixedConfig {
+        merkle: merkle_cfg(ctx, pc.clone()),
+        log: fix_log_cfg(pc),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
         translator: EightCap,
         init_cache: crate::common::INIT_CACHE_SIZE,
@@ -366,12 +371,12 @@ pub(crate) fn cur_fix_cfg_with_cache(
 }
 
 fn cur_var_cfg_with_cache(
-    ctx: &(impl BufferPooler + Strategizer),
+    ctx: &impl Strategizer,
     pc: CacheRef,
-) -> commonware_storage::qmdb::current::VariableConfig<EightCap, ((), ()), Rayon> {
-    commonware_storage::qmdb::current::VariableConfig {
-        merkle_config: merkle_cfg(ctx, pc.clone()),
-        journal_config: var_log_cfg(pc),
+) -> CurrentVariableConfig<EightCap, ((), ()), Rayon> {
+    CurrentVariableConfig {
+        merkle: merkle_cfg(ctx, pc.clone()),
+        log: var_log_cfg(pc),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
         translator: EightCap,
         init_cache: crate::common::INIT_CACHE_SIZE,
@@ -385,7 +390,10 @@ fn cur_var_cfg_with_cache(
 /// This leaves inactive update operations above the inactivity floor, matching
 /// the workload optimized by bitmap-backed floor raising.
 #[boxed]
-async fn run_churned_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest>>(
+async fn run_churned_bench<
+    F: merkle::Family,
+    C: DbAny<Family = F, Key = Digest, Value = Digest>,
+>(
     db: C,
     num_keys: u64,
     churn_batches: u64,
@@ -397,8 +405,8 @@ async fn run_churned_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = 
 
     for _ in 0..churn_batches {
         let batch = write_random_updates(db.new_batch(), num_updates, num_keys, &mut rng);
-        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let merkleized = batch.merkleize(&db).await.unwrap();
+        db = db.apply_batch(merkleized).await.unwrap();
     }
     let db = db.commit().await.unwrap();
     let db = db.sync().await.unwrap();
@@ -407,7 +415,7 @@ async fn run_churned_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = 
     for _ in 0..iters {
         let start = Instant::now();
         let batch = write_random_updates(db.new_batch(), num_updates, num_keys, &mut rng);
-        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+        let merkleized = batch.merkleize(&db).await.unwrap();
         black_box(merkleized.root());
         total += start.elapsed();
     }
@@ -438,7 +446,7 @@ impl BenchOptions {
 pub(crate) struct MerkleizeWorkload<F, C>
 where
     F: merkle::Family,
-    C: DbAny<F, Key = Digest, Value = Digest>,
+    C: DbAny<Family = F, Key = Digest, Value = Digest>,
 {
     context: Context,
     db: Option<C>,
@@ -454,7 +462,7 @@ where
 impl<F, C> MerkleizeWorkload<F, C>
 where
     F: merkle::Family,
-    C: DbAny<F, Key = Digest, Value = Digest>,
+    C: DbAny<Family = F, Key = Digest, Value = Digest>,
 {
     pub(crate) fn new(
         context: Context,
@@ -480,7 +488,7 @@ where
 impl<F, C> Workload for MerkleizeWorkload<F, C>
 where
     F: merkle::Family,
-    C: DbAny<F, Key = Digest, Value = Digest>,
+    C: DbAny<Family = F, Key = Digest, Value = Digest>,
     C::Merkleized: MerkleizedBatch<Digest = Digest>,
 {
     type Output = Digest;
@@ -514,7 +522,7 @@ where
             self.options.num_keys,
             &mut self.rng,
         );
-        self.parent = Some(batch.merkleize(db, None, &mut Proportional).await.unwrap());
+        self.parent = Some(batch.merkleize(db).await.unwrap());
     }
 
     async fn iter(&mut self) -> Self::Output {
@@ -540,7 +548,7 @@ where
                 &mut self.rng,
             )
         };
-        let merkleized = batch.merkleize(db, None, &mut Proportional).await.unwrap();
+        let merkleized = batch.merkleize(db).await.unwrap();
         merkleized.root()
     }
 
@@ -631,7 +639,7 @@ macro_rules! variants {
                     $(
                         Variant::$entry => {
                             let $ctx = &$ctx_expr;
-                            let $pc_name = CacheRef::from_pooler($ctx, PAGE_SIZE, $cache_size);
+                            let $pc_name = CacheRef::new(PAGE_SIZE, $cache_size);
                             let $cache = $pc_name.clone();
                             let $db_name = $init.await.unwrap();
                             $body
@@ -838,20 +846,19 @@ variants! {
     }
 }
 
-cfg_if::cfg_if! {
-    if #[cfg(not(full_bench))] {
-        const NUM_KEYS: &[u64] = &[10_000];
-        const SYNC_NUM_KEYS: &[u64] = NUM_KEYS;
-        const CHURNED_NUM_KEYS: &[u64] = NUM_KEYS;
-    } else {
-        const NUM_KEYS: &[u64] = &[10_000, 100_000, 1_000_000];
-        const SYNC_NUM_KEYS: &[u64] = &[10_000, 100_000];
-        const CHURNED_NUM_KEYS: &[u64] = &[10_000, 100_000];
+fn main_num_keys(seed_sync: bool) -> &'static [u64] {
+    match (Inputs::current(), seed_sync) {
+        (Inputs::Full, false) => &[10_000, 100_000, 1_000_000],
+        (Inputs::Full, true) => &[10_000, 100_000],
+        _ => &[10_000],
     }
 }
 
-const fn main_num_keys(seed_sync: bool) -> &'static [u64] {
-    if seed_sync { SYNC_NUM_KEYS } else { NUM_KEYS }
+fn churned_num_keys() -> &'static [u64] {
+    match Inputs::current() {
+        Inputs::Full => &[10_000, 100_000],
+        _ => &[10_000],
+    }
 }
 
 fn bench_merkleize(c: &mut Criterion) {
@@ -919,7 +926,7 @@ const CHURN_BATCHES: u64 = 50;
 fn bench_merkleize_churned(c: &mut Criterion) {
     let runner = tokio::Runner::new(Config::default());
     let cache_pages = SMALL_PAGE_CACHE_SIZE.get();
-    for &num_keys in CHURNED_NUM_KEYS {
+    for &num_keys in churned_num_keys() {
         // `current::*` already used a bitmap; only `any::*` exercises the new scan path.
         for variant in VARIANTS.iter().copied().filter(Variant::is_any) {
             c.bench_function(

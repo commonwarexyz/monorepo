@@ -4,7 +4,6 @@ use crate::{
     config::WriteShape,
     error::{Error, Result},
 };
-use bytes::Bytes;
 #[cfg(target_os = "linux")]
 use commonware_formatting::hex;
 use commonware_runtime::{Blob, IoBuf, IoBufs, Storage, WriteOptions};
@@ -19,14 +18,6 @@ use std::{
 use std::{fs::OpenOptions, os::fd::AsRawFd};
 
 const DEFAULT_FILL_CHUNK_SIZE: usize = 1024 * 1024;
-
-pub const fn backend_name() -> &'static str {
-    if cfg!(all(target_os = "linux", feature = "iouring")) {
-        "iouring"
-    } else {
-        "tokio"
-    }
-}
 
 /// Create a unique storage root for one benchmark run under the configured parent.
 pub fn prepare_root(parent: &Path) -> Result<PathBuf> {
@@ -170,7 +161,7 @@ pub fn random_write_payload(rng: &mut impl Rng, io_size: usize, shape: WriteShap
         WriteShape::Contiguous => {
             let mut buf = vec![0u8; io_size];
             rng.fill_bytes(&mut buf);
-            IoBufs::from(Bytes::from(buf))
+            IoBufs::from(buf)
         }
         WriteShape::Vectored => {
             const CHUNKS: usize = 4;

@@ -58,6 +58,14 @@ Such a backend runs through `Simd::execute` rather than `dispatch`, which only
 selects the backends defined in this crate, and algorithms may not be aware of
 particular instructions they could be using on your platform.
 
+The crate ships one such common-subset backend, and `dispatch` selects it on
+x86-64 CPUs that have AVX2 but lack x86v4c:
+
+- **x86-64-v3**: x86-64 with AVX2, using 256-bit vectors. This covers Intel
+  Haswell and later client CPUs without AVX-512, Intel Skylake-SP and Cascade
+  Lake, and AMD Zen 1 through Zen 3. Unlike the frontier targets, it exposes
+  only the common subset and runs the `portable` path of every operation.
+
 ## Usage
 
 Algorithms are written against the `Simd` trait, which defines vector types and
@@ -99,8 +107,58 @@ fn add_slices<S: Simd>(simd: S, a: &[u64], b: &[u64], output: &mut [u64]) {
 
 Slices need only their element type's alignment, not vector alignment. Aligning
 buffers to vector boundaries can help performance, but is not required for
-correctness. Use the lane count for each element type independently; backends
-need not use the same vector width for `u8`, `u32`, and `u64`.
+correctness. Every backend uses the same vector width in bits for `S::U8`,
+`S::U32`, and `S::U64`, so `S::U8_LANES == 4 * S::U32_LANES == 8 * S::U64_LANES`.
+Still use each type's own lane count for its loads and stores, and do not
+assume a particular width.
+
+### Casts
+
+Because the vector types have the same width, a value can be reinterpreted as
+another element type without storing it to memory. `u8_as_u32`, `u8_as_u64`,
+and `u32_as_u64` combine adjacent narrower lanes into one wider lane, and
+`u32_as_u8`, `u64_as_u8`, and `u64_as_u32` split them back. Casts only
+relabel bits, and lanes are little-endian on every backend, so `u8_as_u32`
+forms each word from four consecutive bytes, least significant byte first. Use
+them to apply a word operation to byte data and cast back:
+
+```rust
+use commonware_simd::Simd;
+
+#[inline(always)]
+fn rotate_words<S: Simd>(simd: S, bytes: S::U8) -> S::U8 {
+    let words = simd.u8_as_u32(bytes);
+    simd.u32_as_u8(simd.u32_rotate_right::<8>(words))
+}
+```
+
+Permutations take their indices as a vector, one index per lane.
+`u32_permute` computes `r[i] = value[indices[i] mod S::U32_LANES]`, and
+`u32_permute2` selects from the concatenation of two vectors with indices
+reduced modulo `2 * S::U32_LANES`, so every index value is valid. Because the
+lane count varies by backend, generic code computes the indices from
+`S::U32_LANES`. Build the vector with `u32_load` from an array that holds at
+least `S::U32_LANES` elements (the widest backend in this crate has 16 `u32`
+lanes), and hoist the load out of loops so the index vector stays in a register:
+
+```rust
+use commonware_simd::Simd;
+
+#[inline(always)]
+fn reverse_blocks<S: Simd>(simd: S, data: &mut [u32]) {
+    // Lane `i` reads lane `S::U32_LANES - 1 - i`. Array elements past the lane
+    // count are unused.
+    let last = S::U32_LANES as u32 - 1;
+    let reverse = simd.u32_load(&core::array::from_fn::<u32, 16, _>(|i| {
+        last.wrapping_sub(i as u32)
+    }));
+    let full = data.len() / S::U32_LANES * S::U32_LANES;
+    for i in (0..full).step_by(S::U32_LANES) {
+        let value = simd.u32_permute(simd.u32_load(&data[i..]), reverse);
+        simd.u32_store(value, &mut data[i..]);
+    }
+}
+```
 
 Functions that are generic over `Simd` compose naturally. The backend token is
 copied into each helper:
@@ -119,13 +177,44 @@ fn add_three<S: Simd>(simd: S, a: S::U64, b: S::U64, c: S::U64) -> S::U64 {
 }
 ```
 
+### Byte Operations
+
+Byte-oriented kernels, such as hex encoding and parsing, can use the common
+`u8` instructions: wrapping and saturating arithmetic (`u8_add`, `u8_sub`,
+`u8_add_saturating`, `u8_sub_saturating`), `u8_min` and `u8_max`, the
+bitwise `u8_and`, `u8_or`, and `u8_xor`, lane masks from `u8_eq` and
+`u8_gt`, the reductions `u8_movemask`, `u8_any`, and `u8_all`, and
+full-vector interleaving with `u8_zip_lo`, `u8_zip_hi`, `u8_unzip_even`, and
+`u8_unzip_odd`.
+
+`u8_table_lookup` maps every lane through a 16-entry table and gives zero for
+indices of 16 or more. Its table size does not depend on the lane count, so the
+same code runs on every backend. Load the table once with `u8_table_load`,
+outside any loop, and split bytes into nibbles to index it:
+
+```rust
+use commonware_simd::Simd;
+
+/// Hex-encodes `S::U8_LANES` bytes into `2 * S::U8_LANES` characters.
+#[inline(always)]
+fn hex<S: Simd>(simd: S, input: &[u8], output: &mut [u8]) {
+    let table = simd.u8_table_load(b"0123456789abcdef");
+    let value = simd.u8_load(input);
+    let high = simd.u8_table_lookup(table, simd.u8_shr::<4>(value));
+    let low = simd.u8_table_lookup(table, simd.u8_and(value, simd.u8_splat(0x0f)));
+    simd.u8_store(simd.u8_zip_lo(high, low), output);
+    simd.u8_store(simd.u8_zip_hi(high, low), &mut output[S::U8_LANES..]);
+}
+```
+
 ### Operations
 
 An `Operation` can define equivalent algorithms for different backends.
 Implement `portable` using the common instructions, then optionally override
 `x86_v4c`, `neon`, or `arm_v9` to use that profile's extra instructions.
 `arm_v9` defaults to `neon`, and every other specialized path defaults to
-`portable`. Each path must produce the same result.
+`portable`. Each path must produce the same result. Scalar emulation and
+x86-64-v3 always run `portable`.
 
 Our addition example needs only common instructions. A function returning
 `impl Operation<S>` can capture vector values such as `S::U64`:
@@ -148,7 +237,8 @@ The operation returned by `add::<S>` above remains tied to `S`, even when
 different backends share a register representation.
 
 At the outer boundary, `dispatch` selects a native backend supported by the
-host, falling back to scalar emulation.
+host, falling back to scalar emulation. On x86-64 it tries x86v4c and then
+x86-64-v3. On AArch64 it tries Armv9 and then NEON.
 The default `std` feature enables runtime CPU feature detection. Without `std`,
 native backends require their features to be enabled at compile time.
 Targets whose architecture is supported but which lack a required baseline

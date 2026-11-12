@@ -1,3 +1,4 @@
+use commonware_allocator::mimalloc;
 use commonware_codec::EncodeSize as _;
 use commonware_coding::{Config, ReedSolomon, Scheme};
 use commonware_cryptography::Sha256;
@@ -5,6 +6,9 @@ use commonware_parallel::Sequential;
 use commonware_utils::NZU16;
 use rand::{Rng as _, SeedableRng as _};
 use rand_chacha::ChaCha8Rng;
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 const STRATEGY: Sequential = Sequential;
 

@@ -11,7 +11,7 @@
 
 commonware_macros::stability_scope!(BETA {
     use commonware_cryptography::transcript::Transcript;
-    use commonware_runtime::{BufferPooler, Clock, IoBufs, Sink, Stream};
+    use commonware_runtime::{Clock, IoBufs, Sink, Stream};
     use rand_core::CryptoRng;
     use std::{error::Error, future::Future};
 
@@ -76,7 +76,7 @@ commonware_macros::stability_scope!(BETA {
             sink: O,
         ) -> impl Future<Output = Result<(Self::Sender<I, O>, Self::Receiver<I, O>), Self::Error>> + Send
         where
-            C: BufferPooler + Clock + CryptoRng,
+            C: Clock + CryptoRng,
             I: Stream,
             O: Sink;
 
@@ -105,7 +105,7 @@ commonware_macros::stability_scope!(BETA {
             >,
         > + Send
         where
-            C: BufferPooler + Clock + CryptoRng,
+            C: Clock + CryptoRng,
             I: Stream,
             O: Sink,
             B: FnOnce(Self::PublicKey) -> F + Send,
@@ -345,7 +345,7 @@ commonware_macros::stability_scope!(BETA {
                 sink: O,
             ) -> impl Future<Output = Result<(Self::Sender<I, O>, Self::Receiver<I, O>), Self::Error>> + Send
             where
-                C: BufferPooler + Clock + CryptoRng,
+                C: Clock + CryptoRng,
                 I: Stream,
                 O: Sink,
             {
@@ -371,7 +371,7 @@ commonware_macros::stability_scope!(BETA {
                 >,
             > + Send
             where
-                C: BufferPooler + Clock + CryptoRng,
+                C: Clock + CryptoRng,
                 I: Stream,
                 O: Sink,
                 B: FnOnce(Self::PublicKey) -> F + Send,

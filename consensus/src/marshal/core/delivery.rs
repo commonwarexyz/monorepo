@@ -5,6 +5,7 @@ use crate::simplex::{
 };
 use bytes::Bytes;
 use commonware_cryptography::{Digested, certificate::Scoped};
+use commonware_resolver::Outcome;
 use commonware_utils::channel::oneshot;
 
 /// A resolver delivery whose certificate is parsed and awaits batch verification.
@@ -19,13 +20,13 @@ where
         scoped: Scoped<S>,
         notarization: Notarization<S, V::Commitment>,
         block: Bytes,
-        response: oneshot::Sender<bool>,
+        response: oneshot::Sender<Outcome>,
     },
     Finalized {
         scoped: Scoped<S>,
         finalization: Finalization<S, V::Commitment>,
         block: Digested<V::ApplicationBlock>,
-        response: oneshot::Sender<bool>,
+        response: oneshot::Sender<Outcome>,
     },
 }
 

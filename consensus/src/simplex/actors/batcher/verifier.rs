@@ -522,6 +522,8 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         if let Some(existing) = self.leader {
             // Enforces the stable-leader contract (see `Elector::elect`).
             assert_eq!(existing, leader, "leader changed within round");
+            // Later leader votes reach the proposal through `add`.
+            return;
         }
         self.leader = Some(leader);
         if let Some(notarize) = notarize {

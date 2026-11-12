@@ -1,7 +1,7 @@
 //! Utilities for linear ranges and cyclic spans.
 
 use bytes::BufMut;
-use commonware_codec::{Buf, BufsMut, EncodeSize, Error as CodecError, Read, Write};
+use commonware_codec::{Buf, BufsMut, EncodeSize, Error as CodecError, MaxEncodeSize, Read, Write};
 use commonware_macros::stability;
 #[stability(ALPHA)]
 use core::ops::{
@@ -136,6 +136,10 @@ impl<Idx: EncodeSize> EncodeSize for NonEmptyRange<Idx> {
     fn encode_inline_size(&self) -> usize {
         self.0.start.encode_inline_size() + self.0.end.encode_inline_size()
     }
+}
+
+impl<Idx: MaxEncodeSize> MaxEncodeSize for NonEmptyRange<Idx> {
+    const MAX_ENCODE_SIZE: usize = 2 * Idx::MAX_ENCODE_SIZE;
 }
 
 impl<Idx: Read + PartialOrd> Read for NonEmptyRange<Idx> {

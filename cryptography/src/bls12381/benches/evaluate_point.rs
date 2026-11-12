@@ -1,6 +1,6 @@
 use commonware_cryptography::bls12381::primitives::group::{G1, Scalar};
 use commonware_math::{algebra::Random, poly::Poly};
-use commonware_parallel::{Rayon, Sequential};
+use commonware_parallel::{Rayon, Sequential, rayon::ThreadPoolBuilder};
 use commonware_utils::{Faults, N3f1, NZUsize, test_rng};
 use criterion::{BatchSize, Criterion, criterion_group};
 use std::hint::black_box;
@@ -9,7 +9,7 @@ fn bench_evaluate_point(c: &mut Criterion) {
     for &n in &[5, 10, 20, 50, 100, 250, 500] {
         let t = N3f1::quorum(n);
         for concurrency in [1, 8] {
-            let strategy = Rayon::new(NZUsize!(concurrency)).unwrap();
+            let strategy = Rayon::new(ThreadPoolBuilder::new(NZUsize!(concurrency))).unwrap();
             c.bench_function(
                 &format!("{}/n={} t={} conc={}", module_path!(), n, t, concurrency),
                 |b| {

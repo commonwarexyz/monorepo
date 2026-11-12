@@ -88,10 +88,13 @@ impl<I: Ord + Hash + Clone, P: Ord + Copy> PrioritySet<I, P> {
     }
 
     /// Remove all previously inserted items not included in `keep`
-    /// and add any items not yet seen with a priority of `initial`.
-    pub fn reconcile(&mut self, keep: &[I], default: P) {
+    /// and add any items not yet seen with a priority of `default`.
+    pub fn reconcile<'a>(&mut self, keep: impl IntoIterator<Item = &'a I>, default: P)
+    where
+        I: 'a,
+    {
         // Remove items not in keep
-        let mut retained: HashSet<_> = keep.iter().collect();
+        let mut retained: HashSet<_> = keep.into_iter().collect();
         let to_remove = self
             .keys
             .keys()
@@ -233,7 +236,7 @@ mod tests {
 
         // Introduce a new item and remove an existing one
         let key3 = "key3";
-        pq.reconcile(&[key1, key3], Duration::from_secs(2));
+        pq.reconcile([&key1, &key3], Duration::from_secs(2));
 
         // Verify iteration over only the kept items
         let entries: Vec<_> = pq.iter().collect();

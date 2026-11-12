@@ -82,6 +82,10 @@ path = "src/module/benches/bench.rs"
 
 `name` becomes the first segment of a benchmark name.
 
+### Allocator
+
+The [root README](README.md#memory-allocation) recommends mimalloc for binaries, so every benchmark binary installs it as the global allocator and measures allocation costs under it. Add `commonware-allocator = { workspace = true, features = ["mimalloc"] }` to the crate's dev-dependencies and declare the allocator in the binary's entry point, as in the `bench.rs` example below. The `benchmark_allocator` lint (run by `just dylint`) rejects a binary in a `benches` directory that installs any other global allocator or none.
+
 ### Example
 
 ```rust
@@ -109,11 +113,31 @@ criterion_group! {
 In `benches/bench.rs`:
 
 ```rust
+use commonware_allocator::mimalloc;
 use criterion::criterion_main;
 
 mod operation_name;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
+
 criterion_main!(operation_name::benches);
+```
+
+### Inputs
+
+A benchmark picks its inputs by matching on `commonware_bench::Inputs::current()`, which needs `commonware-bench.workspace = true` in the crate's dev-dependencies. `cargo bench` measures the `Standard` inputs, and `just bench-full` (`COMMONWARE_BENCH_FULL=1 cargo bench`) measures the `Full` ones. CI runs `cargo test --benches` instead, which selects `Smoke`: Criterion runs each benchmark once without measuring it, but the benchmark's setup still builds its inputs, so a benchmark with slow setup uses smaller inputs there. Put every input that varies in the benchmark name.
+
+```rust
+use commonware_bench::Inputs;
+
+fn sizes() -> &'static [usize] {
+    match Inputs::current() {
+        Inputs::Smoke => &[1_000],
+        Inputs::Standard => &[1_000, 100_000],
+        Inputs::Full => &[1_000, 100_000, 10_000_000],
+    }
+}
 ```
 
 ### Naming

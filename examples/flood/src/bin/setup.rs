@@ -190,6 +190,7 @@ fn main() {
             storage_class: storage_class.clone(),
             storage_iops,
             storage_throughput,
+            bandwidth_weighting: Default::default(),
             binary: BINARY_NAME.to_string(),
             config: peer_config_file,
             profiling: instrument,
@@ -207,6 +208,7 @@ fn main() {
             storage_class: storage_class.clone(),
             storage_iops,
             storage_throughput,
+            bandwidth_weighting: Default::default(),
             dashboard: "dashboard.json".to_string(),
         },
         ports: vec![aws::PortConfig {

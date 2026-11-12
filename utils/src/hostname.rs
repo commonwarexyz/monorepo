@@ -4,7 +4,8 @@
 use alloc::{string::String, vec::Vec};
 use bytes::BufMut;
 use commonware_codec::{
-    Buf, EncodeSize, Error as CodecError, RangeCfg, Read as CodecRead, Write as CodecWrite,
+    Buf, EncodeSize, Error as CodecError, MaxEncodeSize, RangeCfg, Read as CodecRead,
+    Write as CodecWrite, varint::UInt,
 };
 use thiserror::Error;
 
@@ -34,8 +35,6 @@ pub enum Error {
     LabelStartsWithHyphen,
     #[error("hostname label ends with hyphen")]
     LabelEndsWithHyphen,
-    #[error("hostname contains invalid UTF-8")]
-    InvalidUtf8,
 }
 
 /// A validated hostname.
@@ -151,6 +150,10 @@ impl EncodeSize for Hostname {
     fn encode_size(&self) -> usize {
         self.0.as_bytes().encode_size()
     }
+}
+
+impl MaxEncodeSize for Hostname {
+    const MAX_ENCODE_SIZE: usize = UInt::<u32>::MAX_ENCODE_SIZE + MAX_HOSTNAME_LEN;
 }
 
 impl CodecRead for Hostname {
@@ -400,6 +403,23 @@ mod tests {
     fn test_hostname_macro() {
         let h = hostname!("example.com");
         assert_eq!(h.as_str(), "example.com");
+    }
+
+    #[test]
+    fn test_max_encode_size() {
+        // Three 63-character labels and one 61-character label, joined by dots, reach the
+        // hostname limit exactly.
+        let host = [
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(61),
+        ]
+        .join(".");
+        assert_eq!(host.len(), MAX_HOSTNAME_LEN);
+        let hostname = Hostname::new(host).unwrap();
+        assert_eq!(Hostname::MAX_ENCODE_SIZE, 258);
+        assert!(hostname.encode_size() <= Hostname::MAX_ENCODE_SIZE);
     }
 
     #[cfg(feature = "arbitrary")]

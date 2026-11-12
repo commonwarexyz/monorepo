@@ -7,23 +7,23 @@ use crate::{
     },
     qmdb::{
         self,
-        keyless::{CompactDb, Keyless, Metrics, Operation, operation::Codec},
+        keyless::{Db, Operation, operation::OperationCodec},
+        metrics::Metrics,
         sync,
     },
 };
-use commonware_codec::{EncodeShared, Read};
+use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_utils::range::NonEmptyRange;
 use std::num::NonZeroU64;
 
-impl<F, E, V, C, H, S> sync::Database for Keyless<F, E, V, C, H, S>
+impl<F, E, V, C, H, S> sync::Database for Db<F, E, V, C, H, S>
 where
     F: Family,
     E: Context,
-    V: Codec,
+    V: OperationCodec,
     C: Mutable<Item = Operation<F, V>> + sync::Journal<F, Context = E, Op = Operation<F, V>>,
-    C::Config: Clone + Send,
     H: Hasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
@@ -36,7 +36,7 @@ where
     type Digest = H::Digest;
     type Context = E;
 
-    /// Returns a [Keyless] db initialized from data collected in the sync process.
+    /// Returns a [Db] initialized from data collected in the sync process.
     ///
     /// # Behavior
     ///
@@ -50,7 +50,7 @@ where
     ///
     /// # Returns
     ///
-    /// A [Keyless] db populated with the state from the given range.
+    /// A [Db] populated with the state from the given range.
     async fn from_sync_result(
         context: Self::Context,
         config: Self::Config,
@@ -103,6 +103,13 @@ where
         Ok(self)
     }
 
+    async fn discard_local_state(
+        context: Self::Context,
+        config: &Self::Config,
+    ) -> Result<(), qmdb::Error<F>> {
+        sync::discard_local_state::<F, _, H, S>(context, config.merkle.clone()).await
+    }
+
     async fn local_pinned_nodes(
         context: Self::Context,
         config: &Self::Config,
@@ -129,63 +136,7 @@ where
         .await
     }
 
-    fn root(&self) -> Self::Digest {
-        self.root()
-    }
-}
-
-impl<F, E, V, H, Cfg, S> sync::Database for CompactDb<F, E, V, H, Cfg, S>
-where
-    F: Family,
-    E: Context,
-    V: Codec,
-    H: Hasher,
-    S: Strategy,
-    Operation<F, V>: EncodeShared,
-    Operation<F, V>: Read<Cfg = Cfg>,
-    Cfg: Clone + Send + Sync + 'static,
-{
-    type Family = F;
-    type Op = Operation<F, V>;
-    type Journal = sync::journal::Memory<F, E, Operation<F, V>>;
-    type Config = super::CompactConfig<Cfg, S>;
-    type Digest = H::Digest;
-    type Context = E;
-    type Hasher = H;
-
-    async fn from_sync_result(
-        context: Self::Context,
-        config: Self::Config,
-        log: Self::Journal,
-        pinned_nodes: Option<Vec<Self::Digest>>,
-        range: NonEmptyRange<Location<F>>,
-        _apply_batch_size: NonZeroU64,
-    ) -> Result<Self, qmdb::Error<F>> {
-        crate::qmdb::compact::from_sync_result(
-            context,
-            config,
-            log,
-            pinned_nodes,
-            range,
-            Self::init_from_sync,
-        )
-        .await
-    }
-
-    async fn persist_sync_result(self) -> Result<Self, qmdb::Error<F>> {
-        self.sync().await
-    }
-
-    async fn local_pinned_nodes(
-        _context: Self::Context,
-        _config: &Self::Config,
-        _target: &sync::Target<F, Self::Digest>,
-        _journal: &Self::Journal,
-    ) -> Result<Option<Vec<Self::Digest>>, qmdb::Error<F>> {
-        Ok(None)
-    }
-
-    fn root(&self) -> Self::Digest {
+    fn ops_root(&self) -> Self::Digest {
         self.root()
     }
 }

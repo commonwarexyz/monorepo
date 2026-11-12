@@ -7,23 +7,13 @@
 //! See [Db] for the main database type and
 //! [ExclusionProof](super::proof::constant::ExclusionProof) for proving key inactivity.
 
+pub use crate::qmdb::any::ordered::variable::{Operation, Update};
 use crate::{
-    Context,
     index::ordered::Index,
-    journal::contiguous::variable::Journal,
-    merkle::{Graftable, Location},
-    qmdb::{
-        Error,
-        any::{VariableValue, ordered::variable::Operation, value::VariableEncoding},
-        current::VariableConfig as Config,
-        operation::Key,
-    },
-    translator::Translator,
+    journal::contiguous::variable::{Config as JournalConfig, Journal},
+    merkle::Location,
+    qmdb::{current, value::VariableEncoding},
 };
-use commonware_codec::Read;
-use commonware_cryptography::Hasher;
-use commonware_parallel::Strategy;
-use commonware_runtime::Spawner;
 
 pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
     F,
@@ -37,40 +27,27 @@ pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
     S,
 >;
 
-impl<
-    F: Graftable,
-    E: Context + Spawner,
-    K: Key,
-    V: VariableValue,
-    H: Hasher,
-    T: Translator,
-    const N: usize,
-    S: Strategy,
-> Db<F, E, K, V, H, T, N, S>
-where
-    Operation<F, K, V>: Read,
-{
-    /// Initializes a [Db] from the given `config`.
-    /// The configured [`Strategy`] is used to parallelize merkleization.
-    /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
-    /// while `None` selects the latest retained state. Initialization fails with
-    /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity floor,
-    /// and with [Error::Journal] ([`crate::journal::Error::ItemPruned`]) if the selected commit
-    /// itself has been pruned.
-    pub async fn init(
-        context: E,
-        config: Config<T, <Operation<F, K, V> as Read>::Cfg, S>,
-        max_size: Option<Location<F>>,
-    ) -> Result<Self, Error<F>> {
-        crate::qmdb::current::init(context, config, max_size).await
-    }
-}
+/// Configuration for a [Db].
+pub type Config<T, C, S> = current::Config<T, JournalConfig<C>, S>;
 
 pub mod partitioned {
-    //! A variant of [super] that uses a partitioned index for the snapshot.
+    //! A variant of [super] that uses a partitioned index for the snapshot, dividing the key space
+    //! into `2^(P*8)` partitions. See [Any's counterpart] for when to use one.
+    //!
+    //! See [Db] for the generic type, or use the convenience aliases:
+    //! - [p256::Db] for 256 partitions (P=1)
+    //! - [p64k::Db] for 65,536 partitions (P=2)
+    //!
+    //! `p256` suits smaller datasets, but its partitions spill to a `BTreeMap` once the index holds
+    //! more than 130,816 entries (see [`crate::index::partitioned::ordered`]). Prefer `p64k` to
+    //! keep ordered access mostly inline at larger scale.
+    //!
+    //! [Any's counterpart]: crate::qmdb::any::ordered::variable::partitioned
 
     use super::*;
+    pub use super::{Operation, Update};
     use crate::index::partitioned::ordered::Index;
+    use core::num::NonZeroUsize;
 
     /// A partitioned variant of [super::Db].
     ///
@@ -91,33 +68,21 @@ pub mod partitioned {
             S,
         >;
 
-    impl<
-        F: Graftable,
-        E: Context + Spawner,
-        K: Key,
-        V: VariableValue,
-        H: Hasher,
-        T: Translator,
-        const P: usize,
-        const N: usize,
-        S: Strategy,
-    > Db<F, E, K, V, H, T, P, N, S>
-    where
-        Operation<F, K, V>: Read,
-    {
-        /// Initializes a [Db] from the given `config`.
-        /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
-        /// while `None` selects the latest retained state. Initialization fails with
-        /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity
-        /// floor, and with [Error::Journal] ([`crate::journal::Error::ItemPruned`]) if the selected
-        /// commit itself has been pruned.
-        pub async fn init(
-            context: E,
-            config: Config<T, <Operation<F, K, V> as Read>::Cfg, S, core::num::NonZeroUsize>,
-            max_size: Option<Location<F>>,
-        ) -> Result<Self, Error<F>> {
-            crate::qmdb::current::init(context, config, max_size).await
-        }
+    /// Configuration for a [Db].
+    pub type Config<T, C, S> = current::Config<T, JournalConfig<C>, S, NonZeroUsize>;
+
+    /// Convenience type aliases for 256 partitions (P=1).
+    pub mod p256 {
+        /// Variable-value DB with 256 partitions.
+        pub type Db<F, E, K, V, H, T, const N: usize, S> = super::Db<F, E, K, V, H, T, 1, N, S>;
+        pub use super::Config;
+    }
+
+    /// Convenience type aliases for 65,536 partitions (P=2).
+    pub mod p64k {
+        /// Variable-value DB with 65,536 partitions.
+        pub type Db<F, E, K, V, H, T, const N: usize, S> = super::Db<F, E, K, V, H, T, 2, N, S>;
+        pub use super::Config;
     }
 }
 
@@ -150,7 +115,7 @@ mod test {
         context: deterministic::Context,
         partition_prefix: String,
     ) -> CurrentTest<F> {
-        let cfg = variable_config::<OneCap>(&partition_prefix, &context);
+        let cfg = variable_config::<OneCap>(&partition_prefix);
         CurrentTest::<F>::init(context, cfg, None).await.unwrap()
     }
 

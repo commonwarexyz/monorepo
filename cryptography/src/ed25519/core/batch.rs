@@ -42,10 +42,11 @@ use crate::transcript::{Summary, Transcript, Version};
 use ahash::RandomState;
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
-use commonware_codec::{EncodeSize, Write, varint::UInt};
+use commonware_codec::{Encode, EncodeSize, Write, varint::UInt};
 use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
-use core::iter::once;
+use commonware_utils::Widen;
+use core::{iter::once, num::NonZeroUsize};
 use curve25519_dalek::{
     constants::ED25519_BASEPOINT_POINT as B,
     edwards::{CompressedEdwardsY, EdwardsPoint},
@@ -84,50 +85,43 @@ where
         return Err(Error::InvalidSignature);
     }
 
-    // Seeds are drawn before an execution path is chosen so both paths
-    // can borrow them.
-    let manual = strategy.manual();
+    // Draw one seed per call before the strategy chooses an execution
+    // shape, so either shape can use it. Each batch derives its own
+    // randomizers from the seed and its ordinal.
     let total = items.len();
-    let shard_count = manual.parallelism().min(total);
-    let seeds: Vec<Summary> = (0..shard_count)
-        .map(|_| Summary::random(&mut *rng))
-        .collect();
+    let seed = Summary::random(&mut *rng);
 
-    strategy.try_run(
-        total,
+    strategy.try_run_batches(total, NonZeroUsize::MIN, 1, |batches| {
         // Serial verification checks the whole batch as one equation, so
         // coalescing is global and no partition is needed.
-        || {
-            verify_shard(
+        if batches.is_whole() {
+            return verify_shard(
                 items.iter().enumerate().map(|(i, item)| project(i, item)),
                 total,
-                seeds[0],
-            )
-        },
+                seed,
+                0,
+            );
+        }
+
         // Parallel verification partitions the batch so signatures
         // sharing a verification key coalesce within their shard, then
         // checks one equation per shard.
-        || {
-            let order = partition(items, |i, item| project(i, item).0);
-            let shard_size = total.div_ceil(shard_count);
-            let shards: Vec<_> = order
-                .chunks(shard_size)
-                .zip(seeds.iter().copied())
-                .collect();
-            manual.try_fold(
-                shards,
-                || (),
-                |_, (shard, seed)| {
+        let order = partition(items, |i, item| project(i, item).0);
+        batches
+            .try_map_collect_vec(
+                |ranges| ranges.into_iter().enumerate(),
+                |(batch, range)| {
+                    let shard = &order[range];
                     verify_shard(
                         shard.iter().map(|&idx| project(idx, &items[idx])),
                         shard.len(),
                         seed,
+                        Widen::widen(batch),
                     )
                 },
-                |_, _| (),
             )
-        },
-    )
+            .map(|_| ())
+    })
 }
 
 /// Build an iteration order that groups signatures by the first byte of
@@ -163,15 +157,20 @@ fn partition<'a, T>(
     order
 }
 
-/// Verify `n` signatures as a single verification equation, drawing a
-/// randomizer for each signature from `seed`.
+/// Verify `n` signatures as a single verification equation. Each
+/// signature's randomizer is drawn from `seed` and the batch ordinal.
 #[allow(non_snake_case)]
 fn verify_shard<'a>(
     items: impl Iterator<Item = (&'a VerificationKey, Signature, Option<&'a [u8]>, &'a [u8])>,
     n: usize,
     seed: Summary,
+    batch: u64,
 ) -> Result<(), Error> {
-    let mut rng = Transcript::resume(seed, Version::V1).noise(NOISE_BATCH_VERIFY);
+    // Each batch commits its ordinal, so batches of one call draw distinct
+    // randomizers from the shared seed.
+    let mut rng = Transcript::resume(seed, Version::V1)
+        .commit(batch.encode())
+        .noise(NOISE_BATCH_VERIFY);
 
     // The batch verification equation is
     //
@@ -258,8 +257,8 @@ fn verify_shard<'a>(
 #[cfg(test)]
 mod tests {
     use super::{super::SigningKey, *};
-    use commonware_parallel::{Rayon, Sequential};
-    use commonware_utils::{NZUsize, test_rng};
+    use commonware_parallel::mocks::explore;
+    use commonware_utils::test_rng;
     use rand::RngExt as _;
 
     /// Generate `signers` keys with `per_signer` signed messages each.
@@ -281,27 +280,17 @@ mod tests {
         items
     }
 
-    /// Verify the batch and require sequential and parallel strategies to agree.
+    /// Verifies the batch across execution shapes and returns the verdict.
     fn verify(items: &[(VerificationKey, Signature, [u8; 32])]) -> bool {
-        let sequential = verify_projected(
-            &mut test_rng(),
-            items,
-            |_, (vk, sig, message)| (vk, *sig, None, message.as_slice()),
-            &Sequential,
-        )
-        .is_ok();
-        let parallel = Rayon::new(NZUsize!(4)).unwrap();
-        assert_eq!(
-            sequential,
+        explore(|strategy| {
             verify_projected(
                 &mut test_rng(),
                 items,
                 |_, (vk, sig, message)| (vk, *sig, None, message.as_slice()),
-                &parallel.manual(),
+                strategy,
             )
             .is_ok()
-        );
-        sequential
+        })
     }
 
     #[test]
@@ -328,5 +317,27 @@ mod tests {
 
         items[5].2[0] ^= 1;
         assert!(!verify(&items));
+    }
+
+    #[test]
+    fn test_verify_rejects_each_altered_item_in_every_shape() {
+        // Altering any one item must fail verification however the input is split. Inputs hold
+        // one to nine items, so the explored shapes include one whole batch, one item per batch,
+        // and uneven batches.
+        for signers in 1..=3 {
+            for per_signer in 1..=3 {
+                let valid = signatures(signers, per_signer);
+                assert!(verify(&valid));
+                for altered in 0..valid.len() {
+                    let mut items = valid.clone();
+                    items[altered].2[0] ^= 1;
+                    let total = items.len();
+                    assert!(
+                        !verify(&items),
+                        "verification must reject altered item {altered} of {total}"
+                    );
+                }
+            }
+        }
     }
 }

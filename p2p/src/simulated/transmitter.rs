@@ -502,7 +502,6 @@ impl<P: PublicKey> State<P> {
     }
 
     /// Records the outcome of a transmission, handling sequencing and delivery bookkeeping.
-    #[allow(clippy::too_many_arguments)]
     fn register_completion(
         &mut self,
         origin: P,

@@ -1,8 +1,8 @@
 //! Segmented variable-journal append CPU cost while every record fits in the write buffer.
 
-use crate::{PAGE_SIZE, WRITE_BUFFER};
+use crate::{PAGE_SIZE, REPLAY_BUFFER, WRITE_BUFFER};
 use commonware_runtime::{
-    Supervisor as _,
+    ReadOptions, Supervisor as _,
     benchmarks::{context, tokio},
     buffer::paged::CacheRef,
 };
@@ -22,7 +22,7 @@ fn bench_size<const SIZE: usize>(c: &mut Criterion) {
         |b| {
             b.to_async(&runner).iter_custom(|iters| async move {
                 let ctx = context::get::<commonware_runtime::tokio::Context>();
-                let cache = CacheRef::from_pooler(&ctx, PAGE_SIZE, NZUsize!(32));
+                let cache = CacheRef::new(PAGE_SIZE, NZUsize!(32));
                 let item = FixedBytes::new([0xAB; SIZE]);
                 let mut elapsed = Duration::ZERO;
                 for _ in 0..iters {
@@ -34,9 +34,13 @@ fn bench_size<const SIZE: usize>(c: &mut Criterion) {
                             codec_config: (),
                             page_cache: cache.clone(),
                             write_buffer: WRITE_BUFFER,
+                            replay_buffer: REPLAY_BUFFER,
                         },
+                        ReadOptions::default(),
                     )
                     .await
+                    .unwrap()
+                    .finish()
                     .unwrap();
 
                     // Create section 0 and its first tip page outside the timed region.

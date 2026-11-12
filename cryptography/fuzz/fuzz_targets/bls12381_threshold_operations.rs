@@ -8,10 +8,9 @@ use commonware_cryptography::bls12381::primitives::{
     sharing::Sharing,
     variant::{MinPk, MinSig, PartialSignature},
 };
-use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::{Participant, non_empty, test_rng};
+use commonware_parallel::{Rayon, Sequential, rayon::ThreadPoolBuilder};
+use commonware_utils::{NZUsize, Participant, non_empty, test_rng};
 use libfuzzer_sys::fuzz_target;
-use std::num::NonZeroUsize;
 
 mod common;
 use common::{
@@ -398,12 +397,8 @@ fn fuzz(op: FuzzOperation) {
             concurrency,
         } => {
             if !signature_groups.is_empty() {
-                let groups_refs: Vec<Vec<&PartialSignature<MinPk>>> = signature_groups
-                    .iter()
-                    .map(|group| group.iter().collect())
-                    .collect();
-                let strategy = Rayon::new(NonZeroUsize::new(concurrency).unwrap()).unwrap();
-                let _ = threshold::recover_multiple(&sharing, groups_refs, &strategy);
+                let strategy = Rayon::new(ThreadPoolBuilder::new(NZUsize!(concurrency))).unwrap();
+                let _ = threshold::recover_multiple(&sharing, &signature_groups, &strategy);
             }
         }
 
@@ -413,12 +408,8 @@ fn fuzz(op: FuzzOperation) {
             concurrency,
         } => {
             if !signature_groups.is_empty() {
-                let groups_refs: Vec<Vec<&PartialSignature<MinSig>>> = signature_groups
-                    .iter()
-                    .map(|group| group.iter().collect())
-                    .collect();
-                let strategy = Rayon::new(NonZeroUsize::new(concurrency).unwrap()).unwrap();
-                let _ = threshold::recover_multiple(&sharing, groups_refs, &strategy);
+                let strategy = Rayon::new(ThreadPoolBuilder::new(NZUsize!(concurrency))).unwrap();
+                let _ = threshold::recover_multiple(&sharing, &signature_groups, &strategy);
             }
         }
 

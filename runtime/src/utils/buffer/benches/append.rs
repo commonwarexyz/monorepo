@@ -1,9 +1,7 @@
 //! Benchmark sequential append performance.
 
 use super::{CACHE_SIZE, PAGE_SIZE, create_append, destroy_append};
-use commonware_runtime::{
-    BufferPooler, Runner, Storage, buffer::paged::CacheRef, deterministic, tokio,
-};
+use commonware_runtime::{Runner, Storage, buffer::paged::CacheRef, deterministic, tokio};
 use commonware_utils::NZUsize;
 use criterion::Criterion;
 use std::time::Instant;
@@ -11,7 +9,7 @@ use std::time::Instant;
 fn bench_backend<R>(c: &mut Criterion, backend: &str, chunk_size: usize)
 where
     R: Runner + Default,
-    R::Context: Storage + BufferPooler,
+    R::Context: Storage,
 {
     c.bench_function(
         &format!("{}/backend={backend} chunk={chunk_size}", module_path!()),
@@ -23,7 +21,7 @@ where
                 let executor = R::default();
                 executor.start(|ctx| async move {
                     // Prepare the writer and cache outside the timed operation.
-                    let cache_ref = CacheRef::from_pooler(&ctx, PAGE_SIZE, NZUsize!(CACHE_SIZE));
+                    let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(CACHE_SIZE));
                     let mut append = create_append(&ctx, &name, cache_ref).await;
 
                     // Measure append batches larger than the page cache.

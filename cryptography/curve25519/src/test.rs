@@ -37,7 +37,11 @@ use commonware_codec::{Copying, DecodeExt as _};
 use commonware_cryptography::{BatchEntry, BatchVerifier as _};
 use commonware_formatting::hex;
 use commonware_math::algebra::Random as _;
-use commonware_parallel::{Sequential, Strategy};
+#[cfg(not(test))]
+use commonware_parallel::Sequential;
+use commonware_parallel::Strategy;
+#[cfg(test)]
+use commonware_parallel::mocks::explore;
 use commonware_utils::{FuzzRng, union_unique};
 use ed25519_consensus::SigningKey as ConsensusSigningKey;
 
@@ -497,20 +501,20 @@ impl Batch {
         for item in &self.items {
             expected &= item.verify();
         }
-        assert_eq!(self.verify(&Sequential), expected, "batch: {self:#?}");
 
-        // The fuzz target stays single-threaded, so only the unit test exercises the pool.
+        // The fuzz target verifies serially, and unit tests explore execution shapes.
+        #[cfg(not(test))]
+        assert_eq!(
+            self.verify(&Sequential),
+            expected,
+            "the batch must verify exactly when it is nonempty and every item verifies: {self:#?}"
+        );
         #[cfg(test)]
-        {
-            let strategy = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
-                .unwrap()
-                .manual();
-            assert_eq!(
-                self.verify(&strategy),
-                expected,
-                "parallel batch: {self:#?}"
-            );
-        }
+        assert_eq!(
+            explore(|strategy| self.verify(strategy)),
+            expected,
+            "the batch must verify exactly when it is nonempty and every item verifies: {self:#?}"
+        );
     }
 
     fn verify(&self, strategy: &impl Strategy) -> bool {
@@ -611,8 +615,8 @@ mod tests {
     use crate::{key_exchange::SecretKey, signing::SigningKey};
     use commonware_codec::{Copying, DecodeExt as _};
     use commonware_cryptography::{BatchEntry, BatchVerifier as _};
-    use commonware_parallel::{Rayon, Sequential, Strategy};
-    use commonware_utils::{NZUsize, test_rng};
+    use commonware_parallel::{Sequential, Strategy, mocks::explore};
+    use commonware_utils::test_rng;
 
     #[test]
     fn rfc8032_ed25519_vectors() {
@@ -729,7 +733,6 @@ mod tests {
             )
         }
 
-        let parallel = Rayon::new(NZUsize!(4)).unwrap().manual();
         let mut vectors = Vec::with_capacity(196);
 
         // These are the 196 ZIP215 test vectors: every pairing of the eight canonical
@@ -750,7 +753,6 @@ mod tests {
                 assert!(verify(&vectors[vectors.len() - 1..], &Sequential));
             }
         }
-        assert!(verify(&vectors, &Sequential));
-        assert!(verify(&vectors, &parallel));
+        assert!(explore(|strategy| verify(&vectors, strategy)));
     }
 }

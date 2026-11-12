@@ -5,8 +5,8 @@ use std::{
     sync::{Arc, Weak},
 };
 
-/// Delay reaping dropped children until enough stale weak pointers accumulate to
-/// amortize the cleanup cost for child-heavy parents.
+/// Minimum stale-child count a parent accumulates before [`Children::push`]
+/// compacts its child list, so short lists batch their cleanup.
 const STALE_CHILD_THRESHOLD: usize = 32;
 
 /// Tracks the relationship between runtime contexts.
@@ -34,10 +34,11 @@ struct Children {
 }
 
 impl Children {
-    /// Appends a weak reference to `child`, compacting stale entries first if
-    /// the stale count has reached [`STALE_CHILD_THRESHOLD`].
+    /// Appends a weak reference to `child`, first compacting the list when the
+    /// stale count reaches both [`STALE_CHILD_THRESHOLD`] and half the list, so
+    /// compaction costs amortized constant time per push.
     fn push(&mut self, child: &Arc<Tree>) {
-        if self.stale >= STALE_CHILD_THRESHOLD {
+        if self.stale >= STALE_CHILD_THRESHOLD.max(self.links.len() / 2) {
             self.links.retain(|weak| weak.strong_count() > 0);
             self.stale = 0;
         }
@@ -221,8 +222,14 @@ impl Drop for Tree {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{telemetry::metrics::raw::Gauge, utils::MetricHandle};
-    use futures::future::{AbortHandle, Abortable, pending};
+    use crate::{
+        telemetry::metrics::raw::Gauge,
+        utils::{
+            MetricHandle,
+            abort::{AbortHandle, Abortable},
+        },
+    };
+    use futures::future::pending;
 
     fn aborter() -> (Aborter, Abortable<futures::future::Pending<()>>) {
         let gauge = Gauge::default();
@@ -380,6 +387,63 @@ mod tests {
         }
 
         drop(child);
+        drop(root);
+    }
+
+    #[test]
+    fn child_reaping_scales_with_list_length() {
+        let root = Tree::root();
+
+        // Fill the list with 1,000 live children, so half of it (500) is well
+        // above `STALE_CHILD_THRESHOLD`.
+        let mut children: Vec<_> = (0..1_000)
+            .map(|_| {
+                let (child, aborted) = Tree::child(&root);
+                assert!(!aborted, "child node unexpectedly aborted");
+                child
+            })
+            .collect();
+
+        // A stale count above `STALE_CHILD_THRESHOLD` but below half the list
+        // does not compact.
+        children.drain(..33);
+        let (first, _) = Tree::child(&root);
+        {
+            let inner = root.inner.lock();
+            assert_eq!(inner.children.links.len(), 1_001);
+            assert_eq!(inner.children.stale, 33);
+        }
+
+        // Half of 1,001 entries is 500, so 499 stale entries do not compact.
+        children.drain(..466);
+        let (second, _) = Tree::child(&root);
+        {
+            let inner = root.inner.lock();
+            assert_eq!(inner.children.links.len(), 1_002);
+            assert_eq!(inner.children.stale, 499);
+        }
+
+        // Each push lengthens the list, so 500 stale entries fall one short of
+        // half of 1,002.
+        children.drain(..1);
+        let (third, _) = Tree::child(&root);
+        {
+            let inner = root.inner.lock();
+            assert_eq!(inner.children.links.len(), 1_003);
+            assert_eq!(inner.children.stale, 500);
+        }
+
+        // Reaching half the list (501 of 1,003) removes every stale entry
+        // before the new child is appended.
+        children.drain(..1);
+        let (fourth, _) = Tree::child(&root);
+        {
+            let inner = root.inner.lock();
+            assert_eq!(inner.children.links.len(), 1_003 - 501 + 1);
+            assert_eq!(inner.children.stale, 0);
+        }
+
+        drop((children, first, second, third, fourth));
         drop(root);
     }
 

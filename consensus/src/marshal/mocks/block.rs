@@ -1,6 +1,8 @@
 use crate::{marshal::coding::types::CodedBlock, types::Height};
 use bytes::BufMut;
-use commonware_codec::{Buf, Codec, EncodeSize, Error, Read, ReadExt, Write, varint::UInt};
+use commonware_codec::{
+    Buf, Codec, EncodeSize, Error, FixedSize, MaxEncodeSize, Read, ReadExt, Write, varint::UInt,
+};
 use commonware_coding::{Config as CodingConfig, Scheme};
 use commonware_cryptography::{Digest, Digested, Digestible, Hasher};
 use commonware_parallel::Sequential;
@@ -192,6 +194,12 @@ impl<H: Hasher> crate::CertifiableBlock for EmptyBlock<H> {
     }
 }
 
+impl<H: Hasher> crate::BoundedBlock for EmptyBlock<H> {
+    fn max_encode_size(_: &Self::Cfg) -> usize {
+        H::Digest::SIZE + Height::MAX_ENCODE_SIZE + UInt::<u64>::MAX_ENCODE_SIZE
+    }
+}
+
 /// A mock block type for testing that stores consensus context.
 ///
 /// The context type `C` should be the consensus context (e.g., `simplex::types::Context`).
@@ -320,5 +328,17 @@ impl<D: Digest, C: Codec<Cfg = ()> + Clone + Send + Sync + 'static> crate::Certi
 
     fn context(&self) -> Self::Context {
         self.context.clone()
+    }
+}
+
+impl<D: Digest, C: Codec<Cfg = ()> + MaxEncodeSize + Clone + Send + Sync + 'static>
+    crate::BoundedBlock for Block<D, C>
+{
+    fn max_encode_size(_: &Self::Cfg) -> usize {
+        C::MAX_ENCODE_SIZE
+            + D::SIZE
+            + Height::MAX_ENCODE_SIZE
+            + UInt::<u64>::MAX_ENCODE_SIZE
+            + D::SIZE
     }
 }

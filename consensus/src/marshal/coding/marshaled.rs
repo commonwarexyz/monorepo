@@ -18,14 +18,16 @@
 //! This wrapper integrates with a variant of marshal that supports erasure coded broadcast. When a leader
 //! proposes a new block, it is automatically erasure encoded and its shards are broadcasted to active
 //! participants. When verifying a proposed block (the precondition for notarization), the wrapper
-//! ensures the commitment's context digest matches the consensus context and waits for validation of
-//! the shard assigned to this participant by the proposer. If that shard is valid, the assigned shard is
-//! relayed to all other participants to aid in block reconstruction.
+//! ensures the commitment's context digest matches the consensus context and, when this node can
+//! sign, waits for validation of the shard assigned to it by the proposer. If that shard is valid,
+//! the assigned shard is relayed to all other participants to aid in block reconstruction.
 //!
 //! A participant may still reconstruct the full block from gossiped shards before its assigned shard
 //! arrives. That is sufficient for later certification and repair flows, but it is not treated as
-//! notarization readiness: a participant only helps form a notarization once it has validated the
-//! shard it is supposed to echo.
+//! notarization readiness: a signer only helps form a notarization once it has validated the
+//! shard it is supposed to echo. A node that cannot sign casts no notarize vote, so its
+//! verification resolves without waiting for a shard. The shard engine still verifies and relays
+//! the assigned shard of a committee member without a share.
 //!
 //! During certification (the phase between notarization and finalization), the wrapper subscribes to
 //! block reconstruction and validates epoch boundaries, parent commitment, height contiguity, and
@@ -119,7 +121,7 @@ use commonware_cryptography::{
 use commonware_macros::select;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    Clock, Metrics, Spawner, Storage,
+    Clock, Metrics, Spawner,
     telemetry::{
         metrics::{
             MetricsExt as _,
@@ -130,7 +132,6 @@ use commonware_runtime::{
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use futures::future::Either;
-use rand_core::Rng;
 use std::{future::Future, sync::Arc};
 use tracing::{Instrument as _, debug, info_span, warn};
 
@@ -173,7 +174,6 @@ where
 #[allow(clippy::type_complexity)]
 pub struct Marshaled<E, A, B, C, H, Z, S, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
     A: Application<E>,
     B: CertifiableBlock<Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>>
         + Codec,
@@ -201,7 +201,6 @@ where
 
 impl<E, A, B, C, H, Z, S, ES> Clone for Marshaled<E, A, B, C, H, Z, S, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
     A: Application<E>,
     B: CertifiableBlock<Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>>
         + Codec,
@@ -232,7 +231,7 @@ where
 
 impl<E, A, B, C, H, Z, S, ES> Marshaled<E, A, B, C, H, Z, S, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
+    E: Spawner + Metrics + Clock,
     A: Application<
             E,
             Block = B,
@@ -333,7 +332,7 @@ where
     /// we've already fetched the block to extract its embedded context. Otherwise, a local-only
     /// wait for the block is sent to marshal before this method returns.
     fn deferred_verify(
-        &mut self,
+        &self,
         consensus_context: Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
         commitment: Commitment<B, C, H>,
         prefetched_block: Option<Arc<CodedBlock<B, C, H>>>,
@@ -510,7 +509,7 @@ where
     }
 
     fn certify_from_embedded_context(
-        &mut self,
+        &self,
         round: Round,
         payload: Commitment<B, C, H>,
     ) -> oneshot::Receiver<bool> {
@@ -542,7 +541,7 @@ where
         let block_rx = self
             .marshal
             .subscribe_by_commitment(payload, core::CommitmentFallback::FetchByRound { round });
-        let mut marshaled = self.clone();
+        let marshaled = self.clone();
         let shards = self.shards.clone();
         let (mut tx, rx) = oneshot::channel();
         let context = self.context.child("certify").with_attribute("round", round);
@@ -625,7 +624,7 @@ where
         rx
     }
     fn certify_from_existing_task(
-        &mut self,
+        &self,
         round: Round,
         payload: Commitment<B, C, H>,
         task: oneshot::Receiver<GateOutcome>,
@@ -640,7 +639,7 @@ where
         // A completed gate either carries an applicable local verdict or requests
         // recovery. After an unclean restart the in-memory task is gone, which also
         // recovers via the embedded-context fetch path.
-        let mut marshaled = self.clone();
+        let marshaled = self.clone();
         let (tx, rx) = oneshot::channel();
         let context = self
             .context
@@ -755,7 +754,7 @@ where
 
 impl<E, A, B, C, H, Z, S, ES> Automaton for Marshaled<E, A, B, C, H, Z, S, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
+    E: Spawner + Metrics + Clock,
     A: Application<
             E,
             Block = B,
@@ -1018,12 +1017,12 @@ where
         let task = self.deferred_verify(consensus_context, payload, None, Stage::Verified);
         self.gates.insert(round, payload, task);
 
-        match scheme.me() {
+        match scheme.me().and_then(|m| m.signer()) {
             Some(_) => {
-                // Subscribe to assigned shard verification. For participants, this
-                // only completes once the shard for our assigned index has been
-                // verified. Reconstructing the block from peer gossip is useful for
-                // certification later, but is not enough to emit a notarize vote.
+                // Subscribe to assigned shard verification. For signers, this only
+                // completes once the shard for our assigned index has been verified.
+                // Reconstructing the block from peer gossip is useful for certification
+                // later, but is not enough to emit a notarize vote.
                 let validity_rx = self.shards.subscribe_assigned_shard_verified(payload);
                 let (tx, rx) = oneshot::channel();
                 let context = self
@@ -1043,7 +1042,8 @@ where
                 rx
             }
             None => {
-                // If we are not participating, there's no shard to verify; just accept the proposal.
+                // A node that cannot sign casts no notarize vote, so it accepts the proposal
+                // without waiting for its assigned shard.
                 //
                 // Later, when certifying, we will wait to receive the block from the network.
                 let (tx, rx) = oneshot::channel();
@@ -1056,7 +1056,7 @@ where
 
 impl<E, A, B, C, H, Z, S, ES> CertifiableAutomaton for Marshaled<E, A, B, C, H, Z, S, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
+    E: Spawner + Metrics + Clock,
     A: Application<
             E,
             Block = B,
@@ -1135,7 +1135,7 @@ where
 
 impl<E, A, B, C, H, Z, S, ES> Relay for Marshaled<E, A, B, C, H, Z, S, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
+    E: Send + Sync + 'static,
     A: Application<
             E,
             Block = B,
@@ -1171,7 +1171,7 @@ where
 /// so pruning is ordered with both.
 impl<E, A, B, C, H, Z, S, ES> Reporter for Marshaled<E, A, B, C, H, Z, S, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
+    E: Send + Sync + 'static,
     A: Application<
             E,
             Block = B,
@@ -1191,7 +1191,7 @@ where
             Activity::Finalization(finalization) => finalization.round(),
             activity => Round::new(activity.epoch(), View::zero()),
         };
-        self.gates.retain_after(&retired);
+        self.gates.retain_after(retired);
         self.marshal.report(activity)
     }
 }

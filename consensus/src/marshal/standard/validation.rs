@@ -13,11 +13,10 @@ use commonware_codec::Codec;
 use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
 use commonware_macros::select;
 use commonware_runtime::{
-    Clock, Metrics, Spawner,
+    Clock, Supervisor,
     telemetry::{metrics::histogram::Timed, traces::TracedExt as _},
 };
 use commonware_utils::channel::oneshot;
-use rand_core::Rng;
 use std::sync::Arc;
 use tracing::{Instrument as _, debug, info_span};
 
@@ -196,7 +195,7 @@ pub(super) async fn run_app_verify<E, S, A, B, T>(
     ancestor_fetch_duration: Timed,
 ) -> Option<bool>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Supervisor + Clock,
     S: Scheme,
     A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>>,
     B: Block + Codec,

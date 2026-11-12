@@ -4,15 +4,14 @@
 //! fixed-size value. Inputs are prebuilt, then cloned or wrapped inside the
 //! measurement loop.
 //!
-//! `FixedBytes<N>::decode` is used because it reads into a fixed array via
-//! `Buf::copy_to_slice`. That path checks `remaining`, copies from `chunk`, and
-//! advances the cursor, making it a compact test of the whole `Buf`
-//! implementation rather than one accessor in isolation.
+//! `FixedBytes<N>::decode` reads into a fixed array through
+//! `Buf::try_copy_to_slice`, so one call exercises each buffer's bounds
+//! check, byte copy, and cursor update.
 //!
-//! The `iobuf_bytes` modes decode an external `Bytes`-backed `IoBuf`. The
-//! `iobuf_aligned` modes decode a native heap-backed one (built through
-//! `IoBufMut`), so the pair isolates the owner kind while sharing the same
-//! handle hot path.
+//! The `iobuf_bytes` modes decode an `IoBuf` that holds external `Bytes`. The
+//! `iobuf_native` modes decode one backed by a heap allocation from
+//! `IoBufMut::with_capacity`, so the pair isolates the owner kind while
+//! sharing the same handle hot path.
 //!
 //! The `Vec<u8>` modes are included as a deep-clone baseline. Comparing them
 //! with `Bytes` and `IoBuf` shows where shared backing storage and atomic
@@ -26,7 +25,7 @@ use commonware_codec::{Copying, DecodeExt as _};
 use commonware_runtime::{IoBuf, IoBufMut};
 use commonware_utils::sequence::FixedBytes;
 use criterion::Criterion;
-use std::{hint::black_box, num::NonZeroUsize};
+use std::hint::black_box;
 
 macro_rules! bench_sizes {
     ($c:expr, $($size:literal),+ $(,)?) => {
@@ -34,8 +33,8 @@ macro_rules! bench_sizes {
             let vec = payload($size);
             let bytes = Bytes::from(vec.clone());
             let iobuf_bytes = IoBuf::from(bytes.clone());
-            let iobuf_aligned = {
-                let mut buffer = IoBufMut::with_alignment(vec.len(), NonZeroUsize::new(1).unwrap());
+            let iobuf_native = {
+                let mut buffer = IoBufMut::with_capacity(vec.len());
                 buffer.put_slice(&vec);
                 buffer.freeze()
             };
@@ -58,13 +57,13 @@ macro_rules! bench_sizes {
                 FixedBytes::<$size>::decode(&mut iobuf_bytes).unwrap()
             });
 
-            bench_decode_fixed::<$size, _>($c, "iobuf_aligned", || {
-                FixedBytes::<$size>::decode(iobuf_aligned.clone()).unwrap()
+            bench_decode_fixed::<$size, _>($c, "iobuf_native", || {
+                FixedBytes::<$size>::decode(iobuf_native.clone()).unwrap()
             });
 
-            bench_decode_fixed::<$size, _>($c, "iobuf_aligned_ref", || {
-                let mut iobuf_aligned = iobuf_aligned.clone();
-                FixedBytes::<$size>::decode(&mut iobuf_aligned).unwrap()
+            bench_decode_fixed::<$size, _>($c, "iobuf_native_ref", || {
+                let mut iobuf_native = iobuf_native.clone();
+                FixedBytes::<$size>::decode(&mut iobuf_native).unwrap()
             });
 
             bench_decode_fixed::<$size, _>($c, "vec", || {

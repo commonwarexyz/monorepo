@@ -209,8 +209,7 @@ mod tests {
     use super::*;
     use crate::{Blake3, Sha256};
     use commonware_invariants::minifuzz;
-    use commonware_parallel::Rayon;
-    use commonware_utils::NZUsize;
+    use commonware_parallel::mocks::explore;
     use std::sync::Arc;
 
     fn test_fuzz<H: Hasher>() {
@@ -227,45 +226,46 @@ mod tests {
     }
 
     fn test_fuzz_hash_many<H: Hasher>() {
-        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
-        let mut saw_empty_batch = false;
-        let mut saw_equal_lengths = false;
-        let mut saw_partial_batch = false;
-        let mut saw_equal_full_blocks = false;
-        let mut saw_equal_two_block_padding = false;
-        let mut saw_unequal_lengths = false;
-        minifuzz::Builder::default()
-            .with_seed(0)
-            .with_search_limit(512)
-            .test(|u| {
-                let plan = u.arbitrary::<BatchPlan<H>>()?;
-                let first_len = plan.messages.first().map_or(0, Vec::len);
-                let equal_lengths = plan
-                    .messages
-                    .iter()
-                    .all(|message| message.len() == first_len);
-                for (lane, message) in plan.messages.iter().enumerate() {
-                    if let Some(first) = message.first() {
-                        assert_eq!(*first, lane as u8);
+        explore(|strategy| {
+            let mut saw_empty_batch = false;
+            let mut saw_equal_lengths = false;
+            let mut saw_partial_batch = false;
+            let mut saw_equal_full_blocks = false;
+            let mut saw_equal_two_block_padding = false;
+            let mut saw_unequal_lengths = false;
+            minifuzz::Builder::default()
+                .with_seed(0)
+                .with_search_limit(512)
+                .test(|u| {
+                    let plan = u.arbitrary::<BatchPlan<H>>()?;
+                    let first_len = plan.messages.first().map_or(0, Vec::len);
+                    let equal_lengths = plan
+                        .messages
+                        .iter()
+                        .all(|message| message.len() == first_len);
+                    for (lane, message) in plan.messages.iter().enumerate() {
+                        if let Some(first) = message.first() {
+                            assert_eq!(*first, lane as u8);
+                        }
                     }
-                }
-                saw_empty_batch |= plan.messages.is_empty();
-                saw_equal_lengths |= equal_lengths && plan.messages.len() >= 16;
-                saw_partial_batch |= equal_lengths && (7..16).contains(&plan.messages.len());
-                saw_equal_full_blocks |=
-                    equal_lengths && plan.messages.len() >= 16 && first_len >= 64;
-                saw_equal_two_block_padding |=
-                    equal_lengths && plan.messages.len() >= 16 && first_len % 64 >= 56;
-                saw_unequal_lengths |= !equal_lengths;
-                plan.run(&strategy);
-                Ok(())
-            });
-        assert!(saw_empty_batch);
-        assert!(saw_equal_lengths);
-        assert!(saw_partial_batch);
-        assert!(saw_equal_full_blocks);
-        assert!(saw_equal_two_block_padding);
-        assert!(saw_unequal_lengths);
+                    saw_empty_batch |= plan.messages.is_empty();
+                    saw_equal_lengths |= equal_lengths && plan.messages.len() >= 16;
+                    saw_partial_batch |= equal_lengths && (7..16).contains(&plan.messages.len());
+                    saw_equal_full_blocks |=
+                        equal_lengths && plan.messages.len() >= 16 && first_len >= 64;
+                    saw_equal_two_block_padding |=
+                        equal_lengths && plan.messages.len() >= 16 && first_len % 64 >= 56;
+                    saw_unequal_lengths |= !equal_lengths;
+                    plan.run(strategy);
+                    Ok(())
+                });
+            assert!(saw_empty_batch);
+            assert!(saw_equal_lengths);
+            assert!(saw_partial_batch);
+            assert!(saw_equal_full_blocks);
+            assert!(saw_equal_two_block_padding);
+            assert!(saw_unequal_lengths);
+        });
     }
 
     #[test]
@@ -280,7 +280,6 @@ mod tests {
 
     #[test]
     fn test_hash_many_default_matches_individual_hashes() {
-        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
         let messages = (0..33)
             .map(|lane| Arc::<[u8]>::from(vec![lane as u8; lane]))
             .collect::<Vec<_>>();
@@ -294,8 +293,10 @@ mod tests {
             .collect::<Vec<_>>();
         for count in 0..=messages.len() {
             let messages = &messages[..count];
-            assert_eq!(Blake3::hash_many(messages, &Sequential), expected[..count]);
-            assert_eq!(Blake3::hash_many(messages, &strategy), expected[..count]);
+            assert_eq!(
+                explore(|strategy| Blake3::hash_many(messages, strategy)),
+                expected[..count]
+            );
         }
     }
 

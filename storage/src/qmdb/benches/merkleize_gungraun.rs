@@ -38,7 +38,7 @@ async fn run(context: Context, options: BenchOptions) -> Digest {
     match options.variant {
         Variant::AnyFixed => {
             let metrics_context = context.child("metrics");
-            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, LARGE_PAGE_CACHE_SIZE);
+            let page_cache = CacheRef::new(PAGE_SIZE, LARGE_PAGE_CACHE_SIZE);
             let cfg = any_fix_cfg_with_cache(&context, page_cache.clone());
             let db = AnyUFix::init(context.child("storage"), cfg, None)
                 .await
@@ -56,7 +56,7 @@ async fn run(context: Context, options: BenchOptions) -> Digest {
         }
         Variant::CurrentOrderedFixed256Mmb => {
             let metrics_context = context.child("metrics");
-            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, LARGE_PAGE_CACHE_SIZE);
+            let page_cache = CacheRef::new(PAGE_SIZE, LARGE_PAGE_CACHE_SIZE);
             let cfg = cur_fix_cfg_with_cache(&context, page_cache.clone());
             let db = CurOFix256Mmb::init(context.child("storage"), cfg, None)
                 .await

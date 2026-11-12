@@ -22,6 +22,9 @@ workflows:
         # Only check normal dependencies.
         # Propagating to dev-dependencies leads to compilation issues.
         "--dep-kinds=normal:check,dev:ignore",
+        # The stability macros commonware-simd uses work without std, and forwarding
+        # its std feature to commonware-macros would pull in tokio.
+        "--ignore-missing-propagate=commonware-simd/std:commonware-macros/std",
         "--show-path",
         "--quiet",
       ]

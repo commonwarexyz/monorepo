@@ -1,5 +1,5 @@
 use crate::{
-    Blob, Buf, BufferPool, BufferPooler, Error, Handle, IoBufs, ReadOptions, WriteOptions,
+    Blob, Buf, Error, Handle, IoBufs, ReadOptions, WriteOptions,
     buffer::{SyncState, tip::Buffer},
 };
 use std::num::NonZeroUsize;
@@ -32,7 +32,7 @@ use std::num::NonZeroUsize;
 /// # Example
 ///
 /// ```
-/// use commonware_runtime::{Runner, BufferPooler, buffer::{Write, Read}, Blob, Error, Storage, deterministic};
+/// use commonware_runtime::{Runner, buffer::{Write, Read}, Blob, Error, Storage, deterministic};
 /// use commonware_utils::NZUsize;
 ///
 /// let executor = deterministic::Runner::default();
@@ -42,7 +42,7 @@ use std::num::NonZeroUsize;
 ///     assert_eq!(size, 0);
 ///
 ///     // Create a buffered writer with 16-byte buffer
-///     let blob = Write::from_pooler(&context, blob, 0, NZUsize!(16));
+///     let blob = Write::new(blob, 0, NZUsize!(16));
 ///     let blob = blob.write_at(0, b"hello").await.expect("write failed");
 ///     let blob = blob.sync().await.expect("sync failed");
 ///
@@ -54,7 +54,7 @@ use std::num::NonZeroUsize;
 ///     // Release the writer and read back the persisted data through a new open.
 ///     drop(blob);
 ///     let (blob, size) = context.open("my_partition", b"my_data").await.expect("unable to reopen blob");
-///     let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(8));
+///     let mut reader = Read::new(blob, size, NZUsize!(8));
 ///     let buf = reader.read(size as usize).await.expect("read failed");
 ///     assert_eq!(buf.coalesce().as_ref(), b"hello world!");
 /// });
@@ -73,23 +73,13 @@ pub struct Write<B: Blob> {
 impl<B: Blob> Write<B> {
     /// Creates a new [Write] that buffers up to `capacity` bytes of data to be appended to the tip
     /// of `blob` with the provided `size`.
-    pub fn new(blob: B, size: u64, capacity: NonZeroUsize, pool: BufferPool) -> Self {
+    pub fn new(blob: B, size: u64, capacity: NonZeroUsize) -> Self {
         Self {
             blob,
-            buffer: Buffer::new(size, capacity.get(), pool),
+            buffer: Buffer::new(size, capacity.get()),
             // Existing blob contents may not be durable yet.
             sync_state: SyncState::Dirty,
         }
-    }
-
-    /// Creates a new [Write], extracting the storage [BufferPool] from a [BufferPooler].
-    pub fn from_pooler(
-        pooler: &impl BufferPooler,
-        blob: B,
-        size: u64,
-        capacity: NonZeroUsize,
-    ) -> Self {
-        Self::new(blob, size, capacity, pooler.storage_buffer_pool().clone())
     }
 
     /// Returns the current logical size of the blob including any buffered data.

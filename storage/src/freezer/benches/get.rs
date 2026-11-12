@@ -1,26 +1,30 @@
 use super::utils::{FreezerType, Key, append_random, init};
+use commonware_bench::Inputs;
 use commonware_runtime::{
     Runner,
     benchmarks::{context, tokio},
     tokio::Config,
 };
 use commonware_storage::freezer::Identifier;
-use commonware_utils::TestRng;
+use commonware_utils::{TestRng, futures::try_join_all};
 use criterion::{Criterion, criterion_group};
-use futures::future::try_join_all;
 use rand::RngExt as _;
 use std::{hint::black_box, time::Instant};
 
 /// Items pre-loaded into the store.
-#[cfg(not(full_bench))]
-const ITEMS: u64 = 10_000;
-#[cfg(full_bench)]
-const ITEMS: u64 = 250_000;
+fn n_items() -> u64 {
+    match Inputs::current() {
+        Inputs::Full => 250_000,
+        _ => 10_000,
+    }
+}
 
-#[cfg(not(full_bench))]
-const READS: [usize; 1] = [1_000];
-#[cfg(full_bench)]
-const READS: [usize; 3] = [1_000, 10_000, 50_000];
+fn n_reads() -> &'static [usize] {
+    match Inputs::current() {
+        Inputs::Full => &[1_000, 10_000, 50_000],
+        _ => &[1_000],
+    }
+}
 
 /// Select random keys for benchmarking.
 pub fn select_keys(count: usize, keys: &[Key]) -> Vec<Key> {
@@ -65,7 +69,7 @@ fn bench_get(c: &mut Criterion) {
     let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
     let (keys, checkpoint) = builder.start(|ctx| async move {
         let store = init(ctx, None).await;
-        let (store, keys) = append_random(store, ITEMS).await;
+        let (store, keys) = append_random(store, n_items()).await;
         let checkpoint = store.close().await.unwrap();
         (keys, checkpoint)
     });
@@ -74,12 +78,13 @@ fn bench_get(c: &mut Criterion) {
     let runner = tokio::Runner::new(cfg.clone());
     for pattern in ["random", "recent"] {
         for mode in ["serial", "concurrent"] {
-            for reads in READS {
+            for &reads in n_reads() {
                 let label = format!(
-                    "{}/pattern={} mode={} reads={}",
+                    "{}/pattern={} mode={} items={} reads={}",
                     module_path!(),
                     pattern,
                     mode,
+                    n_items(),
                     reads
                 );
                 c.bench_function(&label, |b| {

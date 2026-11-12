@@ -15,7 +15,7 @@ workspace = true
 
 [features]
 default = [ "std" ]
-std = [ "commonware-macros/std" ]
+std = []
 fuzz = [ "arbitrary/derive", "dep:arbitrary", "std" ]
 
 [dependencies]

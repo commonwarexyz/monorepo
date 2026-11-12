@@ -17,15 +17,16 @@ use clap::{Args, ValueEnum};
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher, Keccak256, Sha256};
 use commonware_storage::{
-    merkle::{Graftable, Location, PendingChunk as _, mem::Mem, mmb, mmr, verification},
+    merkle::{
+        Graftable, Location, PendingChunk as _, mem::Mem, mmb, mmr, multi_proof_positions,
+        verification,
+    },
     qmdb::{
-        self,
-        any::{
-            ordered, unordered,
-            value::{FixedEncoding, VariableEncoding},
-        },
+        self, ProofExt as _,
+        any::{ordered, unordered},
         current::proof::RangeProof,
         immutable, keyless,
+        value::{FixedEncoding, VariableEncoding},
     },
 };
 use commonware_utils::{bitmap::Prunable, sequence::FixedBytes};
@@ -110,7 +111,7 @@ pub(crate) struct RangeArgs {
 pub(crate) struct MultiArgs {
     #[arg(long)]
     leaves: u64,
-    /// Comma-separated locations in caller order; duplicates must name identical operation bytes.
+    /// Comma-separated strictly ascending locations.
     #[arg(long, value_delimiter = ',', num_args = 1, required = true)]
     locations: Vec<u64>,
     #[arg(long)]
@@ -203,6 +204,12 @@ fn generate<F: Graftable, H: Hasher>(
                     "multi requires 1..=4096 locations within inactivity-floor..leaves".into(),
                 );
             }
+
+            // Planning the witness positions rejects locations that are not strictly ascending
+            // before the database is built.
+            let locs: Vec<_> = locations.iter().copied().map(Location::<F>::new).collect();
+            multi_proof_positions(Location::new(leaves), &locs)
+                .map_err(|error| error.to_string())?;
             locations[0]
         }
     };
@@ -437,7 +444,7 @@ fn prove_operations<F: Graftable, H: Hasher, O: Codec + Clone>(
                 )
                 .map_err(|error| error.to_string())?;
             let operations: Vec<_> = (*start..start + count).map(&operation).collect();
-            if !qmdb::verify_proof::<H, F, _>(&proof, Location::new(*start), &operations, &root) {
+            if !proof.verify::<H, _>(Location::new(*start), &operations, &root) {
                 return Err("Commonware rejected its operations range proof".into());
             }
             Ok(RangeOutput {
@@ -476,7 +483,7 @@ fn multi<F: Graftable, H: Hasher, O: Codec + Clone>(
         .iter()
         .map(|&loc| (Location::new(loc), operation(loc)))
         .collect();
-    if !qmdb::verify_multi_proof::<H, F, _>(&proof, &operations, &root) {
+    if !proof.verify_multi::<H, _>(&operations, &root) {
         return Err("Commonware rejected its operations multiproof".into());
     }
     let positions = qmdb_positions::<F>(tree.leaves, &locs, inactive)?;
@@ -502,6 +509,7 @@ mod tests {
     use super::*;
     use crate::Cli;
     use clap::Parser;
+    use commonware_storage::merkle::Error;
 
     type CurrentRange = <sol!((bytes32, uint256, uint256, uint256, bytes32[], bytes[], bytes, bytes32, bytes32, bytes32)) as SolType>::RustType;
     type CurrentMulti = <sol!((bytes32, uint256, uint256[], uint256, uint256[], bytes32[], bytes[], bytes32, bytes32, bytes32, bytes32)) as SolType>::RustType;
@@ -561,7 +569,11 @@ mod tests {
                         if floor != 0 {
                             assert_ne!(range.inactivePeaks, 0);
                         }
-                        let locations = format!("{},{},{}", start + count - 1, start, start);
+                        let locations = if count == 1 {
+                            start.to_string()
+                        } else {
+                            format!("{},{},{}", start, start + count / 2, start + count - 1)
+                        };
                         let encoded = run(&[
                             "--hash",
                             hash,
@@ -590,19 +602,27 @@ mod tests {
                         assert_eq!(multi.inactivePeaks, range.inactivePeaks);
                         assert_eq!(
                             multi.locations,
-                            vec![
-                                Uint256::from(start + count - 1),
-                                Uint256::from(start),
-                                Uint256::from(start)
-                            ]
+                            if count == 1 {
+                                vec![Uint256::from(start)]
+                            } else {
+                                vec![
+                                    Uint256::from(start),
+                                    Uint256::from(start + count / 2),
+                                    Uint256::from(start + count - 1),
+                                ]
+                            }
                         );
                         assert_eq!(
                             multi.operations,
-                            vec![
-                                range.operations.last().unwrap().clone(),
-                                range.operations[0].clone(),
-                                range.operations[0].clone()
-                            ]
+                            if count == 1 {
+                                vec![range.operations[0].clone()]
+                            } else {
+                                vec![
+                                    range.operations[0].clone(),
+                                    range.operations[(count / 2) as usize].clone(),
+                                    range.operations.last().unwrap().clone(),
+                                ]
+                            }
                         );
                         assert_eq!(multi.positions.len(), multi.digests.len());
                         assert!(multi.positions.windows(2).all(|pair| pair[0] < pair[1]));
@@ -674,7 +694,7 @@ mod tests {
                             "--leaves",
                             "17",
                             "--locations",
-                            "7,0,7",
+                            "0,3,7",
                             "--seed",
                             "0",
                         ];
@@ -695,8 +715,8 @@ mod tests {
                         assert_eq!(
                             multi_operations,
                             vec![
-                                operations[7].clone(),
                                 operations[0].clone(),
+                                operations[3].clone(),
                                 operations[7].clone()
                             ]
                         );
@@ -788,7 +808,11 @@ mod tests {
                                 );
                             }
                         }
-                        let locations = format!("{},{},{}", start + count - 1, start, start);
+                        let locations = if count == 1 {
+                            start.to_string()
+                        } else {
+                            format!("{},{},{}", start, start + count / 2, start + count - 1)
+                        };
                         let encoded = run(&[
                             "--hash",
                             hash,
@@ -876,7 +900,7 @@ mod tests {
                     }
                 }
 
-                let locations = format!("{},{},{}", start + count - 1, start, start);
+                let locations = format!("{},{},{}", start, start + count / 2, start + count - 1);
                 let encoded = run(&[
                     "--hash",
                     "keccak256",
@@ -962,6 +986,35 @@ mod tests {
                 assert_eq!(error, format!("{field} requires --root current"));
             }
         }
+    }
+
+    #[test]
+    fn unordered_locations_are_rejected_before_materialization() {
+        // The leaf count exceeds the database size limit, so these errors come from the ordering
+        // check that runs before the database is built.
+        fn check<F: Graftable>(family: TreeKind) {
+            let options = Options {
+                family,
+                variant: Variant::Unordered,
+                encoding: Encoding::Fixed,
+                root: RootKind::Operations,
+                inactivity_floor: 0,
+                activity: None,
+                chunk_bytes: None,
+            };
+            for (locations, expected) in [
+                (vec![7, 7], Error::<F>::DuplicateLocation(Location::new(7))),
+                (vec![0, 7, 7], Error::DuplicateLocation(Location::new(7))),
+                (vec![7, 0, 7], Error::UnsortedLocation(Location::new(0))),
+            ] {
+                let error =
+                    generate::<F, Keccak256>(1_000_001, 17, &options, &Selection::Multi(locations))
+                        .unwrap_err();
+                assert_eq!(error, expected.to_string());
+            }
+        }
+        check::<mmr::Family>(TreeKind::Mmr);
+        check::<mmb::Family>(TreeKind::Mmb);
     }
 
     #[test]

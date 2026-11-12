@@ -25,6 +25,12 @@
 //! revisits scanned views on its own (a rescan re-issues fetches for requests that are still
 //! pending, which the resolver engine deduplicates).
 //!
+//! On startup the voter forwards every certificate it recovers from its journal in view order, so
+//! a certificate can arrive before the finalization or certified notarization that covers it.
+//! Background repair waits until the voter reports that replay is complete. Certificates and
+//! verdicts received before then are recorded. Repair then scans anchors above the recovered floor
+//! and requests exact views for failed certifications that still need a covering nullification.
+//!
 //! # Proposal Ancestry
 //!
 //! Background repair cannot detect a split where one participant certifies a notarization while
@@ -38,8 +44,8 @@
 //! Otherwise serving prefers an exact certified notarization to a covering nullification, matching
 //! proposal construction. If neither is retained, the responder serves its floor for views at or
 //! below it. The highest finalization remains servable even when a certified notarization at the
-//! same or a higher view holds the construction floor. The requester treats a valid response that
-//! does not settle its ask as ambiguous and retries without faulting the peer.
+//! same or a higher view holds the construction floor. A valid response earns credit if it
+//! settles at least one delivered ask. Unresolved asks are retried without faulting the peer.
 //!
 //! A notarization is served only after local certification succeeds. Possession still settles the
 //! holder's own ask, because certification judges evidence already in hand. A failed verdict also
@@ -89,9 +95,12 @@ pub use actor::Actor;
 use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
+use commonware_utils::NonZeroDuration;
 pub use ingress::Mailbox;
 #[cfg(test)]
 pub use ingress::MailboxMessage;
+#[cfg(test)]
+pub(crate) use state::{Effect, State};
 use std::{num::NonZeroUsize, time::Duration};
 
 pub struct Config<S: Scheme, B: Blocker, T: Strategy> {
@@ -104,7 +113,8 @@ pub struct Config<S: Scheme, B: Blocker, T: Strategy> {
 
     pub epoch: Epoch,
     pub mailbox_size: NonZeroUsize,
-    pub fetch_timeout: Duration,
+    pub fetch_timeout: NonZeroDuration,
+    pub fetch_retry_delay: Duration,
     pub term_length: TermLength,
 }
 

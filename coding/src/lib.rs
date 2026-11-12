@@ -147,8 +147,8 @@ commonware_macros::stability_scope!(ALPHA {
         type Commitment: Digest;
         /// A shard of data, to be received by a participant.
         ///
-        /// Shards decode with a [`Config`] and the maximum number of data bytes, and reject any
-        /// shard wider than [`Self::encode`] produces for that much data.
+        /// Shards decode with a [`Config`] and the maximum number of input data bytes. Their data
+        /// portion must be no wider than [`Self::encode`] produces for those inputs.
         type Shard: Clone + Debug + Eq + Codec<Cfg = (Config, usize)> + Send + Sync + 'static;
         /// A shard that has been checked for inclusion in the commitment.
         ///
@@ -156,6 +156,10 @@ commonware_macros::stability_scope!(ALPHA {
         type CheckedShard: Clone + Send + Sync;
         /// The type of errors that can occur during encoding, checking, and decoding.
         type Error: std::fmt::Debug + Send;
+
+        /// Returns an upper bound on the encoded size of any shard [`Self::encode`] produces under
+        /// `config` from at most `data` bytes, using each encoded type's maximum width.
+        fn max_shard_size(config: &Config, data: usize) -> usize;
 
         /// Encode a piece of data, returning a commitment, along with shards, and proofs.
         ///

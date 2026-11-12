@@ -18,6 +18,18 @@ pub struct Metrics {
     pid: sysinfo::Pid,
     /// System information handle.
     system: System,
+    /// Allocator statistics, present when mimalloc is the global allocator.
+    #[cfg(all(
+        feature = "mimalloc",
+        not(any(
+            commonware_stability_BETA,
+            commonware_stability_GAMMA,
+            commonware_stability_DELTA,
+            commonware_stability_EPSILON,
+            commonware_stability_RESERVED
+        ))
+    ))]
+    allocator: Option<super::allocator::mimalloc::Metrics>,
 }
 
 impl Metrics {
@@ -37,6 +49,17 @@ impl Metrics {
             ),
 
             system: System::new(),
+            #[cfg(all(
+                feature = "mimalloc",
+                not(any(
+                    commonware_stability_BETA,
+                    commonware_stability_GAMMA,
+                    commonware_stability_DELTA,
+                    commonware_stability_EPSILON,
+                    commonware_stability_RESERVED
+                ))
+            ))]
+            allocator: super::allocator::mimalloc::Metrics::init(registry),
         }
     }
 
@@ -53,6 +76,19 @@ impl Metrics {
         if let Some(process) = self.system.process(self.pid) {
             let _ = self.rss.try_set(process.memory());
             let _ = self.virtual_memory.try_set(process.virtual_memory());
+        }
+        #[cfg(all(
+            feature = "mimalloc",
+            not(any(
+                commonware_stability_BETA,
+                commonware_stability_GAMMA,
+                commonware_stability_DELTA,
+                commonware_stability_EPSILON,
+                commonware_stability_RESERVED
+            ))
+        ))]
+        if let Some(allocator) = &mut self.allocator {
+            allocator.update();
         }
     }
 
@@ -102,5 +138,27 @@ mod tests {
         );
 
         // Because tests may be run in parallel, we can't assert anything about the value of the metrics.
+    }
+
+    /// The crate's test binary does not install mimalloc, so the allocator
+    /// family must not be registered. The `mimalloc_metrics` integration test
+    /// covers the registered case.
+    #[cfg(all(
+        feature = "mimalloc",
+        not(any(
+            commonware_stability_BETA,
+            commonware_stability_GAMMA,
+            commonware_stability_DELTA,
+            commonware_stability_EPSILON,
+            commonware_stability_RESERVED
+        ))
+    ))]
+    #[test]
+    fn test_allocator_metrics_skipped_without_mimalloc() {
+        let mut registry = crate::telemetry::metrics::Registry::default();
+        let mut metrics = Metrics::init(&mut registry);
+        assert!(metrics.allocator.is_none());
+        metrics.update();
+        assert!(!registry.encode().contains("allocator_committed_bytes"));
     }
 }
