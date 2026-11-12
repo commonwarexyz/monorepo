@@ -611,6 +611,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     pub const CHUNK_SIZE: usize = Inner::<E, A>::CHUNK_SIZE;
 
     /// Prove validation floors without opening a writer or mutating their blobs.
+    ///
+    /// `minimum_items` maps a section to the number of items its durable marker protects. An
+    /// empty map opens every section with no floor.
     pub async fn preflight_floors(
         context: E,
         cfg: Config,
@@ -621,6 +624,10 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
     /// Validate the terminal boundary of every checkpoint-covered section without mutating
     /// storage. Interior pages are not read.
+    ///
+    /// `size` is the logical byte size of `section` and must be a multiple of
+    /// [Self::CHUNK_SIZE]. [Recovery::finish] then durably truncates `section` to `size` bytes
+    /// and removes every later section.
     pub async fn preflight_restore(
         context: E,
         cfg: Config,

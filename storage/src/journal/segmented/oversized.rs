@@ -5406,52 +5406,94 @@ mod tests {
         assert!(interrupted > 0, "some seed must interrupt the prune");
     }
 
-    /// A checkpoint restore removes the value sections a prune interrupted between its index and
-    /// value removals left behind, rather than reporting them as lost index data.
+    /// A checkpoint restore after a prune interrupted at any step keeps every entry at or above
+    /// the oldest retained index section. The index is pruned before the values, so an
+    /// interruption can leave value sections with no index section, which the restore removes,
+    /// and never an index section whose values are gone.
     #[test_traced]
     fn test_init_with_checkpoint_after_interrupted_prune() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg();
-            let mut journal: Oversized<_, TestEntry, TestValue> =
-                Oversized::init_with_checkpoint(context.child("first"), cfg.clone(), (0, 0))
-                    .await
-                    .unwrap();
-            for section in 0..3u64 {
-                (journal, _, _, _) = journal
-                    .append(section, TestEntry::new(section, 0, 0), &[section as u8; 16])
-                    .await
-                    .unwrap();
+        const SECTIONS: u64 = 4;
+        const FLOOR: u64 = 3;
+        let mut orphaned = 0;
+        for seed in 0..64u64 {
+            let (failed, checkpoint) =
+                deterministic::Runner::seeded(seed).start_and_recover(|context| async move {
+                    // Make one entry per section durable.
+                    let mut journal: Oversized<_, TestEntry, TestValue> =
+                        Oversized::init_with_checkpoint(context.child("first"), test_cfg(), (0, 0))
+                            .await
+                            .unwrap();
+                    for section in 0..SECTIONS {
+                        (journal, _, _, _) = journal
+                            .append(section, TestEntry::new(section, 0, 0), &[section as u8; 16])
+                            .await
+                            .unwrap();
+                    }
+                    journal = journal.sync_all().await.unwrap();
+
+                    // Fail removals at random so the prune stops at different steps.
+                    context.storage_fault_config().write().remove_rate = Some(probability!(0.3));
+                    let result = journal.prune(FLOOR).await;
+                    context.storage_fault_config().write().remove_rate = None;
+                    result.is_err()
+                });
+            if !failed {
+                continue;
             }
-            journal = journal.sync_all().await.unwrap();
-            let checkpoint = (2, journal.size(2).unwrap());
 
-            // Prune the index below section 2 and stop before the values are pruned.
-            (journal.index, _) = journal.index.prune(2).await.unwrap();
-            drop(journal);
+            let stopped_between =
+                deterministic::Runner::from(checkpoint).start(|context| async move {
+                    // A prune that stopped after its index removals leaves value sections the index
+                    // no longer names.
+                    let index = context.scan("test-index").await.unwrap();
+                    let values = context.scan("test-values").await.unwrap();
+                    let stopped_between = values.iter().any(|section| !index.contains(section));
 
-            let journal = Oversized::<_, TestEntry, TestValue>::init_with_checkpoint(
-                context.child("restore"),
-                cfg,
-                checkpoint,
-            )
-            .await
-            .unwrap();
-            assert_eq!(journal.oldest_section(), Some(2));
-            assert_eq!(
-                context.scan("test-values").await.unwrap(),
-                vec![2u64.to_be_bytes().to_vec()]
-            );
-            let entry = journal.get(2, 0).await.unwrap();
-            assert_eq!(
-                journal
-                    .get_value(2, entry.value_offset, entry.value_size)
+                    // The restore keeps the last section whole and every section the index retains.
+                    let journal = Oversized::<_, TestEntry, TestValue>::init_with_checkpoint(
+                        context.child("restore"),
+                        test_cfg(),
+                        (SECTIONS - 1, ENTRY_SIZE),
+                    )
                     .await
-                    .unwrap(),
-                [2; 16]
-            );
-            journal.destroy().await.unwrap();
-        });
+                    .expect("an interrupted prune must leave a restorable image");
+                    let oldest = journal
+                        .oldest_section()
+                        .expect("the last section is retained");
+                    assert!(
+                        oldest <= FLOOR,
+                        "the prune floor bounds what a prune removes"
+                    );
+                    for section in oldest..SECTIONS {
+                        let entry = journal.get(section, 0).await.unwrap();
+                        assert_eq!(entry.id, section, "a retained entry must keep its section");
+                        assert_eq!(
+                            journal
+                                .get_value(section, entry.value_offset, entry.value_size)
+                                .await
+                                .unwrap(),
+                            [u8::try_from(section).expect("section must fit in a byte"); 16],
+                            "a retained entry must read back its value"
+                        );
+                    }
+
+                    // The value sections that lost their index section are gone.
+                    assert_eq!(
+                        context.scan("test-values").await.unwrap(),
+                        context.scan("test-index").await.unwrap(),
+                        "every value section must have an index section"
+                    );
+                    journal.destroy().await.unwrap();
+                    stopped_between
+                });
+            if stopped_between {
+                orphaned += 1;
+            }
+        }
+        assert!(
+            orphaned > 0,
+            "some seed must stop between the index and value removals"
+        );
     }
 
     /// A checkpoint restore still rejects a value-only section between the oldest retained index
