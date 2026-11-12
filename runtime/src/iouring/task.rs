@@ -2599,17 +2599,23 @@ mod loom_tests {
     /// before a blocking poll, and that last return hands a kick the counts
     /// suppressed to a parked peer. The claim's notification may also arrive
     /// only after the worker ran on, and dropping the searcher returns the
-    /// count as an unwind does. Worker zero holds two runnables queued
-    /// without a kick.
-    fn claim_after_search_cas(delayed: bool, dropping: bool) {
-        let backlog = KICK;
+    /// count as an unwind does. Worker zero holds `backlog` runnables queued
+    /// without a kick. A backlog of one is a lone runnable, which only a claim
+    /// rounded up takes, so that backlog needs an ordinary pool.
+    fn claim_after_search_cas(
+        make_pool: MakePool,
+        bound: usize,
+        backlog: usize,
+        delayed: bool,
+        dropping: bool,
+    ) {
         // The backlog and the task the push brings.
         let tasks = backlog + 1;
 
         let mut builder = loom::model::Builder::new();
-        builder.preemption_bound = Some(2);
+        builder.preemption_bound = Some(bound);
         builder.check(move || {
-            let (pool, parkers) = pool(4);
+            let (pool, parkers) = make_pool(4);
             let [p0, p1, _p2, p3] = parker_array(parkers);
             let set = Arc::new(Tasks::new(4));
             let completed = Arc::new(AtomicUsize::new(0));
@@ -2733,19 +2739,6 @@ mod loom_tests {
             assert_eq!(pool.idle().search_count(), 0);
             assert!((0..4).all(|index| !pool.idle().is_idle(index)));
         });
-    }
-
-    /// Each notification timing and count return runs in its own model.
-    #[rstest]
-    #[case::prompt_return(false, false)]
-    #[case::prompt_drop(false, true)]
-    #[case::delayed_return(true, false)]
-    #[case::delayed_drop(true, true)]
-    fn test_claim_after_search_cas_hands_on_before_a_blocking_poll(
-        #[case] delayed: bool,
-        #[case] dropping: bool,
-    ) {
-        claim_after_search_cas(delayed, dropping);
     }
 
     /// A parker that returns the last search count and runs because the
@@ -2872,6 +2865,43 @@ mod loom_tests {
     #[test]
     fn test_kick_left_to_a_searcher_is_handed_on_through_quiescence() {
         kick_left_to_a_searcher(pool_rounding_down, 1);
+    }
+
+    /// The claim model with claims rounded down, at two preemptions.
+    #[rstest]
+    #[case::prompt_return(false, false)]
+    #[case::prompt_drop(false, true)]
+    #[case::delayed_return(true, false)]
+    #[case::delayed_drop(true, true)]
+    fn test_claim_after_search_cas_hands_on_before_a_blocking_poll(
+        #[case] delayed: bool,
+        #[case] dropping: bool,
+    ) {
+        claim_after_search_cas(pool_rounding_down, 2, KICK, delayed, dropping);
+    }
+
+    /// The claim model on ordinary run queues, where the woken peer and
+    /// worker zero also race for the lone runnable that the peer's first
+    /// steal leaves, at one preemption.
+    #[test]
+    fn test_claim_after_search_cas_hands_on_before_a_blocking_poll_with_lone_steals() {
+        for delayed in [false, true] {
+            for dropping in [false, true] {
+                claim_after_search_cas(pool, 1, KICK, delayed, dropping);
+            }
+        }
+    }
+
+    /// The claim model on ordinary run queues with a lone runnable as its
+    /// backlog, at two preemptions. The claimed look took its count for that
+    /// runnable, which the peer that the last return wakes then steals.
+    #[test]
+    fn test_claim_after_search_cas_hands_on_a_lone_runnable_before_a_blocking_poll() {
+        for delayed in [false, true] {
+            for dropping in [false, true] {
+                claim_after_search_cas(pool, 2, 1, delayed, dropping);
+            }
+        }
     }
 
     /// The run-after model with claims rounded down, at two preemptions.
