@@ -25,7 +25,7 @@ const MAX_RESTARTS: u8 = 3;
 
 /// The tape: every byte the structured knobs left, or one zero byte so a run
 /// always has entropy to seed from.
-fn tape(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Vec<u8>> {
+pub(crate) fn tape(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Vec<u8>> {
     let remaining = u.len().min(MAX_RAW_BYTES);
     if remaining == 0 {
         Ok(vec![0])

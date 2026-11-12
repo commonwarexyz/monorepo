@@ -28,10 +28,9 @@ const MAX_BLOCKS: usize = 8;
 const MAX_TRANSFERS: usize = 24;
 const MAX_CHANGES: usize = 4;
 
-/// Bytes of the stream a session is sampled from, enough for all but the longest sessions, of
-/// the input's head that seeds the stream, and of the stream's tail that seeds the runtime.
+/// Bytes of the stream a session is sampled from, enough for all but the longest sessions, and
+/// of the stream's tail that seeds the runtime.
 const STREAM_BYTES: usize = 1 << 12;
-const SEED_BYTES: usize = 8;
 const ENTROPY_BYTES: usize = 32;
 
 /// Bulk batches straddle the 8,192 transfers past which a plan hashes in batches, and start at
@@ -220,11 +219,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
         // fixed-size stream of [`FuzzRng`] output that the rest of the input overwrites from its
         // start, so every input, even an empty one, samples whole blocks, and a byte mutated
         // past the head changes only what is sampled from it.
-        let seed = u.bytes(u.len().min(SEED_BYTES))?.to_vec();
-        let mut stream = vec![0; STREAM_BYTES.max(u.len())];
-        FuzzRng::new(seed).fill_bytes(&mut stream);
-        let literal = u.bytes(u.len())?;
-        stream[..literal.len()].copy_from_slice(literal);
+        let stream = commonware_glue_fuzz::input::stream(u, STREAM_BYTES)?;
         let (session, entropy) = stream.split_at(stream.len() - ENTROPY_BYTES);
         let u = &mut Unstructured::new(session);
 

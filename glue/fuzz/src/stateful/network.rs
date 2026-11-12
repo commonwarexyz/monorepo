@@ -29,33 +29,77 @@
 // bindings below stay so the shape survives a scheme whose configuration is not.
 #![allow(clippy::let_unit_value)]
 
-use super::{Digest, PublicKey, Scheme, marshal::Marshal};
+use super::{Digest, MAX_CASES, PREFIX_ROUNDS, PublicKey, Scheme, marshal::Marshal};
 use commonware_codec::{Decode, DecodeExt, Read};
 use commonware_consensus::{
     Viewable,
     marshal::resolver::handler::Key as BackfillKey,
     simplex::{
-        mocks::twins::Scenario,
+        mocks::twins::{self, Scenario},
         types::{Certificate, Vote},
     },
     types::{TermLength, View},
 };
-use commonware_cryptography::certificate::Verifier;
+use commonware_cryptography::{
+    Digest as DigestTrait,
+    certificate::{Scheme as CertificateScheme, Verifier},
+};
 use commonware_p2p::{
     Recipients,
     simulated::{SplitOrigin, SplitTarget},
 };
 use commonware_resolver::p2p::mocks::{Message as ResolverMessage, Payload as ResolverPayload};
 use commonware_runtime::IoBuf;
-use commonware_utils::sequence::U64;
+use commonware_utils::{FuzzRng, sequence::U64};
 use std::sync::Arc;
 
-/// Codec configuration for decoding certificates off the wire.
-type CertificateCfg = <<Scheme as Verifier>::Certificate as Read>::Cfg;
+/// Draw the twins cases from `entropy` and select one.
+///
+/// Returns the compromised identity and its scenario, or `None` if the
+/// generator produced no case.
+pub(crate) fn select_case(
+    entropy: Vec<u8>,
+    participants: usize,
+    sustained: bool,
+    case_selector: u16,
+) -> Option<(usize, Scenario)> {
+    let mut scenario_rng = FuzzRng::new(entropy);
+    let cases = twins::cases(
+        &mut scenario_rng,
+        twins::Framework {
+            participants,
+            faults: 1,
+            rounds: PREFIX_ROUNDS,
+            mode: if sustained {
+                twins::Mode::Sustained
+            } else {
+                twins::Mode::Sampled
+            },
+            max_cases: MAX_CASES,
+        },
+    );
+    if cases.is_empty() {
+        return None;
+    }
+    let selected = usize::from(case_selector) % cases.len();
+    let case = cases
+        .into_iter()
+        .nth(selected)
+        .expect("selected twins case must exist");
+    let compromised = *case
+        .compromised
+        .first()
+        .expect("twins case must compromise one identity");
+    assert!(
+        compromised < participants,
+        "twins case compromised an identity outside the validator set"
+    );
+    Some((compromised, case.scenario))
+}
 
 /// How one message is to be routed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Routing {
+pub(crate) enum Routing {
     /// The message belongs to this view and is partitioned by it.
     Partition(View),
     /// The message decodes but names no view.
@@ -64,16 +108,19 @@ enum Routing {
     Undecodable,
 }
 
-/// Classify a message on the vote channel. Votes name the marshal variant's
-/// payload.
-fn vote_routing<M: Marshal>(message: &IoBuf) -> Routing {
-    Vote::<Scheme, M::Payload>::decode(message.clone())
+/// Classify a message on the vote channel. Votes name the payload `D` under
+/// the scheme `S`.
+pub(crate) fn vote_routing<S: CertificateScheme, D: DigestTrait>(message: &IoBuf) -> Routing {
+    Vote::<S, D>::decode(message.clone())
         .map_or(Routing::Undecodable, |vote| Routing::Partition(vote.view()))
 }
 
 /// Classify a message on the certificate channel.
-fn certificate_routing<M: Marshal>(message: &IoBuf, codec: &CertificateCfg) -> Routing {
-    Certificate::<Scheme, M::Payload>::decode_cfg(message.clone(), codec)
+pub(crate) fn certificate_routing<S: CertificateScheme, D: DigestTrait>(
+    message: &IoBuf,
+    codec: &<S::Certificate as Read>::Cfg,
+) -> Routing {
+    Certificate::<S, D>::decode_cfg(message.clone(), codec)
         .map_or(Routing::Undecodable, |certificate| {
             Routing::Partition(certificate.view())
         })
@@ -83,18 +130,19 @@ fn certificate_routing<M: Marshal>(message: &IoBuf, codec: &CertificateCfg) -> R
 ///
 /// A request names its view directly. A response carries a certificate, whose
 /// view is the one it answers for. An error names nothing.
-fn simplex_resolver_routing<M: Marshal>(message: &IoBuf, codec: &CertificateCfg) -> Routing {
+pub(crate) fn simplex_resolver_routing<S: CertificateScheme, D: DigestTrait>(
+    message: &IoBuf,
+    codec: &<S::Certificate as Read>::Cfg,
+) -> Routing {
     let Ok(message) = ResolverMessage::<U64>::decode(message.clone()) else {
         return Routing::Undecodable;
     };
     match message.payload {
         ResolverPayload::Request(key) => Routing::Partition(View::new(u64::from(key))),
-        ResolverPayload::Response(bytes) => {
-            Certificate::<Scheme, M::Payload>::decode_cfg(bytes, codec)
-                .map_or(Routing::Undecodable, |certificate| {
-                    Routing::Partition(certificate.view())
-                })
-        }
+        ResolverPayload::Response(bytes) => Certificate::<S, D>::decode_cfg(bytes, codec)
+            .map_or(Routing::Undecodable, |certificate| {
+                Routing::Partition(certificate.view())
+            }),
         ResolverPayload::Error => Routing::Viewless,
     }
 }
@@ -103,7 +151,7 @@ fn simplex_resolver_routing<M: Marshal>(message: &IoBuf, codec: &CertificateCfg)
 ///
 /// Only a request for a notarized proposal names a round; requests addressed by
 /// block digest or by height, and every response, name no view.
-fn backfill_routing(message: &IoBuf) -> Routing {
+pub(crate) fn backfill_routing(message: &IoBuf) -> Routing {
     let Ok(message) = ResolverMessage::<BackfillKey<Digest>>::decode(message.clone()) else {
         return Routing::Undecodable;
     };
@@ -124,7 +172,7 @@ fn broadcast_routing<M: Marshal>(message: &IoBuf) -> Routing {
 }
 
 /// Build the outbound half of a split channel.
-fn forwarder(
+pub(crate) fn forwarder(
     participants: Arc<[PublicKey]>,
     scenario: Scenario,
     term_length: TermLength,
@@ -149,7 +197,7 @@ fn forwarder(
 }
 
 /// Build the inbound half of a split channel.
-fn router(
+pub(crate) fn router(
     participants: Arc<[PublicKey]>,
     scenario: Scenario,
     term_length: TermLength,
@@ -165,7 +213,7 @@ fn router(
 }
 
 macro_rules! channel {
-    ($forward:ident, $route:ident, $classify:ident) => {
+    ($forward:ident, $route:ident, $classify:expr) => {
         pub(super) fn $forward<M: Marshal>(
             participants: Arc<[PublicKey]>,
             scenario: Scenario,
@@ -175,7 +223,7 @@ macro_rules! channel {
         + Sync
         + Clone
         + 'static {
-            forwarder(participants, scenario, term_length, $classify::<M>)
+            forwarder(participants, scenario, term_length, $classify)
         }
 
         pub(super) fn $route<M: Marshal>(
@@ -183,13 +231,21 @@ macro_rules! channel {
             scenario: Scenario,
             term_length: TermLength,
         ) -> impl Fn(&(PublicKey, IoBuf)) -> SplitTarget + Send + Sync + 'static {
-            router(participants, scenario, term_length, $classify::<M>)
+            router(participants, scenario, term_length, $classify)
         }
     };
 }
 
-channel!(vote_forwarder, vote_router, vote_routing);
-channel!(broadcast_forwarder, broadcast_router, broadcast_routing);
+channel!(
+    vote_forwarder,
+    vote_router,
+    vote_routing::<Scheme, M::Payload>
+);
+channel!(
+    broadcast_forwarder,
+    broadcast_router,
+    broadcast_routing::<M>
+);
 
 pub(super) fn backfill_forwarder(
     participants: Arc<[PublicKey]>,
@@ -223,7 +279,7 @@ pub(super) fn certificate_forwarder<M: Marshal>(
 + 'static {
     let codec = scheme.certificate_codec_config();
     forwarder(participants, scenario, term_length, move |message| {
-        certificate_routing::<M>(message, &codec)
+        certificate_routing::<Scheme, M::Payload>(message, &codec)
     })
 }
 
@@ -235,7 +291,7 @@ pub(super) fn certificate_router<M: Marshal>(
 ) -> impl Fn(&(PublicKey, IoBuf)) -> SplitTarget + Send + Sync + 'static {
     let codec = scheme.certificate_codec_config();
     router(participants, scenario, term_length, move |message| {
-        certificate_routing::<M>(message, &codec)
+        certificate_routing::<Scheme, M::Payload>(message, &codec)
     })
 }
 
@@ -251,7 +307,7 @@ pub(super) fn resolver_forwarder<M: Marshal>(
 + 'static {
     let codec = scheme.certificate_codec_config();
     forwarder(participants, scenario, term_length, move |message| {
-        simplex_resolver_routing::<M>(message, &codec)
+        simplex_resolver_routing::<Scheme, M::Payload>(message, &codec)
     })
 }
 
@@ -263,13 +319,13 @@ pub(super) fn resolver_router<M: Marshal>(
 ) -> impl Fn(&(PublicKey, IoBuf)) -> SplitTarget + Send + Sync + 'static {
     let codec = scheme.certificate_codec_config();
     router(participants, scenario, term_length, move |message| {
-        simplex_resolver_routing::<M>(message, &codec)
+        simplex_resolver_routing::<Scheme, M::Payload>(message, &codec)
     })
 }
 
-/// The database-sync channel carries no view, so both halves receive every
-/// inbound message.
-pub(super) fn shared_router() -> impl Fn(&(PublicKey, IoBuf)) -> SplitTarget + Send + Sync + 'static
+/// The router of a channel whose messages carry no view, such as the
+/// database-sync channel: both halves receive every inbound message.
+pub(crate) fn shared_router() -> impl Fn(&(PublicKey, IoBuf)) -> SplitTarget + Send + Sync + 'static
 {
     |_| SplitTarget::Both
 }

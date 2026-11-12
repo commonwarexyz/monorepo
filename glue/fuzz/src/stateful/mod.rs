@@ -51,6 +51,8 @@
 //!   interrupt the sync or follow its completion.
 //! - `probe` drives the real `Probe` actors through their public boundaries
 //!   under an adversarial event program and checks floor provenance.
+//! - `observe` holds what a probe driver watches an actor through and seeds a
+//!   marshal with, shared with the DKG probe driver.
 //! - `invariants` records what each engine delivered, committed, and verified,
 //!   and holds the checks.
 
@@ -63,14 +65,16 @@ mod backend;
 mod db_restarts;
 #[cfg(feature = "stateful-db-sync")]
 mod db_sync;
-mod input;
+pub(crate) mod input;
 mod invariants;
 mod marshal;
 #[cfg(any(
+    feature = "dkg",
     feature = "stateful-cert-mock-twins",
     feature = "stateful-cert-mock-twins-coding"
 ))]
-mod network;
+pub(crate) mod network;
+pub(crate) mod observe;
 #[cfg(feature = "stateful-probe")]
 mod probe;
 #[cfg(any(
@@ -78,8 +82,8 @@ mod probe;
     feature = "stateful-cert-mock-restarts-db"
 ))]
 mod restarts;
-mod runner;
-mod stack;
+pub(crate) mod runner;
+pub(crate) mod stack;
 #[cfg(feature = "stateful-cert-mock-state-sync")]
 mod state_sync;
 #[cfg(any(

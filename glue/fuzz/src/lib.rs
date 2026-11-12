@@ -5,4 +5,7 @@
 // query depth.
 #![recursion_limit = "256"]
 
+#[cfg(feature = "dkg")]
+pub mod dkg;
+pub mod input;
 pub mod stateful;

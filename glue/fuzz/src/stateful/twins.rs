@@ -11,7 +11,7 @@
 //! `Deferred`. The scenario, the applications, and the invariants are the same.
 
 use super::{
-    MAX_CASES, NUM_IDENTITIES, PREFIX_ROUNDS, RUN_TIMEOUT,
+    NUM_IDENTITIES, PREFIX_ROUNDS, RUN_TIMEOUT,
     app::{Block, CorrectApp, FaultSchedule, FaultyApp},
     backend::{Any, Backend},
     input::StatefulTwinsFuzzInput,
@@ -20,7 +20,7 @@ use super::{
     network::{
         backfill_forwarder, backfill_router, broadcast_forwarder, broadcast_router,
         certificate_forwarder, certificate_router, resolver_forwarder, resolver_router,
-        shared_router, vote_forwarder, vote_router,
+        select_case, shared_router, vote_forwarder, vote_router,
     },
     runner::{self, CorrectEngine, NodeConfig, Outcome, RunReport},
     stack::{
@@ -111,38 +111,14 @@ where
     let participants = cluster.participants.clone();
 
     // Draw the twins scenario from the tape.
-    let mut scenario_rng = FuzzRng::new(entropy.clone());
-    let cases = twins::cases(
-        &mut scenario_rng,
-        twins::Framework {
-            participants: participants.len(),
-            faults: 1,
-            rounds: PREFIX_ROUNDS,
-            mode: if input.sustained {
-                twins::Mode::Sustained
-            } else {
-                twins::Mode::Sampled
-            },
-            max_cases: MAX_CASES,
-        },
-    );
-    if cases.is_empty() {
+    let Some((compromised, scenario)) = select_case(
+        entropy.clone(),
+        participants.len(),
+        input.sustained,
+        input.case_selector,
+    ) else {
         return RunReport::skipped(target, B::NAME, M::NAME, Outcome::NoCase);
-    }
-    let selected = usize::from(input.case_selector) % cases.len();
-    let case = cases
-        .into_iter()
-        .nth(selected)
-        .expect("selected twins case must exist");
-    let compromised = *case
-        .compromised
-        .first()
-        .expect("twins case must compromise one identity");
-    assert!(
-        compromised < participants.len(),
-        "twins case compromised an identity outside the validator set"
-    );
-    let scenario = case.scenario;
+    };
     let term_length = input.term_length;
     let elector = twins::Elector::new(round_robin(term_length), &scenario, participants.len());
 

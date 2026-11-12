@@ -2319,6 +2319,7 @@ name = "commonware-glue-fuzz"
 version = "2026.10.0"
 dependencies = [
  "arbitrary",
+ "bytes",
  "commonware-actor",
  "commonware-broadcast",
  "commonware-codec",
@@ -2327,6 +2328,7 @@ dependencies = [
  "commonware-cryptography",
  "commonware-glue",
  "commonware-macros",
+ "commonware-math",
  "commonware-p2p",
  "commonware-parallel",
  "commonware-resolver",
@@ -2334,6 +2336,7 @@ dependencies = [
  "commonware-storage",
  "commonware-utils",
  "futures",
+ "governor",
  "libfuzzer-sys",
  "rand 0.10.2",
  "rand_core 0.10.1",
