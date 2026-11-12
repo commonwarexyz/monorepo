@@ -46,6 +46,12 @@
 //! Before either queues, the kernel compares the word with the armed snapshot
 //! under its futex lock and fails the wait at once if they differ.
 //!
+//! The thread wait uses futex2 `futex_wait` rather than `FUTEX_WAIT`, whose
+//! timeout the kernel may delay by up to the thread's timer slack, 50 us by
+//! default. Like the ring wait's `io_uring_enter` timeout, a futex2 timeout
+//! takes no slack, so a fully idle worker wakes for its next timer as promptly
+//! as one with requests in flight, and the thread's slack stays as it is.
+//!
 //! A notification leaves no permit behind, so each place it can fall relative
 //! to a turn is covered separately:
 //! - Before the observation, the observation includes it, so the checks that
@@ -152,9 +158,102 @@ const INCREMENT: u32 = 2;
 /// Waiters one wake releases: a ring wait an earlier park left queued, and the
 /// wait of the worker's current park.
 const WAKE_COUNT: u32 = 2;
-/// futex2 flags of the ring wait: a private 32-bit word.
+/// futex2 flags of the ring and thread waits: a private 32-bit word.
 #[cfg(not(feature = "loom"))]
 const FUTEX2_PRIVATE_U32: u32 = 0x02 | libc::FUTEX_PRIVATE_FLAG as u32;
+cfg_if::cfg_if! {
+    if #[cfg(all(not(feature = "loom"), not(miri)))] {
+        /// System call of the thread wait: futex2 `futex_wait`, which `libc`
+        /// does not name. Linux numbers each system call added since 5.1 alike
+        /// on every architecture, relative to its base, so it is
+        /// `io_uring_setup` plus 30.
+        const IDLE_WAIT_SYSCALL: libc::c_long = libc::SYS_io_uring_setup + 30;
+
+        /// Block on `word` while it equals `snapshot`, for at most `timeout`,
+        /// returning the system call's result.
+        ///
+        /// The timeout is an absolute `CLOCK_MONOTONIC` time, the clock of
+        /// [`Instant`], read here, so time spent since the caller's reading
+        /// extends it.
+        fn idle_wait(word: &AtomicU32, snapshot: u32, timeout: Option<Duration>) -> libc::c_long {
+            const NANOS_PER_SEC: libc::c_long = 1_000_000_000;
+            let timeout = timeout.map(|timeout| {
+                let mut now = libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                };
+                // SAFETY: `now` is writable storage that outlives the call.
+                let ret = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
+                // CLOCK_MONOTONIC exists on every supported kernel and the
+                // pointer is valid, so the call cannot fail.
+                assert_eq!(ret, 0, "CLOCK_MONOTONIC must be readable");
+
+                // Both nanosecond fields are below one second, so their sum
+                // carries at most one second.
+                let nanos = now.tv_nsec + libc::c_long::from(timeout.subsec_nanos());
+                let secs = libc::time_t::try_from(timeout.as_secs()).unwrap_or(libc::time_t::MAX);
+                libc::timespec {
+                    tv_sec: now
+                        .tv_sec
+                        .saturating_add(secs)
+                        .saturating_add(nanos / NANOS_PER_SEC),
+                    tv_nsec: nanos % NANOS_PER_SEC,
+                }
+            });
+            let timeout_ptr = timeout
+                .as_ref()
+                .map_or(std::ptr::null(), std::ptr::from_ref);
+
+            // SAFETY: `word` is an aligned atomic futex word that outlives the
+            // call. `timeout_ptr` is null or references the initialized local
+            // timespec, which remains alive and unchanged until return. On the
+            // 64-bit targets the runtime supports, `libc::timespec` has the
+            // layout of the kernel's `__kernel_timespec`. The value and mask
+            // are passed as `unsigned long`, as the kernel reads them, without
+            // bits above the word size, which it rejects.
+            unsafe {
+                libc::syscall(
+                    IDLE_WAIT_SYSCALL,
+                    word.as_ptr(),
+                    libc::c_ulong::from(snapshot),
+                    libc::c_ulong::from(u32::MAX),
+                    FUTEX2_PRIVATE_U32,
+                    timeout_ptr,
+                    libc::CLOCK_MONOTONIC,
+                )
+            }
+        }
+    } else if #[cfg(not(feature = "loom"))] {
+        /// System call of the thread wait under Miri, which implements only
+        /// `FUTEX_WAIT` and models no timer slack.
+        const IDLE_WAIT_SYSCALL: libc::c_long = libc::SYS_futex;
+
+        /// Block on `word` while it equals `snapshot`, for at most `timeout`,
+        /// returning the system call's result.
+        fn idle_wait(word: &AtomicU32, snapshot: u32, timeout: Option<Duration>) -> libc::c_long {
+            let timeout = timeout.map(|timeout| libc::timespec {
+                tv_sec: timeout.as_secs().try_into().unwrap_or(libc::time_t::MAX),
+                tv_nsec: timeout.subsec_nanos().into(),
+            });
+            let timeout_ptr = timeout
+                .as_ref()
+                .map_or(std::ptr::null(), std::ptr::from_ref);
+
+            // SAFETY: `word` is an aligned atomic futex word that outlives the
+            // call. `timeout_ptr` is null or references the initialized local
+            // timespec, which remains alive and unchanged until return.
+            unsafe {
+                libc::syscall(
+                    IDLE_WAIT_SYSCALL,
+                    word.as_ptr(),
+                    libc::FUTEX_WAIT | libc::FUTEX_PRIVATE_FLAG,
+                    snapshot,
+                    timeout_ptr,
+                )
+            }
+        }
+    }
+}
 
 /// RAII guard returned by [`Parker::arm`], which disarms the word on drop.
 pub struct ArmGuard<'a> {
@@ -438,7 +537,7 @@ impl Parker {
     /// ended the sleep.
     ///
     /// `snapshot` must be the exact post-arm word from the atomic transition
-    /// that set the waiter bit. `FUTEX_WAIT` blocks only while the word still
+    /// that set the waiter bit. The wait blocks only while the word still
     /// equals it, which closes the race between arming and a concurrent
     /// notification. A stale snapshot, an elapsed deadline, `EINTR`, `EAGAIN`,
     /// `ETIMEDOUT`, and an unexpected error all return `false`, and the caller
@@ -459,29 +558,12 @@ impl Parker {
                 if remaining.is_zero() {
                     return false;
                 }
-                Some(libc::timespec {
-                    tv_sec: remaining.as_secs().try_into().unwrap_or(libc::time_t::MAX),
-                    tv_nsec: remaining.subsec_nanos().into(),
-                })
+                Some(remaining)
             }
             None => None,
         };
-        let timeout_ptr = timeout
-            .as_ref()
-            .map_or(std::ptr::null(), std::ptr::from_ref);
 
-        // SAFETY: `word` retains the aligned atomic futex word throughout
-        // this call. `timeout_ptr` is null or references the initialized
-        // local timespec, which remains alive and unchanged until return.
-        let ret = unsafe {
-            libc::syscall(
-                libc::SYS_futex,
-                self.word.as_ptr(),
-                libc::FUTEX_WAIT | libc::FUTEX_PRIVATE_FLAG,
-                snapshot,
-                timeout_ptr,
-            )
-        };
+        let ret = idle_wait(&self.word, snapshot, timeout);
         if ret == 0 {
             return true;
         }
@@ -1010,7 +1092,8 @@ pub mod tests {
             Path::new("/proc").join(std::fs::read_link("/proc/thread-self").unwrap())
         }
 
-        /// Whether the thread at `task` sleeps in a futex call on the word.
+        /// Whether the thread at `task` sleeps in an idle futex wait on the
+        /// word.
         ///
         /// The kernel reports another thread's syscall only once that thread is
         /// descheduled in a sleep, which a futex wait reaches only after it queued
@@ -1025,7 +1108,7 @@ pub mod tests {
                 .next()
                 .and_then(|field| field.strip_prefix("0x"))
                 .and_then(|field| usize::from_str_radix(field, 16).ok());
-            number == Some(libc::SYS_futex) && address == Some(unparker.word.as_ptr() as usize)
+            number == Some(IDLE_WAIT_SYSCALL) && address == Some(unparker.word.as_ptr() as usize)
         }
 
         /// Wait until the thread at `task` sleeps in a futex call on the word,
@@ -1039,6 +1122,43 @@ pub mod tests {
                 );
                 std::thread::yield_now();
             }
+        }
+
+        /// A timed park ends near its deadline even when the thread's timer
+        /// slack is far longer, since futex2 takes no slack.
+        #[test]
+        fn test_timed_park_ignores_timer_slack() {
+            const SLACK: Duration = Duration::from_secs(1);
+
+            // A fresh thread, so the slack set here leaves the harness's threads
+            // alone.
+            std::thread::spawn(|| {
+                let slack = libc::c_ulong::try_from(SLACK.as_nanos()).unwrap();
+                // SAFETY: PR_SET_TIMERSLACK takes a scalar nanosecond value and
+                // changes only the calling thread's slack.
+                let ret = unsafe {
+                    libc::prctl(
+                        libc::PR_SET_TIMERSLACK,
+                        slack,
+                        0 as libc::c_ulong,
+                        0 as libc::c_ulong,
+                        0 as libc::c_ulong,
+                    )
+                };
+                assert_eq!(ret, 0);
+
+                // A wait that failed at once would return before the deadline.
+                // One with the thread's slack can end up to a second late,
+                // unless another timer on the CPU expires it sooner.
+                let parker = Parker::new();
+                let start = Instant::now();
+                let deadline = start + Duration::from_millis(50);
+                assert!(parker.park(0, Some(deadline)).is_none());
+                assert!(Instant::now() >= deadline);
+                assert!(start.elapsed() < SLACK / 2);
+            })
+            .join()
+            .unwrap();
         }
 
         /// A notification between the arm and the kernel's compare fails the new
