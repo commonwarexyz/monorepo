@@ -65,9 +65,8 @@ fix: fix-clippy fix-fmt fix-toml-fmt fix-features
 test-benches crate test_flags='':
     #!/usr/bin/env bash
     set -euo pipefail
-    # Color codes would split the `Executable` lines parsed below.
-    build=$(cargo test --color never --benches -p {{ crate }} {{ test_flags }} --no-run 2>&1) || { echo "$build" >&2; exit 1; }
-    all=$(echo "$build" | sed -n 's|.*Executable .*/deps/\(.*\)-[a-f0-9]*).*|\1|p')
+    build=$(cargo test --color never --message-format=json-render-diagnostics --benches -p {{ crate }} {{ test_flags }} --no-run)
+    all=$(echo "$build" | jq -r 'select(.reason == "compiler-artifact") | select(.target.kind | index("bench")) | select(.executable != null) | .target.name')
     if [ -z "$all" ]; then
         echo "error: no benchmark binaries found for {{ crate }}" >&2
         exit 1

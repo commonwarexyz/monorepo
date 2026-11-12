@@ -17,7 +17,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  FUZZ_VERSION: 0.12.0
+  FUZZ_VERSION: 0.13.2
 
 jobs:
   # Draft pull requests skip this workflow; it runs once the pull request is ready for review.
@@ -166,7 +166,7 @@ jobs:
         key: ${{ runner.os }}-${{ runner.arch }}-${{ env.FUZZ_VERSION }}-cargo-fuzz-${{ steps.rust-version.outputs.rust_version }}
     - name: Install cargo-fuzz
       if: steps.cargo-fuzz-cache.outputs.cache-hit != 'true'
-      run: cargo +nightly install cargo-fuzz --version ${{ env.FUZZ_VERSION }}
+      run: cargo +nightly install cargo-fuzz --version ${{ env.FUZZ_VERSION }} --locked
     - name: Install just
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
