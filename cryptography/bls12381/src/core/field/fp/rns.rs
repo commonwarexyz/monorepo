@@ -25,8 +25,8 @@
 //! a base conversion carries that quotient into the second basis, where adding it times `p` and
 //! dividing by `M` are residue-wise. The conversion multiplies rotated copies of the quotient by
 //! fixed diagonals of the conversion matrix and skips the quotient estimate of an exact
-//! conversion, so the converted quotient may exceed the exact one by a bounded multiple of `M`,
-//! which only adds a bounded multiple of `p` to the result. Extension of the result back to the
+//! conversion, so the converted quotient may exceed the exact one by up to `16 M`, which adds at
+//! most `16 p` to the result. Extension of the result back to the
 //! first basis must be exact, so it estimates its quotient with fixed-point fractions, summed
 //! across the lanes, and broadcasts each residue against a row of the conversion matrix. Every
 //! residue product is a pair of 52-bit multiply-adds (`u64_madd52lo` and `u64_madd52hi`), which
@@ -116,12 +116,12 @@ pub const SUB_BIAS: u64 = SUM_PRODUCTS as u64 * (2 * REDUCED) * (2 * REDUCED);
 /// Most terms a sum of products may hold.
 const TERMS: u64 = 1 << 10;
 
-/// Most terms a subtrahend may hold, which the subtraction bias covers: a full sum of products
-/// and lifts beside them. A subtraction adds one more than this to its minuend's terms, so a
-/// minuend of a few terms can be subtracted from twice.
+/// Most terms a subtrahend may hold, which the subtraction bias covers: [`SUM_PRODUCTS`] products
+/// and half as many lifts. A subtraction adds one more than this to its minuend's terms, so a
+/// minuend of up to `TERMS - 2 * (SUB_TERMS + 1)` terms can be subtracted from twice.
 const SUB_TERMS: u64 = 3 * SUM_PRODUCTS as u64 / 2;
 
-/// Raw products of factors summing at most two reduced values that a sum may hold.
+/// Most products a sum may hold, of factors that are each at most the sum of two reduced values.
 /// Subtraction biases must also fit the integer budget.
 const SUM_PRODUCTS: usize = 256;
 
@@ -156,7 +156,7 @@ struct Basis {
 /// Residue `j` of the output accumulates `input[i] * matrix[i][j]` over the input residues `i`,
 /// plus `k * correction[j]` for the estimated quotient
 /// `k = floor(sum(input[i] * fraction[i]) / 2^64)`. The quotient has two 52-bit digits;
-/// `correction_shift` is `correction` times `2^52`.
+/// `correction_shift` is `correction` times `2^52`, modulo each destination modulus.
 struct Conversion {
     matrix: [[u64; MODULI]; MODULI],
     fraction: [u64; MODULI],
@@ -225,8 +225,8 @@ const fn wide_bias_high_inner(basis: &Basis, encoded_p: &[u64; MODULI]) -> [u64;
 /// Residues below each modulus of the integer `M mod p`, which represents one and is below `p`.
 ///
 /// This is the integer that loading one produces: its single digit converts through the first
-/// row of [`TO_RNS`] with a zero quotient, and the second-basis residues extend exactly to the first
-/// basis through [`EXPAND`]. Each conversion's reduction multiplies by `2^(-52)`.
+/// row of [`TO_RNS`] with a zero quotient, and the second-basis residues extend exactly to the
+/// first basis through [`EXPAND`]. Each conversion's reduction multiplies by `2^(-52)`.
 const ONE: [u64; RESIDUES] = {
     let mut n = [0; MODULI];
     let mut j = 0;
@@ -1322,8 +1322,8 @@ impl<S: X86V4C> Field<S> for Rns<S> {
         product
     }
 
-    /// Uses the two products, accumulated as they form: a subtraction costs about as much as a
-    /// product here.
+    /// Returns `a[0] b[1] + a[1] b[0]` as one positive sum of two products, ignoring the known
+    /// products: a subtraction of wide sums costs about as much as a product.
     #[inline(always)]
     fn cross(simd: S, a: [Self; 2], b: [Self; 2], _p0: Wide<S>, _p1: Wide<S>) -> Signed<Wide<S>> {
         let high = Field::product(a[0], simd, b[1]);
@@ -1332,8 +1332,9 @@ impl<S: X86V4C> Field<S> for Rns<S> {
 
     /// Inverts the canonical integer in scalar arithmetic with [`montgomery::invert`], then loads
     /// the inverse: a single element has nothing to overlap the chain of an exponentiation
-    /// with, and the constant-time division steps cost a small fraction of it. Runs as its own
-    /// kernel, so that the conversions have their instruction set wherever a formula inverts.
+    /// with, and the constant-time division steps cost a small fraction of an exponentiation.
+    /// Runs as its own kernel, so that the conversions have their instruction set wherever a
+    /// formula inverts.
     #[inline(always)]
     fn invert(self, simd: S) -> Self {
         simd.execute(

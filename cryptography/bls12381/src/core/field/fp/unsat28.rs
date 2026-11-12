@@ -4,8 +4,8 @@
 //! Products reduce eagerly. Callers follow the
 //! [operation rules](super::super::arithmetic#operation-rules) of [`Field`] with this
 //! representation's limits: integer bound at most [`LIMIT`], limb bound at most [`LIMB_LIMIT`],
-//! and multiplicand limb bound at most [`SLACK`]. The limb limit is low, so long chains of
-//! additions must carry along the way.
+//! and multiplicand limb bound at most [`SLACK`]. [`LIMB_LIMIT`] is `15`, so a sum of more than
+//! 15 carried values must carry along the way.
 //!
 //! # How it works
 //!
@@ -246,8 +246,9 @@ impl<S: Simd> Unsat28<S> {
         bound.assert_le(LIMIT);
 
         // Product scanning: column k sums a_i b_j and q_i p_j with i + j = k, so only one
-        // column's accumulators are live. Each column is split into the 64-bit halves of the
-        // widening multiplication, and SLACK bounds every column below 2^64.
+        // column's accumulators are live. Each column occupies two 64-bit vectors, one per half
+        // of the lanes, as the widening multiplication returns them, and SLACK bounds every
+        // column below 2^64.
         let (a, b) = (self.limbs, rhs.limbs);
         let mut q = [simd.u32_splat(0); LIMBS];
         let mut limbs = [simd.u32_splat(0); LIMBS];
@@ -352,9 +353,10 @@ impl<S: Simd> Unsat28<S> {
             *estimate = simd.u64_shr::<FOLD_SHIFT>(product);
         }
         let k = simd.u64_narrow_pair(estimate[0], estimate[1]);
-        // Limb j of self - k p, plus the offset for j below the top and less 2^12 units of it
-        // for j above the bottom, so the offsets cancel and every difference stays nonnegative.
-        // Each takes the carry out of the one below, which leaves the top limb of the result.
+        // Column j holds limb j of self - k p, plus FOLD_OFFSET for j below the top and less
+        // FOLD_OFFSET / 2^28 for j above the bottom, so the offsets cancel and every column stays
+        // nonnegative. Each column adds the carry out of the column below; the top column is the
+        // top limb of the result.
         let one = simd.u32_splat(1);
         let mask = simd.u32_splat(MASK);
         let mut limbs = self.limbs;
@@ -818,9 +820,9 @@ pub mod fuzz {
             check_consistent(|| Widest);
         }
 
-        /// Returns the largest top limb below `(LIMIT - 1) p`, with zero low limbs, and the
-        /// element it represents. A multiple estimated from the top limb of `p` alone exceeds
-        /// the value it covers.
+        /// Returns limbs that are zero but for a top limb one less than that of `(LIMIT - 1) p`,
+        /// and the element they represent. A multiple estimated from the top limb of `p` alone
+        /// exceeds the value it covers.
         fn largest_top() -> ([u32; LIMBS], Element) {
             let top = super::super::super::multiple::<LIMBS, LIMB_BITS>(LIMIT - 1)[LIMBS - 1] - 1;
             let mut limbs = [0; LIMBS];

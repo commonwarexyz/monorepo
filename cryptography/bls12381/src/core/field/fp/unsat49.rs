@@ -17,8 +17,8 @@
 //! represented integer; only multiplication reduces modulo `p`.
 //!
 //! Products accumulate with `u64_madd52lo` and `u64_madd52hi`, which AVX-512 IFMA provides
-//! natively and other backends emulate. These split each product at bit 52, so each column of
-//! high halves is shifted left by three bits before joining its column. The multipliers accept
+//! natively and other backends emulate. These split each product at bit 52, so the high halves
+//! of column `k - 1` join column `k` shifted left by three bits. The multipliers accept
 //! limbs below `2^52`, so a multiplication takes sums of up to [`SLACK`] carried values without
 //! carrying them. A subtraction or negation adds a multiple of `p` whose limbs cover any
 //! subtrahend whose limbs are at most twice those of a carried value.
