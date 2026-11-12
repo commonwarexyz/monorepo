@@ -51,6 +51,13 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
 stability_scope!(ALPHA, cfg(all(target_arch = "wasm32", feature = "browser")) {
     pub mod browser;
 });
+
+// The address of a browser endpoint is text handling that needs no browser, so its tests run on
+// the targets the other tests run on.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod browser {
+    mod address;
+}
 stability_scope!(ALPHA, cfg(target_os = "linux") {
     pub mod iouring;
 });

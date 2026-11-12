@@ -91,11 +91,13 @@ impl FromStr for Socket {
 
 /// Where an [Endpoint](super::Endpoint) can be reached and what a page needs to connect to it.
 ///
-/// An address holds up to sixteen sockets its endpoint can be reached at. It also holds the
-/// fingerprint of a certificate, a username, and a password. The endpoint's browser makes
-/// those three for this one connection, and a browser connects only to an endpoint whose
-/// three it was given. They say nothing about who runs the page. A page that must know who it
-/// reached authenticates it over the connection.
+/// An address holds up to sixteen sockets its endpoint can be reached at. An endpoint with
+/// more leaves out sockets of the device's own before any that a STUN server reported.
+///
+/// An address also holds the fingerprint of a certificate, a username, and a password. The
+/// endpoint's browser makes those three for this one connection, and a browser connects only
+/// to an endpoint whose three it was given. They say nothing about who runs the page. A page
+/// that must know who it reached authenticates it over the connection.
 ///
 /// An address is written as its parts in order, joined by the characters shown under them.
 ///
@@ -178,19 +180,36 @@ impl Address {
         }
         let fingerprint = from_hex(&digest.replace(':', ""))?.try_into().ok()?;
 
-        // A candidate lists its foundation, component, transport, priority, host, and port. A
-        // data channel has only the first component, and a browser listens only on UDP.
-        let sockets = description
+        // A candidate lists its foundation, component, transport, priority, host, port, and
+        // type. A data channel has only the first component, and a browser listens only on UDP.
+        let candidates = description
             .lines()
             .filter_map(|line| line.strip_prefix("a=candidate:"))
             .filter_map(|candidate| {
                 let mut fields = candidate.split(' ');
                 let (component, transport) = (fields.nth(1)?, fields.next()?);
                 let (host, port) = (fields.nth(1)?, fields.next()?);
+                let own = fields.nth(1).is_none_or(|kind| kind == "host");
                 if component != "1" || !transport.eq_ignore_ascii_case("udp") {
                     return None;
                 }
-                Socket::new(host, port.parse().ok()?)
+                Some((own, Socket::new(host, port.parse().ok()?)?))
+            })
+            .collect::<Vec<_>>();
+
+        // A browser lists the sockets of the device's own interfaces before the ones a server
+        // reported, and the reported ones are the only sockets that reach a device behind a
+        // NAT. A device with many interfaces has more sockets than an address lists, so its
+        // own are the ones left out.
+        let reported = candidates.iter().filter(|(own, _)| !own).count();
+        let mut spare = MAX_SOCKETS.saturating_sub(reported);
+        let sockets = candidates
+            .into_iter()
+            .filter_map(|(own, socket)| {
+                if own {
+                    spare = spare.checked_sub(1)?;
+                }
+                Some(socket)
             })
             .take(MAX_SOCKETS)
             .collect();
@@ -285,5 +304,112 @@ impl FromStr for Address {
         (parsed.to_string() == address)
             .then_some(parsed)
             .ok_or(InvalidAddress)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FINGERPRINT: &str = "a346bc7d1f08e25c9b4d6a7e3f1c0d2b5a8e9f7061c2d3e4f5a6b7c8d9e09e41";
+    const USERNAME: &str = "1qYx";
+    const PASSWORD: &str = "kV9hQ2mX7pL4sT8wB3nZ6cRf";
+
+    /// Returns the description a browser gives of an endpoint with these candidates.
+    fn description(candidates: &[String]) -> String {
+        let digest = FINGERPRINT
+            .as_bytes()
+            .chunks(2)
+            .map(|pair| String::from_utf8_lossy(pair).to_uppercase())
+            .collect::<Vec<_>>()
+            .join(":");
+        let mut description = String::from(
+            "v=0\r\n\
+             o=- 4611731400430051336 2 IN IP4 127.0.0.1\r\n\
+             s=-\r\n\
+             t=0 0\r\n\
+             a=group:BUNDLE 0\r\n\
+             m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
+             c=IN IP4 0.0.0.0\r\n",
+        );
+        for candidate in candidates {
+            let _ = write!(description, "a=candidate:{candidate}\r\n");
+        }
+        let _ = write!(
+            description,
+            "a=ice-ufrag:{USERNAME}\r\n\
+             a=ice-pwd:{PASSWORD}\r\n\
+             a=ice-options:trickle\r\n\
+             a=fingerprint:sha-256 {digest}\r\n\
+             a=setup:actpass\r\n\
+             a=mid:0\r\n\
+             a=sctp-port:5000\r\n"
+        );
+        description
+    }
+
+    #[test]
+    fn test_read_lists_udp_sockets_of_first_component() {
+        let candidates = [
+            "1 1 udp 2113937151 192.0.2.4 50000 typ host generation 0".to_string(),
+            "2 1 tcp 1518280447 192.0.2.4 9 typ host tcptype active generation 0".to_string(),
+            "3 2 udp 2113937150 192.0.2.4 50001 typ host generation 0".to_string(),
+            "4 1 UDP 1677729535 203.0.113.7 51413 typ srflx raddr 192.0.2.4 rport 50000"
+                .to_string(),
+        ];
+        let (address, section) = Address::read(&description(&candidates)).unwrap();
+        assert_eq!(section, "0");
+        assert_eq!(
+            address.to_string(),
+            format!("{FINGERPRINT}:{USERNAME}:{PASSWORD},192.0.2.4:50000,203.0.113.7:51413")
+        );
+    }
+
+    #[test]
+    fn test_read_keeps_sockets_a_server_reported() {
+        // A device with twenty network interfaces lists their sockets before the two a STUN
+        // server reported.
+        let mut candidates = (0..20)
+            .map(|i| {
+                format!(
+                    "{i} 1 udp 2113937151 10.0.0.{} {} typ host",
+                    i + 1,
+                    50_000 + i
+                )
+            })
+            .collect::<Vec<_>>();
+        candidates
+            .push("20 1 udp 1677729535 203.0.113.7 51413 typ srflx raddr 0.0.0.0 rport 0".into());
+        candidates.push("21 1 udp 1677729535 2001:db8::7 51414 typ srflx raddr :: rport 0".into());
+        let (address, _) = Address::read(&description(&candidates)).unwrap();
+
+        // The address lists both of those and as many of the device's own as still fit, in the
+        // order the browser gave them.
+        let mut expected = (0..14)
+            .map(|i| format!("10.0.0.{}:{}", i + 1, 50_000 + i))
+            .collect::<Vec<_>>();
+        expected.push("203.0.113.7:51413".into());
+        expected.push("[2001:db8::7]:51414".into());
+        assert_eq!(
+            address.to_string(),
+            format!("{FINGERPRINT}:{USERNAME}:{PASSWORD},{}", expected.join(","))
+        );
+    }
+
+    #[test]
+    fn test_read_recovers_described_address() {
+        let address = format!(
+            "{FINGERPRINT}:{USERNAME}:{PASSWORD},203.0.113.7:51413,[2001:db8::7]:51414,a.local:9"
+        )
+        .parse::<Address>()
+        .unwrap();
+        for (active, setup) in [(true, "a=setup:active\r\n"), (false, "a=setup:passive\r\n")] {
+            let description = address.describe("data", active);
+            assert!(description.contains(setup));
+            assert_eq!(
+                Address::read(&description),
+                Some((address.clone(), "data".to_string()))
+            );
+        }
     }
 }
