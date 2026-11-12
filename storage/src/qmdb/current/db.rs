@@ -729,8 +729,12 @@ where
         // Destructure before the await boundary to avoid stack growth from
         // retaining the entire `self` in the future.
         let Self { any, metadata, .. } = self;
+
+        // Delete the log before the grafted metadata. If destroy stops while the old log still
+        // exists, the metadata is needed to reopen it.
+        any.destroy().await?;
         metadata.destroy().await?;
-        any.destroy().await
+        Ok(())
     }
 
     /// Check that `batch` can be applied to the database in its current state, without
@@ -1120,7 +1124,7 @@ pub(super) async fn compute_grafted_root<
 
 /// Resolve each bitmap chunk's covering ops-tree node, returning
 /// `(chunk_idx, chunk_ops_digest, chunk)` triples ready for
-/// [`grafting::graft_chunk_digests`].
+/// [`grafting::grafted_leaf_digests`].
 ///
 /// Callers must pass only **graftable** chunks (those whose h=G ancestor has already been born in
 /// the ops tree). Each graftable chunk has exactly one covering ops node at height G, looked up via
@@ -1196,7 +1200,7 @@ pub(super) async fn build_grafted_tree<
         start: pruned_chunks,
         roots: inputs.iter().map(|(_, digest, _)| *digest).collect(),
     };
-    let leaves = grafting::graft_chunk_digests::<H, _, N>(strategy, inputs);
+    let leaves = grafting::grafted_leaf_digests::<H, _, N>(strategy, inputs);
 
     // Build the base grafted tree: either from pruned components or empty.
     let mut grafted_tree = if pruned_chunks > 0 {
@@ -1286,6 +1290,7 @@ pub(super) async fn init_metadata<F: merkle::Graftable, E: Context, D: Digest>(
 mod tests {
     use super::*;
     use crate::{
+        journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
         merkle::{Bagging::ForwardFold, hasher::Standard as StandardHasher, mmb, mmr},
         qmdb::{
             ProofExt as _,
@@ -1293,15 +1298,23 @@ mod tests {
                 test::{Choice, Inspect as _, Script, test_any_db_start_sync_recovery},
                 traits::{DbAny, UnmerkleizedBatch as _},
             },
-            current::{tests::fixed_config, unordered::fixed},
+            current::{
+                BitmapPrunedBits, Config, MerkleConfig,
+                tests::{fixed_config, variable_config},
+                unordered::{fixed, variable},
+            },
         },
         translator::OneCap,
     };
     use commonware_codec::{Encode as _, FixedSize};
     use commonware_cryptography::{Sha256, sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
-    use commonware_utils::{NZU64, bitmap::Prunable as PrunableBitMap};
+    use commonware_parallel::Sequential;
+    use commonware_runtime::{
+        Error as RuntimeError, Runner as _, Storage as _, Supervisor as _, deterministic,
+    };
+    use commonware_utils::{NZU64, bitmap::Prunable as PrunableBitMap, probability};
+    use std::future::Future;
 
     const N: usize = sha256::Digest::SIZE;
 
@@ -2218,6 +2231,261 @@ mod tests {
             let canonical_root = db.root();
 
             assert!(witness.verify::<Sha256>(&ops_root, &canonical_root));
+        });
+    }
+
+    type VariableDb<F> = variable::Db<
+        F,
+        deterministic::Context,
+        sha256::Digest,
+        sha256::Digest,
+        Sha256,
+        OneCap,
+        32,
+        commonware_parallel::Sequential,
+    >;
+
+    type FixedDbConfig = Config<OneCap, FConfig, Sequential>;
+    type VariableDbConfig = Config<OneCap, VConfig<((), ())>, Sequential>;
+
+    /// Partitions of the operations log, then of the Merkle structure. Destroy removes them in
+    /// that order before the grafted metadata.
+    type Stages = [Vec<String>; 2];
+
+    /// Where an interrupted destroy stopped, in the order destroy reaches each outcome.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Interrupted {
+        /// Destroy stopped before the log's clear was staged, and the database reopens at its
+        /// last commit.
+        Unchanged,
+        /// Destroy stopped while removing the log, and the database reopens new.
+        InLog,
+        /// Destroy stopped after removing the log, while removing the Merkle structure, and the
+        /// database reopens new.
+        InMerkle,
+        /// Destroy stopped after removing the log and the Merkle structure, while removing the
+        /// grafted metadata, and the database reopens new.
+        InGraftedMetadata,
+        /// Destroy completed despite the injected failures.
+        Completed,
+    }
+
+    /// Returns whether `partition` exists in `ctx`'s storage.
+    async fn partition_exists(ctx: &deterministic::Context, partition: &str) -> bool {
+        match ctx.scan(partition).await {
+            Ok(_) => true,
+            Err(RuntimeError::PartitionMissing(_)) => false,
+            Err(err) => panic!("scan of {partition} must succeed: {err}"),
+        }
+    }
+
+    /// Interrupt the destroy of a pruned database holding several commits with injected sync
+    /// and removal failures, then reopen it and report where destroy stopped.
+    fn interrupted_destroy_reopens<F, DB, Fut>(
+        seed: u64,
+        stages: &Stages,
+        open: impl Fn(deterministic::Context) -> Fut,
+    ) -> Interrupted
+    where
+        F: merkle::Graftable,
+        DB: DbAny<Family = F, Key = sha256::Digest, Value = sha256::Digest, Digest = sha256::Digest>
+            + BitmapPrunedBits,
+        Fut: Future<Output = Result<DB, Error<F>>>,
+    {
+        deterministic::Runner::seeded(seed).start(|ctx| async move {
+            // Record the digest of empty storage and the state of a new database. A completed
+            // destroy must restore the former.
+            let empty = ctx.storage_audit();
+            let db = open(ctx.child("first")).await.unwrap();
+            let fresh = (db.bounds(), db.root());
+
+            // Commit twice and prune to the sync boundary, so the grafted metadata records
+            // pruned chunks above a pruned log and Merkle structure.
+            let db = populate_fixed_db::<F, _>(db, 0, 384).await;
+            let db = populate_fixed_db::<F, _>(db, 0, 384).await;
+            let boundary = db.sync_boundary();
+            let db = db.prune(boundary).await.unwrap();
+            let db = db.sync().await.unwrap();
+            let committed = (db.bounds(), db.root());
+            assert!(db.pruned_bits() > 0 && committed.0.start > 0);
+
+            // Fail a sample of syncs and removals so destroy stops at varying depths, from the
+            // log's staged clear through the grafted metadata.
+            ctx.storage_fault_config().write().sync_rate = Some(probability!(0.2));
+            ctx.storage_fault_config().write().remove_rate = Some(probability!(0.05));
+            let result = db.destroy().await;
+            ctx.storage_fault_config().write().sync_rate = None;
+            ctx.storage_fault_config().write().remove_rate = None;
+            if result.is_ok() {
+                assert_eq!(ctx.storage_audit(), empty, "seed {seed}");
+                return Interrupted::Completed;
+            }
+
+            // Removing its last partition is the last step of each stage, so destroy finished
+            // exactly the leading stages whose partitions are all gone.
+            let mut finished = 0;
+            for stage in stages {
+                let mut removed = true;
+                for partition in stage {
+                    removed &= !partition_exists(&ctx, partition).await;
+                }
+                if !removed {
+                    break;
+                }
+                finished += 1;
+            }
+
+            // The reopened database is exactly the last commit or a new database.
+            let db = open(ctx.child("second"))
+                .await
+                .unwrap_or_else(|err| panic!("seed {seed} must reopen: {err}"));
+            let reopened = (db.bounds(), db.root());
+            let outcome = match (reopened == committed, finished) {
+                (true, 0) => Interrupted::Unchanged,
+                (true, _) => {
+                    panic!("seed {seed} must not reopen at its last commit without its log")
+                }
+                (false, 0) => Interrupted::InLog,
+                (false, 1) => Interrupted::InMerkle,
+                (false, _) => Interrupted::InGraftedMetadata,
+            };
+            assert!(
+                outcome == Interrupted::Unchanged || reopened == fresh,
+                "seed {seed} must reopen at its last commit or new, not with bounds {:?}",
+                reopened.0
+            );
+
+            // A reopen makes its repairs durable before it returns, so opening again without a
+            // sync in between finds the same database.
+            drop(db);
+            let db = open(ctx.child("third"))
+                .await
+                .unwrap_or_else(|err| panic!("seed {seed} must reopen twice: {err}"));
+            assert_eq!(
+                (db.bounds(), db.root()),
+                reopened,
+                "seed {seed} must reopen unchanged"
+            );
+
+            // A retried destroy completes and leaves no blob behind.
+            db.destroy().await.unwrap();
+            assert_eq!(ctx.storage_audit(), empty, "seed {seed}");
+            outcome
+        })
+    }
+
+    /// Sweep seeds and require that destroy stopped at each of its outcomes.
+    fn interrupted_destroy_reopens_all_seeds<F, DB, Fut>(
+        stages: &Stages,
+        open: impl Fn(deterministic::Context) -> Fut,
+    ) where
+        F: merkle::Graftable,
+        DB: DbAny<Family = F, Key = sha256::Digest, Value = sha256::Digest, Digest = sha256::Digest>
+            + BitmapPrunedBits,
+        Fut: Future<Output = Result<DB, Error<F>>>,
+    {
+        // Each seed fails a different sample of syncs and removals.
+        let outcomes: Vec<_> = (0..256u64)
+            .map(|seed| interrupted_destroy_reopens(seed, stages, &open))
+            .collect();
+
+        // A stage no seed interrupts is a stage whose recovery this sweep does not exercise.
+        for outcome in [
+            Interrupted::Unchanged,
+            Interrupted::InLog,
+            Interrupted::InMerkle,
+            Interrupted::InGraftedMetadata,
+            Interrupted::Completed,
+        ] {
+            assert!(outcomes.contains(&outcome), "a seed must reach {outcome:?}");
+        }
+    }
+
+    /// Partitions of the Merkle structure configured by `cfg`.
+    fn merkle_partitions(cfg: &MerkleConfig<Sequential>) -> Vec<String> {
+        let journal = &cfg.journal_partition;
+        vec![
+            cfg.metadata_partition.clone(),
+            format!("{journal}-blobs"),
+            format!("{journal}-metadata"),
+        ]
+    }
+
+    /// A configuration of a database over a fixed log, and the partitions of its log and Merkle
+    /// structure. Its journals keep few blobs once pruned, so an interrupted destroy's failures
+    /// reach past the log's removal.
+    fn fixed_destroy_config() -> (FixedDbConfig, Stages) {
+        let mut cfg = fixed_config::<OneCap>("interrupted-destroy");
+        cfg.merkle.items_per_blob = NZU64!(512);
+        cfg.log.items_per_blob = NZU64!(512);
+        let log = &cfg.log.partition;
+        let stages = [
+            vec![format!("{log}-blobs"), format!("{log}-metadata")],
+            merkle_partitions(&cfg.merkle),
+        ];
+        (cfg, stages)
+    }
+
+    /// A configuration of a database over a variable log, and the partitions of its log and
+    /// Merkle structure. Its journals keep few blobs once pruned, so an interrupted destroy's
+    /// failures reach past the log's removal.
+    fn variable_destroy_config() -> (VariableDbConfig, Stages) {
+        let mut cfg = variable_config::<OneCap>("interrupted-destroy");
+        cfg.merkle.items_per_blob = NZU64!(512);
+        cfg.log.items_per_section = NZU64!(512);
+        let log = &cfg.log.partition;
+        let stages = [
+            vec![
+                format!("{log}_data"),
+                format!("{log}_offsets-blobs"),
+                format!("{log}_offsets-metadata"),
+            ],
+            merkle_partitions(&cfg.merkle),
+        ];
+        (cfg, stages)
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5668.
+    ///
+    /// A destroy interrupted at any point leaves a database over a fixed log that reopens at its
+    /// last commit or as a new database, and that a retried destroy removes.
+    #[test]
+    fn issue_5668_regression_interrupted_destroy_reopens_fixed_mmr() {
+        let (cfg, stages) = fixed_destroy_config();
+        interrupted_destroy_reopens_all_seeds(&stages, |ctx| MmrDb::init(ctx, cfg.clone(), None));
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5668.
+    ///
+    /// A destroy interrupted at any point leaves a database over a fixed log that reopens at its
+    /// last commit or as a new database, and that a retried destroy removes.
+    #[test]
+    fn issue_5668_regression_interrupted_destroy_reopens_fixed_mmb() {
+        let (cfg, stages) = fixed_destroy_config();
+        interrupted_destroy_reopens_all_seeds(&stages, |ctx| MmbDb::init(ctx, cfg.clone(), None));
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5668.
+    ///
+    /// A destroy interrupted at any point leaves a database over a variable log that reopens at its
+    /// last commit or as a new database, and that a retried destroy removes.
+    #[test]
+    fn issue_5668_regression_interrupted_destroy_reopens_variable_mmr() {
+        let (cfg, stages) = variable_destroy_config();
+        interrupted_destroy_reopens_all_seeds(&stages, |ctx| {
+            VariableDb::<mmr::Family>::init(ctx, cfg.clone(), None)
+        });
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5668.
+    ///
+    /// A destroy interrupted at any point leaves a database over a variable log that reopens at its
+    /// last commit or as a new database, and that a retried destroy removes.
+    #[test]
+    fn issue_5668_regression_interrupted_destroy_reopens_variable_mmb() {
+        let (cfg, stages) = variable_destroy_config();
+        interrupted_destroy_reopens_all_seeds(&stages, |ctx| {
+            VariableDb::<mmb::Family>::init(ctx, cfg.clone(), None)
         });
     }
 }

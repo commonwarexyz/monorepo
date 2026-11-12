@@ -1543,6 +1543,16 @@ macro_rules! db_any_harness_methods {
             db.destroy().await.unwrap();
         }
 
+        async fn try_destroy(db: Self::Db) -> Result<(), $crate::qmdb::Error<Self::Family>> {
+            db.destroy().await
+        }
+
+        fn merkle_config(
+            config: &$crate::qmdb::sync::harness::ConfigOf<Self>,
+        ) -> $crate::merkle::full::Config<commonware_parallel::Sequential> {
+            config.merkle.clone()
+        }
+
         async fn db_sync(db: Self::Db) -> Self::Db {
             db.sync().await.unwrap()
         }
