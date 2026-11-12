@@ -159,6 +159,7 @@ impl Curve for G1 {
         let mut scratch = vec![0u64; scratch.div_ceil(8)];
         // blst reads one contiguous array through the first of null-terminated pointers.
         let points = [affine.as_ptr(), ptr::null()];
+        assert_eq!(scalars.len(), Scalar::BYTES * affine.len());
         let scalars = [scalars.as_ptr(), ptr::null()];
         let mut out = Self::Blst::default();
         // SAFETY: the arrays hold `affine.len()` points and as many 255-bit scalars, and the
@@ -243,6 +244,7 @@ impl Curve for G2 {
         let mut scratch = vec![0u64; scratch.div_ceil(8)];
         // blst reads one contiguous array through the first of null-terminated pointers.
         let points = [affine.as_ptr(), ptr::null()];
+        assert_eq!(scalars.len(), Scalar::BYTES * affine.len());
         let scalars = [scalars.as_ptr(), ptr::null()];
         let mut out = Self::Blst::default();
         // SAFETY: the arrays hold `affine.len()` points and as many 255-bit scalars, and the
