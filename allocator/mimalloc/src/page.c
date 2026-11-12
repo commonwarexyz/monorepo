@@ -235,6 +235,17 @@ static void mi_theap_page_merge_stats(mi_theap_t* theap, const mi_page_t* page, 
       mi_theapx_stat_decrease(heap, theap, malloc_huge, freed);
     }
   }
+
+  // merge the theap stats into the heap once N bytes were allocated or freed since the last merge
+  // (a merge resets the theap stats, so since then `total` counts the allocated bytes and `total - current` the freed bytes)
+  if (theap != NULL) {
+    const long threshold = mi_option_get(mi_option_stats_merge_threshold);
+    const int64_t allocated_total = theap->stats.malloc_normal.total + theap->stats.malloc_huge.total;
+    const int64_t freed_total = allocated_total - (theap->stats.malloc_normal.current + theap->stats.malloc_huge.current);
+    if (threshold > 0 && allocated_total + freed_total >= (int64_t)threshold) {
+      _mi_theap_merge_stats(theap);
+    }
+  }
 }
 
 // Update stats for a page

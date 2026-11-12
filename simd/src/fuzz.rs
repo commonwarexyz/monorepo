@@ -194,6 +194,9 @@ enum Path {
     Neon,
 }
 
+/// The portable path with one u64 lane, selected when no native backend is available.
+const SCALAR: (Path, usize) = (Path::Portable, 1);
+
 struct Leaf<'a>(&'a mut [u64; 8]);
 
 impl<S: Simd> Operation<S> for Leaf<'_> {
@@ -264,6 +267,10 @@ fn expected_backend() -> (Path, usize) {
     if crate::native::NativeX86V4C::new().is_some() {
         return (Path::X86V4C, 8);
     }
+    #[cfg(target_arch = "x86_64")]
+    if crate::native::NativeX86V3::new().is_some() {
+        return (Path::Portable, 4);
+    }
     #[cfg(target_arch = "aarch64")]
     if crate::native::NativeArmV9::new().is_some() {
         return (Path::ArmV9, 2);
@@ -272,14 +279,36 @@ fn expected_backend() -> (Path, usize) {
     if crate::native::NativeNeon::new().is_some() {
         return (Path::Neon, 2);
     }
-    (Path::Portable, 1)
+    SCALAR
+}
+
+/// Compares native x86-64-v3 with its emulator, independently of dispatch.
+///
+/// Dispatch selects x86-64-v3 only on CPUs without x86v4c, and its portable path skips
+/// instruction checks, so this check covers it on every host with AVX2.
+#[cfg(target_arch = "x86_64")]
+fn x86_v3(plan: Plan, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+    use crate::{emulated::EmulatedX86V3, native::NativeX86V3};
+    let Some(simd) = NativeX86V3::new() else {
+        return Ok(());
+    };
+    simd.execute(|simd: NativeX86V3| match plan {
+        #[cfg(not(miri))]
+        Plan::Common => differential::common(simd, EmulatedX86V3, u),
+        // x86-64-v3 has no additional instructions.
+        #[cfg(not(miri))]
+        Plan::Profile => Ok(()),
+        plan => memory(plan, simd, EmulatedX86V3, u),
+    })
 }
 
 impl Plan {
     /// Runs the selected check through runtime dispatch.
     ///
-    /// Instruction checks compare native results with the matching emulator.
-    /// Portable selection skips those checks without consuming inputs.
+    /// Instruction checks compare native results with the matching emulator. Portable
+    /// selection skips those checks without consuming inputs. On x86-64 CPUs with AVX2,
+    /// instruction checks also compare native x86-64-v3 with its emulator, whichever
+    /// backend dispatch selects.
     pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
         match self {
             Self::Execute => {
@@ -299,7 +328,11 @@ impl Plan {
                 dispatch(Leaf(&mut leaf));
                 assert_eq!(leaf, expected);
             }
-            plan => dispatch(Instructions(plan, u))?,
+            plan => {
+                dispatch(Instructions(plan, &mut *u))?;
+                #[cfg(target_arch = "x86_64")]
+                x86_v3(plan, u)?;
+            }
         }
         Ok(())
     }
@@ -312,7 +345,7 @@ fn test_execute() {
 
 #[cfg(test)]
 fn test_native(plan: Plan) {
-    if expected_backend().0 == Path::Portable {
+    if expected_backend() == SCALAR {
         return;
     }
     commonware_invariants::minifuzz::test(|u| plan.run(u));
@@ -354,16 +387,17 @@ fn test_selected_profile() {
     if let Ok(expected) = std::env::var("COMMONWARE_SIMD_EXPECT_BACKEND")
         && !expected.is_empty()
     {
-        let path = match expected.as_str() {
-            "scalar" => Path::Portable,
-            "x86_v4c" => Path::X86V4C,
-            "neon" => Path::Neon,
-            "arm_v9" => Path::ArmV9,
+        let backend = match expected.as_str() {
+            "scalar" => SCALAR,
+            "x86_v3" => (Path::Portable, 4),
+            "x86_v4c" => (Path::X86V4C, 8),
+            "neon" => (Path::Neon, 2),
+            "arm_v9" => (Path::ArmV9, 2),
             _ => panic!("unknown expected SIMD backend: {expected}"),
         };
-        assert_eq!(selected.0, path, "unexpected SIMD dispatch backend");
+        assert_eq!(selected, backend, "unexpected SIMD dispatch backend");
     }
-    if selected.0 == Path::Portable {
+    if selected == SCALAR {
         for plan in [
             Plan::Load,
             Plan::Store,

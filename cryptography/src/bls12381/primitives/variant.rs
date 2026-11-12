@@ -336,8 +336,8 @@ mod tests {
     use super::*;
     use crate::bls12381::primitives::{group::Scalar, ops};
     use commonware_math::algebra::{CryptoGroup, Random};
-    use commonware_parallel::{Rayon, Sequential};
-    use commonware_utils::{NZUsize, test_rng};
+    use commonware_parallel::{Sequential, mocks::explore};
+    use commonware_utils::test_rng;
 
     fn batch_verify_correct<V: Variant>() {
         let mut rng = test_rng();
@@ -357,24 +357,19 @@ mod tests {
         let hm2 = ops::hash_with_namespace::<V>(V::MESSAGE, b"test", msg2);
         let hm3 = ops::hash_with_namespace::<V>(V::MESSAGE, b"test", msg3);
 
-        V::batch_verify(
-            &mut rng,
-            &[public1, public2, public3],
-            &[hm1, hm2, hm3],
-            &[sig1, sig2, sig3],
-            &Sequential,
-        )
-        .expect("valid batch should pass");
-
-        let parallel = Rayon::new(NZUsize!(2)).unwrap();
-        V::batch_verify(
-            &mut rng,
-            &[public1, public2, public3],
-            &[hm1, hm2, hm3],
-            &[sig1, sig2, sig3],
-            &parallel,
-        )
-        .expect("valid batch should pass with parallel strategy");
+        assert!(
+            explore(|strategy| {
+                V::batch_verify(
+                    &mut rng,
+                    &[public1, public2, public3],
+                    &[hm1, hm2, hm3],
+                    &[sig1, sig2, sig3],
+                    strategy,
+                )
+                .is_ok()
+            }),
+            "a valid batch must verify"
+        );
     }
 
     #[test]

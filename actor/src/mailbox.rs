@@ -532,7 +532,6 @@ struct OverflowState<T, M: Mode<T>> {
 }
 
 impl<T, M: Mode<T>> OverflowState<T, M> {
-    #[allow(clippy::missing_const_for_fn)]
     fn new() -> Self {
         Self {
             queue: Mutex::new(M::Overflow::default()),

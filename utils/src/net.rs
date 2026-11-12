@@ -76,7 +76,8 @@ pub trait IpAddrExt {
     /// Return the [`Subnet`] for the given [`SubnetMask`].
     fn subnet(&self, mask: &SubnetMask) -> Subnet;
 
-    /// Determine if this IP address is globally routable.
+    /// Determine if this IP address is globally reachable according to the IANA IPv4 and IPv6
+    /// Special-Purpose Address Registries.
     // TODO: This mirrors the logic in the unstable `IpAddr::is_global` method from the standard library
     // and can be removed once that API is stabilized.
     fn is_global(&self) -> bool;
@@ -142,6 +143,8 @@ const fn is_global_v4(ip: Ipv4Addr) -> bool {
         || ip.is_loopback()
         || ip.is_link_local()
         || is_future_protocol_v4(ip)
+        // 6a44-relay anycast address (`192.88.99.2/32`)
+        || matches!(ip.octets(), [192, 88, 99, 2])
         || ip.is_documentation()
         || is_benchmarking_v4(ip)
         || is_reserved_v4(ip)
@@ -150,17 +153,10 @@ const fn is_global_v4(ip: Ipv4Addr) -> bool {
 
 #[inline]
 const fn is_documentation_v6(ip: Ipv6Addr) -> bool {
-    (ip.segments()[0] == 0x2001) && (ip.segments()[1] == 0xdb8)
-}
-
-#[inline]
-const fn is_unique_local_v6(ip: Ipv6Addr) -> bool {
-    (ip.segments()[0] & 0xfe00) == 0xfc00
-}
-
-#[inline]
-const fn is_unicast_link_local_v6(ip: Ipv6Addr) -> bool {
-    (ip.segments()[0] & 0xffc0) == 0xfe80
+    matches!(
+        ip.segments(),
+        [0x2001, 0xdb8, ..] | [0x3fff, 0..=0x0fff, ..]
+    )
 }
 
 #[inline]
@@ -173,6 +169,8 @@ const fn is_global_v6(ip: Ipv6Addr) -> bool {
         || matches!(ip.segments(), [0x64, 0xff9b, 1, _, _, _, _, _])
         // Discard-Only Address Block (`100::/64`)
         || matches!(ip.segments(), [0x100, 0, 0, 0, _, _, _, _])
+        // Dummy IPv6 Prefix (`100:0:0:1::/64`)
+        || matches!(ip.segments(), [0x100, 0, 0, 1, _, _, _, _])
         // IETF Protocol Assignments (`2001::/23`)
         || (matches!(ip.segments(), [0x2001, b, _, _, _, _, _, _] if b < 0x200)
             && !(
@@ -180,6 +178,8 @@ const fn is_global_v6(ip: Ipv6Addr) -> bool {
                 u128::from_be_bytes(ip.octets()) == 0x2001_0001_0000_0000_0000_0000_0000_0001
                 // Traversal Using Relays around NAT Anycast (`2001:1::2`)
                 || u128::from_be_bytes(ip.octets()) == 0x2001_0001_0000_0000_0000_0000_0000_0002
+                // DNS-SD Service Registration Protocol Anycast (`2001:1::3`)
+                || u128::from_be_bytes(ip.octets()) == 0x2001_0001_0000_0000_0000_0000_0000_0003
                 // AMT (`2001:3::/32`)
                 || matches!(ip.segments(), [0x2001, 3, _, _, _, _, _, _])
                 // AS112-v6 (`2001:4:112::/48`)
@@ -188,12 +188,13 @@ const fn is_global_v6(ip: Ipv6Addr) -> bool {
                 // Drone Remote ID Protocol Entity Tags (DETs) Prefix (`2001:30::/28`)
                 || matches!(ip.segments(), [0x2001, b, _, _, _, _, _, _] if b >= 0x20 && b <= 0x3F)
             ))
-        // 6to4 (`2002::/16`) – it's not explicitly documented as globally reachable,
-        // IANA says N/A.
+        // 6to4 (`2002::/16`) is not explicitly documented as globally reachable (IANA says N/A).
         || matches!(ip.segments(), [0x2002, _, _, _, _, _, _, _])
         || is_documentation_v6(ip)
-        || is_unique_local_v6(ip)
-        || is_unicast_link_local_v6(ip))
+        // Segment Routing (SRv6) SIDs (`5f00::/16`)
+        || matches!(ip.segments(), [0x5f00, ..])
+        || ip.is_unique_local()
+        || ip.is_unicast_link_local())
 }
 
 #[cfg(test)]
@@ -285,6 +286,12 @@ mod tests {
         assert!(!IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)).is_global()); // 198.51.100.0/24
         assert!(!IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)).is_global()); // 203.0.113.0/24
 
+        // Test 6a44-relay anycast address (192.88.99.2) within the otherwise global deprecated
+        // 6to4 relay anycast block (192.88.99.0/24)
+        assert!(!IpAddr::V4(Ipv4Addr::new(192, 88, 99, 2)).is_global());
+        assert!(IpAddr::V4(Ipv4Addr::new(192, 88, 99, 1)).is_global());
+        assert!(IpAddr::V4(Ipv4Addr::new(192, 88, 99, 3)).is_global());
+
         // Test benchmarking addresses (198.18.0.0/15)
         assert!(!IpAddr::V4(Ipv4Addr::new(198, 18, 0, 1)).is_global());
         assert!(!IpAddr::V4(Ipv4Addr::new(198, 19, 255, 254)).is_global());
@@ -323,13 +330,23 @@ mod tests {
         // Test discard-only addresses (100::/64)
         assert!(!IpAddr::V6(Ipv6Addr::from_str("100::1").unwrap()).is_global());
 
+        // Test dummy prefix addresses (100:0:0:1::/64)
+        assert!(!IpAddr::V6(Ipv6Addr::from_str("100:0:0:1::1").unwrap()).is_global());
+        assert!(
+            !IpAddr::V6(Ipv6Addr::from_str("100:0:0:1:ffff:ffff:ffff:ffff").unwrap()).is_global()
+        );
+        assert!(IpAddr::V6(Ipv6Addr::from_str("100:0:0:2::1").unwrap()).is_global()); // Outside both /64s
+
         // Test IETF protocol assignments (2001::/23)
         assert!(!IpAddr::V6(Ipv6Addr::from_str("2001:0::1").unwrap()).is_global()); // Within 2001::/23
-        assert!(IpAddr::V6(Ipv6Addr::from_str("2001:1::1").unwrap()).is_global()); // Outside 2001::/23
+        assert!(!IpAddr::V6(Ipv6Addr::from_str("2001:1ff::1").unwrap()).is_global()); // Within 2001::/23
+        assert!(IpAddr::V6(Ipv6Addr::from_str("2001:200::1").unwrap()).is_global()); // Outside 2001::/23
 
         // Test exceptions within 2001::/23
         assert!(IpAddr::V6(Ipv6Addr::from_str("2001:1::1").unwrap()).is_global()); // Port Control Protocol Anycast
         assert!(IpAddr::V6(Ipv6Addr::from_str("2001:1::2").unwrap()).is_global()); // Traversal Using Relays around NAT
+        assert!(IpAddr::V6(Ipv6Addr::from_str("2001:1::3").unwrap()).is_global()); // DNS-SD Service Registration Protocol
+        assert!(!IpAddr::V6(Ipv6Addr::from_str("2001:1::4").unwrap()).is_global()); // Unassigned neighbor
         assert!(IpAddr::V6(Ipv6Addr::from_str("2001:3::1").unwrap()).is_global()); // AMT
         assert!(IpAddr::V6(Ipv6Addr::from_str("2001:4:112::1").unwrap()).is_global()); // AS112-v6
         assert!(IpAddr::V6(Ipv6Addr::from_str("2001:20::1").unwrap()).is_global()); // ORCHIDv2
@@ -338,8 +355,23 @@ mod tests {
         // Test 6to4 addresses (2002::/16)
         assert!(!IpAddr::V6(Ipv6Addr::from_str("2002::1").unwrap()).is_global());
 
-        // Test documentation addresses (2001:db8::/32)
+        // Test documentation addresses (2001:db8::/32 and 3fff::/20)
         assert!(!IpAddr::V6(Ipv6Addr::from_str("2001:db8::1").unwrap()).is_global());
+        assert!(!IpAddr::V6(Ipv6Addr::from_str("3fff::1").unwrap()).is_global());
+        assert!(
+            !IpAddr::V6(Ipv6Addr::from_str("3fff:fff:ffff:ffff:ffff:ffff:ffff:ffff").unwrap())
+                .is_global()
+        );
+        assert!(IpAddr::V6(Ipv6Addr::from_str("3fff:1000::1").unwrap()).is_global()); // Outside 3fff::/20
+
+        // Test segment routing addresses (5f00::/16)
+        assert!(!IpAddr::V6(Ipv6Addr::from_str("5f00::1").unwrap()).is_global());
+        assert!(
+            !IpAddr::V6(Ipv6Addr::from_str("5f00:ffff:ffff:ffff:ffff:ffff:ffff:ffff").unwrap())
+                .is_global()
+        );
+        assert!(IpAddr::V6(Ipv6Addr::from_str("5eff::1").unwrap()).is_global()); // Outside 5f00::/16
+        assert!(IpAddr::V6(Ipv6Addr::from_str("5f01::1").unwrap()).is_global()); // Outside 5f00::/16
 
         // Test unique local addresses (fc00::/7)
         assert!(!IpAddr::V6(Ipv6Addr::from_str("fc00::1").unwrap()).is_global()); // fc00::/8

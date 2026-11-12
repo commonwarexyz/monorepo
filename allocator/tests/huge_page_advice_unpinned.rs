@@ -12,7 +12,7 @@ use std::hint::black_box;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc::new(Config {
     reserve: Some(Reserve::unpinned(2 * ARENA_CHUNK_SIZE)),
-    transparent_huge_pages: Some(true),
+    transparent_huge_pages: true,
     ..Config::DEFAULT
 });
 

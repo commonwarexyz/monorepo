@@ -104,10 +104,23 @@ pub fn graftable_chunks<F: Graftable>(ops_leaves: u64, grafting_height: u32) -> 
     (ops_leaves - birth_chunk_0) / chunk_size + 1
 }
 
-/// Compute grafted leaf digests for resolved `(chunk_idx, chunk_ops_digest, chunk)` triples:
-/// each leaf is `hash(chunk || chunk_ops_digest)`, except all-zero chunks preserve
-/// `chunk_ops_digest` directly (zero-chunk identity).
-pub(super) fn graft_chunk_digests<H: Hasher, S: Strategy, const N: usize>(
+/// Returns the grafted leaf digest for a bitmap `chunk` and the root of the ops subtree it covers.
+fn grafted_leaf_digest<H: Hasher>(
+    hasher: &merkle::hasher::Standard<H>,
+    chunk: &[u8],
+    ops_subtree_root: H::Digest,
+) -> H::Digest {
+    // An all-zero chunk grafts to the ops subtree root itself (the zero-chunk identity). Any other
+    // chunk grafts to `hash(chunk || ops_subtree_root)`.
+    if chunk.iter().all(|&b| b == 0) {
+        ops_subtree_root
+    } else {
+        hasher.hash(&[chunk, ops_subtree_root.as_ref()])
+    }
+}
+
+/// Compute the grafted leaf digest of each resolved `(chunk_idx, chunk_ops_digest, chunk)` triple.
+pub(super) fn grafted_leaf_digests<H: Hasher, S: Strategy, const N: usize>(
     strategy: &S,
     inputs: Vec<(usize, H::Digest, [u8; N])>,
 ) -> Vec<(usize, H::Digest)> {
@@ -115,14 +128,7 @@ pub(super) fn graft_chunk_digests<H: Hasher, S: Strategy, const N: usize>(
         inputs,
         || qmdb::hasher::<H>(),
         |h, (chunk_idx, chunk_ops_digest, chunk)| {
-            if chunk == BitMap::<N>::EMPTY_CHUNK {
-                (chunk_idx, chunk_ops_digest)
-            } else {
-                (
-                    chunk_idx,
-                    h.hash(&[chunk.as_slice(), chunk_ops_digest.as_ref()]),
-                )
-            }
+            (chunk_idx, grafted_leaf_digest(h, &chunk, chunk_ops_digest))
         },
     )
 }
@@ -388,14 +394,7 @@ impl<F: Graftable, H: Hasher> HasherTrait<F> for Verifier<'_, F, H> {
                     return ops_subtree_root;
                 };
 
-                // For all-zero chunks, the grafted leaf is the ops subtree root (identity).
-                // For non-zero chunks: grafted_leaf = hash(chunk || ops_subtree_root).
-                let chunk = self.chunks[local];
-                if chunk.iter().all(|&b| b == 0) {
-                    ops_subtree_root
-                } else {
-                    self.hash(&[chunk, ops_subtree_root.as_ref()])
-                }
+                grafted_leaf_digest(&self.hasher, self.chunks[local], ops_subtree_root)
             }
         }
     }
@@ -470,7 +469,7 @@ impl<
     ///
     /// Returns `None` at height 0 (a grafted leaf), since leaves encode bitmap data and
     /// cannot be recomputed from the tree structure alone. The settlement guard in
-    /// [`super::db::Db::sync_boundary`] ensures this case is unreachable for pruned chunks.
+    /// [`super::Db::sync_boundary`] ensures this case is unreachable for pruned chunks.
     fn reconstruct_grafted_node(&self, pos: Position<F>) -> Option<H::Digest> {
         if let Some(node) = self.grafted_tree.get_node(pos) {
             return Some(node);
@@ -1031,13 +1030,13 @@ mod tests {
                         vec![&c1],
                         ALL_CHUNKS_GRAFTABLE,
                     );
-                    assert!(proof.verify_element_inclusion(&verifier, &b1, loc, &grafted_root));
+                    assert!(proof.verify_element_inclusion(&verifier, loc, &b1, &grafted_root));
 
                     let loc = Location::new(1);
                     let proof = verification::range_proof(&hasher, &combined, loc..loc + 1, 0)
                         .await
                         .unwrap();
-                    assert!(proof.verify_element_inclusion(&verifier, &b2, loc, &grafted_root));
+                    assert!(proof.verify_element_inclusion(&verifier, loc, &b2, &grafted_root));
 
                     let loc = Location::new(2);
                     let proof = verification::range_proof(&hasher, &combined, loc..loc + 1, 0)
@@ -1049,13 +1048,13 @@ mod tests {
                         vec![&c2],
                         ALL_CHUNKS_GRAFTABLE,
                     );
-                    assert!(proof.verify_element_inclusion(&verifier, &b3, loc, &grafted_root));
+                    assert!(proof.verify_element_inclusion(&verifier, loc, &b3, &grafted_root));
 
                     let loc = Location::new(3);
                     let proof = verification::range_proof(&hasher, &combined, loc..loc + 1, 0)
                         .await
                         .unwrap();
-                    assert!(proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root));
+                    assert!(proof.verify_element_inclusion(&verifier, loc, &b4, &grafted_root));
                 }
 
                 // Verify that manipulated inputs cause proof verification to fail.
@@ -1070,19 +1069,19 @@ mod tests {
                         vec![&c2],
                         ALL_CHUNKS_GRAFTABLE,
                     );
-                    assert!(proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root));
+                    assert!(proof.verify_element_inclusion(&verifier, loc, &b4, &grafted_root));
 
                     // Wrong leaf element.
-                    assert!(!proof.verify_element_inclusion(&verifier, &b3, loc, &grafted_root));
+                    assert!(!proof.verify_element_inclusion(&verifier, loc, &b3, &grafted_root));
 
                     // Wrong root.
-                    assert!(!proof.verify_element_inclusion(&verifier, &b4, loc, &ops_root));
+                    assert!(!proof.verify_element_inclusion(&verifier, loc, &b4, &ops_root));
 
                     // Wrong position.
                     assert!(!proof.verify_element_inclusion(
                         &verifier,
-                        &b4,
                         loc + 1,
+                        &b4,
                         &grafted_root,
                     ));
 
@@ -1093,7 +1092,7 @@ mod tests {
                         vec![&c1],
                         ALL_CHUNKS_GRAFTABLE,
                     );
-                    assert!(!proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root));
+                    assert!(!proof.verify_element_inclusion(&verifier, loc, &b4, &grafted_root));
 
                     // Wrong chunk index in the verifier.
                     let verifier = Verifier::<mmr::Family, Sha256>::new(
@@ -1102,7 +1101,7 @@ mod tests {
                         vec![&c2],
                         ALL_CHUNKS_GRAFTABLE,
                     );
-                    assert!(!proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root));
+                    assert!(!proof.verify_element_inclusion(&verifier, loc, &b4, &grafted_root));
                 }
 
                 // Verify range proofs.
@@ -1124,8 +1123,8 @@ mod tests {
                     );
                     assert!(proof.verify_range_inclusion(
                         &verifier,
-                        &range,
                         Location::new(0),
+                        &range,
                         &grafted_root,
                     ));
 
@@ -1138,8 +1137,8 @@ mod tests {
                     );
                     assert!(!proof.verify_range_inclusion(
                         &verifier,
-                        &range,
                         Location::new(0),
+                        &range,
                         &grafted_root,
                     ));
                 }
@@ -1190,7 +1189,7 @@ mod tests {
                 vec![&c1],
                 ALL_CHUNKS_GRAFTABLE,
             );
-            assert!(proof.verify_element_inclusion(&verifier, &b1, loc, &grafted_root));
+            assert!(proof.verify_element_inclusion(&verifier, loc, &b1, &grafted_root));
 
             let verifier = Verifier::<mmr::Family, Sha256>::new(
                 GRAFTING_HEIGHT,
@@ -1202,7 +1201,7 @@ mod tests {
             let proof = merkle::verification::range_proof(&hasher, &combined, loc..loc + 1, 0)
                 .await
                 .unwrap();
-            assert!(proof.verify_element_inclusion(&verifier, &b5, loc, &grafted_root));
+            assert!(proof.verify_element_inclusion(&verifier, loc, &b5, &grafted_root));
         });
     }
 

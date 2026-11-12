@@ -35,6 +35,18 @@ impl Config {
 /// Failed durability barriers during content sync remain errors on later opens through this
 /// instance until the blob is removed or recreated. Creation failures are retained only when
 /// the header is complete.
+///
+/// On Linux, reads with [crate::ReadOptions::DONT_CACHE] use direct I/O where they can. An open's
+/// first such read opens a second, read-only `O_DIRECT` descriptor on the blob's file. The open
+/// keeps the descriptor until it is dropped, so every open that served an uncached read holds two
+/// descriptors. [crate::Blob::read_at] returns the requested bytes as a view of an allocation that
+/// holds their superset aligned to 4096 bytes, so a caller that retains them retains the whole
+/// allocation.
+///
+/// A read that cannot use direct I/O falls back to a buffered read with the `RWF_DONTCACHE` hint.
+/// An open stops trying direct I/O once its filesystem rejects `O_DIRECT`. While opening the
+/// descriptor fails for another reason, such as the descriptor limit, uncached reads keep retrying
+/// the open on their blocking threads before reading buffered.
 #[derive(Clone)]
 pub struct Storage {
     /// Serializes namespace operations and access to partition durability records.
@@ -566,7 +578,7 @@ mod tests {
             "raw file should have a full header page"
         );
 
-        // Test 2: Logical offset handling - write at offset 0 stores at the data offset
+        // Test 2: Write at logical offset 0 stores at the data offset
         let data = b"hello world";
         blob.write_at(0, data, WriteOptions::default())
             .await
@@ -1597,6 +1609,16 @@ mod tests {
             env::temp_dir().join(format!("storage_tokio_creation_{}", random_suffix()));
         let storage = Storage::new(Config::new(storage_directory.clone(), Layout::ALL));
         shared::check_failed_creation(&storage, &storage.pending).await;
+        drop(storage);
+        let _ = std::fs::remove_dir_all(storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_failed_creation_over_torn_header_recreates() {
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_torn_header_{}", random_suffix()));
+        let storage = Storage::new(Config::new(storage_directory.clone(), Layout::ALL));
+        shared::check_failed_creation_over_torn_header(&storage, &storage.pending).await;
         drop(storage);
         let _ = std::fs::remove_dir_all(storage_directory);
     }

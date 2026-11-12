@@ -78,9 +78,12 @@ use commonware_codec::Encode;
 use commonware_cryptography::{Crc32, Hasher};
 use commonware_formatting::hex;
 use commonware_macros::select;
-use commonware_parallel::{Rayon, ThreadPool};
+use commonware_parallel::{
+    Rayon, ThreadPool,
+    rayon::{ThreadPoolBuildError, ThreadPoolBuilder},
+};
 use commonware_utils::{
-    Cached, SystemTimeExt,
+    Cached, NZUsize, SystemTimeExt,
     sync::{Mutex, RwLock},
     time::SYSTEM_TIME_PRECISION,
 };
@@ -94,7 +97,6 @@ use governor::clock::{Clock as GClock, ReasonablyRealtime};
 #[cfg(feature = "external")]
 use pin_project::pin_project;
 use rand::{CryptoRng, Rng, SeedableRng, TryCryptoRng, TryRng, prelude::SliceRandom, rngs::StdRng};
-use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use std::{
     collections::{BTreeMap, BinaryHeap, HashMap},
     convert::Infallible,
@@ -475,7 +477,6 @@ impl Checkpoint {
     }
 }
 
-#[allow(clippy::large_enum_variant)]
 enum State {
     Config(Config),
     Checkpoint(Checkpoint),
@@ -628,15 +629,11 @@ impl Runner {
                             }
                         }
                         Mode::Work(future) => {
-                            // Get the future (if it still exists)
+                            // Only this loop polls or clears task futures during scheduling, and it
+                            // removes a finished task from the registry before clearing its future.
+                            // Any task the lookup above finds therefore still has its future.
                             let mut fut_opt = future.lock();
-                            let Some(fut) = fut_opt.as_mut() else {
-                                trace!(id, "skipping already complete task");
-
-                                // Remove the future
-                                executor.tasks.remove(id);
-                                continue;
-                            };
+                            let fut = fut_opt.as_mut().expect("polled task must have a future");
 
                             // Poll the task
                             if fut.as_mut().poll(&mut cx).is_ready() {
@@ -1213,8 +1210,7 @@ fn shared_thread_pool() -> Result<ThreadPool, ThreadPoolBuildError> {
     let pool = Cached::take(
         &THREAD_POOL,
         || {
-            ThreadPoolBuilder::new()
-                .num_threads(1)
+            ThreadPoolBuilder::new(NZUsize!(1))
                 .use_current_thread()
                 .build()
                 .map(Arc::new)
@@ -1227,11 +1223,11 @@ fn shared_thread_pool() -> Result<ThreadPool, ThreadPoolBuildError> {
 /// Spawning threads would be nondeterministic, so the pool has no background workers. The
 /// executor thread registers itself as its sole member and all work executes inline.
 ///
-/// Rayon's current-thread registration is permanent and per-OS-thread, so only one pool
-/// can ever execute work on the executor thread. Every request (including from a later
-/// runner on the same thread) returns a strategy on that single-threaded pool with its
-/// planning parallelism set independently. This controls adaptive decisions and manual
-/// partitioning hints while Rayon executes on the sole registered thread. The returned
+/// Rayon's current-thread registration is permanent and per-OS-thread, so only one pool can ever
+/// execute work on the executor thread. Every request (including from a later runner on the same
+/// thread) returns a strategy on that single-threaded pool with its planning parallelism set
+/// independently. The planning parallelism controls adaptive decisions and the planning of
+/// batches and tiles, while Rayon executes all work on the sole registered thread. The returned
 /// strategy is therefore tied to the executor thread.
 impl crate::Strategizer for Context {
     fn strategy(&self, parallelism: NonZeroUsize) -> Rayon {
@@ -1612,7 +1608,7 @@ mod tests {
     };
     use bytes::Bytes;
     use commonware_macros::test_traced;
-    use commonware_parallel::Strategy;
+    use commonware_parallel::{Strategy, mocks::Explorer};
     #[cfg(feature = "external")]
     use commonware_utils::channel::mpsc;
     use commonware_utils::{NZUsize, ScriptedRng, channel::oneshot, probability};
@@ -2864,7 +2860,7 @@ mod tests {
         executor.start(|ctx| async move {
             let (blob, _) = ctx.open("test_dynamic", b"blob").await.unwrap();
 
-            // Initially no faults - sync should succeed
+            // Without faults, the first sync succeeds.
             blob.write_at(0, b"initial".to_vec(), WriteOptions::default())
                 .await
                 .unwrap();
@@ -3027,8 +3023,8 @@ mod tests {
     fn test_parallel_strategy_spawn_completes() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let strategy = context.child("pool").strategy(NZUsize!(2)).manual();
-            assert_eq!(strategy.parallelism(), 2);
+            let pool = context.child("pool").strategy(NZUsize!(2));
+            let strategy = Explorer::parallel(&pool);
 
             let output = strategy
                 .spawn(2, |strategy| strategy.map_collect_vec(0..2, |i| i + 1))
@@ -3045,8 +3041,7 @@ mod tests {
     fn test_strategies_reuse_pool_across_runners() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let first = context.child("pool_a").strategy(NZUsize!(1)).manual();
-            assert_eq!(first.parallelism(), 1);
+            let first = context.child("pool_a").strategy(NZUsize!(1));
             assert_eq!(first.run(2, || "serial", || "parallel"), "serial");
             let output = first
                 .spawn(2, |strategy| strategy.map_collect_vec(0..2, |i| i + 1))
@@ -3054,8 +3049,8 @@ mod tests {
                 .expect("single-threaded pool should run spawned work inline");
             assert_eq!(output, vec![1, 2]);
 
-            let second = context.child("pool_b").strategy(NZUsize!(3)).manual();
-            assert_eq!(second.parallelism(), 3);
+            let pool_b = context.child("pool_b").strategy(NZUsize!(3));
+            let second = Explorer::parallel(&pool_b);
             assert_eq!(second.run(2, || "serial", || "parallel"), "parallel");
             let output = second
                 .spawn(3, |strategy| strategy.map_collect_vec(0..3, |i| i + 1))
@@ -3066,8 +3061,8 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let third = context.child("pool_c").strategy(NZUsize!(4)).manual();
-            assert_eq!(third.parallelism(), 4);
+            let pool_c = context.child("pool_c").strategy(NZUsize!(4));
+            let third = Explorer::parallel(&pool_c);
             assert_eq!(third.run(2, || "serial", || "parallel"), "parallel");
             let output = third
                 .spawn(4, |strategy| strategy.map_collect_vec(0..4, |i| i + 1))
@@ -3084,7 +3079,8 @@ mod tests {
     fn test_pool_survives_suspension() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let strategy = context.child("pool").strategy(NZUsize!(2)).manual();
+            let pool = context.child("pool").strategy(NZUsize!(2));
+            let strategy = Explorer::parallel(&pool);
             context.sleep(Duration::from_millis(10)).await;
 
             let output = strategy

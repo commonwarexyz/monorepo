@@ -2,14 +2,12 @@
 
 //! Segmented variable journal crash recovery under supported partial-write crash cuts.
 //!
-//! Replay repairs torn pages lazily, and a section retained from a previous execution panics on
-//! append until a replay from offset zero validates it (pinned by the journal's should_panic
-//! unit tests, which a panic-aborting fuzz target cannot probe). This target reconstructs each
-//! section's expected item prefix directly from the post-recovery-crash image (the contiguous
-//! valid-page prefix, cut at the last whole frame), drains a full replay against that prefix,
-//! and reopens the repaired result. A section whose blob holds no valid page recovers to
-//! logical size zero and skips the gate, so when the image contains one the target appends a
-//! probe item to it before the replay to catch an init that over-blocks.
+//! Opening the journal returns a recovery that repairs torn pages as it replays. This target
+//! reconstructs each section's expected item prefix directly from the post-recovery-crash image
+//! (the contiguous valid-page prefix, cut at the last whole frame), drains the recovery against
+//! that prefix, and reopens the repaired result. A section whose blob holds no valid page
+//! recovers to logical size zero, so when the image contains one the target appends a probe
+//! item to it after the recovery and expects it at offset zero.
 //!
 //! The op stream can also prune sections, with remove faults armed only around each prune
 //! drive. A completed prune durably removed every section blob below its floor and gates later
@@ -35,6 +33,7 @@ use std::{
 };
 
 type Journal = variable::Journal<DelayedSyncContext<deterministic::Context>, Vec<u8>>;
+type Recovery = variable::Recovery<DelayedSyncContext<deterministic::Context>, Vec<u8>>;
 
 const PAGE_SIZE: usize = 128;
 const PAGE_CHECKSUM_RECORD_SIZE: usize = commonware_runtime::buffer::paged::CHECKSUM_SIZE as usize;
@@ -78,6 +77,7 @@ fn config() -> variable::Config<(commonware_codec::RangeCfg<usize>, ())> {
         codec_config: ((0..=MAX_ITEM_LEN).into(), ()),
         page_cache: CacheRef::new(NonZeroU16::new(PAGE_SIZE as u16).unwrap(), NZUsize!(8)),
         write_buffer: NZUsize!(4096),
+        replay_buffer: NZUsize!(1024),
     }
 }
 
@@ -198,11 +198,10 @@ async fn recover_expected(
 }
 
 /// Drain a full replay, asserting it yields exactly the expected frames in order.
-async fn assert_replay(journal: Journal, expected: &BTreeMap<u64, (u64, Vec<Vec<u8>>)>) -> Journal {
-    let mut replay = journal
-        .replay(0, 0, NZUsize!(1024), ReadOptions::default())
-        .await
-        .expect("replay start failed");
+async fn assert_replay(
+    mut replay: Recovery,
+    expected: &BTreeMap<u64, (u64, Vec<Vec<u8>>)>,
+) -> Journal {
     let mut seen: BTreeMap<u64, Vec<Vec<u8>>> = BTreeMap::new();
     while let Some(result) = replay.next().await {
         let (section, _, _, item) = result.expect("replay yielded an error");
@@ -241,10 +240,12 @@ async fn recover_once(context: deterministic::Context) -> Result<(), Error> {
         inner: context,
         pending,
     };
-    let journal = Journal::init(context.child("faulted_recovery"), config()).await?;
-    let mut replay = journal
-        .replay(0, 0, NZUsize!(1024), ReadOptions::default())
-        .await?;
+    let mut replay = Journal::init(
+        context.child("faulted_recovery"),
+        config(),
+        ReadOptions::default(),
+    )
+    .await?;
     while let Some(result) = replay.next().await {
         result?;
     }
@@ -269,9 +270,11 @@ fn fuzz(input: FuzzInput) {
                 inner: context,
                 pending: pending.clone(),
             };
-            let mut journal = Journal::init(context.child("journal"), config())
-                .await
-                .expect("initial init failed");
+            let recovery =
+                Journal::init(context.child("journal"), config(), ReadOptions::default())
+                    .await
+                    .expect("initial init failed");
+            let mut journal = assert_replay(recovery, &BTreeMap::new()).await;
 
             // Items covered by a completed sync per still-live section.
             let mut durable: BTreeMap<u64, usize> = BTreeMap::new();
@@ -477,16 +480,15 @@ fn fuzz(input: FuzzInput) {
             pending: pending.clone(),
         };
 
-        // A full replay repairs the torn suffix, matches the image-derived prefix exactly, and
-        // unlocks appends.
-        let mut journal = Journal::init(context.child("journal"), config())
+        // A full replay repairs the torn suffix and matches the image-derived prefix exactly.
+        let recovery = Journal::init(context.child("journal"), config(), ReadOptions::default())
             .await
             .expect("recovery init failed");
+        let mut journal = assert_replay(recovery, &expected).await;
 
-        // A section recovered at logical size zero must stay outside the append gate: the
-        // probe append must succeed without a replay and land at offset zero. The replay
-        // below flushes and yields buffered items, so the probe frame (one outer varint,
-        // one inner varint, five payload bytes) joins the section's expected outcome.
+        // A section recovered at logical size zero resumes at offset zero. The probe frame (one
+        // outer varint, one inner varint, five payload bytes) joins the section's expected
+        // outcome.
         if let Some(section) = empty {
             let offset;
             (journal, offset, _) = journal
@@ -498,7 +500,6 @@ fn fuzz(input: FuzzInput) {
             entry.0 = 7;
             entry.1.push(vec![0xAB; 5]);
         }
-        let mut journal = assert_replay(journal, &expected).await;
         let mut sentinels = expected.clone();
         for (&section, (size, _)) in &expected {
             let offset;
@@ -518,10 +519,10 @@ fn fuzz(input: FuzzInput) {
         drop(journal);
 
         // A clean reopen replays the repaired image plus the sentinels.
-        let journal = Journal::init(context.child("reopen"), config())
+        let recovery = Journal::init(context.child("reopen"), config(), ReadOptions::default())
             .await
             .expect("reopen failed");
-        let journal = assert_replay(journal, &sentinels).await;
+        let journal = assert_replay(recovery, &sentinels).await;
         journal.destroy().await.expect("destroy failed");
     });
 }

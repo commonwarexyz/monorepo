@@ -1,5 +1,5 @@
 use commonware_cryptography::{Hasher, blake3::Blake3};
-use commonware_parallel::Rayon;
+use commonware_parallel::{Rayon, rayon::ThreadPoolBuilder};
 use commonware_utils::{NZUsize, test_rng};
 use criterion::{Criterion, criterion_group};
 use rand::Rng;
@@ -9,7 +9,7 @@ const CONCURRENCY: usize = 8;
 
 fn bench_hash_message(c: &mut Criterion) {
     let mut sampler = test_rng();
-    let strategy = Rayon::new(NZUsize!(CONCURRENCY)).unwrap();
+    let strategy = Rayon::new(ThreadPoolBuilder::new(NZUsize!(CONCURRENCY))).unwrap();
     let cases = [8, 12, 16, 17, 18, 19, 20, 24].map(|i| 2usize.pow(i));
     for message_length in cases.into_iter() {
         let mut msg = vec![0u8; message_length];

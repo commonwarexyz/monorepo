@@ -51,7 +51,7 @@ library LibQMDBCurrentMMR {
 
     /// @notice Verify historical operation inclusion under a canonical current MMR root.
     /// @dev The witness authenticates the operation root without establishing activity of selected operations.
-    /// Proof witnesses are in increasing physical position order.
+    /// Proof locations are strictly ascending and witnesses are in increasing physical position order.
     /// @param root Authenticated current QMDB MMR root with the specified schema and chunk size.
     /// @param operations Exact Commonware operation encodings corresponding to `proof.locations`.
     /// @param proof Sparse operation proof from the same snapshot as `witness`.

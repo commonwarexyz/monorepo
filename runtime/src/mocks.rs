@@ -571,12 +571,20 @@ macro_rules! forward_context {
     };
 }
 
+#[cfg(any(test, feature = "test-utils"))]
+mod read_gate;
+#[cfg(any(test, feature = "test-utils"))]
+pub use read_gate::{ReadGate, ReadGateBlob, ReadGateContext};
+
 /// Snapshot of the options observed by a [RecordingContext] or [RecordingBlob].
 #[cfg(any(test, feature = "test-utils"))]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RecordingSnapshot {
-    /// Options supplied to read operations, in call order.
+    /// Options supplied to read operations, in call order, with one entry per range of a batched
+    /// read.
     pub reads: Vec<ReadOptions>,
+    /// Range count of each batched read, in call order.
+    pub batches: Vec<usize>,
     /// Options supplied to write operations, in call order.
     pub writes: Vec<WriteOptions>,
 }
@@ -602,6 +610,12 @@ impl Recordings {
 
     fn read(&self, options: ReadOptions) {
         self.state.lock().reads.push(options);
+    }
+
+    fn batch(&self, ranges: usize, options: ReadOptions) {
+        let mut state = self.state.lock();
+        state.reads.extend(std::iter::repeat_n(options, ranges));
+        state.batches.push(ranges);
     }
 
     fn write(&self, options: WriteOptions) {
@@ -698,7 +712,8 @@ impl<E: crate::Storage> crate::Storage for RecordingContext<E> {
     }
 }
 
-/// Blob wrapper that records read and write options before delegating each operation.
+/// Blob wrapper that records read and write options and the range count of each batched read,
+/// then delegates each operation.
 #[cfg(any(test, feature = "test-utils"))]
 pub struct RecordingBlob<B> {
     inner: B,
@@ -726,6 +741,15 @@ impl<B: Blob> Blob for RecordingBlob<B> {
     ) -> Result<IoBufsMut, Error> {
         self.recordings.read(options);
         self.inner.read_at(offset, len, options).await
+    }
+
+    fn read_many(
+        &self,
+        ranges: &[(u64, usize)],
+        options: ReadOptions,
+    ) -> impl futures::Stream<Item = Result<(usize, IoBufsMut), Error>> + Send {
+        self.recordings.batch(ranges.len(), options);
+        self.inner.read_many(ranges, options)
     }
 
     async fn write_at(
@@ -1393,12 +1417,196 @@ impl<B: Blob> Blob for SyncFaultBlob<B> {
     }
 }
 
+/// Controls a [MutationFaultContext]: after a set number of mutating operations succeed, every
+/// later one fails with an injected error.
+///
+/// A mutating operation is a write, resize, sync, started sync, or removal.
+#[derive(Clone, Default)]
+pub struct MutationFaults {
+    state: Arc<Mutex<MutationFaultState>>,
+}
+
+#[derive(Default)]
+struct MutationFaultState {
+    allowed: Option<u64>,
+    failed: bool,
+}
+
+impl MutationFaults {
+    /// Let `operations` more mutating operations succeed, then fail every later one.
+    pub fn allow(&self, operations: u64) {
+        *self.state.lock() = MutationFaultState {
+            allowed: Some(operations),
+            failed: false,
+        };
+    }
+
+    /// Stop failing operations.
+    pub fn disarm(&self) {
+        self.state.lock().allowed = None;
+    }
+
+    /// Whether an operation has failed since the last [Self::allow].
+    pub fn failed(&self) -> bool {
+        self.state.lock().failed
+    }
+
+    fn check(&self) -> Result<(), Error> {
+        let mut state = self.state.lock();
+        match &mut state.allowed {
+            None => Ok(()),
+            Some(0) => {
+                state.failed = true;
+                Err(Error::Io(
+                    std::io::Error::other("injected mutation failure").into(),
+                ))
+            }
+            Some(allowed) => {
+                *allowed -= 1;
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Context wrapper whose mutating storage operations fail once the shared [MutationFaults] has
+/// let its allowed number succeed. A failed operation never reaches the wrapped storage.
+#[derive(Clone)]
+pub struct MutationFaultContext<E> {
+    pub inner: E,
+    pub faults: MutationFaults,
+}
+
+forward_context!(MutationFaultContext, faults);
+
+impl<E: crate::Storage> crate::Storage for MutationFaultContext<E> {
+    type Blob = MutationFaultBlob<E::Blob>;
+
+    async fn open_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: std::ops::RangeInclusive<BlobVersion>,
+    ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
+        let (inner, len, version) = self.inner.open_versioned(partition, name, versions).await?;
+        Ok((
+            MutationFaultBlob {
+                inner,
+                faults: self.faults.clone(),
+            },
+            len,
+            version,
+        ))
+    }
+
+    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+        self.faults.check()?;
+        self.inner.remove(partition, name).await
+    }
+
+    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+        self.inner.scan(partition).await
+    }
+}
+
+/// Blob wrapper whose mutating operations fail once its [MutationFaults] allows no more.
+pub struct MutationFaultBlob<B> {
+    inner: B,
+    faults: MutationFaults,
+}
+
+impl<B: Blob> Blob for MutationFaultBlob<B> {
+    async fn read_at_buf(
+        &self,
+        offset: u64,
+        len: usize,
+        bufs: impl Into<IoBufsMut> + Send,
+        options: ReadOptions,
+    ) -> Result<IoBufsMut, Error> {
+        self.inner.read_at_buf(offset, len, bufs, options).await
+    }
+
+    async fn read_at(
+        &self,
+        offset: u64,
+        len: usize,
+        options: ReadOptions,
+    ) -> Result<IoBufsMut, Error> {
+        self.inner.read_at(offset, len, options).await
+    }
+
+    async fn write_at(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
+    ) -> Result<(), Error> {
+        self.faults.check()?;
+        self.inner.write_at(offset, bufs, options).await
+    }
+
+    async fn resize(&self, len: u64) -> Result<(), Error> {
+        self.faults.check()?;
+        self.inner.resize(len).await
+    }
+
+    async fn sync(&self) -> Result<(), Error> {
+        self.faults.check()?;
+        self.inner.sync().await
+    }
+
+    async fn start_sync(&self) -> Handle<()> {
+        if let Err(err) = self.faults.check() {
+            return Handle::ready(Err(err));
+        }
+        self.inner.start_sync().await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{Clock, IoBufMut, Runner, Sink, Spawner, Storage as _, Stream, deterministic};
     use commonware_macros::select;
     use std::{thread::sleep, time::Duration};
+
+    #[test]
+    fn mutation_faults_fail_after_allowed_operations() {
+        deterministic::Runner::default().start(|context| async move {
+            let faults = MutationFaults::default();
+            let context = MutationFaultContext {
+                inner: context,
+                faults: faults.clone(),
+            };
+            let (blob, _) = context.open("mutation", b"blob").await.unwrap();
+
+            // Two mutations succeed, then every later one fails, whatever its kind.
+            faults.allow(2);
+            blob.write_at(0, b"data", WriteOptions::default())
+                .await
+                .unwrap();
+            blob.sync().await.unwrap();
+            assert!(!faults.failed());
+            assert!(blob.resize(2).await.is_err());
+            assert!(faults.failed());
+            assert!(
+                blob.write_at(0, b"more", WriteOptions::default())
+                    .await
+                    .is_err()
+            );
+            assert!(blob.sync().await.is_err());
+            assert!(blob.start_sync().await.await.is_err());
+            assert!(context.remove("mutation", Some(b"blob")).await.is_err());
+
+            // Reads still succeed, and no failed mutation reached storage.
+            let read = blob.read_at(0, 4, ReadOptions::default()).await.unwrap();
+            assert_eq!(read.coalesce(), b"data");
+
+            // Disarming lets mutations through again.
+            faults.disarm();
+            blob.resize(2).await.unwrap();
+        });
+    }
 
     #[test]
     fn recording_context_preserves_data_and_records_options() {
@@ -1422,6 +1630,7 @@ mod tests {
                 recordings.snapshot(),
                 RecordingSnapshot {
                     reads: vec![ReadOptions::DONT_CACHE, ReadOptions::default()],
+                    batches: Vec::new(),
                     writes: vec![WriteOptions::DONT_CACHE],
                 }
             );
@@ -1454,6 +1663,7 @@ mod tests {
             recordings.snapshot(),
             RecordingSnapshot {
                 reads: vec![ReadOptions::DONT_CACHE, ReadOptions::DONT_CACHE],
+                batches: Vec::new(),
                 writes: Vec::new(),
             }
         );

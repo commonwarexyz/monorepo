@@ -1,5 +1,6 @@
+use commonware_allocator::mimalloc;
 use commonware_coding::{Config, Scheme};
-use commonware_parallel::{Rayon, Sequential};
+use commonware_parallel::{Rayon, Sequential, rayon::ThreadPoolBuilder};
 use commonware_utils::{Faults, N3f1, NZU16, NZUsize};
 use core::slice;
 use criterion::{BatchSize, Criterion, criterion_main};
@@ -9,6 +10,9 @@ use shard_selection::{SELECTIONS, ShardSelection};
 
 mod reed_solomon;
 mod shard_selection;
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 pub(crate) fn bench_encode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
     let mut rng = ChaCha8Rng::seed_from_u64(0);
@@ -21,7 +25,7 @@ pub(crate) fn bench_encode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
                     minimum_shards: NZU16!(min),
                     extra_shards: NZU16!(chunks - min),
                 };
-                let strategy = Rayon::new(NZUsize!(conc)).unwrap();
+                let strategy = Rayon::new(ThreadPoolBuilder::new(NZUsize!(conc))).unwrap();
                 c.bench_function(
                     &format!("{name}/msg_len={data_length} chunks={chunks} conc={conc}"),
                     |b| {
@@ -79,7 +83,7 @@ pub(crate) fn bench_decode_generic<S: Scheme>(
                     minimum_shards: NZU16!(min),
                     extra_shards: NZU16!(chunks - min),
                 };
-                let strategy = Rayon::new(NZUsize!(conc)).unwrap();
+                let strategy = Rayon::new(ThreadPoolBuilder::new(NZUsize!(conc))).unwrap();
                 for &selection in selections {
                     let sel = selection.label();
                     c.bench_function(

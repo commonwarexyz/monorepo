@@ -121,7 +121,6 @@ use commonware_runtime::{
     },
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
-use rand_core::Rng;
 use std::{
     future::{Future, ready},
     sync::Arc,
@@ -159,7 +158,6 @@ use tracing::{Instrument as _, debug, info_span};
 /// validators) verified that the block's context matched the consensus context before voting._
 pub struct Deferred<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E>,
     B: CertifiableBlock + Codec,
@@ -178,7 +176,6 @@ where
 
 impl<E, S, A, B, ES> Clone for Deferred<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E>,
     B: CertifiableBlock + Codec,
@@ -200,7 +197,7 @@ where
 
 impl<E, S, A, B, ES> Deferred<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<
             E,
@@ -260,7 +257,7 @@ where
     /// the verification result. Valid blocks are reported to the marshal as verified.
     #[inline]
     fn deferred_verify(
-        &mut self,
+        &self,
         context: <Self as Automaton>::Context,
         block: Digested<B>,
         parent_request: oneshot::Receiver<Digested<B>>,
@@ -331,7 +328,7 @@ where
     }
 
     fn certify_from_embedded_context(
-        &mut self,
+        &self,
         round: Round,
         digest: B::Digest,
     ) -> oneshot::Receiver<bool> {
@@ -357,7 +354,7 @@ where
         let block_rx = self
             .marshal
             .subscribe_by_digest(digest, DigestFallback::FetchByRound { round });
-        let mut marshaled = self.clone();
+        let marshaled = self.clone();
         let epocher = self.epocher.clone();
         let (mut tx, rx) = oneshot::channel();
         let context = self.context.child("certify").with_attribute("round", round);
@@ -444,7 +441,7 @@ where
         rx
     }
     fn certify_from_existing_task(
-        &mut self,
+        &self,
         round: Round,
         digest: B::Digest,
         task: oneshot::Receiver<GateOutcome>,
@@ -458,7 +455,7 @@ where
         // A completed gate either carries an applicable local verdict or requests
         // recovery. After an unclean restart the in-memory task is gone, which also
         // recovers via the embedded-context fetch path.
-        let mut marshaled = self.clone();
+        let marshaled = self.clone();
         let (tx, rx) = oneshot::channel();
         let context = self
             .context
@@ -559,7 +556,7 @@ where
 
 impl<E, S, A, B, ES> Automaton for Deferred<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<
             E,
@@ -627,7 +624,7 @@ where
         digest: Self::Digest,
     ) -> oneshot::Receiver<bool> {
         let marshal = self.marshal.clone();
-        let mut marshaled = self.clone();
+        let marshaled = self.clone();
         let round = context.round;
 
         // Verification needs the full block but waits only for local delivery. Certification starts
@@ -730,11 +727,11 @@ where
                 // Before casting a notarize vote, ensure the block's embedded context matches
                 // the consensus context.
                 //
-                // This is a critical step - the notarize quorum is guaranteed to have at least
-                // f+1 honest validators who will verify against this context, preventing a Byzantine
-                // proposer from embedding a malicious context. The other f honest validators who did
-                // not vote will later use the block-embedded context to help finalize if Byzantine
-                // validators withhold their finalize votes.
+                // The notarize quorum is guaranteed to have at least f+1 honest validators who will
+                // verify against this context, so a Byzantine proposer cannot embed a malicious
+                // context. The other f honest validators who did not vote will later use the
+                // block-embedded context to help finalize if Byzantine validators withhold their
+                // finalize votes.
                 if block.context() != context {
                     debug!(
                         ?context,
@@ -771,7 +768,7 @@ where
 
 impl<E, S, A, B, ES> CertifiableAutomaton for Deferred<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<
             E,
@@ -837,7 +834,7 @@ where
 
 impl<E, S, A, B, ES> Relay for Deferred<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Send + Sync + 'static,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
     B: CertifiableBlock<Context = <A as Application<E>>::Context> + Codec,
@@ -861,7 +858,7 @@ where
 /// so pruning is ordered with both.
 impl<E, S, A, B, ES> Reporter for Deferred<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Send + Sync + 'static,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
     B: CertifiableBlock<Context = <A as Application<E>>::Context> + Codec,
@@ -874,7 +871,7 @@ where
             Activity::Finalization(finalization) => finalization.round(),
             activity => Round::new(activity.epoch(), View::zero()),
         };
-        self.gates.retain_after(&retired);
+        self.gates.retain_after(retired);
         self.marshal.report(activity)
     }
 }
@@ -923,6 +920,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -997,7 +995,7 @@ mod tests {
                 "Block B certification should succeed"
             );
 
-            // Step 4: Certify block A at view 5 - should succeed
+            // Step 4: Certify block A at view 5 and expect success
             let certify_a = marshaled.certify(round_a, commitment_a).await;
 
             select! {
@@ -1057,6 +1055,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -1164,6 +1163,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -1259,6 +1259,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -1333,6 +1334,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -1442,6 +1444,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -1533,6 +1536,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -1652,6 +1656,7 @@ mod tests {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 

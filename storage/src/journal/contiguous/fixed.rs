@@ -150,13 +150,13 @@ use crate::{
     },
 };
 use bytes::Bytes;
-use commonware_codec::{CodecFixedShared, Copying, DecodeExt as _, ReadExt as _};
+use commonware_codec::{CodecFixedShared, Copying, DecodeExt as _, ReadExt as _, Viewing};
 use commonware_runtime::{
     Blob as RBlob, Buf, Handle, IoBuf, ReadOptions,
     buffer::paged::{CacheRef, Recovery as PagedRecovery},
 };
-use commonware_utils::Cached;
-use futures::{FutureExt as _, Stream, future::try_join_all};
+use commonware_utils::{Cached, futures::try_join_all};
+use futures::{FutureExt as _, Stream};
 use std::{
     collections::{BTreeMap, btree_map::Entry},
     future::Future,
@@ -1513,14 +1513,27 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
 
     /// See [Journal::destroy].
     pub(crate) async fn destroy(self) -> Result<(), Error> {
+        self.destroy_cleared(|| async { Ok(()) }).await
+    }
+
+    /// Stage a clear to zero, await `clear_dependents`, then remove this journal's blobs and
+    /// checkpoint. A crash after staging leaves an intent that the next open completes.
+    pub(super) async fn destroy_cleared<F, Fut>(self, clear_dependents: F) -> Result<(), Error>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<(), Error>>,
+    {
         // A failed checkpoint sync must surface before any data is removed, since the surviving
         // checkpoint would otherwise acknowledge items the removed blobs no longer back.
         let mut journal = self.wait_for_sync().await?;
 
-        // Stage a clear to zero before removing anything: a destroy interrupted after the intent is
-        // durable reopens as a fresh journal, and one interrupted before it reopens as a crash
-        // would recover it.
+        // A destroy interrupted after the staged clear is durable reopens as a fresh journal, and
+        // one interrupted before it reopens as a crash would recover it.
         journal.checkpoint = journal.checkpoint.stage_clear(0).await?;
+
+        // Dependent state is removed under the same intent before this journal's own blobs, and
+        // the checkpoint holding the intent goes last.
+        clear_dependents().await?;
         journal.blobs.destroy().await?;
         journal.checkpoint.destroy().await
     }
@@ -1666,6 +1679,12 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         Ok(self)
     }
 
+    /// Wait for every started sync to complete, surfacing a failure without changing storage.
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) async fn wait_for_sync(self) -> Result<Self, Error> {
+        Ok(Self(Box::new(self.0.wait_for_sync().await?)))
+    }
+
     /// Durably persists the current state of the structure.
     ///
     /// Does not advance the recovery watermark, so reopen may replay entries above it. Use
@@ -1787,8 +1806,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ///
     /// # Crash Safety
     ///
-    /// An interrupted destroy leaves a journal that reopens either as a crash would recover it or
-    /// as a fresh journal at position zero, and that a retried destroy removes.
+    /// If destruction is interrupted, reopening either recovers the journal normally or creates an
+    /// empty journal at position zero.
     pub async fn destroy(self) -> Result<(), Error> {
         self.0.destroy().await
     }
@@ -1878,9 +1897,10 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
             .map(|group_hits| group_hits as u64)
             .sum();
 
-        let mut bytes = Bytes::from(buf);
+        let bytes = Bytes::from(buf);
+        let mut items = Viewing::new(&bytes);
         for _ in positions {
-            result.push(A::decode((&mut bytes).take(A::SIZE)).map_err(Error::Codec)?);
+            result.push(A::decode(items.split_to(A::SIZE)).map_err(Error::Codec)?);
         }
 
         self.metrics.cache_hits.inc_by(hits);
@@ -1903,6 +1923,17 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
             .get(blob)
             .expect("position in bounds maps to a retained blob");
         Ok((blob, offset))
+    }
+
+    /// Read `pos` from storage, for callers that already missed the page cache.
+    pub(super) async fn read_miss(&self, pos: u64) -> Result<A, Error> {
+        let _timer = self.metrics.read_timer();
+        let (blob, offset) = self.locate(pos)?;
+        self.metrics.cache_misses.inc();
+        let bufs = blob.read_at(offset, A::SIZE).await?;
+        let item = A::decode(bufs.coalesce()).map_err(Error::Codec)?;
+        self.metrics.items_read.inc();
+        Ok(item)
     }
 
     /// Probe `positions` (strictly increasing) against the page cache, returning one slot per
@@ -1987,14 +2018,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
         if let Some(item) = self.try_read_sync(pos) {
             return Ok(item);
         }
-
-        let _timer = self.metrics.read_timer();
-        let (blob, offset) = self.locate(pos)?;
-        self.metrics.cache_misses.inc();
-        let bufs = blob.read_at(offset, A::SIZE).await?;
-        let item = A::decode(bufs.coalesce()).map_err(Error::Codec)?;
-        self.metrics.items_read.inc();
-        Ok(item)
+        self.read_miss(pos).await
     }
 
     async fn read_many(&self, positions: &[u64]) -> Result<Vec<A>, Error> {

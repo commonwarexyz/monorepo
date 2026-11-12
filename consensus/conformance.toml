@@ -28,7 +28,7 @@ hash = "b6fb315bdc400d4ccf1f352eb30e99b8c65521399a9ea493fc82c6072f08ee22"
 
 ["commonware_consensus::marshal::conformance::StandardStorageConformance"]
 n_cases = 32
-hash = "f2f5f4a81fbebbca21e52816055d3673b7bf861c7cc98c34b183bb32093b4ceb"
+hash = "e22663c99ffd7db517162daad5c492d1bde360003a79f351f5fa0f7e3c1e886b"
 
 ["commonware_consensus::marshal::resolver::handler::tests::conformance::CodecConformance<Key<D>>"]
 n_cases = 65536

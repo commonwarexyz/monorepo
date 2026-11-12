@@ -418,6 +418,8 @@ struct Inner<E: Context, K: Array, V: CodecShared> {
 
     // Current section for new writes
     current_section: u64,
+    // End of the last value in the current section
+    current_value_size: u64,
     next_epoch: u64,
 
     // Sections with pending table updates to be synced
@@ -458,64 +460,48 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         Self::parse_entries(read_buf.freeze())
     }
 
-    /// Recover a single table entry and update tracking.
+    /// Clear a non-empty table entry that is invalid or newer than `max_valid_epoch`.
+    ///
+    /// Returns whether the entry was cleared.
     async fn recover_entry(
         blob: &E::Blob,
         entry: &mut Entry,
         entry_offset: u64,
-        max_valid_epoch: Option<u64>,
-        max_epoch: &mut u64,
-        max_section: &mut u64,
+        max_valid_epoch: u64,
     ) -> Result<bool, Error> {
-        if entry.is_empty() {
+        if entry.is_empty() || (entry.is_valid() && entry.epoch <= max_valid_epoch) {
             return Ok(false);
         }
-
-        if !entry.is_valid()
-            || (max_valid_epoch.is_some() && entry.epoch > max_valid_epoch.unwrap())
-        {
-            debug!(
-                valid_epoch = max_valid_epoch,
-                entry_epoch = entry.epoch,
-                "found invalid table entry"
-            );
-            *entry = Entry::new_empty();
-            let zero_buf = IoBuf::from(&[0u8; Entry::SIZE]);
-            blob.write_at(entry_offset, zero_buf, WriteOptions::default())
-                .await?;
-            Ok(true)
-        } else if max_valid_epoch.is_none() && entry.epoch > *max_epoch {
-            // Only track max epoch if we're discovering it (not validating against a known epoch)
-            *max_epoch = entry.epoch;
-            *max_section = entry.section;
-            Ok(false)
-        } else {
-            Ok(false)
-        }
+        debug!(
+            valid_epoch = max_valid_epoch,
+            entry_epoch = entry.epoch,
+            "found invalid table entry"
+        );
+        *entry = Entry::new_empty();
+        let zero_buf = IoBuf::from(&[0u8; Entry::SIZE]);
+        blob.write_at(entry_offset, zero_buf, WriteOptions::default())
+            .await?;
+        Ok(true)
     }
 
-    /// Validate and clean invalid table entries for a given epoch.
+    /// Clear every non-empty table entry that is invalid or newer than `max_valid_epoch`.
     ///
-    /// Returns (modified, max_epoch, max_section, resizable) where:
-    /// - modified: whether any entries were cleaned
-    /// - max_epoch: the maximum valid epoch found
-    /// - max_section: the section corresponding to `max_epoch`
+    /// Returns (modified, resizable) where:
+    /// - modified: whether any entries were cleared
     /// - resizable: the number of entries that can be resized
     async fn recover_table(
         blob: &Arc<E::Blob>,
         table_size: u32,
         table_resize_frequency: u8,
-        max_valid_epoch: Option<u64>,
+        max_valid_epoch: u64,
         table_replay_buffer: NonZeroUsize,
-    ) -> Result<(bool, u64, u64, u32), Error> {
+    ) -> Result<(bool, u32), Error> {
         // Create a buffered reader for efficient scanning
         let blob_size = Self::table_offset(table_size);
         let mut reader = buffer::Read::new(Arc::clone(blob), blob_size, table_replay_buffer);
 
         // Iterate over all table entries and overwrite invalid ones
         let mut modified = false;
-        let mut max_epoch = 0u64;
-        let mut max_section = 0u64;
         let mut resizable = 0u32;
         for table_index in 0..table_size {
             let offset = Self::table_offset(table_index);
@@ -525,22 +511,13 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             let (mut entry1, mut entry2) = Self::parse_entries(entry_buf)?;
 
             // Check both entries
-            let entry1_cleared = Self::recover_entry(
-                blob,
-                &mut entry1,
-                offset,
-                max_valid_epoch,
-                &mut max_epoch,
-                &mut max_section,
-            )
-            .await?;
+            let entry1_cleared =
+                Self::recover_entry(blob, &mut entry1, offset, max_valid_epoch).await?;
             let entry2_cleared = Self::recover_entry(
                 blob,
                 &mut entry2,
                 offset + Entry::SIZE as u64,
                 max_valid_epoch,
-                &mut max_epoch,
-                &mut max_section,
             )
             .await?;
             modified |= entry1_cleared || entry2_cleared;
@@ -553,7 +530,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             }
         }
 
-        Ok((modified, max_epoch, max_section, resizable))
+        Ok((modified, resizable))
     }
 
     /// Determine the write offset for a table entry based on current entries and epoch.
@@ -659,10 +636,10 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             }
         }
 
-        // Initialize oversized journal. A checkpoint is only published after the
-        // oversized journal is durably synced (see Self::sync), so recovery restores
-        // exactly the checkpointed state: committed data it covers cannot be silently
-        // repaired away, and anything beyond it is discarded.
+        // Initialize the oversized journal. Self::sync returns a checkpoint only after the
+        // oversized journal is durable, so recovery restores exactly the checkpointed state. It
+        // never repairs away committed data the checkpoint covers, and it discards anything beyond
+        // it. A reset restores the empty checkpoint over the wiped partitions.
         let oversized_cfg = OversizedConfig {
             index_partition: config.key_partition.clone(),
             value_partition: config.value_partition.clone(),
@@ -674,16 +651,13 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             codec_config: config.codec_config,
         };
         let oversized_context = context.child("oversized");
-        let oversized: Oversized<E, Record<K>, V> = match checkpoint
+        let restored = checkpoint
             .filter(|checkpoint| !checkpoint.is_empty())
-            .map(|checkpoint| (checkpoint.section, checkpoint.oversized_size))
-        {
-            Some(checkpoint) => {
-                Oversized::init_with_checkpoint(oversized_context, oversized_cfg, checkpoint)
-                    .await?
-            }
-            None => Oversized::init(oversized_context, oversized_cfg).await?,
-        };
+            .map_or((0, 0), |checkpoint| {
+                (checkpoint.section, checkpoint.oversized_size)
+            });
+        let oversized: Oversized<E, Record<K>, V> =
+            Oversized::init_with_checkpoint(oversized_context, oversized_cfg, restored).await?;
 
         // Open table blob
         let (table, table_len) = context
@@ -719,11 +693,11 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
                 };
 
                 // Validate and clean invalid entries
-                let (table_modified, _, _, resizable) = Self::recover_table(
+                let (table_modified, resizable) = Self::recover_table(
                     &table,
                     checkpoint.table_size,
                     config.table_resize_frequency,
-                    Some(checkpoint.epoch),
+                    checkpoint.epoch,
                     config.table_replay_buffer,
                 )
                 .await?;
@@ -760,6 +734,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             "number of unnecessary writes performed during resize",
         );
         let resizes = context.counter("resizes", "number of table resizing operations");
+        let current_value_size = oversized.value_size(checkpoint.section).await?;
 
         Ok(Self {
             context,
@@ -772,6 +747,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             oversized,
             blob_target_size: config.value_target_size,
             current_section: checkpoint.section,
+            current_value_size,
             next_epoch: checkpoint.epoch.checked_add(1).expect("epoch overflow"),
             modified_sections: BTreeSet::new(),
             resizable,
@@ -808,17 +784,15 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
 
     /// Determine which blob section to write to based on current blob size.
     async fn update_section(&mut self) -> Result<(), Error> {
-        // Get the current value blob section size
-        let value_size = self.oversized.value_size(self.current_section).await?;
-
         // If the current section has reached the target size, create a new section
-        if value_size >= self.blob_target_size {
+        if self.current_value_size >= self.blob_target_size {
             self.current_section += 1;
             debug!(
-                size = value_size,
+                size = self.current_value_size,
                 section = self.current_section,
                 "updated section"
             );
+            self.current_value_size = self.oversized.value_size(self.current_section).await?;
         }
 
         Ok(())
@@ -850,6 +824,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             .oversized
             .append(self.current_section, key_entry, value)
             .await?;
+        self.current_value_size = value_offset + u64::from(value_size);
 
         // Update the number of items added to the entry.
         //
@@ -1252,7 +1227,7 @@ mod tests {
         deterministic::Context,
     };
     use commonware_utils::{
-        NZU16, NZUsize,
+        NZU16, NZUsize, Widen,
         sequence::{FixedBytes, U64},
     };
 
@@ -1294,6 +1269,82 @@ mod tests {
     #[allow(dead_code)]
     fn assert_freezer_destroy_is_send(freezer: TestFreezer) {
         is_send(freezer.destroy());
+    }
+
+    /// Recovery durably zeroes a table slot that a torn write left invalid, so the bucket's next
+    /// put finds an empty slot beside the committed head.
+    #[test_traced]
+    fn recovery_zeroes_torn_table_slot() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = super::super::Config {
+                key_partition: "test-key-index".into(),
+                key_write_buffer: NZUsize!(1024),
+                key_page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
+                value_partition: "test-value-journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(1024),
+                value_target_size: 10 * 1024 * 1024,
+                table_partition: "test-table".into(),
+                table_initial_size: 4,
+                table_resize_frequency: 4,
+                table_resize_chunk_size: 4,
+                table_replay_buffer: NZUsize!(64 * 1024),
+                codec_config: (),
+            };
+
+            // Commit one key, leaving its bucket with a valid slot beside an empty one.
+            let key = test_key_at_index(4, 0);
+            let freezer =
+                Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone(), None)
+                    .await
+                    .unwrap();
+            let (freezer, _) = freezer.put(key.clone(), &42).await.unwrap();
+            let checkpoint = freezer.close().await.unwrap();
+            let (blob, _) = context.open(&cfg.table_partition, b"table").await.unwrap();
+            let bucket = blob
+                .read_at(0, Entry::FULL_SIZE, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
+            let (slot0, slot1) =
+                Inner::<Context, FixedBytes<64>, i32>::parse_entries(Copying(bucket.as_ref()))
+                    .unwrap();
+            assert!(slot0.is_valid() && slot1.is_empty());
+
+            // Tear a write of the next epoch's entry into the empty slot so that everything lands
+            // except its CRC.
+            let torn = Entry::new(checkpoint.epoch + 1, 0, 1, 2).encode();
+            let offset: u64 = Widen::widen(Entry::SIZE);
+            blob.write_at(
+                offset,
+                torn.as_ref()[..Entry::SIZE - crc32::Digest::SIZE].to_vec(),
+                WriteOptions::SYNC,
+            )
+            .await
+            .unwrap();
+            drop(blob);
+
+            // Recovery keeps the committed head.
+            let freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                context.child("second"),
+                cfg.clone(),
+                Some(checkpoint),
+            )
+            .await
+            .unwrap();
+            assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(42));
+            drop(freezer);
+
+            // The torn slot is zeroed, and the zeroing is durable.
+            let (blob, _) = context.open(&cfg.table_partition, b"table").await.unwrap();
+            let slot = blob
+                .read_at(offset, Entry::SIZE, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(slot.as_ref(), &[0u8; Entry::SIZE]);
+        });
     }
 
     #[test_traced]

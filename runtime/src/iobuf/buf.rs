@@ -83,9 +83,11 @@ impl Drop for IoBuf {
     #[inline]
     fn drop(&mut self) {
         // Only a final release reads the view, so a shared drop never loads
-        // `ptr` or `len`. A descriptor and a final record reference release
+        // `ptr` or `len`. A descriptor and a record whose count reads 1 release
         // through one outlined call. That keeps this inlined drop small enough
-        // for drops of multi-chunk containers to unroll.
+        // for drops of multi-chunk containers to unroll. When other views drop
+        // concurrently and leave this one final, `drop_view` releases the
+        // record.
         let owner = self.owner.get();
         // SAFETY: this handle owns what its word owns, as an immutable view.
         if unsafe { owner.drop_view() } {

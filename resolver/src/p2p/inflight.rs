@@ -1,5 +1,5 @@
 use crate::{
-    Consumer, Delivery, Outcome,
+    Consumer, Delivery,
     delivery::{Completion, Tracker},
 };
 use bytes::Bytes;
@@ -43,8 +43,8 @@ where
     }
 
     /// Remove the in-flight entry for the key and cancel its duration timer (suppressing
-    /// the recording). If delivery validation was in progress, it is aborted and any
-    /// invalid result is discarded. Returns true if an entry was present.
+    /// the recording). Accepted verdicts remain available for source accounting.
+    /// Returns true if an entry was present.
     pub(super) fn cancel(&mut self, key: &Con::Key) -> bool {
         self.deliveries.remove(key)
     }
@@ -71,9 +71,8 @@ where
         self.deliveries.drain()
     }
 
-    /// Begin a consumer delivery for a network response, attaching the abort handle.
-    /// Spawns `consumer.deliver(delivery, value)` as an in-flight future and records
-    /// the response so later subscribers can be delivered the same bytes.
+    /// Begin a consumer delivery for a network response and cache the response so
+    /// later subscribers can be delivered the same bytes.
     pub(super) fn deliver(
         &mut self,
         delivery: Delivery<Con::Key, Con::Subscriber>,
@@ -90,11 +89,6 @@ where
         self.deliveries.redeliver(delivery);
     }
 
-    /// Returns whether the current response has already been accepted by the consumer.
-    pub(super) fn response_accepted(&self, key: &Con::Key) -> bool {
-        self.deliveries.response_accepted(key)
-    }
-
     /// Mark the current response accepted and record the fetch duration.
     pub(super) fn accept_response<E: Clock>(&mut self, key: &Con::Key, clock: &E) {
         self.deliveries.accept_response(key);
@@ -108,34 +102,22 @@ where
         self.deliveries.discard_response(key);
     }
 
-    /// Returns the next completed delivery, or [Aborted] if it was canceled.
-    /// Clears the entry's delivery aborter so the slot is available for a retry.
-    /// The outcome is `None` if the consumer dropped its verdict.
+    /// Returns the next verdict, or [Aborted] for cancellation without a verdict.
+    /// Canceled completions retain source feedback but cannot affect current demand.
     pub(super) async fn next_delivery(
         &mut self,
-    ) -> Result<
-        (
-            P,
-            Duration,
-            usize,
-            Delivery<Con::Key, Con::Subscriber>,
-            Option<Outcome>,
-        ),
-        Aborted,
-    > {
-        let Completion {
-            context,
-            delivery,
-            outcome,
-        } = self.deliveries.next_completion().await?;
-        Ok((context.0, context.1, context.2, delivery, outcome))
+    ) -> Result<Completion<Con::Key, Con::Subscriber, (P, Duration, usize)>, Aborted> {
+        self.deliveries.next_completion().await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::p2p::mocks::{Consumer as MockConsumer, Key as MockKey};
+    use crate::{
+        Outcome, Resolution,
+        p2p::mocks::{Consumer as MockConsumer, Key as MockKey},
+    };
     use bytes::Bytes;
     use commonware_cryptography::{
         Signer,
@@ -289,13 +271,17 @@ mod tests {
                 value.clone(),
             );
 
-            let (delivered_peer, elapsed, bytes, delivered, outcome) =
-                inflight.next_delivery().await.expect("delivery aborted");
-            assert_eq!(delivered.key, key);
-            assert_eq!(delivered_peer, peer);
-            assert_eq!(elapsed, Duration::from_millis(17));
-            assert_eq!(bytes, value.len());
-            assert_eq!(outcome, Some(Outcome::Complete));
+            let completed = inflight.next_delivery().await.expect("delivery aborted");
+            assert_eq!(completed.delivery.key, key);
+            assert_eq!(
+                completed.context,
+                (peer, Duration::from_millis(17), value.len())
+            );
+            assert_eq!(
+                completed.outcome,
+                Some(Outcome::Resolved(Resolution::Complete))
+            );
+            assert!(!completed.canceled);
 
             // The consumer was actually invoked.
             let (k, v) = events.recv().await.unwrap();
@@ -305,29 +291,41 @@ mod tests {
     }
 
     #[test]
-    fn test_deliver_aborts_when_entry_dropped_before_poll() {
-        let runner = Runner::default();
-        runner.start(|context| async move {
-            let timed = make_timed(&context);
-            let (consumer, _events) = MockConsumer::<MockKey, Bytes>::new();
-            let mut inflight: TestInflight = Inflight::new(consumer);
-            let peer = pubkey();
-            let key = MockKey(1);
+    fn test_cancellation_preserves_ready_verdict_without_recording_duration() {
+        for drain in [false, true] {
+            Runner::default().start(move |context| async move {
+                let timed = make_timed(&context);
+                let (consumer, _events) = MockConsumer::<MockKey, Bytes>::new();
+                let mut inflight: TestInflight = Inflight::new(consumer);
+                let peer = pubkey();
+                let key = MockKey(1);
 
-            inflight.insert(key.clone(), timed.timer(&context));
-            inflight.deliver(
-                delivery(key.clone()),
-                peer,
-                Duration::ZERO,
-                Bytes::from("v"),
-            );
+                // The consumer accepts the response before cancellation is polled.
+                inflight.insert(key.clone(), timed.timer(&context));
+                inflight.deliver(
+                    delivery(key.clone()),
+                    peer.clone(),
+                    Duration::ZERO,
+                    Bytes::from("v"),
+                );
+                if drain {
+                    assert_eq!(inflight.drain(), 1);
+                } else {
+                    assert!(inflight.cancel(&key));
+                }
 
-            // Drop the entry (and its aborter) before the delivery future is ever polled.
-            assert!(inflight.cancel(&key));
-
-            let result = inflight.next_delivery().await;
-            assert!(result.is_err());
-        });
+                // Source feedback survives independently of the canceled fetch timer.
+                let completed = inflight.next_delivery().await.unwrap();
+                assert!(completed.canceled);
+                assert_eq!(completed.context, (peer, Duration::ZERO, 1));
+                assert_eq!(
+                    completed.outcome,
+                    Some(Outcome::Resolved(Resolution::Complete))
+                );
+                assert!(!inflight.contains(&key));
+                assert!(context.encode().contains("test_duration_count 0"));
+            });
+        }
     }
 
     #[test]
@@ -348,61 +346,16 @@ mod tests {
                 Bytes::from("v"),
             );
 
-            let (_, _, _, delivered, outcome) =
-                inflight.next_delivery().await.expect("delivery completed");
-            assert_eq!(delivered.key, key);
-            assert_eq!(outcome, Some(Outcome::Complete));
+            let completed = inflight.next_delivery().await.expect("delivery completed");
+            assert_eq!(completed.delivery.key, key);
+            assert_eq!(
+                completed.outcome,
+                Some(Outcome::Resolved(Resolution::Complete))
+            );
             inflight.complete(&context, &key);
 
             // Late cancel finds no entry; must not panic.
             assert!(!inflight.cancel(&key));
-        });
-    }
-
-    #[test]
-    fn test_cancel_wins_race_with_completion() {
-        let runner = Runner::default();
-        runner.start(|context| async move {
-            let timed = make_timed(&context);
-            let (consumer, _events) = MockConsumer::<MockKey, Bytes>::new();
-            let mut inflight: TestInflight = Inflight::new(consumer);
-            let peer = pubkey();
-            let key = MockKey(1);
-
-            inflight.insert(key.clone(), timed.timer(&context));
-            inflight.deliver(
-                delivery(key.clone()),
-                peer,
-                Duration::ZERO,
-                Bytes::from("v"),
-            );
-
-            // Cancel before any poll of the pool: drops the Aborter, removes the entry.
-            assert!(inflight.cancel(&key));
-
-            // Subsequent poll must yield Err (cancel won the race), not Ok.
-            let result = inflight.next_delivery().await;
-            assert!(matches!(result, Err(Aborted)));
-        });
-    }
-
-    #[test]
-    fn test_drain_aborts_in_flight_deliveries() {
-        let runner = Runner::default();
-        runner.start(|context| async move {
-            let timed = make_timed(&context);
-            let (consumer, _events) = MockConsumer::<MockKey, Bytes>::new();
-            let mut inflight: TestInflight = Inflight::new(consumer);
-            let peer = pubkey();
-            let key = MockKey(1);
-
-            inflight.insert(key.clone(), timed.timer(&context));
-            inflight.deliver(delivery(key), peer, Duration::ZERO, Bytes::from("v"));
-
-            assert_eq!(inflight.drain(), 1);
-
-            let result = inflight.next_delivery().await;
-            assert!(result.is_err());
         });
     }
 }

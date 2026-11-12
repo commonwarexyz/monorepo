@@ -4,11 +4,11 @@ use commonware_cryptography::{
     zk::bulletproofs::ipa::{self, Proof, Setup, Witness},
 };
 use commonware_math::algebra::{CryptoGroup, Random};
-use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::test_rng;
+use commonware_parallel::{Rayon, Sequential, rayon::ThreadPoolBuilder};
+use commonware_utils::{NZUsize, test_rng};
 use criterion::{BatchSize, Criterion, criterion_group};
 use rand_core::CryptoRng;
-use std::{hint::black_box, num::NonZeroUsize};
+use std::hint::black_box;
 
 fn make_setup(len: usize) -> Setup<G1> {
     let generators: Vec<_> = (0..(2 * len + 1))
@@ -45,7 +45,7 @@ fn make_proof(setup: &Setup<G1>, len: usize) -> (ipa::Claim<Scalar, G1>, Proof<S
 }
 
 fn bench_prove(c: &mut Criterion) {
-    let par = Rayon::new(NonZeroUsize::new(8).unwrap()).unwrap();
+    let par = Rayon::new(ThreadPoolBuilder::new(NZUsize!(8))).unwrap();
 
     for len in [8usize, 16, 32, 64, 128] {
         let setup = make_setup(len);
@@ -96,7 +96,7 @@ fn bench_prove(c: &mut Criterion) {
 }
 
 fn bench_verify(c: &mut Criterion) {
-    let par = Rayon::new(NonZeroUsize::new(8).unwrap()).unwrap();
+    let par = Rayon::new(ThreadPoolBuilder::new(NZUsize!(8))).unwrap();
 
     for len in [8usize, 16, 32, 64, 128] {
         let setup = make_setup(len);

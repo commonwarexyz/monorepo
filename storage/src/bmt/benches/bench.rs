@@ -1,3 +1,4 @@
+use commonware_allocator::mimalloc;
 use criterion::criterion_main;
 
 mod build;
@@ -7,6 +8,9 @@ mod range_proof;
 mod verify_multi;
 mod verify_range;
 mod verify_single;
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 criterion_main!(
     build::benches,

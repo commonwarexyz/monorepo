@@ -1,6 +1,10 @@
 //! Lifecycle checks shared by the filesystem storage backends.
 
-use crate::{Blob as _, Error, ReadOptions, WriteOptions, buffer::Write, storage::Pending};
+use crate::{
+    Blob as _, BlobVersion, Error, ReadOptions, WriteOptions,
+    buffer::Write,
+    storage::{Header, Pending},
+};
 use commonware_utils::{NZUsize, channel::oneshot};
 use futures::FutureExt as _;
 use std::sync::{Arc, mpsc};
@@ -69,6 +73,46 @@ pub(crate) async fn check_failed_creation<S: crate::Storage>(storage: &S, pendin
         completions,
         "failed creation must not leave debt"
     );
+}
+
+/// A creation that fails while replacing a torn header leaves a blob the next open recreates.
+///
+/// The torn header carries an older blob version, so its bytes differ from the replacement's.
+/// Bytes of the two creations must never combine into a header that is neither valid nor an
+/// interrupted creation.
+pub(crate) async fn check_failed_creation_over_torn_header<S: crate::Storage>(
+    storage: &S,
+    pending: &Pending,
+) {
+    let partition = "torn_header_replacement";
+    let name = b"blob";
+    let (old, new) = (BlobVersion::new(1), BlobVersion::new(2));
+
+    // Stop the first creation after its checksum, leaving every byte that identifies the old
+    // blob version.
+    *pending.test.fail_creation_after.lock() = Some(Header::PARSE_LEN);
+    assert!(matches!(
+        storage.open_versioned(partition, name, old..=old).await,
+        Err(Error::Closed)
+    ));
+
+    // The replacement stamps the new version. Stop it after its prelude, before any byte of its
+    // checksum.
+    *pending.test.fail_creation_after.lock() = Some(Header::PRELUDE_SIZE);
+    assert!(matches!(
+        storage.open_versioned(partition, name, old..=new).await,
+        Err(Error::Closed)
+    ));
+
+    // The next open creates an empty blob with the new version.
+    let (blob, size, version) = storage
+        .open_versioned(partition, name, old..=new)
+        .await
+        .unwrap();
+    assert_eq!(size, 0);
+    assert_eq!(version, new);
+    drop(blob);
+    storage.remove(partition, None).await.unwrap();
 }
 
 /// Unlinking a dirty blob keeps its handles readable and leaves nothing to flush.

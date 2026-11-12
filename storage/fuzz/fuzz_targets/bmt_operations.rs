@@ -157,7 +157,7 @@ fn fuzz(input: FuzzInput) {
                 if let (Some(p), Some(t)) = (&proof, &tree) {
                     let leaf_digest = Sha256::hash(&[&leaf_value.to_be_bytes()]);
                     let root = t.root();
-                    let _ = p.verify_element_inclusion::<Sha256>(&leaf_digest, *position, &root);
+                    let _ = p.verify_element_inclusion::<Sha256>(*position, &leaf_digest, &root);
                 }
             }
 
@@ -336,11 +336,11 @@ fn fuzz(input: FuzzInput) {
 
             BmtOperation::VerifyMultiProof { elements } => {
                 if let (Some(mp), Some(t)) = (&multi_proof, &tree) {
-                    // Convert (value, position) pairs to (digest, position)
+                    // Convert (value, position) pairs to (position, digest)
                     let element_digests: Vec<_> = elements
                         .iter()
                         .take(20) // Limit elements
-                        .map(|(v, pos)| (Sha256::hash(&[&v.to_be_bytes()]), *pos))
+                        .map(|(v, pos)| (*pos, Sha256::hash(&[&v.to_be_bytes()])))
                         .collect();
                     let root = t.root();
                     let _ = mp.verify_multi_inclusion::<Sha256>(&element_digests, &root);
@@ -367,11 +367,11 @@ fn fuzz(input: FuzzInput) {
 
             BmtOperation::VerifyMultiProofWrongElements { tampered_elements } => {
                 if let (Some(mp), Some(t)) = (&multi_proof, &tree) {
-                    // Convert tampered (value, position) pairs to (digest, position)
+                    // Convert tampered (value, position) pairs to (position, digest)
                     let tampered_digests: Vec<_> = tampered_elements
                         .iter()
                         .take(20)
-                        .map(|(v, pos)| (Sha256::hash(&[&v.to_be_bytes()]), *pos))
+                        .map(|(v, pos)| (*pos, Sha256::hash(&[&v.to_be_bytes()])))
                         .collect();
                     let root = t.root();
                     let _ = mp.verify_multi_inclusion::<Sha256>(&tampered_digests, &root);
@@ -391,7 +391,7 @@ fn fuzz(input: FuzzInput) {
                         .filter_map(|&pos| {
                             leaf_values
                                 .get(pos as usize)
-                                .map(|v| (Sha256::hash(&[&v.to_be_bytes()]), pos))
+                                .map(|v| (pos, Sha256::hash(&[&v.to_be_bytes()])))
                         })
                         .collect();
                     let root = t.root();
@@ -410,7 +410,7 @@ fn fuzz(input: FuzzInput) {
                         .filter_map(|&pos| {
                             leaf_values
                                 .get(pos as usize)
-                                .map(|v| (Sha256::hash(&[&v.to_be_bytes()]), pos))
+                                .map(|v| (pos, Sha256::hash(&[&v.to_be_bytes()])))
                         })
                         .collect();
                     let root = t.root();
@@ -429,7 +429,7 @@ fn fuzz(input: FuzzInput) {
                         .filter_map(|&pos| {
                             leaf_values
                                 .get(pos as usize)
-                                .map(|v| (Sha256::hash(&[&v.to_be_bytes()]), pos))
+                                .map(|v| (pos, Sha256::hash(&[&v.to_be_bytes()])))
                         })
                         .collect();
                     unsorted_elements.reverse();
@@ -438,7 +438,7 @@ fn fuzz(input: FuzzInput) {
 
                     // The proof's positions are in range, so the first descent is reported
                     if unsorted_elements.len() > 1 {
-                        let second = unsorted_elements[1].1;
+                        let second = unsorted_elements[1].0;
                         assert!(matches!(result, Err(Error::UnsortedPosition(p)) if p == second));
                     }
                 }
@@ -450,7 +450,7 @@ fn fuzz(input: FuzzInput) {
                 if let (Some(mp), Some(t)) = (&multi_proof, &tree) {
                     // Create an element with an out-of-bounds position
                     let fake_digest = Sha256::hash(&[&0u64.to_be_bytes()]);
-                    let elements = vec![(fake_digest, *out_of_bounds_position)];
+                    let elements = vec![(*out_of_bounds_position, fake_digest)];
                     let root = t.root();
                     let _ = mp.verify_multi_inclusion::<Sha256>(&elements, &root);
                 }
@@ -473,7 +473,7 @@ fn fuzz(input: FuzzInput) {
                         .filter_map(|&pos| {
                             leaf_values
                                 .get(pos as usize)
-                                .map(|v| (Sha256::hash(&[&v.to_be_bytes()]), pos))
+                                .map(|v| (pos, Sha256::hash(&[&v.to_be_bytes()])))
                         })
                         .collect();
                     // Create a wrong root by hashing the real root with some modifier
@@ -494,7 +494,7 @@ fn fuzz(input: FuzzInput) {
                     if let Ok(mp) = t.multi_proof([*position])
                         && let Some(v) = leaf_values.get(*position as usize)
                     {
-                        let elements = vec![(Sha256::hash(&[&v.to_be_bytes()]), *position)];
+                        let elements = vec![(*position, Sha256::hash(&[&v.to_be_bytes()]))];
                         let root = t.root();
                         let _ = mp.verify_multi_inclusion::<Sha256>(&elements, &root);
                     }
@@ -505,7 +505,7 @@ fn fuzz(input: FuzzInput) {
                 if let (Some(mp), Some(t)) = (&multi_proof, &tree) {
                     // Try verifying with duplicate positions in elements
                     let digest = Sha256::hash(&[&0u64.to_be_bytes()]);
-                    let elements = vec![(digest, *position), (digest, *position)];
+                    let elements = vec![(*position, digest), (*position, digest)];
                     let root = t.root();
                     let result = mp.verify_multi_inclusion::<Sha256>(&elements, &root);
 

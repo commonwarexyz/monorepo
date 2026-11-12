@@ -13,13 +13,15 @@ use commonware_storage::{
     merkle::{Graftable, PendingChunk as _, full::Config as MerkleConfig, mmb, mmr},
     qmdb::{
         self,
-        any::{ordered::fixed::Update, value::FixedEncoding},
+        any::ordered::fixed::Update,
         current::{
-            FixedConfig,
-            ordered::{fixed::Db, proof::ExclusionProof},
+            ordered::{
+                fixed::{Config, Db},
+                proof::ExclusionProof,
+            },
             proof::constant::OperationProof,
         },
-        floor::Proportional,
+        value::FixedEncoding,
     },
     translator::OneCap,
 };
@@ -60,10 +62,10 @@ impl LifecycleArgs {
     }
 }
 
-fn config() -> FixedConfig<OneCap, Sequential> {
+fn config() -> Config<OneCap, Sequential> {
     let page_cache = CacheRef::new(NZU16!(4096), NZUsize!(8));
-    FixedConfig {
-        merkle_config: MerkleConfig {
+    Config {
+        merkle: MerkleConfig {
             journal_partition: "lifecycle-merkle-journal".into(),
             metadata_partition: "lifecycle-merkle-metadata".into(),
             items_per_blob: NZU64!(11),
@@ -72,7 +74,7 @@ fn config() -> FixedConfig<OneCap, Sequential> {
             strategy: Sequential,
             page_cache: page_cache.clone(),
         },
-        journal_config: JournalConfig {
+        log: JournalConfig {
             partition: "lifecycle-operations".into(),
             items_per_blob: NZU64!(7),
             page_cache,
@@ -120,10 +122,10 @@ fn output<F: Graftable, D: Digest>(
 
 async fn membership<F: Graftable, H: Hasher>(
     db: &Database<F, H>,
-    value: FixedBytes<32>,
+    expected_value: FixedBytes<32>,
 ) -> Result<OperationOutput, qmdb::Error<F>> {
-    assert_eq!(db.get(&key(2)).await?.as_ref(), Some(&value));
-    let proof = db.key_value_proof(key(2)).await?;
+    let (proof, value) = db.key_value_proof(&key(2)).await?;
+    assert_eq!(value, expected_value);
     assert!(proof.verify::<H, FixedEncoding<FixedBytes<32>>>(key(2), value.clone(), &db.root()));
     Ok(output(
         db.root(),
@@ -146,7 +148,7 @@ async fn exclusion<F: Graftable, H: Hasher>(
     let (proof, operation) = match proof {
         ExclusionProof::KeyValue(proof, update) => (proof, Operation::Update(update)),
         ExclusionProof::Commit(proof, metadata) => {
-            let operation = Operation::CommitFloor(metadata, proof.loc);
+            let operation = Operation::Commit(metadata, proof.loc);
             (proof, operation)
         }
     };
@@ -169,7 +171,7 @@ fn generate<F: Graftable, H: Hasher>(seed: u64) -> Result<Vec<u8>, String> {
             .write(key(2), Some(initial.clone()))
             .write(key(4), Some(FixedBytes::new(leaf(seed, 1))))
             .write(key(6), Some(FixedBytes::new(leaf(seed, 2))))
-            .merkleize(&db, None, &mut Proportional)
+            .merkleize(&db)
             .await?;
         let db = db.apply_batch(batch).await?.commit().await?;
         let before = membership(&db, initial).await?;
@@ -183,7 +185,7 @@ fn generate<F: Graftable, H: Hasher>(seed: u64) -> Result<Vec<u8>, String> {
                 .new_batch()
                 .write(key(2), Some(FixedBytes::new(leaf(seed, round + 3))))
                 .write(key(4), None)
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await?;
             db = db.apply_batch(batch).await?;
         }
@@ -207,11 +209,8 @@ fn generate<F: Graftable, H: Hasher>(seed: u64) -> Result<Vec<u8>, String> {
             .new_batch()
             .write(key(2), None)
             .write(key(6), None)
-            .merkleize(
-                &db,
-                Some(FixedBytes::new(leaf(seed, OVERWRITES + 3))),
-                &mut Proportional,
-            )
+            .with_metadata(Some(FixedBytes::new(leaf(seed, OVERWRITES + 3))))
+            .merkleize(&db)
             .await?;
         let db = db.apply_batch(batch).await?.commit().await?;
         assert!(db.is_empty());

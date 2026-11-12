@@ -44,7 +44,6 @@ pub struct Actor<E: Spawner + Clock + CryptoRng + Metrics, O: Sender, I: Receive
 impl<E: Spawner + Clock + CryptoRng + Metrics, O: Sender, I: Receiver, C: PublicKey>
     Actor<E, O, I, C>
 {
-    #[allow(clippy::type_complexity)]
     pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox<Message<O, I, C>>) {
         let sent_messages = context.family("messages_sent", "messages sent");
         let received_messages = context.family("messages_received", "messages received");

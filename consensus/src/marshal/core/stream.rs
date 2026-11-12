@@ -1,3 +1,4 @@
+use super::floor::Cutoff;
 use crate::types::{Epoch, Height, Round, View};
 use commonware_codec::varint::UInt;
 use commonware_storage::{
@@ -10,10 +11,13 @@ use commonware_utils::sequence::U64;
 const LATEST_KEY: U64 = U64::new(0xFF);
 
 /// The key used to store the epoch of the processed round floor.
-const ROUND_EPOCH_KEY: U64 = U64::new(0xFE);
+///
+/// With [`CUTOFF_VIEW_KEY`] present, the round floor is [`Cutoff::Round`] at that epoch and view.
+/// When this key is alone, the round floor is the [`Cutoff::Epoch`] of that epoch.
+const CUTOFF_EPOCH_KEY: U64 = U64::new(0xFE);
 
-/// The key used to store the view of the processed round floor.
-const ROUND_VIEW_KEY: U64 = U64::new(0xFD);
+/// The key used to store the view of the processed round floor when it is a [`Cutoff::Round`].
+const CUTOFF_VIEW_KEY: U64 = U64::new(0xFD);
 
 /// Last block acknowledged by the application.
 #[derive(Clone, Copy)]
@@ -51,12 +55,14 @@ impl State {
 
 /// Application delivery stream progress, the processed round floor, and their durable metadata.
 pub(super) struct Stream<E: Context> {
-    /// Holds the processed height and the round floor's epoch and view under fixed keys, so one
-    /// sync persists them together. Every value is a varint `u64`, and a missing round floor reads
-    /// as the zero round.
+    /// Holds the processed height and the round floor under fixed keys, so one sync persists them
+    /// together. Every value is a varint `u64`, and a missing round floor reads as
+    /// [`Cutoff::zero`].
     metadata: Metadata<E, U64, UInt<u64>>,
     /// Mirrors the processed height entry in `metadata`.
     state: State,
+    /// Whether every buffered value has been synced.
+    synced: bool,
 }
 
 impl<E: Context> Stream<E> {
@@ -77,7 +83,16 @@ impl<E: Context> Stream<E> {
                 .get(&LATEST_KEY)
                 .map(|height| Height::new(height.0)),
         );
-        Self { metadata, state }
+        Self {
+            metadata,
+            state,
+            synced: true,
+        }
+    }
+
+    /// Returns whether every buffered value has been synced.
+    pub(super) const fn is_synced(&self) -> bool {
+        self.synced
     }
 
     pub(super) const fn processed_height(&self) -> Option<Height> {
@@ -88,15 +103,18 @@ impl<E: Context> Stream<E> {
         self.state.next_height()
     }
 
-    /// Returns the processed round floor, or the zero round if none has been set. A value
-    /// buffered by [`Self::set_round`] is returned before it is synced.
-    pub(super) fn round(&self) -> Round {
+    /// Returns the processed round floor, or [`Cutoff::zero`] if none has been set. A value
+    /// buffered by [`Self::set_cutoff`] is returned before it is synced.
+    pub(super) fn cutoff(&self) -> Cutoff {
         match (
-            self.metadata.get(&ROUND_EPOCH_KEY),
-            self.metadata.get(&ROUND_VIEW_KEY),
+            self.metadata.get(&CUTOFF_EPOCH_KEY),
+            self.metadata.get(&CUTOFF_VIEW_KEY),
         ) {
-            (Some(epoch), Some(view)) => Round::new(Epoch::new(epoch.0), View::new(view.0)),
-            _ => Round::zero(),
+            (Some(epoch), Some(view)) => {
+                Cutoff::Round(Round::new(Epoch::new(epoch.0), View::new(view.0)))
+            }
+            (Some(epoch), None) => Cutoff::Epoch(Epoch::new(epoch.0)),
+            (None, _) => Cutoff::zero(),
         }
     }
 
@@ -104,17 +122,32 @@ impl<E: Context> Stream<E> {
     pub(super) fn acknowledge(&mut self, height: Height) {
         self.state.acknowledge(height);
         self.metadata.put(LATEST_KEY, UInt(height.get()));
+        self.synced = false;
     }
 
-    /// Buffers `round` as the processed round floor. The next [`Self::sync`] makes it durable.
-    pub(super) fn set_round(&mut self, round: Round) {
-        self.metadata
-            .put(ROUND_EPOCH_KEY, UInt(round.epoch().get()));
-        self.metadata.put(ROUND_VIEW_KEY, UInt(round.view().get()));
+    /// Buffers `cutoff` as the processed round floor. The next [`Self::sync`] makes it durable.
+    pub(super) fn set_cutoff(&mut self, cutoff: Cutoff) {
+        match cutoff {
+            Cutoff::Round(round) => {
+                self.metadata
+                    .put(CUTOFF_EPOCH_KEY, UInt(round.epoch().get()));
+                self.metadata.put(CUTOFF_VIEW_KEY, UInt(round.view().get()));
+            }
+            Cutoff::Epoch(epoch) => {
+                self.metadata.put(CUTOFF_EPOCH_KEY, UInt(epoch.get()));
+                self.metadata.remove(&CUTOFF_VIEW_KEY);
+            }
+        }
+        self.synced = false;
     }
 
+    /// Makes every buffered value durable and skips the metadata sync when nothing is buffered.
     pub(super) async fn sync(mut self) -> Result<Self, metadata::Error> {
+        if self.synced {
+            return Ok(self);
+        }
         self.metadata = self.metadata.sync().await?;
+        self.synced = true;
         Ok(self)
     }
 }
@@ -146,21 +179,53 @@ mod tests {
     fn test_round_floor_round_trips_beside_processed_height() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            // A store holding only the processed height loads with a zero round floor.
+            // A store holding only the processed height loads with the zero round floor.
             seed_processed_height(context.child("seed"), Height::new(7)).await;
             let mut stream = Stream::new(context.child("first"), PARTITION).await;
             assert_eq!(stream.processed_height(), Some(Height::new(7)));
-            assert_eq!(stream.round(), Round::zero());
+            assert_eq!(stream.cutoff(), Cutoff::zero());
 
             // A round floor set beside an acknowledgement survives a sync and reopen.
-            let round = Round::new(Epoch::new(2), View::new(40));
-            stream.set_round(round);
+            let cutoff = Cutoff::Round(Round::new(Epoch::new(2), View::new(40)));
+            stream.set_cutoff(cutoff);
             stream.acknowledge(Height::new(8));
             let stream = stream.sync().await.expect("stream sync must succeed");
             drop(stream);
             let stream = Stream::new(context.child("second"), PARTITION).await;
             assert_eq!(stream.processed_height(), Some(Height::new(8)));
-            assert_eq!(stream.round(), round);
+            assert_eq!(stream.cutoff(), cutoff);
+        });
+    }
+
+    #[test]
+    fn test_round_floor_kind_survives_reopen_across_transitions() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            // A round cutoff persists its epoch and view.
+            let at_round = Cutoff::Round(Round::new(Epoch::new(2), View::new(40)));
+            let mut stream = Stream::new(context.child("first"), PARTITION).await;
+            stream.set_cutoff(at_round);
+            let stream = stream.sync().await.expect("stream sync must succeed");
+            drop(stream);
+            let mut stream = Stream::new(context.child("second"), PARTITION).await;
+            assert_eq!(stream.cutoff(), at_round);
+
+            // An epoch cutoff replaces it and reopens as an epoch cutoff, without the old view.
+            let whole_epoch = Cutoff::Epoch(Epoch::new(2));
+            stream.set_cutoff(whole_epoch);
+            assert_eq!(stream.cutoff(), whole_epoch);
+            let stream = stream.sync().await.expect("stream sync must succeed");
+            drop(stream);
+            let mut stream = Stream::new(context.child("third"), PARTITION).await;
+            assert_eq!(stream.cutoff(), whole_epoch);
+
+            // A round cutoff in a later epoch replaces the epoch cutoff and reopens with its view.
+            let later = Cutoff::Round(Round::new(Epoch::new(3), View::new(5)));
+            stream.set_cutoff(later);
+            let stream = stream.sync().await.expect("stream sync must succeed");
+            drop(stream);
+            let stream = Stream::new(context.child("fourth"), PARTITION).await;
+            assert_eq!(stream.cutoff(), later);
         });
     }
 }

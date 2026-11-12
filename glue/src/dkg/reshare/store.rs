@@ -178,7 +178,9 @@ where
         replay_buffer: NonZeroUsize,
         mut secret_store: SS,
     ) -> Self {
-        let events = Journal::init(
+        // Replay rebuilds the epoch caches in memory, so journal pages don't need to stay in the
+        // OS page cache.
+        let mut replay = Journal::init(
             context.child("events"),
             JournalConfig {
                 partition: format!("{partition_prefix}_events"),
@@ -186,7 +188,9 @@ where
                 codec_config: max_participants,
                 page_cache,
                 write_buffer,
+                replay_buffer,
             },
+            ReadOptions::DONT_CACHE,
         )
         .await
         .expect("failed to initialize reshare event journal");
@@ -195,13 +199,6 @@ where
 
         let mut epochs = BTreeMap::<Epoch, EpochCache<V, P>>::new();
         let events = {
-            // Replay rebuilds the epoch caches in memory, so journal pages need
-            // not remain in the OS page cache.
-            let mut replay = events
-                .replay(0, 0, replay_buffer, ReadOptions::DONT_CACHE)
-                .await
-                .expect("failed to replay reshare events");
-
             while let Some(result) = replay.next().await {
                 let (section, _, _, event) = result.expect("failed to read reshare event");
                 let epoch = Epoch::new(section);
@@ -234,8 +231,8 @@ where
 
     /// Returns the epoch most recently committed with [`Self::commit_epoch`]
     /// (`None` until one is committed after startup).
-    pub fn current(&self) -> Option<EpochInfo<V, P, D>> {
-        self.current.clone()
+    pub const fn current(&self) -> Option<&EpochInfo<V, P, D>> {
+        self.current.as_ref()
     }
 
     /// Returns the share for `epoch`, if any.
@@ -547,7 +544,7 @@ pub struct Dealer<V: Variant, C: Signer> {
     dealer: Option<CryptoDealer<V, C>>,
     public: DealerPubMsg<V>,
     unsent: BTreeMap<C::PublicKey, DealerPrivMsg>,
-    finalized: Option<SignedDealerLog<V, C>>,
+    finalized: Option<SignedDealerLog<V, C::PublicKey>>,
 }
 
 /// Successful outcome of processing a player acknowledgement.
@@ -618,8 +615,8 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
 
     /// Returns the signed log (`None` before [`Self::finalize`] or after
     /// [`Self::clear_finalized`]).
-    pub fn finalized(&self) -> Option<SignedDealerLog<V, C>> {
-        self.finalized.clone()
+    pub const fn finalized(&self) -> Option<&SignedDealerLog<V, C::PublicKey>> {
+        self.finalized.as_ref()
     }
 
     /// Drops the signed log. Callers invoke this once the log is included in a
@@ -880,7 +877,7 @@ mod tests {
                 Ok(AckOutcome::Duplicate)
             ));
             assert!(dealer.finalize::<N3f1>());
-            let signed = dealer.finalized().expect("signed log");
+            let signed = dealer.finalized().cloned().expect("signed log");
             let (dealer, log) = signed.check(&info).expect("valid log");
             store.append_log(Epoch::zero(), dealer, log).await;
             drop(store);
@@ -982,7 +979,7 @@ mod tests {
                 ));
             }
             assert!(dealer.finalize::<N3f1>());
-            let signed = dealer.finalized().expect("signed log");
+            let signed = dealer.finalized().cloned().expect("signed log");
             let (dealer, log) = signed.check(&info).expect("valid log");
             store.append_log(Epoch::zero(), dealer, log).await;
             drop(store);

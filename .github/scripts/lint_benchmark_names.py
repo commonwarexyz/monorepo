@@ -45,6 +45,8 @@ them. Supported input formats:
 2. List output from `cargo bench ... -- --list` or
    `cargo test --benches ... -- --list`:
    `module::function/k=v: benchmark`
+3. Test output from `cargo test --benches ...`:
+   `Testing module::function/k=v`
 
 Usage
 -----
@@ -52,6 +54,7 @@ Usage
   ./lint_benchmark_names.py output1.txt output2.txt
   cargo bench -- --output-format bencher | ./lint_benchmark_names.py -
   cargo test --benches -p commonware-math -- --list | ./lint_benchmark_names.py -
+  cargo test --benches -p commonware-math | ./lint_benchmark_names.py -
 """
 
 import re
@@ -59,6 +62,7 @@ import sys
 
 BENCHER_RE = re.compile(r"^test (.+?) \.\.\. bench:")
 LIST_RE = re.compile(r"^(.+): benchmark$")
+TEST_RE = re.compile(r"^Testing (.+)$")
 
 
 def parse_benchmark_names(text: str) -> list[str]:
@@ -73,6 +77,10 @@ def parse_benchmark_names(text: str) -> list[str]:
             names.append(match.group(1))
             continue
         match = LIST_RE.match(line)
+        if match:
+            names.append(match.group(1))
+            continue
+        match = TEST_RE.match(line)
         if match:
             names.append(match.group(1))
     return names

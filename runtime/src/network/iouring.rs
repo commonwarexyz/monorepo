@@ -17,10 +17,6 @@
 //! Buffers and file descriptors are owned by the active request state machine inside the io_uring
 //! loop, ensuring that the memory location is valid for the duration of the operation.
 //!
-//! ## Feature Flag
-//!
-//! This implementation is enabled by using the `iouring` feature.
-//!
 //! ## Linux Only
 //!
 //! This implementation is only available on Linux systems that support io_uring.

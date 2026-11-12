@@ -14,13 +14,14 @@ use super::{
     sockaddr::SockAddr,
     waiter::{WaiterId, WaiterState},
 };
-use crate::{Error, IoBuf, IoBufMut, IoBufs, storage::iouring::Shared};
-use commonware_utils::sync::AsyncMutex;
+use crate::{BLOB_PAGE_SIZE, Error, IoBuf, IoBufMut, IoBufs, storage::iouring::Shared};
+use bytes::Buf as _;
+use commonware_utils::{NZUsize, sync::AsyncMutex};
 use io_uring::{opcode, squeue::Entry as SqueueEntry, types::Fd};
 use std::{
     fs::File,
     net::TcpListener,
-    os::fd::{AsRawFd, OwnedFd},
+    os::fd::{AsRawFd, OwnedFd, RawFd},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -31,6 +32,17 @@ use std::{
 /// Linux rejects more than IOV_MAX (1024) iovecs with EINVAL. Use the maximum so storage writes
 /// span as few submissions as possible.
 pub const IOVEC_BATCH_SIZE: usize = 1024;
+
+/// Alignment of the file offset, length and destination address of every direct read. One blob
+/// page is a multiple of the logical block size of every supported device.
+pub(crate) const DIRECT_ALIGN: usize = BLOB_PAGE_SIZE as usize;
+
+/// Largest length of one direct read: `i32::MAX` rounded down to a multiple of [DIRECT_ALIGN].
+///
+/// The kernel returns at most `MAX_RW_COUNT` (`INT_MAX` rounded down to the page size) bytes from
+/// one read. On pages larger than [DIRECT_ALIGN], a full chunk therefore completes short at a
+/// length that is a multiple of [DIRECT_ALIGN], so the read continues from an aligned cursor.
+const DIRECT_CHUNK: usize = i32::MAX as usize / DIRECT_ALIGN * DIRECT_ALIGN;
 
 /// Normalized write buffer for [SendRequest] and [WriteAtRequest].
 ///
@@ -283,10 +295,15 @@ impl Request {
                     RetiredResources::Socket { _fd: r.fd },
                 )
             }
-            Self::ReadAt(r) => {
+            Self::ReadAt(mut r) => {
                 let result = match result {
                     Ok(()) => Ok(r.buf),
-                    Err(err) => Err((r.buf, err)),
+                    Err(err) => {
+                        // The kernel may have left part of the buffer unwritten, so a failed read
+                        // exposes none of it.
+                        r.buf.clear();
+                        Err((r.buf, err))
+                    }
                 };
                 (
                     RequestOutput::ReadAt(result),
@@ -572,10 +589,15 @@ impl RecvRequest {
 }
 
 /// Logical positioned file read request and its in-loop state.
+///
+/// A direct read fills `buf` with the aligned superset of its range through the open's direct
+/// descriptor, and `offset` and `read` then refer to that superset. A completion that can neither
+/// finish nor continue the direct read switches the request, at most once, to a buffered read of
+/// the range.
 pub struct ReadAtRequest {
     /// Open whose file the current read SQE uses.
     pub file: Arc<Shared>,
-    /// Starting file offset for the logical read.
+    /// Starting file offset for the logical read, or for the superset of a direct read.
     pub offset: u64,
     /// Bytes already read into `buf`.
     pub read: usize,
@@ -583,9 +605,74 @@ pub struct ReadAtRequest {
     pub buf: IoBufMut,
     /// Page-cache policy for this request.
     pub cache: Cache,
+    /// Direct descriptor and range position in `buf` while the request reads with direct I/O.
+    direct: Option<Direct>,
+}
+
+/// Direct phase of a [ReadAtRequest].
+#[derive(Clone, Copy)]
+struct Direct {
+    /// The open's direct descriptor. The request retains the open, and the open sets the
+    /// descriptor at most once and never takes it, so the descriptor outlives the request.
+    fd: RawFd,
+    /// Bytes of `buf` before the range.
+    skip: usize,
+    /// Length of the range.
+    len: usize,
 }
 
 impl ReadAtRequest {
+    /// Read `buf.len()` bytes at `offset` through the open's file.
+    pub const fn new(file: Arc<Shared>, offset: u64, buf: IoBufMut, cache: Cache) -> Self {
+        Self {
+            file,
+            offset,
+            read: 0,
+            buf,
+            cache,
+            direct: None,
+        }
+    }
+
+    /// Read the `len` bytes at physical `offset` through the open's direct descriptor `fd` into an
+    /// exact-size buffer that holds their [DIRECT_ALIGN]-aligned superset.
+    ///
+    /// Returns `None` when the range is empty, its superset overflows or ends past the largest file
+    /// offset, or the superset's aligned buffer has no allocation layout.
+    pub fn direct(file: Arc<Shared>, fd: RawFd, offset: u64, len: usize) -> Option<Self> {
+        if len == 0 {
+            return None;
+        }
+
+        // The superset spans the aligned blocks that hold the range and must end within the
+        // largest file offset.
+        let skip = (offset % DIRECT_ALIGN as u64) as usize;
+        let aligned_len = skip
+            .checked_add(len)?
+            .checked_next_multiple_of(DIRECT_ALIGN)?;
+        let aligned_offset = offset - skip as u64;
+        if aligned_offset.checked_add(aligned_len as u64)? > i64::MAX as u64 {
+            return None;
+        }
+
+        let mut buf = IoBufMut::try_with_alignment(aligned_len, NZUsize!(DIRECT_ALIGN))?;
+        // SAFETY: Only the kernel writes this buffer, and nothing reads it before the request
+        // completes. On success `on_cqe` has narrowed it to the range after completions reported
+        // every byte of the range. On a fallback `on_cqe` narrows it to the range, and the buffered
+        // read reports success only after it fills every byte. `Request::complete` clears the
+        // length of a failed request's buffer before returning it.
+        unsafe { buf.set_len(aligned_len) };
+
+        Some(Self {
+            file,
+            offset: aligned_offset,
+            read: 0,
+            buf,
+            cache: Cache::Disabled,
+            direct: Some(Direct { fd, skip, len }),
+        })
+    }
+
     /// Build the next positioned read SQE for the unread suffix of the target.
     fn build_sqe(&mut self) -> SqueueEntry {
         let fd = Fd(self.file.as_raw_fd());
@@ -599,6 +686,23 @@ impl ReadAtRequest {
         let ptr = unsafe { self.buf.as_mut_ptr().add(self.read) };
         let remaining = len - self.read;
         let offset = self.offset + self.read as u64;
+
+        // A direct read submits at most one chunk of its unread superset, without RWF flags.
+        if let Some(direct) = self.direct {
+            let len = remaining.min(DIRECT_CHUNK);
+            assert!(
+                len > 0
+                    && len.is_multiple_of(DIRECT_ALIGN)
+                    && ptr.addr().is_multiple_of(DIRECT_ALIGN)
+                    && offset.is_multiple_of(DIRECT_ALIGN as u64),
+                "a direct read must be nonempty and aligned"
+            );
+            return opcode::Read::new(Fd(direct.fd), ptr, scalar_len(len))
+                .offset(offset)
+                .build();
+        }
+
+        // A buffered read submits its unread suffix with the request's cache policy.
         let rw_flags = self.cache.rw_flag(&self.file.dont_cache_supported);
         opcode::Read::new(fd, ptr, scalar_len(remaining))
             .offset(offset)
@@ -609,6 +713,53 @@ impl ReadAtRequest {
     /// Classify one read CQE and decide whether the logical request completes
     /// or needs another SQE.
     fn on_cqe(&mut self, state: WaiterState, result: i32) -> Option<Result<(), Error>> {
+        // Direct completions never reach the cache fallback below, so they never clear the
+        // open's RWF_DONTCACHE support.
+        if let Some(direct) = self.direct {
+            let end = direct.skip + direct.len;
+            match CqeResult::from_raw(result, state) {
+                CqeResult::Retry => return None,
+                CqeResult::Cancelled => return Some(Err(Error::ReadFailed)),
+                CqeResult::Error(code) if code == -libc::ECANCELED => {
+                    return Some(Err(Error::ReadFailed));
+                }
+                CqeResult::Positive(n) => {
+                    let submitted = (self.buf.len() - self.read).min(DIRECT_CHUNK);
+                    assert!(
+                        n <= submitted,
+                        "a direct CQE must not exceed its submission: n={n} submitted={submitted}"
+                    );
+                    self.read += n;
+
+                    // A completion that covers the range finishes the read, even under a
+                    // cancellation request, and narrows the buffer to the range so only reported
+                    // bytes stay reachable.
+                    if self.read >= end {
+                        self.buf.truncate(end);
+                        self.buf.advance(direct.skip);
+                        return Some(Ok(()));
+                    }
+
+                    // Aligned progress continues.
+                    if n.is_multiple_of(DIRECT_ALIGN) {
+                        return None;
+                    }
+                }
+                CqeResult::Zero | CqeResult::Error(_) => {}
+            }
+
+            // An empty or unaligned short read, or any other error, switches the request to a
+            // buffered read of the whole range into the narrowed buffer.
+            self.buf.truncate(end);
+            self.buf.advance(direct.skip);
+            self.read = 0;
+            self.offset += direct.skip as u64;
+            self.direct = None;
+            return None;
+        }
+
+        // A buffered read completes when it fills the buffer, and retries without the hint once
+        // the kernel rejects it.
         match CqeResult::from_raw(result, state) {
             CqeResult::Retry => None,
             CqeResult::Error(code)
@@ -643,7 +794,6 @@ pub enum Cache {
     Disabled,
 }
 
-#[allow(clippy::missing_const_for_fn)]
 impl Cache {
     /// Return the flag for this request, falling back to normal caching if another request has
     /// already found the hint unsupported.
@@ -987,13 +1137,7 @@ mod tests {
 
     /// Create a five-byte positioned read with the requested cache policy.
     fn make_read_request(file: Arc<Shared>, cache: Cache) -> ReadAtRequest {
-        ReadAtRequest {
-            file,
-            offset: 0,
-            read: 0,
-            buf: IoBufMut::zeroed(5),
-            cache,
-        }
+        ReadAtRequest::new(file, 0, IoBufMut::zeroed(5), cache)
     }
 
     /// Create a five-byte positioned write with no durability requirement.
@@ -1030,6 +1174,41 @@ mod tests {
         let (output, retired) = request.complete(status);
         drop(retired);
         output
+    }
+
+    /// Create a simulated open with its direct descriptor set, and return both.
+    fn make_direct_file() -> (Arc<Shared>, RawFd) {
+        let file = make_file();
+        let (direct, _peer) = UnixStream::pair().expect("failed to create unix socket pair");
+        let fd = file.set_direct(File::from(OwnedFd::from(direct)));
+        (file, fd)
+    }
+
+    /// Create a direct read of the 4096 bytes at physical offset 4196. Its aligned superset is the
+    /// 8192 bytes at offset 4096.
+    fn make_direct_request(file: Arc<Shared>, fd: RawFd) -> ReadAtRequest {
+        ReadAtRequest::direct(file, fd, 4196, 4096).unwrap()
+    }
+
+    /// Positioned read fields of an SQE: opcode, descriptor, offset, address, length and RWF
+    /// flags.
+    fn read_fields(sqe: &SqueueEntry) -> (u8, i32, u64, u64, u32, i32) {
+        const _: () = assert!(size_of::<SqueueEntry>() == 64);
+
+        // SAFETY: SqueueEntry is a repr(C) wrapper of the kernel's 64-byte io_uring_sqe. Its fields
+        // are integers without padding, and opcode builders zero it before setting them, so every
+        // byte is initialized.
+        let bytes: [u8; 64] = unsafe { std::mem::transmute_copy(sqe) };
+        let u32_at = |at: usize| u32::from_ne_bytes(bytes[at..at + 4].try_into().unwrap());
+        let u64_at = |at: usize| u64::from_ne_bytes(bytes[at..at + 8].try_into().unwrap());
+        (
+            bytes[0],
+            u32_at(4) as i32,
+            u64_at(8),
+            u64_at(16),
+            u32_at(24),
+            u32_at(28) as i32,
+        )
     }
 
     #[test]
@@ -1568,6 +1747,380 @@ mod tests {
         assert_eq!(second.cache.rw_flag(&file.dont_cache_supported), 0);
     }
 
+    /// A direct read covers the aligned superset of its range with an exact-size aligned buffer,
+    /// and its first SQE reads that superset through the direct descriptor.
+    #[commonware_macros::test_group("miri")]
+    #[test]
+    fn test_direct_read_covers_the_aligned_superset() {
+        let (file, fd) = make_direct_file();
+
+        // The superset of each (offset, len), as (offset, skip, length). The last ends at the
+        // largest aligned file offset.
+        let top = (1u64 << 63) - 2 * DIRECT_ALIGN as u64;
+        for ((offset, len), (aligned_offset, skip, aligned_len)) in [
+            ((4096, 4096), (4096, 0, 4096)),
+            ((4103, 10), (4096, 7, 4096)),
+            ((8189, 6), (4096, 4093, 8192)),
+            ((8192, 1), (8192, 0, 4096)),
+            ((8, 4096), (0, 8, 8192)),
+            ((top + 10, 4086), (top, 10, 4096)),
+        ] {
+            // The request starts at the superset, in an exact-size aligned buffer, and records
+            // where the range lies in it.
+            let mut read = ReadAtRequest::direct(file.clone(), fd, offset, len).unwrap();
+            assert_eq!((read.offset, read.read), (aligned_offset, 0));
+            assert_eq!(
+                (read.buf.len(), read.buf.capacity()),
+                (aligned_len, aligned_len)
+            );
+            let base = read.buf.as_mut_ptr() as u64;
+            assert!(base.is_multiple_of(DIRECT_ALIGN as u64));
+            assert!(matches!(read.cache, Cache::Disabled));
+            let direct = read.direct.unwrap();
+            assert_eq!((direct.fd, direct.skip, direct.len), (fd, skip, len));
+
+            // Its first SQE reads the whole superset through the direct descriptor, without RWF
+            // flags even though the open supports RWF_DONTCACHE.
+            assert_eq!(
+                read_fields(&read.build_sqe()),
+                (
+                    opcode::Read::CODE,
+                    fd,
+                    aligned_offset,
+                    base,
+                    aligned_len as u32,
+                    0
+                )
+            );
+        }
+
+        // `direct` returns `None` for an empty range, a superset whose length or end overflows,
+        // and a superset that crosses the largest file offset while the range does not.
+        for (offset, len) in [
+            (0, 0),
+            (4095, usize::MAX - 4094),
+            (0, usize::MAX - 100),
+            (u64::MAX - 1, 1),
+            (top + DIRECT_ALIGN as u64, 1),
+        ] {
+            assert!(
+                ReadAtRequest::direct(file.clone(), fd, offset, len).is_none(),
+                "{offset} {len}"
+            );
+        }
+    }
+
+    /// A superset one blob page longer than a chunk is read in two chunks, without a fallback,
+    /// under the kernel's cap on one read for every page size.
+    #[test]
+    fn test_direct_chunks_progress_under_every_page_cap() {
+        // Every chunk is aligned, and its length fits in a CQE result.
+        assert_eq!(DIRECT_CHUNK % DIRECT_ALIGN, 0);
+        assert!(DIRECT_CHUNK <= i32::MAX as usize);
+
+        // The kernel caps one read at i32::MAX rounded down to its page size, for 4, 16 and 64 KiB
+        // pages. The superset's buffer stays demand-paged because simulated completions write
+        // nothing.
+        let (file, fd) = make_direct_file();
+        for page in [4096usize, 16 << 10, 64 << 10] {
+            let kernel_cap = i32::MAX as usize & !(page - 1);
+            for skip in [0, 100] {
+                let len = DIRECT_CHUNK + 1 - skip;
+                let mut read = ReadAtRequest::direct(file.clone(), fd, skip as u64, len).unwrap();
+                assert_eq!(read.buf.len(), DIRECT_CHUNK + DIRECT_ALIGN);
+
+                let mut chunks = 0;
+                loop {
+                    // Each SQE submits an aligned chunk at the cursor.
+                    let (_, _, offset, _, submitted, _) = read_fields(&read.build_sqe());
+                    let submitted = submitted as usize;
+                    assert_eq!(offset, read.read as u64);
+                    assert!(submitted > 0 && submitted <= DIRECT_CHUNK);
+                    assert!(submitted.is_multiple_of(DIRECT_ALIGN));
+                    chunks += 1;
+
+                    // The kernel reports at most its cap. Every count it reports is aligned, so the
+                    // read continues until it covers the range.
+                    let result = i32::try_from(submitted.min(kernel_cap)).unwrap();
+                    match read.on_cqe(ACTIVE, result) {
+                        None => assert!(read.read.is_multiple_of(DIRECT_ALIGN)),
+                        Some(result) => {
+                            assert!(result.is_ok());
+                            break;
+                        }
+                    }
+                }
+
+                // Two chunks covered the range, and the buffer is narrowed to it.
+                assert_eq!(chunks, 2);
+                assert_eq!(read.buf.len(), len);
+            }
+        }
+    }
+
+    /// Each sequence of kernel completions ends its direct read with the expected outcome and
+    /// exposes exactly the reported bytes of the range. Every SQE uses the descriptor of the read's
+    /// current phase.
+    #[commonware_macros::test_group("miri")]
+    #[test]
+    fn test_direct_read_completion_sequences() {
+        /// How a sequence of completions ended.
+        #[derive(Debug, PartialEq)]
+        enum Served {
+            /// Served by direct reads.
+            Direct,
+            /// Served by a buffered read after a fallback.
+            Buffered,
+            /// Failed with `Error::ReadFailed`.
+            Failed,
+            /// Timed out under a cancellation request, without output.
+            TimedOut,
+            /// Still needs another completion.
+            Pending,
+        }
+
+        /// Byte at physical offset `offset` of the simulated file.
+        const fn byte(offset: u64) -> u8 {
+            (offset % 251) as u8
+        }
+
+        /// Simulate the kernel completing the first `n` bytes of the next read SQE of `read`.
+        fn kernel_read(read: &mut ReadAtRequest, n: usize) {
+            let (_, fd, offset, address, len, flags) = read_fields(&read.build_sqe());
+
+            // A direct read goes through the direct descriptor without RWF flags, and its
+            // fallback through the open's file with the RWF_DONTCACHE hint.
+            let phase = match read.direct {
+                Some(direct) => (direct.fd, 0),
+                None => (read.file.as_raw_fd(), libc::RWF_DONTCACHE),
+            };
+            assert_eq!((fd, flags), phase);
+
+            // The SQE targets the unread part of the buffer, and the kernel writes its first `n`
+            // bytes there.
+            let base = read.buf.as_mut_ptr();
+            assert_eq!(address, base as u64 + read.read as u64);
+            assert!(n <= len as usize);
+            for i in 0..n {
+                // SAFETY: The SQE's destination is `read.read` bytes into the buffer and holds
+                // `len >= n` bytes.
+                unsafe { base.add(read.read + i).write(byte(offset + i as u64)) };
+            }
+        }
+
+        /// Apply `completions` to a direct read of the `len` bytes at physical `offset`, and
+        /// return the outcome with the bytes it exposes. Each positive count writes that many
+        /// bytes, a `seed` fills the buffer before the first completion, and completions from
+        /// index `cancel_from` on arrive under a cancellation request.
+        fn serve(
+            offset: u64,
+            len: usize,
+            seed: Option<u8>,
+            completions: &[i32],
+            cancel_from: usize,
+        ) -> (Served, Option<Vec<u8>>) {
+            let (file, fd) = make_direct_file();
+            let mut read = ReadAtRequest::direct(file.clone(), fd, offset, len).unwrap();
+            if let Some(seed) = seed {
+                // SAFETY: The buffer holds `buf.len()` bytes.
+                unsafe { std::ptr::write_bytes(read.buf.as_mut_ptr(), seed, read.buf.len()) };
+            }
+
+            for (index, &result) in completions.iter().enumerate() {
+                if result > 0 {
+                    kernel_read(&mut read, result as usize);
+                }
+                let cancelling = index >= cancel_from;
+                let state = if cancelling {
+                    WaiterState::CancelRequested
+                } else {
+                    ACTIVE
+                };
+
+                // No direct completion changes the open's RWF_DONTCACHE support.
+                let outcome = read.on_cqe(state, result);
+                assert!(file.dont_cache_supported.load(Ordering::Relaxed));
+
+                match outcome {
+                    Some(Ok(())) => {
+                        // The bytes around the range stay unreachable through every conversion.
+                        let buf = read.buf.freeze().try_into_mut().unwrap();
+                        assert_eq!(buf.len(), len);
+                        return (Served::Direct, Some(buf.as_ref().to_vec()));
+                    }
+                    // A failed read returns its buffer empty.
+                    Some(Err(Error::ReadFailed)) => {
+                        let (output, _) = Request::ReadAt(read).complete(Err(Error::ReadFailed));
+                        let RequestOutput::ReadAt(Err((buf, _))) = output else {
+                            panic!("a failed read must return its buffer");
+                        };
+                        assert_eq!(buf.len(), 0);
+                        return (Served::Failed, None);
+                    }
+                    Some(Err(error)) => panic!("direct reads must fail with ReadFailed: {error:?}"),
+                    // Under a cancellation request, a read that needs another SQE times out without
+                    // output, whether or not it fell back.
+                    None if cancelling => return (Served::TimedOut, None),
+                    // A fallback reads the whole range again into the narrowed buffer.
+                    None if read.direct.is_none() => {
+                        assert_eq!((read.offset, read.read, read.buf.len()), (offset, 0, len));
+                        kernel_read(&mut read, len);
+                        let result = i32::try_from(len).unwrap();
+                        assert!(matches!(read.on_cqe(ACTIVE, result), Some(Ok(()))));
+                        return (Served::Buffered, Some(read.buf.as_ref().to_vec()));
+                    }
+                    // A retry or aligned progress keeps the read direct.
+                    None => assert!(read.read.is_multiple_of(DIRECT_ALIGN)),
+                }
+            }
+
+            (Served::Pending, None)
+        }
+
+        const NEVER: usize = usize::MAX;
+        let page = DIRECT_ALIGN as i32;
+        let long = 3 * DIRECT_ALIGN - 200;
+
+        // (offset, len, completions, index of the first completion under a cancellation
+        // request, outcome)
+        let cases: &[(u64, usize, &[i32], usize, Served)] = &[
+            // One covering read, aligned or not.
+            (0, DIRECT_ALIGN, &[page], NEVER, Served::Direct),
+            (4196, 50, &[page], NEVER, Served::Direct),
+            (4093, 6, &[2 * page], NEVER, Served::Direct),
+            // A short read at the end of the file that still covers the range, and one that
+            // ends a byte short of it.
+            (8192 + 10, 100, &[200], NEVER, Served::Direct),
+            (8192 + 10, 100, &[110], NEVER, Served::Direct),
+            (8192 + 10, 100, &[109], NEVER, Served::Buffered),
+            // Retries and aligned progress, then a covering read or one that ends a byte short of
+            // the range.
+            (
+                100,
+                long,
+                &[-libc::EAGAIN, page, -libc::EINTR, 2 * page],
+                NEVER,
+                Served::Direct,
+            ),
+            (100, long, &[page, page, page - 100], NEVER, Served::Direct),
+            (
+                100,
+                long,
+                &[page, page, page - 101],
+                NEVER,
+                Served::Buffered,
+            ),
+            // Fallbacks, with or without a direct prefix, after an empty or unaligned short read or
+            // any error except a cancellation.
+            (100, long, &[page, 10], NEVER, Served::Buffered),
+            (100, long, &[page, 0], NEVER, Served::Buffered),
+            (
+                100,
+                long,
+                &[page, -libc::EOPNOTSUPP],
+                NEVER,
+                Served::Buffered,
+            ),
+            (7, 10, &[-libc::EINVAL], NEVER, Served::Buffered),
+            (7, 10, &[-libc::EOPNOTSUPP], NEVER, Served::Buffered),
+            (7, 10, &[-libc::EFAULT], NEVER, Served::Buffered),
+            (7, 10, &[-libc::ENOMEM], NEVER, Served::Buffered),
+            (4096, 4096, &[-libc::EIO], NEVER, Served::Buffered),
+            // A kernel cancellation fails the read, and an unfinished read exposes nothing.
+            (7, 10, &[-libc::ECANCELED], NEVER, Served::Failed),
+            (100, long, &[page, -libc::EAGAIN], NEVER, Served::Pending),
+            // Under a cancellation request, a covering completion still exposes exactly the
+            // reported bytes, including after an aligned prefix read before the request.
+            (4196, 50, &[page], 0, Served::Direct),
+            (8192 + 10, 100, &[110], 0, Served::Direct),
+            (100, long, &[page, 2 * page], 1, Served::Direct),
+            (100, long, &[page, page, page - 100], 2, Served::Direct),
+            // Anything else under a cancellation request ends the read without output: a retry,
+            // aligned progress, an empty or unaligned short read, or an error.
+            (7, 10, &[-libc::EAGAIN], 0, Served::TimedOut),
+            (100, long, &[page], 0, Served::TimedOut),
+            (100, long, &[page, page - 1], 1, Served::TimedOut),
+            (100, long, &[page, page, page - 101], 2, Served::TimedOut),
+            (8192 + 10, 100, &[109], 0, Served::TimedOut),
+            (100, long, &[page, 0], 1, Served::TimedOut),
+            (100, long, &[page, -libc::EAGAIN], 1, Served::TimedOut),
+            (7, 10, &[-libc::EINVAL], 0, Served::TimedOut),
+            (7, 10, &[-libc::ECANCELED], 0, Served::Failed),
+        ];
+
+        // Fresh buffers let Miri catch a read of an unwritten byte, and seeded buffers let the
+        // comparison catch a stale one. Bytes are checked before the outcome, so even an unexpected
+        // success meets both checks.
+        for seed in [None, Some(0xEE), Some(0x00)] {
+            for (offset, len, completions, cancel_from, outcome) in cases {
+                let (served, bytes) = serve(*offset, *len, seed, completions, *cancel_from);
+                if let Some(bytes) = bytes {
+                    let expected: Vec<u8> = (*offset..*offset + *len as u64).map(byte).collect();
+                    assert_eq!(bytes, expected, "{offset} {len} {completions:?} {seed:?}");
+                }
+                assert_eq!(
+                    &served, outcome,
+                    "{offset} {len} {completions:?} {cancel_from}"
+                );
+            }
+        }
+
+        // A completion longer than its submission panics, both for the first chunk and after
+        // aligned progress.
+        let (file, fd) = make_direct_file();
+        for (prefix, result) in [(0, 8193), (4096, 4097)] {
+            let mut read = make_direct_request(file.clone(), fd);
+            if prefix > 0 {
+                assert!(read.on_cqe(ACTIVE, prefix).is_none());
+            }
+            let overflow = catch_unwind(AssertUnwindSafe(|| read.on_cqe(ACTIVE, result)));
+            assert!(overflow.is_err());
+        }
+    }
+
+    /// A fallback rereads the whole range as a buffered read with the hint, and keeps its own
+    /// progress when a buffered rejection of the hint clears the open's RWF_DONTCACHE support.
+    #[commonware_macros::test_group("miri")]
+    #[test]
+    fn test_direct_fallback_rereads_the_range_and_keeps_buffered_progress() {
+        let (file, fd) = make_direct_file();
+        let buffered_fd = file.as_raw_fd();
+        let mut read = make_direct_request(file.clone(), fd);
+        let base = read.buf.as_mut_ptr() as u64;
+
+        // A direct prefix, then a rejected direct read, switches to a buffered read of the
+        // whole range with the hint.
+        assert!(read.on_cqe(ACTIVE, 4096).is_none());
+        assert!(read.on_cqe(ACTIVE, -libc::EOPNOTSUPP).is_none());
+        assert_eq!(
+            read_fields(&read.build_sqe()),
+            (
+                opcode::Read::CODE,
+                buffered_fd,
+                4196,
+                base + 100,
+                4096,
+                libc::RWF_DONTCACHE
+            )
+        );
+
+        // After a buffered prefix, a buffered rejection of the hint clears the open's support, and
+        // the retry continues from the prefix without the hint.
+        assert!(read.on_cqe(ACTIVE, 3).is_none());
+        assert_eq!(read_fields(&read.build_sqe()).2, 4199);
+        assert!(read.on_cqe(ACTIVE, -libc::EOPNOTSUPP).is_none());
+        assert!(!file.dont_cache_supported.load(Ordering::Relaxed));
+        assert_eq!(read.read, 3);
+        assert_eq!(
+            read_fields(&read.build_sqe()),
+            (opcode::Read::CODE, buffered_fd, 4199, base + 103, 4093, 0)
+        );
+
+        // The rest of the range completes the read in the narrowed buffer.
+        assert!(matches!(read.on_cqe(ACTIVE, 4093), Some(Ok(()))));
+        assert_eq!(read.buf.len(), 4096);
+    }
+
     #[test]
     fn test_large_single_write_preserves_progress_and_durability() {
         // Keep one demand-paged zero allocation across the durability variants.
@@ -1875,13 +2428,17 @@ mod tests {
         assert_eq!(buf.as_mut_ptr(), pointer);
         drop(retired);
 
+        // A failed positioned read also empties the buffer it returns, keeping its allocation.
         let mut read = make_read_request(make_file(), Cache::Enabled);
         let pointer = read.buf.as_mut_ptr();
+        let capacity = read.buf.capacity();
         let (output, retired) = Request::ReadAt(read).complete(Err(Error::Timeout));
         let RequestOutput::ReadAt(Err((mut buf, Error::Timeout))) = output else {
             panic!("expected read timeout and buffer");
         };
         assert_eq!(buf.as_mut_ptr(), pointer);
+        assert_eq!(buf.len(), 0);
+        assert_eq!(buf.capacity(), capacity);
         drop(retired);
 
         let request = Request::WriteAt(make_write_request(make_file(), Cache::Enabled));

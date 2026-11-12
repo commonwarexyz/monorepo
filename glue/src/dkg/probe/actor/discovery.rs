@@ -16,7 +16,6 @@ use commonware_consensus::{
     simplex::{scheme::Scheme, types::Finalization},
     types::{Epoch, Epocher, FixedEpocher, Height},
 };
-use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
 use commonware_parallel::Strategy;
@@ -61,8 +60,7 @@ where
         >,
     S: Scheme<V::Commitment>,
     V: Variant,
-    V::ApplicationBlock: ReshareBlock,
-    <V::ApplicationBlock as ReshareBlock>::Signer: Signer<PublicKey = S::PublicKey>,
+    V::ApplicationBlock: ReshareBlock<PublicKey = S::PublicKey>,
     T: Strategy,
     B: Blocker<PublicKey = S::PublicKey>,
 {
@@ -96,8 +94,7 @@ where
         >,
     S: Scheme<V::Commitment>,
     V: Variant,
-    V::ApplicationBlock: ReshareBlock,
-    <V::ApplicationBlock as ReshareBlock>::Signer: Signer<PublicKey = S::PublicKey>,
+    V::ApplicationBlock: ReshareBlock<PublicKey = S::PublicKey>,
     T: Strategy,
     B: Blocker<PublicKey = S::PublicKey>,
 {

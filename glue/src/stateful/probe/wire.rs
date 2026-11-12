@@ -74,10 +74,24 @@ where
     V: Variant,
 {
     fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::Request => 0,
-            Self::Response(finalization) => finalization.encode_size(),
-        }
+        Tag::SIZE
+            + match self {
+                Self::Request => 0,
+                Self::Response(finalization) => finalization.encode_size(),
+            }
+    }
+}
+
+impl<S, V> Message<S, V>
+where
+    S: Scheme,
+    V: Variant,
+{
+    /// Returns an upper bound on the encoded size of a message for committees of at most
+    /// `participants`.
+    pub fn max_encode_size(participants: u32) -> usize {
+        // After its tag, a request carries nothing and a response carries a finalization.
+        Tag::SIZE + Finalization::<S, V::Commitment>::max_encode_size(participants)
     }
 }
 

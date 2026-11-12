@@ -1,3 +1,4 @@
+use commonware_allocator::mimalloc;
 use criterion::criterion_main;
 
 mod count_ones;
@@ -10,6 +11,9 @@ mod roaring_iteration;
 mod roaring_union;
 mod roaring_write;
 mod write;
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 criterion_main!(
     count_ones::benches,

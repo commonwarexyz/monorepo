@@ -93,8 +93,6 @@ impl<F: Family> Location<F> {
     }
 }
 
-// --- Manual trait implementations (to avoid unnecessary bounds on F) ---
-
 impl<F: Family> Copy for Location<F> {}
 
 impl<F: Family> Clone for Location<F> {
@@ -181,8 +179,6 @@ impl<F: Family> From<Location<F>> for u64 {
     }
 }
 
-// --- Codec implementations using varint encoding ---
-
 impl<F: Family> commonware_codec::Write for Location<F> {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
@@ -195,6 +191,10 @@ impl<F: Family> commonware_codec::EncodeSize for Location<F> {
     fn encode_size(&self) -> usize {
         UInt(self.0).encode_size()
     }
+}
+
+impl<F: Family> commonware_codec::MaxEncodeSize for Location<F> {
+    const MAX_ENCODE_SIZE: usize = UInt::<u64>::MAX_ENCODE_SIZE;
 }
 
 impl<F: Family> commonware_codec::Read for Location<F> {
@@ -231,8 +231,6 @@ impl<F: Family> TryFrom<Position<F>> for Location<F> {
         F::position_to_location(pos).ok_or(super::Error::NonLeaf(pos))
     }
 }
-
-// --- Arithmetic operators ---
 
 /// Add two locations together.
 ///

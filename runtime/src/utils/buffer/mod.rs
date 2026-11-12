@@ -146,7 +146,9 @@ mod tests {
     use crate::{
         Blob as _, Error, Handle, IoBufMut, IoBufs, IoBufsMut, ReadOptions, Runner, Storage,
         WriteOptions, deterministic,
-        mocks::{DelayedSyncBlob, WriteFaultContext, WriteFaults, next_pending_sync},
+        mocks::{
+            DelayedSyncBlob, MigratingReadBlob, WriteFaultContext, WriteFaults, next_pending_sync,
+        },
     };
     use commonware_macros::test_traced;
     use commonware_utils::{NZUsize, sync::Mutex};
@@ -476,6 +478,92 @@ mod tests {
             let tail = reader.read(4).await.unwrap().coalesce();
             assert_eq!(tail.as_ref(), b"ghij");
             assert_eq!(reader.position(), 10);
+        });
+    }
+
+    #[test_traced]
+    fn test_read_cancelled_refill_rewinds() {
+        for start in [0, 2] {
+            for seek_after_cancel in [false, true] {
+                deterministic::Runner::default().start(|context| async move {
+                    let data = b"abcdefghijkl";
+                    let (blob, _) = context.open("partition", b"cancelled-read").await.unwrap();
+                    blob.write_at(0, data, WriteOptions::default())
+                        .await
+                        .unwrap();
+                    let blob = Arc::new(MigratingReadBlob::new(blob, false));
+                    let mut reader = Read::new(blob.clone(), data.len() as u64, NZUsize!(4));
+                    assert_eq!(
+                        reader.read(start).await.unwrap().coalesce().as_ref(),
+                        &data[..start]
+                    );
+                    let reads = blob.reads();
+
+                    // Neither an empty read nor an unpolled read changes the cursor or issues I/O.
+                    assert!(reader.read(0).await.unwrap().is_empty());
+                    drop(reader.read(10));
+                    assert_eq!(reader.position(), start as u64);
+                    assert_eq!(blob.reads(), reads);
+
+                    // With start = 2, this consumes buffered bytes before the refill yields.
+                    let mut read = Box::pin(reader.read(10));
+                    assert!(read.as_mut().now_or_never().is_none());
+                    assert_eq!(blob.reads(), reads + 1);
+                    drop(read);
+
+                    // Rewind immediately, before any subsequent read or seek.
+                    assert_eq!(reader.position(), start as u64);
+                    assert_eq!(reader.blob_remaining(), (data.len() - start) as u64);
+                    let resumed = if seek_after_cancel {
+                        reader.seek_to(6).unwrap();
+                        6
+                    } else {
+                        start
+                    };
+                    assert_eq!(
+                        reader
+                            .read(data.len() - resumed)
+                            .await
+                            .unwrap()
+                            .coalesce()
+                            .as_ref(),
+                        &data[resumed..]
+                    );
+                    assert_eq!(reader.position(), data.len() as u64);
+                    assert_eq!(reader.blob_remaining(), 0);
+                });
+            }
+        }
+    }
+
+    #[test_traced]
+    fn test_read_refill_error_rewinds() {
+        deterministic::Runner::default().start(|context| async move {
+            let data = b"abcdefghijkl";
+            let (blob, _) = context.open("partition", b"failed-read").await.unwrap();
+            let blob = Arc::new(blob);
+            // A short backing blob fails the second refill, after a prefix has been gathered.
+            blob.write_at(0, &data[..8], WriteOptions::default())
+                .await
+                .unwrap();
+            let mut reader = Read::new(blob.clone(), data.len() as u64, NZUsize!(4));
+            assert_eq!(reader.read(2).await.unwrap().coalesce().as_ref(), b"ab");
+
+            let err = reader.read(10).await.unwrap_err();
+            assert!(matches!(err, Error::BlobInsufficientLength));
+            assert_eq!(reader.position(), 2);
+            assert_eq!(reader.blob_remaining(), 10);
+
+            // Once the backing bytes are available, retry from the original position.
+            blob.write_at(8, &data[8..], WriteOptions::default())
+                .await
+                .unwrap();
+            assert_eq!(
+                reader.read(10).await.unwrap().coalesce().as_ref(),
+                &data[2..]
+            );
+            assert_eq!(reader.position(), data.len() as u64);
+            assert_eq!(reader.blob_remaining(), 0);
         });
     }
 

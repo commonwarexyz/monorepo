@@ -2,7 +2,7 @@ use commonware_cryptography::bls12381::primitives::{
     ops::hash_with_namespace,
     variant::{MinSig, Variant},
 };
-use commonware_parallel::{Rayon, Sequential, Strategy};
+use commonware_parallel::{Rayon, Sequential, Strategy, rayon::ThreadPoolBuilder};
 use commonware_utils::{NZUsize, test_rng};
 use criterion::{BatchSize, Criterion, criterion_group};
 use rand::RngExt as _;
@@ -21,7 +21,7 @@ fn bench_hash_to_curve(c: &mut Criterion) {
         }
 
         for concurrency in [1, 8] {
-            let strategy = Rayon::new(NZUsize!(concurrency)).unwrap();
+            let strategy = Rayon::new(ThreadPoolBuilder::new(NZUsize!(concurrency))).unwrap();
             c.bench_function(
                 &format!("{}/n={} conc={}", module_path!(), n, concurrency),
                 |b| {

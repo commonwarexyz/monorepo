@@ -8,6 +8,7 @@ use commonware_runtime::{
     Metrics as RuntimeMetrics,
     telemetry::metrics::{Counter, EncodeStruct, Gauge, GaugeExt, GaugeFamily, MetricsExt as _},
 };
+use commonware_utils::ordered::Set;
 
 /// Per-peer metric label.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeStruct)]
@@ -45,9 +46,9 @@ pub(crate) struct Metrics<P: PublicKey> {
     pub(crate) our_reveals: Counter,
     /// Total revealed shares across successful epochs.
     pub(crate) all_reveals: Counter,
-    /// Latest epoch where a valid share was received from a dealer.
+    /// Latest epoch where a valid share was received, per dealer of the installed epoch.
     pub(crate) latest_share: GaugeFamily<Peer<P>>,
-    /// Latest epoch where a valid ack was received from a player.
+    /// Latest epoch where a valid ack was received, per player of the installed epoch.
     pub(crate) latest_ack: GaugeFamily<Peer<P>>,
     /// Current DKG epoch.
     pub(crate) current_epoch: Gauge,
@@ -88,6 +89,23 @@ impl<P: PublicKey> Metrics<P> {
         }
     }
 
+    /// Installs an epoch's dealers and players by dropping the gauges of every other peer. A
+    /// peer that keeps its role keeps its latest epoch.
+    pub(crate) fn reconcile(&self, dealers: &Set<P>, players: &Set<P>) {
+        for (family, peers) in [(&self.latest_share, dealers), (&self.latest_ack, players)] {
+            // Read the kept values before clearing. Each lookup holds the family's read lock
+            // and `clear` needs the write lock.
+            let kept: Vec<_> = peers
+                .iter()
+                .filter_map(|peer| family.get_by(peer).map(|gauge| (peer.clone(), gauge.get())))
+                .collect();
+            family.clear();
+            for (peer, value) in kept {
+                family.get_or_create_by(&peer).set(value);
+            }
+        }
+    }
+
     /// Records the current epoch and its ceremony round.
     pub(crate) fn set_epoch(&self, epoch: u64) {
         let _ = self.current_epoch.try_set(epoch as i64);
@@ -120,5 +138,71 @@ impl<P: PublicKey> Metrics<P> {
         if revealed.position(ours).is_some() {
             self.our_reveals.inc();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::{
+        Signer as _,
+        ed25519::{PrivateKey, PublicKey},
+    };
+    use commonware_runtime::{
+        Runner as _, Supervisor as _, deterministic, telemetry::metrics::metric_samples,
+    };
+    use std::collections::BTreeMap;
+
+    /// `latest_share` and `latest_ack` cover only the installed epoch's dealers and players.
+    #[test]
+    fn reconcile_prunes_peers_that_left_their_role() {
+        deterministic::Runner::default().start(|context| async move {
+            let reshare = context.child("reshare");
+            let metrics = Metrics::new(&reshare);
+            let peers: Vec<PublicKey> = (0..3)
+                .map(|seed| PrivateKey::from_seed(seed).public_key())
+                .collect();
+            let set = |peers: &[&PublicKey]| Set::from_iter_dedup(peers.iter().map(|&p| p.clone()));
+            let exported = |name: &str| -> BTreeMap<String, u64> {
+                metric_samples(&context.encode(), name)
+                    .map(|(labels, value)| (labels.to_string(), value.parse().unwrap()))
+                    .collect()
+            };
+            let label = |peer: &PublicKey| format!("peer=\"{peer}\"");
+
+            // Observed dealers and players are exported with their latest epochs.
+            let all = set(&[&peers[0], &peers[1], &peers[2]]);
+            metrics.reconcile(&all, &all);
+            metrics.record_share(&peers[0], 1);
+            metrics.record_share(&peers[1], 1);
+            metrics.record_ack(&peers[0], 1);
+            metrics.record_ack(&peers[2], 1);
+            assert_eq!(
+                exported("reshare_latest_share"),
+                BTreeMap::from([(label(&peers[0]), 1), (label(&peers[1]), 1)])
+            );
+            assert_eq!(
+                exported("reshare_latest_ack"),
+                BTreeMap::from([(label(&peers[0]), 1), (label(&peers[2]), 1)])
+            );
+
+            // Leaving a role removes that role's gauge, a peer that keeps its role keeps its
+            // epoch, and a dealer appears only once it deals.
+            metrics.reconcile(&set(&[&peers[1], &peers[2]]), &set(&[&peers[0]]));
+            assert_eq!(
+                exported("reshare_latest_share"),
+                BTreeMap::from([(label(&peers[1]), 1)])
+            );
+            assert_eq!(
+                exported("reshare_latest_ack"),
+                BTreeMap::from([(label(&peers[0]), 1)])
+            );
+            metrics.record_share(&peers[1], 2);
+            metrics.record_share(&peers[2], 2);
+            assert_eq!(
+                exported("reshare_latest_share"),
+                BTreeMap::from([(label(&peers[1]), 2), (label(&peers[2]), 2)])
+            );
+        });
     }
 }

@@ -22,6 +22,12 @@ pub trait Translator: Clone + BuildHasher + Send + Sync + 'static {
     fn transform(&self, key: &[u8]) -> Self::Key;
 }
 
+/// A [Translator] whose output preserves the lexicographic order of its input.
+///
+/// For all byte strings `a <= b`, `transform(a) <= transform(b)`. Distinct keys may still map to the
+/// same translated key. Ordered indices rely on this to find a key's neighbors.
+pub trait OrderedTranslator: Translator {}
+
 /// A lightweight hasher for translated `uint` keys.
 ///
 /// Most users typically store keys that are **already hashed** (shortened by the [Translator]).
@@ -96,6 +102,9 @@ fn cap<const N: usize>(key: &[u8]) -> [u8; N] {
 macro_rules! define_cap_translator {
     ($name:ident, $size:expr, $int:ty) => {
         #[doc = concat!("Translator that caps the key to ", stringify!($size), " byte(s) and returns it packed in a ", stringify!($int), ".")]
+        ///
+        /// Truncation, zero-padding, and big-endian packing preserve key order, so this translator
+        /// implements [OrderedTranslator].
         #[derive(Clone, Default)]
         pub struct $name;
 
@@ -110,6 +119,8 @@ macro_rules! define_cap_translator {
             }
         }
 
+        impl OrderedTranslator for $name {}
+
         // Implement the `BuildHasher` trait for `IdentityHasher`.
         impl BuildHasher for $name {
             type Hasher = UintIdentity;
@@ -122,7 +133,6 @@ macro_rules! define_cap_translator {
     };
 }
 
-// Define order-preserving translators for different sizes.
 define_cap_translator!(OneCap, 1, u8);
 define_cap_translator!(TwoCap, 2, u16);
 define_cap_translator!(FourCap, 4, u32);
@@ -131,9 +141,42 @@ define_cap_translator!(EightCap, 8, u64);
 /// Define a special array type for which we'll implement our own lightweight hasher. This avoids the
 /// overhead of the default Array hasher which unnecessarily (for our use case) includes a length
 /// prefix.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct UnhashedArray<const N: usize> {
     pub inner: [u8; N],
+}
+
+impl<const N: usize> UnhashedArray<N> {
+    /// The array as a big-endian integer, zero-padded on the right.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `N > 8`, so callers check `N <= 8` first.
+    #[inline]
+    fn word(&self) -> u64 {
+        let mut word = [0u8; 8];
+        word[..N].copy_from_slice(&self.inner);
+        u64::from_be_bytes(word)
+    }
+}
+
+impl<const N: usize> Ord for UnhashedArray<N> {
+    #[inline]
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        // Equal-length byte strings order like their big-endian values, so an array that fits in a
+        // word compares as one 8-byte integer, in a single compare without a branch.
+        if N <= 8 {
+            return self.word().cmp(&other.word());
+        }
+        self.inner.cmp(&other.inner)
+    }
+}
+
+impl<const N: usize> PartialOrd for UnhashedArray<N> {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl<const N: usize> Hash for UnhashedArray<N> {
@@ -150,6 +193,8 @@ impl<const N: usize> PartialEq<[u8; N]> for UnhashedArray<N> {
 }
 
 /// Translators for keys that are not the length of a standard integer.
+///
+/// Like the fixed-width cap translators, [Cap] implements [OrderedTranslator].
 #[derive(Clone, Copy)]
 pub struct Cap<const N: usize>;
 
@@ -183,6 +228,8 @@ impl<const N: usize> Translator for Cap<N> {
     }
 }
 
+impl<const N: usize> OrderedTranslator for Cap<N> {}
+
 impl<const N: usize> BuildHasher for Cap<N> {
     type Hasher = UintIdentity;
 
@@ -203,9 +250,21 @@ impl<const N: usize> BuildHasher for Cap<N> {
 ///
 /// # No Ordering
 ///
-/// Hashing destroys lexicographic key ordering. Do not use [Hashed] with ordered indices when
-/// callers rely on translated-key adjacency matching original-key adjacency (e.g., exclusion proofs
-/// in the ordered QMDB). [Hashed] is safe for unordered indices and partitioned unordered indices.
+/// Hashing destroys lexicographic key ordering, so [Hashed] does not implement [OrderedTranslator]
+/// and cannot back an ordered index or the ordered QMDB. It is safe for unordered indices and
+/// partitioned unordered indices.
+///
+/// An ordered index over [Hashed] does not compile:
+///
+/// ```compile_fail
+/// use commonware_storage::{
+///     index::{Ordered, ordered::Index},
+///     translator::{Hashed, TwoCap},
+/// };
+///
+/// fn ordered<I: Ordered>() {}
+/// ordered::<Index<Hashed<TwoCap>, u64>>();
+/// ```
 ///
 /// # `no_std` Support
 ///
@@ -291,7 +350,9 @@ impl<T: Translator> BuildHasher for Hashed<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_utils::test_rng;
     use core::hash::Hasher;
+    use rand::RngExt as _;
 
     #[test]
     fn test_one_cap() {
@@ -332,6 +393,48 @@ mod tests {
     }
 
     #[test]
+    fn test_unhashed_array_orders_like_its_bytes() {
+        fn check<const N: usize>(rng: &mut impl rand::Rng) {
+            // Random arrays that mostly differ in their first byte.
+            let mut arrays: Vec<UnhashedArray<N>> = (0..200)
+                .map(|_| {
+                    let mut inner = [0u8; N];
+                    rng.fill_bytes(&mut inner);
+                    UnhashedArray { inner }
+                })
+                .collect();
+
+            // Arrays equal in every byte but the last, and arrays with high bits set.
+            let mut last = [0xab; N];
+            arrays.push(UnhashedArray { inner: last });
+            last[N - 1] = 0xac;
+            arrays.push(UnhashedArray { inner: last });
+            arrays.push(UnhashedArray { inner: [0xff; N] });
+            arrays.push(UnhashedArray { inner: [0; N] });
+
+            // Every pair orders as its bytes do, through `Ord` and `PartialOrd` alike.
+            for a in &arrays {
+                for b in &arrays {
+                    assert_eq!(a.cmp(b), a.inner.cmp(&b.inner), "{a:?} vs {b:?}");
+                    assert_eq!(a.partial_cmp(b), Some(a.inner.cmp(&b.inner)));
+                }
+            }
+        }
+
+        // Every width a `Cap` translator produces, plus one too wide to compare as a word.
+        let mut rng = test_rng();
+        check::<1>(&mut rng);
+        check::<2>(&mut rng);
+        check::<3>(&mut rng);
+        check::<4>(&mut rng);
+        check::<5>(&mut rng);
+        check::<6>(&mut rng);
+        check::<7>(&mut rng);
+        check::<8>(&mut rng);
+        check::<9>(&mut rng);
+    }
+
+    #[test]
     fn test_cap_3() {
         let t = Cap::<3>::new();
         assert_eq!(t.transform(b""), [0; 3]);
@@ -364,6 +467,37 @@ mod tests {
         assert_eq!(t3, t4);
         assert!(t3 < t5);
         assert!(t4 < t5);
+    }
+
+    /// Asserts that `t` maps byte-sorted keys to non-decreasing translated keys.
+    fn assert_order_preserving<T: OrderedTranslator>(t: T) {
+        // A small alphabet makes shared prefixes, zero padding, and high bytes common.
+        const ALPHABET: [u8; 6] = [0x00, 0x01, 0x7F, 0x80, 0xFE, 0xFF];
+        let mut rng = test_rng();
+        let mut keys: Vec<Vec<u8>> = (0..10_000)
+            .map(|_| {
+                let len = rng.random_range(0..=10);
+                (0..len)
+                    .map(|_| ALPHABET[rng.random_range(0..ALPHABET.len())])
+                    .collect()
+            })
+            .collect();
+        keys.sort();
+        for pair in keys.windows(2) {
+            assert!(t.transform(&pair[0]) <= t.transform(&pair[1]), "{pair:?}");
+        }
+    }
+
+    #[test]
+    fn test_cap_translators_preserve_order() {
+        assert_order_preserving(OneCap);
+        assert_order_preserving(TwoCap);
+        assert_order_preserving(FourCap);
+        assert_order_preserving(EightCap);
+        assert_order_preserving(Cap::<1>::new());
+        assert_order_preserving(Cap::<3>::new());
+        assert_order_preserving(Cap::<5>::new());
+        assert_order_preserving(Cap::<8>::new());
     }
 
     #[test]

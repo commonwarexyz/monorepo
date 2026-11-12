@@ -1,5 +1,6 @@
 //! Shared setup for the proof generation and verification benchmarks.
 
+use commonware_bench::Inputs;
 use commonware_cryptography::{Sha256, sha256};
 use commonware_math::algebra::Random as _;
 use commonware_storage::merkle::{
@@ -12,19 +13,21 @@ use std::ops::Range;
 
 pub type StandardHasher<H> = merkle::hasher::Standard<H>;
 
-/// Number of proofs generated or verified per iteration.
+/// Number of leaves or ranges sampled from each tree.
 pub const SAMPLE_SIZE: usize = 100;
-
-#[cfg(not(full_bench))]
-pub const N_LEAVES: [usize; 2] = [10_000, 100_000];
-#[cfg(full_bench)]
-pub const N_LEAVES: [usize; 5] = [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000];
 
 /// A proven leaf and its location.
 pub type SingleSample<F> = (Location<F>, sha256::Digest);
 
 /// A proven range of leaves and their elements.
 pub type RangeSample<F> = (Range<Location<F>>, Vec<sha256::Digest>);
+
+pub fn n_leaves() -> &'static [usize] {
+    match Inputs::current() {
+        Inputs::Full => &[10_000, 100_000, 1_000_000, 5_000_000, 10_000_000],
+        _ => &[10_000, 100_000],
+    }
+}
 
 /// Builds an in-memory tree of `n` random elements and returns it with its root
 /// and the elements in location order.
@@ -62,6 +65,15 @@ pub fn single_samples<F: Family>(
         .sample(&mut sampler, SAMPLE_SIZE)
         .map(|&(loc, element)| (Location::<F>::new(loc as u64), *element))
         .collect();
+    (mem, root, samples)
+}
+
+/// Like `single_samples`, with the leaves sorted by location.
+pub fn multi_samples<F: Family>(
+    n: usize,
+) -> (Mem<F, sha256::Digest>, sha256::Digest, Vec<SingleSample<F>>) {
+    let (mem, root, mut samples) = single_samples::<F>(n);
+    samples.sort_unstable_by_key(|(loc, _)| *loc);
     (mem, root, samples)
 }
 

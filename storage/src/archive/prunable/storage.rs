@@ -381,7 +381,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             compression: cfg.compression,
             codec_config: cfg.codec_config,
         };
-        let mut replay = Oversized::<E, Record<K>, V>::init_with_metadata(
+        let mut replay = Oversized::<E, Record<K>, V>::init_with_markers(
             context.child("oversized"),
             oversized_cfg,
             cfg.metadata_partition,
@@ -415,7 +415,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             intervals.insert(entry.index);
             records += 1;
         }
-        let oversized = replay.finish_tracked().await?;
+        let oversized = replay.finish().await?;
 
         // Index every record by key in a table sized once for all of them.
         let mut keys = Table::with_capacity(records);
@@ -558,12 +558,12 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
 
         // Write value and index entry atomically (glob first, then index)
         let start = self.section(index);
-        let entry = Record::new(index, key.clone(), 0, 0);
+        let translated = self.translator.transform(key.as_ref());
+        let entry = Record::new(index, key, 0, 0);
         let position;
         (self.oversized, position, _, _) = self.oversized.append(start, entry, data).await?;
 
         // Record the position by index and the translated key by position, then index the key.
-        let translated = self.translator.transform(key.as_ref());
         let (slot, first) = self
             .sections
             .add(start, index - start, position, translated);

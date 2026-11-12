@@ -6,7 +6,7 @@ use commonware_allocator::mimalloc::{ARENA_SLICE_SIZE, Config, Effective, MiMall
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc::new(Config {
-    arena_max_object_size: Some(0),
+    arena_max_object_size: 0,
     ..Config::DEFAULT
 });
 

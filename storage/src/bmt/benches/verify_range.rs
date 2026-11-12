@@ -40,7 +40,7 @@ fn bench_verify_range(c: &mut Criterion) {
                     |(start, leaves, proof)| {
                         assert!(
                             proof
-                                .verify_range_inclusion::<Sha256>(*start, leaves, &root)
+                                .verify_range_inclusion::<Sha256>(*start, leaves.iter(), &root)
                                 .is_ok()
                         );
                     },

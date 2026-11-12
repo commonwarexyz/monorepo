@@ -25,8 +25,6 @@ commonware-stream.workspace = true
 commonware-utils.workspace = true
 either.workspace = true
 futures.workspace = true
-num-bigint.workspace = true
-num-integer.workspace = true
 num-rational.workspace = true
 num-traits.workspace = true
 rand.workspace = true
@@ -40,6 +38,7 @@ commonware-conformance.workspace = true
 commonware-math.workspace = true
 commonware-parallel = { workspace = true, features = ["test-utils"] }
 commonware-runtime = { workspace = true, features = ["test-utils"] }
+rstest.workspace = true
 tracing-subscriber.workspace = true
 
 [features]
@@ -51,7 +50,6 @@ arbitrary = [
 	"commonware-stream/arbitrary",
 	"commonware-utils/arbitrary",
 	"dep:arbitrary",
-	"num-bigint/arbitrary",
 ]
 
 [lib]

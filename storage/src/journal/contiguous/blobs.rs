@@ -15,10 +15,8 @@ use commonware_runtime::{
     buffer::paged::{CacheRef, Recovery as PagedRecovery, Replay as PagedReplay, Sealed, Writer},
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
 };
-use futures::{
-    FutureExt as _,
-    future::{self, try_join_all},
-};
+use commonware_utils::futures::try_join_all;
+use futures::{FutureExt as _, future};
 use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc};
 use tracing::debug;
 
@@ -591,6 +589,18 @@ impl<'a, B: RBlob> Blob<'a, B> {
         }
     }
 
+    /// Like [`Self::read_many_into`], but each `(offset, len)` range has its own length.
+    pub(super) async fn read_ranges_into(
+        &self,
+        buf: &mut [u8],
+        ranges: &[(u64, usize)],
+    ) -> Result<usize, Error> {
+        match self {
+            Self::Writer(writer) => Ok(writer.read_ranges_into(buf, ranges).await?),
+            Self::Sealed(sealed) => Ok(sealed.read_ranges_into(buf, ranges).await?),
+        }
+    }
+
     /// Like [`Self::read_many_into`], but synchronous and cache-only. Returns the indices of
     /// items that require a blob read. Their slots in `buf` hold unspecified bytes.
     pub(super) fn try_read_many_sync_into(
@@ -624,8 +634,10 @@ impl<B: RBlob> FrameReader for Blob<'_, B> {
         offset: u64,
         len: usize,
         bufs: impl Into<IoBufMut> + Send,
-    ) -> Result<(IoBufMut, usize), Error> {
-        Self::read_up_to(self, offset, len, bufs).await
+    ) -> Result<IoBufMut, Error> {
+        Self::read_up_to(self, offset, len, bufs)
+            .await
+            .map(|(buf, _)| buf)
     }
 
     async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {

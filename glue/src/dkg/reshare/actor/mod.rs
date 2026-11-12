@@ -109,8 +109,7 @@ where
     X: Blocker<PublicKey = C::PublicKey>,
     S: SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
     MV: MarshalVariant,
-    MV::ApplicationBlock: ReshareBlock,
-    <MV::ApplicationBlock as ReshareBlock>::Signer: Signer<PublicKey = C::PublicKey>,
+    MV::ApplicationBlock: ReshareBlock<PublicKey = C::PublicKey>,
     R: Registrar<PublicKey = C::PublicKey>,
 {
     /// Signer for player acknowledgements and dealer logs.
@@ -134,7 +133,7 @@ where
     /// Parallel strategy for cryptographic verification.
     pub strategy: T,
 
-    /// Receives each epoch's signer or verifier scheme.
+    /// Receives the material for each epoch's signer, member, or verifier scheme.
     pub registrar: R,
 
     /// Marshal mailbox used to read finalized blocks.
@@ -162,9 +161,6 @@ where
 
     /// Actor mailbox capacity.
     pub mailbox_size: NonZeroUsize,
-
-    /// Maximum number of messages to buffer in the dealing channel muxer.
-    pub muxer_size: usize,
 
     /// Prefix of the recovery journal's storage partition.
     pub partition_prefix: String,
@@ -196,7 +192,7 @@ where
 pub struct Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A = Exact>
 where
     E: Spawner + CryptoRng + Metrics + Clock + Storage,
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: BlsVariant,
     C: Signer,
     M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
@@ -224,7 +220,6 @@ where
     namespace: &'static [u8],
     sharing_mode: SharingMode,
     reveal: Reveal,
-    muxer_size: usize,
     partition_prefix: String,
     page_cache: CacheRef,
     write_buffer: NonZeroUsize,
@@ -239,7 +234,7 @@ where
 impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
     E: Spawner + CryptoRng + Metrics + Clock + Storage,
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: BlsVariant,
     C: Signer,
     M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
@@ -278,7 +273,6 @@ where
                 namespace: config.namespace,
                 sharing_mode: config.sharing_mode,
                 reveal: config.reveal,
-                muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
                 page_cache: config.page_cache,
                 write_buffer: config.write_buffer,
@@ -341,8 +335,7 @@ where
         )
         .await;
 
-        let (mux, mut dealing_mux) =
-            Muxer::new(self.context.child("mux"), sender, receiver, self.muxer_size);
+        let (mux, mut dealing_mux) = Muxer::new(self.context.child("mux"), sender, receiver);
         mux.start();
 
         // Plan resolution and the startup tip read one processed position. A

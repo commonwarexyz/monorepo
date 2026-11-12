@@ -17,6 +17,7 @@ use commonware_storage::{
     qmdb::sync::{Request, Response, Source},
 };
 use commonware_utils::{
+    NonZeroDuration,
     channel::{fallible::OneshotExt, oneshot},
     futures::Pool as FuturesPool,
 };
@@ -59,10 +60,11 @@ where
     pub me: Option<P>,
 
     /// Request timeout.
-    pub timeout: Duration,
+    pub fetch_timeout: NonZeroDuration,
 
-    /// Retry cadence for pending fetches.
-    pub fetch_retry_timeout: Duration,
+    /// Delay after an unresolved attempt before retrying its fetch.
+    /// Zero permits immediate retries, subject to the sender's rate limit.
+    pub fetch_retry_delay: Duration,
 
     /// Largest `max_ops` served in a peer's operations request. Larger requests go unanswered.
     ///
@@ -148,8 +150,10 @@ where
         mut self,
         (sender, receiver): (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
+        // Every handler entry is one message the network admitted on the channel, and peer
+        // requests are dropped once the ready queue is full, so hold as many as the channel.
         let (handler_tx, mut handler_rx) =
-            actor_mailbox::new(self.context.child("handler"), self.config.mailbox_size);
+            actor_mailbox::new(self.context.child("handler"), receiver.capacity());
         let handler = handler::Handler::new(handler_tx);
         let (engine, mut resolver_mailbox) = p2p::Engine::new(
             self.context.as_present().child("resolver"),
@@ -160,8 +164,8 @@ where
                 producer: handler,
                 mailbox_size: self.config.mailbox_size,
                 me: self.config.me.clone(),
-                timeout: self.config.timeout,
-                fetch_retry_timeout: self.config.fetch_retry_timeout,
+                fetch_timeout: self.config.fetch_timeout,
+                fetch_retry_delay: self.config.fetch_retry_delay,
                 priority_requests: self.config.priority_requests,
                 priority_responses: self.config.priority_responses,
             },
@@ -374,15 +378,11 @@ mod tests {
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedLogConfig,
         mmr::{self, Location, Proof, full::Config as MmrJournalConfig},
-        qmdb::{
-            any::{FixedConfig, unordered::fixed},
-            floor::Proportional,
-            sync,
-        },
+        qmdb::{any::unordered::fixed, sync},
         translator::TwoCap,
     };
     use commonware_utils::{
-        NZU16, NZU32, NZU64, NZUsize,
+        NZDuration, NZU16, NZU32, NZU64, NZUsize,
         channel::{mpsc, oneshot},
         probability,
         sync::Mutex,
@@ -494,7 +494,7 @@ mod tests {
             Feedback::Ok
         }
 
-        fn fetch_all<T>(&mut self, fetches: Vec<T>) -> Feedback
+        fn fetch_all<T>(&mut self, fetches: impl IntoIterator<Item = T>) -> Feedback
         where
             T: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
         {
@@ -555,8 +555,8 @@ mod tests {
             database,
             mailbox_size: NZUsize!(16),
             me: None,
-            timeout: Duration::from_millis(10),
-            fetch_retry_timeout: Duration::from_millis(10),
+            fetch_timeout: NZDuration!(Duration::from_millis(10)),
+            fetch_retry_delay: Duration::from_millis(10),
             max_serve_ops: NZU64!(16),
             priority_requests: false,
             priority_responses: false,
@@ -571,10 +571,10 @@ mod tests {
         }
     }
 
-    fn db_config(suffix: &str) -> FixedConfig<TwoCap, Sequential> {
+    fn db_config(suffix: &str) -> fixed::Config<TwoCap, Sequential> {
         let page_cache = CacheRef::new(NZU16!(101), NZUsize!(11));
-        FixedConfig {
-            merkle_config: MmrJournalConfig {
+        fixed::Config {
+            merkle: MmrJournalConfig {
                 journal_partition: format!("{suffix}-mmr-journal"),
                 metadata_partition: format!("{suffix}-mmr-metadata"),
                 items_per_blob: NZU64!(11),
@@ -583,7 +583,7 @@ mod tests {
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
-            journal_config: FixedLogConfig {
+            log: FixedLogConfig {
                 partition: format!("{suffix}-log-journal"),
                 items_per_blob: NZU64!(7),
                 page_cache,
@@ -614,7 +614,7 @@ mod tests {
         let batch = db
             .new_batch()
             .write(key, Some(value))
-            .merkleize(&db, None, &mut Proportional)
+            .merkleize(&db)
             .await
             .expect("batch should merkleize");
         let db = db.apply_batch(batch).await.expect("batch should apply");
@@ -696,8 +696,8 @@ mod tests {
                     database: Some(databases[index].clone()),
                     mailbox_size: NZUsize!(16),
                     me: Some(peer.clone()),
-                    timeout: Duration::from_secs(5),
-                    fetch_retry_timeout: Duration::from_millis(10),
+                    fetch_timeout: NZDuration!(Duration::from_secs(5)),
+                    fetch_retry_delay: Duration::from_millis(10),
                     max_serve_ops: NZU64!(16),
                     priority_requests: false,
                     priority_responses: false,
@@ -1039,8 +1039,8 @@ mod tests {
                     producer: handler,
                     mailbox_size: NZUsize!(8),
                     me: Some(peer),
-                    timeout: Duration::from_secs(5),
-                    fetch_retry_timeout: Duration::from_millis(10),
+                    fetch_timeout: NZDuration!(Duration::from_secs(5)),
+                    fetch_retry_delay: Duration::from_millis(10),
                     priority_requests: false,
                     priority_responses: false,
                 },
@@ -1681,19 +1681,19 @@ mod tests {
                 let value = Sha256::hash(&[b"value", &index.to_be_bytes()]);
                 batch = batch.write(key, Some(value));
             }
-            let batch = batch
-                .merkleize(&database, None, &mut Proportional)
-                .await
-                .unwrap();
+            let batch = batch.merkleize(&database).await.unwrap();
             let database = database.apply_batch(batch).await.unwrap();
             let bounds = database.bounds();
-            let target = sync::Target::new(database.root(), bounds.clone().try_into().unwrap());
+            let target = sync::Target {
+                root: database.root(),
+                range: bounds.clone().try_into().unwrap(),
+            };
             slot.put(database);
 
             // Small fetch and apply batches exercise repeated source polling between journal
             // writes, with several candidate responses allowed to wait in parallel.
             let synced: TestDb = select! {
-                result = sync::sync(sync::engine::Config {
+                result = sync::sync(sync::Config {
                     context: pair_context.child("destination"),
                     source: pair.mailboxes[0].clone(),
                     target: target.clone(),
@@ -1762,7 +1762,10 @@ mod tests {
                 let good_db = good_db.read().await;
                 assert_eq!(bad_db.bounds(), good_db.bounds());
                 assert_ne!(bad_db.root(), good_db.root());
-                sync::Target::new(good_db.root(), good_db.bounds().try_into().unwrap())
+                sync::Target {
+                    root: good_db.root(),
+                    range: good_db.bounds().try_into().unwrap(),
+                }
             };
 
             let manager = oracle.manager();
@@ -1784,8 +1787,8 @@ mod tests {
                         database: Some(database),
                         mailbox_size: NZUsize!(16),
                         me: Some(peer),
-                        timeout: Duration::from_secs(2),
-                        fetch_retry_timeout: Duration::from_millis(50),
+                        fetch_timeout: NZDuration!(Duration::from_secs(2)),
+                        fetch_retry_delay: Duration::from_millis(50),
                         max_serve_ops: NZU64!(16),
                         priority_requests: false,
                         priority_responses: false,
@@ -1807,8 +1810,8 @@ mod tests {
                     database: None,
                     mailbox_size: NZUsize!(16),
                     me: Some(client.clone()),
-                    timeout: Duration::from_secs(2),
-                    fetch_retry_timeout: Duration::from_millis(50),
+                    fetch_timeout: NZDuration!(Duration::from_secs(2)),
+                    fetch_retry_delay: Duration::from_millis(50),
                     max_serve_ops: NZU64!(16),
                     priority_requests: false,
                     priority_responses: false,
@@ -1818,7 +1821,7 @@ mod tests {
             handles.push(actor.start(net));
 
             let synced: TestDb = select! {
-                result = sync::sync(sync::engine::Config {
+                result = sync::sync(sync::Config {
                     context: test_context.child("destination"),
                     source: mailbox,
                     target: target.clone(),

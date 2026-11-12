@@ -23,11 +23,6 @@ pub struct Target<F: Family, D: Digest> {
 }
 
 impl<F: Family, D: Digest> Target<F, D> {
-    /// Create a sync target.
-    pub const fn new(root: D, range: NonEmptyRange<Location<F>>) -> Self {
-        Self { root, range }
-    }
-
     /// Whether this target advances relative to `from`.
     ///
     /// Both targets are assumed to describe valid states of the same append-only QMDB. Because
@@ -202,10 +197,10 @@ mod tests {
     use commonware_utils::non_empty_range;
 
     fn target(root: sha256::Digest, start: u64, end: u64) -> Target<MmrFamily, sha256::Digest> {
-        Target::new(
+        Target {
             root,
-            non_empty_range!(Location::new(start), Location::new(end)),
-        )
+            range: non_empty_range!(Location::new(start), Location::new(end)),
+        }
     }
 
     #[test]

@@ -43,8 +43,8 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
     }
 
     /// Sends pre-encoded data to the given `recipient`.
-    fn send(&mut self, recipient: P, encoded: EncodedData, priority: bool) {
-        if let Some(relay) = self.connections.get_mut(&recipient) {
+    fn send(&mut self, recipient: &P, encoded: EncodedData, priority: bool) {
+        if let Some(relay) = self.connections.get_mut(recipient) {
             let _ = relay.send(encoded, priority);
         }
     }
@@ -53,10 +53,10 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
     fn route(&mut self, recipients: Recipients<P>, encoded: EncodedData, priority: bool) {
         match recipients {
             Recipients::One(recipient) => {
-                self.send(recipient, encoded, priority);
+                self.send(&recipient, encoded, priority);
             }
             Recipients::Some(recipients) => {
-                for recipient in recipients {
+                for recipient in &recipients {
                     self.send(recipient, encoded.clone(), priority);
                 }
             }

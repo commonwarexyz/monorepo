@@ -271,6 +271,7 @@
 //!   storage_class: gp2
 //!   # storage_iops: 3000  # Required for io1/io2, optional for gp3.
 //!   # storage_throughput: 125  # Optional for gp3.
+//!   # bandwidth_weighting: vpc-1  # Optional: default, vpc-1, or ebs-1.
 //!   dashboard: /path/to/dashboard.json
 //! instances:
 //!   - name: node1
@@ -280,6 +281,7 @@
 //!     storage_class: gp2
 //!     # storage_iops: 3000
 //!     # storage_throughput: 125
+//!     # bandwidth_weighting: vpc-1
 //!     binary: /path/to/binary-arm64
 //!     config: /path/to/config.conf
 //!     profiling: true
@@ -652,6 +654,33 @@ pub struct PortConfig {
     pub cidr: String,
 }
 
+/// How a Nitro instance splits its fixed card bandwidth between networking and EBS.
+///
+/// Supported on eighth-generation and newer instance families. The combined budget does not
+/// change, so favoring one side lowers the other side's baseline by the same amount. Multi-flow
+/// traffic through an internet gateway is capped at a share of the configured networking
+/// baseline, so [Self::Vpc1] also raises that cap.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BandwidthWeighting {
+    /// The instance type's standard split.
+    #[default]
+    #[serde(rename = "default")]
+    Default,
+    /// More networking baseline, less EBS baseline.
+    #[serde(rename = "vpc-1")]
+    Vpc1,
+    /// More EBS baseline, less networking baseline.
+    #[serde(rename = "ebs-1")]
+    Ebs1,
+}
+
+impl BandwidthWeighting {
+    /// Whether this is the instance type's standard split, which serializes as absent.
+    pub const fn is_default(&self) -> bool {
+        matches!(self, Self::Default)
+    }
+}
+
 /// Instance configuration
 #[derive(Serialize, Deserialize, Clone)]
 pub struct InstanceConfig {
@@ -687,6 +716,10 @@ pub struct InstanceConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_throughput: Option<i32>,
 
+    /// Split of the instance's bandwidth between networking and EBS
+    #[serde(default, skip_serializing_if = "BandwidthWeighting::is_default")]
+    pub bandwidth_weighting: BandwidthWeighting,
+
     /// Path to the binary to deploy
     pub binary: String,
 
@@ -717,6 +750,10 @@ pub struct MonitoringConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_throughput: Option<i32>,
 
+    /// Split of the instance's bandwidth between networking and EBS
+    #[serde(default, skip_serializing_if = "BandwidthWeighting::is_default")]
+    pub bandwidth_weighting: BandwidthWeighting,
+
     /// Path to a custom dashboard file that is automatically
     /// uploaded to grafana
     pub dashboard: String,
@@ -738,4 +775,35 @@ pub struct Config {
 
     /// Ports open on all instances
     pub ports: Vec<PortConfig>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BandwidthWeighting;
+
+    #[test]
+    fn bandwidth_weighting_uses_aws_names_and_defaults_when_absent() {
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct Holder {
+            #[serde(default, skip_serializing_if = "BandwidthWeighting::is_default")]
+            bandwidth_weighting: BandwidthWeighting,
+        }
+
+        // Configs use the AWS identifiers so they read the same as the console and CLI.
+        let parsed: Holder = serde_yaml::from_str("bandwidth_weighting: vpc-1\n").unwrap();
+        assert_eq!(parsed.bandwidth_weighting, BandwidthWeighting::Vpc1);
+        let parsed: Holder = serde_yaml::from_str("bandwidth_weighting: ebs-1\n").unwrap();
+        assert_eq!(parsed.bandwidth_weighting, BandwidthWeighting::Ebs1);
+        assert!(serde_yaml::from_str::<Holder>("bandwidth_weighting: Vpc1\n").is_err());
+
+        // Existing configs omit the field and keep the instance type's standard split.
+        let parsed: Holder = serde_yaml::from_str("{}\n").unwrap();
+        assert_eq!(parsed.bandwidth_weighting, BandwidthWeighting::Default);
+
+        // Writing a config back omits the standard split, so round trips do not add the field.
+        let holder = Holder {
+            bandwidth_weighting: BandwidthWeighting::Default,
+        };
+        assert_eq!(serde_yaml::to_string(&holder).unwrap().trim(), "{}");
+    }
 }

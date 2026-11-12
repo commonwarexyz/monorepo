@@ -256,7 +256,7 @@ abstract contract LibQMDBAnyTest is UnorderedOracle {
         }
     }
 
-    /// @dev The oracle checks every emitted proof with Commonware's `qmdb::verify_proof`.
+    /// @dev The oracle checks every emitted proof with Commonware's `qmdb::ProofExt::verify`.
     function generate(uint256 leaves, uint256 location, uint256 floor, string memory history)
         internal
         returns (AnyCase memory c)

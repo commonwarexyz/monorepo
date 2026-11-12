@@ -321,6 +321,14 @@ mod tests {
         thread,
     };
 
+    impl Timers {
+        /// Register a timer that is already due, so the next expiry sweep
+        /// collects it without any wait on the clock.
+        pub(crate) fn insert_due(&mut self, waker: Waker) -> TimerId {
+            self.insert(Instant::now(), waker)
+        }
+    }
+
     /// Count invocations without scheduling a task.
     #[derive(Default)]
     struct Counter(AtomicUsize);

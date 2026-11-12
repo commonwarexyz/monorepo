@@ -45,7 +45,7 @@ use commonware_cryptography::{
     transcript::Summary,
 };
 use commonware_p2p::{
-    Message as P2pMessage, Provider, Receiver, TrackedPeers,
+    Address, Ingress, Message as P2pMessage, Provider, Receiver, TrackedPeers,
     simulated::{Control, Manager as SimManager},
     utils::mux,
 };
@@ -55,7 +55,7 @@ use commonware_runtime::{
 };
 use commonware_storage::archive::immutable;
 use commonware_utils::{
-    Acknowledgement, NZU16, NZU32, NZU64, NZUsize,
+    Acknowledgement, Hostname, NZDuration, NZU16, NZU32, NZU64, NZUsize,
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, mpsc, oneshot},
     ordered::Set,
@@ -65,10 +65,35 @@ use commonware_utils::{
 use std::{
     collections::{BTreeMap, HashSet},
     marker::PhantomData,
+    net::{IpAddr, Ipv6Addr, SocketAddr},
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     sync::Arc,
     time::Duration,
 };
+
+/// Returns a directory that maps every peer to the widest address: a maximum-length DNS ingress
+/// with an IPv6 egress.
+pub(crate) fn widest_addresses(peers: &Set<PublicKey>) -> Addresses<PublicKey> {
+    let host = [
+        "a".repeat(63),
+        "b".repeat(63),
+        "c".repeat(63),
+        "d".repeat(61),
+    ]
+    .join(".");
+    let address = Address::Asymmetric {
+        ingress: Ingress::Dns {
+            host: Hostname::new(host).unwrap(),
+            port: u16::MAX,
+        },
+        egress: SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), u16::MAX),
+    };
+    peers
+        .iter()
+        .cloned()
+        .map(|peer| (peer, address.clone()))
+        .collect()
+}
 
 pub(crate) type TestDigest = Sha256Digest;
 pub(crate) type TestPublicKey = PublicKey;
@@ -178,7 +203,6 @@ pub(crate) type TestActor = orchestrator::Actor<
     TestProvider,
     TestMarshalVariant,
     TestBlsVariant,
-    TestSigner,
     MockApplication,
     TestElector,
     TestStrategy,
@@ -274,6 +298,10 @@ impl<R: Receiver> Receiver for FilteredReceiver<R> {
             }
         }
     }
+
+    fn capacity(&self) -> NonZeroUsize {
+        self.inner.capacity()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -296,11 +324,11 @@ pub(crate) struct EncodedPayload {
 }
 
 impl EncodedPayload {
-    pub(crate) fn new<V, S, Dir>(max_participants: NonZeroU32, payload: Payload<V, S, Dir>) -> Self
+    pub(crate) fn new<V, P, Dir>(max_participants: NonZeroU32, payload: Payload<V, P, Dir>) -> Self
     where
         V: Variant,
-        S: Signer,
-        Dir: DkgDirectory<S::PublicKey>,
+        P: CryptoPublicKey,
+        Dir: DkgDirectory<P>,
     {
         Self {
             max_participants,
@@ -308,11 +336,11 @@ impl EncodedPayload {
         }
     }
 
-    fn decode<V, S, Dir>(&self) -> Option<Payload<V, S, Dir>>
+    fn decode<V, P, Dir>(&self) -> Option<Payload<V, P, Dir>>
     where
         V: Variant,
-        S: Signer,
-        Dir: DkgDirectory<S::PublicKey>,
+        P: CryptoPublicKey,
+        Dir: DkgDirectory<P>,
     {
         Payload::decode_cfg(
             commonware_codec::Copying(&self.bytes),
@@ -363,16 +391,16 @@ impl<D: Digest, C: Codec, Dir> MockBlock<D, C, Dir> {
         Self::from_parts::<H>(context, parent, height, timestamp, None)
     }
 
-    pub(crate) fn with_payload<H, V, S>(
+    pub(crate) fn with_payload<H, V, P>(
         self,
         max_participants: NonZeroU32,
-        payload: Payload<V, S, Dir>,
+        payload: Payload<V, P, Dir>,
     ) -> Self
     where
         H: Hasher<Digest = D>,
         V: Variant,
-        S: Signer,
-        Dir: DkgDirectory<S::PublicKey>,
+        P: CryptoPublicKey,
+        Dir: DkgDirectory<P>,
     {
         Self::from_parts::<H>(
             self.context,
@@ -507,10 +535,10 @@ where
     Dir: DkgDirectory<TestPublicKey>,
 {
     type Variant = TestBlsVariant;
-    type Signer = TestSigner;
+    type PublicKey = TestPublicKey;
     type Directory = Dir;
 
-    fn payload(&self) -> Option<Payload<Self::Variant, Self::Signer, Self::Directory>> {
+    fn payload(&self) -> Option<Payload<Self::Variant, Self::PublicKey, Self::Directory>> {
         self.payload.as_ref()?.decode()
     }
 }
@@ -790,7 +818,8 @@ pub(crate) fn simplex_config() -> orchestrator::SimplexConfig<TestElector> {
         leader_timeout: Duration::from_millis(100),
         certification_timeout: Duration::from_millis(200),
         timeout_retry: Duration::from_millis(500),
-        fetch_timeout: Duration::from_millis(100),
+        fetch_timeout: NZDuration!(Duration::from_millis(100)),
+        fetch_retry_delay: Duration::from_millis(100),
         view_retention: ViewDelta::new(8),
         skip: SkipPolicy::Enabled {
             timeout: Duration::from_secs(1),

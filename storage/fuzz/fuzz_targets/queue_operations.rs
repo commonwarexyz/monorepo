@@ -175,7 +175,7 @@ fn fuzz(input: FuzzInput) {
         for op in input.operations.iter() {
             queue = match op {
                 QueueOperation::Enqueue { value } => {
-                    let (queue, pos) = queue.enqueue(vec![*value]).await.unwrap();
+                    let (queue, pos) = queue.enqueue(&vec![*value]).await.unwrap();
                     let ref_pos = reference.append(*value);
                     reference.publish();
                     assert_eq!(pos, ref_pos, "enqueue position mismatch");
@@ -183,7 +183,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 QueueOperation::Append { value } => {
-                    let (queue, pos) = queue.append(vec![*value]).await.unwrap();
+                    let (queue, pos) = queue.append(&vec![*value]).await.unwrap();
                     let ref_pos = reference.append(*value);
                     assert_eq!(pos, ref_pos, "append position mismatch");
                     queue

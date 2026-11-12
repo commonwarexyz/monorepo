@@ -10,9 +10,8 @@ use commonware_consensus::{
     types::{EpochPhase, Epocher as _, FixedEpocher, Height},
 };
 use commonware_cryptography::{Digested, Signer, bls12381::primitives::variant::Variant};
-use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt as _};
+use commonware_runtime::telemetry::traces::TracedExt as _;
 use commonware_utils::sequence::Unit;
-use rand_core::Rng;
 use std::{future, num::NonZeroU64};
 use tracing::{debug, field};
 
@@ -26,7 +25,7 @@ pub struct Input<Upstream, V: Variant, C: Signer, D: Directory<C::PublicKey> = U
     pub upstream: Upstream,
 
     /// The reshare payload selected for this proposal, if any.
-    pub payload: Option<Payload<V, C, D>>,
+    pub payload: Option<Payload<V, C::PublicKey, D>>,
 }
 
 /// An [`Application`](commonware_consensus::Application) wrapper that implements
@@ -50,7 +49,7 @@ pub struct Input<Upstream, V: Variant, C: Signer, D: Directory<C::PublicKey> = U
 /// inner application as [`Input::upstream`].
 pub struct Application<A, B, V, C>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
 {
@@ -61,7 +60,7 @@ where
 
 impl<A, B, V, C> Application<A, B, V, C>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
 {
@@ -91,7 +90,7 @@ where
 impl<A, B, V, C> Clone for Application<A, B, V, C>
 where
     A: Clone,
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
 {
@@ -106,10 +105,10 @@ where
 
 impl<A, E, B, V, C, I> ConsensusApplication<E> for Application<A, B, V, C>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Send,
     A: ConsensusApplication<E, Block = B, Input = Input<I, V, C, B::Directory>>,
     A::Context: Send,
-    B: ReshareBlock<Variant = V, Signer = C> + CertifiableBlock,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey> + CertifiableBlock,
     V: Variant,
     C: Signer,
     I: Send,
@@ -333,7 +332,7 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
         sha256::Sha256,
     };
-    use commonware_runtime::{Clock, Metrics, Runner, Spawner, Supervisor, deterministic};
+    use commonware_runtime::{Clock, Runner, Spawner, Supervisor, deterministic};
     use commonware_utils::{
         Acknowledgement, N3f1, NZU32, NZU64, NZUsize, TestRng, channel::oneshot, ordered::Set,
         sync::Mutex,
@@ -343,10 +342,9 @@ mod tests {
         future::{Either, select},
         pin_mut,
     };
-    use rand_core::Rng;
     use std::{sync::Arc, time::Duration};
 
-    type TestPayload = Payload<TestBlsVariant, PrivateKey>;
+    type TestPayload = Payload<TestBlsVariant, PublicKey>;
     type TestResponse = EpochInfoResponse<TestBlsVariant, PrivateKey>;
     type TestWrapper = Application<RecordingApp, TestBlock, TestBlsVariant, PrivateKey>;
 
@@ -413,7 +411,7 @@ mod tests {
 
     impl<E> ConsensusApplication<E> for RecordingApp
     where
-        E: Rng + Spawner + Metrics + Clock,
+        E: Send,
     {
         type SigningScheme = TestScheme;
         type Context = TestContext;
@@ -459,7 +457,7 @@ mod tests {
                 TestBlock::new::<Sha256>(context, parent.digest(), parent.height().next(), 0);
             let block = match input.payload {
                 Some(payload) => {
-                    block.with_payload::<Sha256, TestBlsVariant, PrivateKey>(NZU32!(16), payload)
+                    block.with_payload::<Sha256, TestBlsVariant, PublicKey>(NZU32!(16), payload)
                 }
                 None => block,
             };
@@ -598,7 +596,7 @@ mod tests {
         );
         let block = match payload {
             Some(payload) => {
-                block.with_payload::<Sha256, TestBlsVariant, PrivateKey>(NZU32!(16), payload)
+                block.with_payload::<Sha256, TestBlsVariant, PublicKey>(NZU32!(16), payload)
             }
             None => block,
         };
@@ -1070,7 +1068,7 @@ mod tests {
             // Each candidate extends the previous one and carries epoch info.
             let payload = epoch_payload(5);
             for phase in [EpochPhase::Early, EpochPhase::Midpoint, EpochPhase::Late] {
-                let tip = mocks::child(&parent).with_payload::<Sha256, TestBlsVariant, PrivateKey>(
+                let tip = mocks::child(&parent).with_payload::<Sha256, TestBlsVariant, PublicKey>(
                     NZU32!(16),
                     payload.clone(),
                 );
@@ -1134,7 +1132,7 @@ mod tests {
                 (EpochPhase::Midpoint, true),
                 (EpochPhase::Late, true),
             ] {
-                let tip = mocks::child(&parent).with_payload::<Sha256, TestBlsVariant, PrivateKey>(
+                let tip = mocks::child(&parent).with_payload::<Sha256, TestBlsVariant, PublicKey>(
                     NZU32!(16),
                     payload.clone(),
                 );

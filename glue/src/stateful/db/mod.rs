@@ -1,8 +1,9 @@
 //! Database batch lifecycle and state sync for [`Stateful`](super::Stateful).
 //!
 //! `db` defines the traits a storage backend implements to be driven by
-//! [`Stateful`](super::Stateful) and implements them for QMDB databases ([`any`], [`current`],
-//! [`immutable`], [`keyless`]). [`p2p`] fetches and serves state sync data over the network.
+//! [`Stateful`](super::Stateful) and implements them for QMDB databases ([`any`], [`compact`],
+//! [`current`], [`immutable`], [`keyless`]). [`p2p`] fetches and serves state sync data over the
+//! network.
 //!
 //! # Batch Lifecycle
 //!
@@ -80,9 +81,10 @@
 //! # Failures
 //!
 //! Database failures are fatal. [`DatabaseSet`] implementations panic when a database fails to
-//! open, apply, finalize, or prune, and [`Barrier::durable`] panics when a deferred sync fails. A
-//! mutation that is cancelled also loses its database until restart (see [`Shared`]). A database
-//! that fails state sync is reported through the error returned by [`StateSyncSet::sync`].
+//! open, apply, finalize, or prune, and [`Barrier::durable`] panics when a deferred sync fails.
+//! Cancelling a mutation can leave some databases usable, but the set and all its handles must
+//! still be discarded and recovered on restart (see [`DatabaseSet`]). A database that fails state
+//! sync is reported through the error returned by [`StateSyncSet::sync`].
 
 use commonware_actor::mailbox::{self, Policy};
 use commonware_consensus::{
@@ -96,10 +98,11 @@ use commonware_storage::qmdb::sync::{self, Request, Source, source};
 use commonware_utils::{
     NZUsize,
     channel::{fallible::AsyncFallibleExt, mpsc, oneshot, ring},
+    futures::try_join_all,
     sync::{AsyncRwLockReadGuard, AsyncRwLockWriteGuard, TracedAsyncRwLock},
 };
 use futures::{
-    future::{Either, pending, try_join_all},
+    future::{Either, pending},
     join,
 };
 use std::{
@@ -113,6 +116,7 @@ use std::{
 use tracing::debug;
 
 pub mod any;
+pub mod compact;
 pub mod current;
 pub mod immutable;
 pub mod keyless;
@@ -493,6 +497,10 @@ impl Barrier {
 /// # Mutation Safety
 ///
 /// Calls to [`Self::apply`], [`Self::finalize`], and [`Self::prune`] must not overlap.
+/// Cancelling a pending call may leave some members completed, others untouched, and others
+/// [lost](Shared). Discard the entire set and all handles to its members, including clones and
+/// readers, and recover on restart, even if every member remains accessible.
+///
 /// Implementations panic if a database mutation fails (see
 /// [Failures](crate::stateful::db#failures)).
 pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
@@ -560,6 +568,8 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     ///
     /// Returns once every database exposes its batch as an independently recoverable checkpoint.
     /// Durability starts separately with [`Self::finalize`].
+    ///
+    /// See [Mutation Safety](DatabaseSet#mutation-safety) for cancellation requirements.
     fn apply(&self, batches: Self::Merkleized) -> impl Future<Output = ()> + Send;
 
     /// Starts persisting every checkpoint applied before this call.
@@ -567,12 +577,16 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// The returned [`Barrier`] resolves once that state is durable in every database. Batches
     /// applied while it is pending are not covered and need a later finalization. The barrier
     /// must be awaited before finalizing again.
+    ///
+    /// See [Mutation Safety](DatabaseSet#mutation-safety) for cancellation requirements.
     fn finalize(&self) -> impl Future<Output = Barrier> + Send;
 
     /// Prunes each database to its target in `targets`.
     ///
     /// The state represented by `targets` must already be durable, and no barrier may be pending.
     /// Pruning effects must be durable before this returns.
+    ///
+    /// See [Mutation Safety](DatabaseSet#mutation-safety) for cancellation requirements.
     fn prune(&self, targets: &Self::SyncTargets) -> impl Future<Output = ()> + Send;
 
     /// Returns the targets of the latest applied checkpoints (which need not be durable yet).
@@ -698,12 +712,7 @@ impl<D: Digest, T> TipUpdate<D, T> {
 }
 
 /// A [`DatabaseSet`] that can be built by one-time state sync.
-///
-/// `D` is the block digest type of each [`Anchor`].
-pub trait StateSyncSet<E, R, D>: DatabaseSet<E>
-where
-    D: Digest,
-{
+pub trait StateSyncSet<E, R>: DatabaseSet<E> {
     /// Error returned if any database in the set fails state sync.
     type Error: Debug + Send;
 
@@ -712,8 +721,9 @@ where
     ///
     /// Updates on `tip_updates` follow the [module rules](crate::stateful::db#anchors). The
     /// returned anchor, not the latest tip delivered, identifies the synced state.
-    #[allow(clippy::too_many_arguments)]
-    fn sync(
+    ///
+    /// `D` is the block digest type of each [`Anchor`].
+    fn sync<D: Digest>(
         context: E,
         config: Self::Config,
         sources: R,
@@ -817,17 +827,15 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Shared<T> {
     }
 }
 
-impl<E, T, R, D> StateSyncSet<E, R, D> for Shared<T>
+impl<E, T, R> StateSyncSet<E, R> for Shared<T>
 where
     E: Metrics,
     T: StateSyncDb<E, R> + 'static,
     R: Send + 'static,
-    D: Digest,
 {
     type Error = T::SyncError;
 
-    #[allow(clippy::too_many_arguments)]
-    async fn sync(
+    async fn sync<D: Digest>(
         context: E,
         config: Self::Config,
         source: R,
@@ -1140,10 +1148,9 @@ impl Policy for ReachedEvent {
 
 macro_rules! impl_state_sync_set {
     ($($T:ident : $R:ident : $idx:tt),+) => {
-        impl<E, D, $($T, $R),+> StateSyncSet<E, ($($R,)+), D> for ($(Shared<$T>,)+)
+        impl<E, $($T, $R),+> StateSyncSet<E, ($($R,)+)> for ($(Shared<$T>,)+)
         where
             E: Send + Sync + Spawner + Metrics + 'static,
-            D: Digest + 'static,
             $(
                 $T: StateSyncDb<E, $R> + 'static,
                 $R: Send + 'static,
@@ -1151,8 +1158,7 @@ macro_rules! impl_state_sync_set {
         {
             type Error = String;
 
-            #[allow(clippy::too_many_arguments)]
-            async fn sync(
+            async fn sync<D: Digest>(
                 context: E,
                 config: Self::Config,
                 sources: ($($R,)+),
@@ -1165,13 +1171,6 @@ macro_rules! impl_state_sync_set {
                     DbSyncChannels::<<$T as ManagedDb<E>>::SyncTarget>::new(),
                 )+);
                 let coordinator_senders = ($(
-                    CoordinatorSyncSenders {
-                        target_tx: db_channels.$idx.target_tx.clone(),
-                        finish_tx: db_channels.$idx.finish_tx.clone(),
-                        generation_tx: db_channels.$idx.generation_tx.clone(),
-                    },
-                )+);
-                let coordinator_owned_senders = ($(
                     CoordinatorSyncSenders {
                         target_tx: db_channels.$idx.target_tx,
                         finish_tx: db_channels.$idx.finish_tx,
@@ -1192,7 +1191,8 @@ macro_rules! impl_state_sync_set {
                 // The coordinator applies the convergence rules and dispatches each generation.
                 let coordinator_handle = context.child("coordinator").spawn({
                     move |_context| async move {
-                        let coordinator_owned_senders = coordinator_owned_senders;
+                        // Move the senders into the body so they drop when it returns.
+                        let coordinator_senders = coordinator_senders;
                         let mut tip_updates = Some(tip_updates);
                         let mut state = CoordinatorState::new(db_count, anchor, coordinator_targets);
                         let mut last_dispatched_targets = initial_targets;
@@ -1273,7 +1273,6 @@ macro_rules! impl_state_sync_set {
                                     state.record_reached(index, generation);
                                 },
                                 _ = completion_rx.recv() => {
-                                    drop(coordinator_owned_senders);
                                     return None;
                                 },
                                 update = update_future => {
@@ -1740,7 +1739,7 @@ where
     DB: sync::Database<Context = E>,
     S: sync::SourceFor<DB>,
 {
-    sync::sync(sync::engine::Config {
+    sync::sync(sync::Config {
         context,
         source,
         target,
@@ -1823,7 +1822,7 @@ where
         tx
     });
 
-    let result = sync::sync(sync::engine::Config {
+    let result = sync::sync(sync::Config {
         context,
         source,
         target: initial,
@@ -1996,7 +1995,9 @@ mod tests {
         Shared, StateSyncDb, StateSyncSet, SyncEngineConfig, TipUpdate, dispatch_queued_tips,
         drain_generation_updates, mailbox,
     };
-    use crate::stateful::tests::mocks::{TestMerkleized, TestUnmerkleized, anchor as mock_anchor};
+    use crate::stateful::tests::mocks::{
+        FlushControl, TestDb as ObservedDb, TestMerkleized, TestUnmerkleized, anchor as mock_anchor,
+    };
     use commonware_cryptography::sha256;
     use commonware_macros::select;
     use commonware_runtime::{
@@ -2012,6 +2013,7 @@ mod tests {
         convert::Infallible,
         num::{NonZeroU64, NonZeroUsize},
         ops::RangeInclusive,
+        panic::AssertUnwindSafe,
         sync::{
             Arc,
             atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -2136,7 +2138,6 @@ mod tests {
             Digest,
             U64,
             Sha256,
-            ((), ()),
             Sequential,
         >;
 
@@ -2147,7 +2148,7 @@ mod tests {
         type KeylessCompactFixed =
             storage_keyless::fixed::CompactDb<mmr::Family, Context, U64, Sha256, Sequential>;
         type KeylessCompactVariable =
-            storage_keyless::variable::CompactDb<mmr::Family, Context, U64, Sha256, (), Sequential>;
+            storage_keyless::variable::CompactDb<mmr::Family, Context, U64, Sha256, Sequential>;
 
         fn page_cache() -> CacheRef {
             CacheRef::new(NZU16!(101), NZUsize!(11))
@@ -2187,10 +2188,12 @@ mod tests {
             }
         }
 
-        fn any_fixed_config(suffix: &str) -> storage_any::FixedConfig<TwoCap, Sequential> {
+        fn any_fixed_config(
+            suffix: &str,
+        ) -> storage_any::Config<TwoCap, FixedJournalConfig, Sequential> {
             storage_any::Config {
-                merkle_config: merkle_config(suffix),
-                journal_config: fixed_journal_config(suffix),
+                merkle: merkle_config(suffix),
+                log: fixed_journal_config(suffix),
                 translator: TwoCap,
                 init_cache: Some(NZUsize!(1024)),
                 init_buffer: NZUsize!(1 << 21),
@@ -2200,10 +2203,10 @@ mod tests {
 
         fn any_variable_config(
             suffix: &str,
-        ) -> storage_any::VariableConfig<TwoCap, ((), ()), Sequential> {
+        ) -> storage_any::Config<TwoCap, VariableJournalConfig<((), ())>, Sequential> {
             storage_any::Config {
-                merkle_config: merkle_config(suffix),
-                journal_config: variable_journal_config(suffix, ((), ())),
+                merkle: merkle_config(suffix),
+                log: variable_journal_config(suffix, ((), ())),
                 translator: TwoCap,
                 init_cache: Some(NZUsize!(1024)),
                 init_buffer: NZUsize!(1 << 21),
@@ -2211,10 +2214,12 @@ mod tests {
             }
         }
 
-        fn current_fixed_config(suffix: &str) -> storage_current::FixedConfig<TwoCap, Sequential> {
+        fn current_fixed_config(
+            suffix: &str,
+        ) -> storage_current::Config<TwoCap, FixedJournalConfig, Sequential> {
             storage_current::Config {
-                merkle_config: merkle_config(suffix),
-                journal_config: fixed_journal_config(suffix),
+                merkle: merkle_config(suffix),
+                log: fixed_journal_config(suffix),
                 grafted_metadata_partition: format!("initial-target-{suffix}-grafted-metadata"),
                 translator: TwoCap,
                 init_cache: Some(NZUsize!(1024)),
@@ -2225,10 +2230,10 @@ mod tests {
 
         fn current_variable_config(
             suffix: &str,
-        ) -> storage_current::VariableConfig<TwoCap, ((), ()), Sequential> {
+        ) -> storage_current::Config<TwoCap, VariableJournalConfig<((), ())>, Sequential> {
             storage_current::Config {
-                merkle_config: merkle_config(suffix),
-                journal_config: variable_journal_config(suffix, ((), ())),
+                merkle: merkle_config(suffix),
+                log: variable_journal_config(suffix, ((), ())),
                 grafted_metadata_partition: format!("initial-target-{suffix}-grafted-metadata"),
                 translator: TwoCap,
                 init_cache: Some(NZUsize!(1024)),
@@ -2241,7 +2246,7 @@ mod tests {
             suffix: &str,
         ) -> storage_immutable::fixed::Config<TwoCap, Sequential> {
             storage_immutable::Config {
-                merkle_config: merkle_config(suffix),
+                merkle: merkle_config(suffix),
                 log: fixed_journal_config(suffix),
                 translator: TwoCap,
                 init_buffer: NZUsize!(1 << 21),
@@ -2252,7 +2257,7 @@ mod tests {
             suffix: &str,
         ) -> storage_immutable::variable::Config<TwoCap, ((), ()), Sequential> {
             storage_immutable::Config {
-                merkle_config: merkle_config(suffix),
+                merkle: merkle_config(suffix),
                 log: variable_journal_config(suffix, ((), ())),
                 translator: TwoCap,
                 init_buffer: NZUsize!(1 << 21),
@@ -2281,7 +2286,6 @@ mod tests {
             storage_immutable::CompactConfig {
                 strategy: Sequential,
                 witness: variable_journal_config(suffix, ()),
-                commit_codec_config: (),
             }
         }
 
@@ -2290,8 +2294,7 @@ mod tests {
         ) -> storage_immutable::variable::CompactConfig<((), ()), Sequential> {
             storage_immutable::CompactConfig {
                 strategy: Sequential,
-                witness: variable_journal_config(suffix, ()),
-                commit_codec_config: ((), ()),
+                witness: variable_journal_config(suffix, ((), ())),
             }
         }
 
@@ -2301,7 +2304,6 @@ mod tests {
             storage_keyless::CompactConfig {
                 strategy: Sequential,
                 witness: variable_journal_config(suffix, ()),
-                commit_codec_config: (),
             }
         }
 
@@ -2311,7 +2313,6 @@ mod tests {
             storage_keyless::CompactConfig {
                 strategy: Sequential,
                 witness: variable_journal_config(suffix, ()),
-                commit_codec_config: (),
             }
         }
 
@@ -3822,6 +3823,39 @@ mod tests {
     }
 
     #[test]
+    fn tuple_apply_cancellation_leaves_completed_and_untouched_members() {
+        deterministic::Runner::default().start(|_context| async move {
+            type DbSet = (Shared<ObservedDb>, Shared<ObservedDb>);
+
+            let first = FlushControl::default();
+            let second = FlushControl::default();
+            let databases = (
+                Shared::new("test", ObservedDb::gated(first.clone())),
+                Shared::new("test", ObservedDb::gated(second.clone())),
+            );
+            let readers = <DbSet as DatabaseSet<deterministic::Context>>::readers(&databases);
+            let reader2 = readers.1.read().await;
+
+            // The first member finishes while the second waits for `reader2` to be released.
+            let mut apply = Box::pin(<DbSet as DatabaseSet<deterministic::Context>>::apply(
+                &databases,
+                (TestMerkleized, TestMerkleized),
+            ));
+            assert!(apply.as_mut().now_or_never().is_none());
+
+            // Cancel the apply, then release the reader it was waiting behind.
+            drop(apply);
+            drop(reader2);
+
+            // Neither member was lost, yet only the first applied its batch.
+            assert!(readers.0.read().now_or_never().is_some());
+            assert!(readers.1.read().now_or_never().is_some());
+            assert_eq!(first.applied.load(Ordering::Relaxed), 1);
+            assert_eq!(second.applied.load(Ordering::Relaxed), 0);
+        });
+    }
+
+    #[test]
     fn tuple_apply_runs_databases_in_parallel() {
         deterministic::Runner::default().start(|_context| async move {
             let (started1_tx, started1_rx) = oneshot::channel();
@@ -3884,6 +3918,125 @@ mod tests {
                 Handle::ready(Err(RuntimeError::WriteFailed)),
             ]);
             let _ = barrier.durable().await;
+        });
+    }
+
+    #[rstest::rstest]
+    #[case(30)]
+    #[case(31)]
+    #[case(64)]
+    fn barrier_panics_on_later_failure(
+        #[case] count: usize,
+        #[values(false, true)] shutdown: bool,
+    ) {
+        deterministic::Runner::default().start(|context| async move {
+            // The first handle stays pending and the last one fails. With `shutdown`, the second
+            // handle also reports `Closed`, and the barrier must still panic on the failure.
+            let (pending_tx, pending_rx) = oneshot::channel();
+            let mut handles = vec![Handle::from_receiver(pending_rx)];
+            handles.extend((1..count).map(|index| {
+                Handle::ready(if index == count - 1 {
+                    Err(RuntimeError::WriteFailed)
+                } else if shutdown && index == 1 {
+                    Err(RuntimeError::Closed)
+                } else {
+                    Ok(())
+                })
+            }));
+
+            // Catching the unwind lets the test inspect the panic message. The timeout fails the
+            // test if the failure is held behind the pending handle.
+            let barrier = Barrier::from_handles::<TestDb>(handles);
+            let mut durable = Box::pin(AssertUnwindSafe(barrier.durable()).catch_unwind());
+            let result = select! {
+                result = &mut durable => result,
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("barrier must panic without waiting for the pending sync")
+                }
+            };
+            let panic = result
+                .expect_err("sync failure must panic even when another sync reports shutdown");
+            let message = panic
+                .downcast_ref::<String>()
+                .expect("panic payload must be a String");
+            assert!(message.contains(&format!(
+                "database sync failed (index {}, type {}):",
+                count - 1,
+                std::any::type_name::<TestDb>(),
+            )));
+
+            // The pending handle is dropped by the time the panic surfaces, before the outer
+            // future is dropped.
+            assert!(pending_tx.send(Ok(())).is_err());
+            drop(durable);
+        });
+    }
+
+    #[rstest::rstest]
+    #[case(1)]
+    #[case(30)]
+    #[case(31)]
+    #[case(64)]
+    fn barrier_waits_for_every_handle(#[case] count: usize, #[values(false, true)] shutdown: bool) {
+        deterministic::Runner::default().start(|context| async move {
+            // The first handle stays pending, so the barrier must not resolve before it completes.
+            let (pending_tx, pending_rx) = oneshot::channel();
+            let handles = std::iter::once(Handle::from_receiver(pending_rx))
+                .chain((1..count).map(|_| Handle::ready(Ok(()))));
+            let mut durable = Box::pin(Barrier::from_handles::<TestDb>(handles).durable());
+            assert!(durable.as_mut().now_or_never().is_none());
+
+            // Once the pending handle completes, the barrier must resolve. It is durable unless
+            // that handle reports `Aborted`.
+            pending_tx
+                .send(if shutdown {
+                    Err(RuntimeError::Aborted)
+                } else {
+                    Ok(())
+                })
+                .unwrap();
+            let result = select! {
+                result = durable => result,
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("barrier must resolve once every handle completes")
+                }
+            };
+            assert_eq!(result, !shutdown);
+        });
+    }
+
+    #[rstest::rstest]
+    #[case(1)]
+    #[case(30)]
+    #[case(31)]
+    #[case(64)]
+    fn barrier_cancellation_releases_handles(
+        #[case] count: usize,
+        #[values(false, true)] poll: bool,
+    ) {
+        deterministic::Runner::default().start(|_context| async move {
+            // Dropping the barrier future, with or without a first poll, must drop every handle.
+            let (senders, handles): (Vec<_>, Vec<_>) = (0..count)
+                .map(|_| {
+                    let (sender, receiver) = oneshot::channel();
+                    (sender, Handle::from_receiver(receiver))
+                })
+                .unzip();
+            let mut durable = Box::pin(Barrier::from_handles::<TestDb>(handles).durable());
+            if poll {
+                assert!(durable.as_mut().now_or_never().is_none());
+            }
+            drop(durable);
+            for sender in senders {
+                assert!(sender.send(Ok(())).is_err());
+            }
+        });
+    }
+
+    #[test]
+    fn barrier_empty_is_durable() {
+        deterministic::Runner::default().start(|_context| async move {
+            assert!(Barrier::from_handles::<TestDb>([]).durable().await);
         });
     }
 
@@ -3998,7 +4151,7 @@ mod tests {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(1).unwrap());
             let (release, release_rx) = oneshot::channel();
-            let sync = <Shared<SlowSyncDb> as StateSyncSet<_, _, sha256::Digest>>::sync(
+            let sync = <Shared<SlowSyncDb> as StateSyncSet<_, _>>::sync(
                 context.child("sync"),
                 (),
                 release_rx,
@@ -4031,24 +4184,21 @@ mod tests {
             let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(1).unwrap());
             let _ = tip_tx.send(TipUpdate::new(anchor(1), 1u64)).await;
 
-            let result = <Shared<FailingStateSyncDb> as StateSyncSet<
-                deterministic::Context,
-                (),
-                sha256::Digest,
-            >>::sync(
-                context,
-                (),
-                (),
-                anchor(0),
-                0,
-                tip_rx,
-                SyncEngineConfig {
-                    fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                    apply_batch_size: NZU64!(1),
-                    max_outstanding_requests: NZUsize!(1),
-                },
-            )
-            .await;
+            let result =
+                <Shared<FailingStateSyncDb> as StateSyncSet<deterministic::Context, ()>>::sync(
+                    context,
+                    (),
+                    (),
+                    anchor(0),
+                    0,
+                    tip_rx,
+                    SyncEngineConfig {
+                        fetch_batch_size: NonZeroU64::new(1).unwrap(),
+                        apply_batch_size: NZU64!(1),
+                        max_outstanding_requests: NZUsize!(1),
+                    },
+                )
+                .await;
 
             assert!(matches!(result, Err(TestSyncError)));
         });
@@ -4063,11 +4213,7 @@ mod tests {
             let sync = context
                 .child("single_state_sync_ignores_backward_tip_updates")
                 .spawn(move |context| async move {
-                    <Shared<ObservedSlowSyncDb> as StateSyncSet<
-                        deterministic::Context,
-                        (),
-                        sha256::Digest,
-                    >>::sync(
+                    <Shared<ObservedSlowSyncDb> as StateSyncSet<deterministic::Context, ()>>::sync(
                         context,
                         (),
                         source,
@@ -4107,20 +4253,19 @@ mod tests {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
             let (release, release_rx) = oneshot::channel();
-            let sync =
-                <Shared<RejectDuplicateTargetSyncDb> as StateSyncSet<_, _, sha256::Digest>>::sync(
-                    context.child("sync"),
-                    (),
-                    release_rx,
-                    anchor(7),
-                    7,
-                    tip_rx,
-                    SyncEngineConfig {
-                        fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                        apply_batch_size: NZU64!(1),
-                        max_outstanding_requests: NZUsize!(1),
-                    },
-                );
+            let sync = <Shared<RejectDuplicateTargetSyncDb> as StateSyncSet<_, _>>::sync(
+                context.child("sync"),
+                (),
+                release_rx,
+                anchor(7),
+                7,
+                tip_rx,
+                SyncEngineConfig {
+                    fetch_batch_size: NonZeroU64::new(1).unwrap(),
+                    apply_batch_size: NZU64!(1),
+                    max_outstanding_requests: NZUsize!(1),
+                },
+            );
             pin_mut!(sync);
 
             // Park the coordinator so the tip reaches its select arm rather than the initial
@@ -4156,7 +4301,6 @@ mod tests {
                         <Shared<StaleReachedSyncDb> as StateSyncSet<
                             deterministic::Context,
                             (),
-                            sha256::Digest,
                         >>::sync(
                             context,
                             (),
@@ -4202,7 +4346,6 @@ mod tests {
                     <(Shared<SlowSyncDb>, Shared<FastSyncDb>) as StateSyncSet<
                         deterministic::Context,
                         (oneshot::Receiver<()>, oneshot::Sender<()>),
-                        sha256::Digest,
                     >>::sync(
                         context,
                         ((), ()),
@@ -4254,7 +4397,6 @@ mod tests {
                     <(Shared<SlowSyncDb>, Shared<FastSyncDb>) as StateSyncSet<
                         deterministic::Context,
                         (oneshot::Receiver<()>, oneshot::Sender<()>),
-                        sha256::Digest,
                     >>::sync(
                         context,
                         ((), ()),
@@ -4311,7 +4453,6 @@ mod tests {
             let result = <(Shared<MismatchedTargetSyncDb>, Shared<FastSyncDb>) as StateSyncSet<
                 deterministic::Context,
                 ((), oneshot::Sender<()>),
-                sha256::Digest,
             >>::sync(
                 context,
                 ((), ()),
@@ -4347,7 +4488,6 @@ mod tests {
                 <(Shared<ImmediateStateSyncDb>, Shared<FailingStateSyncDb>) as StateSyncSet<
                     deterministic::Context,
                     ((), ()),
-                    sha256::Digest,
                 >>::sync(
                     context,
                     ((), ()),
@@ -4388,7 +4528,6 @@ mod tests {
             let result = <(Shared<SlowSyncDb>, Shared<FailingStateSyncDb>) as StateSyncSet<
                 deterministic::Context,
                 (oneshot::Receiver<()>, ()),
-                sha256::Digest,
             >>::sync(
                 context,
                 ((), ()),
@@ -4428,7 +4567,6 @@ mod tests {
                 <(Shared<FinishClosedSyncDb>, Shared<FailingStateSyncDb>) as StateSyncSet<
                     deterministic::Context,
                     ((), ()),
-                    sha256::Digest,
                 >>::sync(
                     context,
                     ((), ()),
@@ -4556,7 +4694,6 @@ mod tests {
                     ) as StateSyncSet<
                         deterministic::Context,
                         ((), FastSyncObserver),
-                        sha256::Digest,
                     >>::sync(
                         context,
                         ((), ()),
@@ -4620,7 +4757,6 @@ mod tests {
                     <(Shared<SlowSyncDb>, Shared<ObservedFastSyncDb>) as StateSyncSet<
                         deterministic::Context,
                         (oneshot::Receiver<()>, FastSyncObserver),
-                        sha256::Digest,
                     >>::sync(
                         context,
                         ((), ()),
@@ -4678,7 +4814,6 @@ mod tests {
                         <(Shared<SlowSyncDb>, Shared<DistinctObservedFastSyncDb>) as StateSyncSet<
                             deterministic::Context,
                             (oneshot::Receiver<()>, FastSyncObserver),
-                            sha256::Digest,
                         >>::sync(
                             context,
                             ((), ()),
@@ -4800,7 +4935,7 @@ mod tests {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (mut tips, tip_rx) = ring::channel(NZUsize!(4));
             let (release, release_rx) = oneshot::channel();
-            let sync = <Shared<SlowSyncDb> as StateSyncSet<_, _, sha256::Digest>>::sync(
+            let sync = <Shared<SlowSyncDb> as StateSyncSet<_, _>>::sync(
                 context.child("sync"),
                 (),
                 release_rx,
@@ -4965,7 +5100,7 @@ mod tests {
     ) -> Handle<(Shared<LaggingReportSyncDb>, Anchor<sha256::Digest>)> {
         let (started_tx, started_rx) = oneshot::channel();
         let sync = context.child("sync").spawn(move |context| async move {
-            <Shared<LaggingReportSyncDb> as StateSyncSet<_, _, sha256::Digest>>::sync(
+            <Shared<LaggingReportSyncDb> as StateSyncSet<_, _>>::sync(
                 context,
                 (),
                 ReportGates {
@@ -5080,7 +5215,6 @@ mod tests {
                     <(Shared<SlowSyncDb>, Shared<ObservedFastSyncDb>) as StateSyncSet<
                         deterministic::Context,
                         (oneshot::Receiver<()>, FastSyncObserver),
-                        sha256::Digest,
                     >>::sync(
                         context,
                         ((), ()),
@@ -5180,7 +5314,6 @@ mod tests {
                     <(Shared<StaleReachedSyncDb>, Shared<ObservedFastSyncDb>) as StateSyncSet<
                         deterministic::Context,
                         ((), FastSyncObserver),
-                        sha256::Digest,
                     >>::sync(
                         context,
                         ((), ()),
