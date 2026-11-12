@@ -142,7 +142,6 @@ fn bench_type<T: Clone + Send>(
             for mode in Mode::ALL {
                 // A separate policy keeps one input distribution's estimates out of another's.
                 let mut strategy = None;
-                let mut trained = false;
                 c.bench_function(
                     &format!(
                         "{}/item={item} n={len} shape={} mode={} phase=steady threads=4",
@@ -153,18 +152,19 @@ fn bench_type<T: Clone + Send>(
                     |b| {
                         let source =
                             source.get_or_insert_with(|| input(len, shape, &make, compare));
-                        let strategy =
-                            strategy.get_or_insert_with(|| Rayon::with_pool(Arc::clone(pool)));
-                        if !trained {
+
+                        // An adaptive strategy trains once, before the timed section.
+                        let strategy = strategy.get_or_insert_with(|| {
+                            let strategy = Rayon::with_pool(Arc::clone(pool));
                             if matches!(mode, Mode::AdaptiveStable | Mode::AdaptiveUnstable) {
                                 for _ in 0..TRAINING_CALLS {
                                     let mut items = source.clone();
-                                    run(mode, strategy, &mut items, compare);
+                                    run(mode, &strategy, &mut items, compare);
                                     black_box(items);
                                 }
                             }
-                            trained = true;
-                        }
+                            strategy
+                        });
                         b.iter_batched_ref(
                             || source.clone(),
                             |items| {

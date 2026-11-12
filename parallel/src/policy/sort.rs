@@ -176,8 +176,8 @@ struct SortEntry {
     /// Serial work always runs on the caller, so its estimates are shared across placements.
     serial: [Estimate; 2],
     parallel: [[ParallelTiming; 2]; 2],
-    /// Wide, Local, and serial-only callers each advance their own challenger schedule.
-    choices: [SortChoice; 3],
+    /// Wide and Local callers each advance their own challenger schedule.
+    choices: [SortChoice; 2],
 }
 
 impl SortEntry {
@@ -199,7 +199,15 @@ impl SortEntry {
             RunExecution::Parallel => !serial_only,
         });
 
-        let context = if serial_only { 2 } else { placement as usize };
+        // Planning parallelism is part of the key, so an entry is serial-only for every call or
+        // for none. A serial-only entry never plans a parallel path, so its callers share the Wide
+        // schedule.
+        let context = if serial_only {
+            Placement::Wide
+        } else {
+            placement
+        };
+
         // A call whose sample never arrives leaves the path unseeded, so another call retries it.
         if let Some(path) = Path::SEED
             .into_iter()
