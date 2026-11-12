@@ -1176,8 +1176,9 @@ where
 
     /// Start an empty [`Walked`] at this batch's first location. `capacity` bounds the operations
     /// the batch emits before its floor walk. The walk appends its moves and the commit after
-    /// them, about one move per write under [`Proportional`], so `ops` reserves room for both.
-    /// Building it here keeps its locations on the base that
+    /// them, so `ops` reserves as much room again. That holds the moves of a [`Proportional`]
+    /// walk unless the batch deletes more keys than it creates, and a larger walk grows `ops` to
+    /// exactly what it needs. Building it here keeps its locations on the base that
     /// [`peek_uncommitted`](Self::peek_uncommitted) reads them back with.
     fn walked(&self, capacity: usize) -> Walked<F, U> {
         Walked {
@@ -1278,7 +1279,7 @@ where
         if !evicts {
             // The walk appends at most one moved op per entry or active key, plus the Commit.
             let moves = entries.min(active_keys);
-            walked.ops.reserve(moves + 1);
+            walked.ops.reserve_exact(moves + 1);
             walked.floor_diff.reserve(moves);
         }
 
@@ -2528,7 +2529,7 @@ where
         let (floor, decided) = m
             .walk(&mut walked, superseded_locs, policy, prefetched, source, db)
             .await?;
-        walked.ops.reserve(decided.len() + 1);
+        walked.ops.reserve_exact(decided.len() + 1);
         walked.floor_diff.reserve(decided.len());
         for decided in decided {
             m.emit(&mut walked, decided);
@@ -2775,8 +2776,10 @@ where
             neighbors.finish_prev(db.strategy(), is_deleted);
         }
 
-        // Generate operations. Each created or deleted key may also rewrite its predecessor.
-        let mut walked = m.walked(updated.len() + 2 * (created.len() + deleted.len()));
+        // Generate operations. Each created or deleted key may also rewrite one predecessor
+        // candidate.
+        let rewrites = (created.len() + deleted.len()).min(neighbors.prev.len());
+        let mut walked = m.walked(deleted.len() + updated.len() + created.len() + rewrites);
 
         // Process deletes.
         let mut ancestors = DiffCursors::new(m.ancestors.iter().map(|a| a.diff.as_slice()));
@@ -2871,7 +2874,7 @@ where
             .walk(&mut walked, superseded_locs, policy, prefetched, source, db)
             .await?;
         let decided = m.repair_links(&walked, decided, db).await?;
-        walked.ops.reserve(decided.len() + 1);
+        walked.ops.reserve_exact(decided.len() + 1);
         walked.floor_diff.reserve(decided.len());
         for decided in decided {
             m.emit(&mut walked, decided);

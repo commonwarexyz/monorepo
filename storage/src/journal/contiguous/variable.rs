@@ -1691,23 +1691,9 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             encoded.reserve_exact(total);
         }
         let mut item_starts = Vec::with_capacity(items.len());
-        let mut encode = |item: &V| {
+        for item in items.iter() {
             item_starts.push(encoded.len());
-            encode_frame_into(self.compression, item, &mut encoded)
-        };
-        match items {
-            Many::Flat(items) => {
-                for item in items {
-                    encode(item)?;
-                }
-            }
-            Many::Nested(nested_items) => {
-                for items in nested_items {
-                    for item in *items {
-                        encode(item)?;
-                    }
-                }
-            }
+            encode_frame_into(self.compression, item, &mut encoded)?;
         }
 
         // Deferred batches (COMPACT) may be held across unrelated work, so shrink a buffer
