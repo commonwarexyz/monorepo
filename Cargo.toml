@@ -197,7 +197,7 @@ opentelemetry = "0.32.0"
 opentelemetry-otlp = "0.32.0"
 opentelemetry_sdk = "0.32.1"
 p256 = { version = "0.14.0", default-features = false }
-parking_lot = "0.12.5"
+parking_lot = "0.13.0"
 paste = "1.0.15"
 pin-project = "1.1.13"
 proc-macro-crate = "3.5.0"
@@ -235,10 +235,6 @@ uuid = "1.23.5"
 x25519-dalek = "3.0.0"
 zeroize = "1.9.0"
 zstd = "0.13.3"
-
-[patch.crates-io]
-# Use the Linux futex pointer fix until a compatible crates.io release is available.
-parking_lot_core = { git = "https://github.com/Amanieu/parking_lot", rev = "94d1070a4eceb15002a6fc236556f6a2db50cc5a" }
 
 [profile.bench]
 # Because we enable overflow checks in "release", we should benchmark with them.
