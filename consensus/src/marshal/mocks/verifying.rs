@@ -210,12 +210,11 @@ where
         if let Some(started) = self.started.lock().take() {
             started.send_lossy(());
         }
-        let release = self
-            .release
-            .lock()
-            .take()
-            .expect("release receiver missing");
-        let _ = release.await;
+        // Only the first verification is gated; later ones pass at once.
+        let release = self.release.lock().take();
+        if let Some(release) = release {
+            let _ = release.await;
+        }
         true
     }
 }

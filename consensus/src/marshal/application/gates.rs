@@ -173,6 +173,18 @@ impl<D: Digest, B: Clone> Gates<D, B> {
         gate
     }
 
+    /// Drops the certification gates of `round` for any digest other than `digest`.
+    ///
+    /// A notarization for `digest` means no other proposal of the round can be notarized, so
+    /// their gates can never be claimed. Dropping a gate closes its task, which stops the
+    /// verification feeding it.
+    pub(crate) fn discard_conflicting(&self, round: Round, digest: D) {
+        self.inner
+            .lock()
+            .certifications
+            .retain(|(r, d), _| *r != round || *d == digest);
+    }
+
     /// Discards all entries and sent marks whose round is at or before `finalized_round` and
     /// raises the decided cutoff to it.
     ///
