@@ -532,13 +532,6 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         self.blobs.len()
     }
 
-    /// Returns an iterator over all section numbers starting from `start_section`.
-    pub fn sections_from(&self, start_section: u64) -> impl Iterator<Item = u64> + '_ {
-        self.blobs
-            .range(start_section..)
-            .map(|(&section, _)| section)
-    }
-
     /// Returns an iterator over all section numbers.
     pub fn sections(&self) -> impl Iterator<Item = u64> + '_ {
         self.blobs.keys().copied()
