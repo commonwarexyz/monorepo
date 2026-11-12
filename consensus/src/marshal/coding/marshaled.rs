@@ -913,7 +913,7 @@ where
 
             // Register a certification gate task synchronously before spawning work so
             // `certify` can always find it (no race with task startup).
-            let (task_tx, task_rx) = oneshot::channel();
+            let (mut task_tx, task_rx) = oneshot::channel();
             gates.insert(round, payload, task_rx);
 
             let (mut tx, rx) = oneshot::channel();
@@ -923,10 +923,20 @@ where
                 .with_attribute("round", round);
             context.spawn(move |_| {
                 async move {
+                    // Stop waiting for the block if consensus drops the verification request or
+                    // `Gates` drops the certification gate. Consensus uses no verdict from this
+                    // request after either.
                     let block = select! {
                         _ = tx.closed() => {
                             debug!(
                                 reason = "consensus dropped receiver",
+                                "skipping re-proposal verification"
+                            );
+                            return;
+                        },
+                        _ = task_tx.closed() => {
+                            debug!(
+                                reason = "certification gate dropped",
                                 "skipping re-proposal verification"
                             );
                             return;

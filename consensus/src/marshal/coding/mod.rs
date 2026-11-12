@@ -6314,4 +6314,90 @@ mod tests {
             drop((verify_a, certify_b));
         });
     }
+
+    /// A leader that equivocates re-proposes the epoch boundary block to this validator while
+    /// the rest of the network notarizes block B of the same round. Certifying B claims the
+    /// round, so the re-proposal must stop waiting for the boundary block.
+    #[test_traced("WARN")]
+    fn test_certify_releases_conflicting_reproposal() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+                1024 * 1024,
+            )
+            .await;
+
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+            let setup = CodingHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                participants[0].clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+
+            let application: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new();
+            let cfg = MarshaledConfig {
+                application,
+                marshal: setup.mailbox,
+                shards: setup.extra,
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+
+            // The epoch boundary block, which this validator does not hold.
+            let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);
+            let boundary_view = View::new(boundary_height.get());
+            let boundary_ctx = CodingCtx {
+                round: Round::new(Epoch::zero(), boundary_view),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let boundary = make_coding_block(
+                boundary_ctx,
+                Sha256::hash(&[b"parent"]),
+                boundary_height,
+                100,
+            );
+            let boundary_digest = boundary.digest();
+            let coded_boundary: TestCodedBlock = encode_block(boundary, coding_config);
+            let boundary_commitment = coded_boundary.commitment();
+
+            let round = Round::new(Epoch::zero(), boundary_view.next());
+            let ctx = CodingCtx {
+                round,
+                leader: participants[1].clone(),
+                parent: (boundary_view, boundary_commitment),
+            };
+            let b = make_coding_block(ctx.clone(), boundary_digest, boundary_height.next(), 200);
+            let coded_b: TestCodedBlock = encode_block(b, coding_config);
+            let b_commitment = coded_b.commitment();
+            assert_ne!(boundary_commitment, b_commitment);
+
+            // Consensus asks to verify the re-proposal, which waits for the boundary block.
+            let mut verify = marshaled.verify(ctx, boundary_commitment).await;
+            context.sleep(Duration::from_millis(10)).await;
+            assert_eq!(verify.try_recv(), Err(TryRecvError::Empty));
+
+            // B is notarized, so consensus asks to certify it.
+            let certify_b = marshaled.certify(round, b_commitment).await;
+            context.sleep(Duration::from_millis(10)).await;
+            assert_eq!(
+                verify.try_recv(),
+                Err(TryRecvError::Closed),
+                "the wait for a block that lost its round must end"
+            );
+            drop(certify_b);
+        });
+    }
 }
