@@ -499,7 +499,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> std::fmt::Debug for Journal<E, A
 }
 
 impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
-    /// Size of each entry in bytes. Zero-size item types are rejected at compile time.
+    /// Size of each entry in bytes.
     pub const CHUNK_SIZE: usize = Inner::<E, A>::CHUNK_SIZE;
 
     /// Open through `(section, logical byte end)` and remove later sections.
