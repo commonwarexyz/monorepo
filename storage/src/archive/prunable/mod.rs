@@ -227,6 +227,7 @@ mod tests {
     use crate::{
         archive::{Archive as _, Error, Identifier, MultiArchive as _},
         journal::{Error as JournalError, segmented::glob::corrupt_frame},
+        metadata::{self, Metadata},
         translator::{EightCap, FourCap, TwoCap},
     };
     use commonware_codec::{Error as CodecError, FixedSize};
@@ -236,12 +237,16 @@ mod tests {
         Blob as _, Error as RError, Metrics as _, ReadOptions, Runner, Spawner as _, Storage as _,
         Supervisor as _, WriteOptions, deterministic,
         mocks::{
-            DelayedSyncContext, PendingSyncs, drive_pending_syncs, fail_pending_syncs,
-            release_next_pending_syncs, release_pending_syncs,
+            DelayedSyncContext, MutationFaultContext, MutationFaults, PendingSyncs,
+            drive_pending_syncs, fail_pending_syncs, release_next_pending_syncs,
+            release_pending_syncs,
         },
         telemetry::metrics::has_metric_value,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, probability, sequence::FixedBytes};
+    use commonware_utils::{
+        NZU16, NZU64, NZUsize,
+        sequence::{FixedBytes, U64},
+    };
     use rand::RngExt as _;
     use std::{
         collections::BTreeMap,
@@ -3154,21 +3159,28 @@ mod tests {
 
     const DESTROY_SECTIONS: u64 = 3;
     const DESTROY_SECTION_ITEMS: u64 = 4;
-    const DESTROY_ITEMS: u64 = DESTROY_SECTIONS * DESTROY_SECTION_ITEMS;
 
-    type DestroyArchive = Archive<FourCap, deterministic::Context, FixedBytes<64>, i32>;
+    type DestroyContext = MutationFaultContext<deterministic::Context>;
+    type DestroyArchive = Archive<FourCap, DestroyContext, FixedBytes<64>, i32>;
 
     fn destroy_config() -> Config<FourCap, ()> {
         test_config("destroy", NZU64!(DESTROY_SECTION_ITEMS), FourCap)
     }
 
-    /// Fill and sync [DESTROY_SECTIONS] sections, returning the open archive with a marker
-    /// published for each.
-    async fn seed_for_destroy(context: &deterministic::Context) -> DestroyArchive {
-        let mut archive = Archive::init(context.child("seed"), destroy_config())
+    /// The indices [seed_for_destroy] stores: every index of each section but its last.
+    fn seeded_indices() -> impl Iterator<Item = u64> {
+        (0..DESTROY_SECTIONS * DESTROY_SECTION_ITEMS)
+            .filter(|index| index % DESTROY_SECTION_ITEMS != DESTROY_SECTION_ITEMS - 1)
+    }
+
+    /// Fill and sync [DESTROY_SECTIONS] sections, returning the open archive once a marker covers
+    /// every record.
+    async fn seed_for_destroy(context: &DestroyContext) -> DestroyArchive {
+        let cfg = destroy_config();
+        let mut archive = Archive::init(context.child("seed"), cfg.clone())
             .await
             .unwrap();
-        for index in 0..DESTROY_ITEMS {
+        for index in seeded_indices() {
             archive = archive
                 .put(index, test_key(&index.to_string()), &(index as i32))
                 .await
@@ -3177,13 +3189,38 @@ mod tests {
         archive = archive.sync().await.unwrap();
 
         // A sync with no new data publishes the marker that trails the last section.
-        archive.sync().await.unwrap()
+        drop(archive.sync().await.unwrap());
+
+        // An open trusts the records below a marker, so markers left beside removed journals
+        // would fail it.
+        let markers = Metadata::<_, U64, u64>::init(
+            context.child("markers"),
+            metadata::Config {
+                partition: cfg.metadata_partition.clone(),
+                codec_config: (),
+            },
+        )
+        .await
+        .unwrap();
+        let floors: BTreeMap<u64, u64> = markers
+            .keys()
+            .map(|section| (u64::from(section), *markers.get(section).unwrap()))
+            .collect();
+        assert_eq!(
+            floors,
+            (0..DESTROY_SECTIONS)
+                .map(|section| (section * DESTROY_SECTION_ITEMS, DESTROY_SECTION_ITEMS - 1))
+                .collect()
+        );
+        drop(markers);
+
+        Archive::init(context.child("seeded"), cfg).await.unwrap()
     }
 
     /// Returns the seeded indices the archive holds, requiring index and key lookups to agree.
     async fn retained_indices(archive: &DestroyArchive) -> Vec<u64> {
         let mut retained = Vec::new();
-        for index in 0..DESTROY_ITEMS {
+        for index in seeded_indices() {
             let by_index = archive.get(Identifier::Index(index)).await.unwrap();
             assert!(by_index.is_none_or(|value| value == index as i32));
             assert_eq!(
@@ -3203,33 +3240,43 @@ mod tests {
     /// Reopen the archive an interrupted destroy left behind and return the seeded indices it
     /// retains.
     ///
-    /// A second open must observe what the first did, the archive must accept writes to its
-    /// oldest section and to a new one, and a retried destroy must remove every partition.
-    async fn reopen_and_retire(context: &deterministic::Context) -> Vec<u64> {
+    /// A second open must observe what the first did, writes to the oldest section and to a new
+    /// one must survive a reopen, and a retried destroy must remove every partition.
+    async fn reopen_and_retire(context: &DestroyContext, scenario: &str) -> Vec<u64> {
         let cfg = destroy_config();
         let archive = DestroyArchive::init(context.child("first"), cfg.clone())
             .await
-            .unwrap();
+            .unwrap_or_else(|err| panic!("{scenario}: {err}"));
         let retained = retained_indices(&archive).await;
         drop(archive);
         let mut archive = DestroyArchive::init(context.child("second"), cfg.clone())
             .await
-            .unwrap();
-        assert_eq!(retained_indices(&archive).await, retained);
+            .unwrap_or_else(|err| panic!("{scenario}: {err}"));
+        assert_eq!(retained_indices(&archive).await, retained, "{scenario}");
 
-        for index in [0, DESTROY_ITEMS] {
+        // Neither index was seeded, so both puts store a record.
+        let written = [
+            DESTROY_SECTION_ITEMS - 1,
+            DESTROY_SECTIONS * DESTROY_SECTION_ITEMS,
+        ];
+        for index in written {
             archive = archive
                 .put(index, test_key(&index.to_string()), &(index as i32))
                 .await
                 .unwrap();
         }
-        archive = archive.sync().await.unwrap();
-        for index in [0, DESTROY_ITEMS] {
+        drop(archive.sync().await.unwrap());
+        let archive = DestroyArchive::init(context.child("third"), cfg.clone())
+            .await
+            .unwrap_or_else(|err| panic!("{scenario}: {err}"));
+        for index in written {
             assert_eq!(
                 archive.get(Identifier::Index(index)).await.unwrap(),
-                Some(index as i32)
+                Some(index as i32),
+                "{scenario}"
             );
         }
+        assert_eq!(retained_indices(&archive).await, retained, "{scenario}");
 
         archive.destroy().await.unwrap();
         for partition in [
@@ -3237,122 +3284,130 @@ mod tests {
             &cfg.key_partition,
             &cfg.value_partition,
         ] {
-            assert!(matches!(
-                context.scan(partition).await,
-                Err(RError::PartitionMissing(_))
-            ));
+            assert!(
+                matches!(
+                    context.scan(partition).await,
+                    Err(RError::PartitionMissing(_))
+                ),
+                "{scenario}"
+            );
         }
         retained
     }
 
-    /// A destroy stopped by a failed removal leaves an archive that reopens with every section
-    /// whole or absent, and that a retried destroy removes.
+    /// A destroy stopped before any one of its mutations leaves an archive that reopens and that
+    /// a retried destroy removes.
     #[test_traced]
     fn test_interrupted_destroy_reopens() {
+        // Stop the destroy before its first mutation, then its second, and so on until one
+        // destroy completes.
         let mut interrupted = 0;
-        for seed in 0..32u64 {
-            let (stopped, checkpoint) =
-                deterministic::Runner::seeded(seed).start_and_recover(|context| async move {
+        loop {
+            let faults = MutationFaults::default();
+            let (destroyed, checkpoint) = deterministic::Runner::default().start_and_recover({
+                let faults = faults.clone();
+                |context| async move {
+                    let context = MutationFaultContext {
+                        inner: context,
+                        faults: faults.clone(),
+                    };
                     let archive = seed_for_destroy(&context).await;
-
-                    // Fail a sample of removals so destroy stops at varying depths, from the
-                    // first marker blob through the value journal.
-                    context.storage_fault_config().write().remove_rate = Some(probability!(0.2));
-                    let result = archive.destroy().await;
-                    context.storage_fault_config().write().remove_rate = None;
-                    result.is_err()
-                });
-            if !stopped {
-                continue;
-            }
-            interrupted += 1;
-            deterministic::Runner::from(checkpoint).start(|context| async move {
-                let retained = reopen_and_retire(&context).await;
-                for section in
-                    retained.chunk_by(|a, b| a / DESTROY_SECTION_ITEMS == b / DESTROY_SECTION_ITEMS)
-                {
-                    assert_eq!(
-                        section.len() as u64,
-                        DESTROY_SECTION_ITEMS,
-                        "seed {seed} reopened with {retained:?}"
-                    );
+                    faults.allow(interrupted);
+                    archive.destroy().await.is_ok()
                 }
             });
+            let stopped = faults.failed();
+            let scenario = format!("stopped after {interrupted} mutations");
+            assert_eq!(destroyed, !stopped, "{scenario}");
+
+            deterministic::Runner::from(checkpoint).start(|context| async move {
+                let context = MutationFaultContext {
+                    inner: context,
+                    faults: MutationFaults::default(),
+                };
+                let retained = reopen_and_retire(&context, &scenario).await;
+
+                // Nothing is removed before the first mutation, and nothing survives a completed
+                // destroy.
+                if interrupted == 0 {
+                    assert_eq!(retained, seeded_indices().collect::<Vec<_>>());
+                }
+                if destroyed {
+                    assert!(retained.is_empty(), "{scenario}: {retained:?}");
+                }
+            });
+            if !stopped {
+                break;
+            }
+            interrupted += 1;
         }
-        assert!(interrupted > 0, "no seed interrupted destroy");
+
+        // Destroy removes the markers and every section of both journals, so it can stop at
+        // least once per section of each.
+        assert!(interrupted > 2 * DESTROY_SECTIONS, "{interrupted}");
     }
 
-    /// Destroy removes the markers and then the key and value journals concurrently, so a crash
-    /// can leave any subset of either journal's sections. Each such image reopens holding
-    /// exactly the sections whose key and value blobs both survive.
+    /// With its markers gone, an archive reopens holding exactly the sections whose key and
+    /// value blobs both survive. Destroy removes the markers and then the two journals
+    /// concurrently, so a crash can leave each journal without some of its sections, in any
+    /// pairing.
     #[test_traced]
     fn test_destroy_interrupted_inside_journals_reopens() {
         // Bit k of a mask removes the k-th section of a journal. EVERYTHING also removes the
         // journal's partition.
         const EVERYTHING: u8 = 1 << DESTROY_SECTIONS;
+        let removed = |mask: u8| if mask == EVERYTHING { u8::MAX } else { mask };
+        for key_mask in 0..=EVERYTHING {
+            for value_mask in 0..=EVERYTHING {
+                deterministic::Runner::default().start(|context| async move {
+                    let context = MutationFaultContext {
+                        inner: context,
+                        faults: MutationFaults::default(),
+                    };
+                    let cfg = destroy_config();
+                    drop(seed_for_destroy(&context).await);
 
-        /// Remove the blobs of the partition that the mask selects by position in name order,
-        /// and the partition itself when asked. Returns the number of blobs found.
-        async fn remove(
-            context: &deterministic::Context,
-            partition: &str,
-            mask: u8,
-            partition_too: bool,
-        ) -> usize {
-            let mut names = context.scan(partition).await.unwrap();
-            names.sort();
-            for (position, name) in names.iter().enumerate() {
-                if mask & (1 << position) != 0 {
-                    context.remove(partition, Some(name)).await.unwrap();
-                }
-            }
-            if partition_too {
-                context.remove(partition, None).await.unwrap();
-            }
-            names.len()
-        }
+                    // The markers and their partition are gone before either journal is touched.
+                    context.remove(&cfg.metadata_partition, None).await.unwrap();
 
-        for markers_partition_removed in [false, true] {
-            for key_mask in 0..=EVERYTHING {
-                for value_mask in 0..=EVERYTHING {
-                    deterministic::Runner::default().start(|context| async move {
-                        let cfg = destroy_config();
-                        drop(seed_for_destroy(&context).await);
-
-                        // The markers are gone before either journal is touched.
-                        let markers = remove(
-                            &context,
-                            &cfg.metadata_partition,
-                            u8::MAX,
-                            markers_partition_removed,
-                        )
-                        .await;
-                        assert!(markers > 0);
-
-                        // Leave each journal with the sections its mask spares.
-                        let removed = |mask: u8| if mask == EVERYTHING { u8::MAX } else { mask };
-                        for (partition, mask) in [
-                            (&cfg.key_partition, key_mask),
-                            (&cfg.value_partition, value_mask),
-                        ] {
-                            let sections =
-                                remove(&context, partition, removed(mask), mask == EVERYTHING)
-                                    .await;
-                            assert_eq!(sections as u64, DESTROY_SECTIONS);
-                        }
-
-                        let gone = removed(key_mask) | removed(value_mask);
-                        let expected: Vec<u64> = (0..DESTROY_ITEMS)
-                            .filter(|index| gone & (1 << (index / DESTROY_SECTION_ITEMS)) == 0)
-                            .collect();
+                    // Leave each journal with the sections its mask spares. Each section is one
+                    // blob, named for its first index.
+                    for (partition, mask) in [
+                        (&cfg.key_partition, key_mask),
+                        (&cfg.value_partition, value_mask),
+                    ] {
+                        let mut names = context.scan(partition).await.unwrap();
+                        names.sort();
                         assert_eq!(
-                            reopen_and_retire(&context).await,
-                            expected,
-                            "markers partition removed {markers_partition_removed}, key mask \
-                             {key_mask:#06b}, value mask {value_mask:#06b}"
+                            names,
+                            (0..DESTROY_SECTIONS)
+                                .map(|section| {
+                                    (section * DESTROY_SECTION_ITEMS).to_be_bytes().to_vec()
+                                })
+                                .collect::<Vec<_>>()
                         );
-                    });
-                }
+                        for (position, name) in names.iter().enumerate() {
+                            if removed(mask) & (1 << position) != 0 {
+                                context.remove(partition, Some(name)).await.unwrap();
+                            }
+                        }
+                        if mask == EVERYTHING {
+                            context.remove(partition, None).await.unwrap();
+                        }
+                    }
+
+                    let gone = removed(key_mask) | removed(value_mask);
+                    let expected: Vec<u64> = seeded_indices()
+                        .filter(|index| gone & (1 << (index / DESTROY_SECTION_ITEMS)) == 0)
+                        .collect();
+                    let scenario =
+                        format!("key mask {key_mask:#06b}, value mask {value_mask:#06b}");
+                    assert_eq!(
+                        reopen_and_retire(&context, &scenario).await,
+                        expected,
+                        "{scenario}"
+                    );
+                });
             }
         }
     }

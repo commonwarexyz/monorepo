@@ -1116,7 +1116,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Recovery<E, A> {
 mod tests {
     use super::*;
     use crate::{
-        journal::segmented::manager::tests::{BoundedOpen, check_interrupted_bounded_open},
+        journal::segmented::manager::tests::{
+            BoundedOpen, FaultedContext, check_interrupted_bounded_open,
+        },
         utils::codec::View,
     };
     use commonware_codec::FixedSize;
@@ -1214,11 +1216,11 @@ mod tests {
         }
     }
 
-    impl BoundedOpen for Journal<deterministic::Context, u64> {
+    impl BoundedOpen for Journal<FaultedContext, u64> {
         const ITEM_SIZE: u64 = Self::CHUNK_SIZE as u64;
 
         async fn open(
-            context: deterministic::Context,
+            context: FaultedContext,
             page_cache: CacheRef,
             bound: Option<(u64, u64)>,
         ) -> Result<Self, Error> {
@@ -1496,7 +1498,7 @@ mod tests {
 
     #[test]
     fn test_bounded_initialization_retries_after_storage_faults() {
-        check_interrupted_bounded_open::<Journal<deterministic::Context, u64>>();
+        check_interrupted_bounded_open::<Journal<FaultedContext, u64>>();
     }
 
     #[test_traced]

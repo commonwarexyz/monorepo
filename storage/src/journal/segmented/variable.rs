@@ -904,7 +904,7 @@ mod tests {
     use super::*;
     use crate::journal::{
         frame::encode_frame_into,
-        segmented::manager::tests::{BoundedOpen, check_interrupted_bounded_open},
+        segmented::manager::tests::{BoundedOpen, FaultedContext, check_interrupted_bounded_open},
     };
     use commonware_codec::{EncodeSize, Write as _, varint::UInt};
     use commonware_macros::test_traced;
@@ -985,12 +985,12 @@ mod tests {
         recovery.finish()
     }
 
-    impl BoundedOpen for Journal<deterministic::Context, u64> {
+    impl BoundedOpen for Journal<FaultedContext, u64> {
         // A one-byte length prefix precedes the eight-byte item.
         const ITEM_SIZE: u64 = 9;
 
         async fn open(
-            context: deterministic::Context,
+            context: FaultedContext,
             page_cache: CacheRef,
             bound: Option<(u64, u64)>,
         ) -> Result<Self, Error> {
@@ -1010,7 +1010,9 @@ mod tests {
 
         async fn extend(mut self, section: u64, items: Range<u64>) -> Self {
             for item in items {
-                (self, _, _) = self.append(section, &item).await.unwrap();
+                let offset;
+                (self, offset, _) = self.append(section, &item).await.unwrap();
+                assert_eq!(offset % Self::ITEM_SIZE, 0);
             }
             self.sync_all().await.unwrap()
         }
@@ -1268,7 +1270,7 @@ mod tests {
 
     #[test]
     fn test_bounded_initialization_retries_after_storage_faults() {
-        check_interrupted_bounded_open::<Journal<deterministic::Context, u64>>();
+        check_interrupted_bounded_open::<Journal<FaultedContext, u64>>();
     }
 
     #[test_traced]
