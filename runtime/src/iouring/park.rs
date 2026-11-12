@@ -613,18 +613,25 @@ impl Unparker {
     /// The modeled bucket lock serializes compare-and-queue against wake.
     /// Releasing the oldest waits first exercises a stale ring wait absorbing
     /// a wake before the thread wait. A released ring wait posts its completion.
+    /// A wake that releases no wait changes no waiter's condition, so it skips
+    /// the condvar, whose notification loom would otherwise interleave.
     #[cfg(feature = "loom")]
     fn futex_wake(&self) {
         let mut queue = self.word.futex.lock().unwrap();
         queue.wakes += 1;
+        let mut released = false;
         for _ in 0..queue.wake_count {
             match queue.waiters.pop_front() {
                 Some(Waiter::Ring) => queue.ring_completed = true,
                 Some(Waiter::Thread(_)) => {}
                 None => break,
             }
+            released = true;
         }
-        self.word.futex_waiters.notify_all();
+
+        if released {
+            self.word.futex_waiters.notify_all();
+        }
     }
 }
 
@@ -1176,7 +1183,7 @@ mod loom_tests {
     use loom::{
         sync::{
             Arc,
-            atomic::{AtomicU32, Ordering},
+            atomic::{AtomicBool, AtomicU32, Ordering},
         },
         thread,
     };
@@ -1290,21 +1297,19 @@ mod loom_tests {
         ring
     }
 
-    /// Simulate the worker until `source` reaches `target`: observe, check the
-    /// source with a relaxed load, and park through `park` against the
-    /// observation when the source is still below the target.
+    /// Simulate the worker until `condition` is visible: observe, check the
+    /// condition with a relaxed load, and park through `park` against the
+    /// observation while it is not.
     ///
-    /// The load is relaxed, as is the increment in [`publish`], so only the
+    /// The load is relaxed, as is the store in [`publish`], so only the
     /// eventcount's release and acquire edges can make a condition visible.
-    fn simulate_until(
-        parker: &Parker,
-        source: &AtomicU32,
-        target: u32,
-        mut park: impl FnMut(&Parker, u32),
-    ) {
+    /// The worker can also see the condition before it observes the
+    /// notification, as a worker that finds work early does, and then stops
+    /// parking this way while that notification is still on its way.
+    fn simulate_until(parker: &Parker, condition: &AtomicBool, mut park: impl FnMut(&Parker, u32)) {
         loop {
             let seen = parker.observe();
-            if source.load(Ordering::Relaxed) >= target {
+            if condition.load(Ordering::Relaxed) {
                 assert_eq!(parker.word.load(Ordering::Relaxed) & WAITER, 0);
                 return;
             }
@@ -1312,11 +1317,52 @@ mod loom_tests {
         }
     }
 
-    /// Make one condition visible with a relaxed increment, then notify, so
-    /// only the notification's release can publish the condition.
-    fn publish(unparker: &Unparker, source: &AtomicU32) {
-        source.fetch_add(1, Ordering::Relaxed);
+    /// Simulate the worker until an observation includes `count` notifications
+    /// past the sequence `start`: observe, and park through `park` against the
+    /// observation while it includes fewer.
+    ///
+    /// Unlike [`simulate_until`], the worker stops on the sequence alone and
+    /// reads no condition before the observation that includes its
+    /// notification. It takes every park that a worker stopping on its
+    /// conditions takes and goes on parking where that worker stops, so the
+    /// models that only race notifications against parks explore those races
+    /// without also exploring when a relaxed load first sees each condition.
+    /// They check through [`assert_visible`] that an observation publishes the
+    /// conditions of its notifications.
+    fn park_until_observed(
+        parker: &Parker,
+        start: u32,
+        count: u32,
+        mut park: impl FnMut(&Parker, u32),
+    ) {
+        loop {
+            let seen = parker.observe();
+            if seen.wrapping_sub(start) / INCREMENT >= count {
+                assert_eq!(parker.word.load(Ordering::Relaxed) & WAITER, 0);
+                return;
+            }
+            park(parker, seen);
+        }
+    }
+
+    /// Make one condition visible with a relaxed store, then notify, so only
+    /// the notification's release can publish the condition.
+    fn publish(unparker: &Unparker, condition: &AtomicBool) {
+        condition.store(true, Ordering::Relaxed);
         unparker.unpark();
+    }
+
+    /// Assert that a relaxed load sees each of `conditions`. The worker calls
+    /// it once an observation includes their notifications and before it joins
+    /// their producers, so only the eventcount's release and acquire edges can
+    /// have made them visible.
+    fn assert_visible(conditions: &[AtomicBool]) {
+        for condition in conditions {
+            assert!(
+                condition.load(Ordering::Relaxed),
+                "an observed condition was not visible"
+            );
+        }
     }
 
     /// A message identified by `index`, with no payload to release.
@@ -1354,18 +1400,18 @@ mod loom_tests {
             let unparker = parker.unparker();
             parker.word.futex.lock().unwrap().wake_count = wake_count;
             let _ring = queued_ring_wait(&parker);
-            let source = Arc::new(AtomicU32::new(0));
+            let condition = Arc::new(AtomicBool::new(false));
 
             // The worker parks idle until it sees the producer's condition.
             let producer = thread::spawn({
                 let unparker = unparker.clone();
-                let source = source.clone();
+                let condition = condition.clone();
                 move || {
-                    publish(&unparker, &source);
+                    publish(&unparker, &condition);
                     abandon(&unparker);
                 }
             });
-            simulate_until(&parker, &source, 1, idle_park);
+            simulate_until(&parker, &condition, idle_park);
             producer.join().unwrap();
 
             // The worker saw the condition and disarmed.
@@ -1387,9 +1433,10 @@ mod loom_tests {
 
     /// Explore a producer that publishes `ops` conditions alongside one
     /// modeled worker that parks through `path` until it has observed every
-    /// notification. Each observation must make the conditions of the
-    /// notifications it includes visible to a relaxed load, so only the
-    /// eventcount's release and acquire edges can publish them.
+    /// notification. Each notification publishes its own condition, which the
+    /// worker reads with a relaxed load only once an observation includes that
+    /// notification, so only the eventcount's release and acquire edges can
+    /// publish it and the read changes no step on the word.
     ///
     /// A notification without a condition takes the same steps on the word,
     /// so it needs no program of its own. A later notification can end a park
@@ -1405,28 +1452,27 @@ mod loom_tests {
                 ParkPath::Idle => None,
                 ParkPath::ReusedRing => Some(queued_ring_wait(&parker)),
             };
-            let source = Arc::new(AtomicU32::new(0));
+            let conditions = Arc::new((0..ops).map(|_| AtomicBool::new(false)).collect::<Vec<_>>());
             let producer = thread::spawn({
                 let unparker = unparker.clone();
-                let source = source.clone();
+                let conditions = conditions.clone();
                 move || {
-                    for _ in 0..ops {
-                        publish(&unparker, &source);
+                    for condition in conditions.iter() {
+                        publish(&unparker, condition);
                     }
                 }
             });
 
             // The worker parks until it has observed every notification. Each
-            // notification an observation includes publishes one condition it
-            // must make visible.
+            // observation must make visible the conditions of the
+            // notifications it newly includes.
+            let mut observed = 0;
             loop {
                 let seen = parker.observe();
-                let observed = seen / INCREMENT;
-                assert!(
-                    source.load(Ordering::Relaxed) >= observed,
-                    "an observed condition was not visible: ops={ops} path={path:?}",
-                );
-                if observed == ops {
+                let included = (seen / INCREMENT) as usize;
+                assert_visible(&conditions[observed..included]);
+                observed = included;
+                if observed == conditions.len() {
                     break;
                 }
                 match &mut ring {
@@ -1722,21 +1768,23 @@ mod loom_tests {
             // Start the sequence at its last value.
             let parker = Parker::new();
             let unparker = parker.unparker();
-            parker.word.store(u32::MAX - WAITER, Ordering::Relaxed);
-            let source = Arc::new(AtomicU32::new(0));
+            let start = u32::MAX - WAITER;
+            parker.word.store(start, Ordering::Relaxed);
+            let conditions = Arc::new([AtomicBool::new(false), AtomicBool::new(false)]);
 
             // A producer publishes twice, wrapping the sequence.
             let producer = thread::spawn({
-                let source = source.clone();
+                let conditions = conditions.clone();
                 move || {
-                    publish(&unparker, &source);
-                    publish(&unparker, &source);
+                    publish(&unparker, &conditions[0]);
+                    publish(&unparker, &conditions[1]);
                 }
             });
-            simulate_until(&parker, &source, 2, ring_park);
+            park_until_observed(&parker, start, 2, ring_park);
+            assert_visible(&conditions[..]);
             producer.join().unwrap();
 
-            // The worker saw both and the sequence wrapped.
+            // The worker observed both and the sequence wrapped.
             assert_eq!(parker.observe(), INCREMENT);
         });
     }
@@ -1749,20 +1797,21 @@ mod loom_tests {
             // Two producers publish once each.
             let parker = Parker::new();
             let unparker = parker.unparker();
-            let source = Arc::new(AtomicU32::new(0));
+            let conditions = Arc::new([AtomicBool::new(false), AtomicBool::new(false)]);
             let a = thread::spawn({
                 let unparker = unparker.clone();
-                let source = source.clone();
-                move || publish(&unparker, &source)
+                let conditions = conditions.clone();
+                move || publish(&unparker, &conditions[0])
             });
             let b = thread::spawn({
                 let unparker = unparker.clone();
-                let source = source.clone();
-                move || publish(&unparker, &source)
+                let conditions = conditions.clone();
+                move || publish(&unparker, &conditions[1])
             });
 
-            // The worker parks in the ring until it sees both.
-            simulate_until(&parker, &source, 2, ring_park);
+            // The worker parks in the ring until it has observed both.
+            park_until_observed(&parker, 0, 2, ring_park);
+            assert_visible(&conditions[..]);
             a.join().unwrap();
             b.join().unwrap();
 
@@ -1797,20 +1846,20 @@ mod loom_tests {
             let parker = Parker::new();
             let unparker = parker.unparker();
             let mut ring = queued_ring_wait(&parker);
-            let source = Arc::new(AtomicU32::new(0));
+            let conditions = Arc::new([AtomicBool::new(false), AtomicBool::new(false)]);
 
             // A producer publishes twice. The worker parks idle until the
             // first condition, then in the ring until the second.
             let producer = thread::spawn({
                 let unparker = unparker.clone();
-                let source = source.clone();
+                let conditions = conditions.clone();
                 move || {
-                    publish(&unparker, &source);
-                    publish(&unparker, &source);
+                    publish(&unparker, &conditions[0]);
+                    publish(&unparker, &conditions[1]);
                 }
             });
-            simulate_until(&parker, &source, 1, idle_park);
-            simulate_until(&parker, &source, 2, |parker, seen| {
+            simulate_until(&parker, &conditions[0], idle_park);
+            simulate_until(&parker, &conditions[1], |parker, seen| {
                 persistent_ring_park(parker, &mut ring, seen, true);
             });
             producer.join().unwrap();
@@ -1852,22 +1901,23 @@ mod loom_tests {
             let parker = Parker::new();
             let unparker = parker.unparker();
             let mut ring = queued_ring_wait(&parker);
-            let source = Arc::new(AtomicU32::new(0));
+            let conditions = Arc::new([AtomicBool::new(false), AtomicBool::new(false)]);
             let a = thread::spawn({
                 let unparker = unparker.clone();
-                let source = source.clone();
-                move || publish(&unparker, &source)
+                let conditions = conditions.clone();
+                move || publish(&unparker, &conditions[0])
             });
             let b = thread::spawn({
                 let unparker = unparker.clone();
-                let source = source.clone();
-                move || publish(&unparker, &source)
+                let conditions = conditions.clone();
+                move || publish(&unparker, &conditions[1])
             });
 
-            // The worker parks in the ring until it sees both.
-            simulate_until(&parker, &source, 2, |parker, seen| {
+            // The worker parks in the ring until it has observed both.
+            park_until_observed(&parker, 0, 2, |parker, seen| {
                 persistent_ring_park(parker, &mut ring, seen, true);
             });
+            assert_visible(&conditions[..]);
             a.join().unwrap();
             b.join().unwrap();
 
@@ -1890,25 +1940,26 @@ mod loom_tests {
             let parker = Parker::new();
             let unparker = parker.unparker();
             let mut ring = queued_ring_wait(&parker);
-            let source = Arc::new(AtomicU32::new(0));
+            let conditions = Arc::new([AtomicBool::new(false), AtomicBool::new(false)]);
             let a = thread::spawn({
                 let unparker = unparker.clone();
-                let source = source.clone();
-                move || publish(&unparker, &source)
+                let conditions = conditions.clone();
+                move || publish(&unparker, &conditions[0])
             });
             let b = thread::spawn({
                 let unparker = unparker.clone();
-                let source = source.clone();
-                move || publish(&unparker, &source)
+                let conditions = conditions.clone();
+                move || publish(&unparker, &conditions[1])
             });
 
             // The first park returns without blocking, and the later ones
             // block until a wake completes the ring wait.
             let mut first = true;
-            simulate_until(&parker, &source, 2, |parker, seen| {
+            park_until_observed(&parker, 0, 2, |parker, seen| {
                 let block = !mem::take(&mut first);
                 persistent_ring_park(parker, &mut ring, seen, block);
             });
+            assert_visible(&conditions[..]);
             a.join().unwrap();
             b.join().unwrap();
 
