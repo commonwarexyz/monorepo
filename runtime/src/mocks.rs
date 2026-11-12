@@ -1420,7 +1420,7 @@ impl<B: Blob> Blob for SyncFaultBlob<B> {
 /// Controls a [MutationFaultContext]: after a set number of mutating operations succeed, every
 /// later one fails with an injected error.
 ///
-/// A mutating operation is a write, resize, sync, started sync, or removal.
+/// A mutating operation is a blob creation, write, resize, sync, started sync, or removal.
 #[derive(Clone, Default)]
 pub struct MutationFaults {
     state: Arc<Mutex<MutationFaultState>>,
@@ -1479,6 +1479,36 @@ pub struct MutationFaultContext<E> {
 
 forward_context!(MutationFaultContext, faults);
 
+impl<E: Spawner> Spawner for MutationFaultContext<E> {
+    fn shared(mut self, blocking: bool) -> Self {
+        self.inner = self.inner.shared(blocking);
+        self
+    }
+
+    fn dedicated(mut self) -> Self {
+        self.inner = self.inner.dedicated();
+        self
+    }
+
+    fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
+    where
+        F: FnOnce(Self) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let faults = self.faults;
+        self.inner.spawn(move |inner| f(Self { inner, faults }))
+    }
+
+    async fn stop(self, value: i32, timeout: Option<std::time::Duration>) -> Result<(), Error> {
+        self.inner.stop(value, timeout).await
+    }
+
+    fn stopped(&self) -> Signal {
+        self.inner.stopped()
+    }
+}
+
 impl<E: crate::Storage> crate::Storage for MutationFaultContext<E> {
     type Blob = MutationFaultBlob<E::Blob>;
 
@@ -1488,6 +1518,15 @@ impl<E: crate::Storage> crate::Storage for MutationFaultContext<E> {
         name: &[u8],
         versions: std::ops::RangeInclusive<BlobVersion>,
     ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
+        // Opening a blob that is not stored creates it. Creation is a mutation.
+        let stored = match self.inner.scan(partition).await {
+            Ok(names) => names.iter().any(|stored| stored == name),
+            Err(Error::PartitionMissing(_)) => false,
+            Err(err) => return Err(err),
+        };
+        if !stored {
+            self.faults.check()?;
+        }
         let (inner, len, version) = self.inner.open_versioned(partition, name, versions).await?;
         Ok((
             MutationFaultBlob {
@@ -1597,10 +1636,16 @@ mod tests {
             assert!(blob.sync().await.is_err());
             assert!(blob.start_sync().await.await.is_err());
             assert!(context.remove("mutation", Some(b"blob")).await.is_err());
+            assert!(context.open("mutation", b"created").await.is_err());
 
             // Reads still succeed, and no failed mutation reached storage.
             let read = blob.read_at(0, 4, ReadOptions::default()).await.unwrap();
             assert_eq!(read.coalesce(), b"data");
+            assert_eq!(context.scan("mutation").await.unwrap(), [b"blob".to_vec()]);
+
+            // Opening a stored blob is not a mutation.
+            drop(blob);
+            let (blob, _) = context.open("mutation", b"blob").await.unwrap();
 
             // Disarming lets mutations through again.
             faults.disarm();
