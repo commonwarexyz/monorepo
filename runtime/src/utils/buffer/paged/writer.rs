@@ -5908,13 +5908,13 @@ mod tests {
         });
     }
 
-    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5667.
     ///
     /// A shrink torn while it retires the old checksum slot can leave that slot's CRC on the
     /// page. Recovery zeroes the slot, so a torn rewrite that lands only a length there cannot
     /// revalidate the bytes the shrink removed.
     #[test_traced("DEBUG")]
-    fn pr_5651_regression_torn_shrink() {
+    fn issue_5667_regression_torn_shrink() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
@@ -5992,13 +5992,13 @@ mod tests {
         });
     }
 
-    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5651.
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5667.
     ///
     /// A torn append can leave its bytes and CRC on the page without their length. Recovery
     /// zeroes the slot, so a torn rewrite that lands only a length there cannot revalidate the
     /// bytes recovery discarded.
     #[test_traced("DEBUG")]
-    fn pr_5651_regression_torn_append() {
+    fn issue_5667_regression_torn_append() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
