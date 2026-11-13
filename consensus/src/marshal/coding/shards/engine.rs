@@ -201,7 +201,6 @@ use commonware_runtime::{
 };
 use commonware_utils::{
     Widen,
-    bitmap::BitMap,
     channel::{fallible::OneshotExt, oneshot},
     futures::{AbortablePool, Aborter},
     iter::zip_eq,
@@ -1064,12 +1063,7 @@ where
             );
             return;
         }
-        let participants_len: u64 = Widen::widen(scheme.participants().len());
-        self.insert_reconstruction_record(
-            commitment,
-            round,
-            ReconstructionState::new(participants_len),
-        );
+        self.insert_reconstruction_record(commitment, round, ReconstructionState::new());
         let buffered_progress = self.ingest_buffered_shards(commitment, scheme.as_ref());
         if buffered_progress {
             self.try_advance(sender, commitment);
@@ -1477,8 +1471,6 @@ where
 {
     /// Our verified assigned shard, until it is relayed to peers.
     pending_relay: Option<Shard<B, C, H>>,
-    /// Bitmap tracking which participant indices have contributed a shard.
-    contributed: BitMap,
     /// Whether the shard for our assigned index has been verified.
     assigned_shard_verified: bool,
 }
@@ -1525,10 +1517,9 @@ where
     H: Hasher,
 {
     /// Create a new empty common state.
-    fn new(participants_len: u64) -> Self {
+    const fn new() -> Self {
         Self {
             pending_relay: None,
-            contributed: BitMap::zeroes(participants_len),
             assigned_shard_verified: false,
         }
     }
@@ -1542,9 +1533,9 @@ where
     H: Hasher,
 {
     /// Create an initial reconstruction state for a commitment.
-    fn new(participants_len: u64) -> Self {
+    const fn new() -> Self {
         Self::AwaitingQuorum(AwaitingQuorumState {
-            common: CommonState::new(participants_len),
+            common: CommonState::new(),
             received_shards: BTreeMap::new(),
             checked_shards: Vec::new(),
             pending_shards: BTreeMap::new(),
@@ -1617,7 +1608,6 @@ where
         };
 
         let common = self.common_mut();
-        common.contributed.set(u64::from(shard.index), true);
         common.assigned_shard_verified = true;
         common.pending_relay = Some(Shard::new(commitment, shard.index, shard.data.clone()));
         if let Self::AwaitingQuorum(state) = self {
@@ -1663,8 +1653,6 @@ where
     ///
     /// - Exact duplicate of a previously received shard for the same index
     ///   while awaiting quorum.
-    /// - The index has already been marked as contributed (via the bitmap,
-    ///   e.g. after batch validation).
     /// - Sender-indexed shards that arrive after the state has transitioned to
     ///   [`ReconstructionState::Ready`] (i.e., the block is cached), including
     ///   ones that conflict with earlier shards. An assigned shard for our
@@ -1729,11 +1717,6 @@ where
             return false;
         }
 
-        // Check if this index already contributed (via batch validation).
-        if self.common().contributed.get(u64::from(indexed.index)) {
-            return false;
-        }
-
         // The assigned shard is always verified eagerly, even after transitioning
         // to Ready. This ensures we broadcast it to help slower peers reach quorum.
         if is_assigned_shard && !self.common().assigned_shard_verified {
@@ -1749,7 +1732,6 @@ where
         state
             .received_shards
             .insert(indexed.index, indexed.data.clone());
-        state.common.contributed.set(u64::from(indexed.index), true);
         state.pending_shards.insert(sender, indexed);
         true
     }
@@ -6232,7 +6214,7 @@ mod tests {
                     encode_block::<B, C, H>(inner.clone(), coding_config)
                 };
                 let commitment = block.commitment();
-                engine.insert_reconstruction_record(commitment, round, ReconstructionState::new(4));
+                engine.insert_reconstruction_record(commitment, round, ReconstructionState::new());
                 for index in [1, 2] {
                     let state = engine
                         .records
