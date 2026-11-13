@@ -73,38 +73,75 @@ assert_eq!(
 
 ## Benchmarks
 
-Times of this crate and of [blst](https://github.com/supranational/blst) 0.3.16 on the same inputs, on one thread, measured on 2026-11-12:
+Times of this crate on one thread, with its speedup over [blst](https://github.com/supranational/blst) 0.3.16 on the same inputs and its speedup under a `Rayon` strategy of 8 and of 16 workers, measured on 2026-11-13.
 
-- Zen 5: AMD EPYC 9R45 (AWS c8a.4xlarge), rustc 1.99.1. The crate uses the residue number system over AVX-512 IFMA.
-- M4 Max: Apple M4 Max, rustc 1.98.1. The crate uses 28-bit limbs over NEON.
+The speedup over blst is blst's time divided by this crate's, so blst is faster where it is below 1. Both libraries take projective points. blst's sums, multi-scalar multiplications, and pairings take affine points, so its times for them include the conversion. The speedup with workers is the time on one thread divided by the time with that many workers. The operations on single elements take no strategy.
 
-The speedup is blst's time divided by this crate's, so blst is faster where it is below 1. Both libraries take projective points. blst's sums, multi-scalar multiplications, and pairings take affine points, so its times for them include the conversion.
+### Zen 5
 
-| Operation | Zen 5: commonware | Zen 5: blst | Zen 5: speedup | M4 Max: commonware | M4 Max: blst | M4 Max: speedup |
-| --- | --- | --- | --- | --- | --- | --- |
-| G1 addition | 321 ns | 458 ns | 1.43x | 1.63 us | 348 ns | 0.21x |
-| G1 doubling | 273 ns | 202 ns | 0.74x | 1.10 us | 156 ns | 0.14x |
-| G1 multiplication by a scalar | 23.5 us | 56.1 us | 2.39x | 167 us | 45.3 us | 0.27x |
-| G1 multiplication of 128 elements by their own scalars | 1.85 ms | 7.17 ms | 3.88x | 5.45 ms | 5.79 ms | 1.06x |
-| G1 sum of 1024 elements | 123 us | 364 us | 2.96x | 323 us | 300 us | 0.93x |
-| G1 multi-scalar multiplication, 8 elements | 90.9 us | 258 us | 2.84x | 240 us | 208 us | 0.87x |
-| G1 multi-scalar multiplication, 128 elements | 885 us | 2.06 ms | 2.33x | 2.08 ms | 1.56 ms | 0.75x |
-| G1 multi-scalar multiplication, 2048 elements | 8.94 ms | 18.6 ms | 2.08x | 19.5 ms | 14.3 ms | 0.73x |
-| G2 addition | 739 ns | 1.26 us | 1.71x | 5.50 us | 927 ns | 0.17x |
-| G2 doubling | 615 ns | 459 ns | 0.75x | 3.24 us | 408 ns | 0.13x |
-| G2 multiplication by a scalar | 31.4 us | 116 us | 3.68x | 449 us | 87.8 us | 0.20x |
-| G2 multiplication of 128 elements by their own scalars | 4.62 ms | 14.8 ms | 3.20x | 14.5 ms | 11.2 ms | 0.78x |
-| G2 sum of 1024 elements | 319 us | 1.03 ms | 3.23x | 1.20 ms | 796 us | 0.67x |
-| G2 multi-scalar multiplication, 8 elements | 164 us | 658 us | 4.02x | 788 us | 498 us | 0.63x |
-| G2 multi-scalar multiplication, 128 elements | 1.60 ms | 5.84 ms | 3.66x | 7.19 ms | 4.30 ms | 0.60x |
-| G2 multi-scalar multiplication, 2048 elements | 17.5 ms | 54.1 ms | 3.10x | 72.4 ms | 39.4 ms | 0.54x |
-| Pairing | 109 us | 427 us | 3.92x | 1.67 ms | 318 us | 0.19x |
-| 16 independent pairings | 1.68 ms | 6.83 ms | 4.07x | 6.45 ms | 5.15 ms | 0.80x |
-| Product of 2 pairings | 137 us | 543 us | 3.97x | 1.67 ms | 396 us | 0.24x |
-| Product of 16 pairings | 535 us | 2.19 ms | 4.10x | 3.09 ms | 1.59 ms | 0.51x |
-| Product of 128 pairings | 3.80 ms | 15.8 ms | 4.16x | 17.0 ms | 11.4 ms | 0.67x |
+AMD EPYC 9R45 (AWS c8a.4xlarge, 16 cores), rustc 1.99.1. The crate uses the residue number system over AVX-512 IFMA.
 
-Run the benchmarks of this crate with `cargo bench -p commonware-cryptography-bls12381`.
+| Operation | Time | Speedup over blst | Speedup with 8 workers | Speedup with 16 workers |
+| --- | --- | --- | --- | --- |
+| G1 addition | 354 ns | 1.29x | - | - |
+| G1 doubling | 274 ns | 0.73x | - | - |
+| G1 multiplication by a scalar | 23.3 us | 2.39x | - | - |
+| G1 multiplication of 128 elements by their own scalars | 1.83 ms | 3.90x | 7.6x | 13.9x |
+| G1 sum of 1024 elements | 123 us | 2.96x | 4.4x | 4.9x |
+| G1 multi-scalar multiplication, 8 elements | 84.1 us | 3.04x | 2.8x | 3.0x |
+| G1 multi-scalar multiplication, 128 elements | 853 us | 2.39x | 5.0x | 8.2x |
+| G1 multi-scalar multiplication, 2048 elements | 8.54 ms | 2.17x | 5.6x | 9.7x |
+| G2 addition | 791 ns | 1.59x | - | - |
+| G2 doubling | 599 ns | 0.76x | - | - |
+| G2 multiplication by a scalar | 31.1 us | 3.69x | - | - |
+| G2 multiplication of 128 elements by their own scalars | 4.59 ms | 3.20x | 7.7x | 14.8x |
+| G2 sum of 1024 elements | 315 us | 3.23x | 5.9x | 6.5x |
+| G2 multi-scalar multiplication, 8 elements | 162 us | 4.07x | 2.9x | 4.1x |
+| G2 multi-scalar multiplication, 128 elements | 1.55 ms | 3.82x | 5.0x | 8.3x |
+| G2 multi-scalar multiplication, 2048 elements | 16.3 ms | 3.28x | 5.6x | 9.6x |
+| Pairing | 108 us | 3.92x | - | - |
+| 16 independent pairings | 1.66 ms | 4.08x | 7.4x | 13.1x |
+| Product of 2 pairings | 136 us | 3.99x | 1.1x | 1.1x |
+| Product of 16 pairings | 535 us | 4.09x | 3.0x | 3.5x |
+| Product of 128 pairings | 3.79 ms | 4.16x | 6.8x | 9.6x |
+
+### M4 Max
+
+Apple M4 Max (10 performance cores and 4 efficiency cores), rustc 1.98.1. The crate uses 28-bit limbs over NEON.
+
+| Operation | Time | Speedup over blst | Speedup with 8 workers | Speedup with 16 workers |
+| --- | --- | --- | --- | --- |
+| G1 addition | 1.71 us | 0.22x | - | - |
+| G1 doubling | 1.13 us | 0.15x | - | - |
+| G1 multiplication by a scalar | 170 us | 0.27x | - | - |
+| G1 multiplication of 128 elements by their own scalars | 5.50 ms | 1.05x | 7.0x | 6.7x |
+| G1 sum of 1024 elements | 319 us | 0.96x | 3.7x | 2.3x |
+| G1 multi-scalar multiplication, 8 elements | 239 us | 0.94x | 1.2x | 1.1x |
+| G1 multi-scalar multiplication, 128 elements | 2.12 ms | 0.78x | 4.4x | 3.4x |
+| G1 multi-scalar multiplication, 2048 elements | 19.8 ms | 0.72x | 5.1x | 4.2x |
+| G2 addition | 5.72 us | 0.17x | - | - |
+| G2 doubling | 3.32 us | 0.11x | - | - |
+| G2 multiplication by a scalar | 452 us | 0.19x | - | - |
+| G2 multiplication of 128 elements by their own scalars | 14.5 ms | 0.77x | 7.2x | 7.3x |
+| G2 sum of 1024 elements | 1.17 ms | 0.68x | 4.7x | 3.4x |
+| G2 multi-scalar multiplication, 8 elements | 788 us | 0.70x | 1.5x | 1.5x |
+| G2 multi-scalar multiplication, 128 elements | 7.33 ms | 0.59x | 4.5x | 4.1x |
+| G2 multi-scalar multiplication, 2048 elements | 73.9 ms | 0.54x | 5.3x | 4.8x |
+| Pairing | 1.68 ms | 0.21x | - | - |
+| 16 independent pairings | 6.59 ms | 0.80x | 3.8x | 3.7x |
+| Product of 2 pairings | 1.68 ms | 0.24x | 1.0x | 1.0x |
+| Product of 16 pairings | 3.10 ms | 0.51x | 1.7x | 1.7x |
+| Product of 128 pairings | 17.2 ms | 0.67x | 5.0x | 4.5x |
+
+Several effects keep the speedups below the count of workers:
+
+- A strategy cuts batches of whole groups of lanes. A group holds four elements on the M4 Max, so 16 pairs make at most four batches there.
+- A product of pairings runs its final exponentiation on one thread.
+- Each batch of a multi-scalar multiplication repeats the doublings and bucket sums that one thread does once.
+- A sum of 1024 elements of G1 takes 123 us on the Zen 5 and 319 us on the M4 Max, so the time to hand its batches to eight workers holds its speedup to 4.4x and 3.7x.
+- Sixteen workers outnumber the 14 cores of the M4 Max.
+
+Run the benchmarks of this crate with `cargo bench -p commonware-cryptography-bls12381`. The operations over slices run under 1 and 8 workers, and under 1, 2, 4, 8, and 16 with `COMMONWARE_BENCH_FULL=1`.
 
 ## Parameters
 
