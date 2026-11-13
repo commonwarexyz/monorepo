@@ -50,6 +50,7 @@ use crate::{
     Epochable,
     multimmit::{
         config::Parameters,
+        faults::MultimmitFaults as _,
         types::{ChainId, CodecConfig, Error as TypesError, LeaderBlock, VoteBody},
     },
     types::Epoch,
