@@ -25,9 +25,9 @@ Operations over slices cost less per element than the same operation repeated on
 
 Each takes a strategy of [commonware-parallel](https://docs.rs/commonware-parallel). [`Sequential`] runs the operation on the calling thread. `Rayon`, which needs the `std` feature of commonware-parallel, decides at each call whether to split the operation into batches that run on several threads.
 
-Three functions compute pairings:
+Three functions compute pairings, and the two over several pairs take a strategy as well:
 
-- [`multi_pairing`] returns the product of the pairings of several pairs with one final exponentiation, so it costs less than multiplying separate pairings. Use it for verification equations: check `e(a, b) = e(c, d)` as `multi_pairing(&[(a, b), (-c, d)])` equal to [`GT::ONE`].
+- [`multi_pairing`] returns the product of the pairings of several pairs with one final exponentiation, so it costs less than multiplying separate pairings. Use it for verification equations: check `e(a, b) = e(c, d)` as `multi_pairing(&[(a, b), (-c, d)], &Sequential)` equal to [`GT::ONE`].
 - [`pairings`] computes the pairings of independent pairs, as when verifying many signatures separately, at less cost per pair than [`pairing`].
 - [`pairing`] returns a single pairing.
 
@@ -52,7 +52,7 @@ let signature = h * &secret;
 
 // Check e(public, h) = e(generator, signature) with one product of pairings.
 assert_eq!(
-    multi_pairing(&[(public, h), (-G1::generator(), signature)]),
+    multi_pairing(&[(public, h), (-G1::generator(), signature)], &Sequential),
     GT::ONE
 );
 assert_eq!(pairing(&public, &h), pairing(&G1::generator(), &signature));
