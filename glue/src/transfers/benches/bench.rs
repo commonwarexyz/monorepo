@@ -65,6 +65,7 @@ impl Nonced {
 }
 
 impl Account for Nonced {
+    /// The balance and the amounts a payment debits and credits.
     type Amount = u64;
 
     /// The nonce a payment consumes.

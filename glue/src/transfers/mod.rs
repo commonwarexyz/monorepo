@@ -282,6 +282,7 @@ pub trait Transfer {
 /// }
 ///
 /// impl Account for Sequenced {
+///     // The balance and the amounts a transfer debits and credits.
 ///     type Amount = u64;
 ///
 ///     // The nonce a transfer consumes.
