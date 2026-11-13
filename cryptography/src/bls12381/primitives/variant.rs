@@ -72,7 +72,7 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
 }
 
 /// A [Variant] with a public key of type [G1] and a signature of type [G2].
-#[derive(Clone, Hash, PartialEq, Eq)]
+#[derive(Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MinPk {}
 
 impl Variant for MinPk {
@@ -180,7 +180,7 @@ impl Debug for MinPk {
 }
 
 /// A [Variant] with a public key of type [G2] and a signature of type [G1].
-#[derive(Clone, Hash, PartialEq, Eq)]
+#[derive(Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MinSig {}
 
 impl Variant for MinSig {

@@ -214,7 +214,7 @@ impl<D: Digest> Viewable for Subject<'_, D> {
 }
 
 /// Vote represents individual votes ([Notarize], [Nullify], [Finalize]).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum Vote<S: Scheme, D: Digest> {
     /// A validator's notarize vote over a proposal.
     Notarize(Notarize<S, D>),
@@ -223,6 +223,19 @@ pub enum Vote<S: Scheme, D: Digest> {
     /// A validator's finalize vote over a proposal.
     Finalize(Finalize<S, D>),
 }
+
+impl<S: Scheme, D: Digest> PartialEq for Vote<S, D> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Notarize(a), Self::Notarize(b)) => a == b,
+            (Self::Nullify(a), Self::Nullify(b)) => a == b,
+            (Self::Finalize(a), Self::Finalize(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl<S: Scheme, D: Digest> Eq for Vote<S, D> {}
 
 impl<S: Scheme, D: Digest> Write for Vote<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
@@ -335,7 +348,7 @@ where
 }
 
 /// Certificate represents aggregated votes ([Notarization], [Nullification], [Finalization]).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum Certificate<S: Scheme, D: Digest> {
     /// A recovered certificate for a notarization.
     Notarization(Notarization<S, D>),
@@ -344,6 +357,19 @@ pub enum Certificate<S: Scheme, D: Digest> {
     /// A recovered certificate for a finalization.
     Finalization(Finalization<S, D>),
 }
+
+impl<S: Scheme, D: Digest> PartialEq for Certificate<S, D> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Notarization(a), Self::Notarization(b)) => a == b,
+            (Self::Nullification(a), Self::Nullification(b)) => a == b,
+            (Self::Finalization(a), Self::Finalization(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl<S: Scheme, D: Digest> Eq for Certificate<S, D> {}
 
 /// The discriminant of a [Certificate], naming its kind without its contents.
 #[cfg(not(target_arch = "wasm32"))]
@@ -503,7 +529,7 @@ where
 }
 
 /// Artifact represents all consensus artifacts (votes and certificates) for storage.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum Artifact<S: Scheme, D: Digest> {
     /// A validator's notarize vote over a proposal.
     Notarize(Notarize<S, D>),
@@ -520,6 +546,23 @@ pub enum Artifact<S: Scheme, D: Digest> {
     /// A recovered certificate for a finalization.
     Finalization(Finalization<S, D>),
 }
+
+impl<S: Scheme, D: Digest> PartialEq for Artifact<S, D> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Notarize(a), Self::Notarize(b)) => a == b,
+            (Self::Notarization(a), Self::Notarization(b)) => a == b,
+            (Self::Certification(a, x), Self::Certification(b, y)) => a == b && x == y,
+            (Self::Nullify(a), Self::Nullify(b)) => a == b,
+            (Self::Nullification(a), Self::Nullification(b)) => a == b,
+            (Self::Finalize(a), Self::Finalize(b)) => a == b,
+            (Self::Finalization(a), Self::Finalization(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl<S: Scheme, D: Digest> Eq for Artifact<S, D> {}
 
 impl<S: Scheme, D: Digest> Write for Artifact<S, D> {
     fn write(&self, writer: &mut impl BufMut) {

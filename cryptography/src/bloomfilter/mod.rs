@@ -12,6 +12,7 @@ use commonware_codec::{
 };
 use commonware_utils::bitmap::BitMap;
 use core::{
+    fmt,
     marker::PhantomData,
     num::{NonZeroU8, NonZeroU64, NonZeroUsize},
 };
@@ -56,11 +57,29 @@ const LN2_INV: (u64, u64) = (29145, 20201);
 /// - **Performance**: Hash function performance varies with the size of items inserted
 ///   and queried. [Sha256] is faster for smaller items (up to ~2KB), while
 ///   [Blake3](crate::blake3::Blake3) is faster for larger items (4KB+).
-#[derive(Clone, Debug)]
 pub struct BloomFilter<H: Hasher = Sha256> {
     hashers: NonZeroU8,
     bits: BitMap,
     _marker: PhantomData<H>,
+}
+
+impl<H: Hasher> Clone for BloomFilter<H> {
+    fn clone(&self) -> Self {
+        Self {
+            hashers: self.hashers,
+            bits: self.bits.clone(),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<H: Hasher> fmt::Debug for BloomFilter<H> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BloomFilter")
+            .field("hashers", &self.hashers)
+            .field("bits", &self.bits)
+            .finish()
+    }
 }
 
 impl<H: Hasher> PartialEq for BloomFilter<H> {
