@@ -1178,9 +1178,12 @@ where
             };
             let digest = V::commitment_to_inner(commitment);
 
-            // A body already in storage releases its slot. A body found only in the buffer keeps
-            // the slot reserved for its fetch, because the buffer may evict it. Any other body is
-            // requested from peers.
+            // A body already in storage releases its slot. Storage is checked by digest, because a
+            // digest identifies the commitment of every body consensus accepts (see
+            // `Variant::commitment_to_inner`). A range acquires each body by its exact commitment,
+            // so a body stored under another commitment forgoes only the speculative fetch. A body
+            // found only in the buffer keeps the slot reserved for its fetch, because the buffer
+            // may evict it. Any other body is requested from peers.
             if self.cache.has_block(digest).await
                 || self
                     .finalized_blocks
