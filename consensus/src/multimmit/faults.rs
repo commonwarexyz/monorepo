@@ -67,12 +67,50 @@ impl MultimmitFaults for N5f1 {
     }
 }
 
+/// Fault model requiring `n >= 5f + 1` participants, whose quorum is the `2f + 1` nullification
+/// quorum of [`N5f1`].
+///
+/// Tolerates up to `f = (n-1)/5` faults. Every quorum contains at least `f + 1` correct
+/// participants, but two quorums need not share one, so this model suits only a protocol whose
+/// correct participants agree without intersecting quorums, such as certifying a deterministic
+/// digest.
+///
+/// # Example
+///
+/// | n  | f  | quorum (2f+1) |
+/// |----|----|---------------|
+/// | 6  | 1  | 3             |
+/// | 11 | 2  | 5             |
+/// | 16 | 3  | 7             |
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct N5f1Nullification;
+
+impl Faults for N5f1Nullification {
+    fn max_faults(n: impl ToPrimitive) -> u32 {
+        N5f1::max_faults(n)
+    }
+
+    fn quorum(n: impl ToPrimitive) -> u32 {
+        N5f1::nullification_quorum(n)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use proptest::prelude::*;
     use rstest::rstest;
     use std::panic::{UnwindSafe, catch_unwind};
+
+    #[test]
+    fn test_n5f1_nullification_quorum() {
+        for (n, faults, quorum) in [(1, 0, 1), (6, 1, 3), (11, 2, 5), (16, 3, 7), (50, 9, 19)] {
+            assert_eq!(N5f1Nullification::max_faults(n), faults);
+            assert_eq!(N5f1Nullification::quorum(n), quorum);
+            // A quorum outnumbers twice the faults and can form without them.
+            assert!(2 * faults < quorum && quorum <= n - faults);
+        }
+    }
 
     #[test]
     #[should_panic(expected = "n must not be zero")]

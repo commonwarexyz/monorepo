@@ -31,10 +31,9 @@
 
 use crate::{
     aggregation::types::{Item, Namespace},
-    multimmit::faults::MultimmitFaults as _,
+    multimmit::faults::N5f1Nullification,
 };
 use commonware_cryptography::impl_certificate_bls12381_threshold;
-use commonware_utils::faults::N5f1Nullification;
 
 impl_certificate_bls12381_threshold!(&'a Item<D>, Namespace, N5f1Nullification);
 
