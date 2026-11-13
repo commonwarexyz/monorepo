@@ -8,7 +8,7 @@
 //!
 //! An operation may be polled or dropped on any thread after registration.
 //! Dropping it releases its observer. The driver decides whether to cancel the
-//! request or finish retained work such as writes and syncs.
+//! request or finish retained work such as writes, syncs, and resizes.
 
 use super::{
     mailbox::{Cancel, Forward},
@@ -148,6 +148,12 @@ pub mod tests {
     pub fn admitted() -> usize {
         let owner = Local::current().expect("io_uring I/O requires a current worker");
         owner.borrow().driver.as_ref().unwrap().len()
+    }
+
+    /// Mark the current worker as closing, so it rejects new registrations as during shutdown.
+    pub fn close_current_worker() {
+        let owner = Local::current().expect("io_uring I/O requires a current worker");
+        owner.borrow_mut().closing = true;
     }
 
     /// Arbitrary waker callbacks that reenter the current worker's local state.

@@ -495,8 +495,10 @@ impl crate::Blob for Blob {
     }
 
     async fn resize(&self, len: u64) -> Result<(), crate::Error> {
+        // Reject lengths a file cannot represent, as the filesystem backends do.
         let len = len
             .checked_add(self.data_offset)
+            .filter(|len| *len <= i64::MAX as u64)
             .ok_or(crate::Error::OffsetOverflow)?;
         let len: usize = len.try_into().map_err(|_| crate::Error::OffsetOverflow)?;
         let mut content = self.content.write();
@@ -708,6 +710,18 @@ mod tests {
         drop(sync);
         let (_, sync_len) = storage.open("partition", b"sync").await.unwrap();
         assert_eq!(sync_len, 0);
+    }
+
+    #[tokio::test]
+    async fn test_resize_rejects_unrepresentable_lengths() {
+        let storage = Storage::new();
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        for len in [i64::MAX as u64 + 1, u64::MAX] {
+            assert!(matches!(
+                blob.resize(len).await,
+                Err(crate::Error::OffsetOverflow)
+            ));
+        }
     }
 
     #[tokio::test]

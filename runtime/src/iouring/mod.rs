@@ -63,9 +63,10 @@
 //!
 //! On shutdown, the runner rejects new tasks and I/O, aborts supervised tasks,
 //! and drains registered I/O before returning. The first poll registers an I/O
-//! request with its worker. Registered storage writes and syncs run to completion
-//! even if their futures are dropped while still queued. For pending reads and
-//! network operations, dropping the future or closing the worker requests cancellation.
+//! request with its worker. Registered storage writes, syncs, and resizes run to
+//! completion even if their futures are dropped while still queued. For pending
+//! reads and network operations, dropping the future or closing the worker
+//! requests cancellation.
 //!
 //! Shutdown waits for all workers to finish runtime cleanup and failure publication,
 //! with no timeout. No pool worker closes its mailbox or io_uring ring until
