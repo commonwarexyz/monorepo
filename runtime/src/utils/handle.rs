@@ -1384,6 +1384,56 @@ mod tests {
         assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
     }
 
+    /// Sets its flag when dropped, then panics with its message.
+    struct Explodes(&'static str, Arc<AtomicBool>);
+
+    impl Drop for Explodes {
+        fn drop(&mut self) {
+            self.1.store(true, Ordering::SeqCst);
+            panic!("{}", self.0);
+        }
+    }
+
+    /// A task whose future panics when the wrapper drops it after it resolved fails the
+    /// wrapper's poll with that panic. An output it completed with, which can no longer be
+    /// delivered, is dropped first and the handle resolves Closed. A poll panic it raised first
+    /// is published and the handle resolves Exited. Either way the task's metric finishes.
+    #[rstest]
+    #[case::completed(false)]
+    #[case::poll_panic(true)]
+    fn wrap_disposes_of_a_future_that_panics_when_dropped(#[case] poll_panic: bool) {
+        let (future_dropped, output_dropped) = (Arc::default(), Arc::default());
+        let guard = Explodes("drop", Arc::clone(&future_dropped));
+        let mut output = (!poll_panic).then(|| Explodes("output", Arc::clone(&output_dropped)));
+        let future = future::poll_fn(move |_| {
+            let _guard = &guard;
+            if poll_panic {
+                panic!("poll");
+            }
+            std::task::Poll::Ready(output.take().expect("polled once"))
+        });
+        let (panicker, panicked) = Panicker::new(false);
+        let gauge = Gauge::default();
+        let metric = MetricHandle::new(gauge.clone());
+        let (task, handle) = Handle::init(future, metric, panicker, Tree::root());
+        let panic = catch_unwind(AssertUnwindSafe(|| task.now_or_never()))
+            .expect_err("the destructor panic was contained");
+        assert_eq!(extract_panic_message(&*panic), "drop");
+        assert!(future_dropped.load(Ordering::SeqCst));
+        assert_eq!(gauge.get(), 0, "the task's metric did not finish");
+        let published = panicked
+            .try_take()
+            .map(|panic| extract_panic_message(&*panic));
+        if poll_panic {
+            assert_eq!(published.as_deref(), Some("poll"));
+            assert!(matches!(handle.now_or_never(), Some(Err(Error::Exited))));
+        } else {
+            assert_eq!(published, None);
+            assert!(output_dropped.load(Ordering::SeqCst), "the output was kept");
+            assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
+        }
+    }
+
     /// A task can write through a borrow of its own state after suspending (checked by Miri).
     #[commonware_macros::test_group("miri")]
     #[test]

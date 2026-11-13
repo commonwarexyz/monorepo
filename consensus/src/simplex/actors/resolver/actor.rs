@@ -932,23 +932,14 @@ mod tests {
             let _actor = actor.start(voter::Mailbox::new(voter_sender), sender, receiver);
             loop {
                 let metrics = context.encode();
-                let tasks: Vec<_> = metrics
-                    .lines()
-                    .filter(|line| {
-                        line.starts_with("runtime_tasks_spawned_total{")
-                            && line.contains("name=\"actor_resolver\"")
-                    })
-                    .collect();
-                if tasks.is_empty() {
+                if !metrics.lines().any(|line| {
+                    line.starts_with("runtime_tasks_spawned_total{")
+                        && line.contains("name=\"actor_resolver\"")
+                }) {
                     context.sleep(Duration::from_millis(1)).await;
                     continue;
                 }
-                assert!(
-                    tasks
-                        .iter()
-                        .all(|line| line.contains("execution=\"Thread\"")),
-                    "{metrics}"
-                );
+                crate::marshal::mocks::assert_execution(&metrics, "actor_resolver", "Thread");
                 break;
             }
         });

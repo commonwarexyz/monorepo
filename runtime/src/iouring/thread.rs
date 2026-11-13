@@ -81,18 +81,6 @@ impl IouringThread {
     pub(super) fn ready_len(&self) -> usize {
         self.wake.lock().ids.len()
     }
-
-    /// Number of root wakes the thread's residents and admission have sent.
-    #[cfg(test)]
-    pub(super) fn root_wakes(&self) -> usize {
-        self.wake.root_wakes.load(Ordering::SeqCst)
-    }
-
-    /// Number of host turns the thread has started.
-    #[cfg(test)]
-    pub(super) fn turns(&self) -> usize {
-        self.wake.turns.load(Ordering::SeqCst)
-    }
 }
 
 /// The ready list of a thread's residents and the wake of its root, shared with every
@@ -104,12 +92,6 @@ pub(super) struct WakeState {
     notified: AtomicBool,
     /// The worker's root waker, stored by the root's first poll.
     root: Mutex<Option<Waker>>,
-    /// Root wakes sent.
-    #[cfg(test)]
-    root_wakes: std::sync::atomic::AtomicUsize,
-    /// Host turns started.
-    #[cfg(test)]
-    turns: std::sync::atomic::AtomicUsize,
 }
 
 /// The ready list and whether the thread closed it.
@@ -132,10 +114,6 @@ impl WakeState {
             }),
             notified: AtomicBool::new(false),
             root: Mutex::new(None),
-            #[cfg(test)]
-            root_wakes: std::sync::atomic::AtomicUsize::new(0),
-            #[cfg(test)]
-            turns: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -191,9 +169,6 @@ impl WakeState {
         // Waking runs no user code, but waking outside the lock keeps lock order trivial.
         let root = self.root().clone();
         if let Some(root) = root {
-            #[cfg(test)]
-            self.root_wakes
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             root.wake();
         }
     }
@@ -201,8 +176,6 @@ impl WakeState {
     /// Start a host turn. Record the root waker, then clear `notified`, so a wake from here on
     /// wakes the root again.
     pub(super) fn begin_turn(&self, waker: &Waker) {
-        #[cfg(test)]
-        self.turns.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         {
             let mut root = self.root();
             if !root.as_ref().is_some_and(|root| root.will_wake(waker)) {

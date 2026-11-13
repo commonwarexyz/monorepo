@@ -2,6 +2,7 @@
 
 use crate::{Clock, Metrics};
 use std::{
+    future::{Ready, ready},
     panic::resume_unwind,
     sync::{
         Arc,
@@ -67,6 +68,15 @@ pub(crate) fn executions(metrics: &impl Metrics, name: &str) -> Vec<String> {
 /// A new flag, initially false.
 pub(crate) fn flag() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(false))
+}
+
+/// A factory that sets `ran` and returns a future that completes at once.
+pub(crate) fn recording<L>(ran: &Arc<AtomicBool>) -> impl FnOnce(L) -> Ready<()> + Send + 'static {
+    let ran = ran.clone();
+    move |_| {
+        ran.store(true, Ordering::SeqCst);
+        ready(())
+    }
 }
 
 /// Sets its flag when dropped.

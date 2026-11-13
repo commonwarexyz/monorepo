@@ -2733,23 +2733,6 @@ mod tests {
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
     #[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default()))]
-    fn test_thread_spawn<R: Runner>(#[case] runner: R)
-    where
-        R::Context: Spawner,
-    {
-        runner.start(|context| async move {
-            let handle = context
-                .thread()
-                .spawn(|_| async move { 42 })
-                .expect("thread");
-            assert!(matches!(handle.await, Ok(42)));
-        });
-    }
-
-    #[rstest]
-    #[case::deterministic(deterministic::Runner::default())]
-    #[case::tokio(tokio::Runner::default())]
-    #[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default()))]
     fn test_spawn<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,

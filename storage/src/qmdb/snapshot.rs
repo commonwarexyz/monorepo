@@ -973,8 +973,7 @@ mod tests {
     /// its finisher returns [ThreadError::EmptyCpus].
     struct FailLaunch {
         inner: deterministic::Context,
-        launches: Arc<AtomicUsize>,
-        fail_at: usize,
+        state: Arc<(AtomicUsize, usize)>,
     }
 
     impl FailLaunch {
@@ -982,8 +981,7 @@ mod tests {
         fn wrap(&self, inner: deterministic::Context) -> Self {
             Self {
                 inner,
-                launches: self.launches.clone(),
-                fail_at: self.fail_at,
+                state: self.state.clone(),
             }
         }
     }
@@ -1025,13 +1023,9 @@ mod tests {
         }
 
         fn thread(self) -> ThreadBuilder<Self> {
-            let fail = self.launches.fetch_add(1, Ordering::SeqCst) == self.fail_at;
-            let (launches, fail_at) = (self.launches, self.fail_at);
-            let builder = self.inner.thread().map(move |inner| Self {
-                inner,
-                launches,
-                fail_at,
-            });
+            let fail = self.state.0.fetch_add(1, Ordering::SeqCst) == self.state.1;
+            let state = self.state;
+            let builder = self.inner.thread().map(move |inner| Self { inner, state });
             if fail {
                 builder.pin(Vec::<usize>::new())
             } else {
@@ -1045,14 +1039,8 @@ mod tests {
             Fut: Future<Output = T> + Send + 'static,
             T: Send + 'static,
         {
-            let (launches, fail_at) = (self.launches, self.fail_at);
-            self.inner.spawn(move |inner| {
-                f(Self {
-                    inner,
-                    launches,
-                    fail_at,
-                })
-            })
+            let state = self.state;
+            self.inner.spawn(move |inner| f(Self { inner, state }))
         }
 
         fn spawn_on<Fn, Fut, T>(self, thread: &Thread, f: Fn) -> Handle<T>
@@ -1061,13 +1049,9 @@ mod tests {
             Fut: Future<Output = T> + 'static,
             T: Send + 'static,
         {
-            let (launches, fail_at) = (self.launches, self.fail_at);
+            let state = self.state;
             self.inner.spawn_on(thread, move |local| {
-                f(local.map(|inner| Self {
-                    inner,
-                    launches,
-                    fail_at,
-                }))
+                f(local.map(|inner| Self { inner, state }))
             })
         }
 
@@ -1105,7 +1089,7 @@ mod tests {
     /// initial decoders, and 4 the replacement decoder.
     #[test]
     fn test_parallel_build_thread_launch_failure_cleans_up() {
-        for fail_at in [1, 3, 4] {
+        for fail_at in [1, 3, 4, usize::MAX] {
             deterministic::Runner::default().start(|context| async move {
                 let log = three_chunk_log();
                 let mut index =
@@ -1113,11 +1097,10 @@ mod tests {
                         context.child("index"),
                         TwoCap,
                     );
-                let launches = Arc::new(AtomicUsize::new(0));
+                let state = Arc::new((AtomicUsize::new(0), fail_at));
                 let wrapper = FailLaunch {
                     inner: context.child("build"),
-                    launches: launches.clone(),
-                    fail_at,
+                    state: state.clone(),
                 };
                 let result = build_snapshot_parallel(
                     &mut index,
@@ -1129,13 +1112,26 @@ mod tests {
                     None,
                 )
                 .await;
-                assert!(
-                    matches!(result, Err(Error::Thread(ThreadError::EmptyCpus))),
-                    "launch {fail_at}: {result:?}"
-                );
-                assert_eq!(launches.load(Ordering::SeqCst), fail_at + 1);
-                assert_eq!(Arc::strong_count(&log), 1, "launch {fail_at}");
-                assert!(holds_no_key(&index), "launch {fail_at}");
+                if fail_at == usize::MAX {
+                    assert_eq!(result.unwrap().0, 10, "successful build key count");
+                    assert!(
+                        (0u64..10).all(|i| index.get(&key(i)).next().is_some()),
+                        "successful build installs every key"
+                    );
+                    assert_eq!(state.0.load(Ordering::SeqCst), 5, "successful launches");
+                } else {
+                    assert!(
+                        matches!(result, Err(Error::Thread(ThreadError::EmptyCpus))),
+                        "launch {fail_at}: {result:?}"
+                    );
+                    assert_eq!(
+                        state.0.load(Ordering::SeqCst),
+                        fail_at + 1,
+                        "failed launches"
+                    );
+                    assert!(holds_no_key(&index), "launch {fail_at} installs no keys");
+                }
+                assert_eq!(Arc::strong_count(&log), 1, "launch {fail_at} releases log");
             });
         }
     }
@@ -1174,15 +1170,24 @@ mod tests {
         });
     }
 
-    /// Build the three-chunk log on a native runtime, where each worker and decoder runs on an
-    /// OS thread of its own, `rounds` times. `make` returns a runner and its storage directory,
-    /// which is removed afterwards.
-    fn parallel_build_native<R>(make: impl Fn() -> (R, std::path::PathBuf), rounds: usize)
-    where
+    #[rstest::rstest]
+    #[case::tokio(|| {
+        let cfg = commonware_runtime::tokio::Config::default();
+        let directory = cfg.storage_directory().clone();
+        (commonware_runtime::tokio::Runner::new(cfg), directory)
+    })]
+    #[cfg_attr(target_os = "linux", case::iouring(|| {
+        let cfg = commonware_runtime::iouring::Config::default();
+        let directory = cfg.storage_directory().clone();
+        (commonware_runtime::iouring::Runner::new(cfg), directory)
+    }))]
+    fn test_parallel_build_three_chunk_log_native<R>(
+        #[case] make: impl Fn() -> (R, std::path::PathBuf),
+    ) where
         R: commonware_runtime::Runner,
         R::Context: Spawner + commonware_runtime::Metrics,
     {
-        for round in 0..rounds {
+        for round in 0..3 {
             let (runner, directory) = make();
             runner.start(|context| async move {
                 let log = three_chunk_log();
@@ -1203,68 +1208,14 @@ mod tests {
                 .await
                 .unwrap();
                 assert_eq!(keys, 10, "round {round}");
-                assert!((0u64..10).all(|i| index.get(&key(i)).next().is_some()));
+                assert!(
+                    (0u64..10).all(|i| index.get(&key(i)).next().is_some()),
+                    "round {round} installs every key"
+                );
                 assert_eq!(Arc::strong_count(&log), 1, "round {round}");
             });
             let _ = std::fs::remove_dir_all(directory);
         }
-    }
-
-    #[test]
-    fn test_parallel_build_three_chunk_log_tokio() {
-        parallel_build_native(
-            || {
-                let cfg = commonware_runtime::tokio::Config::default();
-                let directory = cfg.storage_directory().clone();
-                (commonware_runtime::tokio::Runner::new(cfg), directory)
-            },
-            10,
-        );
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn test_parallel_build_three_chunk_log_iouring() {
-        parallel_build_native(
-            || {
-                let cfg = commonware_runtime::iouring::Config::default();
-                let directory = cfg.storage_directory().clone();
-                (commonware_runtime::iouring::Runner::new(cfg), directory)
-            },
-            10,
-        );
-    }
-
-    /// The same log builds in full without failures, so the failures above come from the
-    /// injected launches.
-    #[test]
-    fn test_parallel_build_three_chunk_log() {
-        deterministic::Runner::default().start(|context| async move {
-            let log = three_chunk_log();
-            let mut index = crate::index::partitioned::unordered::Index::<TwoCap, Location, 1>::new(
-                context.child("index"),
-                TwoCap,
-            );
-            let wrapper = FailLaunch {
-                inner: context.child("build"),
-                launches: Arc::new(AtomicUsize::new(0)),
-                fail_at: usize::MAX,
-            };
-            let (keys, _) = build_snapshot_parallel(
-                &mut index,
-                wrapper,
-                Location::new(0),
-                &log,
-                NonZeroUsize::new(4).unwrap(),
-                NonZeroUsize::new(1 << 16).unwrap(),
-                None,
-            )
-            .await
-            .unwrap();
-            assert_eq!(keys, 10);
-            assert!((0u64..10).all(|i| index.get(&key(i)).next().is_some()));
-            assert_eq!(Arc::strong_count(&log), 1);
-        });
     }
 
     #[test]

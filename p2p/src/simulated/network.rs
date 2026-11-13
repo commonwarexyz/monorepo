@@ -1642,20 +1642,7 @@ mod tests {
                 ("network_peer_router", "Shared"),
                 ("network_peer_listener", "Shared"),
             ] {
-                let name = format!("name=\"{task}\"");
-                let lines: Vec<_> = metrics
-                    .lines()
-                    .filter(|line| {
-                        line.starts_with("runtime_tasks_spawned_total{") && line.contains(&name)
-                    })
-                    .collect();
-                assert!(!lines.is_empty(), "missing {name}: {metrics}");
-                assert!(
-                    lines
-                        .iter()
-                        .all(|line| line.contains(&format!("execution=\"{execution}\""))),
-                    "{name}: {metrics}"
-                );
+                crate::authenticated::placement::assert_execution(&metrics, task, execution, true);
             }
         });
     }

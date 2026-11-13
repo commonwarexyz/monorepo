@@ -1290,19 +1290,10 @@ mod tests {
             let _verification = marshaled.verify(consensus_context, commitment).await;
             let metrics = context.encode();
             for task in ["propose", "deferred_verify", "shard_validity_wait"] {
-                let name = format!("name=\"marshaled_{task}\"");
-                let tasks: Vec<_> = metrics
-                    .lines()
-                    .filter(|line| {
-                        line.starts_with("runtime_tasks_spawned_total{") && line.contains(&name)
-                    })
-                    .collect();
-                assert!(!tasks.is_empty(), "missing {name}: {metrics}");
-                assert!(
-                    tasks
-                        .iter()
-                        .all(|line| line.contains("execution=\"Shared\"")),
-                    "{name}: {metrics}"
+                crate::marshal::mocks::assert_execution(
+                    &metrics,
+                    &format!("marshaled_{task}"),
+                    "Shared",
                 );
             }
         });

@@ -199,8 +199,55 @@ impl ArcWake for Blocker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Runner as _, Spawner as _, Supervisor as _, deterministic};
     use futures::task::waker;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// Where the next spawn of a fresh context runs after `steps`, one letter each: `o` places
+    /// it on `thread`, `s` on the shared executor and `b` on the blocking pool, `p` calls
+    /// `place`, and `h` takes the context a spawn hands its task.
+    fn runs_at(steps: &str, thread: &Thread) -> &'static str {
+        let mut place = Place::default();
+        for step in steps.chars() {
+            match step {
+                'o' => place.set(Placement::Thread(thread.clone())),
+                's' => place.set(Placement::Shared),
+                'b' => place.set(Placement::Blocking),
+                'p' => place.place(),
+                _ => place = place.handoff(),
+            }
+        }
+        let at = match place.execution() {
+            Execution::Thread => "thread",
+            Execution::Shared(true) => "blocking",
+            Execution::Shared(false) => "shared",
+        };
+        assert_eq!(place.thread().is_some(), at == "thread", "{steps}");
+        assert_eq!(place.blocking(), at == "blocking", "{steps}");
+        at
+    }
+
+    /// The last explicit placement wins. `place` does nothing on a fresh or explicitly placed
+    /// context. A handed-off context is unplaced and remembers where its task runs until `place`,
+    /// and an explicit placement replaces what it remembers.
+    #[test]
+    fn test_place_follows_the_last_placement() {
+        let thread = deterministic::Runner::default()
+            .start(|context| async move { context.child("t").thread().build().expect("thread") });
+        let rows: [(&str, &[&str]); 3] = [
+            (
+                "shared",
+                &["", "p", "os", "bs", "osp", "oh", "hp", "ohhp", "ohsp"],
+            ),
+            ("blocking", &["ob", "sb", "bp", "bhp", "ohbp"]),
+            ("thread", &["o", "bo", "op", "ohp", "ohphp"]),
+        ];
+        for (expected, steps) in rows {
+            for steps in steps {
+                assert_eq!(runs_at(steps, &thread), expected, "{steps}");
+            }
+        }
+    }
 
     #[test]
     fn test_blocker_waits_until_wake() {

@@ -581,3 +581,31 @@ impl<Fut: Future> Future for Root<Fut> {
         self.future.as_mut().poll(cx)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Cpus;
+
+    /// Ranges store each id once, membership agrees with iteration up to and past 1024, and ids at
+    /// or above 1024 are not stored while the smallest one is recorded.
+    #[test]
+    fn test_cpus_store_ids_below_1024() {
+        let cpus = Cpus::from(2..5);
+        assert_eq!(cpus.iter().collect::<Vec<_>>(), [2, 3, 4]);
+        assert_eq!((cpus.len(), Cpus::from(3..=3).len()), (3, 1));
+        for empty in [Cpus::from(0..0), Cpus::from(3..3)] {
+            assert!(empty.is_empty() && empty.beyond().is_none());
+        }
+        let cpus = Cpus::from([0, 63, 64, 1023]);
+        for id in 0..1100 {
+            assert_eq!(cpus.contains(id), cpus.iter().any(|cpu| cpu == id), "{id}");
+        }
+        assert_eq!(cpus.len(), 4);
+        let large = Cpus::from([5000, 1024]);
+        assert!(large.is_empty() && !large.contains(1024));
+        assert_eq!((large.len(), large.iter().count()), (0, 0));
+        assert_eq!(large.beyond(), Some(1024));
+        assert_eq!(Cpus::from(1000..=5000).len(), 24);
+        assert_eq!(Cpus::from(1000..=5000).beyond(), Some(1024));
+    }
+}

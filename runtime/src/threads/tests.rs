@@ -4,70 +4,33 @@
 use crate::iouring;
 use crate::{
     Clock, ContextCell, Error, Handle, Local, LocalHandle, Metrics, Runner, Spawner, Supervisor,
-    Thread, ThreadError, deterministic, reschedule, tokio,
+    Thread, deterministic, reschedule,
+    threads::{
+        admission::State,
+        testing::{DropFlag, bounded, executions, flag, recording, residents, settle},
+    },
+    tokio,
 };
-use commonware_macros::select;
-use commonware_utils::channel::oneshot;
-use futures::future::pending;
+use commonware_utils::{channel::oneshot, sync::Mutex};
+use futures::{FutureExt as _, future::pending};
 use rstest::rstest;
 use std::{
     cell::{Cell, RefCell},
-    future::Future,
+    future::{Ready, ready},
+    panic::{AssertUnwindSafe, catch_unwind},
     rc::Rc,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicUsize, Ordering},
         mpsc,
     },
-    thread::ThreadId,
+    thread::{JoinHandle, ThreadId},
     time::Duration,
 };
-
-/// Run `body` on a helper thread and fail if it does not return in time, so a runner that hangs
-/// on shutdown fails the test instead of blocking it.
-fn bounded<T: Send + 'static>(body: impl FnOnce() -> T + Send + 'static) -> T {
-    let (tx, rx) = mpsc::channel();
-    let helper = std::thread::spawn(move || {
-        let _ = tx.send(body());
-    });
-    match rx.recv_timeout(Duration::from_secs(60)) {
-        Ok(value) => {
-            helper.join().unwrap();
-            value
-        }
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            std::panic::resume_unwind(helper.join().unwrap_err())
-        }
-        Err(mpsc::RecvTimeoutError::Timeout) => panic!("the runner did not return"),
-    }
-}
 
 /// The OS thread running the caller.
 fn os() -> ThreadId {
     std::thread::current().id()
-}
-
-/// Await `future`, failing if it does not complete in time, so a rule that would leave a task
-/// pending forever fails instead of hanging.
-async fn within<F: Future>(context: &impl Clock, future: F) -> F::Output {
-    select! {
-        output = future => output,
-        _ = context.sleep(Duration::from_secs(10)) => panic!("timed out"),
-    }
-}
-
-/// The execution labels of the tasks spawned under `name`, from the runner's task metrics.
-pub(super) fn executions(metrics: &impl Metrics, name: &str) -> Vec<String> {
-    let needle = format!("name=\"{name}\"");
-    metrics
-        .encode()
-        .lines()
-        .filter(|line| line.starts_with("runtime_tasks_spawned_total{") && line.contains(&needle))
-        .filter_map(|line| {
-            let execution = line.split("execution=\"").nth(1)?.split('"').next()?;
-            Some(execution.to_string())
-        })
-        .collect()
 }
 
 /// Spawn a task from `context` and return the OS thread it ran on and the context's label.
@@ -77,39 +40,13 @@ async fn ran_on<C: Spawner>(context: C) -> (ThreadId, String) {
     (id, name)
 }
 
-/// A context whose runtime thread a test can read.
-trait PlacedOn {
-    /// The runtime thread the context's spawns run on.
-    fn placed_on(&self) -> Thread;
-}
-
-impl PlacedOn for deterministic::Context {
-    fn placed_on(&self) -> Thread {
-        self.placed_thread().cloned().expect("placed on a thread")
-    }
-}
-
-impl PlacedOn for tokio::Context {
-    fn placed_on(&self) -> Thread {
-        self.placed_thread().cloned().expect("placed on a thread")
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl PlacedOn for iouring::Context {
-    fn placed_on(&self) -> Thread {
-        self.placed_thread().cloned().expect("placed on a thread")
-    }
-}
-
-/// Wait until `thread` stops admitting work.
-async fn closes(context: &impl Clock, thread: &Thread) {
-    within(context, async {
-        while thread.inner().is_open() {
-            context.sleep(Duration::from_millis(1)).await;
-        }
-    })
-    .await;
+/// The OS thread a `Local`'s task runs on, and where spawns from its context run, unplaced and
+/// placed.
+async fn local_spawns<C: Spawner>(local: Local<C>) -> (ThreadId, [(ThreadId, String); 2]) {
+    let here = os();
+    let inner = ran_on(local.child("inner").into_inner()).await;
+    let placed = ran_on(local.child("placed").into_inner().placed()).await;
+    (here, [inner, placed])
 }
 
 /// The number of OS threads in this process, where the platform reports it.
@@ -185,15 +122,6 @@ impl<E: Spawner> CellActor<E> {
     }
 }
 
-/// Sets a flag when dropped.
-struct DropFlag(Arc<AtomicBool>);
-
-impl Drop for DropFlag {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::SeqCst);
-    }
-}
-
 /// Spawns a local task from `Drop` and reports whether its handle resolved Closed at once and
 /// whether its factory ran.
 struct SpawnOnDrop<C: Spawner> {
@@ -214,10 +142,7 @@ impl<C: Spawner> Drop for SpawnOnDrop<C> {
                 async {}
             }
         });
-        let closed = matches!(
-            futures::FutureExt::now_or_never(&mut handle),
-            Some(Err(Error::Closed))
-        );
+        let closed = matches!((&mut handle).now_or_never(), Some(Err(Error::Closed)));
         let _ = self.report.take().unwrap().send((closed, ran.get()));
     }
 }
@@ -228,6 +153,16 @@ struct Probe {
     report: Option<oneshot::Sender<ThreadId>>,
     /// Makes the output `!Send`.
     _local: Rc<()>,
+}
+
+impl Probe {
+    /// A probe reporting to `report`.
+    fn new(report: oneshot::Sender<ThreadId>) -> Self {
+        Self {
+            report: Some(report),
+            _local: Rc::new(()),
+        }
+    }
 }
 
 impl Drop for Probe {
@@ -243,64 +178,92 @@ thread_local! {
     static HELD: RefCell<Option<LocalHandle<Probe>>> = const { RefCell::new(None) };
 }
 
-/// Run a runner of another instance on its own OS thread, holding a thread of it open until the
-/// returned sender is used. Returns the thread, the sender, and the runner's OS thread.
-fn hold_open<R: Runner + Send + 'static>(
+/// Spawn a resident of `thread` from `context` that spawns a local task, both pending forever,
+/// and wait until it started. Returns its OS thread and receivers of the OS threads the
+/// resident's future and the local task's future are dropped on.
+async fn probes<C: Spawner>(
+    context: C,
+    thread: &Thread,
+) -> (ThreadId, [oneshot::Receiver<ThreadId>; 2]) {
+    let (report, dropped) = oneshot::channel();
+    let (report_local, dropped_local) = oneshot::channel();
+    let (started, start) = oneshot::channel();
+    drop(context.spawn_on(thread, move |local| {
+        let (probe, probe_local) = (Probe::new(report), Probe::new(report_local));
+        drop(local.child("local").spawn_local(move |_| async move {
+            let _probe = probe_local;
+            pending::<()>().await;
+        }));
+        started.send(os()).unwrap();
+        async move {
+            let _probe = probe;
+            pending::<()>().await;
+        }
+    }));
+    (start.await.unwrap(), [dropped, dropped_local])
+}
+
+/// Run a runner of another instance on its own OS thread and hold its root until the returned
+/// sender is used. Returns what `make` built from the root's context, the sender, and the
+/// runner's OS thread.
+fn hold_open<R, T>(
     runner: R,
-) -> (Thread, mpsc::Sender<()>, std::thread::JoinHandle<()>)
+    make: impl FnOnce(&R::Context) -> T + Send + 'static,
+) -> (T, mpsc::Sender<()>, JoinHandle<()>)
 where
-    R::Context: Spawner,
+    R: Runner + Send + 'static,
+    T: Send + 'static,
 {
     let (hold, held) = mpsc::channel();
     let (release, released) = mpsc::channel::<()>();
     let other = std::thread::spawn(move || {
         runner.start(|context| async move {
-            hold.send(context.child("foreign").thread().build().unwrap())
-                .unwrap();
+            hold.send(make(&context)).unwrap();
             released.recv().unwrap();
         });
     });
     (held.recv().unwrap(), release, other)
 }
 
+/// An open thread of another runner, held by [hold_open].
+fn foreign_thread<R>(runner: R) -> (Thread, mpsc::Sender<()>, JoinHandle<()>)
+where
+    R: Runner + Send + 'static,
+    R::Context: Spawner,
+{
+    hold_open(runner, |context| {
+        context.child("foreign").thread().build().unwrap()
+    })
+}
+
 /// Spawn toward a thread of each runner in `others` from `runner`, then release them.
-fn wrong_runtime<R: Runner>(
+fn wrong_runtime<R: Runner + Send + 'static>(
     runner: R,
-    others: Vec<(Thread, mpsc::Sender<()>, std::thread::JoinHandle<()>)>,
+    others: Vec<(Thread, mpsc::Sender<()>, JoinHandle<()>)>,
 ) where
-    R::Context: Spawner + Clock,
+    R::Context: Spawner,
 {
     let threads: Vec<Thread> = others.iter().map(|(thread, _, _)| thread.clone()).collect();
-    runner.start(|context| async move {
-        for thread in threads {
-            assert!(thread.inner().is_open());
-            let ran = Arc::new(AtomicBool::new(false));
+    bounded(move || {
+        runner.start(|context| async move {
+            for thread in threads {
+                assert!(thread.inner().is_open());
+                let ran = flag();
 
-            let placed = context.child("placed").on(&thread);
-            let wired = placed.child("wired").shared().spawn(|_| pending::<()>());
-            let handle = placed.spawn({
-                let ran = ran.clone();
-                move |_| {
-                    ran.store(true, Ordering::SeqCst);
-                    async {}
-                }
-            });
-            assert!(matches!(handle.await, Err(Error::Closed)));
-            assert!(matches!(within(&context, wired).await, Err(Error::Closed)));
+                let placed = context.child("placed").on(&thread);
+                let wired = placed.child("wired").shared().spawn(|_| pending::<()>());
+                let handle = placed.spawn(recording(&ran));
+                assert!(matches!(handle.await, Err(Error::Closed)));
+                assert!(matches!(wired.await, Err(Error::Closed)));
 
-            let on = context.child("on");
-            let wired = on.child("wired").spawn(|_| pending::<()>());
-            let handle = on.spawn_on(&thread, {
-                let ran = ran.clone();
-                move |_| {
-                    ran.store(true, Ordering::SeqCst);
-                    async {}
-                }
-            });
-            assert!(matches!(handle.await, Err(Error::Closed)));
-            assert!(matches!(within(&context, wired).await, Err(Error::Closed)));
-            assert!(!ran.load(Ordering::SeqCst));
-        }
+                let on = context.child("on");
+                let wired = on.child("wired").spawn(|_| pending::<()>());
+                let handle = on.spawn_on(&thread, recording(&ran));
+                assert!(matches!(handle.await, Err(Error::Closed)));
+                assert!(matches!(wired.await, Err(Error::Closed)));
+                assert!(!ran.load(Ordering::SeqCst));
+            }
+        })
     });
     for (_, release, other) in others {
         release.send(()).unwrap();
@@ -308,113 +271,11 @@ fn wrong_runtime<R: Runner>(
     }
 }
 
-/// The series of the residents gauge for threads named `name`, as (count, value of the last).
-fn residents(metrics: &impl Metrics, name: &str) -> (usize, Option<i64>) {
-    let needle = format!("name=\"{name}\"");
-    let values: Vec<i64> = metrics
-        .encode()
-        .lines()
-        .filter(|line| line.starts_with("runtime_thread_residents{") && line.contains(&needle))
-        .filter_map(|line| line.trim_end().rsplit(' ').next()?.parse().ok())
-        .collect();
-    (values.len(), values.last().copied())
-}
-
-/// Wait until the residents gauge of threads named `name` reads `expected`. Gauges lag handles
-/// on native runners.
-async fn settle(context: &(impl Metrics + Clock), name: &str, expected: i64) {
-    within(context, async {
-        while residents(context, name).1 != Some(expected) {
-            context.sleep(Duration::from_millis(1)).await;
-        }
-    })
-    .await;
-}
-
-#[rstest]
-#[case::deterministic(deterministic::Runner::default())]
-#[case::tokio(tokio::Runner::default())]
-#[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default()))]
-fn test_thread_smoke<R: Runner>(#[case] runner: R)
-where
-    R::Context: Spawner + Clock + Metrics,
-{
-    runner.start(|context| async move {
-        // A root task with !Send state shared by its residents.
-        let value = context
-            .child("root")
-            .thread()
-            .spawn(|local| async move {
-                let shared = Rc::new(RefCell::new(0));
-                let mut handles = Vec::new();
-                for _ in 0..10 {
-                    let shared = shared.clone();
-                    handles.push(local.child("leaf").spawn_local(move |_| async move {
-                        reschedule().await;
-                        *shared.borrow_mut() += 1;
-                        Rc::new(7)
-                    }));
-                }
-                let mut total = 0;
-                for handle in handles {
-                    total += *handle.await.unwrap();
-                }
-                let count = *shared.borrow();
-                total + count
-            })
-            .unwrap()
-            .await
-            .unwrap();
-        assert_eq!(value, 80);
-
-        // A built thread hosting placed spawns and spawn_on tasks.
-        let thread = context.child("built").thread().build().unwrap();
-        let placed = context.child("placed").on(&thread);
-        let a = placed.spawn(|_| async { 1 });
-        let b = context
-            .child("remote")
-            .spawn_on(&thread, |local| async move {
-                let inner = local.child("inner").spawn_local(|_| async { Rc::new(2) });
-                *inner.await.unwrap()
-            });
-        assert_eq!(a.await.unwrap() + b.await.unwrap(), 3);
-
-        // An attached context.
-        let attached = context.child("attached").thread().attach().unwrap();
-        let c = attached.child("x").spawn(|ctx| async move {
-            ctx.sleep(Duration::from_millis(1)).await;
-            3
-        });
-        assert_eq!(c.await.unwrap(), 3);
-
-        // Closing a thread aborts its residents.
-        let lineage = context.child("lineage");
-        let (tx, rx) = futures::channel::oneshot::channel();
-        let owner = lineage.spawn(move |ctx| async move {
-            let thread = ctx.child("t").thread().build().unwrap();
-            let probe = ctx.child("probe").spawn_on(&thread, |_| pending::<()>());
-            tx.send((thread, probe)).ok().unwrap();
-            pending::<()>().await;
-        });
-        let (thread, probe) = rx.await.unwrap();
-        owner.abort();
-        assert!(matches!(probe.await, Err(Error::Closed)));
-        let late = context.child("late").spawn_on(&thread, |_| pending::<()>());
-        assert!(matches!(late.await, Err(Error::Closed)));
-
-        // Pins validate.
-        let empty: Vec<usize> = Vec::new();
-        assert!(matches!(
-            context.child("empty").thread().pin(empty).build(),
-            Err(ThreadError::EmptyCpus)
-        ));
-    });
-}
-
-// The last of shared, blocking and on decides where a spawn runs, and child and with_attribute keep
-// it. A spawn hands its task an unplaced context, which spawns on the shared executor until placed
-// places it where the task runs, and placed does nothing on a context placed explicitly.
-// Contexts a thread hands out keep the creating context's label.
+// Spawns run where the last of shared, blocking and on placed their context, and child and
+// with_attribute keep it. A spawn hands its task an unplaced context, which spawns on the shared
+// executor until placed places it where the task runs. Residents of a thread share its OS
+// thread, which is not the runner's, and a spawned thread's root has its own. Contexts a thread
+// hands out keep the creating context's label. The unit tests of Place cover the combinations.
 #[rstest]
 #[case::deterministic(deterministic::Runner::default(), false)]
 #[case::tokio(tokio::Runner::default(), true)]
@@ -431,115 +292,50 @@ where
             .spawn_on(&thread, |_| async { os() })
             .await
             .unwrap();
+        assert!(
+            !native || home != os(),
+            "a resident ran on the runner's OS thread"
+        );
         let check = |ran, expect| assert_ran(&context, ran, expect, home, native);
 
-        // The last of shared, blocking and on wins.
-        check(
-            ran_on(context.child("on").on(&thread)).await,
-            Expect::Thread,
-        );
-        check(
-            ran_on(context.child("on_shared").on(&thread).shared()).await,
-            Expect::Shared,
-        );
-        check(
-            ran_on(context.child("on_blocking").on(&thread).blocking()).await,
-            Expect::Blocking,
-        );
-        check(
-            ran_on(context.child("blocking_on").blocking().on(&thread)).await,
-            Expect::Thread,
-        );
-        check(
-            ran_on(context.child("blocking_shared").blocking().shared()).await,
-            Expect::Shared,
-        );
-        check(
-            ran_on(context.child("shared_blocking").shared().blocking()).await,
-            Expect::Blocking,
-        );
-
-        // child and with_attribute keep the placement, the blocking pool included.
-        check(
-            ran_on(context.child("on_child").on(&thread).child("child")).await,
-            Expect::Thread,
-        );
-        check(
-            ran_on(context.child("on_attr").on(&thread).with_attribute("k", 1)).await,
-            Expect::Thread,
-        );
-        check(
-            ran_on(context.child("blocking_child").blocking().child("child")).await,
-            Expect::Blocking,
-        );
-        check(
-            ran_on(
+        // Each placement, and child and with_attribute after one.
+        let on = |label| context.child(label).on(&thread);
+        let lines = [
+            (on("on"), Expect::Thread),
+            (on("on_shared").shared(), Expect::Shared),
+            (on("on_blocking").blocking(), Expect::Blocking),
+            (on("on_child").child("child"), Expect::Thread),
+            (on("on_attr").with_attribute("k", 1), Expect::Thread),
+            (
                 context
                     .child("blocking_attr")
                     .blocking()
                     .with_attribute("k", 1),
-            )
-            .await,
-            Expect::Blocking,
-        );
+                Expect::Blocking,
+            ),
+            (context.child("fresh_placed").placed(), Expect::Shared),
+        ];
+        for (line, expect) in lines {
+            check(ran_on(line).await, expect);
+        }
 
-        // placed does nothing on a context that no spawn handed out, or that was placed
-        // explicitly.
-        check(
-            ran_on(context.child("fresh_placed").placed()).await,
-            Expect::Shared,
-        );
-        check(
-            ran_on(context.child("on_placed").on(&thread).placed()).await,
-            Expect::Thread,
-        );
-        check(
-            ran_on(context.child("shared_placed").on(&thread).shared().placed()).await,
-            Expect::Shared,
-        );
-        check(
-            ran_on(context.child("blocking_placed").blocking().placed()).await,
-            Expect::Blocking,
-        );
-
-        // A task placed on the thread receives an unplaced context. Its spawns, and those of the
-        // contexts derived from it, run on the shared executor until placed places them, and an
-        // explicit placement replaces what they remember.
+        // A task placed on the thread receives an unplaced context, and so does a task it spawns
+        // through placed. The placement belongs to the context, not to the task that holds it.
         let handed = context
             .child("handed")
             .on(&thread)
             .spawn(|context| async move {
                 let plain = ran_on(context.child("plain")).await;
-                let derived = ran_on(context.child("derived").with_attribute("k", 1)).await;
                 let placed = ran_on(context.child("placed").placed()).await;
-                let derived_placed = ran_on(
-                    context
-                        .child("derived_placed")
-                        .with_attribute("k", 1)
-                        .placed(),
-                )
-                .await;
-                let blocking = ran_on(context.child("blocking").blocking().placed()).await;
-                let shared = ran_on(context.child("shared").shared().placed()).await;
-
-                // A placed context stays placed through child and with_attribute.
-                let hoisted = context.child("hoisted").placed();
-                let hoisted_child = ran_on(hoisted.child("peer")).await;
-                let hoisted_attr = ran_on(hoisted.with_attribute("k", 1)).await;
-
-                // A task spawned through placed receives an unplaced context as well.
                 let nested = context
                     .child("nested")
                     .placed()
                     .spawn(|context| async move {
                         let plain = ran_on(context.child("plain")).await;
-                        let placed = ran_on(context.child("placed").placed()).await;
-                        (plain, placed)
+                        (plain, ran_on(context.child("placed").placed()).await)
                     })
                     .await
                     .unwrap();
-
-                // The placement belongs to the context, not to the task that holds it.
                 let saved = context.child("saved");
                 let saved = context
                     .child("elsewhere")
@@ -548,13 +344,7 @@ where
                     .unwrap();
                 [
                     (plain, Expect::Shared),
-                    (derived, Expect::Shared),
                     (placed, Expect::Thread),
-                    (derived_placed, Expect::Thread),
-                    (blocking, Expect::Blocking),
-                    (shared, Expect::Shared),
-                    (hoisted_child, Expect::Thread),
-                    (hoisted_attr, Expect::Thread),
                     (nested.0, Expect::Shared),
                     (nested.1, Expect::Thread),
                     (saved, Expect::Thread),
@@ -579,630 +369,218 @@ where
         // A task on the shared executor or the blocking pool receives an unplaced context that
         // remembers it. Each blocking task runs on a thread of its own, so a blocking task's
         // placed spawns do not run on its thread.
-        for blocking in [false, true] {
-            let line = context.child(if blocking {
-                "blocking_task"
-            } else {
-                "shared_task"
-            });
+        for (label, expect) in [
+            ("shared_task", Expect::Shared),
+            ("blocking_task", Expect::Blocking),
+        ] {
+            let blocking = matches!(expect, Expect::Blocking);
+            let line = context.child(label);
             let line = if blocking { line.blocking() } else { line };
-            let (plain, placed, hoisted, parent) = line
+            let (plain, placed, parent) = line
                 .spawn(|context| async move {
                     let parent = os();
                     let plain = ran_on(context.child("plain")).await;
                     let placed = ran_on(context.child("placed").placed()).await;
-                    let hoisted = ran_on(context.child("hoisted").placed().child("peer")).await;
-                    (plain, placed, hoisted, parent)
+                    (plain, placed, parent)
                 })
                 .await
                 .unwrap();
-            if native && blocking {
-                assert_ne!(placed.0, parent);
-                assert_ne!(hoisted.0, parent);
-            }
-            let expect = if blocking {
-                Expect::Blocking
-            } else {
-                Expect::Shared
-            };
+            assert!(
+                !native || !blocking || placed.0 != parent,
+                "a blocking task's placed spawn ran on its thread"
+            );
             check(plain, Expect::Shared);
             check(placed, expect);
-            check(hoisted, expect);
         }
 
-        // A Local's context is unplaced on its thread, through into_inner and through a deref
-        // child, for a spawn_on task, a root and a spawn_local task alike.
-        let (inner, deref, placed) = context
+        // A Local's context is unplaced on its thread, for a spawn_on task, a spawn_local task
+        // and a root alike. A root and its spawn_local task share an OS thread of their own.
+        let (here, spawns) = context
             .child("local")
+            .spawn_on(&thread, local_spawns)
+            .await
+            .unwrap();
+        let (local, task_spawns) = context
+            .child("spawn_local")
             .spawn_on(&thread, |local| async move {
-                let deref = ran_on((*local).child("deref")).await;
-                let placed = ran_on(local.child("placed").into_inner().placed()).await;
-                let inner = ran_on(local.child("inner").into_inner()).await;
-                (inner, deref, placed)
+                local.child("task").spawn_local(local_spawns).await.unwrap()
             })
             .await
             .unwrap();
-        check(inner, Expect::Shared);
-        check(deref, Expect::Shared);
-        check(placed, Expect::Thread);
-        let (inner, placed, root) = context
+        assert!(
+            !native || (here == home && local == home),
+            "a resident left its thread"
+        );
+        for (ran, expect) in spawns
+            .into_iter()
+            .chain(task_spawns)
+            .zip([Expect::Shared, Expect::Thread].repeat(2))
+        {
+            check(ran, expect);
+        }
+        let ((root, spawns), (leaf, leaf_spawns)) = context
             .child("root")
             .thread()
             .spawn(|local| async move {
-                let root = os();
-                let placed = ran_on(local.child("placed").into_inner().placed()).await;
-                let inner = ran_on(local.child("inner").into_inner()).await;
-                (inner, placed, root)
+                let leaf = local.child("leaf").spawn_local(local_spawns);
+                (local_spawns(local).await, leaf.await.unwrap())
             })
             .unwrap()
             .await
             .unwrap();
-        assert_ran(&context, inner, Expect::Shared, root, native);
-        assert_ran(&context, placed, Expect::Thread, root, native);
-        let (inner, placed) = context
-            .child("spawn_local")
-            .spawn_on(&thread, |local| async move {
-                local
-                    .child("task")
-                    .spawn_local(|local| async move {
-                        let placed = ran_on(local.child("placed").into_inner().placed()).await;
-                        let inner = ran_on(local.child("inner").into_inner()).await;
-                        (inner, placed)
-                    })
-                    .await
-                    .unwrap()
-            })
-            .await
-            .unwrap();
-        check(inner, Expect::Shared);
-        check(placed, Expect::Thread);
+        assert!(
+            !native || (root == leaf && root != home && root != os()),
+            "a root does not share its own OS thread with its residents"
+        );
+        for (ran, expect) in spawns
+            .into_iter()
+            .chain(leaf_spawns)
+            .zip([Expect::Shared, Expect::Thread].repeat(2))
+        {
+            assert_ran(&context, ran, expect, root, native);
+        }
 
-        // An attached context is placed on its thread, and a task spawned from it can spawn there
-        // again through placed. Contexts handed out by attach and by the builder's spawn keep the
-        // creating label.
+        // An attached context is placed on its thread, and a task spawned from it can spawn
+        // there again through placed. Contexts handed out by attach and by the builder's spawn
+        // keep the creating label.
         let attached = context.child("attached").thread().attach().unwrap();
         assert_eq!(attached.name().label, "attached");
-        let attached_home = attached
-            .child("home")
-            .spawn(|_| async { os() })
-            .await
-            .unwrap();
-        let (plain, placed) = attached
+        let (attached_home, plain, placed) = attached
             .child("task")
             .spawn(|context| async move {
                 let plain = ran_on(context.child("plain")).await;
-                let placed = ran_on(context.child("placed").placed()).await;
-                (plain, placed)
+                (os(), plain, ran_on(context.child("placed").placed()).await)
             })
             .await
             .unwrap();
         assert_ran(&context, plain, Expect::Shared, attached_home, native);
         assert_ran(&context, placed, Expect::Thread, attached_home, native);
-        let (_, name) = ran_on(attached.placed()).await;
-        assert_eq!(executions(&context, &name), ["Thread"]);
-        let (label, home) = context
+        assert_ran(
+            &context,
+            ran_on(attached).await,
+            Expect::Thread,
+            attached_home,
+            native,
+        );
+        let names = context
             .child("spawned")
             .thread()
             .spawn(|local| async move { (local.name().label, local.home().name().to_string()) })
             .unwrap()
             .await
             .unwrap();
-        assert_eq!(label, "spawned");
-        assert_eq!(home, "spawned");
+        assert_eq!(names, ("spawned".to_string(), "spawned".to_string()));
     });
 }
 
-// An unplaced context belongs to its task's supervision node, so once the task ends a spawn from it
-// resolves Closed without running its factory, whether or not it was placed.
+// Placement creates no supervision edge, and a thread lives as long as the lineage that built
+// it. Aborting a context placed on a thread aborts its tasks and the residents it spawned with
+// spawn_on, with their spawn_local tasks, and leaves the thread open. Once a task ended, spawns
+// from a context it handed out resolve Closed without running their factory, placed or not.
+// Once the lineage that built a thread ends, the thread closes and aborts only its residents,
+// wherever they are supervised, and a later placed spawn resolves Closed without running its
+// factory and closes the consumed context's node.
 #[rstest]
 #[case::deterministic(deterministic::Runner::default())]
 #[case::tokio(tokio::Runner::default())]
 #[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default()))]
-fn test_thread_placed_after_task_ends<R: Runner>(#[case] runner: R)
-where
-    R::Context: Spawner,
-{
-    runner.start(|context| async move {
-        let thread = context.child("t").thread().build().unwrap();
-        let saved = context
-            .child("task")
-            .on(&thread)
-            .spawn(|context| async move { context.child("saved") })
-            .await
-            .unwrap();
-
-        // The handle resolves before the task's completing poll aborts its node. The thread polls
-        // its residents one at a time, so once another resident has run, that poll is over.
-        context
-            .child("barrier")
-            .spawn_on(&thread, |_| async {})
-            .await
-            .unwrap();
-        for placed in [false, true] {
-            let line = saved.child("late");
-            let line = if placed { line.placed() } else { line };
-            let ran = Arc::new(AtomicBool::new(false));
-            let factory = ran.clone();
-            let handle = line.spawn(move |_| {
-                factory.store(true, Ordering::SeqCst);
-                async {}
-            });
-            assert!(matches!(handle.await, Err(Error::Closed)));
-            assert!(!ran.load(Ordering::SeqCst), "the factory ran");
-        }
-    });
-}
-
-// Placed spawns, spawn_on and spawn_local tasks of one thread run on one OS thread, which is not
-// the runner's.
-#[rstest]
-#[case::tokio(tokio::Runner::default())]
-#[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default()))]
-fn test_thread_residents_share_os_thread<R: Runner>(#[case] runner: R)
-where
-    R::Context: Spawner,
-{
-    runner.start(|context| async move {
-        let root = os();
-        let thread = context.child("t").thread().build().unwrap();
-        let placed = context
-            .child("placed")
-            .on(&thread)
-            .spawn(|_| async { os() })
-            .await
-            .unwrap();
-        let (on, local) = context
-            .child("on")
-            .spawn_on(&thread, |local| async move {
-                let on = os();
-                let local = local
-                    .child("local")
-                    .spawn_local(|_| async { os() })
-                    .await
-                    .unwrap();
-                (on, local)
-            })
-            .await
-            .unwrap();
-        assert_eq!(placed, on);
-        assert_eq!(on, local);
-        assert_ne!(on, root);
-
-        // The root of a spawned thread shares its own OS thread with its residents.
-        let (spawned, local) = context
-            .child("spawned")
-            .thread()
-            .spawn(|local| async move {
-                let spawned = os();
-                let inner = local
-                    .child("local")
-                    .spawn_local(|_| async { os() })
-                    .await
-                    .unwrap();
-                (spawned, inner)
-            })
-            .unwrap()
-            .await
-            .unwrap();
-        assert_eq!(spawned, local);
-        assert_ne!(spawned, on);
-        assert_ne!(spawned, root);
-    });
-}
-
-// Placement creates no supervision edge. Aborting a context placed on a thread leaves the
-// thread open, and closing a thread aborts only its residents.
-#[rstest]
-#[case::deterministic(deterministic::Runner::default())]
-#[case::tokio(tokio::Runner::default())]
-#[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default()))]
-fn test_thread_no_supervision_edge<R: Runner>(#[case] runner: R)
+fn test_thread_supervision<R: Runner + Send + 'static>(#[case] runner: R)
 where
     R::Context: Spawner + Clock,
 {
-    runner.start(|context| async move {
-        let thread = context.child("t").thread().build().unwrap();
-
-        // Abort a placed task, then a placed lineage with a placed child.
-        let task = context
-            .child("placed")
-            .on(&thread)
-            .spawn(|_| pending::<()>());
-        task.abort();
-        assert!(matches!(task.await, Err(Error::Closed)));
-        let (tx, rx) = oneshot::channel();
-        let lineage = context
-            .child("lineage")
-            .on(&thread)
-            .spawn(move |context| async move {
-                let inner = context.child("inner").spawn(|_| pending::<()>());
-                tx.send(inner).ok().unwrap();
-                pending::<()>().await;
-            });
-        let inner = rx.await.unwrap();
-        lineage.abort();
-        assert!(matches!(lineage.await, Err(Error::Closed)));
-        assert!(matches!(inner.await, Err(Error::Closed)));
-
-        // The thread is still open.
-        let on = context.child("after").spawn_on(&thread, |_| async { 5 });
-        assert_eq!(on.await.unwrap(), 5);
-        let placed = context
-            .child("after_placed")
-            .on(&thread)
-            .spawn(|_| async { 6 });
-        assert_eq!(placed.await.unwrap(), 6);
-
-        // A thread that closes when its creating task is aborted.
-        let (tx, rx) = oneshot::channel();
-        let creator = context.child("creator").spawn(move |context| async move {
-            tx.send(context.thread().build().unwrap()).ok().unwrap();
-            pending::<()>().await;
-        });
-        let closing = rx.await.unwrap();
-
-        // Tasks that are not residents: a sibling, a task moved off the thread, and a task of a
-        // lineage that also spawns a resident.
-        let (go_sibling, wait) = oneshot::channel::<u32>();
-        let sibling = context
-            .child("sibling")
-            .spawn(move |_| async move { wait.await.unwrap() });
-        let (go_moved, wait) = oneshot::channel::<u32>();
-        let moved = context
-            .child("moved")
-            .on(&closing)
-            .shared()
-            .spawn(move |_| async move { wait.await.unwrap() });
-        let lineage = context.child("resident");
-        let (go_kept, wait) = oneshot::channel::<u32>();
-        let kept = lineage
-            .child("kept")
-            .spawn(move |_| async move { wait.await.unwrap() });
-
-        // Residents of the closing thread.
-        let resident = lineage.child("on").spawn_on(&closing, |_| pending::<()>());
-        let placed = context
-            .child("resident_placed")
-            .on(&closing)
-            .spawn(|_| pending::<()>());
-
-        creator.abort();
-        assert!(matches!(
-            within(&context, resident).await,
-            Err(Error::Closed)
-        ));
-        assert!(matches!(within(&context, placed).await, Err(Error::Closed)));
-        go_sibling.send(1).unwrap();
-        go_moved.send(2).unwrap();
-        go_kept.send(3).unwrap();
-        assert_eq!(sibling.await.unwrap(), 1);
-        assert_eq!(moved.await.unwrap(), 2);
-        assert_eq!(kept.await.unwrap(), 3);
-
-        // The first thread is unaffected.
-        let on = context.child("still").spawn_on(&thread, |_| async { 7 });
-        assert_eq!(on.await.unwrap(), 7);
-    });
-}
-
-// A built thread that nothing uses closes with its lineage, whether it was built from the root
-// or from a task, so start returns.
-#[rstest]
-#[case::deterministic(deterministic::Runner::default())]
-#[case::tokio(tokio::Runner::default())]
-#[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default()))]
-fn test_thread_build_idle_shutdown<R: Runner + Send + 'static>(#[case] runner: R)
-where
-    R::Context: Spawner,
-{
     bounded(move || {
         runner.start(|context| async move {
-            drop(context.child("root").thread().build().unwrap());
-            let task = context.child("task").spawn(|context| async move {
-                drop(context.child("inner").thread().build().unwrap());
-            });
-            task.await.unwrap();
-        });
-    });
-}
+            let thread = context.child("t").thread().build().unwrap();
+            let ran = flag();
 
-// An attached context used only through child keeps its thread open after it is dropped, until
-// its lineage is aborted, so start returns.
-#[rstest]
-#[case::deterministic(deterministic::Runner::default())]
-#[case::tokio(tokio::Runner::default())]
-#[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default()))]
-fn test_thread_attach_lifetime<R: Runner + Send + 'static>(#[case] runner: R)
-where
-    R::Context: Spawner + Clock + PlacedOn,
-{
-    bounded(move || {
-        runner.start(|context| async move {
+            // Abort a placed task, then a placed lineage with a child and a resident.
+            let task = context
+                .child("placed")
+                .on(&thread)
+                .spawn(|_| pending::<()>());
+            task.abort();
+            assert!(
+                matches!(task.await, Err(Error::Closed)),
+                "an aborted placed task did not close"
+            );
+            let dropped = flag();
             let (tx, rx) = oneshot::channel();
-            let lineage = context.child("lineage").spawn(move |context| async move {
-                let attached = context.child("t").thread().attach().unwrap();
-                let thread = attached.placed_on();
-                let probe = attached.child("probe").spawn(|_| pending::<()>());
-                drop(attached);
-                tx.send((thread, probe)).ok().unwrap();
-                pending::<()>().await;
-            });
-            let (thread, mut probe) = rx.await.unwrap();
-
-            // Dropping the attached context leaves its thread running the probe.
-            context.sleep(Duration::from_millis(10)).await;
-            assert!(futures::FutureExt::now_or_never(&mut probe).is_none());
-            assert!(thread.inner().is_open());
-
-            lineage.abort();
-            assert!(matches!(within(&context, probe).await, Err(Error::Closed)));
-            closes(&context, &thread).await;
-        });
-    });
-}
-
-// An attached thread closes when the task that consumes the attached context ends. An actor
-// derived from that context with child ending first leaves it open.
-#[rstest]
-#[case::deterministic(deterministic::Runner::default())]
-#[case::tokio(tokio::Runner::default())]
-#[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default()))]
-fn test_thread_attach_closes_with_consumer<R: Runner>(#[case] runner: R)
-where
-    R::Context: Spawner + Clock + PlacedOn,
-{
-    runner.start(|context| async move {
-        let attached = context.child("subsystem").thread().attach().unwrap();
-        let thread = attached.placed_on();
-
-        // The thread polls its residents one at a time, so once another resident ran, the
-        // completing poll of the actor, which aborts its node, is over.
-        attached.child("actor").spawn(|_| async {}).await.unwrap();
-        context
-            .child("barrier")
-            .spawn_on(&thread, |_| async {})
-            .await
-            .unwrap();
-        assert!(thread.inner().is_open());
-
-        // The thread stays open while the consuming task runs, and closes once it ends.
-        let (release, released) = oneshot::channel::<()>();
-        let main = attached.spawn(|_| async move { released.await.unwrap() });
-        context
-            .child("barrier")
-            .spawn_on(&thread, |_| async {})
-            .await
-            .unwrap();
-        assert!(thread.inner().is_open());
-        release.send(()).unwrap();
-        main.await.unwrap();
-        closes(&context, &thread).await;
-        let late = context.child("late").spawn_on(&thread, |_| async {});
-        assert!(matches!(late.await, Err(Error::Closed)));
-    });
-}
-
-// A long-lived task that attaches a thread per epoch leaves no thread open, because each
-// epoch's thread closes with the task that consumed its context, whether that task completed
-// or was aborted. OS threads do not accumulate either.
-#[rstest]
-#[case::deterministic(deterministic::Runner::default())]
-#[case::tokio(tokio::Runner::default())]
-#[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default()))]
-fn test_thread_attach_per_epoch<R: Runner>(#[case] runner: R)
-where
-    R::Context: Spawner + Clock + PlacedOn,
-{
-    /// Epochs the orchestrator runs.
-    const EPOCHS: u64 = 16;
-
-    runner.start(|context| async move {
-        let orchestrator = context.child("orchestrator").spawn(|context| async move {
-            let baseline = os_threads();
-            let mut threads = Vec::new();
-            for epoch in 0..EPOCHS {
-                let engine = context
-                    .child("engine")
-                    .with_attribute("epoch", epoch)
-                    .thread()
-                    .attach()
-                    .unwrap();
-                let thread = engine.placed_on();
-                let aborted = epoch % 2 == 0;
-                let main = engine.spawn(move |context| async move {
-                    // A long-lived actor runs next to the engine until the engine ends.
-                    drop(context.child("actor").placed().spawn(|_| pending::<()>()));
-                    if aborted {
-                        pending::<()>().await;
-                    }
-                });
-                if aborted {
-                    main.abort();
-                    assert!(matches!(main.await, Err(Error::Closed)));
-                } else {
-                    main.await.unwrap();
-                }
-                closes(&context, &thread).await;
-                threads.push(thread);
-            }
-
-            // The OS threads of native runners exit once their close completes. The count covers
-            // the whole process, so this relies on nextest running each test in its own process.
-            if let Some(baseline) = baseline {
-                within(&context, async {
-                    while os_threads().unwrap() > baseline {
-                        context.sleep(Duration::from_millis(1)).await;
-                    }
-                })
-                .await;
-            }
-            threads
-        });
-        let threads = orchestrator.await.unwrap();
-        assert_eq!(threads.len(), EPOCHS as usize);
-        assert!(threads.iter().all(|thread| !thread.inner().is_open()));
-    });
-}
-
-// A built thread lives as long as the task that built it. Once the task ended, the thread
-// closes, later placed spawns resolve Closed without running their factory, and each rejected
-// spawn closes its context's node.
-#[rstest]
-#[case::deterministic(deterministic::Runner::default())]
-#[case::tokio(tokio::Runner::default())]
-#[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default()))]
-fn test_thread_build_lives_with_lineage<R: Runner>(#[case] runner: R)
-where
-    R::Context: Spawner + Clock,
-{
-    runner.start(|context| async move {
-        let thread = context
-            .child("creator")
-            .spawn(|context| async move { context.thread().build().unwrap() })
-            .await
-            .unwrap();
-
-        // The creating task's node is aborted after it published, so a probe may be admitted
-        // first, and the close aborts it.
-        let probe = context
-            .child("probe")
-            .spawn_on(&thread, |_| pending::<()>());
-        assert!(matches!(within(&context, probe).await, Err(Error::Closed)));
-
-        // New placed spawns are rejected without running their factory, and the rejection
-        // aborts a child wired from the consumed context.
-        let placed = context.child("placed").on(&thread);
-        let wired = placed.child("wired").shared().spawn(|_| pending::<()>());
-        let ran = Arc::new(AtomicBool::new(false));
-        let handle = placed.spawn({
-            let ran = ran.clone();
-            move |_| {
-                ran.store(true, Ordering::SeqCst);
-                async {}
-            }
-        });
-        assert!(matches!(handle.await, Err(Error::Closed)));
-        assert!(!ran.load(Ordering::SeqCst));
-        assert!(matches!(within(&context, wired).await, Err(Error::Closed)));
-    });
-}
-
-// Aborting a root at once closes its thread and resolves Closed, whether or not its factory
-// started. On deterministic both calls happen in one poll, so the factory never runs.
-#[rstest]
-#[case::deterministic(deterministic::Runner::default(), true)]
-#[case::tokio(tokio::Runner::default(), false)]
-#[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default(), false))]
-fn test_thread_root_abort_before_start<R: Runner + Send + 'static>(
-    #[case] runner: R,
-    #[case] unrun: bool,
-) where
-    R::Context: Spawner + Clock,
-{
-    bounded(move || {
-        runner.start(|context| async move {
-            let ran = Arc::new(AtomicBool::new(false));
-            let handle = context
-                .child("t")
-                .thread()
-                .spawn({
-                    let ran = ran.clone();
-                    move |_| {
-                        ran.store(true, Ordering::SeqCst);
+            let lineage = context.child("lineage").on(&thread).spawn({
+                let (thread, flag) = (thread.clone(), DropFlag(dropped.clone()));
+                move |context| async move {
+                    let inner = context.child("inner").spawn(|_| pending::<()>());
+                    let resident = context.child("resident").spawn_on(&thread, move |local| {
+                        drop(local.child("local").spawn_local(move |_| async move {
+                            let _flag = flag;
+                            pending::<()>().await;
+                        }));
                         pending::<()>()
-                    }
-                })
-                .unwrap();
-            handle.abort();
-            assert!(matches!(within(&context, handle).await, Err(Error::Closed)));
-            if unrun {
-                assert!(!ran.load(Ordering::SeqCst));
-            }
-        });
-    });
-}
-
-// A panic in the root factory or the root poll resolves the root handle with Exited, and the
-// thread closes.
-#[rstest]
-#[case::deterministic(deterministic::Runner::new(
-    deterministic::Config::default().with_catch_panics(true)
-))]
-#[case::tokio(tokio::Runner::new(tokio::Config::default().with_catch_panics(true)))]
-#[cfg_attr(
-    target_os = "linux",
-    case::iouring(iouring::Runner::new(iouring::Config::default().with_catch_panics(true)))
-)]
-fn test_thread_root_panic<R: Runner>(#[case] runner: R)
-where
-    R::Context: Spawner + Clock,
-{
-    runner.start(|context| async move {
-        let (tx, rx) = oneshot::channel();
-        let handle = context
-            .child("factory")
-            .thread()
-            .spawn(move |local| -> std::future::Ready<()> {
-                tx.send(local.home().clone()).unwrap();
-                panic!("root factory");
-            })
-            .unwrap();
-        assert!(matches!(within(&context, handle).await, Err(Error::Exited)));
-        let thread = rx.await.unwrap();
-        let probe = context
-            .child("probe")
-            .spawn_on(&thread, |_| pending::<()>());
-        assert!(matches!(within(&context, probe).await, Err(Error::Closed)));
-
-        let (tx, rx) = oneshot::channel();
-        let handle = context
-            .child("poll")
-            .thread()
-            .spawn(move |local| {
-                let home = local.home().clone();
-                async move {
-                    tx.send(home).unwrap();
-                    reschedule().await;
-                    panic!("root poll");
+                    });
+                    tx.send((inner, resident)).ok().unwrap();
+                    pending::<()>().await;
                 }
-            })
-            .unwrap();
-        assert!(matches!(within(&context, handle).await, Err(Error::Exited)));
-        let thread = rx.await.unwrap();
-        let probe = context
-            .child("probe")
-            .spawn_on(&thread, |_| pending::<()>());
-        assert!(matches!(within(&context, probe).await, Err(Error::Closed)));
-    });
-}
+            });
+            let (inner, resident) = rx.await.unwrap();
+            lineage.abort();
+            for handle in [lineage, inner, resident] {
+                assert!(
+                    matches!(handle.await, Err(Error::Closed)),
+                    "a task of the aborted lineage did not close"
+                );
+            }
+            settle(&context, || dropped.load(Ordering::SeqCst)).await;
+            let after = context.child("after").spawn_on(&thread, |_| async { 5 });
+            assert_eq!(after.await.unwrap(), 5, "the abort closed the thread");
 
-// Closing a thread when its creating lineage finishes aborts residents supervised by an
-// unrelated lineage, which keeps running.
-#[rstest]
-#[case::deterministic(deterministic::Runner::default())]
-#[case::tokio(tokio::Runner::default())]
-#[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default()))]
-fn test_thread_close_cancels_foreign_residents<R: Runner>(#[case] runner: R)
-where
-    R::Context: Spawner + Clock,
-{
-    runner.start(|context| async move {
-        let (tx, rx) = oneshot::channel();
-        let (end, ended) = oneshot::channel::<()>();
-        let creator = context.child("creator").spawn(move |context| async move {
-            tx.send(context.thread().build().unwrap()).unwrap();
-            ended.await.unwrap();
-        });
-        let thread = rx.await.unwrap();
+            // The handle resolves before the task's completing poll aborts its node. The thread
+            // polls its residents one at a time, so once another resident has run, that poll is
+            // over.
+            let saved = context
+                .child("task")
+                .on(&thread)
+                .spawn(|context| async move { context.child("saved") })
+                .await
+                .unwrap();
+            context
+                .child("barrier")
+                .spawn_on(&thread, |_| async {})
+                .await
+                .unwrap();
+            for line in [saved.child("late"), saved.child("late").placed()] {
+                let handle = line.spawn(recording(&ran));
+                assert!(
+                    matches!(handle.await, Err(Error::Closed)),
+                    "a spawn from an ended task's context was admitted"
+                );
+            }
 
-        // An unrelated lineage places a spawn_on resident, which spawns a local resident, and
-        // a placed resident, then waits for both.
-        let dropped = Arc::new(AtomicBool::new(false));
-        let (started, start) = oneshot::channel();
-        let unrelated = context.child("unrelated").spawn({
-            let dropped = dropped.clone();
-            move |context| async move {
-                let on = context.child("on").spawn_on(&thread, move |local| {
+            // A thread whose building lineage ends, with residents and tasks that are not: a
+            // sibling, a task moved off the thread, and a task of a lineage that also spawns a
+            // resident.
+            let (tx, rx) = oneshot::channel();
+            let (end, ended) = oneshot::channel::<()>();
+            let creator = context.child("creator").spawn(move |context| async move {
+                tx.send(context.thread().build().unwrap()).unwrap();
+                ended.await.unwrap();
+            });
+            let closing = rx.await.unwrap();
+            let lineage = context.child("resident");
+            let mut gates = Vec::new();
+            let mut others = Vec::new();
+            for line in [
+                context.child("sibling"),
+                context.child("moved").on(&closing).shared(),
+                lineage.child("kept"),
+            ] {
+                let (go, wait) = oneshot::channel::<()>();
+                gates.push(go);
+                others.push(line.spawn(move |_| async move { wait.await.unwrap() }));
+            }
+            let dropped = flag();
+            let (started, start) = oneshot::channel();
+            let resident = lineage.child("on").spawn_on(&closing, {
+                let dropped = dropped.clone();
+                move |local| {
                     let flag = DropFlag(dropped);
                     drop(local.child("local").spawn_local(move |_| async move {
                         let _flag = flag;
@@ -1210,295 +588,325 @@ where
                     }));
                     started.send(()).unwrap();
                     pending::<()>()
-                });
-                let placed = context
-                    .child("placed")
-                    .on(&thread)
-                    .spawn(|_| pending::<()>());
-                (on.await, placed.await)
-            }
-        });
-        start.await.unwrap();
-
-        // The creating lineage finishes, which closes the thread.
-        end.send(()).unwrap();
-        creator.await.unwrap();
-        let (on, placed) = within(&context, unrelated).await.unwrap();
-        assert!(matches!(on, Err(Error::Closed)));
-        assert!(matches!(placed, Err(Error::Closed)));
-
-        // Nothing orders the local resident's drop before the other handles resolve, so wait
-        // for it.
-        within(&context, async {
-            while !dropped.load(Ordering::SeqCst) {
-                context.sleep(Duration::from_millis(1)).await;
-            }
-        })
-        .await;
-    });
-}
-
-// A spawn_on resident is supervised by the calling context, and so is a resident it spawns
-// with spawn_local. Aborting the caller aborts both and leaves the thread open.
-#[rstest]
-#[case::deterministic(deterministic::Runner::default())]
-#[case::tokio(tokio::Runner::default())]
-#[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default()))]
-fn test_thread_spawn_on_supervised_by_caller<R: Runner>(#[case] runner: R)
-where
-    R::Context: Spawner + Clock,
-{
-    runner.start(|context| async move {
-        let thread = context.child("t").thread().build().unwrap();
-        let dropped = Arc::new(AtomicBool::new(false));
-        let (tx, rx) = oneshot::channel();
-        let caller = context.child("caller").spawn({
-            let thread = thread.clone();
-            let dropped = dropped.clone();
-            move |context| async move {
-                let flag = DropFlag(dropped);
-                let resident = context.child("resident").spawn_on(&thread, move |local| {
-                    drop(local.child("local").spawn_local(move |_| async move {
-                        let _flag = flag;
-                        pending::<()>().await;
-                    }));
-                    pending::<()>()
-                });
-                tx.send(resident).ok().unwrap();
-                pending::<()>().await;
-            }
-        });
-        let resident = rx.await.unwrap();
-        caller.abort();
-        assert!(matches!(
-            within(&context, resident).await,
-            Err(Error::Closed)
-        ));
-        within(&context, async {
-            while !dropped.load(Ordering::SeqCst) {
-                context.sleep(Duration::from_millis(1)).await;
-            }
-        })
-        .await;
-
-        // The thread is still open.
-        let on = context.child("after").spawn_on(&thread, |_| async { 1 });
-        assert_eq!(within(&context, on).await.unwrap(), 1);
-    });
-}
-
-// Residents share Rc<RefCell<_>> state, and spawn_local works from a factory, from a poll, and
-// from a resident's Drop during close, without a BorrowMutError.
-#[rstest]
-#[case::deterministic(deterministic::Runner::default())]
-#[case::tokio(tokio::Runner::default())]
-#[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default()))]
-fn test_thread_spawn_local_rc_and_reentrancy<R: Runner>(#[case] runner: R)
-where
-    R::Context: Spawner + Clock,
-{
-    runner.start(|context| async move {
-        let (tx, rx) = oneshot::channel();
-        let creator = context.child("creator").spawn(move |context| async move {
-            tx.send(context.thread().build().unwrap()).unwrap();
-            pending::<()>().await;
-        });
-        let thread = rx.await.unwrap();
-
-        // From the factory of spawn_on, from a spawn_local factory, and from a poll.
-        let order = context
-            .child("shared")
-            .spawn_on(&thread, |local| {
-                let shared = Rc::new(RefCell::new(Vec::new()));
-                let from_factory = local.child("factory").spawn_local({
-                    let shared = shared.clone();
-                    move |local| {
-                        shared.borrow_mut().push(1);
-                        let nested = local
-                            .child("nested")
-                            .spawn_local(move |_| async move { shared.borrow_mut().push(2) });
-                        async move { nested.await.unwrap() }
-                    }
-                });
-                async move {
-                    from_factory.await.unwrap();
-                    let from_poll = local.child("poll").spawn_local({
-                        let shared = shared.clone();
-                        move |_| async move { shared.borrow_mut().push(3) }
-                    });
-                    from_poll.await.unwrap();
-                    shared.borrow().clone()
                 }
-            })
-            .await
-            .unwrap();
-        assert_eq!(order, [1, 2, 3]);
-
-        // From a resident's Drop while the thread closes.
-        let (report, outcome) = oneshot::channel();
-        let (started, start) = oneshot::channel();
-        let _dropper = context.child("dropper").spawn_on(&thread, move |local| {
-            let probe = SpawnOnDrop {
-                local: Some(local),
-                report: Some(report),
-            };
-            started.send(()).unwrap();
-            async move {
-                let _probe = probe;
-                pending::<()>().await;
+            });
+            let placed = context
+                .child("resident_placed")
+                .on(&closing)
+                .spawn(|_| pending::<()>());
+            start.await.unwrap();
+            end.send(()).unwrap();
+            creator.await.unwrap();
+            for handle in [resident, placed] {
+                assert!(
+                    matches!(handle.await, Err(Error::Closed)),
+                    "a resident outlived its thread"
+                );
             }
-        });
-        start.await.unwrap();
-        creator.abort();
-        let (closed, ran) = within(&context, outcome).await.unwrap();
-        assert!(closed);
-        assert!(!ran);
+
+            // Nothing orders the local resident's drop before the other handles resolve.
+            settle(&context, || dropped.load(Ordering::SeqCst)).await;
+            for go in gates {
+                go.send(()).unwrap();
+            }
+            for handle in others {
+                assert!(
+                    handle.await.is_ok(),
+                    "the close aborted a task that is not a resident"
+                );
+            }
+            let late = context.child("late").on(&closing);
+            let wired = late.child("wired").shared().spawn(|_| pending::<()>());
+            assert!(matches!(
+                late.spawn(recording(&ran)).await,
+                Err(Error::Closed)
+            ));
+            assert!(
+                matches!(wired.await, Err(Error::Closed)),
+                "a rejected spawn left its context's node open"
+            );
+            assert!(!ran.load(Ordering::SeqCst), "a rejected factory ran");
+            let still = context.child("still").spawn_on(&thread, |_| async { 7 });
+            assert_eq!(
+                still.await.unwrap(),
+                7,
+                "another thread's close closed this one"
+            );
+        })
     });
 }
 
-// A spawn_local factory runs after the caller's poll, so it can take a borrow the caller holds
-// during the call. A spawn_on factory toward the caller's own thread does not run inside the
-// caller's poll either.
+// An attached context keeps its thread while its lineage lives, also when it is used only
+// through child and then dropped, or when an actor derived from it with child ends first. The
+// thread closes once the task that consumes the context ends, so a task that attaches a thread
+// per epoch, whose consumers complete or are aborted, leaves no OS thread behind.
 #[rstest]
 #[case::deterministic(deterministic::Runner::default())]
 #[case::tokio(tokio::Runner::default())]
 #[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default()))]
-fn test_thread_spawn_local_deferred<R: Runner>(#[case] runner: R)
+fn test_thread_attach<R: Runner + Send + 'static>(#[case] runner: R)
 where
-    R::Context: Spawner,
+    R::Context: Spawner + Clock,
 {
-    runner.start(|context| async move {
-        let thread = context.child("t").thread().build().unwrap();
-        let (value, same) = context
-            .child("caller")
-            .spawn_on(&thread, |local| async move {
-                let cell = Rc::new(RefCell::new(0));
-                let ran = Rc::new(Cell::new(None));
-                let handle = {
-                    let mut borrow = cell.borrow_mut();
-                    let handle = local.child("deferred").spawn_local({
-                        let cell = cell.clone();
-                        let ran = ran.clone();
-                        move |_| {
-                            ran.set(Some(os()));
-                            *cell.borrow_mut() += 1;
-                            async {}
+    /// Epochs the orchestrator runs.
+    const EPOCHS: u64 = 16;
+
+    bounded(move || {
+        runner.start(|context| async move {
+            // Used only through child, then dropped.
+            let (tx, rx) = oneshot::channel();
+            let lineage = context.child("lineage").spawn(move |context| async move {
+                let attached = context.child("t").thread().attach().unwrap();
+                tx.send(attached.child("probe").spawn(|_| pending::<()>()))
+                    .ok()
+                    .unwrap();
+                drop(attached);
+                pending::<()>().await;
+            });
+            let mut probe = rx.await.unwrap();
+            context.sleep(Duration::from_millis(10)).await;
+            assert!(
+                (&mut probe).now_or_never().is_none(),
+                "dropping the attached context closed its thread"
+            );
+            lineage.abort();
+            assert!(matches!(probe.await, Err(Error::Closed)));
+
+            // An actor derived with child ends first, then the consuming task runs.
+            let attached = context.child("subsystem").thread().attach().unwrap();
+            attached.child("actor").spawn(|_| async {}).await.unwrap();
+            let saved = attached.child("saved");
+            let (release, released) = oneshot::channel::<()>();
+            let main = attached.spawn(|_| async move { released.await.unwrap() });
+            let open = saved.child("open").spawn(|_| async { 1 });
+            assert_eq!(
+                open.await.unwrap(),
+                1,
+                "the thread closed before its consumer ended"
+            );
+            release.send(()).unwrap();
+            main.await.unwrap();
+
+            // A resident of the same thread runs after the consumer's completing poll, which
+            // aborts its node, or is aborted with it.
+            let _ = saved.child("barrier").spawn(|_| async {}).await;
+            let late = saved.child("late").spawn(|_| async {});
+            assert!(
+                matches!(late.await, Err(Error::Closed)),
+                "a spawn from the consumed context was admitted after its consumer ended"
+            );
+
+            let orchestrator = context.child("orchestrator").spawn(|context| async move {
+                let baseline = os_threads();
+                for epoch in 0..EPOCHS {
+                    let engine = context
+                        .child("engine")
+                        .with_attribute("epoch", epoch)
+                        .thread()
+                        .attach()
+                        .unwrap();
+                    let aborted = epoch % 2 == 0;
+                    let main = engine.spawn(move |context| async move {
+                        // A long-lived actor runs next to the engine until the engine ends.
+                        drop(context.child("actor").placed().spawn(|_| pending::<()>()));
+                        if aborted {
+                            pending::<()>().await;
                         }
                     });
-                    assert!(ran.get().is_none());
-                    *borrow = 41;
-                    handle
-                };
-
-                // A spawn_on toward this thread waits for a later turn too.
-                let remote = Arc::new(AtomicBool::new(false));
-                let on = local.child("on").into_inner().spawn_on(local.home(), {
-                    let remote = remote.clone();
-                    move |_| {
-                        remote.store(true, Ordering::SeqCst);
-                        async {}
+                    if aborted {
+                        main.abort();
+                        assert!(matches!(main.await, Err(Error::Closed)));
+                    } else {
+                        main.await.unwrap();
                     }
-                });
-                assert!(ran.get().is_none());
-                assert!(!remote.load(Ordering::SeqCst));
+                }
 
-                handle.await.unwrap();
-                on.await.unwrap();
-                assert!(remote.load(Ordering::SeqCst));
-                let value = *cell.borrow();
-                (value, ran.get() == Some(os()))
-            })
-            .await
-            .unwrap();
-        assert_eq!(value, 42);
-        assert!(same);
+                // The OS threads of native runners exit once their close completes. The count
+                // covers the whole process, so this relies on nextest running each test in its
+                // own process.
+                if let Some(baseline) = baseline {
+                    settle(&context, || os_threads().unwrap() <= baseline).await;
+                }
+            });
+            orchestrator.await.unwrap();
+        })
     });
 }
 
-// A LocalHandle delivers a !Send output, resolves Closed once aborted, detaches its task when
-// dropped, and an output it never took is dropped on the thread at close. On deterministic a
-// later poll of that handle resolves Closed.
+// spawn_local runs its factory after the caller's poll, on the caller's thread, so residents
+// share Rc<RefCell<_>> state and spawn_local works from a factory, a poll and a Drop during the
+// close without a BorrowMutError, and a spawn_on toward the caller's own thread does not run
+// inside its poll either. A LocalHandle delivers a !Send output, resolves Closed once aborted,
+// detaches its task when dropped, and an output it never took is dropped on its thread at close.
+// On deterministic a later poll of that handle resolves Closed.
 #[rstest]
 #[case::deterministic(deterministic::Runner::default(), false)]
 #[case::tokio(tokio::Runner::default(), true)]
 #[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default(), true))]
-fn test_thread_local_handle<R: Runner>(#[case] runner: R, #[case] native: bool)
+fn test_thread_spawn_local<R: Runner + Send + 'static>(#[case] runner: R, #[case] native: bool)
 where
     R::Context: Spawner + Clock,
 {
-    runner.start(|context| async move {
-        let thread = context.child("t").thread().build().unwrap();
-        let (output, aborted, detached) = context
-            .child("caller")
-            .spawn_on(&thread, |local| async move {
-                // A !Send output.
-                let output = local
-                    .child("output")
-                    .spawn_local(|_| async { Rc::new(5) })
-                    .await
-                    .unwrap();
+    bounded(move || {
+        runner.start(|context| async move {
+            let (tx, rx) = oneshot::channel();
+            let creator = context.child("creator").spawn(move |context| async move {
+                tx.send(context.thread().build().unwrap()).unwrap();
+                pending::<()>().await;
+            });
+            let thread = rx.await.unwrap();
 
-                // Abort.
-                let handle = local.child("abort").spawn_local(|_| pending::<()>());
-                handle.abort();
-                let aborted = matches!(handle.await, Err(Error::Closed));
+            let (order, deferred, output, aborted, detached) = context
+                .child("caller")
+                .spawn_on(&thread, |local| {
+                    // From the factory of spawn_on, from a spawn_local factory, and from a poll.
+                    let shared = Rc::new(RefCell::new(Vec::new()));
+                    let from_factory = local.child("factory").spawn_local({
+                        let shared = shared.clone();
+                        move |local| {
+                            shared.borrow_mut().push(1);
+                            let nested = local
+                                .child("nested")
+                                .spawn_local(move |_| async move { shared.borrow_mut().push(2) });
+                            async move { nested.await.unwrap() }
+                        }
+                    });
+                    async move {
+                        from_factory.await.unwrap();
+                        let from_poll = shared.clone();
+                        local
+                            .child("poll")
+                            .spawn_local(move |_| async move { from_poll.borrow_mut().push(3) })
+                            .await
+                            .unwrap();
 
-                // Drop the handle, then let the task finish.
-                let (go, wait) = oneshot::channel::<()>();
-                let (done, finished) = oneshot::channel::<()>();
-                drop(local.child("detach").spawn_local(move |_| async move {
-                    wait.await.unwrap();
-                    done.send(()).unwrap();
-                }));
-                go.send(()).unwrap();
-                let detached = finished.await.is_ok();
-                (*output, aborted, detached)
-            })
-            .await
-            .unwrap();
-        assert_eq!(output, 5);
-        assert!(aborted);
-        assert!(detached);
+                        // A factory that borrows what the caller holds during the call, and a
+                        // spawn_on toward this thread.
+                        let ran = Rc::new(Cell::new(None));
+                        let remote = flag();
+                        let (deferred, on) = {
+                            let mut borrow = shared.borrow_mut();
+                            let deferred = local.child("deferred").spawn_local({
+                                let (shared, ran) = (shared.clone(), ran.clone());
+                                move |_| {
+                                    ran.set(Some(os()));
+                                    shared.borrow_mut().push(5);
+                                    async {}
+                                }
+                            });
+                            let on = local
+                                .child("on")
+                                .into_inner()
+                                .spawn_on(local.home(), recording(&remote));
+                            borrow.push(4);
+                            (deferred, on)
+                        };
+                        let inline = ran.get().is_some() || remote.load(Ordering::SeqCst);
+                        deferred.await.unwrap();
+                        on.await.unwrap();
+                        let deferred = !inline && ran.get() == Some(os());
 
-        // A thread that closes with a finished output its handle never took.
-        let (report, dropped) = oneshot::channel();
-        let home = context
-            .child("closing")
-            .thread()
-            .spawn(move |local| async move {
-                let (finished, finish) = oneshot::channel::<()>();
-                let handle = local.child("output").spawn_local(move |_| async move {
-                    finished.send(()).unwrap();
-                    Probe {
-                        report: Some(report),
-                        _local: Rc::new(()),
+                        // A !Send output, an aborted handle, and a dropped handle whose task
+                        // finishes.
+                        let output = local
+                            .child("output")
+                            .spawn_local(|_| async { Rc::new(5) })
+                            .await
+                            .unwrap();
+                        let handle = local.child("abort").spawn_local(|_| pending::<()>());
+                        handle.abort();
+                        let aborted = matches!(handle.await, Err(Error::Closed));
+                        let (done, finished) = oneshot::channel::<()>();
+                        drop(local.child("detach").spawn_local(move |_| async move {
+                            reschedule().await;
+                            done.send(()).unwrap();
+                        }));
+                        let detached = finished.await.is_ok();
+                        let order = shared.borrow().clone();
+                        (order, deferred, *output, aborted, detached)
                     }
-                });
-                finish.await.unwrap();
-                HELD.with(|held| *held.borrow_mut() = Some(handle));
-                os()
-            })
-            .unwrap()
-            .await
-            .unwrap();
-        let dropped = within(&context, dropped).await.unwrap();
-        if native {
-            assert_eq!(dropped, home);
-        } else {
-            let handle = HELD.with(|held| held.borrow_mut().take()).unwrap();
-            assert!(matches!(handle.await, Err(Error::Closed)));
-        }
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                order,
+                [1, 2, 3, 4, 5],
+                "a spawn_local factory ran out of order"
+            );
+            assert!(
+                deferred,
+                "a factory ran inside its caller's poll or off its thread"
+            );
+            assert_eq!(output, 5);
+            assert!(aborted, "an aborted local handle did not resolve Closed");
+            assert!(detached, "a dropped local handle cancelled its task");
+
+            // From a resident's Drop while the thread closes.
+            let (report, outcome) = oneshot::channel();
+            let (started, start) = oneshot::channel();
+            let _dropper = context.child("dropper").spawn_on(&thread, move |local| {
+                let probe = SpawnOnDrop {
+                    local: Some(local),
+                    report: Some(report),
+                };
+                started.send(()).unwrap();
+                async move {
+                    let _probe = probe;
+                    pending::<()>().await;
+                }
+            });
+            start.await.unwrap();
+            creator.abort();
+            assert_eq!(
+                outcome.await.unwrap(),
+                (true, false),
+                "a spawn_local from a Drop during the close ran or did not close at once"
+            );
+
+            // A thread that closes with a finished output its handle never took.
+            let (report, dropped) = oneshot::channel();
+            let home = context
+                .child("closing")
+                .thread()
+                .spawn(move |local| async move {
+                    let (finished, finish) = oneshot::channel::<()>();
+                    let handle = local.child("output").spawn_local(move |_| async move {
+                        finished.send(()).unwrap();
+                        Probe::new(report)
+                    });
+                    finish.await.unwrap();
+                    HELD.with(|held| *held.borrow_mut() = Some(handle));
+                    os()
+                })
+                .unwrap()
+                .await
+                .unwrap();
+            let dropped = dropped.await.unwrap();
+            if native {
+                assert_eq!(
+                    dropped, home,
+                    "an unclaimed output was dropped off its thread"
+                );
+            } else {
+                let handle = HELD.with(|held| held.borrow_mut().take()).unwrap();
+                assert!(matches!(handle.await, Err(Error::Closed)));
+            }
+        })
     });
 }
 
-// A runner returns while a Thread is held, by the value start returns and by a clone on another
-// OS thread.
+// A runner returns with idle threads built by the root or by a task, and with a Thread held by
+// the value start returns and by a clone on another OS thread. The held thread is closed by then,
+// although its residents never wake and spawned local residents, and on native runners leaked a
+// Local.
 #[rstest]
-#[case::deterministic(deterministic::Runner::default())]
-#[case::tokio(tokio::Runner::default())]
-#[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default()))]
-fn test_thread_shutdown_with_held_thread<R: Runner + Send + 'static>(#[case] runner: R)
-where
+#[case::deterministic(deterministic::Runner::default(), false)]
+#[case::tokio(tokio::Runner::default(), true)]
+#[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default(), true))]
+fn test_thread_shutdown_with_held_thread<R: Runner + Send + 'static>(
+    #[case] runner: R,
+    #[case] native: bool,
+) where
     R::Context: Spawner,
 {
     let (hold, held) = mpsc::channel::<Thread>();
@@ -1510,17 +918,45 @@ where
     });
     let thread = bounded(move || {
         runner.start(|context| async move {
+            drop(context.child("root").thread().build().unwrap());
+            let task = context.child("task").spawn(|context| async move {
+                drop(context.child("inner").thread().build().unwrap());
+            });
+            task.await.unwrap();
+
             let thread = context.child("held").thread().build().unwrap();
+            let mut starts = Vec::new();
+            for _ in 0..4 {
+                let (started, start) = oneshot::channel();
+                drop(context.child("resident").spawn_on(&thread, move |local| {
+                    drop(local.child("local").spawn_local(|_| pending::<()>()));
+                    if native {
+                        std::mem::forget(local.child("leaked"));
+                    }
+                    started.send(()).unwrap();
+                    pending::<()>()
+                }));
+                starts.push(start);
+            }
             drop(
                 context
-                    .child("probe")
-                    .spawn_on(&thread, |_| pending::<()>()),
+                    .child("placed")
+                    .on(&thread)
+                    .spawn(|_| pending::<()>()),
             );
+            for start in starts {
+                start.await.unwrap();
+            }
             hold.send(thread.clone()).unwrap();
             thread
         })
     });
     assert_eq!(thread.name(), "held");
+    assert_eq!(
+        thread.inner().state(),
+        State::Closed,
+        "the held thread did not close"
+    );
     release.send(()).unwrap();
     holder.join().unwrap();
 }
@@ -1533,114 +969,84 @@ where
     target_os = "linux",
     case::iouring(iouring::Runner::new(iouring::Config::default().with_catch_panics(true)))
 )]
-fn test_thread_drop_on_owner_thread<R: Runner>(#[case] runner: R)
+fn test_thread_drop_on_owner_thread<R: Runner + Send + 'static>(#[case] runner: R)
 where
     R::Context: Spawner + Clock,
 {
-    let make_probe = |report| Probe {
-        report: Some(report),
-        _local: Rc::new(()),
-    };
-    let (shutdown_report, at_shutdown) = oneshot::channel();
-    let (shutdown_home, local_at_shutdown) = runner.start(|context| async move {
-        let thread = context.child("t").thread().build().unwrap();
-
-        // Completion.
-        let (report, dropped) = oneshot::channel();
-        let home = context
-            .child("complete")
-            .spawn_on(&thread, move |_| {
-                let probe = make_probe(report);
-                async move {
-                    let _probe = probe;
-                    os()
+    let (home, at_shutdown) = bounded(move || {
+        runner.start(|context| async move {
+            let thread = context.child("t").thread().build().unwrap();
+            let home = context
+                .child("home")
+                .spawn_on(&thread, |_| async { os() })
+                .await
+                .unwrap();
+            for action in ["complete", "abort", "panic"] {
+                let (report, dropped) = oneshot::channel();
+                let (started, start) = oneshot::channel();
+                let handle = context.child(action).spawn_on(&thread, move |_| {
+                    let probe = Probe::new(report);
+                    async move {
+                        let _probe = probe;
+                        started.send(()).unwrap();
+                        match action {
+                            "complete" => {}
+                            "abort" => pending::<()>().await,
+                            _ => {
+                                reschedule().await;
+                                panic!("resident poll");
+                            }
+                        }
+                    }
+                });
+                start.await.unwrap();
+                if action == "abort" {
+                    handle.abort();
                 }
-            })
-            .await
-            .unwrap();
-        assert_eq!(within(&context, dropped).await.unwrap(), home);
-
-        // Abort.
-        let (report, dropped) = oneshot::channel();
-        let (started, start) = oneshot::channel();
-        let handle = context.child("abort").spawn_on(&thread, move |_| {
-            let probe = make_probe(report);
-            started.send(()).unwrap();
-            async move {
-                let _probe = probe;
-                pending::<()>().await;
+                let result = handle.await;
+                assert!(
+                    match action {
+                        "complete" => result.is_ok(),
+                        "abort" => matches!(result, Err(Error::Closed)),
+                        _ => matches!(result, Err(Error::Exited)),
+                    },
+                    "{action}: the handle resolved wrongly"
+                );
+                assert_eq!(
+                    dropped.await.unwrap(),
+                    home,
+                    "{action}: dropped off its thread"
+                );
             }
-        });
-        start.await.unwrap();
-        handle.abort();
-        assert!(matches!(handle.await, Err(Error::Closed)));
-        assert_eq!(within(&context, dropped).await.unwrap(), home);
 
-        // Poll panic.
-        let (report, dropped) = oneshot::channel();
-        let handle = context.child("panic").spawn_on(&thread, move |_| {
-            let probe = make_probe(report);
-            async move {
-                let _probe = probe;
-                reschedule().await;
-                panic!("resident poll");
+            // A close, for a spawn_on future and a spawn_local future.
+            let (tx, rx) = oneshot::channel();
+            let creator = context.child("creator").spawn(move |context| async move {
+                tx.send(context.thread().build().unwrap()).unwrap();
+                pending::<()>().await;
+            });
+            let closing = rx.await.unwrap();
+            let (closing_home, dropped) = probes(context.child("close"), &closing).await;
+            creator.abort();
+            for dropped in dropped {
+                assert_eq!(
+                    dropped.await.unwrap(),
+                    closing_home,
+                    "close: dropped off its thread"
+                );
             }
-        });
-        assert!(matches!(handle.await, Err(Error::Exited)));
-        assert_eq!(within(&context, dropped).await.unwrap(), home);
 
-        // Close, for a spawn_on future and a spawn_local future.
-        let (tx, rx) = oneshot::channel();
-        let creator = context.child("creator").spawn(move |context| async move {
-            tx.send(context.thread().build().unwrap()).unwrap();
-            pending::<()>().await;
-        });
-        let closing = rx.await.unwrap();
-        let (report, dropped) = oneshot::channel();
-        let (report_local, dropped_local) = oneshot::channel();
-        let (started, start) = oneshot::channel();
-        drop(context.child("close").spawn_on(&closing, move |local| {
-            let probe = make_probe(report);
-            let probe_local = make_probe(report_local);
-            drop(local.child("local").spawn_local(move |_| async move {
-                let _probe = probe_local;
-                pending::<()>().await;
-            }));
-            started.send(os()).unwrap();
-            async move {
-                let _probe = probe;
-                pending::<()>().await;
-            }
-        }));
-        let closing_home = start.await.unwrap();
-        creator.abort();
-        assert_eq!(within(&context, dropped).await.unwrap(), closing_home);
-        assert_eq!(within(&context, dropped_local).await.unwrap(), closing_home);
-
-        // Shutdown, for a spawn_on future and a spawn_local future, checked after start
-        // returns.
-        let (report_local, dropped_local) = oneshot::channel();
-        let (started, start) = oneshot::channel();
-        drop(context.child("shutdown").spawn_on(&thread, move |local| {
-            let probe = make_probe(shutdown_report);
-            let probe_local = make_probe(report_local);
-            drop(local.child("local").spawn_local(move |_| async move {
-                let _probe = probe_local;
-                pending::<()>().await;
-            }));
-            started.send(()).unwrap();
-            async move {
-                let _probe = probe;
-                pending::<()>().await;
-            }
-        }));
-        start.await.unwrap();
-        (home, dropped_local)
+            // Shutdown, checked after start returns.
+            probes(context.child("shutdown"), &thread).await
+        })
     });
-    let mut at_shutdown = at_shutdown;
-    let mut local_at_shutdown = local_at_shutdown;
-    assert_eq!(at_shutdown.try_recv().unwrap(), shutdown_home);
-    assert_eq!(local_at_shutdown.try_recv().unwrap(), shutdown_home);
+    for mut dropped in at_shutdown {
+        assert_eq!(
+            dropped.try_recv().unwrap(),
+            home,
+            "shutdown: dropped off its thread"
+        );
+    }
 }
 
 // A placed spawn and a spawn_on toward an open thread of another runner, of the same or another
@@ -1649,15 +1055,15 @@ where
 #[case::deterministic(deterministic::Runner::default())]
 #[case::tokio(tokio::Runner::default())]
 #[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default()))]
-fn test_thread_wrong_runtime<R: Runner>(#[case] runner: R)
+fn test_thread_wrong_runtime<R: Runner + Send + 'static>(#[case] runner: R)
 where
-    R::Context: Spawner + Clock,
+    R::Context: Spawner,
 {
     wrong_runtime(
         runner,
         vec![
-            hold_open(deterministic::Runner::default()),
-            hold_open(tokio::Runner::default()),
+            foreign_thread(deterministic::Runner::default()),
+            foreign_thread(tokio::Runner::default()),
         ],
     );
 }
@@ -1668,11 +1074,11 @@ where
 #[case::deterministic(deterministic::Runner::default())]
 #[case::tokio(tokio::Runner::default())]
 #[case::iouring(iouring::Runner::default())]
-fn test_thread_wrong_runtime_iouring_target<R: Runner>(#[case] runner: R)
+fn test_thread_wrong_runtime_iouring_target<R: Runner + Send + 'static>(#[case] runner: R)
 where
-    R::Context: Spawner + Clock,
+    R::Context: Spawner,
 {
-    wrong_runtime(runner, vec![hold_open(iouring::Runner::default())]);
+    wrong_runtime(runner, vec![foreign_thread(iouring::Runner::default())]);
 }
 
 // Thread tasks carry the Thread execution label, including a spawn_on task from a blocking
@@ -1709,24 +1115,18 @@ where
             .child("counter")
             .spawn_on(&gauge, |local| async move {
                 let context = &*local;
-                assert_eq!(residents(context, "gauge"), (1, Some(1)));
+                assert_eq!(residents(context, "gauge"), Some(1));
 
                 // Queued jobs count at once, including ones aborted before they run.
-                let running: Vec<_> = (0..3)
+                let mut running: Vec<_> = (0..5)
                     .map(|_| {
                         context
-                            .child("running")
+                            .child("job")
                             .spawn_on(local.home(), |_| pending::<()>())
                     })
                     .collect();
-                let skipped: Vec<_> = (0..2)
-                    .map(|_| {
-                        context
-                            .child("skipped")
-                            .spawn_on(local.home(), |_| pending::<()>())
-                    })
-                    .collect();
-                assert_eq!(residents(context, "gauge"), (1, Some(6)));
+                let skipped = running.split_off(3);
+                assert_eq!(residents(context, "gauge"), Some(6));
                 for handle in &skipped {
                     handle.abort();
                 }
@@ -1735,7 +1135,7 @@ where
                 for handle in skipped {
                     assert!(matches!(handle.await, Err(Error::Closed)));
                 }
-                settle(context, "gauge", 4).await;
+                settle(context, || residents(context, "gauge") == Some(4)).await;
 
                 // A finished output waiting in its slot does not count.
                 let (finished, finish) = oneshot::channel::<()>();
@@ -1744,7 +1144,7 @@ where
                     Rc::new(1)
                 });
                 finish.await.unwrap();
-                settle(context, "gauge", 4).await;
+                settle(context, || residents(context, "gauge") == Some(4)).await;
                 assert_eq!(*output.await.unwrap(), 1);
 
                 for handle in &running {
@@ -1753,11 +1153,11 @@ where
                 for handle in running {
                     assert!(matches!(handle.await, Err(Error::Closed)));
                 }
-                settle(context, "gauge", 1).await;
+                settle(context, || residents(context, "gauge") == Some(1)).await;
             })
             .await
             .unwrap();
-        settle(&context, "gauge", 0).await;
+        settle(&context, || residents(&context, "gauge") == Some(0)).await;
 
         // Two threads with one label share one series.
         let first = context.child("same").thread().build().unwrap();
@@ -1765,11 +1165,18 @@ where
         assert_ne!(first, second);
         let a = context.child("a").spawn_on(&first, |_| pending::<()>());
         let b = context.child("b").spawn_on(&second, |_| pending::<()>());
-        settle(&context, "same", 2).await;
-        assert_eq!(residents(&context, "same").0, 1);
+        settle(&context, || residents(&context, "same") == Some(2)).await;
+        let series = context
+            .encode()
+            .lines()
+            .filter(|line| {
+                line.starts_with("runtime_thread_residents{") && line.contains("name=\"same\"")
+            })
+            .count();
+        assert_eq!(series, 1, "threads with one label have separate series");
         a.abort();
         b.abort();
-        settle(&context, "same", 0).await;
+        settle(&context, || residents(&context, "same") == Some(0)).await;
     });
 }
 
@@ -1793,33 +1200,19 @@ fn test_thread_local_context_swap<R: Runner + Send + 'static>(
     #[case] other: R,
     #[case] native: bool,
 ) where
-    R::Context: Spawner + Clock,
+    R::Context: Spawner,
 {
-    // Another runner, alive on its own OS thread until its context was consumed.
-    let (send, foreign) = mpsc::channel();
-    let done = Arc::new(AtomicBool::new(false));
-    let other = std::thread::spawn({
-        let done = done.clone();
-        move || {
-            other.start(|context| async move {
-                send.send(context.child("foreign")).unwrap();
-                while !done.load(Ordering::SeqCst) {
-                    reschedule().await;
-                }
-            });
-        }
-    });
-
+    let (foreign, release, other) = hold_open(other, |context| context.child("foreign"));
     runner.start(|context| async move {
         let a = context.child("a").thread().build().unwrap();
         let b = context.child("b").thread().build().unwrap();
 
         // A context of thread b, from a resident that outlives its use.
         let (send, from_b) = oneshot::channel();
-        let (release, released) = oneshot::channel::<()>();
+        let (unhold, unheld) = oneshot::channel::<()>();
         let holder = context.child("holder").spawn_on(&b, move |local| {
             send.send(local.child("from_b").into_inner()).ok().unwrap();
-            async move { released.await.unwrap() }
+            async move { unheld.await.unwrap() }
         });
         let from_b = from_b.await.unwrap();
 
@@ -1828,37 +1221,24 @@ fn test_thread_local_context_swap<R: Runner + Send + 'static>(
             .spawn_on(&a, move |local| async move {
                 let home = os();
 
-                // A context of another thread.
+                // A context of another thread, then a shared context.
                 let mut swapped = local.child("other_thread");
                 *swapped = from_b;
-                let (ran, same) = swapped
-                    .spawn_local(|local| async move { (os(), local.home().name().to_string()) })
-                    .await
-                    .unwrap();
-                assert_eq!(same, "a");
-                assert!(!native || ran == home);
-
-                // A shared context.
-                let mut swapped = local.child("shared");
-                *swapped = (*local).child("plain").shared();
-                let (ran, same) = swapped
-                    .spawn_local(|local| async move { (os(), local.home().name().to_string()) })
-                    .await
-                    .unwrap();
-                assert_eq!(same, "a");
-                assert!(!native || ran == home);
+                let mut shared = local.child("shared");
+                *shared = (*local).child("plain").shared();
+                for swapped in [swapped, shared] {
+                    let (ran, same) = swapped
+                        .spawn_local(|local| async move { (os(), local.home().name().to_string()) })
+                        .await
+                        .unwrap();
+                    assert_eq!(same, "a");
+                    assert!(!native || ran == home);
+                }
 
                 // A context of another runner.
-                let foreign = loop {
-                    if let Ok(foreign) = foreign.try_recv() {
-                        break foreign;
-                    }
-                    reschedule().await;
-                };
                 let mut stale = local.child("stale");
                 *stale = foreign;
-                let dropped = Arc::new(AtomicBool::new(false));
-                let ran = Rc::new(Cell::new(false));
+                let (dropped, ran) = (flag(), Rc::new(Cell::new(false)));
                 let flag = DropFlag(dropped.clone());
                 let handle = stale.spawn_local({
                     let ran = ran.clone();
@@ -1870,102 +1250,200 @@ fn test_thread_local_context_swap<R: Runner + Send + 'static>(
                 });
                 assert!(dropped.load(Ordering::SeqCst));
                 assert!(!ran.get());
-                done.store(true, Ordering::SeqCst);
                 matches!(handle.await, Err(Error::Closed))
             })
             .await
             .unwrap();
         assert!(swapped);
-        release.send(()).unwrap();
+        unhold.send(()).unwrap();
         holder.await.unwrap();
     });
+    release.send(()).unwrap();
     other.join().unwrap();
 }
 
-// A placed ordinary spawn runs its factory on the caller, synchronously, and its future on the
-// thread. A panic in that factory unwinds out of spawn and closes the consumed context's node.
+// The factory of an ordinary spawn runs on the caller before spawn returns, wherever the future
+// runs, so it may borrow the caller's !Send state to build a Send future. A placed spawn's future
+// runs on its thread, and a panic in its factory unwinds out of spawn and closes the consumed
+// context's node.
 #[rstest]
 #[case::deterministic(deterministic::Runner::default(), false)]
 #[case::tokio(tokio::Runner::default(), true)]
 #[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default(), true))]
-fn test_thread_placed_spawn_factory<R: Runner>(#[case] runner: R, #[case] native: bool)
-where
-    R::Context: Spawner + Clock + Metrics,
+fn test_spawn_factory_reads_local_state<R: Runner + Send + 'static>(
+    #[case] runner: R,
+    #[case] native: bool,
+) where
+    R::Context: Spawner + Metrics,
 {
-    runner.start(|context| async move {
-        let thread = context.child("t").thread().build().unwrap();
-        let home = context
-            .child("home")
-            .spawn_on(&thread, |_| async { os() })
-            .await
-            .unwrap();
-        let caller = os();
-        let factory = Arc::new(commonware_utils::sync::Mutex::new(None));
-        let handle = context.child("placed").on(&thread).spawn({
-            let factory = factory.clone();
-            move |_| {
-                *factory.lock() = Some(os());
-                async { os() }
-            }
-        });
-        assert_eq!(factory.lock().take(), Some(caller));
-        let ran = handle.await.unwrap();
-        assert_eq!(executions(&context, "placed"), ["Thread"]);
-        if native {
-            assert_eq!(ran, home);
-            assert_ne!(caller, home);
-        }
+    bounded(move || {
+        runner.start(|context| async move {
+            let thread = context.child("other").thread().build().unwrap();
+            let home = context
+                .child("home")
+                .spawn_on(&thread, |_| async { os() })
+                .await
+                .unwrap();
+            let target = thread.clone();
+            let (factories, futures, caller, placed) = context
+                .child("t")
+                .thread()
+                .spawn(move |local| async move {
+                    let state = Rc::new(RefCell::new(Vec::new()));
+                    let read = |id: usize| {
+                        let state = &state;
+                        move |_| {
+                            state.borrow_mut().push(id);
+                            async { os() }
+                        }
+                    };
+                    let context = local.into_inner();
+                    let placed = context.child("placed");
+                    let name = placed.name().label;
+                    let handles = [
+                        context.child("shared").spawn(read(1)),
+                        placed.on(&target).spawn(read(2)),
+                        context.child("blocking").blocking().spawn(read(3)),
+                    ];
+                    let factories = state.borrow().clone();
+                    let mut futures = Vec::new();
+                    for handle in handles {
+                        futures.push(handle.await.unwrap());
+                    }
+                    (factories, futures, os(), name)
+                })
+                .unwrap()
+                .await
+                .unwrap();
+            assert_eq!(
+                factories,
+                [1, 2, 3],
+                "a factory ran after its spawn returned"
+            );
+            assert_eq!(executions(&context, &placed), ["Thread"]);
+            assert!(
+                !native || (futures[1] == home && caller != home),
+                "a placed future ran off its thread"
+            );
 
-        let placed = context.child("panics").on(&thread);
-        let wired = placed.child("wired").shared().spawn(|_| pending::<()>());
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            placed.spawn(|_| -> std::future::Ready<()> { panic!("placed factory") })
-        }));
-        assert!(result.is_err());
-        assert!(matches!(within(&context, wired).await, Err(Error::Closed)));
+            let placed = context.child("panics").on(&thread);
+            let wired = placed.child("wired").shared().spawn(|_| pending::<()>());
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                placed.spawn(|_| -> Ready<()> { panic!("placed factory") })
+            }));
+            assert!(
+                result.is_err(),
+                "a placed factory's panic did not unwind out of spawn"
+            );
+            assert!(
+                matches!(wired.await, Err(Error::Closed)),
+                "a panicking factory left its context's node open"
+            );
+        })
     });
 }
 
-// The factory of an ordinary spawn runs on the caller before spawn returns, wherever the future
-// runs, so it may borrow the caller's !Send state to build a Send future.
+// A burst of jobs queued in one poll, across several admission batches, starts in submission
+// order. While another OS thread keeps the ingress of a thread non-empty, a resident keeps being
+// polled, and its spawn_local factory runs after the jobs submitted before it and before the jobs
+// submitted after it.
 #[rstest]
-#[case::deterministic(deterministic::Runner::default())]
 #[case::tokio(tokio::Runner::default())]
 #[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default()))]
-fn test_spawn_factory_reads_local_state<R: Runner>(#[case] runner: R)
+fn test_thread_busy_producer<R: Runner + Send + 'static>(#[case] runner: R)
 where
     R::Context: Spawner,
 {
-    runner.start(|context| async move {
-        let total = context
-            .child("t")
-            .thread()
-            .spawn(|local| async move {
-                let state = Rc::new(RefCell::new(Vec::new()));
-                let read = |id: usize| {
-                    let state = &state;
-                    move |_| {
-                        state.borrow_mut().push(id);
-                        let value = state.borrow().len();
-                        async move { value }
+    /// Jobs of the burst, three admission batches.
+    const JOBS: usize = 3 * 64;
+
+    bounded(move || {
+        runner.start(|context| async move {
+            let order = context
+                .child("burst")
+                .thread()
+                .spawn(|local| async move {
+                    let order = Arc::new(Mutex::new(Vec::new()));
+                    let handles: Vec<_> = (0..JOBS)
+                        .map(|i| {
+                            let order = order.clone();
+                            (*local).child("job").spawn_on(local.home(), move |_| {
+                                order.lock().push(i);
+                                ready(())
+                            })
+                        })
+                        .collect();
+                    assert_eq!(local.home().inner().queued(), JOBS);
+                    for handle in handles {
+                        handle.await.unwrap();
                     }
-                };
-                let context = local.into_inner();
-                let handles = [
-                    context.child("shared").spawn(read(1)),
-                    context.child("placed").placed().spawn(read(2)),
-                    context.child("blocking").blocking().spawn(read(3)),
-                ];
-                assert_eq!(*state.borrow(), [1, 2, 3]);
-                let mut total = 0;
-                for handle in handles {
-                    total += handle.await.unwrap();
+                    order.lock().clone()
+                })
+                .unwrap()
+                .await
+                .unwrap();
+            assert!(
+                order.into_iter().eq(0..JOBS),
+                "the burst did not start in order"
+            );
+
+            let thread = context.child("busy").thread().build().unwrap();
+
+            // Jobs the producer started to submit, finished submitting, and that ran.
+            let counts: [_; 3] = std::array::from_fn(|_| Arc::new(AtomicUsize::new(0)));
+            let stop = flag();
+            let producer = std::thread::spawn({
+                let (context, thread) = (context.child("producer"), thread.clone());
+                let ([started, submitted, admitted], stop) = (counts.clone(), stop.clone());
+                move || {
+                    while !stop.load(Ordering::SeqCst) {
+                        if thread.inner().queued() >= 4 * 64 {
+                            std::thread::yield_now();
+                            continue;
+                        }
+                        started.fetch_add(1, Ordering::SeqCst);
+                        let admitted = admitted.clone();
+                        drop(context.child("job").spawn_on(&thread, move |_| {
+                            admitted.fetch_add(1, Ordering::SeqCst);
+                            ready(())
+                        }));
+                        submitted.fetch_add(1, Ordering::SeqCst);
+                    }
                 }
-                total
-            })
-            .unwrap()
-            .await
-            .unwrap();
-        assert_eq!(total, 6);
+            });
+            let [started, submitted, admitted] = counts;
+            let (ahead, behind, ran) = context
+                .child("resident")
+                .spawn_on(&thread, move |local| async move {
+                    // Polled again and again while jobs are queued, until the ingress is full.
+                    let mut contended = 0;
+                    while contended < 100 || local.home().inner().queued() < 200 {
+                        if local.home().inner().queued() > 0 {
+                            contended += 1;
+                        }
+                        reschedule().await;
+                    }
+
+                    // No factory of this thread runs during this poll. Jobs submitted before the
+                    // child are ahead of it, and jobs started after it are behind it.
+                    let start = admitted.load(Ordering::SeqCst);
+                    let ahead = submitted.load(Ordering::SeqCst).saturating_sub(start);
+                    let child = local.child("child").spawn_local({
+                        let admitted = admitted.clone();
+                        move |_| ready(admitted.load(Ordering::SeqCst))
+                    });
+                    let behind = started.load(Ordering::SeqCst) - start;
+                    (ahead, behind, child.await.unwrap() - start)
+                })
+                .await
+                .unwrap();
+            stop.store(true, Ordering::SeqCst);
+            producer.join().unwrap();
+            assert!(ahead >= 200, "the ingress was not full");
+            assert!(
+                (ahead..=behind).contains(&ran),
+                "{ran} jobs ran before the child, expected {ahead} to {behind}"
+            );
+        })
     });
 }

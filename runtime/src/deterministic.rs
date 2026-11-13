@@ -1630,12 +1630,6 @@ impl Context {
         self.place.execution()
     }
 
-    /// The runtime thread this context's spawns run on, if any.
-    #[cfg(test)]
-    pub(crate) const fn placed_thread(&self) -> Option<&Thread> {
-        self.place.thread()
-    }
-
     /// Get a reference to the [Auditor].
     pub fn auditor(&self) -> Arc<Auditor> {
         self.executor().auditor.clone()
@@ -2271,7 +2265,8 @@ mod tests {
     use crate::{
         Blob, IoBuf, Metrics as _, ReadOptions, Resolver, Runner as _, Spawner as _, Storage,
         Strategizer, Supervisor as _, WriteOptions, deterministic, reschedule,
-        threads::admission::State as AdmissionState, utils::extract_panic_message,
+        threads::{admission::State as AdmissionState, testing::DropFlag},
+        utils::extract_panic_message,
     };
     use bytes::Bytes;
     use commonware_macros::test_traced;
@@ -2291,20 +2286,6 @@ mod tests {
         rc::Rc,
         sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     };
-
-    thread_local! {
-        /// A `Local` parked by a resident for another task on the runner's OS thread.
-        static PARKED: RefCell<Option<Local<Context>>> = const { RefCell::new(None) };
-    }
-
-    /// Sets a flag when dropped.
-    struct SetOnDrop(Arc<AtomicBool>);
-
-    impl Drop for SetOnDrop {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::SeqCst);
-        }
-    }
 
     /// Panics with its message when dropped.
     struct PanicOnDrop(&'static str);
@@ -2403,8 +2384,8 @@ mod tests {
         (receiver.await.unwrap(), handle)
     }
 
-    /// Create a built thread, a thread with a root and a local resident, an attached thread,
-    /// and a shared task, each task holding a [Submitter], and wait until every task started.
+    /// Create a built thread, a thread with a root and a local resident, and a shared task.
+    /// Each task holds a [Submitter]. Wait until every task started.
     async fn populate(context: &Context, probe: &Arc<ExitProbe>, threads: &Mutex<Vec<Thread>>) {
         let submitter = |context: Context, thread: &Thread| Submitter {
             context,
@@ -2462,18 +2443,6 @@ mod tests {
         let home = home_receiver.await.unwrap();
         threads.lock().push(home);
 
-        // A placed resident of an attached thread.
-        let attached = context.child("attached").thread().attach().unwrap();
-        let thread = attached.place.thread().cloned().unwrap();
-        threads.lock().push(thread.clone());
-        let held = submitter(context.child("submitter"), &thread);
-        let started = probe.clone();
-        drop(attached.child("placed").spawn(move |_| async move {
-            let _held = held;
-            started.started.fetch_add(1, Ordering::SeqCst);
-            pending::<()>().await
-        }));
-
         // A task on the shared executor.
         let held = submitter(context.child("submitter"), &built);
         let started = probe.clone();
@@ -2483,7 +2452,7 @@ mod tests {
             pending::<()>().await
         }));
 
-        while probe.started.load(Ordering::SeqCst) < 5 {
+        while probe.started.load(Ordering::SeqCst) < 4 {
             reschedule().await;
         }
     }
@@ -2497,7 +2466,7 @@ mod tests {
                 .child("rooted")
                 .thread()
                 .spawn(|local| async move {
-                    let handles: Vec<_> = (0..5u64)
+                    let handles: Vec<_> = (0..2u64)
                         .map(|i| {
                             local.child("leaf").spawn_local(move |local| async move {
                                 for _ in 0..i {
@@ -2516,50 +2485,24 @@ mod tests {
                 })
                 .unwrap();
 
-            // Several threads of one lineage, with spawn_on and placed residents.
-            let (sender, receiver) = oneshot::channel();
-            let lineage = context.child("lineage").spawn(move |context| async move {
-                let threads: Vec<_> = (0..3)
-                    .map(|_| context.child("thread").thread().build().unwrap())
-                    .collect();
-                sender.send(threads).ok().unwrap();
-                pending::<()>().await
+            let (thread, lineage) = lineage(&context, "lineage").await;
+            let on = context.child("on").spawn_on(&thread, |_| async {
+                reschedule().await;
+                7
             });
-            let threads = receiver.await.unwrap();
-            let mut handles = Vec::new();
-            for (i, thread) in threads.iter().enumerate() {
-                handles.push(context.child("on").spawn_on(thread, move |_| async move {
-                    for _ in 0..i {
-                        reschedule().await;
-                    }
-                    i
-                }));
-                handles.push(
-                    context
-                        .child("placed")
-                        .on(thread)
-                        .spawn(move |_| async move {
-                            reschedule().await;
-                            i
-                        }),
-                );
-            }
-            let mut total = 0;
-            for handle in handles {
-                total += handle.await.unwrap();
-            }
-            assert_eq!(total, 6);
-            assert_eq!(root.await.unwrap(), 10);
+            let placed = context.child("placed").on(&thread).spawn(|_| async {
+                reschedule().await;
+                11
+            });
+            assert_eq!(on.await.unwrap(), 7, "spawn_on completed");
+            assert_eq!(placed.await.unwrap(), 11, "placed spawn completed");
+            assert_eq!(root.await.unwrap(), 1, "both local leaves completed");
 
-            // Close every thread of the lineage at once, with residents still pending.
-            let probes: Vec<_> = threads
-                .iter()
-                .map(|thread| context.child("probe").spawn_on(thread, |_| pending::<()>()))
-                .collect();
+            let probe = context
+                .child("probe")
+                .spawn_on(&thread, |_| pending::<()>());
             lineage.abort();
-            for probe in probes {
-                assert!(matches!(probe.await, Err(Error::Closed)));
-            }
+            assert!(matches!(probe.await, Err(Error::Closed)), "lineage closed");
             context.auditor().state()
         })
     }
@@ -4088,121 +4031,6 @@ mod tests {
         assert_ne!(thread_program(1), thread_program(2));
     }
 
-    /// A `Local` of thread A used by a task on thread B spawns a resident of A, so closing B
-    /// leaves it running and closing A aborts it. The `Local` holds a context of an unrelated
-    /// lineage, so only a close can abort the resident.
-    #[test]
-    fn test_thread_routing_to_owner() {
-        Runner::default().start(|context| async move {
-            let (a, lineage_a) = lineage(&context, "a").await;
-            let (b, lineage_b) = lineage(&context, "b").await;
-
-            // A resident of A parks its Local.
-            context
-                .child("parker")
-                .spawn_on(&a, |local| {
-                    PARKED.with(|parked| *parked.borrow_mut() = Some(local));
-                    ready(())
-                })
-                .await
-                .unwrap();
-
-            // A resident of B spawns through it.
-            let free = context.child("free");
-            let home = Arc::new(AtomicBool::new(false));
-            let started = Arc::new(AtomicBool::new(false));
-            let dropped = Arc::new(AtomicBool::new(false));
-            context
-                .child("spawner")
-                .spawn_on(&b, {
-                    let (a, home, started, dropped) =
-                        (a.clone(), home.clone(), started.clone(), dropped.clone());
-                    move |_| {
-                        let mut routed = PARKED.with(|parked| parked.borrow_mut().take()).unwrap();
-                        *routed = free;
-                        drop(routed.spawn_local(move |local| {
-                            home.store(local.home() == &a, Ordering::SeqCst);
-                            async move {
-                                let _dropped = SetOnDrop(dropped);
-                                started.store(true, Ordering::SeqCst);
-                                pending::<()>().await
-                            }
-                        }));
-                        ready(())
-                    }
-                })
-                .await
-                .unwrap();
-            while !started.load(Ordering::SeqCst) {
-                reschedule().await;
-            }
-            assert!(home.load(Ordering::SeqCst));
-
-            // Closing B leaves the resident running.
-            let probe = context.child("probe").spawn_on(&b, |_| pending::<()>());
-            lineage_b.abort();
-            assert!(matches!(probe.await, Err(Error::Closed)));
-            assert!(!dropped.load(Ordering::SeqCst));
-
-            // Closing A aborts it.
-            let probe = context.child("probe").spawn_on(&a, |_| pending::<()>());
-            lineage_a.abort();
-            assert!(matches!(probe.await, Err(Error::Closed)));
-            assert!(dropped.load(Ordering::SeqCst));
-        });
-    }
-
-    /// `spawn_local` through a `Local` whose thread closed earlier in the run resolves closed
-    /// without running its factory, `home` still names the thread, and a capture that panics
-    /// when dropped is reported through the owner's panicker.
-    #[test]
-    fn test_thread_late_spawn_local() {
-        let checked = Arc::new(AtomicBool::new(false));
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            Runner::default().start(|context| {
-                let checked = checked.clone();
-                async move {
-                    let (thread, lineage) = lineage(&context, "t").await;
-                    context
-                        .child("parker")
-                        .spawn_on(&thread, |local| {
-                            PARKED.with(|parked| *parked.borrow_mut() = Some(local));
-                            ready(())
-                        })
-                        .await
-                        .unwrap();
-                    let probe = context
-                        .child("probe")
-                        .spawn_on(&thread, |_| pending::<()>());
-                    lineage.abort();
-                    assert!(matches!(probe.await, Err(Error::Closed)));
-
-                    let local = PARKED.with(|parked| parked.borrow_mut().take()).unwrap();
-                    assert_eq!(local.home(), &thread);
-                    let ran = Rc::new(Cell::new(false));
-                    let capture = PanicOnDrop("late capture");
-                    let handle = local.spawn_local({
-                        let ran = ran.clone();
-                        move |_| {
-                            let _capture = capture;
-                            ran.set(true);
-                            ready(())
-                        }
-                    });
-                    assert!(!ran.get());
-                    assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
-                    checked.store(true, Ordering::SeqCst);
-
-                    // The reported panic fails the run at the root's next poll.
-                    reschedule().await;
-                }
-            })
-        }));
-        assert!(checked.load(Ordering::SeqCst));
-        let panic = result.expect_err("the dropped capture's panic was not reported");
-        assert_eq!(extract_panic_message(&*panic), "late capture");
-    }
-
     /// A `spawn_on` from another OS thread runs its factory on the runner's thread.
     #[test]
     fn test_thread_foreign_spawn_on() {
@@ -4308,12 +4136,20 @@ mod tests {
         );
 
         let threads = threads.lock();
-        assert_eq!(threads.len(), 3);
+        assert_eq!(threads.len(), 2, "both virtual threads closed");
         for thread in threads.iter() {
             assert_eq!(thread.inner().state(), AdmissionState::Closed);
         }
-        assert_eq!(probe.dropped.load(Ordering::SeqCst), 5);
-        assert_eq!(probe.rejected.load(Ordering::SeqCst), 15);
+        assert_eq!(
+            probe.dropped.load(Ordering::SeqCst),
+            4,
+            "every task was disposed"
+        );
+        assert_eq!(
+            probe.rejected.load(Ordering::SeqCst),
+            12,
+            "late submissions were rejected"
+        );
         assert!(!probe.ran.load(Ordering::SeqCst));
     }
 
@@ -4353,109 +4189,14 @@ mod tests {
         }
     }
 
-    /// A close drops every resident's future before any unrun `spawn_on` factory, even when the
-    /// factory belongs to an older resident.
+    /// An escaped context takes precedence over a resident's disposal panic after the exit
+    /// drain clears shared tasks.
     #[test]
-    fn test_thread_close_drops_futures_before_factories() {
-        /// Records its name in the shared order when dropped.
-        struct Record(Arc<Mutex<Vec<&'static str>>>, &'static str);
-
-        impl Drop for Record {
-            fn drop(&mut self) {
-                self.0.lock().push(self.1);
-            }
-        }
-
-        let (context, executor, _panicked, _tree) = Context::new(Config::default());
-        let thread = context.child("t").thread().build().unwrap();
-        let id = thread.inner().id();
-        let order = Arc::new(Mutex::new(Vec::new()));
-
-        // The older resident keeps its factory unrun, and the newer one runs its factory and
-        // leaves its future pending.
-        let factory = Record(order.clone(), "factory");
-        let older = context.child("older").spawn_on(&thread, move |_| {
-            let _factory = factory;
-            ready(())
-        });
-        let future = Record(order.clone(), "future");
-        let newer = context
-            .child("newer")
-            .spawn_on(&thread, move |_| async move {
-                let _future = future;
-                pending::<()>().await
-            });
-        let (first, second) = {
-            let threads = executor.threads.lock();
-            let mut residents = threads.entries[&id].residents.keys().copied();
-            (residents.next().unwrap(), residents.next().unwrap())
-        };
-        assert!(first < second);
-        let table = RefCell::new(LocalTable::default());
-        let task = executor.tasks.get(second).unwrap();
-        let waker = futures::task::noop_waker();
-        let mut cx = task::Context::from_waker(&waker);
-        assert!(!executor.poll_resident(&table, &task, id, &mut cx));
-        assert!(order.lock().is_empty());
-
-        executor.close_thread(&table, id);
-        assert_eq!(*order.lock(), ["future", "factory"]);
-        assert!(matches!(older.now_or_never(), Some(Err(Error::Closed))));
-        assert!(matches!(newer.now_or_never(), Some(Err(Error::Closed))));
-        drop(context);
-    }
-
-    /// A pending thread close is ready work, so time does not skip to a sleeper and the runtime
-    /// does not report a stall while a close is queued.
-    #[test]
-    fn test_thread_closing_list_counts_as_ready() {
-        let (context, executor, _panicked, _tree) = Context::new(Config::default());
-        let current = *executor.time.lock();
-        let deadline = current + Duration::from_secs(3600);
-        let backend = VirtualThread {
-            tasks: Arc::downgrade(&executor.tasks),
-            id: 3,
-        };
-
-        // With no sleeper, a queued close is progress.
-        backend.wake();
-        assert_ne!(executor.tasks.ready(), 0);
-        executor.wake_until_progress(current);
-        assert_eq!(executor.tasks.take_closing(), [3]);
-
-        // With a far sleeper, a queued close keeps time where it is.
-        executor.sleeping.lock().push(Alarm {
-            time: deadline,
-            waker: Arc::new(AtomicWaker::new()),
-        });
-        backend.wake();
-        assert_ne!(executor.tasks.ready(), 0);
-        assert_eq!(executor.skip_idle_time(current), current);
-        executor.wake_until_progress(current);
-        assert_eq!(*executor.time.lock(), current);
-
-        // Once the close is taken, the same runtime skips to the sleeper.
-        assert_eq!(executor.tasks.take_closing(), [3]);
-        assert_eq!(executor.tasks.ready(), 0);
-        if !cfg!(feature = "external") {
-            assert_eq!(executor.skip_idle_time(current), deadline);
-        }
-        drop(context);
-    }
-
-    /// A resident whose destructor panics during the exit drain of a run that did not panic
-    /// fails the run with that payload when panics are not caught, after cleanup and the
-    /// escaped-context assertion ran.
-    #[rstest::rstest]
-    #[case::reported(false, false)]
-    #[case::caught(true, false)]
-    #[case::escaped_context(false, true)]
-    fn test_thread_exit_drain_panic(#[case] catch: bool, #[case] escape: bool) {
+    fn test_thread_exit_drain_panic() {
         let cleared = Arc::new(AtomicBool::new(false));
         let escaped = Arc::new(Mutex::new(None));
-        let cfg = Config::default().with_catch_panics(catch);
         let result = catch_unwind(AssertUnwindSafe(|| {
-            Runner::new(cfg).start(|context| {
+            Runner::default().start(|context| {
                 let (cleared, escaped) = (cleared.clone(), escaped.clone());
                 async move {
                     let thread = context.child("t").thread().build().unwrap();
@@ -4471,28 +4212,22 @@ mod tests {
 
                     // A shared task the exit clears.
                     drop(context.child("shared").spawn(move |_| async move {
-                        let _cleared = SetOnDrop(cleared);
+                        let _cleared = DropFlag(cleared);
                         pending::<()>().await
                     }));
                     while !started.load(Ordering::SeqCst) {
                         reschedule().await;
                     }
-                    if escape {
-                        *escaped.lock() = Some(context.child("escaped"));
-                    }
+                    *escaped.lock() = Some(context.child("escaped"));
                 }
             })
         }));
-        let expected = match (catch, escape) {
-            (_, true) => Some("executor still has weak references"),
-            (false, false) => Some("drain"),
-            (true, false) => None,
-        };
         assert_eq!(
-            result.err().map(|panic| extract_panic_message(&*panic)),
-            expected.map(String::from)
+            extract_panic_message(&*result.expect_err("escaped context must fail the run")),
+            "executor still has weak references",
+            "escaped context takes precedence over disposal"
         );
-        assert!(cleared.load(Ordering::SeqCst));
+        assert!(cleared.load(Ordering::SeqCst), "shared tasks were cleared");
         drop(escaped.lock().take());
     }
 

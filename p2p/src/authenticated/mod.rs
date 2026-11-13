@@ -23,4 +23,4 @@ mod stream;
 mod throttle;
 
 #[cfg(test)]
-mod placement;
+pub(crate) mod placement;

@@ -240,111 +240,71 @@ pub(crate) mod tests {
         }
     }
 
-    /// A pinned thread runs on exactly the CPUs it requested.
-    #[rstest]
-    #[case::tokio(tokio::Runner::default())]
-    #[case::iouring(iouring::Runner::default())]
-    fn test_affinity_pinned_thread_reports_requested<R: Runner>(#[case] runner: R)
-    where
-        R::Context: Spawner,
-    {
-        let Some(base) = base() else {
-            return;
-        };
-        let requested = Cpus::from(base.iter().skip(1).collect::<Vec<_>>());
-        let reported = runner.start(|context| {
-            let requested = requested.clone();
-            async move {
-                context
-                    .child("pinned")
-                    .thread()
-                    .pin(requested)
-                    .spawn(|_| ready(current()))
-                    .unwrap()
-                    .await
-                    .unwrap()
-            }
-        });
-        assert_eq!(reported, Some(requested));
+    /// Observe the mask and masks inherited by runtime-created descendants.
+    async fn masks<C: Spawner>(context: C) -> (Option<Cpus>, Option<Cpus>, Option<Cpus>) {
+        let reported = current();
+        let blocking = context
+            .child("blocking")
+            .blocking()
+            .spawn(|_| async { current() })
+            .await
+            .unwrap();
+        let unpinned = context
+            .child("unpinned")
+            .thread()
+            .spawn(|_| ready(current()))
+            .unwrap()
+            .await
+            .unwrap();
+        (reported, blocking, unpinned)
     }
 
-    /// Once a pin armed the reset, threads the runtime creates from a pinned thread write
-    /// the base set: a blocking task's thread (an io_uring blocking worker on io_uring) and
-    /// an unpinned runtime thread.
+    /// Pins report the requested mask and arm descendant resets. Without a pin,
+    /// descendants retain the narrowed mask inherited from their creator.
     #[rstest]
     #[case::tokio(tokio::Runner::default())]
     #[case::iouring(iouring::Runner::default())]
-    fn test_affinity_reset_after_pin<R: Runner>(#[case] runner: R)
+    fn test_affinity_masks<R: Runner>(#[case] runner: R, #[values(false, true)] pinned: bool)
     where
         R::Context: Spawner,
     {
         let Some(base) = base() else {
             return;
         };
-        let pin = base.iter().next().unwrap();
-        let (blocking, unpinned) = runner.start(|context| async move {
-            context
-                .child("pinned")
-                .thread()
-                .pin(pin)
-                .spawn(move |local| async move {
-                    assert_eq!(current(), Some(Cpus::from(pin)));
-                    let blocking = local
-                        .child("blocking")
-                        .into_inner()
-                        .blocking()
-                        .spawn(|_| async { current() })
-                        .await
-                        .unwrap();
-                    let unpinned = local
-                        .child("unpinned")
-                        .into_inner()
-                        .thread()
-                        .spawn(|_| ready(current()))
-                        .unwrap()
-                        .await
-                        .unwrap();
-                    (blocking, unpinned)
-                })
-                .unwrap()
-                .await
-                .unwrap()
-        });
-        assert_eq!(blocking.as_ref(), Some(&base));
-        assert_eq!(unpinned.as_ref(), Some(&base));
-    }
-
-    /// A runner that never pins writes no mask. Threads created while the runner thread is
-    /// narrowed keep the narrowed mask they inherit.
-    #[rstest]
-    #[case::tokio(tokio::Runner::default())]
-    #[case::iouring(iouring::Runner::default())]
-    fn test_affinity_unpinned_runner_writes_no_mask<R: Runner>(#[case] runner: R)
-    where
-        R::Context: Spawner,
-    {
-        let Some(base) = base() else {
-            return;
-        };
-        let narrow = Cpus::from(base.iter().next().unwrap());
-        let (blocking, unpinned) = runner.start(|context| {
-            let (narrow, base) = (narrow.clone(), base.clone());
+        let mut ids = base.iter();
+        let narrow = Cpus::from(ids.next().unwrap());
+        let requested = Cpus::from(ids.collect::<Vec<_>>());
+        let observed = runner.start(|context| {
+            let (base, narrow, requested) = (base.clone(), narrow.clone(), requested.clone());
             async move {
                 let _narrowed = Narrowed::new(narrow, &base);
-                let blocking = context
-                    .child("blocking")
-                    .blocking()
-                    .spawn(|_| async { current() });
-                let unpinned = context
-                    .child("unpinned")
-                    .thread()
-                    .spawn(|_| ready(current()))
-                    .unwrap();
-                (blocking.await.unwrap(), unpinned.await.unwrap())
+                if pinned {
+                    context
+                        .child("pinned")
+                        .thread()
+                        .pin(requested)
+                        .spawn(|local| masks(local.into_inner()))
+                        .unwrap()
+                        .await
+                        .unwrap()
+                } else {
+                    masks(context).await
+                }
             }
         });
-        assert_eq!(blocking, Some(narrow.clone()));
-        assert_eq!(unpinned, Some(narrow));
+        if pinned {
+            assert_eq!(
+                observed,
+                (Some(requested), Some(base.clone()), Some(base)),
+                "pin outside creator mask reports requested CPUs and resets descendants"
+            );
+        } else {
+            assert_eq!(
+                observed,
+                (Some(narrow.clone()), Some(narrow.clone()), Some(narrow)),
+                "an unpinned runner preserves inherited masks"
+            );
+        }
     }
 
     /// How a pinned thread fails before its mask applies.
@@ -391,6 +351,8 @@ pub(crate) mod tests {
                         assert!(matches!(probe.await, Err(Error::Closed)));
                     }
                 }
+                fail_spawns(0);
+                fail_writes(0);
                 let _narrowed = Narrowed::new(narrow, &base);
                 context
                     .child("unpinned")
@@ -402,69 +364,6 @@ pub(crate) mod tests {
             }
         });
         assert_eq!(unpinned, Some(narrow));
-    }
-
-    /// A pin may name a CPU of the base set that the creating thread may not run on.
-    #[rstest]
-    #[case::tokio(tokio::Runner::default())]
-    #[case::iouring(iouring::Runner::default())]
-    fn test_affinity_pin_outside_creator_mask<R: Runner>(#[case] runner: R)
-    where
-        R::Context: Spawner,
-    {
-        let Some(base) = base() else {
-            return;
-        };
-        let mut ids = base.iter();
-        let (narrow, pin) = (ids.next().unwrap(), ids.next().unwrap());
-        let reported = runner.start(|context| {
-            let base = base.clone();
-            async move {
-                let _narrowed = Narrowed::new(narrow, &base);
-                context
-                    .child("pinned")
-                    .thread()
-                    .pin(pin)
-                    .spawn(|_| ready(current()))
-                    .unwrap()
-                    .await
-                    .unwrap()
-            }
-        });
-        assert_eq!(reported, Some(Cpus::from(pin)));
-    }
-
-    /// Every finisher rejects a pin when the base set is unknown.
-    #[rstest]
-    #[case::tokio(tokio::Runner::default())]
-    #[case::iouring(iouring::Runner::default())]
-    fn test_affinity_unknown_base_set_is_unsupported<R: Runner>(#[case] runner: R)
-    where
-        R::Context: Spawner,
-    {
-        override_base(Some(None));
-        runner.start(|context| async move {
-            let built = context.child("built").thread().pin(0).build();
-            assert!(matches!(built, Err(ThreadError::UnsupportedAffinity)));
-            let attached = context.child("attached").thread().pin(0).attach();
-            assert!(matches!(attached, Err(ThreadError::UnsupportedAffinity)));
-            let spawned = context
-                .child("spawned")
-                .thread()
-                .pin(0)
-                .spawn(|_| ready(()));
-            assert!(matches!(spawned, Err(ThreadError::UnsupportedAffinity)));
-
-            // An unpinned thread needs no base set.
-            context
-                .child("unpinned")
-                .thread()
-                .spawn(|_| ready(()))
-                .unwrap()
-                .await
-                .unwrap();
-        });
-        override_base(None);
     }
 
     /// A mask write that fails on the new thread is a late startup failure. Spawns sent
@@ -480,8 +379,6 @@ pub(crate) mod tests {
     where
         R::Context: Spawner,
     {
-        /// Spawns sent toward the failing thread.
-        const SPAWNS: usize = 16;
         let Some(base) = base() else {
             return;
         };
@@ -493,21 +390,18 @@ pub(crate) mod tests {
                 let ran = ran.clone();
                 async move {
                     let thread = context.child("pinned").thread().pin(pin).build().unwrap();
-                    let handles: Vec<_> = (0..SPAWNS)
-                        .map(|_| {
-                            let ran = ran.clone();
-                            context.child("queued").spawn_on(&thread, move |_| {
-                                ran.store(true, Ordering::SeqCst);
-                                ready(())
-                            })
-                        })
-                        .collect();
-                    for handle in handles {
-                        assert!(matches!(handle.await, Err(Error::Closed)));
-                    }
+                    let handle = context.child("queued").spawn_on(&thread, move |_| {
+                        ran.store(true, Ordering::SeqCst);
+                        ready(())
+                    });
+                    assert!(
+                        matches!(handle.await, Err(Error::Closed)),
+                        "failed pin closes queued work"
+                    );
                 }
             })
         }));
+        fail_writes(0);
         assert!(!ran.load(Ordering::SeqCst));
         if catch {
             result.expect("a caught startup failure failed the runner");

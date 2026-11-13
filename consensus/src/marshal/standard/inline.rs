@@ -760,43 +760,9 @@ mod tests {
     #[test]
     fn test_inline_round_tasks_use_shared_executor() {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle = setup_network_with_participants(
-                context.child("network"),
-                NZUsize!(1),
-                participants.clone(),
-                1024 * 1024,
-            )
-            .await;
-            let setup = StandardHarness::setup_validator(
-                context.child("validator").with_attribute("index", 0),
-                &mut oracle,
-                participants[0].clone(),
-                ConstantProvider::new(schemes[0].clone()),
-            )
-            .await;
-            let marshal = setup.mailbox;
-            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
-            let parent_round = Round::new(Epoch::zero(), View::new(1));
-            let parent_ctx = Ctx {
-                round: parent_round,
-                leader: default_leader(),
-                parent: (View::zero(), genesis.digest()),
-            };
-            let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
-            let parent_digest = parent.digest();
-            assert!(marshal.verified(parent_round, ready(parent)).await);
-            let round = Round::new(Epoch::zero(), View::new(2));
-            let ctx = Ctx {
-                round,
-                leader: participants[0].clone(),
-                parent: (View::new(1), parent_digest),
-            };
-            let block = B::new::<Sha256>(ctx.clone(), parent_digest, Height::new(2), 200);
+            let (marshal, ctx, block) =
+                crate::marshal::mocks::harness::placement_setup(&mut context).await;
+            let round = ctx.round;
             let digest = block.digest();
             let thread = context.child("t").thread().build().unwrap();
             let mut inline = Inline::new(
@@ -818,20 +784,7 @@ mod tests {
                 "inline_inline_verify",
                 "inline_inline_certify",
             ] {
-                let name = format!("name=\"{task}\"");
-                let lines: Vec<_> = metrics
-                    .lines()
-                    .filter(|line| {
-                        line.starts_with("runtime_tasks_spawned_total{") && line.contains(&name)
-                    })
-                    .collect();
-                assert!(!lines.is_empty(), "missing {name}: {metrics}");
-                assert!(
-                    lines
-                        .iter()
-                        .all(|line| line.contains("execution=\"Shared\"")),
-                    "{name}: {metrics}"
-                );
+                crate::marshal::mocks::assert_execution(&metrics, task, "Shared");
             }
         });
     }

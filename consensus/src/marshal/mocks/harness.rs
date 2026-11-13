@@ -81,6 +81,52 @@ pub type V = MinPk;
 pub type S = bls12381_threshold_vrf::Scheme<K, V>;
 pub type P = ConstantProvider<S, Epoch>;
 
+#[cfg(test)]
+pub(crate) async fn placement_setup(
+    context: &mut deterministic::Context,
+) -> (Mailbox<S, Standard<B>>, Ctx, B) {
+    let Fixture {
+        participants,
+        schemes,
+        ..
+    } = bls12381_threshold_vrf::fixture::<V, _>(context, NAMESPACE, NUM_VALIDATORS);
+    let mut oracle = setup_network_with_participants(
+        context.child("network"),
+        NZUsize!(1),
+        participants.clone(),
+        1024 * 1024,
+    )
+    .await;
+    let setup = StandardHarness::setup_validator(
+        context.child("validator").with_attribute("index", 0),
+        &mut oracle,
+        participants[0].clone(),
+        ConstantProvider::new(schemes[0].clone()),
+    )
+    .await;
+    let marshal = setup.mailbox;
+    let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
+    let parent_round = Round::new(Epoch::zero(), View::new(1));
+    let parent_ctx = Ctx {
+        round: parent_round,
+        leader: default_leader(),
+        parent: (View::zero(), genesis.digest()),
+    };
+    let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
+    let parent_digest = parent.digest();
+    assert!(
+        marshal.verified(parent_round, ready(parent)).await,
+        "parent is verified"
+    );
+    let ctx = Ctx {
+        round: Round::new(Epoch::zero(), View::new(2)),
+        leader: participants[0].clone(),
+        parent: (View::new(1), parent_digest),
+    };
+    let block = B::new::<Sha256>(ctx.clone(), parent_digest, Height::new(2), 200);
+    (marshal, ctx, block)
+}
+
 // Coding variant type aliases (uses Commitment in context)
 type TestCommitment = Commitment<CodingB, ReedSolomon<Sha256>, Sha256>;
 pub type CodingCtx = Context<TestCommitment, K>;

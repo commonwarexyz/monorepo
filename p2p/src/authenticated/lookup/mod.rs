@@ -299,19 +299,11 @@ mod tests {
             );
             oracle0.track(0, peers.clone());
             oracle1.track(0, peers);
-            network0.start();
-            network1.start();
-
-            loop {
-                let metrics = context.encode();
-                if crate::authenticated::placement::assert_thread_placement(
-                    &metrics,
-                    &["network0", "network1"],
-                ) {
-                    break;
-                }
-                context.sleep(Duration::from_millis(100)).await;
-            }
+            crate::authenticated::placement::start_and_check(&context, || {
+                network0.start();
+                network1.start();
+            })
+            .await;
         });
     }
 
