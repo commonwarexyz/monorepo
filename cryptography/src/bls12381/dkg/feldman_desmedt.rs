@@ -612,8 +612,7 @@ impl<V: Variant, P: Ord> Output<V, P> {
         &self.players
     }
 
-    /// Return the players whose shares may have been revealed, based only on what the selected
-    /// dealers revealed in this round.
+    /// Return the players whose shares the selected dealers may have revealed in this round.
     ///
     /// A Byzantine player can reveal its own share outside the protocol. An adversary that knew an
     /// honest player's share before a reshare (from a reveal or some other path) may use it with
