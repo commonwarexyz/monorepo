@@ -389,17 +389,20 @@ impl Config {
         self
     }
 
-    /// Set the stack size of pool, dedicated worker, and Rayon threads. Worker
+    /// Set the stack size of pool, runtime thread, blocking worker, and Rayon threads. Worker
     /// zero runs on the calling thread and keeps its stack.
     pub const fn with_thread_stack_size(mut self, size: usize) -> Self {
         self.thread_stack_size = size;
         self
     }
 
-    /// Set whether spawned-task panics and dedicated worker failures are caught.
+    /// Set whether spawned-task panics and runtime thread and blocking worker
+    /// failures are caught.
     ///
     /// Caught failures are logged without interrupting the root. Propagated
-    /// failures are observed only while the root is executing. A failure of a
+    /// failures of ordinary and blocking tasks are observed only while the root
+    /// is executing, and failures of runtime threads until every worker has
+    /// finished. A failure of a
     /// pool worker itself, such as an io_uring error, fails the runner with
     /// either setting. It interrupts the root while the root runs, and
     /// otherwise the runner resumes it after shutdown.
@@ -500,12 +503,13 @@ impl Config {
         &self.idle_spinner
     }
 
-    /// Return the configured pool, dedicated worker, and Rayon thread stack size.
+    /// Return the configured pool, runtime thread, blocking worker, and Rayon thread stack size.
     pub const fn thread_stack_size(&self) -> usize {
         self.thread_stack_size
     }
 
-    /// Return whether spawned-task panics and dedicated worker failures are caught.
+    /// Return whether spawned-task panics and runtime thread and blocking worker failures are
+    /// caught.
     pub const fn catch_panics(&self) -> bool {
         self.catch_panics
     }
@@ -2556,14 +2560,22 @@ impl crate::Runner for Runner {
             Role::Pool(0),
             || {
                 threads.start(&shared, &pool_panicker);
-                let root = thread_failures.interrupt(tasks.interrupt(f(Context {
+                let root = f(Context {
                     name: label.name().to_string(),
                     attributes: Vec::new(),
                     shared: context_shared,
                     tree: context_tree,
                     blocking: false,
                     placement: None,
-                })));
+                });
+
+                // The root owns the ordinary task panic receiver, so a panic published after
+                // the root is destroyed is dropped where it is notified, and one published
+                // during its destruction is dropped before admission closes.
+                let root = thread_failures.interrupt(async move {
+                    let tasks = tasks;
+                    tasks.interrupt(root).await
+                });
                 let failures = &mut pool_failures;
                 async move {
                     let mut root = pin!(root);
@@ -2578,10 +2590,6 @@ impl crate::Runner for Runner {
             },
             Some(Box::pin(process.collect(Sleep::new))),
         );
-
-        // Stop observing ordinary task panics once the root is gone, so a later one is dropped
-        // where it is notified.
-        drop(tasks);
         let output = run.and_then(|(mut worker, output)| {
             #[cfg(test)]
             tests::before_abort();

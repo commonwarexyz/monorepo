@@ -5,8 +5,8 @@
 //! residents. The pool, its run queues and work stealing are not involved. Residents are polled
 //! on the thread's worker, so their I/O and sleeps register on its ring.
 //!
-//! Each turn of the root admits at most [BATCH] queued jobs, in order, then polls at most [BATCH]
-//! ready residents, and wakes itself if work remains. A resident woken during the turn goes to
+//! Each turn of the root admits at most [BATCH] queued jobs, in order, then makes at most [BATCH]
+//! polls of ready residents, and wakes itself if work remains. A resident woken during the turn goes to
 //! the back of the ready list and is polled again in the same turn while the budget lasts, as a
 //! pool task woken during its poll is. Each resident owns one waker for its whole life, carrying
 //! a `queued` flag, so a burst of wakes queues it once. Waking the root is coalesced with one
@@ -675,7 +675,7 @@ mod loom_tests {
                 move || Wake::wake_by_ref(&resident)
             });
 
-            // A host turn: clear notified, take the batch, then poll it.
+            // A host turn clears notified, takes the batch, then polls it.
             wake.begin_turn(&waker);
             let mut batch = Vec::new();
             wake.take(BATCH, &mut batch);
@@ -738,8 +738,8 @@ mod loom_tests {
             let aborter = Aborter::thread(Arc::downgrade(&inner));
             let aborter = thread::spawn(move || aborter.abort());
 
-            // The first turn: store the root waker and clear notified, then
-            // check admission.
+            // The first turn stores the root waker and clears notified, then
+            // checks admission.
             wake.begin_turn(&waker);
             let mut batch = VecDeque::new();
             let closing = inner.take_batch(BATCH, &mut batch) == Turn::Closing;

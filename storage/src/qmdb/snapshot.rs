@@ -1164,6 +1164,67 @@ mod tests {
         });
     }
 
+    /// Build the three-chunk log on a native runtime, where each worker and decoder runs on an
+    /// OS thread of its own, `rounds` times. `make` returns a runner and its storage directory,
+    /// which is removed afterwards.
+    fn parallel_build_native<R>(make: impl Fn() -> (R, std::path::PathBuf), rounds: usize)
+    where
+        R: commonware_runtime::Runner,
+        R::Context: Spawner + commonware_runtime::Metrics,
+    {
+        for round in 0..rounds {
+            let (runner, directory) = make();
+            runner.start(|context| async move {
+                let log = three_chunk_log();
+                let mut index =
+                    crate::index::partitioned::unordered::Index::<TwoCap, Location, 1>::new(
+                        context.child("index"),
+                        TwoCap,
+                    );
+                let (keys, _) = build_snapshot_parallel(
+                    &mut index,
+                    context.child("build"),
+                    Location::new(0),
+                    &log,
+                    NonZeroUsize::new(4).unwrap(),
+                    NonZeroUsize::new(1 << 16).unwrap(),
+                    None,
+                )
+                .await
+                .unwrap();
+                assert_eq!(keys, 10, "round {round}");
+                assert!((0u64..10).all(|i| index.get(&key(i)).next().is_some()));
+                assert_eq!(Arc::strong_count(&log), 1, "round {round}");
+            });
+            let _ = std::fs::remove_dir_all(directory);
+        }
+    }
+
+    #[test]
+    fn test_parallel_build_three_chunk_log_tokio() {
+        parallel_build_native(
+            || {
+                let cfg = commonware_runtime::tokio::Config::default();
+                let directory = cfg.storage_directory().clone();
+                (commonware_runtime::tokio::Runner::new(cfg), directory)
+            },
+            10,
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_parallel_build_three_chunk_log_iouring() {
+        parallel_build_native(
+            || {
+                let cfg = commonware_runtime::iouring::Config::default();
+                let directory = cfg.storage_directory().clone();
+                (commonware_runtime::iouring::Runner::new(cfg), directory)
+            },
+            10,
+        );
+    }
+
     /// The same log builds in full without failures, so the failures above come from the
     /// injected launches.
     #[test]

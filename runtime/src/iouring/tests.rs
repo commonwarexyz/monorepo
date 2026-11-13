@@ -2871,6 +2871,77 @@ fn test_shutdown_waits_for_thread_task_destruction() {
     assert_eq!(registry.state.lock().active, 0);
 }
 
+/// A task panic published while the root is destroyed is not observed, and its payload is
+/// dropped with the root, before the runner stops admitting work, so its destructor can still
+/// spawn.
+#[test]
+fn test_task_panic_payload_dropped_with_the_root_can_spawn() {
+    /// Panic payload that spawns cleanup work when dropped.
+    struct Payload {
+        /// Context of the cleanup spawn.
+        context: Option<Context>,
+        /// Set by the cleanup factory, which runs on the spawning thread.
+        invoked: Arc<AtomicBool>,
+    }
+
+    impl Drop for Payload {
+        fn drop(&mut self) {
+            let invoked = self.invoked.clone();
+            drop(self.context.take().unwrap().shared(true).spawn(move |_| {
+                invoked.store(true, Ordering::SeqCst);
+                async {}
+            }));
+        }
+    }
+
+    /// Ready root whose destruction releases a blocking task and waits for it to panic.
+    struct Root {
+        release: Option<mpsc::Sender<()>>,
+        task: Option<Handle<()>>,
+    }
+
+    impl Future for Root {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<()> {
+            Poll::Ready(())
+        }
+    }
+
+    impl Drop for Root {
+        fn drop(&mut self) {
+            self.release.take().unwrap().send(()).unwrap();
+            let task = self.task.take().unwrap();
+            assert!(matches!(block_on(task), Err(Error::Exited)));
+        }
+    }
+
+    let invoked = Arc::new(AtomicBool::new(false));
+    let observed = invoked.clone();
+    Runner::new(config()).start(|context| {
+        let (release, released) = mpsc::channel();
+        let (started, starting) = mpsc::channel();
+        let payload = Payload {
+            context: Some(context.child("payload")),
+            invoked,
+        };
+        let task = context
+            .child("blocking")
+            .shared(true)
+            .spawn(move |_| async move {
+                started.send(()).unwrap();
+                released.recv_timeout(TEST_TIMEOUT).unwrap();
+                panic_any(payload);
+            });
+        starting.recv_timeout(TEST_TIMEOUT).unwrap();
+        Root {
+            release: Some(release),
+            task: Some(task),
+        }
+    });
+    assert!(observed.load(Ordering::SeqCst));
+}
+
 #[test]
 fn test_shutdown_waits_for_workers_without_observing_late_panics() {
     /// Signal the end of root execution before allowing a worker failure to publish.
@@ -5810,8 +5881,8 @@ mod threads {
         drop(peer);
     }
 
-    /// Case A of a thread whose ring fails to start: the root handle resolves
-    /// `Closed` without running the factory. With caught panics the runner
+    /// When a thread's ring fails to start, the root handle resolves `Closed`
+    /// without running the factory. With caught panics the runner
     /// goes on and a later thread works. Otherwise `start` fails with the
     /// startup error.
     #[rstest::rstest]
@@ -5858,8 +5929,8 @@ mod threads {
         }
     }
 
-    /// Case B of a thread whose ring fails to start: a `spawn_on` task and a
-    /// placed spawn toward the built thread resolve `Closed` unpolled, whether
+    /// When a thread's ring fails to start, a `spawn_on` task and a placed
+    /// spawn toward the built thread resolve `Closed` unpolled, whether
     /// queued before the failure or rejected after it, and a later thread works.
     #[test]
     fn test_thread_startup_failure_closes_work_sent_to_a_built_thread() {

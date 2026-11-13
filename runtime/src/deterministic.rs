@@ -117,7 +117,10 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     pin::Pin,
     rc::Rc,
-    sync::{Arc, Weak},
+    sync::{
+        Arc, Weak,
+        atomic::{AtomicUsize, Ordering},
+    },
     task::{self, Poll},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -699,11 +702,10 @@ impl Executor {
         }
     }
 
-    /// Close `thread`. Abort its residents, drop their futures and unrun factories in task-id
-    /// order, then its parked factories and result slots, each in its own panic boundary. Then
-    /// mark it closed and release its node and entry.
-    ///
-    /// Every resident future is dropped before any unrun factory, each group in task-id order.
+    /// Close the thread `id`. Abort every resident, then drop the resident futures in task-id
+    /// order, then the factories that never ran in task-id order, then the parked factories and
+    /// result slots, each in its own panic boundary. Finally mark the thread closed and release
+    /// its node and entry.
     fn close_thread(&self, table: &RefCell<LocalTable>, id: u64) {
         let Some(thread) = self
             .threads
@@ -1291,6 +1293,9 @@ struct Tasks {
     running: Mutex<BTreeMap<u128, Arc<Task>>>,
     /// Runtime threads whose close was requested, which the loop counts as ready work.
     closing: Mutex<Vec<u64>>,
+    /// Length of `closing`, written under its lock, so the loop can check for closes without
+    /// locking on every iteration.
+    closes: AtomicUsize,
 }
 
 impl Tasks {
@@ -1301,6 +1306,7 @@ impl Tasks {
             ready: Mutex::new(Vec::new()),
             running: Mutex::new(BTreeMap::new()),
             closing: Mutex::new(Vec::new()),
+            closes: AtomicUsize::new(0),
         }
     }
 
@@ -1376,17 +1382,24 @@ impl Tasks {
     /// The number of ready tasks.
     fn ready(&self) -> usize {
         // A pending thread close is work the loop does before time moves.
-        self.ready.lock().len() + self.closing.lock().len()
+        self.ready.lock().len() + self.closes.load(Ordering::Acquire)
     }
 
     /// Request the close of runtime thread `thread`.
     fn close(&self, thread: u64) {
-        self.closing.lock().push(thread);
+        let mut closing = self.closing.lock();
+        closing.push(thread);
+        self.closes.store(closing.len(), Ordering::Release);
     }
 
     /// Take the threads whose close was requested.
     fn take_closing(&self) -> Vec<u64> {
-        take(&mut *self.closing.lock())
+        if self.closes.load(Ordering::Acquire) == 0 {
+            return Vec::new();
+        }
+        let mut closing = self.closing.lock();
+        self.closes.store(0, Ordering::Release);
+        take(&mut *closing)
     }
 
     /// Lookup a task.
@@ -1407,7 +1420,7 @@ impl Tasks {
     fn clear(&self) -> Vec<Arc<Task>> {
         // Clear ready
         self.ready.lock().clear();
-        self.closing.lock().clear();
+        drop(self.take_closing());
 
         // Clear running tasks
         let running: BTreeMap<u128, Arc<Task>> = {

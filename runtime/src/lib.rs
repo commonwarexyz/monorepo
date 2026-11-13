@@ -362,10 +362,11 @@ stability_scope!(BETA {
     /// # Placement
     ///
     /// Every context carries a placement: the runtime's shared executor (the default) or a
-    /// runtime [Thread] (see [Spawner::thread]). [Spawner::on] and [Spawner::shared] set it, and
-    /// the last of the two wins. Placement is inherited by [Supervisor::child],
-    /// [Supervisor::with_attribute] and the context handed to every spawned task, so placing a
-    /// subsystem's context colocates everything it spawns, with no change to the subsystem.
+    /// runtime [`Thread`] (see [`Spawner::thread`]). [`Spawner::on`] and [`Spawner::shared`] set
+    /// it, and the last of the two wins. A context line is a context together with every context
+    /// derived from it by [`Supervisor::child`], [`Supervisor::with_attribute`] or spawning, and
+    /// all of them inherit its placement, so placing a subsystem's context colocates everything
+    /// it spawns, with no change to the subsystem.
     /// Library code that fans out per connection or per peer, or does CPU-heavy work, should
     /// spawn with `shared(false)` if its subsystem may be placed on a thread.
     pub trait Spawner: Supervisor {
@@ -386,15 +387,15 @@ stability_scope!(BETA {
         ///
         /// The placement is inherited by [`Supervisor::child`], [`Supervisor::with_attribute`]
         /// and the context handed to every task spawned from this line. [`Spawner::shared`] or a
-        /// later [`Spawner::on`] replaces it, and this clears a pending blocking flag.
+        /// later [`Spawner::on`] replaces it. Calling `on` also clears a pending blocking flag.
         ///
         /// A spawn from a placed context runs its factory on the caller, as usual, and its
         /// future on the thread. Tasks on a thread are cooperative. Every poll, factory and
         /// destructor must return promptly (see [`Spawner::thread`]). A spawn toward a thread
         /// that already closed, or belongs to another runner, resolves [`Error::Closed`] without
-        /// running its factory, and aborts the consumed context's node. If the thread closes after
-        /// the factory ran, the task's future is dropped unpolled and the handle resolves
-        /// [`Error::Closed`] as well.
+        /// running its factory, and aborts the consumed context's node. If the thread closes before
+        /// the task finishes, its future is dropped and the handle resolves [`Error::Closed`] as
+        /// well.
         ///
         /// Placement creates no supervision edge. Aborting a context placed on a thread does not
         /// close the thread, and closing the thread aborts only the tasks running on it.
@@ -404,8 +405,8 @@ stability_scope!(BETA {
         /// Configure a new runtime thread.
         ///
         /// A runtime thread is an OS thread owned by the runtime that runs only the tasks placed
-        /// on it, cooperatively, for their whole lives. Tasks on one thread share its core, its
-        /// wakes and its data.
+        /// on it, its residents, cooperatively, for their whole lives. Tasks on one thread share
+        /// its core, its wakes and its data.
         ///
         /// This consumes the context. The thread occupies this context's supervision node and lives
         /// as long as that node, until the context's lineage finishes or is aborted, or the runtime
@@ -437,8 +438,8 @@ stability_scope!(BETA {
         ///   thread-bound I/O inside [`ThreadBuilder::spawn`] or [`Spawner::spawn_on`].
         /// - tokio: a thread runs a `LocalSet` inside the owning runtime, which gives each task
         ///   tokio's cooperative budget. One turn admits at most 64 queued spawns.
-        ///   `tokio::task::block_in_place` panics there, and holding another runtime's enter
-        ///   guard across an await is unsupported.
+        ///   `tokio::task::block_in_place` panics there. Do not hold the enter guard of another
+        ///   Tokio runtime across an await in a thread's tasks.
         /// - deterministic: threads are virtual. Their tasks are ordinary seeded tasks with an
         ///   identity, and pins are validated and recorded but never applied. All virtual threads
         ///   share one OS thread, so thread-local storage can carry `!Send` values between them,

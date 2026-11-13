@@ -183,8 +183,8 @@ impl<F: Future> Future for FutureCell<F> {
 /// running-task metric, its result sink and its abort registration.
 ///
 /// [`Handle::prepare`] registers the task's aborter on the node, and [`Handle::wrap`] consumes
-/// the parts. Parts dropped without being wrapped close nothing, so an owner that may drop them
-/// unwrapped calls [`Prepared::close`] or [`Prepared::exit`] instead.
+/// the parts. Parts dropped without being wrapped abort no node and finish no metric, so an
+/// owner that may drop them unwrapped calls [`Prepared::close`] or [`Prepared::exit`] instead.
 pub(crate) struct Prepared<T>
 where
     T: Send + 'static,
@@ -435,8 +435,8 @@ where
         }
     }
 
-    /// Returns a task handle that resolves to [`Error::Closed`] without spawning work, also after
-    /// it is aborted, like the handle of a spawned task that was closed.
+    /// Returns a handle that resolves to [`Error::Closed`] without spawning work. Aborting it does
+    /// not change that result.
     pub(crate) fn closed(metric: MetricHandle) -> Self {
         // Mark the task as finished immediately so gauges remain accurate.
         metric.finish();

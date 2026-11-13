@@ -14,8 +14,9 @@
 //!   |                                                         return once closing
 //!   +-- close admission, detach the ingress
 //!   +-- runtime entered:
-//!   |     abort residents, drop the LocalSet (each resident disposes of itself),
-//!   |     drop detached jobs, parked factories and result slots
+//!   |     abort residents, drop the LocalSet (each resident drops its future and
+//!   |     hands a factory that never ran to the host), drop those factories,
+//!   |     then detached jobs, parked factories and result slots
 //!   +-- publish failures, mark closed
 //!   +-- release the node, then the tracker guard
 //! ```
@@ -185,7 +186,7 @@ impl Body {
 
 /// Run the thread's host until it closes, then dispose of every resident, queued job, parked
 /// factory and result slot, each in its own panic boundary. Returns the host's own failures:
-/// a startup failure or a panic of the control future.
+/// a startup failure, or a panic of the control future or of dropping the `LocalSet`.
 fn host(
     runtime: &RuntimeHandle,
     panicker: &Panicker,
@@ -375,7 +376,9 @@ enum State {
 }
 
 /// A resident of a Tokio runtime thread: a `LocalSet` task that runs its factory on its first
-/// poll and polls its task wrapper, and owns their disposal.
+/// poll and polls its task wrapper. It disposes of its future, and of a factory that never ran
+/// while the thread is open. On a closing thread it hands such a factory to the host, which
+/// drops it after every resident future.
 struct ResidentTask {
     /// The thread's owner half.
     host: Rc<Host>,

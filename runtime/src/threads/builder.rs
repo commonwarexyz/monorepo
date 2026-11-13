@@ -199,12 +199,15 @@ pub(crate) fn validate(cpus: &Cpus, base: Option<&Cpus>) -> Result<(), ThreadErr
 pub enum ThreadError {
     /// The runtime is shutting down, or the lineage of the context that would create the thread
     /// already ended.
-    #[error("thread creation rejected: the runtime is shutting down or the creating lineage ended")]
+    #[error(
+        "thread creation rejected because the runtime is shutting down or the creating lineage ended"
+    )]
     Closed,
     /// CPU affinity is unavailable on this platform, so the thread cannot be pinned.
     #[error("CPU affinity is unavailable on this platform")]
     UnsupportedAffinity,
-    /// A requested CPU is not in the CPU set of the thread that started the runner.
+    /// A requested CPU is not in the runner's CPU set: the CPUs of the thread that started a
+    /// native runner, or the configured set of the deterministic runtime.
     #[error("CPU {0} is not in the runner's CPU set")]
     CpuUnavailable(usize),
     /// [ThreadBuilder::pin] was given no CPU.
@@ -358,9 +361,10 @@ impl<C> ThreadBuilder<C> {
 impl<C: Spawner> ThreadBuilder<C> {
     /// Pin the thread to these logical CPUs. A later call replaces an earlier one.
     ///
-    /// Every CPU must be one the thread that started the runner was allowed to run on, or the
-    /// finisher returns [ThreadError::CpuUnavailable]. Platforms without CPU affinity return
-    /// [ThreadError::UnsupportedAffinity] for any pin.
+    /// Every CPU must be one the thread that started the runner was allowed to run on (on the
+    /// deterministic runtime, one of `deterministic::Config::with_cpus`), or the finisher
+    /// returns [ThreadError::CpuUnavailable]. An empty set returns [ThreadError::EmptyCpus], and
+    /// platforms without CPU affinity return [ThreadError::UnsupportedAffinity] for any pin.
     ///
     /// Build strategies ([crate::Strategizer::strategy]) at wiring time, outside pinned threads,
     /// since a Rayon pool keeps the CPUs of the thread that builds it.
@@ -375,6 +379,13 @@ impl<C: Spawner> ThreadBuilder<C> {
     /// The thread lives as long as its creating lineage. Code that rebuilds a subsystem per
     /// epoch should create its thread inside a task that lives exactly as long as the subsystem,
     /// or use [ThreadBuilder::spawn].
+    ///
+    /// # Errors
+    ///
+    /// Returns the pin errors of [ThreadBuilder::pin] if a pin was requested, then
+    /// [ThreadError::Closed] if the runtime is shutting down or the creating lineage already
+    /// ended, and [ThreadError::Spawn] if the operating system refuses the thread. A failed
+    /// finisher creates no thread and aborts nothing.
     pub fn build(self) -> Result<Thread, ThreadError> {
         let (thread, _context) = self.create()?;
         Ok(thread)
@@ -388,6 +399,10 @@ impl<C: Spawner> ThreadBuilder<C> {
     /// [Spawner::spawn_on] cannot target it. It lives as long as its creating lineage, so code
     /// that rebuilds a subsystem per epoch should attach inside a task that lives exactly as long
     /// as the subsystem.
+    ///
+    /// # Errors
+    ///
+    /// See [ThreadBuilder::build].
     pub fn attach(self) -> Result<C, ThreadError> {
         let (thread, context) = self.create()?;
         Ok(context.on(&thread))
@@ -400,6 +415,10 @@ impl<C: Spawner> ThreadBuilder<C> {
     /// `f` runs on the new thread, and its future may be `!Send`. If the thread starts
     /// closing before the root is admitted, this still returns `Ok`, with a handle that
     /// resolves [crate::Error::Closed].
+    ///
+    /// # Errors
+    ///
+    /// See [ThreadBuilder::build].
     pub fn spawn<F, Fut, T>(self, f: F) -> Result<Handle<T>, ThreadError>
     where
         F: FnOnce(Local<C>) -> Fut + Send + 'static,

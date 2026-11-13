@@ -26,7 +26,8 @@
 //! A runtime thread ([`crate::Spawner::thread`]) is a worker with a thread and
 //! io_uring ring of its own that polls only the tasks placed on it, its
 //! residents, outside the pool and its work stealing. Each turn admits at most
-//! 64 queued spawns, in order, then polls at most 64 ready residents. Residents
+//! 64 queued spawns, in order, then makes at most 64 resident polls, polling a
+//! resident again if it was woken during the turn. Residents
 //! share the thread's ring and its in-flight limit, and their I/O and sleeps
 //! register on that ring.
 //!

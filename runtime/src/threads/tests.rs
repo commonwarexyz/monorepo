@@ -1201,12 +1201,35 @@ fn test_thread_wrong_runtime<R: Runner>(#[case] runner: R)
 where
     R::Context: Spawner + Clock,
 {
-    let mut others = vec![
-        hold_open(deterministic::Runner::default()),
-        hold_open(tokio::Runner::default()),
-    ];
-    #[cfg(target_os = "linux")]
-    others.push(hold_open(iouring::Runner::default()));
+    wrong_runtime(
+        runner,
+        vec![
+            hold_open(deterministic::Runner::default()),
+            hold_open(tokio::Runner::default()),
+        ],
+    );
+}
+
+// The same toward an open thread of an io_uring runner, in a test whose every case needs io_uring.
+#[cfg(target_os = "linux")]
+#[rstest]
+#[case::deterministic(deterministic::Runner::default())]
+#[case::tokio(tokio::Runner::default())]
+#[case::iouring(iouring::Runner::default())]
+fn test_thread_wrong_runtime_iouring_target<R: Runner>(#[case] runner: R)
+where
+    R::Context: Spawner + Clock,
+{
+    wrong_runtime(runner, vec![hold_open(iouring::Runner::default())]);
+}
+
+/// Spawn toward a thread of each runner in `others` from `runner`, then release them.
+fn wrong_runtime<R: Runner>(
+    runner: R,
+    others: Vec<(Thread, mpsc::Sender<()>, std::thread::JoinHandle<()>)>,
+) where
+    R::Context: Spawner + Clock,
+{
     let threads: Vec<Thread> = others.iter().map(|(thread, _, _)| thread.clone()).collect();
     runner.start(|context| async move {
         for thread in threads {

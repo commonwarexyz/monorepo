@@ -245,7 +245,7 @@ impl<F> Abortable<F, true> {
     /// may own the result. The runtime's executors poll that future only with wakers of its
     /// task, and it passes their context through, so whichever waker is registered wakes the
     /// task that a later poll's waker wakes. Runtime threads keep this, since each resident is
-    /// polled only with its own stable waker.
+    /// polled only with wakers of its own task.
     pub(super) fn task(future: F, registration: AbortRegistration) -> Self {
         Self {
             future,

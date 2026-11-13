@@ -80,8 +80,8 @@ pub(crate) struct Admission {
 
 /// The shared state of a runtime thread, behind every [`Thread`](super::Thread) handle.
 ///
-/// It holds no context and no runtime services, only ids, the admission lock and the backend
-/// state, so a handle kept anywhere keeps nothing of its runner alive.
+/// It holds no context and no runtime services, so a handle kept anywhere keeps nothing of its
+/// runner alive.
 pub(crate) struct ThreadInner {
     /// Instance id of the runner that created the thread.
     runner: u64,

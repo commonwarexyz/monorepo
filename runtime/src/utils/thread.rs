@@ -123,7 +123,8 @@ where
 }
 
 /// Returns the name of a runtime thread created by a context labeled `label`: the label's last
-/// [MAX_THREAD_NAME] bytes, or `thread` when the label is empty.
+/// [MAX_THREAD_NAME] bytes, shortened to start at a character boundary, or `thread` when the
+/// label is empty.
 pub(crate) fn name(label: &str) -> &str {
     if label.is_empty() {
         return "thread";
