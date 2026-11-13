@@ -11,7 +11,7 @@ use crate::{
     qmdb::operation::{Floored, Operation},
     translator::Translator,
 };
-use commonware_runtime::{AbortOnDrop, ReadOptions, Spawner};
+use commonware_runtime::{AbortOnDrop, ReadOptions, Spawner, ThreadError};
 use commonware_utils::{
     bitmap::{Atomic, BitMap},
     channel::mpsc,
@@ -564,13 +564,15 @@ where
     // All workers share one atomic bitmap to track the activity bits.
     let active = Arc::new(Atomic::zeroes(end - floor));
 
-    // Spawn one worker per contiguous partition range, each owning its own reader and cache.
+    // Run one worker per contiguous partition range on a thread of its own, each owning its own
+    // reader and cache. If a thread cannot start, stop launching and skip routing, so the
+    // cleanup below joins the workers already started before the error surfaces.
     let mut senders = Vec::with_capacity(plan.workers);
     let mut handles = Vec::with_capacity(plan.workers);
     let per_worker_cache = plan.per_worker_cache;
+    let mut launched: Result<(), ThreadError> = Ok(());
     for (w, (lo, range_len)) in plan.ranges().enumerate() {
         let (tx, rx) = mpsc::channel(SNAPSHOT_CHANNEL_DEPTH);
-        senders.push(tx);
         let log = log.clone();
 
         // This worker owns the contiguous partition range [lo, lo + range_len). It allocates
@@ -580,7 +582,7 @@ where
         let handle = context
             .child("snapshot_worker")
             .with_attribute("worker", w)
-            .dedicated()
+            .thread()
             .spawn(move |_| {
                 build_snapshot_worker::<F, C, I::Range>(
                     log,
@@ -591,7 +593,16 @@ where
                     per_worker_cache,
                 )
             });
-        handles.push(handle.abort_on_drop());
+        match handle {
+            Ok(handle) => {
+                senders.push(tx);
+                handles.push(handle.abort_on_drop());
+            }
+            Err(error) => {
+                launched = Err(error);
+                break;
+            }
+        }
     }
 
     // Route each replayed op to the worker owning its partition, forwarding decoded chunks in
@@ -610,6 +621,8 @@ where
         init_buffer,
     };
     let routing_result: Result<(), Error<F>> = async {
+        launched?;
+
         // With no decode tasks, decode and route on this task over one continuous replay to avoid
         // per-chunk buffered-reader overhead (measured 265s vs 369s on a 1.66B-op log).
         if plan.decoders == 0 {
@@ -625,16 +638,18 @@ where
         let chunk_capacity = SNAPSHOT_DECODE_CHUNK as usize / SNAPSHOT_ROUTE_BATCH + plan.workers;
         let mut starts = (floor..end)
             .step_by(usize::try_from(SNAPSHOT_DECODE_CHUNK).expect("chunk size fits usize"));
-        let mut spawn_next = |pending: &mut VecDeque<_>| {
+        // Each decoder runs on a thread of its own. A decoder that cannot start fails routing,
+        // and the cleanup below aborts the decoders already started.
+        let mut spawn_next = |pending: &mut VecDeque<_>| -> Result<bool, ThreadError> {
             let Some(start) = starts.next() else {
-                return false;
+                return Ok(false);
             };
             let log = log.clone();
             let len = SNAPSHOT_DECODE_CHUNK.min(end - start);
             let (tx, rx) = mpsc::channel(chunk_capacity);
             let handle = context
                 .child("snapshot_decoder")
-                .dedicated()
+                .thread()
                 .spawn(move |_| async move {
                     let tx = &tx;
                     route_snapshot::<F, C, _>(
@@ -644,14 +659,14 @@ where
                         |w, batch| async move { tx.send((w, batch)).await.is_ok() },
                     )
                     .await
-                });
+                })?;
             pending.push_back((rx, handle.abort_on_drop()));
-            true
+            Ok(true)
         };
 
         // Start decoding ahead of forwarding, with at most `plan.decoders` chunks in flight.
         for _ in 0..plan.decoders {
-            if !spawn_next(&mut pending) {
+            if !spawn_next(&mut pending)? {
                 break;
             }
         }
@@ -666,7 +681,7 @@ where
             }
             let (_, decoder) = pending.pop_front().expect("front exists");
             decoder.join().await??;
-            spawn_next(&mut pending);
+            spawn_next(&mut pending)?;
         }
         Ok(())
     }
@@ -837,6 +852,350 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{merkle::mmr, translator::TwoCap};
+    use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
+    use commonware_runtime::{
+        Error as RuntimeError, Handle, Local, Name, Runner as _, Supervisor, Thread,
+        ThreadBuilder, deterministic, signal::Signal,
+    };
+    use core::{future::ready, time::Duration};
+    use futures::{Stream, stream};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    type Location = crate::merkle::Location<mmr::Family>;
+
+    /// An operation of a test log: a commit, or an update of a key.
+    #[derive(Clone, Debug)]
+    enum TestOp {
+        Commit,
+        Update(Digest),
+    }
+
+    impl Floored<mmr::Family> for TestOp {
+        fn inactivity_floor(&self) -> Option<Location> {
+            matches!(self, Self::Commit).then(|| Location::new(0))
+        }
+    }
+
+    impl Operation<mmr::Family> for TestOp {
+        type Key = Digest;
+
+        fn key(&self) -> Option<&Digest> {
+            match self {
+                Self::Commit => None,
+                Self::Update(key) => Some(key),
+            }
+        }
+
+        fn into_key(self) -> Option<Digest> {
+            match self {
+                Self::Commit => None,
+                Self::Update(key) => Some(key),
+            }
+        }
+
+        fn is_update(&self) -> bool {
+            matches!(self, Self::Update(_))
+        }
+
+        fn is_delete(&self) -> bool {
+            false
+        }
+    }
+
+    /// An in-memory log of test operations.
+    struct MemLog(Vec<TestOp>);
+
+    impl Contiguous for MemLog {
+        type Item = TestOp;
+
+        fn bounds(&self) -> Range<u64> {
+            0..self.0.len() as u64
+        }
+
+        fn read(
+            &self,
+            position: u64,
+        ) -> impl Future<Output = Result<TestOp, crate::journal::Error>> + Send {
+            ready(Ok(self.0[position as usize].clone()))
+        }
+
+        fn read_many(
+            &self,
+            positions: &[u64],
+        ) -> impl Future<Output = Result<Vec<TestOp>, crate::journal::Error>> + Send {
+            ready(Ok(positions
+                .iter()
+                .map(|&position| self.0[position as usize].clone())
+                .collect()))
+        }
+
+        fn try_read_sync(&self, position: u64) -> Option<TestOp> {
+            self.0.get(position as usize).cloned()
+        }
+
+        fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<TestOp>> {
+            positions
+                .iter()
+                .map(|&position| self.0.get(position as usize).cloned())
+                .collect()
+        }
+
+        fn replay(
+            &self,
+            range: Range<u64>,
+            _buffer: NonZeroUsize,
+            _read_options: ReadOptions,
+        ) -> impl Future<
+            Output = Result<
+                impl Stream<Item = Result<crate::journal::contiguous::Batch<TestOp>, crate::journal::Error>>
+                    + Send,
+                crate::journal::Error,
+            >,
+        > + Send {
+            let items = &self.0[range.start as usize..range.end as usize];
+            let batches: Vec<_> = items
+                .chunks(1024)
+                .enumerate()
+                .map(|(i, chunk)| {
+                    Ok(crate::journal::contiguous::Batch {
+                        start: range.start + (i * 1024) as u64,
+                        items: chunk.to_vec(),
+                    })
+                })
+                .collect();
+            ready(Ok(stream::iter(batches)))
+        }
+    }
+
+    /// A context whose thread launches are counted, with launch `fail_at` pinned to no CPU, so
+    /// its finisher returns [ThreadError::EmptyCpus].
+    struct FailLaunch {
+        inner: deterministic::Context,
+        launches: Arc<AtomicUsize>,
+        fail_at: usize,
+    }
+
+    impl FailLaunch {
+        /// Rewrap `inner`, sharing this context's launch count.
+        fn wrap(&self, inner: deterministic::Context) -> Self {
+            Self {
+                inner,
+                launches: self.launches.clone(),
+                fail_at: self.fail_at,
+            }
+        }
+    }
+
+    impl Supervisor for FailLaunch {
+        fn name(&self) -> Name {
+            self.inner.name()
+        }
+
+        fn child(&self, label: &'static str) -> Self {
+            self.wrap(self.inner.child(label))
+        }
+
+        fn with_attribute(self, key: &'static str, value: impl std::fmt::Display) -> Self {
+            let inner = self.inner.with_attribute(key, value);
+            Self { inner, ..self }
+        }
+    }
+
+    impl Spawner for FailLaunch {
+        fn shared(self, blocking: bool) -> Self {
+            let inner = self.inner.shared(blocking);
+            Self { inner, ..self }
+        }
+
+        fn on(self, thread: &Thread) -> Self {
+            let inner = self.inner.on(thread);
+            Self { inner, ..self }
+        }
+
+        fn thread(self) -> ThreadBuilder<Self> {
+            let fail = self.launches.fetch_add(1, Ordering::SeqCst) == self.fail_at;
+            let (launches, fail_at) = (self.launches, self.fail_at);
+            let builder = self.inner.thread().map(move |inner| Self {
+                inner,
+                launches,
+                fail_at,
+            });
+            if fail {
+                builder.pin(Vec::<usize>::new())
+            } else {
+                builder
+            }
+        }
+
+        fn spawn<Fn, Fut, T>(self, f: Fn) -> Handle<T>
+        where
+            Fn: FnOnce(Self) -> Fut + Send + 'static,
+            Fut: Future<Output = T> + Send + 'static,
+            T: Send + 'static,
+        {
+            let (launches, fail_at) = (self.launches, self.fail_at);
+            self.inner.spawn(move |inner| {
+                f(Self {
+                    inner,
+                    launches,
+                    fail_at,
+                })
+            })
+        }
+
+        fn spawn_on<Fn, Fut, T>(self, thread: &Thread, f: Fn) -> Handle<T>
+        where
+            Fn: FnOnce(Local<Self>) -> Fut + Send + 'static,
+            Fut: Future<Output = T> + 'static,
+            T: Send + 'static,
+        {
+            let (launches, fail_at) = (self.launches, self.fail_at);
+            self.inner.spawn_on(thread, move |local| {
+                f(local.map(|inner| Self {
+                    inner,
+                    launches,
+                    fail_at,
+                }))
+            })
+        }
+
+        async fn stop(self, value: i32, timeout: Option<Duration>) -> Result<(), RuntimeError> {
+            self.inner.stop(value, timeout).await
+        }
+
+        fn stopped(&self) -> Signal {
+            self.inner.stopped()
+        }
+    }
+
+    /// A log of three decode chunks: a few updates, then commits.
+    fn three_chunk_log() -> Arc<MemLog> {
+        let len = 2 * SNAPSHOT_DECODE_CHUNK as usize + 10;
+        let mut ops: Vec<_> = (0u64..10).map(|i| TestOp::Update(key(i))).collect();
+        ops.resize(len, TestOp::Commit);
+        Arc::new(MemLog(ops))
+    }
+
+    /// The key of update `i` in the test log.
+    fn key(i: u64) -> Digest {
+        Sha256::hash(&[&i.to_be_bytes()])
+    }
+
+    /// Whether `index` holds none of the test log's keys. Its key gauge also counts keys of
+    /// ranges that were never installed, so look the keys up instead.
+    fn holds_no_key<I: Index<Value = Location>>(index: &I) -> bool {
+        (0u64..10).all(|i| index.get(&key(i)).next().is_none())
+    }
+
+    /// A parallel build that cannot start a thread returns [Error::Thread] only after every
+    /// worker and decoder it started was joined or aborted, and installs nothing. With a budget
+    /// of four over a three-chunk log, launches 0 and 1 start the insert workers, 2 and 3 the
+    /// initial decoders, and 4 the replacement decoder.
+    #[test]
+    fn test_parallel_build_thread_launch_failure_cleans_up() {
+        for fail_at in [1, 3, 4] {
+            deterministic::Runner::default().start(|context| async move {
+                let log = three_chunk_log();
+                let mut index = crate::index::partitioned::unordered::Index::<
+                    TwoCap,
+                    Location,
+                    1,
+                >::new(context.child("index"), TwoCap);
+                let launches = Arc::new(AtomicUsize::new(0));
+                let wrapper = FailLaunch {
+                    inner: context.child("build"),
+                    launches: launches.clone(),
+                    fail_at,
+                };
+                let result = build_snapshot_parallel(
+                    &mut index,
+                    wrapper,
+                    Location::new(0),
+                    &log,
+                    NonZeroUsize::new(4).unwrap(),
+                    NonZeroUsize::new(1 << 16).unwrap(),
+                    None,
+                )
+                .await;
+                assert!(
+                    matches!(result, Err(Error::Thread(ThreadError::EmptyCpus))),
+                    "launch {fail_at}: {result:?}"
+                );
+                assert_eq!(launches.load(Ordering::SeqCst), fail_at + 1);
+                assert_eq!(Arc::strong_count(&log), 1, "launch {fail_at}");
+                assert!(holds_no_key(&index), "launch {fail_at}");
+            });
+        }
+    }
+
+    /// A parallel build from a context whose lineage already ended starts no worker and returns
+    /// [ThreadError::Closed].
+    #[test]
+    fn test_parallel_build_from_ended_lineage_is_closed() {
+        deterministic::Runner::default().start(|context| async move {
+            let ended = context
+                .child("ended")
+                .spawn(|context| async move { context.child("retained") })
+                .await
+                .unwrap();
+            let log = three_chunk_log();
+            let mut index =
+                crate::index::partitioned::unordered::Index::<TwoCap, Location, 1>::new(
+                    context.child("index"),
+                    TwoCap,
+                );
+            let result = build_snapshot_parallel(
+                &mut index,
+                ended,
+                Location::new(0),
+                &log,
+                NonZeroUsize::new(4).unwrap(),
+                NonZeroUsize::new(1 << 16).unwrap(),
+                None,
+            )
+            .await;
+            assert!(
+                matches!(result, Err(Error::Thread(ThreadError::Closed))),
+                "{result:?}"
+            );
+            assert_eq!(Arc::strong_count(&log), 1);
+            assert!(holds_no_key(&index));
+        });
+    }
+
+    /// The same log builds in full without failures, so the failures above come from the
+    /// injected launches.
+    #[test]
+    fn test_parallel_build_three_chunk_log() {
+        deterministic::Runner::default().start(|context| async move {
+            let log = three_chunk_log();
+            let mut index =
+                crate::index::partitioned::unordered::Index::<TwoCap, Location, 1>::new(
+                    context.child("index"),
+                    TwoCap,
+                );
+            let wrapper = FailLaunch {
+                inner: context.child("build"),
+                launches: Arc::new(AtomicUsize::new(0)),
+                fail_at: usize::MAX,
+            };
+            let (keys, _) = build_snapshot_parallel(
+                &mut index,
+                wrapper,
+                Location::new(0),
+                &log,
+                NonZeroUsize::new(4).unwrap(),
+                NonZeroUsize::new(1 << 16).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(keys, 10);
+            assert!((0u64..10).all(|i| index.get(&key(i)).next().is_some()));
+            assert_eq!(Arc::strong_count(&log), 1);
+        });
+    }
 
     #[test]
     fn test_parallel_plan_budget_and_ranges() {

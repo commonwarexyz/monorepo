@@ -346,6 +346,10 @@ pub enum Error<F: Family> {
     #[error("runtime error: {0}")]
     Runtime(#[from] commonware_runtime::Error),
 
+    /// A parallel snapshot build could not start a runtime thread.
+    #[error("thread error: {0}")]
+    Thread(#[from] commonware_runtime::ThreadError),
+
     /// The operation at the location, or the bitmap chunk covering it, has been pruned.
     #[error("operation pruned: {0}")]
     OperationPruned(Location<F>),
