@@ -271,7 +271,7 @@ impl<E: Spawner> Spawner for Recorder<E> {
 
     fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
     where
-        F: FnOnce(Self) -> Fut + Send + 'static,
+        F: FnOnce(Self) -> Fut,
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
@@ -1477,6 +1477,7 @@ fn builder_closed<R: Runner>(
         pin.map(|cpu| context.child("returned").thread().pin(cpu))
     });
     if let Some(builder) = builder {
+        assert_eq!(builder.available(), None);
         assert!(matches!(builder.build(), Err(ThreadError::Closed)));
     }
 }
@@ -1538,16 +1539,28 @@ where
             Err(ThreadError::EmptyCpus)
         ));
 
-        // An id at or above 1024 is not stored, but the set is not empty.
-        assert!(!Cpus::from(5000).is_empty());
+        // An id at or above 1024 is not stored, so the set is empty, but a pin to it is
+        // unavailable rather than empty.
+        let large = Cpus::from(5000);
+        assert!(large.is_empty() && !large.contains(5000));
+        assert_eq!((large.len(), large.iter().count()), (0, 0));
+
+        // The builder reports the base set, and membership agrees with iteration.
+        assert_eq!(context.child("probe").thread().available(), base);
         let Some(base) = base else {
             for cpus in [Cpus::from(0), Cpus::from(5000), Cpus::from(0..=usize::MAX)] {
                 assert!(matches!(pin(cpus), Err(ThreadError::UnsupportedAffinity)));
             }
             return;
         };
+        let ids: Vec<usize> = base.iter().collect();
+        assert_eq!(ids.len(), base.len());
+        for id in 0..1100 {
+            assert_eq!(base.contains(id), ids.contains(&id), "{id}");
+        }
         let inside = base.iter().next().expect("empty base set");
         let outside = (0..1024).find(|&id| !base.contains(id)).unwrap_or(1024);
+        assert!(pin(Cpus::from(inside)).is_ok());
 
         // The smallest requested id outside the base set, including ids at or above 1024.
         assert!(matches!(

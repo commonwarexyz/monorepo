@@ -363,37 +363,48 @@ stability_scope!(BETA {
     ///
     /// Every context carries a placement: the runtime's shared executor (the default), its
     /// blocking pool, or a runtime [`Thread`] (see [`Spawner::thread`]). [`Spawner::shared`],
-    /// [`Spawner::blocking`] and [`Spawner::on`] set it, and the last of them wins. A context line
-    /// is a context together with the contexts derived from it by [`Supervisor::child`] and
-    /// [`Supervisor::with_attribute`], which keep its placement.
+    /// [`Spawner::blocking`] and [`Spawner::on`] set it, and the last of them wins.
+    /// [`Supervisor::child`] and [`Supervisor::with_attribute`] keep it.
     ///
-    /// A spawn hands its task a parked context. The context remembers where its task runs, but
-    /// its spawns run on the shared executor. Placing a subsystem's context therefore places the
-    /// tasks spawned from it and from the contexts derived from it, including actors it wires
-    /// before spawning, while the tasks those spawn from the contexts their own spawns handed
-    /// them run on the shared executor. A task that wants its children where it runs asks with
-    /// [`Spawner::placed`].
+    /// A spawn hands its task an unplaced context. The context remembers where its task runs, but
+    /// its spawns run on the shared executor until [`Spawner::placed`] places it there. Placing a
+    /// subsystem's context therefore places the tasks spawned from it and from the contexts
+    /// derived from it, including actors it wires before spawning, while what those tasks spawn
+    /// runs on the shared executor unless they ask with [`Spawner::placed`].
+    ///
+    /// Callers choose where a subsystem runs, with [`Spawner::shared`], [`Spawner::blocking`],
+    /// [`Spawner::on`] or [`ThreadBuilder::attach`]. Libraries choose what follows it:
+    ///
+    /// - A running task that wires a long-lived actor spawns it from `context.child(..).placed()`,
+    ///   so the actor runs where the task runs.
+    /// - Per-peer or per-request fan-out stays unplaced, so it runs on the shared executor
+    ///   instead of crowding one thread or the blocking pool.
+    /// - A component that keeps its construction context and spawns from it on demand stores it
+    ///   with [`Spawner::shared`]. A stored context never crosses a spawn, so it would otherwise
+    ///   carry its caller's placement into every on-demand spawn.
     pub trait Spawner: Supervisor {
-        /// Place this context line on the runtime's shared executor.
+        /// Place this context on the runtime's shared executor.
         ///
         /// Contexts spawn there unless something placed them elsewhere, so this is needed only
-        /// to move a line off another placement, or to keep code that calls [`Spawner::placed`]
+        /// to move a context off another placement, to store a context that spawns on demand
+        /// (see [Placement](Spawner#placement)), or to keep code that calls [`Spawner::placed`]
         /// on a context derived from yours from running where your task runs.
         #[must_use]
         fn shared(self) -> Self;
 
-        /// Place this context line on the runtime's blocking pool, for tasks that may hold their
-        /// thread for a short, blocking operation.
+        /// Place this context on the runtime's blocking pool, for tasks that hold their thread
+        /// for a short, blocking operation.
         ///
         /// Runtimes run these tasks where they cannot starve the asynchronous tasks of the shared
-        /// executor, such as a blocking-friendly pool. Every task spawned from the line is such a
-        /// task, and [`Supervisor::child`] keeps the placement, so place the context you spawn
-        /// from rather than one you derive many children from. For long-lived work that should
-        /// not compete with the shared executor, use [`Spawner::thread`] instead.
+        /// executor, such as a blocking-friendly pool. Every task spawned from the context, or
+        /// from a context derived from it, is such a task, because [`Supervisor::child`] keeps
+        /// the placement. Place the context you spawn from rather than one you derive many
+        /// children from. A long-lived task that should own a thread belongs on a runtime thread
+        /// (see [`Spawner::thread`]), and long CPU work on a [`Strategizer::strategy`].
         #[must_use]
         fn blocking(self) -> Self;
 
-        /// Place this context line on `thread`.
+        /// Place this context on `thread`.
         ///
         /// A spawn from a context placed on a thread runs its factory on the caller, as usual,
         /// and its future on the thread. Tasks on a thread are cooperative. Every poll, factory
@@ -404,18 +415,23 @@ stability_scope!(BETA {
         /// well.
         ///
         /// Placement creates no supervision edge. Aborting a context placed on a thread does not
-        /// close the thread, and closing the thread aborts only the tasks running on it.
+        /// close the thread. Closing the thread aborts the tasks running on it, wherever they are
+        /// supervised, and supervision then aborts their descendants wherever those run.
+        ///
+        /// A component that stores this context, or one derived from it, and spawns from it on
+        /// demand runs every such spawn on the thread. Such a component should store its context
+        /// with [`Spawner::shared`] (see [Placement](Spawner#placement)).
         #[must_use]
         fn on(self, thread: &Thread) -> Self;
 
-        /// Unpark this context line, so its spawns run where its task runs.
+        /// Place this context where its task runs.
         ///
         /// The context a spawn hands to its task remembers where that task runs: on a runtime
         /// thread, on the blocking pool or on the shared executor. Until this is called, its
         /// spawns run on the shared executor (see [Placement](Spawner#placement)). Contexts
         /// derived from it with [`Supervisor::child`] and [`Supervisor::with_attribute`] remember
-        /// the same placement. On a line placed with [`Spawner::shared`], [`Spawner::blocking`]
-        /// or [`Spawner::on`], this does nothing.
+        /// the same placement. On a context placed with [`Spawner::shared`],
+        /// [`Spawner::blocking`] or [`Spawner::on`], this does nothing.
         ///
         /// A context handed to a blocking task remembers the blocking pool, so its placed spawns
         /// are blocking tasks as well.
@@ -425,20 +441,29 @@ stability_scope!(BETA {
         ///
         /// # Examples
         ///
+        /// A task on a thread wires a long-lived actor next to it, while its per-peer tasks run
+        /// on the shared executor:
+        ///
         /// ```
         /// use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
         ///
         /// deterministic::Runner::default().start(|context| async move {
         ///     let core = context.child("core").thread().build().unwrap();
-        ///     let router = context.child("router").on(&core).spawn(|context| async move {
-        ///         // Runs on `core`, like the router.
-        ///         let peer = context.child("peer").placed().spawn(|_| async { 1 });
+        ///     let engine = context.child("engine").on(&core).spawn(|context| async move {
+        ///         // A long-lived actor runs on `core`, like the engine.
+        ///         let actor = context.child("actor").placed().spawn(|_| async { 1 });
         ///
-        ///         // Runs on the shared executor.
-        ///         let report = context.child("report").spawn(|_| async { 2 });
-        ///         peer.await.unwrap() + report.await.unwrap()
+        ///         // Per-peer tasks run on the shared executor.
+        ///         let peers: Vec<_> = (0..3)
+        ///             .map(|peer| context.child("peer").spawn(move |_| async move { peer }))
+        ///             .collect();
+        ///         let mut total = actor.await.unwrap();
+        ///         for peer in peers {
+        ///             total += peer.await.unwrap();
+        ///         }
+        ///         total
         ///     });
-        ///     assert_eq!(router.await.unwrap(), 3);
+        ///     assert_eq!(engine.await.unwrap(), 4);
         /// });
         /// ```
         #[must_use]
@@ -448,27 +473,33 @@ stability_scope!(BETA {
         ///
         /// A runtime thread is an OS thread owned by the runtime that runs only the tasks placed
         /// on it, its residents, cooperatively, for their whole lives. Tasks on one thread share
-        /// its core, its wakes and its data.
+        /// its core, its wakes and its data. It suits long-lived tasks that should own a thread.
         ///
-        /// This consumes the context. The thread occupies this context's supervision node and lives
-        /// as long as that node, until the context's lineage finishes or is aborted, or the runtime
-        /// shuts down. The context's placement is ignored. Holding a [`Thread`] or a [`Local`]
-        /// never keeps a thread open. Closing a thread aborts the tasks running on it, wherever
-        /// they are supervised.
+        /// This consumes the context and ignores its placement. A thread created by
+        /// [`ThreadBuilder::build`] or [`ThreadBuilder::spawn`] occupies this context's
+        /// supervision node and lives as long as that node, until the context's lineage finishes
+        /// or is aborted, or the runtime shuts down. A thread created by [`ThreadBuilder::attach`]
+        /// closes when the task that consumes the attached context ends. Holding a [`Thread`] or
+        /// a [`Local`] never keeps a thread open. Closing a thread aborts the tasks running on
+        /// it, wherever they are supervised, and supervision then aborts their descendants
+        /// wherever those run.
         ///
         /// The returned [`ThreadBuilder`] can pin the thread to CPUs, then creates it with one of:
         ///
         /// - [`ThreadBuilder::build`]: a [`Thread`] handle for [`Spawner::on`] and
         ///   [`Spawner::spawn_on`].
-        /// - [`ThreadBuilder::attach`]: a context placed on the thread.
+        /// - [`ThreadBuilder::attach`]: a context placed on the thread, which closes when the task
+        ///   that consumes the context ends.
         /// - [`ThreadBuilder::spawn`]: a root task that runs on the thread, which closes when the
         ///   root task ends.
         ///
         /// # Cooperation and liveness
         ///
         /// Tasks on a thread are cooperative. Every poll, factory and destructor must return
-        /// promptly. Blocking work belongs on [`Spawner::blocking`], and long CPU work on a
-        /// [`Strategizer::strategy`]. Each runtime bounds a thread's turns:
+        /// promptly. Short blocking calls belong on [`Spawner::blocking`], and long CPU work on a
+        /// [`Strategizer::strategy`]. A strategy may run work inline on the calling task, as a
+        /// sequential strategy or a pool with one worker can, so it does not isolate the thread
+        /// from that work. Each runtime bounds a thread's turns:
         ///
         /// - io_uring: one turn admits at most 64 queued spawns, in order, then makes at most 64
         ///   polls of ready tasks, polling a task again if it was woken meanwhile. There is no
@@ -529,9 +560,11 @@ stability_scope!(BETA {
         /// Spawn a task with the current context.
         ///
         /// Unlike directly awaiting a future, the task starts running immediately even if the caller
-        /// never awaits the returned [`Handle`]. The factory `f` runs on the caller, and the task
-        /// runs where the context's spawns run (see [Placement](Spawner#placement)). The context
-        /// handed to the task remembers where the task runs, and is parked.
+        /// never awaits the returned [`Handle`]. The factory `f` runs on the caller before this
+        /// returns, so it may borrow or read `!Send` state. The future it returns runs where the
+        /// context's spawns run (see [Placement](Spawner#placement)), so it must be `Send` and
+        /// `'static`. The context handed to the task remembers where the task runs, and is
+        /// unplaced.
         ///
         /// # Mandatory Supervision
         ///
@@ -553,10 +586,51 @@ stability_scope!(BETA {
         ///
         /// Task A finishes or aborts --> Task B and Task C are aborted
         /// ```
+        ///
+        /// # Examples
+        ///
+        /// A task on a runtime thread can read its `!Send` state in a factory to build a `Send`
+        /// future:
+        ///
+        /// ```
+        /// use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
+        /// use std::{cell::RefCell, rc::Rc};
+        ///
+        /// deterministic::Runner::default().start(|context| async move {
+        ///     let handle = context.child("worker").thread().spawn(|local| async move {
+        ///         let config = Rc::new(RefCell::new(5));
+        ///         let task = local.child("task").into_inner().spawn(|_| {
+        ///             let value = *config.borrow();
+        ///             async move { value + 1 }
+        ///         });
+        ///         task.await.unwrap()
+        ///     });
+        ///     assert_eq!(handle.unwrap().await.unwrap(), 6);
+        /// });
+        /// ```
+        ///
+        /// The future cannot hold the `Rc`:
+        ///
+        /// ```compile_fail
+        /// use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
+        /// use std::{cell::RefCell, rc::Rc};
+        ///
+        /// deterministic::Runner::default().start(|context| async move {
+        ///     let handle = context.child("worker").thread().spawn(|local| async move {
+        ///         let config = Rc::new(RefCell::new(5));
+        ///         let task = local.child("task").into_inner().spawn(move |_| async move {
+        ///             let value = *config.borrow();
+        ///             value + 1
+        ///         });
+        ///         task.await.unwrap()
+        ///     });
+        ///     assert_eq!(handle.unwrap().await.unwrap(), 6);
+        /// });
+        /// ```
         fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
         where
             Self: Sized,
-            F: FnOnce(Self) -> Fut + Send + 'static,
+            F: FnOnce(Self) -> Fut,
             Fut: Future<Output = T> + Send + 'static,
             T: Send + 'static;
 
@@ -564,7 +638,7 @@ stability_scope!(BETA {
         /// future may be `!Send`.
         ///
         /// The task is supervised by this context, like [`Spawner::spawn`], and `f` receives a
-        /// [`Local`] on `thread`, whose context is parked like any context a spawn hands out.
+        /// [`Local`] on `thread`, whose context is unplaced like any context a spawn hands out.
         /// `f` runs on the thread, in the thread's own runtime environment, never inside the
         /// caller's poll. A spawn toward a thread that is closed or belongs to another runner
         /// resolves [`Error::Closed`], drops `f` unrun and aborts the consumed context's node.
@@ -650,7 +724,7 @@ stability_scope!(BETA {
         /// ```
         ///
         /// An ordinary spawn from a context placed on a thread runs its factory on the caller and
-        /// sends its future to the thread, so the factory cannot capture one either:
+        /// sends the future it returns to the thread, so that future cannot hold one:
         ///
         /// ```compile_fail
         /// use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
@@ -665,16 +739,17 @@ stability_scope!(BETA {
         /// });
         /// ```
         ///
-        /// With a `Send` value it compiles:
+        /// Its factory can read one, and it compiles once the future holds only `Send` values:
         ///
         /// ```
         /// use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
         ///
         /// deterministic::Runner::default().start(|context| async move {
         ///     let thread = context.child("exec").thread().build().unwrap();
-        ///     let state = std::sync::Arc::new(5);
-        ///     let handle = context.child("execute").on(&thread).spawn(move |_| async move {
-        ///         *state + 1
+        ///     let state = std::rc::Rc::new(5);
+        ///     let handle = context.child("execute").on(&thread).spawn(|_| {
+        ///         let value = *state;
+        ///         async move { value + 1 }
         ///     });
         ///     assert_eq!(handle.await.unwrap(), 6);
         /// });

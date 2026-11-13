@@ -682,7 +682,7 @@ impl<E: Spawner> Spawner for RecordingContext<E> {
 
     fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
     where
-        F: FnOnce(Self) -> Fut + Send + 'static,
+        F: FnOnce(Self) -> Fut,
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
@@ -934,7 +934,7 @@ impl<E: Spawner> Spawner for DelayedSyncContext<E> {
 
     fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
     where
-        F: FnOnce(Self) -> Fut + Send + 'static,
+        F: FnOnce(Self) -> Fut,
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
@@ -1593,7 +1593,7 @@ impl<E: Spawner> Spawner for MutationFaultContext<E> {
 
     fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
     where
-        F: FnOnce(Self) -> Fut + Send + 'static,
+        F: FnOnce(Self) -> Fut,
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {

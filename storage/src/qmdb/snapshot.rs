@@ -1041,7 +1041,7 @@ mod tests {
 
         fn spawn<Fn, Fut, T>(self, f: Fn) -> Handle<T>
         where
-            Fn: FnOnce(Self) -> Fut + Send + 'static,
+            Fn: FnOnce(Self) -> Fut,
             Fut: Future<Output = T> + Send + 'static,
             T: Send + 'static,
         {

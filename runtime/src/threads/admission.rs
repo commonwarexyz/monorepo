@@ -388,7 +388,7 @@ where
 {
     /// The user's factory, with its captures.
     factory: F,
-    /// The context handed to the factory, parked on the thread.
+    /// The context handed to the factory, unplaced on the thread.
     context: C,
     /// The task's prepared parts.
     ticket: Ticket<T>,

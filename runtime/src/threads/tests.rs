@@ -77,6 +77,52 @@ async fn ran_on<C: Spawner>(context: C) -> (ThreadId, String) {
     (id, name)
 }
 
+/// A context whose runtime thread a test can read.
+pub(super) trait PlacedOn {
+    /// The runtime thread the context's spawns run on.
+    fn placed_on(&self) -> Thread;
+}
+
+impl PlacedOn for deterministic::Context {
+    fn placed_on(&self) -> Thread {
+        self.placed_thread().cloned().expect("placed on a thread")
+    }
+}
+
+impl PlacedOn for tokio::Context {
+    fn placed_on(&self) -> Thread {
+        self.placed_thread().cloned().expect("placed on a thread")
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl PlacedOn for iouring::Context {
+    fn placed_on(&self) -> Thread {
+        self.placed_thread().cloned().expect("placed on a thread")
+    }
+}
+
+/// Wait until `thread` stops admitting work.
+async fn closes(context: &impl Clock, thread: &Thread) {
+    within(context, async {
+        while thread.inner().is_open() {
+            context.sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
+}
+
+/// The number of OS threads in this process, where the platform reports it.
+fn os_threads() -> Option<usize> {
+    cfg_if::cfg_if! {
+        if #[cfg(target_os = "linux")] {
+            std::fs::read_dir("/proc/self/task").ok().map(Iterator::count)
+        } else {
+            None
+        }
+    }
+}
+
 /// Where a test expects a task to run.
 #[derive(Clone, Copy, Debug)]
 enum Expect {
@@ -194,8 +240,8 @@ where
 }
 
 // The last of shared, blocking and on decides where a spawn runs, and child and with_attribute keep
-// it. A spawn hands its task a parked context, which spawns on the shared executor until placed
-// unparks it to where the task runs, and placed does nothing on a context placed explicitly.
+// it. A spawn hands its task an unplaced context, which spawns on the shared executor until placed
+// places it where the task runs, and placed does nothing on a context placed explicitly.
 // Contexts a thread hands out keep the creating context's label.
 #[rstest]
 #[case::deterministic(deterministic::Runner::default(), false)]
@@ -284,8 +330,8 @@ where
             Expect::Blocking,
         );
 
-        // A task placed on the thread receives a parked context. Its spawns, and those of the
-        // contexts derived from it, run on the shared executor until placed unparks them, and an
+        // A task placed on the thread receives an unplaced context. Its spawns, and those of the
+        // contexts derived from it, run on the shared executor until placed places them, and an
         // explicit placement replaces what they remember.
         let handed = context
             .child("handed")
@@ -304,12 +350,12 @@ where
                 let blocking = ran_on(context.child("blocking").blocking().placed()).await;
                 let shared = ran_on(context.child("shared").shared().placed()).await;
 
-                // An unparked context stays unparked through child and with_attribute.
+                // A placed context stays placed through child and with_attribute.
                 let hoisted = context.child("hoisted").placed();
                 let hoisted_child = ran_on(hoisted.child("peer")).await;
                 let hoisted_attr = ran_on(hoisted.with_attribute("k", 1)).await;
 
-                // A task spawned through placed receives a parked context as well.
+                // A task spawned through placed receives an unplaced context as well.
                 let nested = context
                     .child("nested")
                     .placed()
@@ -348,7 +394,7 @@ where
             check(ran, expect);
         }
 
-        // spawn_cell! restores the context the spawn handed to its task, which is parked.
+        // spawn_cell! restores the context the spawn handed to its task, which is unplaced.
         let [plain, placed] = CellActor {
             context: ContextCell::new(context.child("cell").on(&thread)),
         }
@@ -358,9 +404,9 @@ where
         check(plain, Expect::Shared);
         check(placed, Expect::Thread);
 
-        // A task on the shared executor or the blocking pool receives a context parked there.
-        // Each blocking task runs on a thread of its own, so a blocking task's placed spawns do
-        // not run on its thread.
+        // A task on the shared executor or the blocking pool receives an unplaced context that
+        // remembers it. Each blocking task runs on a thread of its own, so a blocking task's
+        // placed spawns do not run on its thread.
         for blocking in [false, true] {
             let line = context.child(if blocking {
                 "blocking_task"
@@ -392,7 +438,7 @@ where
             check(hoisted, expect);
         }
 
-        // A Local's context is parked on its thread, through into_inner and through a deref
+        // A Local's context is unplaced on its thread, through into_inner and through a deref
         // child, for a spawn_on task, a root and a spawn_local task alike.
         let (inner, deref, placed) = context
             .child("local")
@@ -491,7 +537,7 @@ impl<E: Spawner> CellActor<E> {
         })
     }
 
-    /// Spawn from the restored context, then again after unparking it.
+    /// Spawn from the restored context, then again after placing it.
     async fn run(self) -> [(ThreadId, String); 2] {
         [
             ran_on(self.context.child("plain")).await,
@@ -500,8 +546,8 @@ impl<E: Spawner> CellActor<E> {
     }
 }
 
-// A parked context belongs to its task's supervision node, so once the task ends a spawn from it
-// resolves Closed without running its factory, whether or not placed unparked it.
+// An unplaced context belongs to its task's supervision node, so once the task ends a spawn from it
+// resolves Closed without running its factory, whether or not it was placed.
 #[rstest]
 #[case::deterministic(deterministic::Runner::default())]
 #[case::tokio(tokio::Runner::default())]
@@ -714,35 +760,140 @@ where
     });
 }
 
-// An attached thread does not close when its context is dropped, and closes when its lineage is
-// aborted, so start returns.
+// An attached context used only through child keeps its thread open after it is dropped, until
+// its lineage is aborted, so start returns.
 #[rstest]
 #[case::deterministic(deterministic::Runner::default())]
 #[case::tokio(tokio::Runner::default())]
 #[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default()))]
 fn test_thread_attach_lifetime<R: Runner + Send + 'static>(#[case] runner: R)
 where
-    R::Context: Spawner + Clock,
+    R::Context: Spawner + Clock + PlacedOn,
 {
     bounded(move || {
         runner.start(|context| async move {
             let (tx, rx) = oneshot::channel();
             let lineage = context.child("lineage").spawn(move |context| async move {
                 let attached = context.child("t").thread().attach().unwrap();
+                let thread = attached.placed_on();
                 let probe = attached.child("probe").spawn(|_| pending::<()>());
                 drop(attached);
-                tx.send(probe).ok().unwrap();
+                tx.send((thread, probe)).ok().unwrap();
                 pending::<()>().await;
             });
-            let mut probe = rx.await.unwrap();
+            let (thread, mut probe) = rx.await.unwrap();
 
             // Dropping the attached context leaves its thread running the probe.
             context.sleep(Duration::from_millis(10)).await;
             assert!(futures::FutureExt::now_or_never(&mut probe).is_none());
+            assert!(thread.inner().is_open());
 
             lineage.abort();
             assert!(matches!(within(&context, probe).await, Err(Error::Closed)));
+            closes(&context, &thread).await;
         });
+    });
+}
+
+// An attached thread closes when the task that consumes the attached context ends. An actor
+// derived from that context with child ending first leaves it open.
+#[rstest]
+#[case::deterministic(deterministic::Runner::default())]
+#[case::tokio(tokio::Runner::default())]
+#[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default()))]
+fn test_thread_attach_closes_with_consumer<R: Runner>(#[case] runner: R)
+where
+    R::Context: Spawner + Clock + PlacedOn,
+{
+    runner.start(|context| async move {
+        let attached = context.child("subsystem").thread().attach().unwrap();
+        let thread = attached.placed_on();
+
+        // The thread polls its residents one at a time, so once another resident ran, the
+        // completing poll of the actor, which aborts its node, is over.
+        attached.child("actor").spawn(|_| async {}).await.unwrap();
+        context
+            .child("barrier")
+            .spawn_on(&thread, |_| async {})
+            .await
+            .unwrap();
+        assert!(thread.inner().is_open());
+
+        // The thread stays open while the consuming task runs, and closes once it ends.
+        let (release, released) = oneshot::channel::<()>();
+        let main = attached.spawn(|_| async move { released.await.unwrap() });
+        context
+            .child("barrier")
+            .spawn_on(&thread, |_| async {})
+            .await
+            .unwrap();
+        assert!(thread.inner().is_open());
+        release.send(()).unwrap();
+        main.await.unwrap();
+        closes(&context, &thread).await;
+        let late = context.child("late").spawn_on(&thread, |_| async {});
+        assert!(matches!(late.await, Err(Error::Closed)));
+    });
+}
+
+// A long-lived task that attaches a thread per epoch leaves no thread open, because each
+// epoch's thread closes with the task that consumed its context, whether that task completed
+// or was aborted. OS threads do not accumulate either.
+#[rstest]
+#[case::deterministic(deterministic::Runner::default())]
+#[case::tokio(tokio::Runner::default())]
+#[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default()))]
+fn test_thread_attach_per_epoch<R: Runner>(#[case] runner: R)
+where
+    R::Context: Spawner + Clock + PlacedOn,
+{
+    /// Epochs the orchestrator runs.
+    const EPOCHS: u64 = 16;
+
+    runner.start(|context| async move {
+        let orchestrator = context.child("orchestrator").spawn(|context| async move {
+            let baseline = os_threads();
+            let mut threads = Vec::new();
+            for epoch in 0..EPOCHS {
+                let engine = context
+                    .child("engine")
+                    .with_attribute("epoch", epoch)
+                    .thread()
+                    .attach()
+                    .unwrap();
+                let thread = engine.placed_on();
+                let aborted = epoch % 2 == 0;
+                let main = engine.spawn(move |context| async move {
+                    // A long-lived actor runs next to the engine until the engine ends.
+                    drop(context.child("actor").placed().spawn(|_| pending::<()>()));
+                    if aborted {
+                        pending::<()>().await;
+                    }
+                });
+                if aborted {
+                    main.abort();
+                    assert!(matches!(main.await, Err(Error::Closed)));
+                } else {
+                    main.await.unwrap();
+                }
+                closes(&context, &thread).await;
+                threads.push(thread);
+            }
+
+            // The OS threads of native runners exit once their close completes.
+            if let Some(baseline) = baseline {
+                within(&context, async {
+                    while os_threads().unwrap() > baseline {
+                        context.sleep(Duration::from_millis(1)).await;
+                    }
+                })
+                .await;
+            }
+            threads
+        });
+        let threads = orchestrator.await.unwrap();
+        assert_eq!(threads.len(), EPOCHS as usize);
+        assert!(threads.iter().all(|thread| !thread.inner().is_open()));
     });
 }
 
@@ -1771,5 +1922,49 @@ where
         }));
         assert!(result.is_err());
         assert!(matches!(within(&context, wired).await, Err(Error::Closed)));
+    });
+}
+
+// The factory of an ordinary spawn runs on the caller before spawn returns, wherever the future
+// runs, so it may borrow the caller's !Send state to build a Send future.
+#[rstest]
+#[case::deterministic(deterministic::Runner::default())]
+#[case::tokio(tokio::Runner::default())]
+#[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default()))]
+fn test_spawn_factory_reads_local_state<R: Runner>(#[case] runner: R)
+where
+    R::Context: Spawner,
+{
+    runner.start(|context| async move {
+        let total = context
+            .child("t")
+            .thread()
+            .spawn(|local| async move {
+                let state = Rc::new(RefCell::new(Vec::new()));
+                let read = |id: usize| {
+                    let state = &state;
+                    move |_| {
+                        state.borrow_mut().push(id);
+                        let value = state.borrow().len();
+                        async move { value }
+                    }
+                };
+                let context = local.into_inner();
+                let handles = [
+                    context.child("shared").spawn(read(1)),
+                    context.child("placed").placed().spawn(read(2)),
+                    context.child("blocking").blocking().spawn(read(3)),
+                ];
+                assert_eq!(*state.borrow(), [1, 2, 3]);
+                let mut total = 0;
+                for handle in handles {
+                    total += handle.await.unwrap();
+                }
+                total
+            })
+            .unwrap()
+            .await
+            .unwrap();
+        assert_eq!(total, 6);
     });
 }

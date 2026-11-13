@@ -375,11 +375,11 @@ impl Config {
             self.start_time >= UNIX_EPOCH,
             "start time must be greater than or equal to unix epoch"
         );
-        assert!(!self.cpus.is_empty(), "cpus must not be empty");
         assert!(
             self.cpus.beyond().is_none(),
             "cpus must be below 1024 (CPU_SETSIZE)"
         );
+        assert!(!self.cpus.is_empty(), "cpus must not be empty");
     }
 }
 
@@ -831,6 +831,13 @@ impl ThreadRuntime for Executor {
             }
         });
         Ok(thread)
+    }
+
+    fn available(&self) -> Option<Cpus> {
+        if self.threads.lock().closed {
+            return None;
+        }
+        Some(self.cpus.clone())
     }
 }
 
@@ -1464,7 +1471,7 @@ pub struct Context {
     storage: Arc<Storage>,
     opens: Arc<Opens>,
     tree: Arc<Tree>,
-    /// Where this context line's spawns run.
+    /// Where this context's spawns run.
     place: Place,
 }
 
@@ -1623,6 +1630,12 @@ impl Context {
         self.place.execution()
     }
 
+    /// The runtime thread this context's spawns run on, if any.
+    #[cfg(test)]
+    pub(crate) const fn placed_thread(&self) -> Option<&Thread> {
+        self.place.thread()
+    }
+
     /// Get a reference to the [Auditor].
     pub fn auditor(&self) -> Arc<Auditor> {
         self.executor().auditor.clone()
@@ -1696,29 +1709,29 @@ impl crate::Spawner for Context {
     }
 
     fn placed(mut self) -> Self {
-        self.place.unpark();
+        self.place.place();
         self
     }
 
     fn thread(self) -> ThreadBuilder<Self> {
-        // The thread occupies this context's node. The context handed to its work keeps this
-        // context's name and attributes at a fresh child of that node, unplaced.
+        // The context handed to the thread's work keeps this context's name and attributes at a
+        // fresh child of this context's node, on the shared executor.
         let node = self.tree.clone();
         let (tree, _) = Tree::child(&node);
         let name = self.name.clone();
         let host: Weak<Executor> = self.executor.clone();
         let host: Weak<dyn ThreadRuntime> = host;
         let context = Self {
-            tree,
+            tree: tree.clone(),
             place: Place::default(),
             ..self
         };
-        ThreadBuilder::new(context, node, name, host)
+        ThreadBuilder::new(context, tree, node, name, host)
     }
 
     fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
     where
-        F: FnOnce(Self) -> Fut + Send + 'static,
+        F: FnOnce(Self) -> Fut,
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
@@ -1792,7 +1805,7 @@ impl crate::Spawner for Context {
         let (label, metric) =
             spawn_metrics!(Label::task(self.name.clone(), Execution::Thread), @make self);
 
-        // The task is supervised by this context, and its context is parked on the thread
+        // The task is supervised by this context, and its context is unplaced on the thread
         // A factory dropped unrun is disposed of like a resident's future
         let parent = Arc::clone(&self.tree);
         let (child, aborted) = Tree::child(&parent);
@@ -1801,7 +1814,7 @@ impl crate::Spawner for Context {
             return Handle::closed(metric);
         }
         self.tree = child;
-        self.place = Place::parked(Placement::Thread(thread.clone()));
+        self.place = Place::unplaced(Placement::Thread(thread.clone()));
 
         // The factory runs on the thread. A rejected job drops its factory, then its ticket,
         // which aborts the node and closes the handle.
@@ -1848,12 +1861,6 @@ impl crate::Spawner for Context {
         executor.auditor.event(b"stopped", |_| {});
 
         executor.shutdown.lock().stopped()
-    }
-}
-
-impl From<Local<Self>> for Context {
-    fn from(local: Local<Self>) -> Self {
-        local.into_inner()
     }
 }
 

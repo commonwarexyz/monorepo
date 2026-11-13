@@ -40,7 +40,7 @@ use std::{
 /// A [Local] dereferences to its context, so `&C` and `&mut C` methods (such as the RNG) work
 /// directly. It cannot implement the runtime traits, which require `Send + Sync`, so generic
 /// helpers take `&*local` or `&mut *local`, and code that needs an owned context uses
-/// [Local::into_inner], or `.into()` where the target type is known. Both give up the proof.
+/// [Local::into_inner], which gives up the proof.
 ///
 /// The context inside is replaceable through [DerefMut]. The proof is the owner, not the
 /// context, so [Local::spawn_local] always runs its task on [Local::home], supervised by the
@@ -129,7 +129,7 @@ use std::{
 /// });
 /// ```
 pub struct Local<C> {
-    /// The context, parked on the thread unless the holder replaced it.
+    /// The context, unplaced on the thread unless the holder replaced it.
     context: C,
     /// The owner state of the thread this value lives on.
     owner: Rc<Owner>,
@@ -189,7 +189,7 @@ impl<C: Spawner> Local<C> {
     /// Spawn a resident on this thread. Nothing needs to be `Send`.
     ///
     /// The task always runs on [Local::home], is supervised by the context this value holds,
-    /// and receives a [Local] on the thread, whose context is parked like any context a spawn
+    /// and receives a [Local] on the thread, whose context is unplaced like any context a spawn
     /// hands out. `f` runs on this thread after this call returns and before the task's first
     /// poll, so it may borrow state the caller holds borrowed now. The returned [LocalHandle]
     /// cannot leave the thread either.
@@ -249,8 +249,8 @@ impl<C: Spawner> Local<C> {
     }
 
     /// Return the plain context, giving up the proof. Unless the holder replaced it, it is
-    /// parked on this thread, so its spawns run on the shared executor until
-    /// [crate::Spawner::placed] unparks it.
+    /// unplaced, so its spawns run on the shared executor until [crate::Spawner::placed] places
+    /// it on this thread.
     pub fn into_inner(self) -> C {
         self.context
     }

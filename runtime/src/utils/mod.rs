@@ -38,7 +38,7 @@ pub(crate) enum Execution {
     Thread,
 }
 
-/// Where a context line's spawns run.
+/// Where a context's spawns run.
 #[derive(Clone, Debug, Default)]
 pub(crate) enum Placement {
     /// The runtime's shared executor.
@@ -52,40 +52,40 @@ pub(crate) enum Placement {
 
 /// The placement a context carries.
 ///
-/// A spawn hands its task a parked context. It remembers where the task runs, but its spawns
-/// run on the shared executor until [`crate::Spawner::placed`] unparks it or an explicit
+/// A spawn hands its task an unplaced context. It remembers where the task runs, but its spawns
+/// run on the shared executor until [`crate::Spawner::placed`] places it there or an explicit
 /// placement replaces what it remembers.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Place {
-    /// The explicit placement, or where the context's task runs while parked.
+    /// The explicit placement, or where the context's task runs while unplaced.
     placement: Placement,
     /// Whether spawns run on the shared executor instead of at `placement`.
-    parked: bool,
+    unplaced: bool,
 }
 
 impl Place {
     /// The context handed to a task that runs at `placement`.
-    pub(crate) const fn parked(placement: Placement) -> Self {
+    pub(crate) const fn unplaced(placement: Placement) -> Self {
         Self {
             placement,
-            parked: true,
+            unplaced: true,
         }
     }
 
     /// Place the context explicitly, replacing what it remembers.
     pub(crate) fn set(&mut self, placement: Placement) {
         self.placement = placement;
-        self.parked = false;
+        self.unplaced = false;
     }
 
-    /// Spawn at the remembered placement: where the context's task runs if it is parked.
-    pub(crate) const fn unpark(&mut self) {
-        self.parked = false;
+    /// Spawn at the remembered placement: where the context's task runs if it is unplaced.
+    pub(crate) const fn place(&mut self) {
+        self.unplaced = false;
     }
 
     /// The runtime thread the next spawn runs on, if any.
     pub(crate) const fn thread(&self) -> Option<&Thread> {
-        match (&self.placement, self.parked) {
+        match (&self.placement, self.unplaced) {
             (Placement::Thread(thread), false) => Some(thread),
             _ => None,
         }
@@ -93,7 +93,10 @@ impl Place {
 
     /// Whether the next spawn runs on the blocking pool.
     pub(crate) const fn blocking(&self) -> bool {
-        matches!((&self.placement, self.parked), (Placement::Blocking, false))
+        matches!(
+            (&self.placement, self.unplaced),
+            (Placement::Blocking, false)
+        )
     }
 
     /// Where the next spawn runs, as its task metric reports it.
@@ -105,14 +108,15 @@ impl Place {
         }
     }
 
-    /// The context handed to a task spawned from this one: parked where the task runs.
+    /// The context handed to a task spawned from this one: unplaced, remembering where the task
+    /// runs.
     pub(crate) fn handoff(&self) -> Self {
-        let placement = if self.parked {
+        let placement = if self.unplaced {
             Placement::Shared
         } else {
             self.placement.clone()
         };
-        Self::parked(placement)
+        Self::unplaced(placement)
     }
 }
 

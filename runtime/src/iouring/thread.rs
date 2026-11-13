@@ -308,6 +308,13 @@ impl ThreadRuntime for Shared {
             }
         }
     }
+
+    fn available(&self) -> Option<Cpus> {
+        if self.workers.is_closed() {
+            return None;
+        }
+        self.affinity.base().cloned()
+    }
 }
 
 /// What a thread's native thread owns. Fields drop in order, so Shared and the node are

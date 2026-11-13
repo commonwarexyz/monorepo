@@ -126,6 +126,13 @@ impl ThreadRuntime for Executor {
             }
         }
     }
+
+    fn available(&self) -> Option<Cpus> {
+        if self.tasks.is_closed() {
+            return None;
+        }
+        self.affinity.base().cloned()
+    }
 }
 
 /// What a thread's native thread owns. Fields drop in order, so a refused thread releases its
