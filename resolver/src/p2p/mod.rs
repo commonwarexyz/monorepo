@@ -2580,7 +2580,7 @@ mod tests {
     /// A blocker whose blocked-set subscription closes immediately, as test
     /// mocks elsewhere in the workspace do.
     #[derive(Clone)]
-    struct ClosedBlocker;
+    pub(super) struct ClosedBlocker;
 
     impl Blocker for ClosedBlocker {
         type PublicKey = PublicKey;

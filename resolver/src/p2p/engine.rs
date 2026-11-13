@@ -218,8 +218,7 @@ where
                     self.fetcher.add_retry(key);
                 }
             },
-            // Poll delivery completions before mailbox work so a ready completion
-            // can retire its subscribers before a queued fetch is coalesced with them.
+            // Handle delivery completions
             delivery = self.inflight.next_delivery() => {
                 if let Ok(completed) = delivery {
                     self.handle_delivery(completed);
@@ -231,42 +230,9 @@ where
                 return;
             } => {
                 match msg {
-                    Message::Fetch(keys) => {
-                        for FetchKey {
-                            key,
-                            subscribers,
-                            metadata: targets,
-                        } in keys
-                        {
-                            trace!(?key, "mailbox: fetch");
-
-                            // Check if the fetch is already in progress
-                            let is_new = !self.inflight.contains(&key);
-                            self.subscribers.insert(key.clone(), subscribers);
-
-                            // Update targets
-                            match targets {
-                                Some(targets) => {
-                                    // Only add targets if this is a new fetch OR the existing
-                                    // fetch already has targets. Don't restrict an "all" fetch
-                                    // (no targets) to specific targets.
-                                    if is_new || self.fetcher.has_targets(&key) {
-                                        self.fetcher.add_targets(key.clone(), targets);
-                                    }
-                                }
-                                None => self.fetcher.clear_targets(&key),
-                            }
-
-                            // Only start new fetch if not already in progress
-                            if is_new {
-                                self.inflight.insert(
-                                    key.clone(),
-                                    self.metrics.fetch_duration.timer(self.context.as_ref()),
-                                );
-                                self.fetcher.add_ready(key);
-                            } else {
-                                trace!(?key, "updated targets for existing fetch");
-                            }
+                    Message::Fetch(fetches) => {
+                        for fetch in fetches {
+                            self.add_fetch(fetch);
                         }
                     }
                     Message::Retain { predicate } => {
@@ -345,6 +311,50 @@ where
                     self.fetcher.fetch(&mut sender);
                 }
             },
+        }
+    }
+
+    /// Add subscribers for a key and start a fetch if none is in progress.
+    fn add_fetch(&mut self, fetch: FetchKey<Key, P, Con::Subscriber>) {
+        let FetchKey {
+            key,
+            subscribers,
+            metadata: targets,
+        } = fetch;
+        trace!(?key, "mailbox: fetch");
+
+        // Apply a verdict the consumer already sent before adding these subscribers so
+        // it cannot retire them. They then start a new fetch or join those that remain.
+        if let Some(completed) = self.inflight.try_delivery(&key) {
+            self.handle_delivery(completed);
+        }
+
+        // Check if the fetch is already in progress
+        let is_new = !self.inflight.contains(&key);
+        self.subscribers.insert(key.clone(), subscribers);
+
+        // Update targets
+        match targets {
+            Some(targets) => {
+                // Only add targets if this is a new fetch OR the existing
+                // fetch already has targets. Don't restrict an "all" fetch
+                // (no targets) to specific targets.
+                if is_new || self.fetcher.has_targets(&key) {
+                    self.fetcher.add_targets(key.clone(), targets);
+                }
+            }
+            None => self.fetcher.clear_targets(&key),
+        }
+
+        // Only start new fetch if not already in progress
+        if is_new {
+            self.inflight.insert(
+                key.clone(),
+                self.metrics.fetch_duration.timer(self.context.as_ref()),
+            );
+            self.fetcher.add_ready(key);
+        } else {
+            trace!(?key, "updated targets for existing fetch");
         }
     }
 
@@ -558,5 +568,82 @@ where
         // The peer did not have the data, so we need to try again
         self.metrics.fetch.inc(Status::Failure);
         self.fetcher.add_retry(key);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::p2p::{
+        mocks::{Consumer as MockConsumer, Key as MockKey, Producer as MockProducer},
+        tests::ClosedBlocker,
+    };
+    use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
+    use commonware_p2p::utils::StaticProvider;
+    use commonware_runtime::{Runner as _, deterministic};
+    use commonware_utils::{NZDuration, NZUsize, non_empty_vec, ordered::Set};
+    use futures::FutureExt as _;
+    use std::time::Duration;
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5720.
+    ///
+    /// A verdict sent before the consumer fetches the key again does not retire that fetch,
+    /// even when the engine takes the fetch before it polls the verdict.
+    #[test]
+    fn issue_5720_regression() {
+        deterministic::Runner::default().start(|context| async move {
+            let (consumer, mut delivered) = MockConsumer::<MockKey, Bytes>::new();
+            let (mut engine, _mailbox) = Engine::new(
+                context,
+                Config {
+                    peer_provider: StaticProvider::new(0, Set::default()),
+                    blocker: ClosedBlocker,
+                    consumer,
+                    producer: MockProducer::<MockKey, Bytes>::default(),
+                    mailbox_size: NZUsize!(1),
+                    me: None,
+                    fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                    fetch_retry_delay: Duration::from_secs(1),
+                    priority_requests: false,
+                    priority_responses: false,
+                },
+            );
+            let key = MockKey(1);
+            let fetch = || FetchKey {
+                key: key.clone(),
+                subscribers: non_empty_vec![((), tracing::Span::none())],
+                metadata: None,
+            };
+
+            // Stand in for a request and its response. The fetcher drops the key and
+            // the consumer receives the value, answering inside `deliver`.
+            engine.add_fetch(fetch());
+            engine.fetcher.retain(|_| false);
+            engine.inflight.deliver(
+                Delivery {
+                    key: key.clone(),
+                    subscribers: engine.subscribers.pending(&key).unwrap(),
+                },
+                PrivateKey::from_seed(1).public_key(),
+                Duration::ZERO,
+                Bytes::from_static(b"value"),
+            );
+            assert!(delivered.try_recv().is_ok());
+
+            // The consumer fetches again. The engine takes the fetch before it polls
+            // the verdict.
+            engine.add_fetch(fetch());
+            if let Some(Ok(completed)) = engine.inflight.next_delivery().now_or_never() {
+                engine.handle_delivery(completed);
+            }
+
+            // The repeat keeps its subscriber and waits for a request of its own.
+            assert!(
+                engine.subscribers.contains(&key),
+                "fetch issued after the verdict must keep its subscriber"
+            );
+            assert!(engine.inflight.contains(&key));
+            assert_eq!(engine.fetcher.len_pending(), 1);
+        });
     }
 }
