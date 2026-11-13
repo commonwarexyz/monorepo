@@ -215,7 +215,6 @@ fuzz fuzz_dir max_time='60' max_mem='4000':
     cargo {{nightly_version}} fuzz build --fuzz-dir {{fuzz_dir}}
     for target in $targets; do
         cargo {{nightly_version}} fuzz run $target --fuzz-dir {{fuzz_dir}} -- -max_total_time={{max_time}} -rss_limit_mb={{max_mem}}
-        rm -f {{fuzz_dir}}/target/*/release/$target
     done
 
 # Run cargo-hack with feature powerset
