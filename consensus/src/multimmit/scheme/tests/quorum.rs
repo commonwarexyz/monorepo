@@ -1,6 +1,7 @@
 //! Data-availability quorums, payment epochs, and receipts across suites.
 
 use super::*;
+use crate::multimmit::faults::N5f1Nullification;
 
 #[test]
 fn fault_models_match_the_codec_quorums() {

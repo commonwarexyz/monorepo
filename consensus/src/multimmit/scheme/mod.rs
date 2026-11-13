@@ -75,7 +75,7 @@
 use crate::{
     Epochable,
     multimmit::{
-        faults::MultimmitFaults as _,
+        faults::{MultimmitFaults as _, N5f1Nullification},
         types::{
             ChainId, DaCertificate, LeaderBlock, NoVote, TransactionBlockHeader, Vote, VoteBody,
         },
@@ -92,7 +92,7 @@ use commonware_cryptography::{
     },
     sha256,
 };
-use commonware_utils::{Faults, N5f1, faults::N5f1Nullification, union};
+use commonware_utils::{Faults, N5f1, union};
 use core::{fmt::Debug, hash::Hash};
 use num_traits::ToPrimitive;
 
