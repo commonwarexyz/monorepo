@@ -11,6 +11,10 @@
 //! `deterministic` module provides a runtime that allows for deterministic
 //! execution of tasks (given a fixed seed).
 //!
+//! On WebAssembly targets, the `browser` feature enables the `browser` module. It
+//! provides a runtime that runs tasks on a page's event loop and connects pages over
+//! WebRTC.
+//!
 //! # Terminology
 //!
 //! Each runtime is typically composed of an `Executor` and a `Context`. The `Executor` implements the
@@ -44,6 +48,16 @@ stability_scope!(ALPHA {
 stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     pub mod benchmarks;
 });
+stability_scope!(ALPHA, cfg(all(target_arch = "wasm32", feature = "browser")) {
+    pub mod browser;
+});
+
+// The address of a browser endpoint is text handling that needs no browser, so its tests run on
+// the targets the other tests run on.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod browser {
+    mod address;
+}
 stability_scope!(ALPHA, cfg(target_os = "linux") {
     pub mod iouring;
 });

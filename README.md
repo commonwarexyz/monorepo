@@ -44,6 +44,7 @@ _Examples may include insecure code (i.e. deriving keypairs from an integer argu
 * [estimator](./examples/estimator/README.md): Simulate mechanism performance under realistic network conditions.
 * [flood](./examples/flood/README.md): Spam peers deployed to AWS EC2 with random messages.
 * [log](./examples/log/README.md): Commit to a secret log and agree to its hash.
+* [whisper](./examples/whisper/README.md): Send encrypted messages directly to another browser.
 
 ## Miscellaneous
 
