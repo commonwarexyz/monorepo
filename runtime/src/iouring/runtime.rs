@@ -868,7 +868,7 @@ impl crate::Spawner for Context {
         let (_, metric) =
             spawn_metrics!(Label::task(self.name.clone(), Execution::Thread), @make self);
 
-        // The task is supervised by this context, and its context is placed on the thread
+        // The task is supervised by this context, and its context is parked on the thread
         // A factory dropped unrun is disposed of like a task's future, which io_uring contains
         let parent = self.tree.clone();
         let (child, aborted) = Tree::child(&parent);

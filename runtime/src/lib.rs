@@ -369,9 +369,10 @@ stability_scope!(BETA {
     ///
     /// A spawn hands its task a parked context. The context remembers where its task runs, but
     /// its spawns run on the shared executor. Placing a subsystem's context therefore places the
-    /// tasks spawned from it, including actors it wires from that context before spawning, but
-    /// not the tasks those spawn while they run. A task that wants its children where it runs
-    /// asks with [`Spawner::placed`].
+    /// tasks spawned from it and from the contexts derived from it, including actors it wires
+    /// before spawning, while the tasks those spawn from the contexts their own spawns handed
+    /// them run on the shared executor. A task that wants its children where it runs asks with
+    /// [`Spawner::placed`].
     pub trait Spawner: Supervisor {
         /// Place this context line on the runtime's shared executor.
         ///
@@ -386,8 +387,9 @@ stability_scope!(BETA {
         ///
         /// Runtimes run these tasks where they cannot starve the asynchronous tasks of the shared
         /// executor, such as a blocking-friendly pool. Every task spawned from the line is such a
-        /// task. For long-lived work that should not compete with the shared executor, use
-        /// [`Spawner::thread`] instead.
+        /// task, and [`Supervisor::child`] keeps the placement, so place the context you spawn
+        /// from rather than one you derive many children from. For long-lived work that should
+        /// not compete with the shared executor, use [`Spawner::thread`] instead.
         #[must_use]
         fn blocking(self) -> Self;
 
@@ -414,6 +416,9 @@ stability_scope!(BETA {
         /// derived from it with [`Supervisor::child`] and [`Supervisor::with_attribute`] remember
         /// the same placement. On a line placed with [`Spawner::shared`], [`Spawner::blocking`]
         /// or [`Spawner::on`], this does nothing.
+        ///
+        /// A context handed to a blocking task remembers the blocking pool, so its placed spawns
+        /// are blocking tasks as well.
         ///
         /// The placement belongs to the context, not to the code holding it. A context passed to
         /// another task, or kept by a service, still resolves to the task it was handed to.
@@ -525,7 +530,7 @@ stability_scope!(BETA {
         ///
         /// Unlike directly awaiting a future, the task starts running immediately even if the caller
         /// never awaits the returned [`Handle`]. The factory `f` runs on the caller, and the task
-        /// runs where the context is placed (see [Placement](Spawner#placement)). The context
+        /// runs where the context's spawns run (see [Placement](Spawner#placement)). The context
         /// handed to the task remembers where the task runs, and is parked.
         ///
         /// # Mandatory Supervision
@@ -548,7 +553,6 @@ stability_scope!(BETA {
         ///
         /// Task A finishes or aborts --> Task B and Task C are aborted
         /// ```
-        ///
         fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
         where
             Self: Sized,

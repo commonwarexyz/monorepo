@@ -3,8 +3,8 @@
 #[cfg(target_os = "linux")]
 use crate::iouring;
 use crate::{
-    Clock, Error, Local, LocalHandle, Metrics, Runner, Spawner, Supervisor, Thread, ThreadError,
-    deterministic, reschedule, tokio,
+    Clock, ContextCell, Error, Handle, Local, LocalHandle, Metrics, Runner, Spawner, Supervisor,
+    Thread, ThreadError, deterministic, reschedule, tokio,
 };
 use commonware_macros::select;
 use commonware_utils::channel::oneshot;
@@ -304,6 +304,11 @@ where
                 let blocking = ran_on(context.child("blocking").blocking().placed()).await;
                 let shared = ran_on(context.child("shared").shared().placed()).await;
 
+                // An unparked context stays unparked through child and with_attribute.
+                let hoisted = context.child("hoisted").placed();
+                let hoisted_child = ran_on(hoisted.child("peer")).await;
+                let hoisted_attr = ran_on(hoisted.with_attribute("k", 1)).await;
+
                 // A task spawned through placed receives a parked context as well.
                 let nested = context
                     .child("nested")
@@ -330,6 +335,8 @@ where
                     (derived_placed, Expect::Thread),
                     (blocking, Expect::Blocking),
                     (shared, Expect::Shared),
+                    (hoisted_child, Expect::Thread),
+                    (hoisted_attr, Expect::Thread),
                     (nested.0, Expect::Shared),
                     (nested.1, Expect::Thread),
                     (saved, Expect::Thread),
@@ -341,7 +348,19 @@ where
             check(ran, expect);
         }
 
+        // spawn_cell! restores the context the spawn handed to its task, which is parked.
+        let [plain, placed] = CellActor {
+            context: ContextCell::new(context.child("cell").on(&thread)),
+        }
+        .start()
+        .await
+        .unwrap();
+        check(plain, Expect::Shared);
+        check(placed, Expect::Thread);
+
         // A task on the shared executor or the blocking pool receives a context parked there.
+        // Each blocking task runs on a thread of its own, so a blocking task's placed spawns do
+        // not run on its thread.
         for blocking in [false, true] {
             let line = context.child(if blocking {
                 "blocking_task"
@@ -349,23 +368,28 @@ where
                 "shared_task"
             });
             let line = if blocking { line.blocking() } else { line };
-            let (plain, placed) = line
+            let (plain, placed, hoisted, parent) = line
                 .spawn(|context| async move {
+                    let parent = os();
                     let plain = ran_on(context.child("plain")).await;
                     let placed = ran_on(context.child("placed").placed()).await;
-                    (plain, placed)
+                    let hoisted = ran_on(context.child("hoisted").placed().child("peer")).await;
+                    (plain, placed, hoisted, parent)
                 })
                 .await
                 .unwrap();
+            if native && blocking {
+                assert_ne!(placed.0, parent);
+                assert_ne!(hoisted.0, parent);
+            }
+            let expect = if blocking {
+                Expect::Blocking
+            } else {
+                Expect::Shared
+            };
             check(plain, Expect::Shared);
-            check(
-                placed,
-                if blocking {
-                    Expect::Blocking
-                } else {
-                    Expect::Shared
-                },
-            );
+            check(placed, expect);
+            check(hoisted, expect);
         }
 
         // A Local's context is parked on its thread, through into_inner and through a deref
@@ -447,6 +471,65 @@ where
             .unwrap();
         assert_eq!(label, "spawned");
         assert_eq!(home, "spawned");
+    });
+}
+
+/// An actor that spawns its loop the way `spawn_cell!` does, then spawns from the restored
+/// context. The macro itself cannot be named by path inside this crate.
+struct CellActor<E> {
+    /// The actor's context, restored in the spawned closure.
+    context: ContextCell<E>,
+}
+
+impl<E: Spawner> CellActor<E> {
+    /// Spawn the actor's loop, as `spawn_cell!(self.context, self.run())` expands.
+    fn start(mut self) -> Handle<[(ThreadId, String); 2]> {
+        let context = self.context.take();
+        context.spawn(move |context| {
+            self.context.restore(context);
+            self.run()
+        })
+    }
+
+    /// Spawn from the restored context, then again after unparking it.
+    async fn run(self) -> [(ThreadId, String); 2] {
+        [
+            ran_on(self.context.child("plain")).await,
+            ran_on(self.context.child("placed").placed()).await,
+        ]
+    }
+}
+
+// A parked context belongs to its task's supervision node, so once the task ends a spawn from it
+// resolves Closed without running its factory, whether or not placed unparked it.
+#[rstest]
+#[case::deterministic(deterministic::Runner::default())]
+#[case::tokio(tokio::Runner::default())]
+#[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default()))]
+fn test_thread_placed_after_task_ends<R: Runner>(#[case] runner: R)
+where
+    R::Context: Spawner,
+{
+    runner.start(|context| async move {
+        let thread = context.child("t").thread().build().unwrap();
+        let saved = context
+            .child("task")
+            .on(&thread)
+            .spawn(|context| async move { context.child("saved") })
+            .await
+            .unwrap();
+        for placed in [false, true] {
+            let line = saved.child("late");
+            let line = if placed { line.placed() } else { line };
+            let ran = Arc::new(AtomicBool::new(false));
+            let factory = ran.clone();
+            let handle = line.spawn(move |_| {
+                factory.store(true, Ordering::SeqCst);
+                async {}
+            });
+            assert!(matches!(handle.await, Err(Error::Closed)));
+            assert!(!ran.load(Ordering::SeqCst), "the factory ran");
+        }
     });
 }
 

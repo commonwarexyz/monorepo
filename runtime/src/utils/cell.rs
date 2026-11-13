@@ -6,9 +6,9 @@ const DUPLICATE_CONTEXT: &str = "runtime context already present";
 /// Spawn a task using a [`Cell`] by taking its context, restoring the context synchronously
 /// in the spawned closure, and returning the provided future directly to the runtime.
 ///
-/// The macro spawns with the stored context's configuration: supervised, and placed where the
-/// context is placed. The context restored in the spawned closure is the one the spawn hands to
-/// the task, so it is parked (see [Placement](crate::Spawner#placement)). If you need another
+/// The macro spawns with the stored context's configuration: supervised, and run where the
+/// context's spawns run. The context restored in the spawned closure is the one the spawn hands
+/// to the task, so it is parked (see [Placement](crate::Spawner#placement)). If you need another
 /// placement, take the context via [`Cell::take`] and call the appropriate [`crate::Spawner`]
 /// methods before spawning.
 #[macro_export]

@@ -153,9 +153,10 @@ pub struct Config {
     /// Tokio sets the default value to 512 to avoid hanging on lower-level
     /// operations that require blocking (like `fs` and writing to `Stdout`).
     ///
-    /// Tasks spawned from a context placed with [`crate::Spawner::blocking`] share this pool
-    /// with the blocking work behind storage operations and name resolution. A blocking task
-    /// that waits on them holds a thread they need, so enough such tasks exhaust the pool and
+    /// Blocking tasks, spawned from a context placed with [`crate::Spawner::blocking`] or
+    /// through [`crate::Spawner::placed`] from a blocking task's context, share this pool with
+    /// the blocking work behind storage operations and name resolution. A blocking task that
+    /// waits on them holds a thread they need, so enough such tasks exhaust the pool and
     /// deadlock.
     max_blocking_threads: usize,
 
@@ -630,7 +631,7 @@ impl crate::Spawner for Context {
         let (_, metric) =
             spawn_metrics!(Label::task(self.name.clone(), Execution::Thread), @make self);
 
-        // The task is supervised by this context, and its context is placed on the thread
+        // The task is supervised by this context, and its context is parked on the thread
         // A factory dropped unrun is disposed of like a task's future
         let parent = Arc::clone(&self.tree);
         let (child, aborted) = Tree::child(&parent);
@@ -1021,31 +1022,27 @@ mod tests {
 
     /// Where a test spawns its task.
     #[derive(Clone, Copy, Debug)]
-    enum Placement {
+    enum Mode {
         /// On the shared executor, as short blocking work or not.
         Shared(bool),
         /// As the root task of a new runtime thread.
         Thread,
     }
 
-    /// Every placement a test covers.
-    const PLACEMENTS: [Placement; 3] = [
-        Placement::Shared(false),
-        Placement::Shared(true),
-        Placement::Thread,
-    ];
+    /// Every mode a test covers.
+    const MODES: [Mode; 3] = [Mode::Shared(false), Mode::Shared(true), Mode::Thread];
 
     /// Spawn `f` from `context` as `placement` says.
-    fn spawn_placed<F, Fut, T>(context: Context, placement: Placement, f: F) -> Handle<T>
+    fn spawn_placed<F, Fut, T>(context: Context, placement: Mode, f: F) -> Handle<T>
     where
         F: FnOnce(Context) -> Fut + Send + 'static,
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
         match placement {
-            Placement::Shared(false) => context.shared().spawn(f),
-            Placement::Shared(true) => context.blocking().spawn(f),
-            Placement::Thread => context
+            Mode::Shared(false) => context.shared().spawn(f),
+            Mode::Shared(true) => context.blocking().spawn(f),
+            Mode::Thread => context
                 .thread()
                 .spawn(move |local| f(local.into_inner()))
                 .expect("thread"),
@@ -1068,7 +1065,7 @@ mod tests {
 
     fn spawn_drop_gated_task(
         context: Context,
-        placement: Placement,
+        placement: Mode,
         drop_gate: TaskDropGate,
         ready: Option<oneshot::Sender<()>>,
     ) {
@@ -1082,7 +1079,7 @@ mod tests {
         });
     }
 
-    fn assert_runner_drains_spawned_task(placement: Placement, root_exit: RootExit) {
+    fn assert_runner_drains_spawned_task(placement: Mode, root_exit: RootExit) {
         let cfg = Config::new();
         let storage_directory = cfg.storage_directory().clone();
         let (ready_tx, ready_rx) = oneshot::channel();
@@ -1308,7 +1305,7 @@ mod tests {
 
     #[test]
     fn test_runner_waits_for_spawned_task_cancellation() {
-        for placement in PLACEMENTS {
+        for placement in MODES {
             for root_exit in [
                 RootExit::Return,
                 RootExit::FuturePanic,
@@ -1361,8 +1358,7 @@ mod tests {
     #[rstest]
     fn test_disposal_panic_is_task_panic(
         #[values(Disposal::Output, Disposal::Cancel, Disposal::Ready)] disposal: Disposal,
-        #[values(Placement::Shared(false), Placement::Shared(true), Placement::Thread)]
-        placement: Placement,
+        #[values(Mode::Shared(false), Mode::Shared(true), Mode::Thread)] placement: Mode,
         #[values(false, true)] catch: bool,
     ) {
         let cfg = Config::new().with_catch_panics(catch);
@@ -1522,7 +1518,7 @@ mod tests {
             }
         }
 
-        for placement in PLACEMENTS {
+        for placement in MODES {
             let cfg = Config::new();
             let storage_directory = cfg.storage_directory().clone();
             let invoked = Arc::new(AtomicBool::new(false));
@@ -1531,9 +1527,9 @@ mod tests {
                 // A thread's root factory runs on the thread, so the thread case spawns from a
                 // context placed on it, whose factory runs on the caller.
                 context: Some(match placement {
-                    Placement::Shared(false) => context.child("root").shared(),
-                    Placement::Shared(true) => context.child("root").blocking(),
-                    Placement::Thread => context.child("root").thread().attach().expect("thread"),
+                    Mode::Shared(false) => context.child("root").shared(),
+                    Mode::Shared(true) => context.child("root").blocking(),
+                    Mode::Thread => context.child("root").thread().attach().expect("thread"),
                 }),
                 invoked: invoked.clone(),
                 dropped: dropped_tx,

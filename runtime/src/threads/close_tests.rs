@@ -2014,9 +2014,10 @@ fn test_thread_admission_race_deterministic() {
 }
 
 /// For one wrapper, `attach`, `spawn`, `spawn_on` and `spawn_local` all hand their closures
-/// the wrapper type with its state (`holds` checks it). The root barrier also holds through the
-/// wrapper, after completion and after a root dropped unrun, so once a root's handle resolves
-/// no spawn toward its thread runs.
+/// the wrapper type with its state (`holds` checks it), and `placed`, `blocking` and `shared`
+/// keep that state and reach the inner context. The root barrier also holds through the wrapper,
+/// after completion and after a root dropped unrun, so once a root's handle resolves no spawn
+/// toward its thread runs.
 async fn wrapper_threads<W>(context: W, holds: fn(&W) -> bool, stale: Thread)
 where
     W: Spawner + Metrics,
