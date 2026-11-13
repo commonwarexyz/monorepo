@@ -3,8 +3,8 @@
 //! the tests of the restart drivers sample, watch, and search runs with.
 
 use super::{
-    Cut, CutScope, EnvironmentControls, Info, LinkControls, MockGroup, Outcome, PublicKey,
-    RESHARE_IDENTITIES, Rotation,
+    COMMITTEE, Cut, CutScope, EnvironmentControls, Info, LinkControls, MockGroup, Outcome,
+    PublicKey, RESHARE_IDENTITIES, Rotation,
     environment::{Event, Program, Stack},
     pacing::PacedCounts,
     public_keys,
@@ -14,10 +14,14 @@ use super::{
 };
 use crate::stateful::runner::Panic;
 use arbitrary::{Arbitrary, Unstructured};
+use commonware_codec::{Copying, Encode as _, Read as _};
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::bls12381::{
-    dkg::feldman_desmedt::deal,
-    primitives::{group::Share, sharing::Mode},
+    dkg::feldman_desmedt::{Output, deal},
+    primitives::{
+        group::Share,
+        sharing::{Mode, ModeVersion},
+    },
 };
 use commonware_glue::dkg::types::EpochOutcome;
 use commonware_runtime::{Handle, Storage as _, deterministic};
@@ -154,6 +158,24 @@ pub(super) fn described(seed: u64, epoch: Epoch) -> (Info, Vec<Share>) {
         next_players: players,
     };
     (info, shares.values().to_vec())
+}
+
+/// The share of the identity at `holder` of [`committee`] in the output a
+/// trusted dealer deals the committee under seed 1, which no ceremony of a
+/// bootstrap run produces. It carries the identity's index in the committee.
+pub(super) fn forged(holder: usize) -> Share {
+    described(1, Epoch::zero()).1.swap_remove(holder)
+}
+
+/// `output` with another transcript summary and everything else the same.
+pub(super) fn resummarized(output: &Output<MockGroup, PublicKey>) -> Output<MockGroup, PublicKey> {
+    let mut encoded = output.encode().to_vec();
+    encoded[0] ^= 1;
+    Output::read_cfg(
+        &mut Copying(encoded.as_slice()),
+        &(COMMITTEE, ModeVersion::v1()),
+    )
+    .expect("the output still decodes")
 }
 
 /// The restart schedule a run among `identities` identities draws from

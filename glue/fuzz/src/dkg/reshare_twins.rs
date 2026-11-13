@@ -9,13 +9,15 @@
 //! Four identities are correct and run one real reshare engine each. The
 //! compromised identity runs two, sharing its key, each on its own storage
 //! partitions and with its own secret store; both stores start with the
-//! identity's share of the first output, if it has one. Its Simplex, marshal,
-//! and dissemination channels are split per view by the selected twins
-//! scenario for the prefix the input draws, the first views of every epoch or
-//! every view, its DKG channel is split by the input's mask for each epoch's
-//! ceremony, and its secondary half runs the faulty application. The
-//! scenario's scripted leaders lead the views they are scripted for in every
-//! epoch whose committee holds them.
+//! identity's share of the first output. The input picks the identity
+//! outside the first committee among the other four, so the compromised
+//! identity is always in the first committee and deals in its ceremony. Its
+//! Simplex, marshal, and dissemination channels are split per view by the
+//! selected twins scenario for the prefix the input draws, the first views of
+//! every epoch or every view, its DKG channel is split by the input's mask
+//! for each epoch's ceremony, and its secondary half runs the faulty
+//! application. The scenario's scripted leaders lead the views they are
+//! scripted for in every epoch whose committee holds them.
 //!
 //! The run ends when every correct engine has processed the last boundary
 //! block of the selected epochs, when a correct engine stops, or when the
@@ -39,6 +41,7 @@ use super::{
     network::halve,
     public_keys,
     reshare_cluster::Session,
+    reshare_input::PEERS,
     reshare_network::{Masks, Scripted, Simplex, Twins},
     reshare_stack::{self, Config},
     runner::{self, Report},
@@ -50,6 +53,7 @@ use crate::stateful::{
     runner::{LINK, Panic, network_sized},
 };
 use commonware_consensus::types::Epoch;
+use commonware_p2p::simulated::Oracle;
 use commonware_runtime::{Handle, Spawner as _, Supervisor as _, deterministic};
 use commonware_utils::FuzzRng;
 use std::{
@@ -75,6 +79,9 @@ pub struct ReshareReport {
     pub deviations: usize,
     /// How much each check compared.
     pub counts: ReshareCounts,
+    /// Registrations of an epoch the engine holds a share for, each required
+    /// to carry that share under I2.
+    pub signers: usize,
 }
 
 impl fmt::Display for ReshareReport {
@@ -82,7 +89,7 @@ impl fmt::Display for ReshareReport {
         write!(
             f,
             "[{TARGET}] outcome={} asked={} epochs={} correct_nodes={} boundaries={} successes={} \
-             failures={} agreements={} registrations={} shares={} players={} \
+             failures={} agreements={} registrations={} signers={} shares={} players={} \
              reconstructions={} continuities={} isolations={} carried={} blocks={} \
              placements={} dealer_logs={} epoch_infos={} deviations={} tolerated_panics={}",
             self.outcome,
@@ -94,6 +101,7 @@ impl fmt::Display for ReshareReport {
             self.counts.failures,
             self.counts.agreements,
             self.counts.registrations,
+            self.signers,
             self.counts.shares,
             self.counts.players,
             self.counts.reconstructions,
@@ -126,16 +134,50 @@ pub fn fuzz_dkg_reshare(input: DkgReshareFuzzInput) {
 ///
 /// A run is fully determined by its input.
 pub fn run_dkg_reshare(input: DkgReshareFuzzInput) -> ReshareReport {
-    execute(input).0
+    execute(input, ()).0
 }
 
-/// Run `input` and return what the run measured with every panic it raised,
-/// each of which was tolerated.
-fn execute(input: DkgReshareFuzzInput) -> (ReshareReport, Vec<Panic>) {
+/// What a plant reaches of a run: the engines' surroundings, and the records
+/// and secret stores the oracle reads.
+struct Planting<'a> {
+    context: &'a deterministic::Context,
+    oracle: &'a Oracle<PublicKey, deterministic::Context>,
+    /// The identities, in identity order.
+    participants: &'a [PublicKey],
+    /// The engines of the correct identities, each at its identity's index.
+    correct: &'a [usize],
+    /// One record and one secret store per engine.
+    records: &'a [Records],
+    secrets: &'a [Secrets],
+}
+
+/// A fault planted into a run at the boundary the oracle observes.
+///
+/// libFuzzer plants nothing. A test plants a fault to show that the oracle
+/// the fuzz target runs rejects it.
+trait Plant {
+    /// Change the session the engines are configured with. The oracle holds
+    /// the session as it was dealt.
+    fn configure(&mut self, _session: &mut Session) {}
+
+    /// Plant into the run once every engine has been started.
+    async fn started(&mut self, _run: &Planting<'_>) {}
+
+    /// Plant into what the engines left on record once the run has ended,
+    /// before the oracle reads it.
+    async fn ended(&mut self, _run: &Planting<'_>) {}
+}
+
+impl Plant for () {}
+
+/// Run `input` with `plant` planted, and return what the run measured with
+/// every panic it raised, each of which was tolerated.
+fn execute(input: DkgReshareFuzzInput, plant: impl Plant) -> (ReshareReport, Vec<Panic>) {
     let entropy = input.raw_bytes.clone();
     let asked = input.epochs;
-    let (observed, panics) =
-        runner::execute(entropy.clone(), |context| run(context, input, entropy));
+    let (observed, panics) = runner::execute(entropy.clone(), |context| {
+        run(context, input, entropy, plant)
+    });
 
     // Measurement point, outside the runtime so a violation is never caught.
     let Some(observed) = observed else {
@@ -145,12 +187,14 @@ fn execute(input: DkgReshareFuzzInput) -> (ReshareReport, Vec<Panic>) {
             asked,
             deviations: 0,
             counts: ReshareCounts::default(),
+            signers: 0,
         };
         return (report, panics);
     };
     let tolerated_panics = invariants::check_panics(&panics, &observed.halves);
     invariants::check_engines_running(&observed.stopped);
     let counts = invariants::check_reshare(&observed.reshare, &observed.blocked);
+    let signers = invariants::check_registered_shares(&observed.reshare);
     let report = ReshareReport {
         outcome: observed.outcome,
         asked,
@@ -159,6 +203,7 @@ fn execute(input: DkgReshareFuzzInput) -> (ReshareReport, Vec<Panic>) {
             tolerated_panics,
             ..counts
         },
+        signers,
     };
     (report, panics)
 }
@@ -192,10 +237,25 @@ fn await_epoch(context: deterministic::Context, records: &Records, epoch: Epoch)
     })
 }
 
+/// The identity outside the first committee: the one at position `selected`
+/// among the identities other than `compromised`, in identity order. The
+/// compromised identity is therefore in the first committee, and both of its
+/// halves start with its share of the first output.
+fn outsider(compromised: usize, selected: u8) -> u8 {
+    let position = usize::from(selected) % PEERS;
+    let outsider = if position < compromised {
+        position
+    } else {
+        position + 1
+    };
+    u8::try_from(outsider).expect("an identity's index fits in a byte")
+}
+
 async fn run(
     mut context: deterministic::Context,
     input: DkgReshareFuzzInput,
     entropy: Vec<u8>,
+    mut plant: impl Plant,
 ) -> Option<Observations> {
     let signers = signers(RESHARE_IDENTITIES);
     let participants: Arc<[PublicKey]> = public_keys(&signers);
@@ -217,15 +277,18 @@ async fn run(
         input.case_selector,
     )?;
 
-    // The first output comes from a trusted deal among the first committee.
+    // The first output comes from a trusted deal among the first committee,
+    // which holds the compromised identity.
     let controls = SessionControls {
         epochs: input.epochs,
         sharing_mode: input.sharing_mode,
-        outsider: input.outsider,
+        outsider: outsider(compromised, input.outsider),
         rotations: input.rotations,
         mailbox: input.mailbox,
     };
-    let session = Session::deal(&mut context, signers, &controls);
+    let dealt = Session::deal(&mut context, signers, &controls);
+    let mut session = dealt.clone();
+    plant.configure(&mut session);
 
     // One secret store and one set of records per engine, held here so the
     // oracle can read them. Both halves of the compromised identity start
@@ -362,6 +425,7 @@ async fn run(
         session.genesis.clone(),
         spare,
         EPOCH_LENGTH,
+        session.sharing_mode,
     );
     let deviations = faulty.deviations();
     let secondary = config(SECONDARY_ENGINE, format!("engine-{compromised}-secondary"));
@@ -389,26 +453,38 @@ async fn run(
         dkg_secondary,
         (raw.probe.0, probe_rx_secondary),
     ));
-    let (outcome, stopped) = runner::watch(&context, engines, waiters, RESHARE_RUN_TIMEOUT).await;
+    let run = Planting {
+        context: &context,
+        oracle: &oracle,
+        participants: &participants,
+        correct: &correct,
+        records: &records,
+        secrets: &secrets,
+    };
+    plant.started(&run).await;
+    let (outcome, stopped) =
+        runner::watch(run.context, engines, waiters, RESHARE_RUN_TIMEOUT).await;
+    plant.ended(&run).await;
 
     // Both halves of the compromised identity are excluded from the records.
-    let blocked = runner::blocked(&oracle).await;
-    let nodes = correct
-        .into_iter()
-        .map(|engine| {
+    let blocked = runner::blocked(run.oracle).await;
+    let nodes = run
+        .correct
+        .iter()
+        .map(|&engine| {
             Resharer::observed(
                 engine,
-                participants[engine].clone(),
-                &records[engine],
-                secrets[engine].held(),
+                run.participants[engine].clone(),
+                &run.records[engine],
+                run.secrets[engine].held(),
             )
         })
         .collect();
     Some(Observations {
         outcome,
         reshare: Reshare {
-            genesis: session.genesis,
-            schedule: session.schedule,
+            genesis: dealt.genesis,
+            schedule: dealt.schedule,
             nodes,
         },
         halves: [compromised, SECONDARY_ENGINE],
@@ -422,12 +498,20 @@ async fn run(
 mod tests {
     use super::*;
     use crate::dkg::{
-        DkgMask, MAX_EPOCHS, Rotation, Side,
-        fixtures::{self, PREFIX, ROTATE, STAY, contradicted, decode, tape},
+        DkgMask, Info, MAX_EPOCHS, MockGroup, Rotation, Side,
+        fixtures::{self, PREFIX, ROTATE, STAY, contradicted, decode, resummarized, tape},
         reshare_input::ROTATIONS,
         reshare_restarts_input::ROOMY_MAILBOX,
+        schedule::Schedule,
     };
-    use commonware_cryptography::bls12381::primitives::sharing::Mode;
+    use commonware_consensus::types::Height;
+    use commonware_cryptography::bls12381::{
+        dkg::feldman_desmedt::deal, primitives::sharing::Mode,
+    };
+    use commonware_glue::dkg::types::{EpochOutcome, Payload, SchemeInfo};
+    use commonware_p2p::{Blocker as _, block};
+    use commonware_utils::{N3f1, TestRng};
+    use std::collections::BTreeSet;
 
     /// The masks under which both halves exchange ceremony messages with
     /// every identity in every epoch.
@@ -458,7 +542,7 @@ mod tests {
             } else {
                 Mode::RootsOfUnity
             },
-            outsider: seed % RESHARE_IDENTITIES as u8,
+            outsider: seed % PEERS as u8,
             rotations,
             mailbox: ROOMY_MAILBOX,
             raw_bytes: tape(seed.into()),
@@ -482,6 +566,14 @@ mod tests {
         assert!(
             counts.registrations > 0,
             "no registration was checked: {report}"
+        );
+
+        // Every correct member of the first committee registers the first
+        // epoch with its share, and so does every correct player of each
+        // output after it.
+        assert!(
+            report.signers >= 3,
+            "no registered share was checked: {report}"
         );
         assert!(counts.shares > 0, "no share was checked: {report}");
         assert!(
@@ -616,7 +708,7 @@ mod tests {
     #[test]
     fn half_with_a_contradicted_dealing_is_tolerated() {
         let (report, panics) = fixtures::first(lopsided(), 4, |input| {
-            let (report, panics) = execute(input);
+            let (report, panics) = execute(input, ());
             contradicted(&panics).then_some((report, panics))
         });
         println!("{report}");
@@ -632,7 +724,7 @@ mod tests {
     fn survey_contradicted_dealings() {
         let inputs: Vec<_> = lopsided().collect();
         let shown =
-            fixtures::sample::over(&inputs, |input| contradicted(&execute(input.clone()).1));
+            fixtures::sample::over(&inputs, |input| contradicted(&execute(input.clone(), ()).1));
         let shown: Vec<usize> = (0..inputs.len()).filter(|input| shown[*input]).collect();
         println!(
             "CONTRADICTED {} of {}: {shown:?}",
@@ -660,10 +752,399 @@ mod tests {
         }
     }
 
+    /// Decoded inputs, run through the target's entry point, hold the
+    /// invariants.
+    #[test]
+    #[ignore = "runs 600 inputs"]
+    fn large_sample_holds_invariants() {
+        let count = std::env::var("SAMPLE").map_or(600, |count| {
+            count.parse().expect("SAMPLE is a number of inputs")
+        });
+        let reports = fixtures::sample::each(count, |bytes| {
+            let input: DkgReshareFuzzInput = decode(bytes);
+            run_dkg_reshare(input)
+        });
+        let count = |holds: &dyn Fn(&ReshareReport) -> bool| {
+            reports.iter().filter(|report| holds(report)).count()
+        };
+        println!(
+            "runs={} completed={} failed={} signers={} deviations={} tolerated_panics={}",
+            reports.len(),
+            count(&|report| report.outcome == Outcome::Completed),
+            count(&|report| report.counts.failures > 0),
+            reports.iter().map(|report| report.signers).sum::<usize>(),
+            reports
+                .iter()
+                .map(|report| report.deviations)
+                .sum::<usize>(),
+            reports
+                .iter()
+                .map(|report| report.counts.tolerated_panics)
+                .sum::<usize>(),
+        );
+    }
+
     /// I10: a replayed input fails, or passes, identically.
     #[test]
     fn replay_is_reproducible() {
         let run = || run_dkg_reshare(input(11, 2, SPLIT, ROTATE, 9));
-        assert_eq!(run(), run());
+        invariants::check_replay(run(), run());
+    }
+
+    /// I10 rejects two runs of one input that measured different things.
+    /// The second run here is not a function of its input alone: an engine
+    /// in it registers an epoch once more, as a restart would, which every
+    /// other check accepts.
+    #[test]
+    #[should_panic(expected = "I10 violated: two runs of one input measured different things")]
+    fn replay_that_measures_something_else_is_rejected() {
+        let input = input(0, 1, WHOLE, STAY, 0);
+        let first = run_dkg_reshare(input.clone());
+        let (second, _) = execute(input, Fault::Reregister);
+        assert_eq!(second.signers, first.signers + 1, "{second}");
+        invariants::check_replay(first, second);
+    }
+
+    /// Whichever identity the scenario compromises, the input picks the
+    /// identity outside the first committee among the other four, so both
+    /// halves start with the compromised identity's share of the first
+    /// output.
+    #[test]
+    fn compromised_identity_is_in_the_first_committee() {
+        let signers = signers(RESHARE_IDENTITIES);
+        for compromised in 0..RESHARE_IDENTITIES as usize {
+            let outsiders: BTreeSet<u8> = (0..PEERS as u8)
+                .map(|selected| outsider(compromised, selected))
+                .collect();
+            assert_eq!(outsiders.len(), PEERS, "{outsiders:?}");
+            for selected in 0..=u8::MAX {
+                let outsider = outsider(compromised, selected);
+                assert!(outsiders.contains(&outsider));
+                let session = Session::deal(
+                    TestRng::new(u64::from(selected)),
+                    signers.clone(),
+                    &SessionControls {
+                        epochs: 1,
+                        sharing_mode: Mode::NonZeroCounter,
+                        outsider,
+                        rotations: STAY,
+                        mailbox: ROOMY_MAILBOX,
+                    },
+                );
+                assert!(
+                    session.share(compromised).is_some(),
+                    "compromised identity {compromised} is outside the first committee"
+                );
+            }
+        }
+    }
+
+    /// A fault a negative control plants at the boundary the oracle
+    /// observes. Unless a fault names another, the engine it is planted at
+    /// is the first correct one that fits it, in identity order.
+    #[derive(Clone, Copy)]
+    enum Fault {
+        /// Have the second correct engine report a second description of
+        /// the second epoch, with the other outcome.
+        Describe,
+        /// Have an engine that holds a share of the second output register
+        /// the second epoch once more as a member, without the share.
+        Shareless,
+        /// Have an engine that holds a share of the second output register
+        /// the second epoch once more as a signer with a share of another
+        /// output.
+        ForeignShare,
+        /// Give the engines another schedule than the oracle holds: the
+        /// players of the third epoch's ceremony differ, and the second
+        /// epoch's description names them.
+        Reschedule,
+        /// Give an engine that holds a share of both outputs, under the
+        /// second epoch, the share it held of the first output.
+        Keep,
+        /// Give the engines a first output with another transcript summary
+        /// than the one the oracle holds, and the same sharing.
+        Resummarize,
+        /// Panic in a task of an engine.
+        EnginePanic,
+        /// Panic in a task of no engine.
+        HarnessPanic,
+        /// Close the channels of an engine, so that it ends on its own.
+        Sever,
+        /// Have the first correct identity block the second.
+        Block,
+        /// Have an engine that holds a share of the second output register
+        /// the second epoch once more with the material it registered it
+        /// with.
+        Reregister,
+        /// Have an engine be delivered a block before the midpoint of the
+        /// first epoch that carries an epoch description.
+        Misplace,
+    }
+
+    /// The description of the second epoch the engine behind `records` was
+    /// delivered.
+    fn second_description(records: &Records) -> Info {
+        records
+            .deliveries()
+            .into_iter()
+            .find(|(epoch, _)| *epoch == Epoch::new(1))
+            .expect("the engine reached the second epoch")
+            .1
+    }
+
+    /// The first correct engine whose secret store held a share of the
+    /// output of each of `epochs`.
+    fn holder(run: &Planting<'_>, epochs: &[Epoch]) -> usize {
+        run.correct
+            .iter()
+            .copied()
+            .find(|engine| {
+                let held = run.secrets[*engine].held();
+                epochs
+                    .iter()
+                    .all(|epoch| held.iter().any(|(stored, _)| stored == epoch))
+            })
+            .expect("a correct engine held the shares")
+    }
+
+    impl Plant for Fault {
+        fn configure(&mut self, session: &mut Session) {
+            match self {
+                Self::Reschedule => {
+                    let committee = session.schedule.committee();
+                    let outsider = session
+                        .participants
+                        .iter()
+                        .position(|identity| committee.position(identity).is_none())
+                        .expect("one identity is outside the first committee");
+                    let mut rotations = STAY;
+                    rotations[2] = Rotation::Replace(0);
+                    session.schedule = Schedule::new(&session.participants, outsider, &rotations);
+                }
+                Self::Resummarize => {
+                    session.genesis.output = resummarized(&session.genesis.output);
+                }
+                _ => {}
+            }
+        }
+
+        async fn started(&mut self, run: &Planting<'_>) {
+            let engine = run.correct[0];
+            match self {
+                Self::EnginePanic => {
+                    let context = run.context.child("planted");
+                    drop(
+                        EngineContext::new(context, engine).spawn(|_| async { panic!("planted") }),
+                    );
+                }
+                Self::HarnessPanic => {
+                    drop(
+                        run.context
+                            .child("planted")
+                            .spawn(|_| async { panic!("planted") }),
+                    );
+                }
+                Self::Sever => {
+                    // Registering a channel again closes the receiver the
+                    // engine holds.
+                    drop(reshare_stack::register(run.oracle, &run.participants[engine]).await);
+                }
+                _ => {}
+            }
+        }
+
+        async fn ended(&mut self, run: &Planting<'_>) {
+            let (first, second) = (Epoch::zero(), Epoch::new(1));
+            match self {
+                Self::Describe => {
+                    let records = &run.records[run.correct[1]];
+                    let mut info = second_description(records);
+                    info.outcome = match info.outcome {
+                        EpochOutcome::Success => EpochOutcome::Failure,
+                        EpochOutcome::Failure => EpochOutcome::Success,
+                    };
+                    records.delivered(second, info);
+                }
+                Self::Shareless => {
+                    let engine = holder(run, &[second]);
+                    let info = second_description(&run.records[engine]);
+                    run.records[engine].registered(
+                        second,
+                        SchemeInfo::new(
+                            &run.participants[engine],
+                            info.output.players().clone(),
+                            info.output.public().clone(),
+                            None,
+                        ),
+                    );
+                }
+                Self::ForeignShare => {
+                    let engine = holder(run, &[second]);
+                    let info = second_description(&run.records[engine]);
+                    let players = info.output.players().clone();
+                    let (_, shares) =
+                        deal::<MockGroup, _, N3f1>(TestRng::new(1), Mode::NonZeroCounter, players)
+                            .expect("a trusted deal must succeed");
+                    let share = shares
+                        .get_value(&run.participants[engine])
+                        .expect("the engine is a player of the second output")
+                        .clone();
+                    run.records[engine].registered(
+                        second,
+                        SchemeInfo::Signer {
+                            participants: info.output.players().clone(),
+                            sharing: info.output.public().clone(),
+                            share,
+                        },
+                    );
+                }
+                Self::Keep => {
+                    let engine = holder(run, &[first, second]);
+                    let secrets = &run.secrets[engine];
+                    let (_, kept) = secrets
+                        .held()
+                        .into_iter()
+                        .find(|(stored, _)| *stored == first)
+                        .expect("the engine held a share of the first output");
+                    secrets.plant(second, kept);
+                }
+                Self::Reregister => {
+                    let engine = holder(run, &[second]);
+                    let records = &run.records[engine];
+                    let (_, registration) = records
+                        .registrations()
+                        .into_iter()
+                        .find(|(epoch, _)| *epoch == second)
+                        .expect("the engine registered the second epoch");
+                    records.registered(second, registration);
+                }
+                Self::Block => {
+                    let (blocker, blocked) = (run.correct[0], run.correct[1]);
+                    let mut control = run.oracle.control(run.participants[blocker].clone());
+                    block!(control, run.participants[blocked].clone(), "planted block");
+                }
+                Self::Misplace => {
+                    let records = &run.records[run.correct[0]];
+                    let info = second_description(records);
+                    records.placed(Height::new(3), Some(&Payload::EpochInfo(info)));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Run the fixed input of one successful ceremony over a fixed committee
+    /// with `fault` planted. Its scenario compromises the last identity, and
+    /// the first is outside the committee, so engine 0 holds no share.
+    fn planted(fault: Fault) -> ReshareReport {
+        execute(input(0, 1, WHOLE, STAY, 0), fault).0
+    }
+
+    /// The fixed input of one ceremony over a fixed committee that fails: a
+    /// sustained scenario without a bound on its prefix names one leader for
+    /// the whole epoch, and too few correct dealers get a log into a block.
+    fn failing() -> DkgReshareFuzzInput {
+        DkgReshareFuzzInput {
+            sustained: true,
+            prefix: None,
+            ..input(0, 1, WHOLE, STAY, 0)
+        }
+    }
+
+    #[test]
+    fn fixed_inputs_of_the_controls_hold_invariants() {
+        let report = measured(input(0, 1, WHOLE, STAY, 0));
+        assert_eq!(report.counts.failures, 0, "{report}");
+        let report = run_dkg_reshare(failing());
+        println!("{report}");
+        assert_eq!(report.outcome, Outcome::Completed, "{report}");
+        assert_eq!(report.counts.failures, 1, "{report}");
+        assert!(report.counts.carried > 0, "{report}");
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "I1 violated: engine 0 and engine 1 disagree on the description of epoch 1"
+    )]
+    fn description_that_differs_between_engines_is_rejected() {
+        planted(Fault::Describe);
+    }
+
+    /// Only the check of registered shares rejects this registration: it
+    /// names the agreed sharing and the engine's own place among the
+    /// players.
+    #[test]
+    #[should_panic(
+        expected = "I2 violated: engine 1 registered the scheme of epoch 1 without the share it \
+                    holds for it"
+    )]
+    fn registration_without_the_held_share_is_rejected() {
+        planted(Fault::Shareless);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "I2 violated: the share engine 1 holds for epoch 1 does not match the \
+                    output's partial public key"
+    )]
+    fn registered_share_of_another_output_is_rejected() {
+        planted(Fault::ForeignShare);
+    }
+
+    #[test]
+    #[should_panic(expected = "I4 violated: the next players of epoch 1 are")]
+    fn next_players_off_the_schedule_are_rejected() {
+        planted(Fault::Reschedule);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "I5 violated: the shares engines [2, 3] held before the reshare into epoch 1, \
+                    mixed with the shares engines [1] hold after it, reconstruct the key"
+    )]
+    fn share_kept_through_the_reshare_is_rejected() {
+        planted(Fault::Keep);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "I6 violated: the failed ceremony did not carry the previous \
+                               output into epoch 1 unchanged"
+    )]
+    fn failed_ceremony_that_changes_the_output_is_rejected() {
+        execute(failing(), Fault::Resummarize);
+    }
+
+    #[test]
+    #[should_panic(expected = "I8 violated: correct engine 0 panicked")]
+    fn engine_panic_is_rejected() {
+        planted(Fault::EnginePanic);
+    }
+
+    #[test]
+    #[should_panic(expected = "I8 violated: a task of no engine panicked")]
+    fn harness_panic_is_rejected() {
+        planted(Fault::HarnessPanic);
+    }
+
+    #[test]
+    #[should_panic(expected = "I8 violated: correct engines [0] stopped before the run ended")]
+    fn engine_that_stops_on_its_own_is_rejected() {
+        planted(Fault::Sever);
+    }
+
+    #[test]
+    #[should_panic(expected = "I9 violated: correct identity")]
+    fn block_between_correct_identities_is_rejected() {
+        planted(Fault::Block);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "I18 violated: engine 0 was delivered a finalized block at height 3, before \
+                    the midpoint of epoch 0, that carries an epoch description"
+    )]
+    fn description_before_the_midpoint_is_rejected() {
+        planted(Fault::Misplace);
     }
 }

@@ -9,11 +9,13 @@
 //!
 //! The history is a fabricated chain: blocks of the reshare chain's type in
 //! epochs of two blocks, each final block of an epoch carrying the description
-//! of the next, every description built from a trusted deal over the mock
-//! group, and every block finalized under the threshold scheme of the first
-//! deal, whose group public key every marshal and probe verifies with. A
-//! source may instead hold a foreign chain: the same construction over other
-//! deals, so its finalizations decode and do not verify.
+//! of the next. Epoch zero's output is a trusted deal over the mock group and
+//! every later epoch's a reshare of the one before, so every description
+//! carries the first deal's group public key, which every marshal and probe
+//! verifies with, and every block is finalized under the threshold scheme of
+//! its epoch's output. A source may instead hold a foreign chain: the same
+//! construction from another deal, so its finalizations decode and do not
+//! verify.
 //!
 //! Every source probe's sender is wrapped so that the response it builds is
 //! captured as opaque bytes instead of being sent, together with the request
@@ -64,8 +66,12 @@ use commonware_consensus::{
     types::{Epoch, Epocher as _, FixedEpocher, Height, Round, View},
 };
 use commonware_cryptography::{
-    Digestible as _,
-    bls12381::{dkg::feldman_desmedt::deal, primitives::sharing::Mode},
+    Digestible as _, Signer as _,
+    bls12381::{
+        dkg::feldman_desmedt::{Dealer, Info as Ceremony, Logs, Output, Player, Reveal, deal},
+        primitives::{group::Share, sharing::Mode},
+    },
+    ed25519,
 };
 use commonware_glue::dkg::{
     probe,
@@ -83,7 +89,7 @@ use commonware_runtime::{
 use commonware_utils::{
     N3f1, NZDuration, NZUsize,
     channel::oneshot::{self, error::TryRecvError},
-    ordered::Set,
+    ordered::{Map, Set},
 };
 use futures::future::select_all;
 use std::{collections::BTreeMap, fmt, time::Duration};
@@ -167,7 +173,8 @@ pub struct ProbeReport {
     /// Why the run stopped.
     pub outcome: ProbeOutcome,
     /// Events executed, by kind: subscribe, unsubscribe, attach, release,
-    /// duplicate, replay, truncate, fragment, junk, advance.
+    /// duplicate, replay, truncate, fragment, junk, advance. A junk event
+    /// counts only when its bytes were sent.
     pub events: [usize; KINDS.len()],
     /// How much each check compared.
     pub counts: ProbeCounts,
@@ -299,14 +306,17 @@ struct Chain {
 impl Chain {
     /// Fabricate a chain among `committee`, whose members deal and receive
     /// every epoch's shares, with `next` announced as each epoch's next
-    /// players.
+    /// players. `keys` holds the identity key of every committee member.
     ///
-    /// Every epoch's description carries the output of its own trusted deal.
-    /// The first deal's shares finalize every block, as a group public key
-    /// that no reshare changes would.
+    /// Epoch zero's output is a trusted deal among the committee, and every
+    /// later epoch's is a [`reshare`] of the one before, so every epoch's
+    /// description carries the first deal's group public key while its
+    /// sharing changes. Every block is finalized under the threshold scheme
+    /// of its epoch's output.
     fn new(
         context: &mut deterministic::Context,
         mode: Mode,
+        keys: &[ed25519::PrivateKey],
         committee: &Set<PublicKey>,
         next: &Set<PublicKey>,
         epocher: &FixedEpocher,
@@ -314,16 +324,24 @@ impl Chain {
         let top = u64::from(MAX_SOURCE_HEIGHT);
         let last_epoch = epocher
             .containing(Height::new(top))
-            .expect("every source height has an epoch")
-            .epoch();
-        let mut signers = Vec::new();
-        let infos: Vec<Info> = (0..=last_epoch.next().get())
-            .map(|epoch| {
-                let (output, shares) =
-                    deal::<MockGroup, _, N3f1>(&mut *context, mode, committee.clone())
-                        .expect("a trusted deal among the committee must succeed");
-                if epoch == 0 {
-                    signers = shares
+            .expect("every source height has an epoch");
+        let (mut output, mut shares) =
+            deal::<MockGroup, _, N3f1>(&mut *context, mode, committee.clone())
+                .expect("a trusted deal among the committee must succeed");
+        let key = *output.public().public();
+        let mut infos = Vec::new();
+        let mut signers: Vec<Vec<Scheme>> = Vec::new();
+        for epoch in (0..=last_epoch.epoch().next().get()).map(Epoch::new) {
+            if !epoch.is_zero() {
+                (output, shares) = reshare(context, mode, epoch, keys, &output, &shares);
+            }
+            assert!(
+                *output.public().public() == key,
+                "harness defect: the reshare into epoch {epoch} changed the group public key"
+            );
+            if epoch <= last_epoch.epoch() {
+                signers.push(
+                    shares
                         .values()
                         .iter()
                         .map(|share| {
@@ -335,19 +353,19 @@ impl Chain {
                             )
                             .expect("a dealt share must sign")
                         })
-                        .collect();
-                }
-                Info {
-                    outcome: EpochOutcome::Success,
-                    epoch: Epoch::new(epoch),
-                    directory: directory_of(output.players(), committee, next),
-                    output,
-                    players: committee.clone(),
-                    next_players: next.clone(),
-                }
-            })
-            .collect();
-        let verifier = certificate_verifier(*infos[0].output.public().public());
+                        .collect(),
+                );
+            }
+            infos.push(Info {
+                outcome: EpochOutcome::Success,
+                epoch,
+                directory: directory_of(output.players(), committee, next),
+                output: output.clone(),
+                players: committee.clone(),
+                next_players: next.clone(),
+            });
+        }
+        let verifier = certificate_verifier(key);
 
         let mut blocks = vec![Block::genesis(committee[0].clone(), infos[0].clone())];
         let mut finalizations = Vec::new();
@@ -366,7 +384,7 @@ impl Chain {
             let proposal_round = context.round;
             let block = Block::new(context, parent, Height::new(height), payload);
             finalizations.push(certify(
-                &signers,
+                &signers[bounds.epoch().get() as usize],
                 Proposal::new(proposal_round, View::new(height - 1), block.digest()),
             ));
             blocks.push(block);
@@ -408,6 +426,84 @@ impl Chain {
             boundaries,
         }
     }
+}
+
+/// Reshare `previous` among its players into `epoch` through the real dealer
+/// and player state machines, every player dealing from its share in
+/// `shares` and acknowledging every dealing: the output of the reshare, which
+/// has the group public key of `previous`, and each player's share of it.
+/// `keys` holds the identity key of every player.
+fn reshare(
+    context: &mut deterministic::Context,
+    mode: Mode,
+    epoch: Epoch,
+    keys: &[ed25519::PrivateKey],
+    previous: &Output<MockGroup, PublicKey>,
+    shares: &Map<PublicKey, Share>,
+) -> (Output<MockGroup, PublicKey>, Map<PublicKey, Share>) {
+    let players = previous.players().clone();
+    let key = |identity: &PublicKey| {
+        keys.iter()
+            .find(|key| key.public_key() == *identity)
+            .expect("every player has an identity key")
+            .clone()
+    };
+    let ceremony = Ceremony::<MockGroup, PublicKey>::new::<N3f1>(
+        RESHARE_NAMESPACE,
+        epoch.get(),
+        Some(previous.clone()),
+        mode,
+        Reveal::V1,
+        players.clone(),
+        players.clone(),
+    )
+    .expect("a reshare among the previous players must be valid");
+    let mut states: Vec<_> = players
+        .iter()
+        .map(|player| {
+            Player::<MockGroup, ed25519::PrivateKey>::new(ceremony.clone(), key(player))
+                .expect("every player is in the reshare")
+        })
+        .collect();
+    let mut logs = Logs::<MockGroup, PublicKey, N3f1>::new(ceremony.clone());
+    for (dealer, share) in shares.iter_pairs() {
+        let (mut state, public, privates) =
+            Dealer::<MockGroup, ed25519::PrivateKey>::start::<N3f1>(
+                &mut *context,
+                ceremony.clone(),
+                key(dealer),
+                Some(share.clone()),
+            )
+            .expect("every share holder deals");
+        for (player, private) in privates {
+            let index = players.position(&player).expect("a dealing names a player");
+            let ack = states[index]
+                .dealer_message::<N3f1>(dealer.clone(), public.clone(), private)
+                .expect("the dealing is valid")
+                .expect("the dealing is the dealer's first");
+            state
+                .receive_player_ack(player, ack)
+                .expect("the ack is valid");
+        }
+        let (dealer, log) = state
+            .finalize::<N3f1>()
+            .check(&ceremony)
+            .expect("the dealer's log must verify");
+        logs.record(dealer, log);
+    }
+
+    // Verified once here, the logs are not verified again by each player.
+    logs.pre_verify(&mut *context, &Sequential);
+    let mut output = None;
+    let shares =
+        Map::from_iter_dedup(players.iter().cloned().zip(states).map(|(player, state)| {
+            let (finalized, share) = state
+                .finalize::<N3f1>(&mut *context, logs.clone(), &Sequential)
+                .expect("every player derives its share");
+            output.get_or_insert(finalized);
+            (player, share)
+        }));
+    (output.expect("the reshare has players"), shares)
 }
 
 /// What a member's wrappers report to the run's ledger. The discovering
@@ -459,6 +555,8 @@ struct Harness {
     /// receiver is kept so the channel stays open.
     outsider: (PublicKey, RawSender, Receiver<PublicKey>),
     subscriptions: Vec<oneshot::Receiver<ProbeArtifact>>,
+    /// The program attached the discovering probe's marshal.
+    attached: bool,
     events: [usize; KINDS.len()],
 }
 
@@ -540,7 +638,8 @@ impl Harness {
         mut context: deterministic::Context,
         input: &DkgProbeFuzzInput,
     ) -> (Self, Fixture) {
-        let identities: Vec<PublicKey> = public_keys(&signers(COMMITTEE.get() + 1));
+        let keys = signers(COMMITTEE.get() + 1);
+        let identities: Vec<PublicKey> = public_keys(&keys);
         let (dealers, outsider) = identities.split_at(SOURCES + 1);
         let outsider = outsider[0].clone();
         let oracle =
@@ -560,6 +659,7 @@ impl Harness {
         let chain = Chain::new(
             &mut context,
             input.sharing_mode,
+            &keys,
             &committee,
             &next,
             &epocher,
@@ -567,6 +667,7 @@ impl Harness {
         let foreign = Chain::new(
             &mut context,
             input.sharing_mode,
+            &keys,
             &committee,
             &next,
             &epocher,
@@ -777,6 +878,7 @@ impl Harness {
             members,
             outsider: (outsider, sender, receiver),
             subscriptions: Vec::new(),
+            attached: false,
             events: [0; KINDS.len()],
         };
         (harness, fixture)
@@ -834,23 +936,27 @@ impl Harness {
                 if self.subscriptions.len() < MAX_SUBSCRIPTIONS {
                     self.subscribe();
                 }
-                0
+                Some(0)
             }
             ProbeEvent::Unsubscribe => {
                 if !self.subscriptions.is_empty() {
                     self.subscriptions.remove(0);
                     self.ledger.note(ProbeStep::Unsubscribed);
+                    if self.subscriptions.is_empty() {
+                        self.wake();
+                    }
                 }
-                1
+                Some(1)
             }
             ProbeEvent::Attach { node } => {
                 let node = usize::from(*node) % self.members.len();
                 let member = &self.members[node];
                 member.probe.attach(member.marshal.clone());
                 if node == DISCOVERER {
+                    self.attached = true;
                     self.ledger.note(ProbeStep::Attached);
                 }
-                2
+                Some(2)
             }
             ProbeEvent::Release { source } => {
                 if let Some((capture, bytes)) = self.captured(*source) {
@@ -858,21 +964,21 @@ impl Harness {
                     self.members[source + 1].released = Some((capture, bytes.clone()));
                     self.send(self.sender(source), ProbeShape::Response(capture), bytes);
                 }
-                3
+                Some(3)
             }
             ProbeEvent::Duplicate { source } => {
                 let source = Self::source(*source);
                 if let Some((capture, bytes)) = self.members[source + 1].released.clone() {
                     self.send(self.sender(source), ProbeShape::Response(capture), bytes);
                 }
-                4
+                Some(4)
             }
             ProbeEvent::Replay { source } => {
                 if let Some((capture, bytes)) = self.captured(*source) {
                     let outsider = (self.outsider.1.clone(), self.outsider.0.clone());
                     self.send(outsider, ProbeShape::Response(capture), bytes);
                 }
-                5
+                Some(5)
             }
             ProbeEvent::Truncate { source, keep } => {
                 if let Some((capture, bytes)) = self.captured(*source) {
@@ -882,7 +988,7 @@ impl Harness {
                         prefix(&bytes, *keep),
                     );
                 }
-                6
+                Some(6)
             }
             ProbeEvent::Fragment {
                 origin,
@@ -896,26 +1002,56 @@ impl Harness {
                         prefix(&bytes, *keep),
                     );
                 }
-                7
+                Some(7)
             }
             ProbeEvent::Junk { origin, payload } => {
                 // Junk starts with no tag of the wire format, so it is
                 // malformed whatever the probe is doing. Bytes that start
-                // with a tag are not sent.
+                // with a tag are neither sent nor counted.
                 let payload = &payload[..payload.len().min(usize::from(MAX_RAW_PAYLOAD))];
-                if payload.first().is_some_and(|tag| *tag >= PROBE_TAGS) {
+                let junk = payload.first().is_some_and(|tag| *tag >= PROBE_TAGS);
+                if junk {
                     self.send(self.origin(*origin), ProbeShape::Junk, payload.to_vec());
                 }
-                8
+                junk.then_some(8)
             }
             ProbeEvent::Advance { steps } => {
                 self.context.sleep(PROBE_STEP * u32::from(*steps)).await;
-                9
+                Some(9)
             }
         };
-        self.events[kind] += 1;
+        if let Some(kind) = kind {
+            self.events[kind] += 1;
+        }
         self.context.sleep(PROBE_STEP).await;
         self.observe();
+
+        // The block the probe awaits, from the responder it asked, resolves
+        // the artifact unseen while no subscription is open. One is opened so
+        // that the artifact shows before the next event: a probe that holds
+        // it answers at once and is otherwise left as it was. A probe whose
+        // marshal is attached serves by then and ignored the block.
+        if self.subscriptions.is_empty() && !self.attached && self.ledger.answered_alone() {
+            self.subscribe();
+            self.context.sleep(PROBE_STEP).await;
+            self.observe();
+        }
+    }
+
+    /// Send the discovering probe the request for latest finalizations it
+    /// sent, as the identity that is not a dealer.
+    ///
+    /// The probe looks at its subscriptions whenever it wakes, and nothing
+    /// wakes it when the program drops one. A request wakes it and changes
+    /// nothing else: it ignores a request while it discovers and answers it
+    /// from its marshal, which holds nothing, while it serves. Woken once the
+    /// program drops its last subscription, it has noticed before the next
+    /// event.
+    fn wake(&self) {
+        if let Some(request) = self.ledger.solicitation() {
+            let outsider = (self.outsider.1.clone(), self.outsider.0.clone());
+            self.send(outsider, ProbeShape::Request, request);
+        }
     }
 
     /// Open an artifact subscription on the discovering probe.
@@ -957,9 +1093,12 @@ impl Harness {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dkg::{fixtures::decode, probe_input::drawable};
+    use crate::dkg::{
+        fixtures::{decode, sample},
+        probe_input::drawable,
+    };
     use commonware_consensus::Epochable as _;
-    use commonware_runtime::Spawner as _;
+    use commonware_runtime::{Runner as _, Spawner as _};
 
     /// Run one input whose program the decoder can draw, and return what was
     /// observed of it.
@@ -1432,12 +1571,10 @@ mod tests {
     }
 
     /// Once the probe holds its artifact it awaits no block, so a cut block
-    /// from the responder the block was requested from must not be blocked.
-    /// That is required only when a subscription showed the artifact: after
-    /// the responder delivered the whole block with no subscription open,
-    /// nothing at the probe's boundaries shows whether the artifact resolved,
-    /// and the cut block is left open. One from anyone else must not be
-    /// blocked either way.
+    /// from the responder the block was requested from must not be blocked,
+    /// nor one from anyone else. That holds as well when the responder
+    /// delivered the whole block with no subscription open: the subscription
+    /// the driver then opens shows the artifact.
     #[test]
     fn cut_block_after_the_block_is_judged_once_the_artifact_is_seen() {
         let cuts = [
@@ -1454,26 +1591,22 @@ mod tests {
         assert_eq!(report.counts.unsettled, 0, "{report}");
         assert_eq!(report.counts.blocks, 0, "{report}");
 
-        let mut events = vec![
-            ProbeEvent::Release { source: 0 },
-            ProbeEvent::Unsubscribe,
-            ProbeEvent::Release { source: 1 },
-            ProbeEvent::Release { source: 0 },
-            ProbeEvent::Release { source: 0 },
-        ];
+        // The deliveries are the two latest replies, the request that wakes
+        // the probe, the boundary finalization, the block, and the cuts.
+        let mut events = UNSEEN.to_vec();
         events.extend(cuts);
-        let report = discovered(input([3, 3, 3], program(&[], &events), 44));
-        assert_eq!(report.counts.artifacts, 1, "{report}");
-        assert_eq!(report.counts.deliveries, 6, "{report}");
-        assert_eq!(report.counts.admissions, 5, "{report}");
-        assert_eq!(report.counts.unsettled, 1, "{report}");
+        let report = discovered(input([3, 3, 3], program(&[0, 1], &events), 44));
+        assert_eq!(report.counts.artifacts, 2, "{report}");
+        assert_eq!(report.counts.deliveries, 7, "{report}");
+        assert_eq!(report.counts.admissions, 7, "{report}");
+        assert_eq!(report.counts.unsettled, 0, "{report}");
         assert_eq!(report.counts.blocks, 0, "{report}");
     }
 
     /// Junk is blocked in every state: before any subscription, while the
     /// probe samples, while it awaits its boundary, once it holds its
-    /// artifact, and while it serves. Bytes that start with a tag are not
-    /// sent.
+    /// artifact, and while it serves. Bytes that start with a tag are neither
+    /// sent nor counted.
     #[test]
     fn junk_is_blocked_in_every_state() {
         let junk = |origin: u8, tag: u8| ProbeEvent::Junk {
@@ -1498,8 +1631,15 @@ mod tests {
             ProbeEvent::Attach { node: 0 },
             junk(0, 9),
         ];
-        let report = discovered(input([3, 3, 3], events, 15));
-        assert_eq!(report.events[8], 7, "{report}");
+        // The junk that starts with a tag is built by hand: the decoder never
+        // draws it.
+        let input = input([3, 3, 3], events, 15);
+        assert!(!drawable(&input.events));
+        let report = measure(&super::observe(input));
+        println!("{report}");
+        assert_eq!(report.outcome, ProbeOutcome::Program);
+        assert!(report.measured(), "{report}");
+        assert_eq!(report.events[8], 5, "{report}");
         assert_eq!(report.counts.deliveries, 9, "{report}");
         assert_eq!(report.counts.refusals, 5, "{report}");
         assert_eq!(report.counts.blocks, 5, "{report}");
@@ -1544,7 +1684,8 @@ mod tests {
         assert_eq!(report.counts.unsettled, 0, "{report}");
 
         // It also serves once its marshal is attached while no subscription
-        // is open, with no artifact.
+        // is open, with no artifact. The first delivery is the request that
+        // wakes it when the subscription is dropped.
         let events = vec![
             ProbeEvent::Attach { node: 1 },
             ProbeEvent::Subscribe,
@@ -1554,7 +1695,7 @@ mod tests {
             ProbeEvent::Release { source: 0 },
         ];
         let report = undiscovered(input([3, 3, 3], events, 18));
-        assert_eq!(report.counts.admissions, 2, "{report}");
+        assert_eq!(report.counts.admissions, 3, "{report}");
         assert_eq!(report.counts.blocks, 0, "{report}");
     }
 
@@ -1580,12 +1721,11 @@ mod tests {
         assert_eq!(report.counts.unsettled, 0, "{report}");
     }
 
-    /// Dropping the last subscription after the marshal is attached leaves
-    /// the probe's state to the actor, which notices the drop only when it
-    /// next wakes: the delivery that wakes it is still judged, and later ones
-    /// are served. The oracle requires nothing for a damaged response here.
+    /// Dropping the last subscription after the marshal is attached is
+    /// followed by the request that wakes the probe, which it ignores, and
+    /// it serves from then on: a cut response is ignored, not blocked.
     #[test]
-    fn delivery_after_unsubscribe_is_left_to_the_actor() {
+    fn probe_serves_once_woken_after_its_last_subscription_is_dropped() {
         let cut = ProbeEvent::Truncate { source: 0, keep: 5 };
         let events = [
             ProbeEvent::Attach { node: 0 },
@@ -1593,10 +1733,23 @@ mod tests {
             cut.clone(),
             cut,
         ];
-        let report = undiscovered(input([3, 3, 3], program(&[], &events), 20));
-        assert_eq!(report.counts.deliveries, 2, "{report}");
-        assert_eq!(report.counts.unsettled, 2, "{report}");
-        assert_eq!(report.counts.blocks, 1, "{report}");
+        let observed = observe(input([3, 3, 3], program(&[], &events), 20));
+        let report = measure(&observed);
+        println!("{report}");
+        assert_eq!(report.counts.deliveries, 3, "{report}");
+        assert_eq!(report.counts.admissions, 3, "{report}");
+        assert_eq!(report.counts.unsettled, 0, "{report}");
+        assert_eq!(report.counts.blocks, 0, "{report}");
+        let first = observed.run.steps.iter().find_map(|step| match step {
+            ProbeStep::Sent(send) => Some(send),
+            _ => None,
+        });
+        assert!(
+            first
+                .is_some_and(|send| send.shape == ProbeShape::Request
+                    && send.origin == observed.run.outsider),
+            "{first:?}"
+        );
     }
 
     /// A sample that is not complete when the retry timeout expires is
@@ -1625,19 +1778,50 @@ mod tests {
         assert_eq!(report.counts.solicitations, 2, "{report}");
     }
 
-    /// An artifact resolved while no subscription was open is kept and served
-    /// to the run's closing subscription.
+    /// An artifact resolved while no subscription is open is kept: the
+    /// subscription the driver opens to show it and the run's closing one
+    /// both resolve with it.
     #[test]
     fn artifact_resolved_unseen_is_checked() {
+        let observed = observe(input([3, 3, 3], program(&[0, 1], &UNSEEN), 23));
+        let report = measure(&observed);
+        println!("{report}");
+        assert!(report.measured(), "{report}");
+        assert_eq!(report.counts.artifacts, 2, "{report}");
+        let steps = &observed.run.steps;
+        let block = steps
+            .iter()
+            .rposition(|step| matches!(step, ProbeStep::Delivered { .. }))
+            .expect("the run made a delivery");
+        assert!(matches!(
+            steps[block + 1..],
+            [ProbeStep::Subscribed, ProbeStep::Resolved(_), ..]
+        ));
+    }
+
+    /// A subscription is opened to show the artifact only when the block the
+    /// probe awaits comes from the responder it asked: relayed by anyone
+    /// else, the block resolves nothing.
+    #[test]
+    fn block_from_another_identity_opens_no_subscription() {
         let events = [
-            ProbeEvent::Release { source: 0 },
             ProbeEvent::Unsubscribe,
-            ProbeEvent::Release { source: 1 },
             ProbeEvent::Release { source: 0 },
-            ProbeEvent::Release { source: 0 },
+            ProbeEvent::Replay { source: 0 },
         ];
-        let report = discovered(input([3, 3, 3], program(&[], &events), 23));
-        assert_eq!(report.counts.artifacts, 1, "{report}");
+        let observed = observe(input([3, 3, 3], program(&[0, 1], &events), 23));
+        let report = measure(&observed);
+        println!("{report}");
+        assert_eq!(report.counts.artifacts, 0, "{report}");
+        assert_eq!(report.counts.block_replies, 1, "{report}");
+        assert_eq!(report.counts.unsettled, 0, "{report}");
+        let subscribed = observed
+            .run
+            .steps
+            .iter()
+            .filter(|step| matches!(step, ProbeStep::Subscribed))
+            .count();
+        assert_eq!(subscribed, 2, "{report}");
     }
 
     /// A selector reaches a source's older responses: its block while the
@@ -1752,6 +1936,40 @@ mod tests {
         }
     }
 
+    /// Every epoch of a fabricated chain carries an output of the group key
+    /// its finalizations verify under, the first deal's, resharing it rather
+    /// than repeating it, and so does the foreign chain under its own key.
+    #[test]
+    fn fabricated_chain_keeps_its_group_key() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let keys = signers(COMMITTEE.get() + 1);
+            let identities: Vec<PublicKey> = public_keys(&keys);
+            let committee = Set::from_iter_dedup(identities[..=SOURCES].iter().cloned());
+            let next = Set::from_iter_dedup(identities[1..].iter().cloned());
+            let epocher = FixedEpocher::new(PROBE_EPOCH_LENGTH);
+            for mode in [Mode::NonZeroCounter, Mode::RootsOfUnity] {
+                let chain = Chain::new(&mut context, mode, &keys, &committee, &next, &epocher);
+                let foreign = Chain::new(&mut context, mode, &keys, &committee, &next, &epocher);
+                for chain in [&chain, &foreign] {
+                    let key = chain.infos[0].output.public().public();
+                    assert!(chain.infos.len() > 2);
+                    for (epoch, info) in chain.infos.iter().enumerate().skip(1) {
+                        assert_eq!(info.output.public().public(), key, "epoch {epoch}");
+                        assert_ne!(
+                            info.output.public(),
+                            chain.infos[epoch - 1].output.public(),
+                            "epoch {epoch}"
+                        );
+                    }
+                }
+                assert_ne!(
+                    chain.infos[0].output.public().public(),
+                    foreign.infos[0].output.public().public()
+                );
+            }
+        });
+    }
+
     /// The entry point libFuzzer calls returns on a run that discovers and on
     /// one that does not.
     #[test]
@@ -1781,13 +1999,13 @@ mod tests {
             input.foreign = [false, true, false];
             measure(&observe(input))
         };
-        assert_eq!(run(), run());
+        invariants::check_replay(run(), run());
     }
 
     /// Short inputs sample whole sessions: across the one-byte inputs every
     /// event kind is executed, every response kind is built, the probe is
-    /// required to block and required not to, and artifacts are compared in
-    /// every epoch a floor can be in.
+    /// required to block and required not to, and never left to itself, and
+    /// artifacts are compared in every epoch a floor can be in.
     #[test]
     fn short_inputs_reach_every_event_and_response_kind() {
         let mut events = [0usize; KINDS.len()];
@@ -1805,6 +2023,7 @@ mod tests {
             counts.block_replies += report.counts.block_replies;
             counts.refusals += report.counts.refusals;
             counts.admissions += report.counts.admissions;
+            counts.unsettled += report.counts.unsettled;
             counts.floors += report.counts.floors;
             counts.comparisons += report.counts.comparisons;
             if report.measured() {
@@ -1820,9 +2039,65 @@ mod tests {
         assert!(counts.block_replies >= 32, "{counts:?}");
         assert!(counts.refusals >= 256, "{counts:?}");
         assert!(counts.admissions >= 256, "{counts:?}");
+        assert_eq!(counts.unsettled, 0, "{counts:?}");
         assert!(counts.floors >= 32 && counts.comparisons == counts.floors);
         for epoch in 0..=2 {
             assert!(epochs.contains_key(&Epoch::new(epoch)), "{epochs:?}");
+        }
+    }
+
+    /// Over a large sample of decoded inputs, I14 settles every delivery:
+    /// each one is required to block or required not to.
+    #[test]
+    #[ignore = "runs 4,096 inputs"]
+    fn large_sample_settles_every_delivery() {
+        let counts = sample::each(4_096, |bytes| measure(&observe(decode(bytes))).counts);
+        let deliveries: usize = counts.iter().map(|counts| counts.deliveries).sum();
+        let unsettled: usize = counts.iter().map(|counts| counts.unsettled).sum();
+        println!("deliveries={deliveries} unsettled={unsettled}");
+        assert!(deliveries > 16_384, "{deliveries}");
+        assert_eq!(unsettled, 0);
+    }
+
+    /// Every junk event of a decoded program presents its bytes to the
+    /// discovering probe, and the report counts the junk that was sent. The
+    /// inputs run are those whose junk starts with the lowest bytes.
+    #[test]
+    fn decoded_junk_is_sent() {
+        let junk = |input: &DkgProbeFuzzInput| -> Vec<u8> {
+            input
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    ProbeEvent::Junk { payload, .. } => Some(payload[0]),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut inputs: Vec<DkgProbeFuzzInput> = (0..4_096u16)
+            .map(|seed| decode(&seed.to_le_bytes()))
+            .filter(|input| !junk(input).is_empty())
+            .collect();
+        inputs.sort_by_key(|input| junk(input).into_iter().min());
+        for input in inputs.into_iter().take(16) {
+            let first = junk(&input);
+            let observed = observe(input);
+            let sent = observed
+                .run
+                .steps
+                .iter()
+                .filter(|step| {
+                    matches!(
+                        step,
+                        ProbeStep::Sent(ProbeSend {
+                            shape: ProbeShape::Junk,
+                            ..
+                        })
+                    )
+                })
+                .count();
+            assert_eq!(sent, first.len(), "junk starting with {first:?}");
+            assert_eq!(measure(&observed).events[8], sent, "{first:?}");
         }
     }
 
@@ -2372,6 +2647,203 @@ mod tests {
         let events = [ProbeEvent::Truncate { source: 0, keep: 9 }];
         let mut observed = observe(input([3, 3, 3], program(&[], &events), 39));
         observed.run.blocked.clear();
+        measure(&observed);
+    }
+
+    /// Remove every block the discovering probe placed from the record.
+    fn unblock(observed: &mut Observations) {
+        observed
+            .run
+            .steps
+            .retain(|step| !matches!(step, ProbeStep::Blocked { .. }));
+        observed.run.blocked.clear();
+    }
+
+    /// Plant a block of the sender of the run's last delivery, placed while
+    /// the probe processed it and recorded by the network.
+    fn block_last(observed: &mut Observations) {
+        let (at, peer) = observed
+            .run
+            .steps
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(at, step)| match step {
+                ProbeStep::Delivered { peer, .. } => Some((at, peer.clone())),
+                _ => None,
+            })
+            .expect("the run made a delivery");
+        observed
+            .run
+            .steps
+            .insert(at + 1, ProbeStep::Blocked { peer: peer.clone() });
+        observed
+            .run
+            .blocked
+            .push((observed.run.discoverer.clone(), peer));
+    }
+
+    /// A run whose floor is selected from the first two sources, in which
+    /// the identity that is not a dealer relays the first source's boundary
+    /// finalization, so the probe asks it for the block, and the second
+    /// source then delivers its own. The third source holds the foreign
+    /// chain. `rest` follows.
+    fn responders(rest: &[ProbeEvent]) -> DkgProbeFuzzInput {
+        let mut events = vec![
+            ProbeEvent::Replay { source: 0 },
+            ProbeEvent::Release { source: 1 },
+        ];
+        events.extend(rest.iter().cloned());
+        let mut input = input([3, 3, 3], program(&[0, 1], &events), 49);
+        input.foreign = [false, false, true];
+        input
+    }
+
+    /// A foreign boundary finalization relayed by the identity that is not a
+    /// dealer is ignored while the probe holds that identity as its
+    /// responder, and blocked once the probe has asked the next responder
+    /// instead, which shows that it dropped the identity.
+    #[test]
+    fn foreign_boundary_is_judged_by_the_responders_held() {
+        let foreign = ProbeEvent::Replay { source: 2 };
+        let observed = observe(responders(std::slice::from_ref(&foreign)));
+        let report = measure(&observed);
+        println!("{report}");
+        assert_eq!(report.counts.deliveries, 5, "{report}");
+        assert_eq!(report.counts.admissions, 5, "{report}");
+        assert_eq!(report.counts.unsettled, 0, "{report}");
+        assert_eq!(report.counts.blocks, 0, "{report}");
+
+        let observed = observe(responders(&[RETRY, foreign]));
+        let report = measure(&observed);
+        println!("{report}");
+        assert_eq!(report.counts.deliveries, 5, "{report}");
+        assert_eq!(report.counts.refusals, 1, "{report}");
+        assert_eq!(report.counts.unsettled, 0, "{report}");
+        assert_eq!(report.counts.blocks, 1, "{report}");
+        let run = &observed.run;
+        assert_eq!(
+            run.blocked,
+            vec![(run.discoverer.clone(), run.outsider.clone())]
+        );
+        let asked: Vec<_> = run
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                ProbeStep::Requested {
+                    recipients: Recipients::One(peer),
+                    ..
+                } => Some(peer.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            asked,
+            vec![run.outsider.clone(), run.sources[1].identity.clone()]
+        );
+    }
+
+    /// I14 negative control: a foreign boundary finalization relayed by a
+    /// responder the probe dropped, whose sender was not blocked.
+    #[test]
+    #[should_panic(
+        expected = "I14 violated: the identity that is not a dealer was not blocked for delivery 4"
+    )]
+    fn unblocked_foreign_boundary_from_a_dropped_responder_is_rejected() {
+        let mut observed = observe(responders(&[RETRY, ProbeEvent::Replay { source: 2 }]));
+        unblock(&mut observed);
+        measure(&observed);
+    }
+
+    /// I14 negative control: a foreign boundary finalization relayed by the
+    /// responder the probe holds, whose sender was blocked.
+    #[test]
+    #[should_panic(
+        expected = "I14 violated: the identity that is not a dealer was blocked for delivery 4"
+    )]
+    fn block_of_a_held_responder_for_a_foreign_boundary_is_rejected() {
+        let mut observed = observe(responders(&[ProbeEvent::Replay { source: 2 }]));
+        block_last(&mut observed);
+        measure(&observed);
+    }
+
+    /// The events after which the discovering probe holds no subscriber and
+    /// its sample is dropped: the first source's latest reply, the program
+    /// dropping the subscription, the first source's reply again, which the
+    /// probe already counted, and the second source's, which reaches a probe
+    /// with no subscriber.
+    const DROPPED: [ProbeEvent; 4] = [
+        ProbeEvent::Release { source: 0 },
+        ProbeEvent::Unsubscribe,
+        ProbeEvent::Duplicate { source: 0 },
+        ProbeEvent::Release { source: 1 },
+    ];
+
+    /// A probe with no subscriber selects no floor however many replies it
+    /// is sent, so it still refuses a latest reply from the identity that is
+    /// not a dealer.
+    #[test]
+    fn non_dealer_is_refused_while_no_subscriber_holds_the_sample() {
+        let mut events = DROPPED.to_vec();
+        events.push(ProbeEvent::Replay { source: 0 });
+        let report = undiscovered(input([3, 3, 3], program(&[], &events), 50));
+        assert_eq!(report.counts.fetches, 0, "{report}");
+        assert_eq!(report.counts.refusals, 1, "{report}");
+        assert_eq!(report.counts.blocks, 1, "{report}");
+        assert_eq!(report.counts.unsettled, 0, "{report}");
+    }
+
+    /// I14 negative control: a latest reply from the identity that is not a
+    /// dealer, sent to a probe with no subscriber after two valid replies,
+    /// whose sender was not blocked.
+    #[test]
+    #[should_panic(expected = "I14 violated: the identity that is not a dealer was not blocked")]
+    fn unblocked_non_dealer_after_a_dropped_sample_is_rejected() {
+        let mut events = DROPPED.to_vec();
+        events.push(ProbeEvent::Replay { source: 0 });
+        let mut observed = observe(input([3, 3, 3], program(&[], &events), 50));
+        unblock(&mut observed);
+        measure(&observed);
+    }
+
+    /// I14 negative control: a cut response to a probe that serves once the
+    /// program dropped its last subscription after attaching its marshal,
+    /// whose sender was blocked.
+    #[test]
+    #[should_panic(expected = "I14 violated: engine 1 was blocked for delivery")]
+    fn block_of_a_cut_response_after_the_last_subscription_is_dropped_is_rejected() {
+        let cut = ProbeEvent::Truncate { source: 0, keep: 5 };
+        let events = [
+            ProbeEvent::Attach { node: 0 },
+            ProbeEvent::Unsubscribe,
+            cut.clone(),
+            cut,
+        ];
+        let mut observed = observe(input([3, 3, 3], program(&[], &events), 20));
+        block_last(&mut observed);
+        measure(&observed);
+    }
+
+    /// The events after which the discovering probe resolves its artifact
+    /// while no subscription is open: the floor is selected, the program
+    /// drops its subscription, and the first source delivers its boundary
+    /// finalization and then its block.
+    const UNSEEN: [ProbeEvent; 3] = [
+        ProbeEvent::Unsubscribe,
+        ProbeEvent::Release { source: 0 },
+        ProbeEvent::Release { source: 0 },
+    ];
+
+    /// I14 negative control: a cut block from the responder after its whole
+    /// block resolved the artifact with no subscription open, whose sender
+    /// was blocked.
+    #[test]
+    #[should_panic(expected = "I14 violated: engine 1 was blocked for delivery")]
+    fn block_of_a_cut_block_after_an_unseen_resolution_is_rejected() {
+        let mut events = UNSEEN.to_vec();
+        events.push(ProbeEvent::Truncate { source: 0, keep: 9 });
+        let mut observed = observe(input([3, 3, 3], program(&[0, 1], &events), 44));
+        block_last(&mut observed);
         measure(&observed);
     }
 

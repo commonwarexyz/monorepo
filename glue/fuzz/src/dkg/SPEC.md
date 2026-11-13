@@ -115,9 +115,10 @@ invariants must hold whenever a ceremony completes.
   `commonware_runtime::deterministic` runtime with its randomness supplied by `FuzzRng` over the input.
   Scheduling and randomized choices MUST depend only on the input bytes. No entropy-backed
   randomness and no wall-clock time may be used.
-- **R5. Input sampling.** Each target's input MUST be decoded that
+- **R5. Input sampling.** Each target's input MUST be decoded so that
   the head of the input (at most 8 bytes) seeds a fixed-size stream of `FuzzRng` output,
-  the literal input overwrites that stream from its start, and the structured controls are drawn
+  the literal input overwrites that stream from its start, at the same offsets and as far as the
+  stream reaches, and the structured controls are drawn
   from the stream. The rest of the stream is the run's tape, which seeds the deterministic
   runtime and every sampler in the harness. Every input, including an empty one, MUST therefore
   sample a complete session, and a short input MUST NOT collapse every control to its minimum.
@@ -159,13 +160,17 @@ invariants must hold whenever a ceremony completes.
 - **R14. Harness-supplied traits.** The harness MUST implement `SecretStore`, `Registrar`,
   `ParticipantsProvider`, and the epoch-keyed scheme provider. These implementations MUST honor
   the contracts documented on the traits, so that a panic the DKG module raises on a contract
-  violation can never be caused by the harness.
+  violation can never be caused by the harness. The registrar builds a scheme only in the role
+  the registered material names. On material no such scheme can be built from it fails closed:
+  it records the registration, serves no scheme for the epoch, and never resolves. I2 judges
+  the record.
 - **R15. Twins topology.** The Twins targets MUST run one more engine than identities: 5 engines
   over 4 identities for bootstrap, 6 over 5 for reshare. The compromised identity's two halves
   are built from the real code, share the identity key, and each have their own storage
   partitions and their own secret store. In the reshare target both halves start with the
-  compromised identity's share of the first output. The Twins targets MUST NOT restart any
-  engine.
+  compromised identity's share of the first output: the input selects the identity outside the
+  first committee among the identities other than the compromised one. The Twins targets MUST
+  NOT restart any engine.
 - **R16. Restart scope.** The restart targets MUST run correct nodes only and accept a
   fuzz-controlled schedule that crashes and restarts them. A restart is an in-run abort and
   re-initialisation on the same deterministic runtime. All storage partitions and the node's
@@ -184,8 +189,11 @@ invariants must hold whenever a ceremony completes.
   outcomes, and the invariants are checked over whatever was reached.
 - **R19. Deterministic regression suite.** Every target MUST have ordinary tests in the fuzz
   crate, driven by fixed inputs, that use the same library entry points and oracles as libFuzzer.
-  For every invariant in section 8 the suite MUST contain a negative control: a fault planted
-  inside the harness at the observation boundary that makes exactly that invariant fail.
+  For every invariant in section 8 that a run checks, the suite MUST contain at least one
+  negative control: a fault planted inside the harness at the observation boundary that makes
+  exactly that invariant fail. An invariant that another invariant always reports first in a
+  target may have its control in another target or over built records. I11 constrains the
+  working tree, not a run, and is verified at delivery (section 10, step 1).
 - **R20. Reuse of fuzzing primitives.** The implementation MUST reuse existing fuzzing primitives
   wherever one fits and MUST NOT duplicate them in `glue/fuzz`. This covers the primitives the
   published crates provide (`FuzzRng`, the twins scenario generator and elector, the simulated
@@ -195,13 +203,16 @@ invariants must hold whenever a ceremony completes.
   primitive provides: the mock group, the DKG block, applications, stores, the DKG mask, the
   drivers' DKG-specific wiring, and the invariants. A primitive that fits only after being made
   generic MUST be generalized and shared, not copied; the stateful targets MUST remain
-  behaviorally equivalent and their corpora replayable (P5). The feature MUST NOT depend on
-  `commonware-consensus-fuzz-*` or on the `test-utils` feature of `commonware-glue`.
+  behaviorally equivalent, apart from the prefix their Twins targets take from the input (P5).
+  The feature MUST NOT depend on `commonware-consensus-fuzz-*` or on the `test-utils` feature
+  of `commonware-glue`.
 - **R21. Probe target construction.** The probe target MUST run one discovering `dkg::probe`
   actor and three serving ones over real marshal actors seeded with a fabricated chain, plus one
   tracked identity that is not a dealer. No consensus and no ceremony runs. Boundary blocks carry
-  `EpochInfo` built from `deal` outputs over the mock group. The epoch length is 2. A source MAY
-  be seeded from a foreign chain signed under a different dealt key.
+  `EpochInfo` over the mock group: epoch 0's output is a `deal` output, and each later epoch's is
+  a reshare of the one before through the real dealer and player state machines, so every
+  epoch's output carries the group key the chain is verified with. The epoch length is 2. A
+  source MAY be seeded from a foreign chain built the same way from a different dealt key.
 - **R22. Probe adversary program.** The probe target's structured input MUST bound and control
   what each source holds, the minimum epoch, and a program of events: subscribe, unsubscribe,
   attach a marshal, release a captured response, duplicate it, replay it from the non-dealer,
@@ -238,9 +249,14 @@ invariants must hold whenever a ceremony completes.
   so a bound too small for a message the module sends is a finding.
 - **R28. Peer directory.** The bootstrap targets MUST run with the key-only directory and the
   network's key-only peer manager. Every other target MUST carry an address for every peer of an
-  epoch in the epoch's `EpochInfo` and track peers through the DKG module's `AddressableManager`.
-  The first `EpochInfo` and the participants provider MUST supply a directory of exactly the
-  epoch's dealers, players, and next players.
+  epoch in the epoch's `EpochInfo` and track peers through the DKG module's `AddressableManager`,
+  over the peer manager of the engine's own identity, so that the peer sets one engine activates
+  are not another's. The probe target's members run no engine and never restart: they track over
+  the network's peer manager, which gives every member the set the discovering probe activates.
+  Every identity starts with the network's initial set of every identity, which keeps it
+  reachable whatever committee it is in; an engine restarted in a run starts again from
+  that set alone and activates its epochs anew. The first `EpochInfo` and the participants
+  provider MUST supply a directory of exactly the epoch's dealers, players, and next players.
 - **R29. Reshare mailbox.** In the reshare Twins, reshare restart, and state-sync targets the
   input MUST choose the size of the reshare actor's mailbox: one, two, or four messages in half of
   the runs, and room for a hundred in the others. A small mailbox overflows when marshal and the
@@ -259,10 +275,14 @@ invariants must hold whenever a ceremony completes.
   contracts; section 9 records what is excluded.
 - **P4. Determinism and minimization.** Any failure must be reproducible from the crashing input
   and minimizable by the fuzzer, with no cross-run state.
-- **P5. Search-space isolation.** Adding these targets MUST NOT change the input decoding,
-  topology, fault model, or predicates of any existing target in `glue/fuzz`. Shared machinery
-  MAY be refactored for R20 only when the existing targets remain behaviorally equivalent and
-  their corpora remain replayable.
+- **P5. Search-space isolation.** Adding these targets MUST NOT change the fault model or the
+  predicates of any existing target in `glue/fuzz`, nor the input decoding or topology of any
+  existing target other than the stateful Twins targets. Those take the adversarial prefix from
+  the input, as `glue/fuzz/src/stateful/SPEC.md` describes, where they had a fixed prefix of
+  three rounds; the prefix is decoded before their fault controls, so the bytes those controls
+  and the tape are drawn from move. Shared machinery MAY be refactored for R20 only when the
+  existing targets otherwise remain behaviorally equivalent. No corpus compatibility is
+  promised: no corpus is kept, and every campaign starts from an empty corpus (R1).
 
 ## 5. Files and interfaces
 
@@ -319,7 +339,10 @@ dependencies and must be re-audited against this document.
 - **A1. Message layer.** In the Twins targets, each of the compromised identity's channels that
   carries view-addressable Simplex traffic MUST be split in two, with the twins scenario
   deciding, per view, which identities each half may send to and which half receives a given
-  inbound message. The scenario applies to the prefix of every epoch, which the input draws:
+  inbound message. A half's view-addressable message reaches the identities the half addressed
+  that the scenario admits: a broadcast reaches every identity the scenario admits, a message to
+  some identities those of them it admits, and a message to one identity it does not admit
+  reaches no one. The scenario applies to the prefix of every epoch, which the input draws:
   the first 1 to 16 views, or every view. Past a bounded prefix both halves exchange
   view-addressable traffic with every identity. Traffic from which no view can be determined,
   other than the DKG channel, follows the stateful rule: it is delivered to both halves and sent
@@ -357,8 +380,22 @@ dependencies and must be re-audited against this document.
    whole ceremony.
 3. **Measurement.** The run ends when every correct engine has reported a `Completion`, when a
    correct engine stops, or when the simulated timeout expires. I1-I3 and I6-I11 are checked.
-   Results are compared among the correct engines that completed; a share is checked wherever a
-   correct engine holds one, whether or not that engine has reported.
+   Results are compared among the correct engines that completed. With every completion the
+   harness records the share the engine's secret store holds at that moment, and the store keeps
+   every share it was ever given. I2 is checked at each completion against the share recorded
+   with it, and at the end against the share each store holds and against every share each store
+   ever held, a share later overwritten included: a share is checked wherever a correct engine
+   holds or held one, whether or not that engine has reported. The agreed output is known only
+   from a completion: the engine keeps the final block that carries it in its own storage and
+   exposes it through no other interface. If no correct engine has reported, every share a
+   correct engine held is checked against what every output I1 accepts implies: it carries the
+   engine's position in the committee, no engine held two different shares (I2), and every
+   `required()` of the engines' shares recover one and the same signature (I3). Whether the
+   ceremony failed, after which no share may be held (I6), and whether the shares are those of
+   the output it produced are then not checked, and with no more holders than `required()`, as
+   with the three correct engines of this target, the I3 clause compares nothing. An engine
+   reports at every start once it has stored its share, so this arises only when the run ends
+   between the write of a share and the engine's next report (section 9).
 
 ### 7.2 `dkg_reshare`
 
@@ -378,14 +415,25 @@ dependencies and must be re-audited against this document.
 2. **Execution.** A bounded schedule crashes and restarts nodes per R16 while link conditions
    follow R17.
 3. **Measurement.** As in 7.1 and 7.2. I1-I6 and I8-I11 are checked, and I18 in the reshare
-   restart target.
+   restart target. In `dkg_bootstrap_restarts` every completion of every instance of an engine is
+   recorded with the share its store held then. I1 compares the engines' first completions with
+   one another and every later completion with its engine's first. A crash between the write of a
+   share and the completion leaves a share that no completion of that instance accompanies; the
+   share is judged against the output another completion reports, or as 7.1 states if none does.
 
 ### 7.4 `dkg_probe`
 
 1. **Setup.** Per R21. The harness records, for each source, the exact finalizations and boundary
    blocks it holds.
 2. **Execution.** The bounded event program of R22 drives subscriptions, attachment, retries,
-   delivery, and raw malformed traffic through public boundaries.
+   delivery, and raw malformed traffic through public boundaries. The driver adds two
+   observable boundaries, so that the oracle knows the probe's state at every delivery. When
+   the program drops its last subscription, the identity that is not a dealer sends the probe
+   back the request for latest finalizations the probe sent: the probe ignores it while
+   discovering, answers it with nothing while serving, and looks at its subscriptions once it
+   has taken it. When the responder the probe asked delivers the whole boundary block while no
+   subscription is open and the probe's marshal is not attached, the driver opens a
+   subscription, which the probe answers with the artifact it then holds.
 3. **Measurement.** If the discovering probe emits an artifact, I12-I14 are checked against the
    recorded source state. No artifact is required. I8, I10, and I11 apply throughout.
 
@@ -412,18 +460,21 @@ restart, and state-sync targets.
   MUST describe the ceremony that was run: outcome `Success` for epoch 0, players and output
   players equal to the committee, no next players, and a sharing among the committee's size that
   needs the committee's quorum of shares.
-- **I2. Share validity.** Every share a correct node holds for an epoch MUST carry the node's
-  index in that epoch's agreed output, and its public key MUST equal the output's partial public
-  key at that index. A correct node at which a bootstrap completed successfully MUST hold a share.
+- **I2. Share validity.** Every share a correct node holds or has held for an epoch MUST carry the
+  node's index in that epoch's agreed output, and its public key MUST equal the output's partial
+  public key at that index. A correct node at which a bootstrap completed successfully MUST hold a
+  share from the moment it reports the completion.
   A correct node that has reached an epoch of a reshare run as a player of that epoch's agreed
   output MUST hold a share for that epoch; it has reached the epoch once it registered the epoch's
   scheme. After a successful reshare that share is its share of the new output. After a failed
   reshare it is the share the node held for the previous epoch, held again under the new one; a
   node that held no share for the previous epoch has none to carry. An epoch a node entered
   through state sync without playing its ceremony is exempt (I17). Every `SchemeInfo` a correct
-  node registers for an epoch MUST name the players of that epoch's agreed output and carry its
-  public sharing, and whenever a correct node registers the scheme of an epoch it has ever held a
-  share for, the registration MUST be a signer's and carry that share.
+  node registers for an epoch MUST name the players of that epoch's agreed output, carry its
+  public sharing, which needs the quorum of those players, and name the node's own role: a
+  verifier only outside those players, a member only under the node's own key, and a signer only
+  with the node's valid share. Whenever a correct node registers the scheme of an epoch it has
+  ever held a share for, the registration MUST be a signer's and carry that share.
 - **I3. Reconstruction.** For every subset of exactly `required()` correct nodes that hold a
   share of an output, their partial signatures over a fixed message MUST recover to a signature
   that verifies under the output's group public key. No subset of `required() - 1` shares may
@@ -439,7 +490,8 @@ restart, and state-sync targets.
 - **I6. Failed ceremony.** A failed reshare MUST carry the previous output forward unchanged, and
   every share a correct node held for the previous epoch MUST be valid under it. A correct node
   that reaches the new epoch as a player of the carried output MUST hold that share for the new
-  epoch as well (I2). After a failed bootstrap no correct node may hold an epoch-0 share.
+  epoch as well (I2). After a failed bootstrap no correct node may hold, or have held, an epoch-0
+  share.
 - **I7. Withdrawn.** It required that no correct identity appear in `Output::revealed()`. The
   number is kept so that the later invariants keep theirs. No target checks the secrecy of a
   correct player's share; see section 12, item 4.
@@ -464,7 +516,9 @@ restart, and state-sync targets.
 - **I9. Correct nodes do not block each other.** No correct node may block another correct
   identity. Blocks on or by the compromised identity are permitted. In the probe target I14
   governs blocking instead.
-- **I10. Reproducibility.** A failing input replayed MUST fail identically.
+- **I10. Reproducibility.** A failing input replayed MUST fail identically. The regression suite
+  of every target replays a fixed input and compares what the two runs measured with one shared
+  check, which names I10 when they differ.
 - **I11. Fuzz-only change scope.** Every change introduced by this feature MUST be confined to
   `glue/fuzz/` (R3), and pre-existing unrelated working-tree changes MUST be preserved.
 - **I12. Probe floor provenance.** If the discovering probe emits an artifact, its floor MUST be
@@ -491,7 +545,9 @@ restart, and state-sync targets.
 - **I16. Joiner floor provenance.** The floor the joiner starts from and the `EpochInfo` it
   pairs with it MUST be ones the nodes that started at genesis actually finalized.
 - **I17. Agreement after sync.** Every block and every `EpochInfo` the joiner commits above its
-  floor MUST equal what the other correct nodes committed at that height or epoch. The joiner is
+  floor MUST equal what the other correct nodes committed at that height or epoch, and MUST be
+  one the nodes that started at genesis have a record of, whether or not they have committed it
+  yet. The joiner is
   subject to I1-I6 from its floor upward, with one exemption from I2: it is not required to
   hold a share of an output whose ceremony it did not play, which is the output of the epoch of
   a floor it entered from and, when that floor lies past the midpoint of its epoch, of the next
@@ -516,6 +572,10 @@ section 9.
 - **Liveness.** Excluded by R18. No progress requirement is asserted in any target.
 - **Reporting of runs that measured nothing.** The harness does not label or count runs in which
   no ceremony completed. Whether the oracle code is reached is read from libFuzzer coverage.
+- **The outcome of a bootstrap no correct engine reported.** The oracle reads outputs only from
+  reports (section 11, Observation), and a bootstrap engine reports its outcome only in its
+  completion, so when a run ends with a share written and no completion recorded, the share is
+  judged without the outcome (section 7.1) and I6 is not checked.
 - **Coverage targets.** No line-coverage threshold is set. Fuzzing runs until it is stopped.
 - **Real BLS.** Excluded by R6. No target has a variant over `MinPk` or `MinSig`.
 - **A mock identity signer.** Identities stay on ed25519 (R8). A mock signer for the targets
@@ -556,8 +616,8 @@ use the nightly pinned by CI (`NIGHTLY_VERSION` in `.github/workflows/slow.yml`)
 3. **Everything compiles and lints clean.** `cargo check -p commonware-glue-fuzz --tests`
    succeeds and `cargo clippy -p commonware-glue-fuzz --tests` reports no warnings.
 4. **The regression suite passes.** `cargo nextest run -p commonware-glue-fuzz dkg::` runs every
-   fixed-input scenario of the target, including the negative control for each invariant that
-   applies to it (R19).
+   fixed-input scenario of the target. The suite holds the negative controls R19 requires: at least
+   one for each invariant a run checks, in some target or, where R19 allows it, over built records.
 5. **The fuzz target builds.** `cargo fuzz build --fuzz-dir glue/fuzz <target>` completes with no
    warnings and no errors.
 6. **A smoke run is clean.** A short run of the target over its own corpus completes with no
@@ -634,17 +694,20 @@ These were not decided explicitly. Each is stated as the harness currently has i
    bounded prefix is. Under a prefix without a bound the script names the leader of every view
    of the epoch. The twins elector of `consensus` returns the scripted index as a committee
    position, so the harness has its own elector for this.
-6. **I2 for a reshare.** A share is checked wherever a correct engine holds one. A registered
-   scheme must name the agreed output's players and carry its public sharing, and a share
-   registered with it must be the engine's valid share. A share or a registration for an epoch
-   that no correct engine holds a description of is a violation. The first cut only counted a
-   correct engine that completed a successful ceremony as a player of its output and held no
-   share of it; the user decided that this is a violation. An engine has completed the
-   ceremony once it registered the scheme of the epoch the ceremony introduces, which the DKG
-   module does only after it stored the share, so the check cannot fire on an engine that has
-   not yet written its share. A node that enters an epoch without having played its ceremony,
-   as a state-sync joiner can, is not a player that completed it. After a failed ceremony the
-   same engines are held to the share the ceremony carried forward (item 8).
+6. **I2 for a reshare.** A share is checked wherever a correct engine holds one. A registered scheme
+   must name the agreed output's players and carry its public sharing, and a share registered with
+   it must be the engine's valid share. The sharing must need the players' quorum, and the role must
+   be the one the DKG module builds from the engine's key and share: a member only under the
+   engine's own key, a verifier only outside the players. That is the material the harness's
+   registrar builds a scheme from, so material it fails closed on (R14) is a violation at a correct
+   engine. A share or a registration for an epoch that no correct engine holds a description of is a
+   violation. The first cut only counted a correct engine that completed a successful ceremony as a
+   player of its output and held no share of it; the user decided that this is a violation. An
+   engine has completed the ceremony once it registered the scheme of the epoch the ceremony
+   introduces, which the DKG module does only after it stored the share, so the check cannot fire on
+   an engine that has not yet written its share. A node that enters an epoch without having played
+   its ceremony, as a state-sync joiner can, is not a player that completed it. After a failed
+   ceremony the same engines are held to the share the ceremony carried forward (item 8).
 7. **I5 as checked.** Every set of `required()` shares with at least one share of each output is
    interpolated twice, once under each output's sharing, and neither result may verify under the
    group public key.
@@ -702,37 +765,43 @@ These were not decided explicitly. Each is stated as the harness currently has i
    final block's `EpochInfo` is the right one is I1 and I4. The final-block rule has
    record-level controls only: a correct engine that is given a final block without an
    `EpochInfo` panics, which I8 reports first.
-10. **I2 across restarts.** The check of item 6 judges an engine by every share its store
-    ever held, so it passes an engine whose restart does not find its share again. The restart
-    target adds a check for that: whenever an engine registers the scheme of an epoch its
-    store ever held a share for, the registration must be a signer's and carry that share. It
-    covers the first output, a reshared output, and an output a failed ceremony carried
-    forward. The check reads the shares by the epoch they were stored under, so on its own it
-    passes an engine that registers the new epoch without having stored the carried share
-    under it. Item 26 requires that share under the new epoch of every engine that reached it,
-    and this check then requires every registration of the epoch to carry it. It is sound
-    because the DKG module builds every
-    registration from the share it reads from the secret store, stores a share before it
-    registers with it, and prunes an epoch's secrets only once it is two epochs past it, while a
-    restart returns an engine at most to the epoch whose final block its marshal had not
-    recorded. The restart driver calls the check; it is not among the checks `dkg_reshare` runs.
-    `dkg_state_sync` can apply it to the nodes that started at genesis.
+10. **Registrations and held shares (I2).** The check of item 6 judges an engine by every share its
+    store ever held, so it passes an engine whose restart does not find its share again, and it
+    accepts a member's registration from a player that holds a share. A second check covers both:
+    whenever an engine registers the scheme of an epoch its store ever held a share for, the
+    registration must be a signer's and carry that share. It covers the first output, a reshared
+    output, and an output a failed ceremony carried forward. The check reads the shares by the epoch
+    they were stored under, so on its own it passes an engine that registers the new epoch without
+    having stored the carried share under it. Item 8 requires that share under the new epoch of
+    every engine that reached it, and this check then requires every registration of the epoch to
+    carry it. It is sound because the DKG module builds every registration from the share it reads
+    from the secret store, stores a share before it registers with it, and prunes an epoch's secrets
+    only once it is two epochs past it, while a restart returns an engine at most to the epoch whose
+    final block its marshal had not recorded. Every driver of the reshare stack calls the check: the
+    restart and state-sync drivers, and `dkg_reshare`, whose correct engines do not restart and are
+    the only ones judged.
 11. **Probe blocking table (section 11, I14).** Read off `glue/src/dkg/probe`. While
     discovering, the probe decodes every message first and blocks the sender of one with no tag,
-    an unknown tag, or a finalization cut short, whatever it awaits. A block response is decoded
-    past its epoch only from the peer the block was requested from, which is blocked if it is cut
-    short; from anyone else it is ignored, whole or cut past its epoch. A latest reply is judged
-    only until the floor is selected: the sender that is not a dealer is blocked, whatever the
-    reply; a stale reply is set aside, from either chain; a foreign reply that is not stale blocks
-    its source. A boundary finalization is judged only while the boundary is awaited: a foreign one
-    blocks its sender, unless the sender already delivered a valid one, in which case nothing is
-    required. The identity that is not a dealer is not blocked for a valid boundary finalization or
-    block: the probe asks every peer for those, and takes them from it. While serving, the probe
-    reads requests only: it blocks the sender of a message with no tag or an unknown tag, and of
-    nothing else. Every other delivery must not be blocked. Each block the probe places is
-    attributed to the delivery it was processing, the probe may block only that delivery's sender,
-    and the pairs the network recorded must be exactly the blocks the probe placed, so a block by a
-    source is a violation too.
+    an unknown tag, or a finalization cut short, whatever it awaits; it ignores a request. A block
+    response is decoded past its epoch only from the peer the block was requested from, which is
+    blocked if it is cut short; from anyone else it is ignored, whole or cut past its epoch. A
+    latest reply is judged only until the floor is selected: the sender that is not a dealer is
+    blocked, whatever the reply; a stale reply is set aside, from either chain; a foreign reply
+    that is not stale blocks its source. The probe records no reply while it has no subscriber, so
+    it selects nothing then. A boundary finalization is judged only while the boundary is awaited:
+    a foreign one blocks its sender, unless the probe still holds the sender as a responder, in
+    which case it is ignored. The probe holds a peer from the delivery of the peer's valid one
+    until it asks another peer, or every peer, for what it asked that peer alone. The identity that
+    is not a dealer is not blocked for a valid boundary finalization or block: the probe asks every
+    peer for those, and takes them from it. While serving, the probe reads requests only: it
+    blocks the sender of a message with no tag or an unknown tag, and of nothing else, and answers
+    a request from its marshal, which holds nothing. Every other delivery must not be blocked.
+    With the boundaries the driver adds (7.4), the probe's state is known at every delivery, and
+    nothing is required only where a correct probe would have selected its floor or resolved its
+    artifact and the run shows that it did not, which a stalled run may. Each block the probe
+    places is attributed to the delivery it was processing, the probe may block only that
+    delivery's sender, and the pairs the network recorded must be exactly the blocks the probe
+    placed, so a block by a source is a violation too.
 12. **I12 as checked.** The replies are every whole latest reply of the fabricated chain that is not
     stale, delivered by the source that built it, once per source, since the last request for latest
     finalizations and before the first subscription resolved, in the order the probe took them. Each
@@ -745,9 +814,11 @@ These were not decided explicitly. Each is stated as the harness currently has i
     (`glue/src/dkg/probe/actor/discovery.rs`, lines 301-351). Once the floor is selected the probe
     judges no latest reply and sends no request for one, so the floor is final. A valid reply that
     reaches a probe with no subscriber is not recorded and discards what was (`discovery.rs`, lines
-    332-335). The replies as listed include it all the same, which changes nothing: a probe with no
-    subscriber records nothing, and the next subscription makes it ask again (`discovery.rs`, lines
-    201-214), from where the replies are listed anew. The negative control is a run in which the
+    332-335). The probe drops a closed subscription only when it next wakes, and the driver wakes
+    it as soon as the program drops its last one (7.4). The replies as listed include such a reply
+    all the same, which changes nothing: a probe with no subscriber records nothing, and the next
+    subscription makes it ask again (`discovery.rs`, lines 201-214), from where the replies are
+    listed anew. The negative control is a run in which the
     third source's higher reply is delivered after the first two and before the boundary, with that
     reply's finalization planted as the floor.
 13. **Writes are held around a scheduled crash (R16, A6, 7.3).** A crash is an abort of the
@@ -953,11 +1024,37 @@ These were not decided explicitly. Each is stated as the harness currently has i
     built records.
 21. **I17 as checked.** Marshal delivers the joiner nothing below its floor, so every block and
     every description the joiner was delivered is compared with what each other engine was delivered
-    at that height and for that epoch, and a second block at one height at the joiner is a
+    at that height and for that epoch, a block also with every block another engine's marshal
+    reported finalized at its height, and a second block at one height at the joiner is a
     violation. The measurement runs I8, then I15 to I17, then the reshare checks, so a description
     on which the joiner differs is reported under I17. The comparison of descriptions repeats I1,
     which compares every engine's description of every epoch, the joiner's included, and which would
     report the same defect if I17 did not come first. The comparison of blocks has no other check.
+
+    A comparison only finds a defect where another engine was delivered the height or the epoch,
+    so a block or a description only the joiner holds would pass every comparison. Each must
+    therefore also be traced to the nodes that started at genesis. A block is traced if one of them
+    was delivered it, its marshal reported it finalized, or its application built it or verified
+    and accepted it. Each engine's application is wrapped in the reshare stack, below the reshare
+    wrapper, to record the last. A description is traced if one of them was delivered it, or if the
+    block that carried it to the joiner, the final block of the epoch before, is traced: a block's
+    digest covers its payload. A description is judged before the blocks, so one the joiner alone
+    holds is reported as a description.
+
+    The trace never waits on another engine's marshal, so it cannot turn a run that ended early, or
+    a node that is down, into a violation. A finalization needs the finalize votes of three of the
+    four members of a committee, at most one of which is the joiner, and a correct member votes to
+    finalize only a block it certified: one its application built, or one its application verified
+    and accepted after the reshare wrapper's checks. The final block of an epoch proposed again
+    later in the epoch is certified without the application, and is notarized again only by members
+    that certified its first proposal or know it finalized. A block a finalized block extends was
+    the certified parent of a block a correct member notarized. So every block marshal can deliver
+    has a record of a node that started at genesis from before any finalization of it existed. The
+    records are kept outside the engines and survive their restarts. A sweep of 2,000 decoded inputs
+    of the target with the schedule's clock in each position of `RESTARTS_BEFORE_JOIN` reported
+    nothing, and three of the blocks the joiners were delivered were traced by an application's
+    record alone: no node that started at genesis had been delivered them or held their
+    finalization when the run ended.
 22. **Length of the adversarial prefix (A1).** The Twins inputs draw the prefix: each length
     from 1 to 16 views is as likely as any other, and one draw in five sets no bound. Fixed
     inputs of the regression suite use three views. The twins generator of `consensus` counts

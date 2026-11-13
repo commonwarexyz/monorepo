@@ -10,7 +10,9 @@
 //!
 //! - A message whose protocol view can be determined is partitioned by that
 //!   view: outbound it goes to the half's mask, inbound it goes to whichever
-//!   halves the scenario admits its sender for.
+//!   halves the scenario admits its sender for. The stateful channels send it
+//!   to the whole mask; [`Addressing`] lets another harness keep the
+//!   recipients the engine addressed within the mask instead.
 //! - A message that decodes but carries no view is delivered to both halves and
 //!   sent to the recipients the engine itself addressed. Marshal backfill mixes
 //!   round-addressed requests with requests addressed by block digest and by
@@ -393,7 +395,49 @@ where
     }
 }
 
-/// Build the outbound half of a split channel.
+/// Where the outbound half of a split channel sends a message that is
+/// partitioned by its view, given the identities the half's partition admits
+/// at that view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Addressing {
+    /// To the whole partition, whoever the engine addressed.
+    Partition,
+    /// To the recipients the engine addressed that the partition admits: a
+    /// broadcast reaches the partition, a send to some identities reaches
+    /// those of them it admits, and a send to one identity it does not admit
+    /// reaches no one.
+    // Only the DKG harness narrows.
+    #[cfg_attr(not(feature = "dkg"), allow(dead_code))]
+    Narrowed,
+}
+
+impl Addressing {
+    /// The recipients of a message the engine addressed to `intended`, for a
+    /// half whose partition admits `partition`.
+    pub(crate) fn recipients(
+        self,
+        intended: &Recipients<PublicKey>,
+        partition: Vec<PublicKey>,
+    ) -> Recipients<PublicKey> {
+        match (self, intended) {
+            (Self::Partition, _) | (Self::Narrowed, Recipients::All) => Recipients::Some(partition),
+            (Self::Narrowed, Recipients::Some(peers)) => Recipients::Some(
+                peers
+                    .iter()
+                    .filter(|peer| partition.contains(peer))
+                    .cloned()
+                    .collect(),
+            ),
+            (Self::Narrowed, Recipients::One(peer)) if partition.contains(peer) => {
+                Recipients::One(peer.clone())
+            }
+            (Self::Narrowed, Recipients::One(_)) => Recipients::Some(Vec::new()),
+        }
+    }
+}
+
+/// Build the outbound half of a split channel, which sends a message that is
+/// partitioned by its view to the half's whole partition.
 pub(crate) fn forwarder(
     participants: Arc<[PublicKey]>,
     scenario: TwinsScript,
@@ -404,14 +448,39 @@ pub(crate) fn forwarder(
 + Sync
 + Clone
 + 'static {
+    addressed_forwarder(
+        participants,
+        scenario,
+        term_length,
+        Addressing::Partition,
+        classify,
+    )
+}
+
+/// Build the outbound half of a split channel, which sends a message that is
+/// partitioned by its view where `addressing` says.
+pub(crate) fn addressed_forwarder(
+    participants: Arc<[PublicKey]>,
+    scenario: TwinsScript,
+    term_length: TermLength,
+    addressing: Addressing,
+    classify: impl Fn(&IoBuf) -> Routing + Send + Sync + Clone + 'static,
+) -> impl Fn(SplitOrigin, &Recipients<PublicKey>, &IoBuf) -> Option<Recipients<PublicKey>>
++ Send
++ Sync
++ Clone
++ 'static {
     move |origin, intended, message| match classify(message) {
         Routing::Partition(view) => {
             let (primary, secondary) =
                 scenario.partitions(view, term_length, participants.as_ref());
-            Some(match origin {
-                SplitOrigin::Primary => Recipients::Some(primary),
-                SplitOrigin::Secondary => Recipients::Some(secondary),
-            })
+            Some(addressing.recipients(
+                intended,
+                match origin {
+                    SplitOrigin::Primary => primary,
+                    SplitOrigin::Secondary => secondary,
+                },
+            ))
         }
         Routing::Viewless => Some(intended.clone()),
         Routing::Undecodable => None,
@@ -705,6 +774,75 @@ mod tests {
             }),
             "the second part repeats the first"
         );
+    }
+
+    /// The peers `recipients` names, and whether it names one peer.
+    fn named(recipients: Option<Recipients<PublicKey>>) -> (bool, Vec<PublicKey>) {
+        match recipients.expect("the message is sent") {
+            Recipients::One(peer) => (true, vec![peer]),
+            Recipients::Some(peers) => (false, peers),
+            Recipients::All => panic!("a partitioned message is never broadcast"),
+        }
+    }
+
+    /// The stateful channels send a message partitioned by its view to the
+    /// half's whole partition, whoever the engine addressed; a narrowed
+    /// channel keeps the engine's recipients within the partition.
+    #[test]
+    fn partitioned_message_goes_where_the_addressing_says() {
+        let identities = identities(4);
+        let partition = vec![identities[0].clone(), identities[2].clone()];
+        let (inside, outside) = (identities[2].clone(), identities[1].clone());
+        let intended = [
+            Recipients::All,
+            Recipients::Some(vec![outside.clone(), inside.clone()]),
+            Recipients::One(inside.clone()),
+            Recipients::One(outside.clone()),
+        ];
+        let whole: Vec<_> = intended
+            .iter()
+            .map(|intended| {
+                named(Some(
+                    Addressing::Partition.recipients(intended, partition.clone()),
+                ))
+            })
+            .collect();
+        assert!(whole.iter().all(|sent| *sent == (false, partition.clone())));
+        let narrowed: Vec<_> = intended
+            .iter()
+            .map(|intended| {
+                named(Some(
+                    Addressing::Narrowed.recipients(intended, partition.clone()),
+                ))
+            })
+            .collect();
+        assert_eq!(
+            narrowed,
+            vec![
+                (false, partition.clone()),
+                (false, vec![inside.clone()]),
+                (true, vec![inside]),
+                (false, Vec::new()),
+            ]
+        );
+
+        // The stateful forwarder sends a targeted message at a scripted view
+        // to the whole partition of the half.
+        let script = script(identities.len(), Some(1), false);
+        let participants: Arc<[PublicKey]> = identities.clone().into();
+        let forward = forwarder(participants, script.clone(), ONE, |_: &IoBuf| {
+            Routing::Partition(View::new(1))
+        });
+        let (primary, secondary) = script.partitions(View::new(1), ONE, &identities);
+        for (origin, partition) in [
+            (SplitOrigin::Primary, primary),
+            (SplitOrigin::Secondary, secondary),
+        ] {
+            for peer in &identities {
+                let sent = forward(origin, &Recipients::One(peer.clone()), &IoBuf::default());
+                assert_eq!(named(sent), (false, partition.clone()));
+            }
+        }
     }
 
     #[test]

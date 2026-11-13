@@ -44,9 +44,10 @@ use crate::stateful::{
 use commonware_actor::Feedback;
 use commonware_broadcast::buffered;
 use commonware_consensus::{
-    Application, Heightable as _, Reporter, Reporters,
+    Application, Handoff, Heightable as _, Reporter, Reporters,
     marshal::{
         self, Start, Update,
+        ancestry::Ancestry,
         core::Actor as MarshalActor,
         resolver::p2p as marshal_resolver,
         standard::{Deferred, Standard},
@@ -74,7 +75,7 @@ use commonware_glue::dkg::{
     types::Payload,
 };
 use commonware_p2p::{
-    Receiver as ReceiverTrait, Sender as SenderTrait,
+    Manager as _, Receiver as ReceiverTrait, Sender as SenderTrait, TrackedPeers,
     simulated::{Control, Oracle, SocketManager},
 };
 use commonware_parallel::Sequential;
@@ -82,7 +83,7 @@ use commonware_runtime::{
     Handle, Spawner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::{archive::prunable, translator::TwoCap};
-use commonware_utils::{NZDuration, NZUsize, NonZeroDuration};
+use commonware_utils::{NZDuration, NZUsize, NonZeroDuration, ordered::Set};
 use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 
 /// Channel identifier of the probe, after the six channels of the chain that
@@ -101,6 +102,10 @@ const PROBE_RETRY: Duration = Duration::from_millis(500);
 
 /// Blocks the buffered broadcast keeps per sender.
 const BROADCAST_DEQUE: usize = 10;
+
+/// The peer-set id under which the network tracks its initial set of every
+/// identity of a run, for every identity.
+pub(super) const INITIAL_PEER_SET: u64 = 0;
 
 /// One identity's unsplit channels: the six of the chain and the probe's.
 pub(super) struct Channels {
@@ -204,15 +209,129 @@ impl<R: Reporter<Activity = Update<Block>>> Reporter for Observer<R> {
     }
 }
 
+/// The application the reshare wrapper drives, with a record of every block
+/// it builds and of every block it verifies and accepts for consensus.
+///
+/// A correct node votes to finalize a block only once its application built
+/// or accepted it, so the record of the nodes that started at genesis vouches
+/// for a block before any finalization of it exists (I17).
+#[derive(Clone)]
+struct Endorsing<A> {
+    inner: A,
+    records: Records,
+}
+
+impl<A> Endorsing<A> {
+    /// Record `block` as one the application built or accepted.
+    fn endorse(&self, block: &Digested<Block>) {
+        // The application is called inside an engine's task, and the record
+        // is the harness's code, not the engine's.
+        unattributed(|| self.records.endorsed(block.height(), block.digest()));
+    }
+}
+
+impl<A> Application<EngineContext> for Endorsing<A>
+where
+    A: Application<
+            EngineContext,
+            SigningScheme = Scheme,
+            Context = BlockContext,
+            Block = Block,
+            Input = Input,
+        >,
+{
+    type SigningScheme = Scheme;
+    type Context = BlockContext;
+    type Block = Block;
+    type Input = Input;
+
+    async fn prepare(
+        &mut self,
+        context: (EngineContext, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
+        input: Self::Input,
+    ) -> Handoff<Digested<Self::Block>> {
+        let handoff = self.inner.prepare(context, ancestry, input).await;
+        if let Handoff::Vote(block) | Handoff::Stage(block) = &handoff {
+            self.endorse(block);
+        }
+        handoff
+    }
+
+    async fn propose(
+        &mut self,
+        context: (EngineContext, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
+        input: Self::Input,
+    ) -> Option<Digested<Self::Block>> {
+        let block = self.inner.propose(context, ancestry, input).await;
+        if let Some(block) = &block {
+            self.endorse(block);
+        }
+        block
+    }
+
+    async fn verify(
+        &mut self,
+        context: (EngineContext, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
+    ) -> bool {
+        let tip = ancestry.peek().cloned();
+        let accepted = self.inner.verify(context, ancestry).await;
+        if accepted && let Some(tip) = &tip {
+            self.endorse(tip);
+        }
+        accepted
+    }
+}
+
 /// The peer manager and the blocker of an engine on the simulated network.
 pub(super) type Peers = AddressableManager<SocketManager<PublicKey, deterministic::Context>>;
 
-/// The peer manager of the network of `oracle`, as every engine is given it:
-/// through the adapter that resolves each peer an epoch tracks in the epoch's
-/// directory.
+/// The network-wide peer manager of `oracle`, through the adapter that
+/// resolves each peer an epoch tracks in the epoch's directory. The members
+/// of the probe driver, which run no engine, are given it.
 pub(super) fn peers(oracle: &Oracle<PublicKey, deterministic::Context>) -> Peers {
     AddressableManager::new(oracle.socket_manager())
 }
+
+/// The peer manager of `identity` on the network of `oracle`, as its engine
+/// is given it: the peer sets it tracks are the identity's own, and the
+/// adapter resolves each peer an epoch tracks in the epoch's directory. The
+/// two halves of a compromised identity share it, as they share the identity.
+pub(super) fn own_peers(
+    oracle: &Oracle<PublicKey, deterministic::Context>,
+    identity: &PublicKey,
+) -> Peers {
+    AddressableManager::new(oracle.control(identity.clone()).socket_manager())
+}
+
+/// Give `identity` the peer sets an engine starts with, as its restart does:
+/// the network's initial set of every one of `identities`, and none of the
+/// sets its earlier instances tracked, which the DKG module tracks again.
+///
+/// The network delivers a message only between two identities that each
+/// track the other, as an authenticated network keeps a connection, and the
+/// DKG module tracks only an epoch's dealers, players, and next players. The
+/// initial set keeps every identity reachable, whatever committee it is in
+/// (see [`TRACKED_PEER_SETS`](super::TRACKED_PEER_SETS)); the module's
+/// activation of epoch zero, whose peers it holds, is not newer than it and
+/// is not taken. Call this only while no instance of the identity's engine
+/// runs.
+pub(super) fn restart_peers(
+    oracle: &Oracle<PublicKey, deterministic::Context>,
+    identity: &PublicKey,
+    identities: &[PublicKey],
+) {
+    let control = oracle.control(identity.clone());
+    control.reset_peer_sets();
+    let initial = TrackedPeers::new(
+        Set::from_iter_dedup(identities.iter().cloned()),
+        Set::default(),
+    );
+    let _ = control.manager().track(INITIAL_PEER_SET, initial);
+}
+
 pub(super) type Blocker = Control<PublicKey, deterministic::Context>;
 
 /// The marshal variant of the reshare chain.
@@ -464,7 +583,7 @@ async fn run<A, L, S, R>(
         mailbox,
     } = config;
     let identity = signer.public_key();
-    let manager = peers(&oracle);
+    let manager = own_peers(&oracle, &identity);
     let blocker = oracle.control(identity.clone());
     let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     let epocher = FixedEpocher::new(EPOCH_LENGTH);
@@ -602,6 +721,10 @@ async fn run<A, L, S, R>(
     let reshare_handle = reshare_actor.start(dkg);
 
     // The reshare wrapper selects each block's payload for the application.
+    let application = Endorsing {
+        inner: application,
+        records: records.clone(),
+    };
     let deferred = Deferred::new(
         context.child("deferred"),
         reshare::Application::new(application, reshare_mailbox.clone(), EPOCH_LENGTH),
@@ -677,7 +800,7 @@ mod tests {
     use super::*;
     use crate::{
         dkg::{
-            RESHARE_IDENTITIES,
+            RESHARE_IDENTITIES, TRACKED_PEER_SETS,
             app::{App, BlockPayload},
             fixtures::{identities, raised},
             invariants::{Reshare, Resharer, Step, check_placement},
@@ -690,9 +813,10 @@ mod tests {
     };
     use commonware_consensus::{CertifiableBlock as _, types::Height};
     use commonware_cryptography::bls12381::dkg::feldman_desmedt::deal;
-    use commonware_glue::dkg::types::EpochOutcome;
+    use commonware_glue::dkg::{network::Manager as DkgManager, types::EpochOutcome};
+    use commonware_p2p::Provider as _;
     use commonware_runtime::{Clock as _, Runner as _};
-    use commonware_utils::{N3f1, TestRng, ordered::Set};
+    use commonware_utils::{N3f1, TestRng};
 
     /// The description of an epoch among the first committee.
     fn info() -> Info {
@@ -830,6 +954,55 @@ mod tests {
         assert_eq!(assembled(3, "engine-3"), Vec::new());
     }
 
+    /// The peer sets an engine tracks are its identity's own: no other
+    /// identity is handed them. A restart leaves the identity the network's
+    /// initial set of every identity and nothing it tracked before, and the
+    /// engine that comes back tracks its epoch again.
+    #[test]
+    fn engine_peer_sets_are_its_own_and_a_restart_forgets_them() {
+        deterministic::Runner::default().start(|context| async move {
+            let identities = identities();
+            let oracle =
+                runner::network_with(&context, &identities, runner::LINK, TRACKED_PEER_SETS).await;
+            let every = Set::from_iter_dedup(identities.iter().cloned());
+            let committee = Set::from_iter_dedup(identities[1..].iter().cloned());
+            let epoch = TrackedPeers::new(committee.clone(), Set::default());
+            let track = |identity: &PublicKey| {
+                DkgManager::track(
+                    &mut own_peers(&oracle, identity),
+                    Epoch::new(1),
+                    epoch.clone(),
+                    &directory(&committee),
+                )
+                .expect("the directory holds every tracked peer");
+            };
+            let tracked = |identity: &PublicKey, id: u64| {
+                let mut peers = own_peers(&oracle, identity);
+                async move { peers.peer_set(id).await.map(|peers| peers.primary) }
+            };
+            let (first, second) = (&identities[0], &identities[1]);
+
+            // The first identity's engine enters epoch one. The second's is
+            // not handed the epoch's set, and every identity holds the
+            // initial set.
+            track(first);
+            assert_eq!(tracked(first, 1).await, Some(committee.clone()));
+            assert_eq!(tracked(second, 1).await, None);
+            for identity in &identities {
+                assert_eq!(tracked(identity, 0).await, Some(every.clone()));
+            }
+
+            // The first identity restarts: it holds the initial set only,
+            // until its engine enters the epoch again.
+            restart_peers(&oracle, first, &identities);
+            assert_eq!(tracked(first, 1).await, None);
+            assert_eq!(tracked(first, 0).await, Some(every.clone()));
+            track(first);
+            assert_eq!(tracked(first, 1).await, Some(committee));
+            assert_eq!(tracked(second, 1).await, None);
+        });
+    }
+
     /// R24: an engine restarted in the middle of its state sync hands the
     /// floor its caller kept to its probe, and no other start hands its
     /// probe a floor. This is the harness's own caller that is checked, on
@@ -846,7 +1019,7 @@ mod tests {
             let floor_of = |label, joiner: Option<&Joiner<EngineContext>>| {
                 probe_config(
                     engine(label),
-                    peers(&oracle),
+                    own_peers(&oracle, &identities[0]),
                     oracle.control(identities[0].clone()),
                     verifier.clone(),
                     &genesis,

@@ -319,6 +319,15 @@ impl Cluster {
         index: usize,
         config: Config<App, Elector>,
     ) -> Handle<()> {
+        // A restarted engine starts with the peer sets an engine starts
+        // with, as a node does.
+        if self.nodes[index].down {
+            reshare_stack::restart_peers(
+                &self.oracle,
+                &self.session.participants[index],
+                &self.session.participants,
+            );
+        }
         self.starting(index);
 
         // Registering a channel again replaces the registration the crashed

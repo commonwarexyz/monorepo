@@ -139,6 +139,19 @@ impl Secrets {
     pub(super) fn held(&self) -> Vec<(Epoch, Share)> {
         self.read(|inner| inner.held.clone())
     }
+
+    /// Every distinct share the engine ever stored for `epoch`, in the order
+    /// stored.
+    pub(super) fn held_for(&self, epoch: Epoch) -> Vec<Share> {
+        self.read(|inner| {
+            inner
+                .held
+                .iter()
+                .filter(|(stored, _)| *stored == epoch)
+                .map(|(_, share)| share.clone())
+                .collect()
+        })
+    }
 }
 
 impl SecretStore for Secrets {

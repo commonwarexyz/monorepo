@@ -24,9 +24,13 @@ use commonware_consensus::{
     simplex::types::Finalization,
     types::{Epoch, EpochPhase, Epocher as _, FixedEpocher, Height, Round},
 };
-use commonware_cryptography::bls12381::primitives::{
-    group::Share,
-    ops::{self, threshold},
+use commonware_cryptography::bls12381::{
+    dkg::feldman_desmedt::deal,
+    primitives::{
+        group::Share,
+        ops::{self, threshold},
+        sharing::Mode,
+    },
 };
 use commonware_glue::dkg::{
     network,
@@ -35,7 +39,9 @@ use commonware_glue::dkg::{
 };
 use commonware_p2p::Recipients;
 use commonware_parallel::Sequential;
-use commonware_utils::{Faults as _, N3f1, Participant, channel::mpsc, ordered::Set, sync::Mutex};
+use commonware_utils::{
+    Faults as _, N3f1, Participant, TestRng, channel::mpsc, ordered::Set, sync::Mutex,
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -77,6 +83,99 @@ pub(crate) struct Ceremony {
     pub(crate) nodes: Vec<Observed>,
 }
 
+/// What one correct engine of a bootstrap run observed, across every instance
+/// of it the run started.
+#[derive(Clone, Debug)]
+pub(crate) struct Bootstrapper {
+    /// The engine, for failure messages.
+    pub(crate) engine: usize,
+    /// The identity the engine runs as.
+    pub(crate) identity: PublicKey,
+    /// How the ceremony ended at each instance that reported it, in the order
+    /// the instances reported, each with the share the engine's secret store
+    /// held for epoch zero when the report was recorded.
+    pub(crate) completions: Vec<(Ending, Option<Share>)>,
+    /// Every distinct share the engine's secret store held for epoch zero, in
+    /// the order stored, a share later overwritten included.
+    pub(crate) held: Vec<Share>,
+    /// The share the engine's secret store holds for epoch zero at the end of
+    /// the run.
+    pub(crate) share: Option<Share>,
+}
+
+impl Bootstrapper {
+    /// This engine's record of the ceremony with `ending` and `share`.
+    fn observed(&self, ending: Option<Ending>, share: Option<Share>) -> Observed {
+        Observed {
+            engine: self.engine,
+            identity: self.identity.clone(),
+            ending,
+            share,
+        }
+    }
+}
+
+/// A bootstrap run as the correct engines observed it.
+#[derive(Clone, Debug)]
+pub(crate) struct Bootstrap {
+    /// The sharing mode every engine is configured with.
+    pub(crate) mode: Mode,
+    /// The correct engines.
+    pub(crate) nodes: Vec<Bootstrapper>,
+}
+
+impl Bootstrap {
+    /// The ceremony as the end of the run leaves it: how it ended at the
+    /// first instance of each engine that reported it, and the share each
+    /// engine holds.
+    fn ended(&self) -> Ceremony {
+        Ceremony {
+            epoch: Epoch::zero(),
+            nodes: self
+                .nodes
+                .iter()
+                .map(|node| {
+                    let first = node.completions.first().map(|(ending, _)| ending.clone());
+                    node.observed(first, node.share.clone())
+                })
+                .collect(),
+        }
+    }
+
+    /// Every report an instance of a correct engine made, each with the share
+    /// the engine held when the report was recorded.
+    fn reported(&self) -> Ceremony {
+        Ceremony {
+            epoch: Epoch::zero(),
+            nodes: self
+                .nodes
+                .iter()
+                .flat_map(|node| {
+                    node.completions
+                        .iter()
+                        .map(|(ending, share)| node.observed(Some(ending.clone()), share.clone()))
+                })
+                .collect(),
+        }
+    }
+
+    /// Every share a correct engine held, each on its own, with no report.
+    fn held(&self) -> Ceremony {
+        Ceremony {
+            epoch: Epoch::zero(),
+            nodes: self
+                .nodes
+                .iter()
+                .flat_map(|node| {
+                    node.held
+                        .iter()
+                        .map(|share| node.observed(None, Some(share.clone())))
+                })
+                .collect(),
+        }
+    }
+}
+
 /// How much each check compared.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Counts {
@@ -88,9 +187,13 @@ pub struct Counts {
     pub successes: usize,
     /// Cross-engine result comparisons made under I1.
     pub agreements: usize,
-    /// Shares checked against the public output under I2.
+    /// Shares checked under I2: every distinct share a correct engine held,
+    /// against the agreed output, or against the committee if no correct
+    /// engine reported.
     pub shares: usize,
-    /// Share subsets that reconstructed the key under I3.
+    /// Share subsets of the size the output requires that recovered, under
+    /// I3, a signature its key verifies, or the signature every other such
+    /// subset recovered if no correct engine reported.
     pub reconstructions: usize,
     /// Blocks the network recorded, by any identity.
     pub blocks: usize,
@@ -303,6 +406,115 @@ pub(crate) fn check_failed_bootstrap(ceremony: &Ceremony) {
     }
 }
 
+/// I2 and I3 for a bootstrap that no correct engine reported, judged without
+/// its output.
+///
+/// A bootstrap engine makes its outcome known only by reporting it: the final
+/// block that carries the outcome stays in the engine's storage. An engine
+/// that has stored its share reports at every later start, so a share that
+/// no report accompanies is left only when the run ends between the write of
+/// the share and a report: before the engine reports, or after a crash
+/// between the two and before a later start has reported. Every output I1
+/// accepts is among exactly `committee` and needs the committee's quorum of
+/// shares. So I2 requires that a share a correct engine held carry the
+/// engine's position in the committee and that no engine held two different
+/// shares, and I3 requires that every quorum of the engines' shares recover
+/// one and the same signature, since no key verifies two. Recovery reads of a
+/// sharing only its mode, its size, and the number of shares it needs, so the
+/// shares are recovered under the sharing of a trusted deal among the
+/// committee in the run's mode. That sharing's key is not the ceremony's, and
+/// no recovered signature is verified.
+///
+/// Not judged: whether the ceremony succeeded, so a share held after a failed
+/// ceremony, which I6 forbids, passes; whether the shares are those of the
+/// output the ceremony produced, which takes the output's partial public
+/// keys; and, when no more engines hold a share than a quorum, whether the
+/// shares lie on one polynomial, which any quorum of them does.
+///
+/// Returns the number of shares checked and of quorums of shares recovered.
+pub(crate) fn check_unreported_shares(
+    bootstrap: &Bootstrap,
+    committee: &[PublicKey],
+) -> (usize, usize) {
+    let epoch = Epoch::zero();
+    let mut checked = 0;
+    let mut holders: Vec<(usize, &Share)> = Vec::new();
+    for node in &bootstrap.nodes {
+        let position = committee
+            .iter()
+            .position(|member| *member == node.identity)
+            .map(Participant::from_usize);
+        for share in &node.held {
+            assert!(
+                position == Some(share.index),
+                "I2 violated: engine {} holds a share of epoch {epoch} at index {:?}, but its \
+                 identity is at {position:?} in the committee",
+                node.engine,
+                share.index,
+            );
+            checked += 1;
+        }
+        let Some((share, others)) = node.held.split_first() else {
+            continue;
+        };
+        assert!(
+            others.iter().all(|other| other == share),
+            "I2 violated: engine {} held two different shares of epoch {epoch}",
+            node.engine,
+        );
+        holders.push((node.engine, share));
+    }
+
+    let players = Set::from_iter_dedup(committee.iter().cloned());
+    let (frame, _) = deal::<MockGroup, _, N3f1>(TestRng::new(0), bootstrap.mode, players)
+        .expect("a trusted deal among the committee must succeed");
+    let sharing = frame.public();
+    let required = sharing.required() as usize;
+    let partials: Vec<_> = holders
+        .iter()
+        .map(|(_, share)| {
+            threshold::sign_message::<MockGroup>(
+                share,
+                RECONSTRUCTION_NAMESPACE,
+                RECONSTRUCTION_MESSAGE,
+            )
+        })
+        .collect();
+    let engines = |subset: &[usize]| -> Vec<usize> {
+        subset.iter().map(|member| holders[*member].0).collect()
+    };
+
+    let mut recovered = None;
+    let mut quorums = 0;
+    for subset in subsets(holders.len(), required) {
+        let chosen: Vec<_> = subset.iter().map(|member| &partials[*member]).collect();
+        let signature = threshold::recover::<MockGroup, _>(sharing, chosen, &Sequential).ok();
+        if let Some((first, agreed)) = &recovered {
+            assert!(
+                signature == *agreed,
+                "I3 violated: the shares of engines {first:?} and the shares of engines {:?} \
+                 recover different signatures for epoch {epoch}",
+                engines(&subset),
+            );
+        } else {
+            recovered = Some((engines(&subset), signature));
+        }
+        quorums += 1;
+    }
+    if required > 0 {
+        for subset in subsets(holders.len(), required - 1) {
+            let chosen: Vec<_> = subset.iter().map(|member| &partials[*member]).collect();
+            assert!(
+                threshold::recover::<MockGroup, _>(sharing, chosen, &Sequential).is_err(),
+                "I3 violated: the shares of engines {:?}, one fewer than required, recover a \
+                 signature for epoch {epoch}",
+                engines(&subset),
+            );
+        }
+    }
+    (checked, quorums)
+}
+
 /// I8: no task panics, except a task of a half of the compromised identity.
 ///
 /// `panics` lists every panic the run raised, each with the engine whose task
@@ -360,16 +572,6 @@ pub(crate) struct Instance {
     pub(crate) exit: Exit,
 }
 
-/// What the instances of one correct engine reported of a ceremony.
-#[derive(Clone, Debug)]
-pub(crate) struct Reports {
-    /// The engine, for failure messages.
-    pub(crate) engine: usize,
-    /// How the ceremony ended at each instance that completed it, in the
-    /// order the instances reported.
-    pub(crate) endings: Vec<Ending>,
-}
-
 /// I8: the run's root task, which is the harness itself, does not panic.
 ///
 /// `result` is what the root task returned, or the payload of the panic that
@@ -399,22 +601,24 @@ pub(crate) fn check_instances_running(instances: &[Instance]) -> usize {
 }
 
 /// I1, across restarts: every instance of a correct engine that completed the
-/// ceremony of `epoch` holds the same result for it.
+/// bootstrap holds the same result for it.
 ///
 /// An engine restarted after it completed reports the ceremony again from its
 /// storage, and a restart must not change what it reports. Returns the number
 /// of comparisons made.
-pub(crate) fn check_reports_agree(epoch: Epoch, reports: &[Reports]) -> usize {
+pub(crate) fn check_reports_agree(bootstrap: &Bootstrap) -> usize {
+    let epoch = Epoch::zero();
     let mut comparisons = 0;
-    for Reports { engine, endings } in reports {
-        let Some((first, repeated)) = endings.split_first() else {
+    for node in &bootstrap.nodes {
+        let Some(((first, _), repeated)) = node.completions.split_first() else {
             continue;
         };
-        for ending in repeated {
+        for (ending, _) in repeated {
             assert!(
                 ending == first,
-                "I1 violated: engine {engine} reported different results for the ceremony of \
-                 epoch {epoch} across restarts: {first:?} != {ending:?}",
+                "I1 violated: engine {} reported different results for the ceremony of epoch \
+                 {epoch} across restarts: {first:?} != {ending:?}",
+                node.engine,
             );
             comparisons += 1;
         }
@@ -439,21 +643,33 @@ pub(crate) fn check_no_correct_blocks(
     blocked.len()
 }
 
-/// Check a bootstrap ceremony among `committee` and the blocks recorded
-/// during its run, and report how much was compared.
+/// Check a bootstrap run among `committee` and the blocks recorded during it,
+/// and report how much was compared.
+///
+/// I1 compares the first report of every correct engine. After a successful
+/// ceremony I2 is checked at every report, against the share the engine held
+/// when the report was recorded, at the end, against the share each engine
+/// holds, and for every share each engine ever held, a share later
+/// overwritten included; I3 is checked over the shares the engines hold. I2
+/// leaves each engine one share its output accepts, so I3 over those holds at
+/// every report as well. After a failed ceremony no correct engine may ever
+/// have held a share (I6). If no correct engine reported, the shares are
+/// judged without the outcome, and I6 is not judged (see
+/// [`check_unreported_shares`]).
 pub(crate) fn check_bootstrap(
-    ceremony: &Ceremony,
+    bootstrap: &Bootstrap,
     committee: &[PublicKey],
     blocked: &[(PublicKey, PublicKey)],
 ) -> Counts {
-    let correct: Vec<PublicKey> = ceremony
+    let ended = bootstrap.ended();
+    let correct: Vec<PublicKey> = bootstrap
         .nodes
         .iter()
         .map(|node| node.identity.clone())
         .collect();
     let mut counts = Counts {
-        correct_nodes: ceremony.nodes.len(),
-        completed: ceremony
+        correct_nodes: bootstrap.nodes.len(),
+        completed: ended
             .nodes
             .iter()
             .filter(|node| node.ending.is_some())
@@ -461,17 +677,21 @@ pub(crate) fn check_bootstrap(
         blocks: check_no_correct_blocks(blocked, &correct),
         ..Counts::default()
     };
-    let (agreed, agreements) = check_output_agreement(ceremony);
+    let (agreed, agreements) = check_output_agreement(&ended);
     counts.agreements = agreements;
     match agreed {
         Some(Ending::Success(info)) => {
             counts.successes = 1;
-            check_bootstrap_output(ceremony, info, committee);
-            counts.shares = check_share_validity(ceremony, info);
-            counts.reconstructions = check_reconstruction(ceremony, info);
+            check_bootstrap_output(&ended, info, committee);
+            check_share_validity(&bootstrap.reported(), info);
+            check_share_validity(&ended, info);
+            counts.shares = check_share_validity(&bootstrap.held(), info);
+            counts.reconstructions = check_reconstruction(&ended, info);
         }
-        Some(Ending::Failure) => check_failed_bootstrap(ceremony),
-        None => {}
+        Some(Ending::Failure) => check_failed_bootstrap(&bootstrap.held()),
+        None => {
+            (counts.shares, counts.reconstructions) = check_unreported_shares(bootstrap, committee);
+        }
     }
     counts
 }
@@ -511,6 +731,7 @@ struct Recorded {
     watchers: Vec<mpsc::UnboundedSender<Epoch>>,
     finalized: BTreeSet<(Round, Height, Digest)>,
     committed: BTreeSet<(Height, Digest)>,
+    endorsed: BTreeSet<(Height, Digest)>,
     commit_watchers: Vec<mpsc::UnboundedSender<Height>>,
     /// Each step with the number of schemes the engine had registered when
     /// the step was recorded.
@@ -592,6 +813,12 @@ impl Records {
             .retain(|watcher| watcher.send(height).is_ok());
     }
 
+    /// Record the height and digest of a block the engine's application
+    /// built, or verified and accepted, for consensus.
+    pub(crate) fn endorsed(&self, height: Height, digest: Digest) {
+        self.0.lock().endorsed.insert((height, digest));
+    }
+
     /// The height of every finalized block marshal delivers to the engine
     /// from now on, each as it is delivered.
     pub(crate) fn watch_commits(&self) -> mpsc::UnboundedReceiver<Height> {
@@ -616,6 +843,12 @@ impl Records {
     /// order. A block delivered again is listed once.
     pub(crate) fn commits(&self) -> Vec<(Height, Digest)> {
         self.0.lock().committed.iter().copied().collect()
+    }
+
+    /// The height and digest of every block the engine's application built
+    /// or accepted so far, in height order.
+    pub(crate) fn endorsements(&self) -> Vec<(Height, Digest)> {
+        self.0.lock().endorsed.iter().copied().collect()
     }
 
     /// Every step of the engine's entry through state sync so far, in order.
@@ -849,8 +1082,16 @@ pub(crate) fn check_epoch_agreement(reshare: &Reshare) -> (BTreeMap<Epoch, Info>
 }
 
 /// I2, for the scheme a correct engine registers for an epoch: it carries the
-/// epoch's agreed public sharing among the agreed output's players, and a
-/// share registered with it is the engine's valid share of that output.
+/// epoch's agreed public sharing among the agreed output's players, a sharing
+/// among those players that needs their quorum, and it names the engine's
+/// role in that output. A verifier is outside the players, a member is one of
+/// them under the engine's own key, and a share registered with it is the
+/// engine's valid share of that output.
+///
+/// The DKG module builds every registration from the node's own key and the
+/// share it holds, as a signer if it holds one, as a member if it is one of
+/// the players, and as a verifier otherwise. What passes this check is what
+/// the harness's registrar builds a scheme from.
 pub(crate) fn check_registration(
     node: &Resharer,
     epoch: Epoch,
@@ -877,17 +1118,43 @@ pub(crate) fn check_registration(
          agreed public sharing: {registration:?}",
         node.engine,
     );
-    if let SchemeInfo::Signer { share, .. } = registration {
-        let registered = Ceremony {
-            epoch,
-            nodes: vec![Observed {
-                engine: node.engine,
-                identity: node.identity.clone(),
-                ending: None,
-                share: Some(share.clone()),
-            }],
-        };
-        check_share_validity(&registered, info);
+    let quorum = info.output.quorum::<N3f1>();
+    assert!(
+        sharing.total().get() as usize == participants.len() && sharing.required() == quorum,
+        "I2 violated: engine {} registered a scheme for epoch {epoch} whose sharing is among {} \
+         participants and needs {} shares, but it names {} players with a quorum of {quorum}",
+        node.engine,
+        sharing.total(),
+        sharing.required(),
+        participants.len(),
+    );
+    let player = participants.position(&node.identity).is_some();
+    match registration {
+        SchemeInfo::Verifier { .. } => assert!(
+            !player,
+            "I2 violated: engine {} registered the scheme of epoch {epoch} as a verifier, but \
+             it is one of the players of the agreed output",
+            node.engine,
+        ),
+        SchemeInfo::Member { public_key, .. } => assert!(
+            player && *public_key == node.identity,
+            "I2 violated: engine {} registered the scheme of epoch {epoch} as the member {}, \
+             which is not the engine's own place among the players",
+            node.engine,
+            public_key,
+        ),
+        SchemeInfo::Signer { share, .. } => {
+            let registered = Ceremony {
+                epoch,
+                nodes: vec![Observed {
+                    engine: node.engine,
+                    identity: node.identity.clone(),
+                    ending: None,
+                    share: Some(share.clone()),
+                }],
+            };
+            check_share_validity(&registered, info);
+        }
     }
 }
 
@@ -1215,17 +1482,19 @@ pub(crate) fn check_placement(epocher: &FixedEpocher, reshare: &Reshare) -> Plac
     placed
 }
 
-/// I2, under a restart schedule: every time a correct engine registers the
-/// scheme of an epoch it holds a share for, it registers that share.
+/// I2: every time a correct engine registers the scheme of an epoch it holds a
+/// share for, it registers that share.
 ///
 /// An engine registers the scheme of an epoch when it completes the ceremony
 /// that leads into the epoch, and again at every start that finds it in the
-/// epoch, each time from the share its secret store then holds. A restart
-/// retains the secret store, so an engine whose store ever held a share for
-/// an epoch registers that epoch as a signer with that share, every time.
-/// [`check_players_hold_shares`] judges an engine by every share its store
-/// ever held, and so passes an engine whose restart did not find its share
-/// again. Returns the number of registrations checked.
+/// epoch, each time from the share its secret store then holds. The DKG
+/// module stores a share before it registers with it, and a restart retains
+/// the secret store, so an engine whose store ever held a share for an epoch
+/// registers that epoch as a signer with that share, every time.
+/// [`check_registration`] accepts a member's registration from a player that
+/// holds a share, and [`check_players_hold_shares`] judges an engine by every
+/// share its store ever held, so it passes an engine whose restart did not
+/// find its share again. Returns the number of registrations checked.
 pub(crate) fn check_registered_shares(reshare: &Reshare) -> usize {
     let mut checked = 0;
     for node in &reshare.nodes {
@@ -1349,6 +1618,18 @@ pub(crate) fn check_reshare(
     counts
 }
 
+/// I10: two runs of one input measure the same thing.
+///
+/// `first` and `second` are what two runs of the same input measured, which
+/// the regression suite of every driver compares when it replays an input.
+#[cfg(test)]
+pub(crate) fn check_replay<T: PartialEq + fmt::Debug>(first: T, second: T) {
+    assert!(
+        first == second,
+        "I10 violated: two runs of one input measured different things: {first:?} != {second:?}",
+    );
+}
+
 /// A finalization of a chain the probe target fabricates.
 pub(crate) type ProbeFinalization = Finalization<Scheme, Digest>;
 
@@ -1425,6 +1706,9 @@ pub(crate) enum ProbeShape {
     Prefix(usize),
     /// Bytes that start with no tag of the wire format.
     Junk,
+    /// The request for latest finalizations the discovering probe sent,
+    /// which the harness sends back to it to wake it.
+    Request,
 }
 
 /// A message the program sent to the discovering probe.
@@ -1531,6 +1815,56 @@ impl ProbeLedger {
         distinct
             .last()
             .map(|(position, bytes)| (*position, bytes.to_vec()))
+    }
+
+    /// The request for latest finalizations as the discovering probe encoded
+    /// it, once the probe has sent one.
+    pub(crate) fn solicitation(&self) -> Option<Vec<u8>> {
+        self.0.lock().steps.iter().find_map(|step| match step {
+            ProbeStep::Requested { bytes, .. } => Some(bytes.clone()),
+            _ => None,
+        })
+    }
+
+    /// Whether the last message the program sent is the whole of a response
+    /// to the discovering probe's most recent request, which the probe
+    /// addressed to the sender alone, and no subscription was opened or
+    /// resolved since.
+    ///
+    /// The probe addresses a request to one peer only for its boundary block,
+    /// and sends another as soon as it gives that peer up. A probe that is
+    /// still discovering takes the response as the block it awaits and
+    /// resolves its artifact with it or refuses it and asks someone else, so
+    /// once the probe has taken the response this holds only if it resolved.
+    pub(crate) fn answered_alone(&self) -> bool {
+        let log = self.0.lock();
+        let Some((at, send)) =
+            log.steps
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(at, step)| match step {
+                    ProbeStep::Sent(send) => Some((at, send)),
+                    _ => None,
+                })
+        else {
+            return false;
+        };
+        if log.steps[at..]
+            .iter()
+            .any(|step| matches!(step, ProbeStep::Subscribed | ProbeStep::Resolved(_)))
+        {
+            return false;
+        }
+        let request = log.steps.iter().rev().find_map(|step| match step {
+            ProbeStep::Requested { recipients, bytes } => Some((recipients, bytes)),
+            _ => None,
+        });
+        let Some((Recipients::One(asked), request)) = request else {
+            return false;
+        };
+        matches!(send.shape, ProbeShape::Response(capture)
+            if *asked == send.origin && log.captures[capture].request == *request)
     }
 
     /// Everything recorded at the discovering probe's boundaries, in order.
@@ -1693,8 +2027,8 @@ pub struct ProbeCounts {
     pub refusals: usize,
     /// Deliveries I14 forbade the discovering probe to block the sender of.
     pub admissions: usize,
-    /// Deliveries I14 required nothing for, because the harness cannot know
-    /// from the probe's boundaries which state the probe took them in.
+    /// Deliveries I14 required nothing for, because the probe did not select
+    /// its floor or resolve its artifact when a correct probe would have.
     pub unsettled: usize,
     /// Blocks the discovering probe placed, one per delivery it blocked.
     pub blocks: usize,
@@ -1884,8 +2218,10 @@ enum ProbeVerdict {
     Block,
     /// The sender must not be blocked.
     Pass,
-    /// Nothing is required: the harness cannot know from the probe's
-    /// boundaries which state the probe takes the message in.
+    /// Nothing is required: the probe did not select its floor or resolve
+    /// its artifact when a correct probe would have, and a probe that failed
+    /// to do so takes the message differently from one that did not. A run
+    /// that stalls is healthy, so neither is required.
     Open,
 }
 
@@ -1896,25 +2232,30 @@ enum ProbeVerdict {
 ///
 /// This is a small model of the probe's state, kept to what those boundaries
 /// settle: which loop the probe runs, whether its floor is selected, whether
-/// it awaits its boundary, and which peer it last addressed. It reproduces
-/// neither the probe's sample, nor its verification, nor its queue of
-/// responders, and a verdict that would need one of those is left open.
+/// it awaits its boundary, which peer it last addressed, and which peers it
+/// holds as responders. It reproduces neither the probe's sample nor its
+/// verification. The driver places the boundaries that settle the rest: once
+/// the program drops its last subscription it wakes the probe, which then
+/// looks at its subscriptions before the next event, and once the responder
+/// the block was requested from delivers it with no subscription open it
+/// opens one, which shows the artifact.
 #[derive(Default)]
 struct ProbeKnowledge<'a> {
     /// The program attached the probe's marshal.
     attached: bool,
     /// Subscriptions the program holds open.
     open: usize,
+    /// The program dropped its last subscription and the probe has taken no
+    /// message since. The next message is the wake the driver sends.
+    dropped: bool,
     /// A subscription resolved, so the probe holds its artifact.
     resolved: bool,
     /// The probe certainly serves: its marshal was attached while no
-    /// subscription was pending, a subscription closed without an artifact,
-    /// or its marshal is attached and its subscriptions resolved.
+    /// subscription was pending, it was woken with its marshal attached
+    /// after the program dropped its last subscription, a subscription
+    /// closed without an artifact, or its marshal is attached and its
+    /// subscriptions resolved.
     serving: bool,
-    /// The probe's marshal is attached and, since then, the program at some
-    /// point held no subscription open without an artifact resolving: the
-    /// probe serves once it notices, and the contract does not say when.
-    unheld: bool,
     /// The probe sent a request other than for latest finalizations, which
     /// it does only once it has selected its floor.
     fetching: bool,
@@ -1924,22 +2265,23 @@ struct ProbeKnowledge<'a> {
     /// last asked for latest finalizations.
     counted: BTreeSet<usize>,
     /// Identities that delivered the whole of a boundary finalization of the
-    /// fabricated chain, each of which the probe may hold as a responder.
+    /// fabricated chain and that the probe still holds as responders: a peer
+    /// it holds is retired when the probe asks another peer, or every peer,
+    /// for what it asked that peer alone.
     vouched: Vec<&'a PublicKey>,
     /// The whole of a boundary block of the fabricated chain was delivered
     /// by the peer the probe's most recent request was addressed to alone.
     /// The probe takes a block from the responder it requested the block
-    /// from and from nobody else, so only such a delivery may have resolved
-    /// the artifact unseen.
+    /// from and from nobody else, so only such a delivery resolves the
+    /// artifact through the boundary.
     fetched: bool,
 }
 
-/// Which loop the discovering probe certainly runs.
+/// Which loop the discovering probe runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProbePhase {
     Discovering,
     Serving,
-    Unknown,
 }
 
 impl<'a> ProbeKnowledge<'a> {
@@ -1947,7 +2289,10 @@ impl<'a> ProbeKnowledge<'a> {
     fn learn(&mut self, solicitation: Option<&[u8]>, step: &'a ProbeStep) {
         match step {
             ProbeStep::Subscribed => self.open += 1,
-            ProbeStep::Unsubscribed => self.open = self.open.saturating_sub(1),
+            ProbeStep::Unsubscribed => {
+                self.open = self.open.saturating_sub(1);
+                self.dropped = self.open == 0;
+            }
             ProbeStep::Attached => {
                 self.attached = true;
                 self.serving |= self.open == 0;
@@ -1965,17 +2310,36 @@ impl<'a> ProbeKnowledge<'a> {
                     self.counted.clear();
                 } else {
                     self.fetching = true;
+                    // The probe asks for a boundary finalization or block
+                    // only once it awaits a block from nobody: the peer it
+                    // last asked alone is no longer its responder, and a
+                    // request to every peer shows it holds none at all.
+                    match (self.asked, recipients) {
+                        (Some(Recipients::One(last)), Recipients::One(next)) if last != next => {
+                            self.vouched.retain(|held| *held != last);
+                        }
+                        (_, Recipients::One(_)) => {}
+                        _ => self.vouched.clear(),
+                    }
                 }
                 self.asked = Some(recipients);
             }
             ProbeStep::Sent(_) | ProbeStep::Delivered { .. } | ProbeStep::Blocked { .. } => {}
         }
         self.serving |= self.attached && self.resolved;
-        self.unheld |= self.attached && !self.serving && self.open == 0;
     }
 
     /// Take in the delivery of `send`.
     fn deliver(&mut self, run: &ProbeRun, send: &'a ProbeSend) {
+        if self.dropped {
+            assert!(
+                send.shape == ProbeShape::Request,
+                "harness defect: engine 0 was not woken after the program dropped its last \
+                 subscription"
+            );
+            self.dropped = false;
+            self.serving |= self.attached;
+        }
         if let Some(source) = run.counted(send) {
             self.counted.insert(source);
         }
@@ -1993,13 +2357,9 @@ impl<'a> ProbeKnowledge<'a> {
         }
     }
 
-    fn phase(&self) -> ProbePhase {
-        if !self.attached {
-            ProbePhase::Discovering
-        } else if self.serving {
+    const fn phase(&self) -> ProbePhase {
+        if self.serving {
             ProbePhase::Serving
-        } else if self.unheld {
-            ProbePhase::Unknown
         } else {
             ProbePhase::Discovering
         }
@@ -2010,11 +2370,16 @@ impl<'a> ProbeKnowledge<'a> {
         self.fetching || self.resolved
     }
 
-    /// The probe has certainly not selected its floor: it needs `required`
-    /// valid latest replies for one, and fewer were delivered since it last
-    /// asked.
+    /// The probe has certainly not selected its floor: it selects once
+    /// `required` valid latest replies are recorded, it records none while
+    /// it has no subscriber, and fewer were delivered since it last asked.
+    ///
+    /// A probe with no subscription open has noticed so: the driver wakes it
+    /// once the program drops its last one, and the next subscription makes
+    /// it ask again, so every reply counted since it last asked reached it
+    /// while it had a subscriber.
     fn sampling(&self, required: usize) -> bool {
-        !self.selected() && self.counted.len() < required
+        !self.selected() && (self.open == 0 || self.counted.len() < required)
     }
 
     /// The probe certainly waits for its boundary: it asked for one, no
@@ -2041,42 +2406,32 @@ impl<'a> ProbeKnowledge<'a> {
 /// This is the blocking table of the DKG probe, read off its code. While
 /// discovering, the probe decodes every message before anything else and
 /// blocks the sender of one that does not decode: one with no tag or an
-/// unknown tag, or a finalization response cut short. A block response is
-/// decoded past its epoch only when it comes from the peer the block was
-/// requested from, and is ignored from anyone else. A latest reply is judged
-/// only until the floor is selected: a sender that is not a dealer is
-/// blocked, a stale reply is set aside, and a reply that does not verify
-/// blocks its sender. A boundary finalization is judged only while the
-/// boundary is awaited, from a sender not yet held as a responder, and one
-/// that does not verify blocks its sender. While serving, the probe reads
-/// requests only: it blocks the sender of a message with no tag or an unknown
-/// tag and ignores every response, whole or cut short.
+/// unknown tag, or a finalization response cut short. It ignores a request.
+/// A block response is decoded past its epoch only when it comes from the
+/// peer the block was requested from, and is ignored from anyone else. A
+/// latest reply is judged only until the floor is selected: a sender that is
+/// not a dealer is blocked, a stale reply is set aside, and a reply that does
+/// not verify blocks its sender. A boundary finalization is judged only while
+/// the boundary is awaited and from a sender the probe does not hold as a
+/// responder, and one that does not verify blocks its sender. While serving,
+/// the probe reads requests only: it blocks the sender of a message with no
+/// tag or an unknown tag and ignores every response, whole or cut short. It
+/// answers a request from its marshal, which holds nothing in this target.
 ///
-/// A verdict stays open where the probe's boundaries do not show which state
-/// the probe takes the message in. That is so while the probe may be
-/// discovering or serving and the two require different things, and for three
-/// deliveries to a probe that discovers. A latest reply the probe would
-/// refuse, once enough valid replies were delivered for a floor and neither a
-/// request for the boundary nor an artifact followed: the floor is selected
-/// if it is in epoch zero and the artifact resolved unseen, and is not if the
-/// probe dropped its sample for want of a subscriber. A foreign boundary
-/// finalization, or a cut block from the responder the block was requested
-/// from, after that responder delivered the whole block and no subscription
-/// resolved: whether the block resolved the artifact is the probe's
-/// verification. A foreign boundary finalization relayed by an identity that
-/// delivered a valid one: the probe ignores a responder it still holds and
-/// judges one it dropped, which is its queue of responders.
+/// A verdict stays open only where a correct probe would have moved on and
+/// the run shows no sign that it did, in two cases of a probe that
+/// discovers. A latest reply the probe would refuse, once enough valid
+/// replies for a floor reached it while it had a subscriber and neither a
+/// request for the boundary nor an artifact followed: a probe that selected
+/// its floor ignores the reply. A foreign boundary finalization, or a cut
+/// block from the responder the block was requested from, once that responder
+/// delivered the whole block and no subscription resolved, not even the one
+/// the driver opens to show the artifact: a probe that resolved ignores both.
 fn probe_verdict(run: &ProbeRun, known: &ProbeKnowledge<'_>, send: &ProbeSend) -> ProbeVerdict {
-    // While serving, only a message with no tag or an unknown tag blocks.
-    let serving = match send.shape {
-        ProbeShape::Junk => ProbeVerdict::Block,
-        ProbeShape::Prefix(_) if send.bytes.is_empty() => ProbeVerdict::Block,
-        ProbeShape::Prefix(_) | ProbeShape::Response(_) => ProbeVerdict::Pass,
-    };
-
     let outsider = send.origin == run.outsider;
     let discovering = match send.shape {
         ProbeShape::Junk => ProbeVerdict::Block,
+        ProbeShape::Request => ProbeVerdict::Pass,
         // A prefix this short ends inside the tag or right after it.
         ProbeShape::Prefix(_) if send.bytes.len() <= 1 => ProbeVerdict::Block,
         ProbeShape::Prefix(capture) => match run.answer(&run.captures[capture]) {
@@ -2112,15 +2467,17 @@ fn probe_verdict(run: &ProbeRun, known: &ProbeKnowledge<'_>, send: &ProbeSend) -
                 }
                 ProbeAnswer::Latest => ProbeVerdict::Pass,
                 ProbeAnswer::Boundary if !source.foreign => ProbeVerdict::Pass,
-                ProbeAnswer::Boundary => {
-                    if known.fetching() && !known.vouched.contains(&&send.origin) {
-                        ProbeVerdict::Block
-                    } else if known.resolved {
+                // A responder the probe holds is ignored before its boundary
+                // finalization is verified.
+                ProbeAnswer::Boundary if known.fetching() => {
+                    if known.vouched.contains(&&send.origin) {
                         ProbeVerdict::Pass
                     } else {
-                        ProbeVerdict::Open
+                        ProbeVerdict::Block
                     }
                 }
+                ProbeAnswer::Boundary if known.resolved => ProbeVerdict::Pass,
+                ProbeAnswer::Boundary => ProbeVerdict::Open,
                 ProbeAnswer::Block => {
                     // A source builds a block only when the probe requests
                     // one from it, which the probe does only of a peer whose
@@ -2141,9 +2498,14 @@ fn probe_verdict(run: &ProbeRun, known: &ProbeKnowledge<'_>, send: &ProbeSend) -
 
     match known.phase() {
         ProbePhase::Discovering => discovering,
-        ProbePhase::Serving => serving,
-        ProbePhase::Unknown if discovering == serving => discovering,
-        ProbePhase::Unknown => ProbeVerdict::Open,
+        // While serving, only a message with no tag or an unknown tag blocks.
+        ProbePhase::Serving => match send.shape {
+            ProbeShape::Junk => ProbeVerdict::Block,
+            ProbeShape::Prefix(_) if send.bytes.is_empty() => ProbeVerdict::Block,
+            ProbeShape::Prefix(_) | ProbeShape::Response(_) | ProbeShape::Request => {
+                ProbeVerdict::Pass
+            }
+        },
     }
 }
 
@@ -2377,6 +2739,9 @@ pub(crate) struct Chain {
     /// The height and digest of every finalized block marshal delivered to
     /// the engine.
     pub(crate) committed: Vec<(Height, Digest)>,
+    /// The height and digest of every block the engine's application built,
+    /// or verified and accepted, for consensus.
+    pub(crate) endorsed: Vec<(Height, Digest)>,
     /// The description of each epoch that marshal delivered to the engine, in
     /// the final block of the epoch before it.
     pub(crate) delivered: Vec<(Epoch, Info)>,
@@ -2392,9 +2757,22 @@ impl Chain {
             engine,
             finalized: records.finalizations(),
             committed: records.commits(),
+            endorsed: records.endorsements(),
             delivered: records.deliveries(),
             steps: records.steps(),
         }
+    }
+
+    /// Whether the engine has a record of the block `digest` at `height`: it
+    /// was delivered the block, its marshal reported a finalization of it,
+    /// or its application built or accepted it.
+    fn vouches(&self, height: Height, digest: Digest) -> bool {
+        self.committed.contains(&(height, digest))
+            || self.endorsed.contains(&(height, digest))
+            || self
+                .finalized
+                .iter()
+                .any(|(_, at, finalized)| *at == height && *finalized == digest)
     }
 }
 
@@ -2622,18 +3000,70 @@ pub(crate) fn check_floor_provenance(sync: &StateSync) -> (usize, usize) {
 
 /// I17: every block and every epoch description the joiner commits above its
 /// floor equals what the other engines committed at that height or for that
-/// epoch.
+/// epoch, and is one of theirs.
 ///
 /// Marshal delivers the joiner nothing below its floor, so everything it was
-/// delivered is compared. The comparison of descriptions repeats I1, which
-/// compares the description of every epoch among all engines, the joiner
-/// included: the state-sync measurement runs this check first, so a
-/// description on which the joiner differs is reported here, and I1 would
-/// report it otherwise. Returns the number of block comparisons and of
-/// description comparisons made.
+/// delivered is judged. A block must equal every block another engine was
+/// delivered, or reported finalized, at its height, and some engine that
+/// started at genesis must have a record of it: it was delivered the block,
+/// its marshal reported a finalization of it, or its application built or
+/// accepted it. The last record exists before a quorum can finalize the
+/// block, whenever the run ends and whichever engine is down: of the three
+/// committee members whose finalize votes a finalization needs, at most one
+/// is the joiner, and a correct member votes to finalize only a block its
+/// application built or accepted, or a block that ends an epoch proposed
+/// again, which it notarizes only on that block's acceptance in an earlier
+/// view. A block that a finalized one extends was accepted the same way,
+/// before its child could be notarized.
+///
+/// A description must equal every description another engine was delivered
+/// for its epoch. If no engine that started at genesis was delivered it, the
+/// block that carried it to the joiner, the final block of the epoch before,
+/// must be one of theirs as above: the digest of a block covers its payload.
+///
+/// The comparison of descriptions repeats I1, which compares the description
+/// of every epoch among all engines, the joiner included: the state-sync
+/// measurement runs this check first, so a description on which the joiner
+/// differs is reported here, and I1 would report it otherwise. Returns the
+/// number of comparisons made of a block with one another engine was
+/// delivered, and of a description with one another engine was delivered.
 pub(crate) fn check_agreement_after_sync(sync: &StateSync) -> (usize, usize) {
     let joiner = sync.joined();
+    let epocher = FixedEpocher::new(EPOCH_LENGTH);
+    let vouched =
+        |height: Height, digest: Digest| sync.sources().any(|node| node.vouches(height, digest));
     let (mut blocks, mut descriptions) = (0, 0);
+    for (epoch, info) in &joiner.delivered {
+        let mut held = false;
+        for node in sync.sources() {
+            for (_, other) in node.delivered.iter().filter(|(at, _)| at == epoch) {
+                assert!(
+                    other == info,
+                    "I17 violated: engine {} committed a description of epoch {epoch} above its \
+                     floor other than the one engine {} committed: {info:?} != {other:?}",
+                    joiner.engine,
+                    node.engine,
+                );
+                descriptions += 1;
+                held = true;
+            }
+        }
+        if held {
+            continue;
+        }
+        let boundary = epoch.previous().and_then(|previous| epocher.last(previous));
+        let carrier = joiner
+            .committed
+            .iter()
+            .find(|(height, _)| Some(*height) == boundary);
+        assert!(
+            carrier.is_some_and(|(height, digest)| vouched(*height, *digest)),
+            "I17 violated: engine {} committed a description of epoch {epoch} above its floor \
+             that no node that started at genesis committed, carried by a block none of them has \
+             a record of: {carrier:?}",
+            joiner.engine,
+        );
+    }
     for (index, (height, digest)) in joiner.committed.iter().enumerate() {
         let conflicting = joiner.committed[..index]
             .iter()
@@ -2655,21 +3085,22 @@ pub(crate) fn check_agreement_after_sync(sync: &StateSync) -> (usize, usize) {
                 );
                 blocks += 1;
             }
-        }
-    }
-    for (epoch, info) in &joiner.delivered {
-        for node in sync.sources() {
-            for (_, other) in node.delivered.iter().filter(|(at, _)| at == epoch) {
+            for (round, _, other) in node.finalized.iter().filter(|(_, at, _)| at == height) {
                 assert!(
-                    other == info,
-                    "I17 violated: engine {} committed a description of epoch {epoch} above its \
-                     floor other than the one engine {} committed: {info:?} != {other:?}",
+                    other == digest,
+                    "I17 violated: engine {} committed block {digest} at height {height} above \
+                     its floor, and engine {} finalized block {other} there in round {round}",
                     joiner.engine,
                     node.engine,
                 );
-                descriptions += 1;
             }
         }
+        assert!(
+            vouched(*height, *digest),
+            "I17 violated: engine {} committed block {digest} at height {height} above its \
+             floor, of which no node that started at genesis has a record",
+            joiner.engine,
+        );
     }
     (blocks, descriptions)
 }
@@ -2730,38 +3161,80 @@ mod tests {
         }
     }
 
-    /// A ceremony dealt by a trusted dealer under `seed`, as four correct
-    /// engines would observe it had it succeeded.
-    fn dealt(seed: u64) -> (Ceremony, BootstrapInfo) {
+    /// The record of the engine `engine` running as `identity` that reported
+    /// `ending`, if any, once and held `share` from before its report to the
+    /// end of the run.
+    fn bootstrapper(
+        engine: usize,
+        identity: PublicKey,
+        ending: Option<Ending>,
+        share: Option<Share>,
+    ) -> Bootstrapper {
+        Bootstrapper {
+            engine,
+            identity,
+            completions: ending
+                .map(|ending| (ending, share.clone()))
+                .into_iter()
+                .collect(),
+            held: share.iter().cloned().collect(),
+            share,
+        }
+    }
+
+    /// Have `node` hold `share` instead, from before its reports to the end
+    /// of the run.
+    fn hold(node: &mut Bootstrapper, share: Option<Share>) {
+        for (_, held) in &mut node.completions {
+            held.clone_from(&share);
+        }
+        node.held = share.iter().cloned().collect();
+        node.share = share;
+    }
+
+    /// Have `node` report `ending` once instead, if anything, holding the
+    /// share it holds.
+    fn report(node: &mut Bootstrapper, ending: Option<Ending>) {
+        node.completions = ending
+            .map(|ending| (ending, node.share.clone()))
+            .into_iter()
+            .collect();
+    }
+
+    /// A ceremony dealt by a trusted dealer under `seed` in `mode`, as four
+    /// correct engines would observe it had it succeeded.
+    fn dealt_in(seed: u64, mode: Mode) -> (Bootstrap, BootstrapInfo) {
         let identities = identities();
         let players = Set::from_iter_dedup(identities.iter().map(|signer| signer.public_key()));
         let (output, shares) =
-            deal::<MockGroup, _, N3f1>(TestRng::new(seed), Mode::NonZeroCounter, players.clone())
+            deal::<MockGroup, _, N3f1>(TestRng::new(seed), mode, players.clone())
                 .expect("a trusted deal must succeed");
         let info = successful(output, players);
         let nodes = identities
             .iter()
             .enumerate()
-            .map(|(engine, signer)| Observed {
-                engine,
-                identity: signer.public_key(),
-                ending: Some(Ending::Success(Box::new(info.clone()))),
-                share: shares.get_value(&signer.public_key()).cloned(),
+            .map(|(engine, signer)| {
+                bootstrapper(
+                    engine,
+                    signer.public_key(),
+                    Some(Ending::Success(Box::new(info.clone()))),
+                    shares.get_value(&signer.public_key()).cloned(),
+                )
             })
             .collect();
-        (
-            Ceremony {
-                epoch: Epoch::zero(),
-                nodes,
-            },
-            info,
-        )
+        (Bootstrap { mode, nodes }, info)
+    }
+
+    /// A ceremony dealt by a trusted dealer under `seed`, as four correct
+    /// engines would observe it had it succeeded.
+    fn dealt(seed: u64) -> (Bootstrap, BootstrapInfo) {
+        dealt_in(seed, Mode::NonZeroCounter)
     }
 
     /// A ceremony run through the real dealer and player state machines in
     /// which the identity at `victim` acknowledges no dealing, so every
     /// dealer reveals its share, as the four engines would observe it.
-    fn revealing(victim: usize) -> Ceremony {
+    fn revealing(victim: usize) -> Bootstrap {
         let mut rng = TestRng::new(7);
         let identities = identities();
         let players = Set::from_iter_dedup(identities.iter().map(|signer| signer.public_key()));
@@ -2816,28 +3289,29 @@ mod tests {
             .iter()
             .zip(states)
             .enumerate()
-            .map(|(engine, (signer, player))| Observed {
-                engine,
-                identity: signer.public_key(),
-                ending: Some(Ending::Success(Box::new(info.clone()))),
-                share: Some(
-                    player
-                        .finalize::<N3f1>(&mut rng, logs.clone(), &Sequential)
-                        .expect("every player derives its share")
-                        .1,
-                ),
+            .map(|(engine, (signer, player))| {
+                let share = player
+                    .finalize::<N3f1>(&mut rng, logs.clone(), &Sequential)
+                    .expect("every player derives its share")
+                    .1;
+                bootstrapper(
+                    engine,
+                    signer.public_key(),
+                    Some(Ending::Success(Box::new(info.clone()))),
+                    Some(share),
+                )
             })
             .collect();
-        Ceremony {
-            epoch: Epoch::zero(),
+        Bootstrap {
+            mode: Mode::NonZeroCounter,
             nodes,
         }
     }
 
     #[test]
     fn dealt_ceremony_passes_every_check() {
-        let (ceremony, _) = dealt(1);
-        let counts = check_bootstrap(&ceremony, &committee(), &[]);
+        let (bootstrap, _) = dealt(1);
+        let counts = check_bootstrap(&bootstrap, &committee(), &[]);
         assert_eq!(counts.correct_nodes, 4);
         assert_eq!(counts.completed, 4);
         assert_eq!(counts.successes, 1);
@@ -2850,52 +3324,116 @@ mod tests {
 
     #[test]
     fn incomplete_engines_are_not_compared() {
-        let (mut ceremony, _) = dealt(1);
-        ceremony.nodes[2].ending = None;
-        ceremony.nodes[3].ending = None;
-        ceremony.nodes[3].share = None;
-        let counts = check_bootstrap(&ceremony, &committee(), &[]);
+        let (mut bootstrap, _) = dealt(1);
+        report(&mut bootstrap.nodes[2], None);
+        report(&mut bootstrap.nodes[3], None);
+        hold(&mut bootstrap.nodes[3], None);
+        let counts = check_bootstrap(&bootstrap, &committee(), &[]);
         assert_eq!(counts.completed, 2);
         assert_eq!(counts.agreements, 1);
         assert_eq!(counts.shares, 3);
         assert_eq!(counts.reconstructions, 1);
     }
 
+    /// No engine reported, so the shares are judged without the output: in
+    /// both modes, four shares that carry their holders' positions and four
+    /// quorums of them that recover one signature.
     #[test]
-    fn nothing_completed_checks_nothing() {
-        let (mut ceremony, _) = dealt(1);
-        for node in &mut ceremony.nodes {
-            node.ending = None;
+    fn unreported_shares_are_judged_without_the_output() {
+        for mode in [Mode::NonZeroCounter, Mode::RootsOfUnity] {
+            let (mut bootstrap, _) = dealt_in(1, mode);
+            for node in &mut bootstrap.nodes {
+                report(node, None);
+            }
+            let counts = check_bootstrap(&bootstrap, &committee(), &[]);
+            assert_eq!(counts.completed, 0, "{mode:?}");
+            assert_eq!(counts.successes, 0, "{mode:?}");
+            assert_eq!(counts.shares, 4, "{mode:?}");
+            assert_eq!(counts.reconstructions, 4, "{mode:?}");
         }
-        let counts = check_bootstrap(&ceremony, &committee(), &[]);
-        assert_eq!(counts.successes, 0);
-        assert_eq!(counts.shares, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "I2 violated: engine 1 holds a share of epoch 0 at index \
+                               Participant(2), but its identity is at Some(Participant(1)) in \
+                               the committee")]
+    fn unreported_share_at_another_index_is_rejected() {
+        let (mut bootstrap, _) = dealt(1);
+        for node in &mut bootstrap.nodes {
+            report(node, None);
+        }
+        let share = bootstrap.nodes[2].share.clone();
+        hold(&mut bootstrap.nodes[1], share);
+        check_bootstrap(&bootstrap, &committee(), &[]);
+    }
+
+    #[test]
+    #[should_panic(expected = "I2 violated: engine 1 held two different shares of epoch 0")]
+    fn unreported_shares_that_differ_at_one_engine_are_rejected() {
+        let (mut bootstrap, _) = dealt(1);
+        let (other, _) = dealt(2);
+        for node in &mut bootstrap.nodes {
+            report(node, None);
+        }
+        bootstrap.nodes[1].held.extend(other.nodes[1].share.clone());
+        check_bootstrap(&bootstrap, &committee(), &[]);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "I3 violated: the shares of engines [0, 1, 2] and the shares of \
+                               engines [0, 1, 3] recover different signatures for epoch 0"
+    )]
+    fn unreported_share_of_another_output_is_rejected() {
+        let (mut bootstrap, _) = dealt(1);
+        let (other, _) = dealt(2);
+        for node in &mut bootstrap.nodes {
+            report(node, None);
+        }
+        hold(&mut bootstrap.nodes[2], other.nodes[2].share.clone());
+        check_bootstrap(&bootstrap, &committee(), &[]);
+    }
+
+    /// Without the output, shares no more numerous than a quorum are
+    /// consistent with some output whatever they are: a share of another
+    /// output among three is not found.
+    #[test]
+    fn unreported_shares_of_one_quorum_are_not_compared() {
+        let (mut bootstrap, _) = dealt(1);
+        let (other, _) = dealt(2);
+        for node in &mut bootstrap.nodes {
+            report(node, None);
+        }
+        hold(&mut bootstrap.nodes[2], other.nodes[2].share.clone());
+        bootstrap.nodes.remove(3);
+        let counts = check_bootstrap(&bootstrap, &committee(), &[]);
+        assert_eq!((counts.shares, counts.reconstructions), (3, 1));
     }
 
     #[test]
     #[should_panic(expected = "I1 violated: engines 0 and 2 disagree")]
     fn differing_outputs_are_rejected() {
-        let (mut ceremony, _) = dealt(1);
+        let (mut bootstrap, _) = dealt(1);
         let (other, _) = dealt(2);
-        ceremony.nodes[2].ending = other.nodes[2].ending.clone();
-        check_bootstrap(&ceremony, &committee(), &[]);
+        bootstrap.nodes[2].completions = other.nodes[2].completions.clone();
+        check_bootstrap(&bootstrap, &committee(), &[]);
     }
 
     #[test]
     #[should_panic(expected = "I1 violated: engines 0 and 3 disagree")]
     fn success_against_failure_is_rejected() {
-        let (mut ceremony, _) = dealt(1);
-        ceremony.nodes[3].ending = Some(Ending::Failure);
-        check_bootstrap(&ceremony, &committee(), &[]);
+        let (mut bootstrap, _) = dealt(1);
+        report(&mut bootstrap.nodes[3], Some(Ending::Failure));
+        check_bootstrap(&bootstrap, &committee(), &[]);
     }
 
     #[test]
     #[should_panic(expected = "I1 violated: the output of epoch 0 is not among the committee")]
     fn output_among_other_players_is_rejected() {
-        let (ceremony, _) = dealt(1);
+        let (bootstrap, _) = dealt(1);
         let mut committee = committee();
         committee.pop();
-        check_bootstrap(&ceremony, &committee, &[]);
+        check_bootstrap(&bootstrap, &committee, &[]);
     }
 
     #[test]
@@ -2903,7 +3441,7 @@ mod tests {
     fn output_with_a_sharing_of_another_size_is_rejected() {
         // The committee's output, carrying the public sharing of a deal
         // among seven participants.
-        let (mut ceremony, info) = dealt(1);
+        let (mut bootstrap, info) = dealt(1);
         let wider = Set::from_iter_dedup(
             (0..7).map(|seed| ed25519::PrivateKey::from_seed(seed).public_key()),
         );
@@ -2917,57 +3455,83 @@ mod tests {
         let output = Output::decode_cfg(Bytes::from(forged), &(NZU32!(7), ModeVersion::v1()))
             .expect("the forged output decodes");
         let forged = successful(output, info.players.clone());
-        for node in &mut ceremony.nodes {
-            node.ending = Some(Ending::Success(Box::new(forged.clone())));
+        for node in &mut bootstrap.nodes {
+            report(node, Some(Ending::Success(Box::new(forged.clone()))));
         }
-        check_bootstrap(&ceremony, &committee(), &[]);
+        check_bootstrap(&bootstrap, &committee(), &[]);
     }
 
     #[test]
     #[should_panic(expected = "I1 violated: the successful ceremony of epoch 0 reports outcome")]
     fn output_of_another_epoch_is_rejected() {
-        let (mut ceremony, mut info) = dealt(1);
+        let (mut bootstrap, mut info) = dealt(1);
         info.epoch = Epoch::new(1);
-        for node in &mut ceremony.nodes {
-            node.ending = Some(Ending::Success(Box::new(info.clone())));
+        for node in &mut bootstrap.nodes {
+            report(node, Some(Ending::Success(Box::new(info.clone()))));
         }
-        check_bootstrap(&ceremony, &committee(), &[]);
+        check_bootstrap(&bootstrap, &committee(), &[]);
     }
 
     #[test]
     #[should_panic(expected = "I1 violated: the bootstrap output of epoch 0 names next players")]
     fn output_with_next_players_is_rejected() {
-        let (mut ceremony, mut info) = dealt(1);
+        let (mut bootstrap, mut info) = dealt(1);
         info.next_players = info.players.clone();
-        for node in &mut ceremony.nodes {
-            node.ending = Some(Ending::Success(Box::new(info.clone())));
+        for node in &mut bootstrap.nodes {
+            report(node, Some(Ending::Success(Box::new(info.clone()))));
         }
-        check_bootstrap(&ceremony, &committee(), &[]);
+        check_bootstrap(&bootstrap, &committee(), &[]);
     }
 
     #[test]
     #[should_panic(expected = "I2 violated: engine 1 holds a share of epoch 0 at index")]
     fn share_at_another_index_is_rejected() {
-        let (mut ceremony, _) = dealt(1);
-        ceremony.nodes[1].share = ceremony.nodes[2].share.clone();
-        check_bootstrap(&ceremony, &committee(), &[]);
+        let (mut bootstrap, _) = dealt(1);
+        let share = bootstrap.nodes[2].share.clone();
+        hold(&mut bootstrap.nodes[1], share);
+        check_bootstrap(&bootstrap, &committee(), &[]);
     }
 
     #[test]
     #[should_panic(expected = "I2 violated: the share engine 1 holds for epoch 0 does not match")]
     fn share_of_another_sharing_is_rejected() {
-        let (mut ceremony, _) = dealt(1);
+        let (mut bootstrap, _) = dealt(1);
         let (other, _) = dealt(2);
-        ceremony.nodes[1].share = other.nodes[1].share.clone();
-        check_bootstrap(&ceremony, &committee(), &[]);
+        hold(&mut bootstrap.nodes[1], other.nodes[1].share.clone());
+        check_bootstrap(&bootstrap, &committee(), &[]);
+    }
+
+    /// A share the engine held and later overwrote with its valid one is
+    /// judged like the one it holds.
+    #[test]
+    #[should_panic(expected = "I2 violated: the share engine 2 holds for epoch 0 does not match")]
+    fn overwritten_share_of_another_sharing_is_rejected() {
+        let (mut bootstrap, _) = dealt(1);
+        let (other, _) = dealt(2);
+        let overwritten = other.nodes[2].share.clone().expect("every player is dealt");
+        bootstrap.nodes[2].held.insert(0, overwritten);
+        check_bootstrap(&bootstrap, &committee(), &[]);
     }
 
     #[test]
     #[should_panic(expected = "I2 violated: engine 3 completed the successful ceremony")]
     fn completion_without_a_share_is_rejected() {
-        let (mut ceremony, _) = dealt(1);
-        ceremony.nodes[3].share = None;
-        check_bootstrap(&ceremony, &committee(), &[]);
+        let (mut bootstrap, _) = dealt(1);
+        hold(&mut bootstrap.nodes[3], None);
+        check_bootstrap(&bootstrap, &committee(), &[]);
+    }
+
+    /// An engine that reported the success before it held its share is
+    /// judged at its report, whatever it holds at the end.
+    #[test]
+    #[should_panic(
+        expected = "I2 violated: engine 3 completed the successful ceremony of epoch 0 \
+                               without a share"
+    )]
+    fn report_made_before_the_share_was_held_is_rejected() {
+        let (mut bootstrap, _) = dealt(1);
+        bootstrap.nodes[3].completions[0].1 = None;
+        check_bootstrap(&bootstrap, &committee(), &[]);
     }
 
     // A share that fails I3 also fails I2, which runs first, so this control
@@ -2975,32 +3539,47 @@ mod tests {
     #[test]
     #[should_panic(expected = "I3 violated: the shares of engines [0, 1, 2] do not reconstruct")]
     fn foreign_share_does_not_reconstruct() {
-        let (mut ceremony, info) = dealt(1);
+        let (mut bootstrap, info) = dealt(1);
         let (other, _) = dealt(2);
-        ceremony.nodes[1].share = other.nodes[1].share.clone();
-        check_reconstruction(&ceremony, &info);
+        hold(&mut bootstrap.nodes[1], other.nodes[1].share.clone());
+        check_reconstruction(&bootstrap.ended(), &info);
     }
 
     #[test]
     #[should_panic(expected = "I6 violated: engine 2 holds a share of epoch 0")]
     fn share_after_a_failed_ceremony_is_rejected() {
-        let (mut ceremony, _) = dealt(1);
-        for node in &mut ceremony.nodes {
-            node.ending = Some(Ending::Failure);
-            node.share = None;
+        let (mut bootstrap, _) = dealt(1);
+        for node in &mut bootstrap.nodes {
+            hold(node, None);
+            report(node, Some(Ending::Failure));
         }
         let (other, _) = dealt(1);
-        ceremony.nodes[2].share = other.nodes[2].share.clone();
-        check_bootstrap(&ceremony, &committee(), &[]);
+        hold(&mut bootstrap.nodes[2], other.nodes[2].share.clone());
+        check_bootstrap(&bootstrap, &committee(), &[]);
+    }
+
+    /// A share held during a failed ceremony is a violation even if the
+    /// engine holds none at the end.
+    #[test]
+    #[should_panic(expected = "I6 violated: engine 2 holds a share of epoch 0")]
+    fn share_held_during_a_failed_ceremony_is_rejected() {
+        let (mut bootstrap, _) = dealt(1);
+        for node in &mut bootstrap.nodes {
+            hold(node, None);
+            report(node, Some(Ending::Failure));
+        }
+        let (other, _) = dealt(1);
+        bootstrap.nodes[2].held.extend(other.nodes[2].share.clone());
+        check_bootstrap(&bootstrap, &committee(), &[]);
     }
 
     #[test]
     fn revealed_share_is_accepted() {
         // Every dealer reveals the compromised identity's share, and no
         // correct engine runs as it.
-        let mut ceremony = revealing(2);
-        ceremony.nodes.remove(2);
-        let counts = check_bootstrap(&ceremony, &committee(), &[]);
+        let mut bootstrap = revealing(2);
+        bootstrap.nodes.remove(2);
+        let counts = check_bootstrap(&bootstrap, &committee(), &[]);
         assert_eq!(counts.shares, 3);
         assert_eq!(counts.reconstructions, 1);
     }
@@ -3094,23 +3673,35 @@ mod tests {
         check_root_task::<()>(Err(Box::new("boom")), &[raised(None, "boom")]);
     }
 
-    fn reports(engine: usize, endings: Vec<Ending>) -> Reports {
-        Reports { engine, endings }
+    /// A run in which the engines of `reports` reported, in order, the
+    /// endings each lists, holding no share.
+    fn reports(reports: Vec<(usize, Vec<Ending>)>) -> Bootstrap {
+        let committee = committee();
+        Bootstrap {
+            mode: Mode::NonZeroCounter,
+            nodes: reports
+                .into_iter()
+                .map(|(engine, endings)| Bootstrapper {
+                    engine,
+                    identity: committee[engine].clone(),
+                    completions: endings.into_iter().map(|ending| (ending, None)).collect(),
+                    held: Vec::new(),
+                    share: None,
+                })
+                .collect(),
+        }
     }
 
     #[test]
     fn repeated_reports_that_agree_are_counted() {
         let (_, info) = dealt(1);
         let success = || Ending::Success(Box::new(info.clone()));
-        let comparisons = check_reports_agree(
-            Epoch::zero(),
-            &[
-                reports(0, Vec::new()),
-                reports(1, vec![success()]),
-                reports(2, vec![success(), success(), success()]),
-                reports(3, vec![Ending::Failure, Ending::Failure]),
-            ],
-        );
+        let comparisons = check_reports_agree(&reports(vec![
+            (0, Vec::new()),
+            (1, vec![success()]),
+            (2, vec![success(), success(), success()]),
+            (3, vec![Ending::Failure, Ending::Failure]),
+        ]));
         assert_eq!(comparisons, 3);
     }
 
@@ -3120,16 +3711,13 @@ mod tests {
     fn report_of_another_output_after_a_restart_is_rejected() {
         let (_, info) = dealt(1);
         let (_, other) = dealt(2);
-        check_reports_agree(
-            Epoch::zero(),
-            &[reports(
-                2,
-                vec![
-                    Ending::Success(Box::new(info)),
-                    Ending::Success(Box::new(other)),
-                ],
-            )],
-        );
+        check_reports_agree(&reports(vec![(
+            2,
+            vec![
+                Ending::Success(Box::new(info)),
+                Ending::Success(Box::new(other)),
+            ],
+        )]));
     }
 
     #[test]
@@ -3137,26 +3725,23 @@ mod tests {
                                ceremony of epoch 0 across restarts")]
     fn failure_reported_after_a_success_is_rejected() {
         let (_, info) = dealt(1);
-        check_reports_agree(
-            Epoch::zero(),
-            &[reports(
-                1,
-                vec![
-                    Ending::Success(Box::new(info.clone())),
-                    Ending::Success(Box::new(info)),
-                    Ending::Failure,
-                ],
-            )],
-        );
+        check_reports_agree(&reports(vec![(
+            1,
+            vec![
+                Ending::Success(Box::new(info.clone())),
+                Ending::Success(Box::new(info)),
+                Ending::Failure,
+            ],
+        )]));
     }
 
     #[test]
     #[should_panic(expected = "I9 violated: correct identity")]
     fn block_between_correct_identities_is_rejected() {
-        let (ceremony, _) = dealt(1);
+        let (bootstrap, _) = dealt(1);
         let committee = committee();
         check_bootstrap(
-            &ceremony,
+            &bootstrap,
             &committee,
             &[(committee[1].clone(), committee[2].clone())],
         );
@@ -3164,14 +3749,14 @@ mod tests {
 
     #[test]
     fn blocks_involving_the_compromised_identity_are_accepted() {
-        let (mut ceremony, _) = dealt(1);
-        ceremony.nodes.remove(0);
+        let (mut bootstrap, _) = dealt(1);
+        bootstrap.nodes.remove(0);
         let committee = committee();
         let blocked = [
             (committee[0].clone(), committee[1].clone()),
             (committee[2].clone(), committee[0].clone()),
         ];
-        assert_eq!(check_bootstrap(&ceremony, &committee, &blocked).blocks, 2);
+        assert_eq!(check_bootstrap(&bootstrap, &committee, &blocked).blocks, 2);
     }
 }
 
@@ -3179,21 +3764,24 @@ mod tests {
 mod reshare_tests {
     use super::*;
     use crate::dkg::{
-        COMMITTEE, RESHARE_IDENTITIES, faulty::spare_log, fixtures::identities,
-        reshare_input::Rotation, schedule::directory_of, signers,
+        COMMITTEE, RESHARE_IDENTITIES,
+        faulty::spare_log,
+        fixtures::{identities, resummarized},
+        reshare_input::Rotation,
+        schedule::directory_of,
+        signers,
     };
-    use commonware_codec::{Copying, Encode as _, Read as _};
     use commonware_cryptography::{
         Signer as _,
         bls12381::{
             dkg::feldman_desmedt::{
                 Dealer, Info as Round, Logs, Output, Player, Reveal, deal, observe,
             },
-            primitives::sharing::{Mode, ModeVersion},
+            primitives::sharing::Mode,
         },
         ed25519,
     };
-    use commonware_utils::{FuzzRng, NZU64, TestRng};
+    use commonware_utils::{FuzzRng, N5f1, NZU64, TestRng};
 
     type Shares = Vec<(PublicKey, Share)>;
 
@@ -3492,17 +4080,6 @@ mod reshare_tests {
         info.output = output;
         fixture.boundary(&info, &shares);
         fixture
-    }
-
-    /// `output` with another transcript summary and everything else the same.
-    fn resummarized(output: &Output<MockGroup, PublicKey>) -> Output<MockGroup, PublicKey> {
-        let mut encoded = output.encode().to_vec();
-        encoded[0] ^= 1;
-        Output::read_cfg(
-            &mut Copying(encoded.as_slice()),
-            &(COMMITTEE, ModeVersion::v1()),
-        )
-        .expect("the output still decodes")
     }
 
     #[test]
@@ -3927,6 +4504,98 @@ mod reshare_tests {
             },
         );
         check_reshare(&fixture.reshare, &[]);
+    }
+
+    /// A player registers the epoch as a verifier, which the DKG module never
+    /// does: it registers a player without a share as a member.
+    #[test]
+    #[should_panic(
+        expected = "I2 violated: engine 1 registered the scheme of epoch 1 as a verifier, \
+                               but it is one of the players of the agreed output"
+    )]
+    fn registration_of_a_player_as_a_verifier_is_rejected() {
+        let mut fixture = succeeded(Rotation::Stay);
+        let info = fixture.info();
+        let node = &mut fixture.reshare.nodes[1];
+        node.shares.truncate(1);
+        node.registered[1].1 = SchemeInfo::Verifier {
+            participants: info.output.players().clone(),
+            sharing: info.output.public().clone(),
+        };
+        node.unplayed = vec![Epoch::new(1)];
+        check_reshare(&fixture.reshare, &[]);
+    }
+
+    /// The registrar would build a member's scheme at another player's place.
+    #[test]
+    #[should_panic(
+        expected = "I2 violated: engine 1 registered the scheme of epoch 1 as the member"
+    )]
+    fn registration_as_another_member_is_rejected() {
+        let mut fixture = succeeded(Rotation::Stay);
+        let info = fixture.info();
+        let other = fixture.reshare.nodes[2].identity.clone();
+        let node = &mut fixture.reshare.nodes[1];
+        node.shares.truncate(1);
+        node.registered[1].1 = SchemeInfo::Member {
+            participants: info.output.players().clone(),
+            sharing: info.output.public().clone(),
+            public_key: other,
+        };
+        node.unplayed = vec![Epoch::new(1)];
+        check_reshare(&fixture.reshare, &[]);
+    }
+
+    /// The outside identity registers as a member, which it is not.
+    #[test]
+    #[should_panic(
+        expected = "I2 violated: engine 4 registered the scheme of epoch 1 as the member"
+    )]
+    fn registration_of_an_outsider_as_a_member_is_rejected() {
+        let mut fixture = succeeded(Rotation::Stay);
+        let info = fixture.info();
+        let node = &mut fixture.reshare.nodes[4];
+        node.registered[1].1 = SchemeInfo::Member {
+            participants: info.output.players().clone(),
+            sharing: info.output.public().clone(),
+            public_key: node.identity.clone(),
+        };
+        check_reshare(&fixture.reshare, &[]);
+    }
+
+    /// The engines agree on an output whose sharing needs more shares than
+    /// the quorum of its players, and register it. No scheme can be built
+    /// from it.
+    #[test]
+    #[should_panic(
+        expected = "I2 violated: engine 0 registered a scheme for epoch 1 whose sharing is \
+                               among 4 participants and needs 4 shares, but it names 4 players \
+                               with a quorum of 3"
+    )]
+    fn registration_of_a_sharing_off_the_quorum_is_rejected() {
+        let mut fixture = succeeded(Rotation::Stay);
+        let players = fixture.info().output.players().clone();
+        let (output, shares) =
+            deal::<MockGroup, _, N5f1>(TestRng::new(9), Mode::NonZeroCounter, players)
+                .expect("a trusted deal must succeed");
+        assert_eq!(output.public().required(), 4);
+        let shares = fixture
+            .new
+            .iter()
+            .map(|(player, _)| {
+                let share = shares.get_value(player).expect("every player is dealt");
+                (player.clone(), share.clone())
+            })
+            .collect();
+        let mut info = fixture.info();
+        info.output = output;
+        fixture.boundary(&info, &shares);
+
+        // The output does not keep the group key, which I4 reports before
+        // the registrations are judged, so the registration is checked
+        // directly.
+        let node = &fixture.reshare.nodes[0];
+        check_registration(node, Epoch::new(1), &node.registered[1].1, &info);
     }
 
     #[test]
@@ -4437,6 +5106,9 @@ mod state_sync_tests {
             committed: (0..=tip)
                 .map(|height| (Height::new(height), block(height)))
                 .collect(),
+            endorsed: (1..=tip)
+                .map(|height| (Height::new(height), block(height)))
+                .collect(),
             delivered: (1..=(tip + 1) / EPOCH_LENGTH.get())
                 .map(|epoch| (Epoch::new(epoch), info(epoch)))
                 .collect(),
@@ -4809,15 +5481,116 @@ mod state_sync_tests {
     }
 
     /// A joiner that is ahead of every other engine has nothing to be
-    /// compared with at the heights only it reached.
+    /// compared with at the heights only it was delivered, and the blocks
+    /// there are the others' all the same: their marshals reported them
+    /// finalized.
     #[test]
     fn heights_only_the_joiner_reached_are_not_compared() {
         let mut sync = synced(LATE, FINAL);
         for node in &mut sync.nodes[..JOINER] {
             node.committed.retain(|(height, _)| height.get() < 60);
+            node.endorsed.clear();
             node.delivered.clear();
         }
         assert_eq!(check_agreement_after_sync(&sync), (44, 0));
+    }
+
+    /// A run can end, or the nodes that started at genesis can be down,
+    /// before their marshals hold what the joiner was delivered. Their
+    /// applications built or accepted those blocks before a finalization of
+    /// them could exist, and one such record vouches for a block and for the
+    /// description it carries.
+    #[test]
+    fn blocks_one_source_built_or_accepted_are_accepted() {
+        let mut sync = synced(LATE, FINAL);
+        for node in &mut sync.nodes[..JOINER] {
+            node.committed.retain(|(height, _)| height.get() < 60);
+            node.finalized.retain(|(_, height, _)| height.get() < 60);
+            node.delivered.clear();
+        }
+        for node in &mut sync.nodes[1..JOINER] {
+            node.endorsed.clear();
+        }
+        assert_eq!(check_agreement_after_sync(&sync), (44, 0));
+    }
+
+    /// A block no node that started at genesis has any record of is not
+    /// theirs, whether or not any of them reached its height.
+    #[test]
+    #[should_panic(
+        expected = "at height 50 above its floor, of which no node that started at genesis has \
+                    a record"
+    )]
+    fn block_only_the_joiner_committed_is_rejected() {
+        let mut sync = synced(LATE, FINAL);
+        for node in &mut sync.nodes[..JOINER] {
+            node.committed.retain(|(height, _)| height.get() != 50);
+            node.finalized.retain(|(_, height, _)| height.get() != 50);
+            node.endorsed.retain(|(height, _)| height.get() != 50);
+        }
+        check_agreement_after_sync(&sync);
+    }
+
+    /// The same at the top of the joiner's chain, where no node that started
+    /// at genesis has been delivered anything.
+    #[test]
+    #[should_panic(expected = "of which no node that started at genesis has a record")]
+    fn block_above_every_record_of_the_others_is_rejected() {
+        let mut sync = synced(LATE, FINAL);
+        for node in &mut sync.nodes[..JOINER] {
+            node.committed.retain(|(height, _)| height.get() < 60);
+            node.finalized.retain(|(_, height, _)| height.get() < 60);
+            node.endorsed.retain(|(height, _)| height.get() < 60);
+            node.delivered.clear();
+        }
+        sync.nodes[JOINER].delivered.clear();
+        check_agreement_after_sync(&sync);
+    }
+
+    /// A description no node that started at genesis was delivered, carried
+    /// by a block none of them has a record of, is not theirs.
+    #[test]
+    #[should_panic(
+        expected = "I17 violated: engine 4 committed a description of epoch 2 above its floor \
+                    that no node that started at genesis committed"
+    )]
+    fn description_only_the_joiner_committed_is_rejected() {
+        let mut sync = synced(LATE, FINAL);
+        for node in &mut sync.nodes[..JOINER] {
+            node.delivered.clear();
+            node.committed.retain(|(height, _)| height.get() != FINAL);
+            node.finalized
+                .retain(|(_, height, _)| height.get() != FINAL);
+            node.endorsed.retain(|(height, _)| height.get() != FINAL);
+        }
+        check_agreement_after_sync(&sync);
+    }
+
+    /// A description the joiner holds without the block that carries it is
+    /// not traced to anything.
+    #[test]
+    #[should_panic(
+        expected = "I17 violated: engine 4 committed a description of epoch 3 above its floor \
+                    that no node that started at genesis committed"
+    )]
+    fn description_without_the_block_that_carries_it_is_rejected() {
+        let mut sync = synced(LATE, FINAL);
+        sync.nodes[JOINER].delivered.push((Epoch::new(3), info(3)));
+        check_agreement_after_sync(&sync);
+    }
+
+    /// A block another engine's marshal reported finalized at a height is the
+    /// block the joiner must have been delivered there.
+    #[test]
+    #[should_panic(expected = "and engine 0 finalized block")]
+    fn block_other_than_the_one_another_engine_finalized_is_rejected() {
+        let mut sync = synced(LATE, FINAL);
+        for node in &mut sync.nodes[..JOINER] {
+            node.committed.retain(|(height, _)| height.get() < 60);
+        }
+        let last = sync.nodes[0].finalized.len() - 1;
+        sync.nodes[0].finalized[last].2 = block(1_000);
+        check_agreement_after_sync(&sync);
     }
 
     #[test]
@@ -4829,11 +5602,16 @@ mod state_sync_tests {
         records.committed(Height::new(2), block(2));
         records.committed(Height::new(1), block(1));
         records.committed(Height::new(2), block(2));
+        records.endorsed(Height::new(4), block(4));
+        records.endorsed(Height::new(3), block(3));
+        records.endorsed(Height::new(4), block(4));
         records.stepped(start(None, None, true));
         records.stepped(Step::Entered(material(40)));
 
         // A tip or a block reported again is recorded once, and the blocks
-        // are listed by height and announced as they are delivered.
+        // are listed by height and announced as they are delivered. A block
+        // the application built or accepted again is recorded once, and an
+        // endorsement announces no delivery.
         assert_eq!(
             records.finalizations(),
             vec![(round(3), Height::new(3), block(3))]
@@ -4850,6 +5628,10 @@ mod state_sync_tests {
         assert_eq!(chain.engine, JOINER);
         assert_eq!(chain.finalized, records.finalizations());
         assert_eq!(chain.committed, records.commits());
+        assert_eq!(
+            chain.endorsed,
+            vec![(Height::new(3), block(3)), (Height::new(4), block(4))]
+        );
         assert_eq!(
             chain.steps,
             vec![start(None, None, true), Step::Entered(material(40))]

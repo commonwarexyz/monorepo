@@ -1452,7 +1452,7 @@ mod tests {
     #[test]
     fn replay_is_reproducible() {
         let run = || observed(input(2, ROTATE, 3, 37, after(9, 0), 3, 21));
-        assert_eq!(run(), run());
+        invariants::check_replay(run(), run());
     }
 
     #[test]
@@ -1724,6 +1724,13 @@ mod tests {
         /// Have the joiner report a second description of the newest epoch
         /// it was delivered, with the other outcome.
         Redescribed,
+        /// Have the joiner report a block far above every height of the run,
+        /// of which no other engine has a record.
+        OrphanBlock,
+        /// Have the joiner report a description of an epoch far past the run,
+        /// which no other engine was delivered, without the block that would
+        /// carry it.
+        OrphanDescription,
         /// Hand the joiner's engine a secret store the oracle does not
         /// read, so that no share it stores is on record.
         Unrecorded,
@@ -1811,6 +1818,17 @@ mod tests {
                 Plant::Again => started(synced, true),
                 Plant::Forgotten => started(None, false),
                 Plant::Fork => joined.committed(Height::new(1), Sha256::hash(&[b"planted"])),
+                Plant::OrphanBlock => {
+                    joined.committed(Height::new(1_000), Sha256::hash(&[b"planted"]));
+                }
+                Plant::OrphanDescription => {
+                    let (_, info) = joined
+                        .deliveries()
+                        .pop()
+                        .expect("the joiner was delivered a boundary");
+                    let epoch = Epoch::new(1_000);
+                    joined.delivered(epoch, Info { epoch, ..info });
+                }
                 Plant::Redescribed => {
                     let (epoch, info): (Epoch, Info) = joined
                         .deliveries()
@@ -2056,6 +2074,24 @@ mod tests {
     #[should_panic(expected = "I17 violated: engine 0 committed a description of epoch")]
     fn description_the_others_did_not_commit_is_rejected() {
         planted(Plant::Redescribed);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "at height 1000 above its floor, of which no node that started at genesis has \
+                    a record"
+    )]
+    fn block_only_the_joiner_committed_is_rejected() {
+        planted(Plant::OrphanBlock);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "I17 violated: engine 0 committed a description of epoch 1000 above its floor \
+                    that no node that started at genesis committed"
+    )]
+    fn description_only_the_joiner_committed_is_rejected() {
+        planted(Plant::OrphanDescription);
     }
 
     /// The joiner entered the first epoch through state sync, before the

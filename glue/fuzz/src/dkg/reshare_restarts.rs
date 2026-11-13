@@ -305,9 +305,9 @@ mod tests {
         SecretStore as _,
         types::{EpochOutcome, SchemeInfo},
     };
-    use commonware_p2p::{Blocker as _, block};
+    use commonware_p2p::{Blocker as _, Provider as _, block};
     use commonware_runtime::{Handle, Spawner as _, Supervisor as _};
-    use commonware_utils::{N3f1, TestRng, sync::Mutex};
+    use commonware_utils::{N3f1, TestRng, ordered::Set, sync::Mutex};
     use std::{ops::Range, sync::Arc};
 
     fn input(
@@ -784,6 +784,148 @@ mod tests {
         assert!(run.report.counts.players >= 8, "{}", run.report);
     }
 
+    /// The peer-set id of the second epoch, which the engines track it under.
+    const SECOND_PEER_SET: u64 = 1;
+
+    /// The peer sets one restart found and left the restarted identity.
+    #[derive(Clone, Debug)]
+    struct Rejoined {
+        /// The epoch the engine resumes in, and where its crash found it.
+        crashed: (Epoch, Landing),
+        /// Whether another identity held the peer set of the second epoch as
+        /// its own when the restart began.
+        ahead: bool,
+        /// The peer set of the second epoch the restarted identity held as
+        /// its own when the restart began.
+        before: Option<Set<PublicKey>>,
+        /// The same once the restart had started the engine, before the
+        /// engine ran.
+        after: Option<Set<PublicKey>>,
+        /// The initial set the identity held then.
+        initial: Option<Set<PublicKey>>,
+    }
+
+    /// The cluster, with the peer sets each restart finds and leaves put on
+    /// record.
+    struct Rejoining {
+        cluster: Cluster,
+        /// The starts of each identity's engine so far.
+        starts: Vec<usize>,
+        rejoined: Arc<Mutex<Vec<Rejoined>>>,
+    }
+
+    impl Rejoining {
+        /// The peers of the set `id` the identity at `index` holds as its
+        /// own.
+        async fn held(&self, index: usize, id: u64) -> Option<Set<PublicKey>> {
+            let identity = self.cluster.session.participants[index].clone();
+            let mut manager = self.cluster.oracle.control(identity).socket_manager();
+            manager.peer_set(id).await.map(|peers| peers.primary)
+        }
+    }
+
+    impl Stack for Rejoining {
+        async fn start(&mut self, index: usize) -> Handle<()> {
+            self.starts[index] += 1;
+            if self.starts[index] == 1 {
+                return self.cluster.start(index).await;
+            }
+            let crashed = self.cluster.nodes[index]
+                .crashed
+                .expect("a restart follows a crash");
+            let mut ahead = false;
+            for peer in (0..self.starts.len()).filter(|peer| *peer != index) {
+                ahead |= self.held(peer, SECOND_PEER_SET).await.is_some();
+            }
+            let before = self.held(index, SECOND_PEER_SET).await;
+
+            // Both questions reach the network before the engine started
+            // here has run, so before it tracks anything.
+            let handle = self.cluster.start(index).await;
+            let (after, initial) = futures::join!(
+                self.held(index, SECOND_PEER_SET),
+                self.held(index, reshare_stack::INITIAL_PEER_SET),
+            );
+            self.rejoined.lock().push(Rejoined {
+                crashed,
+                ahead,
+                before,
+                after,
+                initial,
+            });
+            handle
+        }
+
+        fn crashing(&mut self, index: usize) {
+            self.cluster.crashing(index);
+        }
+
+        async fn settled(&mut self, absent: &[bool]) {
+            self.cluster.settled(absent).await;
+        }
+
+        fn follows(&self) -> bool {
+            self.cluster.follows()
+        }
+    }
+
+    /// Run `input` over the cluster through the driver's entry point, and
+    /// return what it measured and the peer sets of each of its restarts.
+    fn rejoining(input: DkgReshareRestartsFuzzInput) -> (ReshareRestartsReport, Vec<Rejoined>) {
+        let rejoined = Arc::new(Mutex::new(Vec::new()));
+        let (report, _, _) = execute(input, |cluster| Rejoining {
+            starts: vec![0; cluster.nodes.len()],
+            cluster,
+            rejoined: Arc::clone(&rejoined),
+        });
+        println!("{report}");
+        let rejoined = rejoined.lock().clone();
+        (report, rejoined)
+    }
+
+    /// The network's initial set: every identity of a run.
+    fn every_identity() -> Set<PublicKey> {
+        Set::from_iter_dedup(fixtures::identities())
+    }
+
+    /// The engine is crashed in the first epoch and stays down while a peer
+    /// enters the second. The peer set an engine tracks for an epoch is its
+    /// own identity's: the identity whose engine is down is not handed the
+    /// second epoch's, and the engine that comes back holds the initial set
+    /// alone until it enters that epoch itself.
+    #[test]
+    fn engine_down_across_a_boundary_is_not_handed_the_epoch_s_peer_set() {
+        let found = fixtures::first(SEEDS, ABREAST, |seed| {
+            let (report, rejoined) = rejoining(input(2, STAY, 1, CLEAN, Vec::new(), seed));
+            let [found] = &rejoined[..] else {
+                return None;
+            };
+            let (epoch, landing) = found.crashed;
+            let in_ceremony = matches!(landing, Landing::Dealing | Landing::Inclusion);
+            (report.outcome == Outcome::Completed
+                && epoch == Epoch::zero()
+                && in_ceremony
+                && found.ahead)
+                .then(|| found.clone())
+        });
+        assert_eq!(found.before, None, "{found:?}");
+        assert_eq!(found.after, None, "{found:?}");
+        assert_eq!(found.initial, Some(every_identity()), "{found:?}");
+    }
+
+    /// The engine is crashed once it has tracked the peer set of the second
+    /// epoch. Its restart takes that set away, with every other set its
+    /// earlier instances tracked, and leaves the identity the initial set.
+    #[test]
+    fn restart_takes_away_the_peer_sets_the_engine_tracked() {
+        let found = fixtures::first(SEEDS, ABREAST, |seed| {
+            let (_, rejoined) = rejoining(input(1, STAY, 1, CLEAN, Vec::new(), seed));
+            rejoined.into_iter().find(|found| found.before.is_some())
+        });
+        assert_eq!(found.after, None, "{found:?}");
+        assert_eq!(found.initial, Some(every_identity()), "{found:?}");
+    }
+
     /// The engine is crashed in the dealing window and stays down while the
     /// other four end the ceremony and the run. Its restart is brought
     /// forward, it applies the rest of the epoch from the chain, and it
@@ -1187,7 +1329,7 @@ mod tests {
     /// entered the third epoch.
     #[test]
     fn crash_after_old_secrets_are_pruned_is_survived() {
-        let run = pinned(2, OUTSIDER, 2001);
+        let run = pinned(2, OUTSIDER, 2602);
         let found = found(&run);
         assert_dropped(&run, &[(PRUNE, Stage::After)]);
         let (second, third) = (Epoch::new(1), Epoch::new(2));
@@ -1343,7 +1485,7 @@ mod tests {
             (report, trace)
         };
         let (report, trace) = run();
-        assert_eq!((report, trace.clone()), run());
+        invariants::check_replay((report, trace.clone()), run());
         let watched = watched(input(2, ROTATE, 3, links, cuts.clone(), 21));
         assert_eq!((watched.report, watched.trace), (report, trace));
     }

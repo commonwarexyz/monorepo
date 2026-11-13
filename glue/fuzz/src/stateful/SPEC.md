@@ -279,7 +279,10 @@ criteria; the checkable predicates are enumerated in §8.
 - **P6 — Search-space isolation.** Adding database-adapter and probe targets MUST NOT change the
   existing Twins or restart targets' input decoding, topology, scheduling, fault model, or safety
   predicates. Shared machinery MAY be refactored only when the existing targets remain behaviorally
-  equivalent and their corpora remain replayable.
+  equivalent. The Twins targets take their prefix from the input (the definition of the prefix,
+  7.1), a control decoded before their fault controls, where they had a fixed prefix of three
+  rounds, and their run end counts past the script's last round (7.1, step 4). No corpus
+  compatibility is promised: no corpus is kept, and every campaign starts from an empty corpus.
 
 ## 5. Files and interfaces
 

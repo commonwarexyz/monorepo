@@ -260,21 +260,38 @@ mod tests {
         assert_eq!(first.raw_bytes, second.raw_bytes);
     }
 
-    /// The bytes past the head of an input are the controls themselves, so a
-    /// byte mutated there changes only what is drawn from it.
+    /// The bytes of an input are the controls themselves, from its first
+    /// byte on, so a byte mutated past the head changes only what is drawn
+    /// from it.
     #[test]
-    fn bytes_past_the_head_are_the_controls() {
+    fn bytes_of_the_input_are_the_controls() {
         let mut bytes = vec![0u8; 24];
         let base = decode(&bytes);
         assert_eq!(base.session.epochs, 1);
+        assert_eq!(base.session.mailbox, 1);
 
-        // The first byte past the head is the first control drawn.
-        bytes[crate::input::SEED_BYTES] = 2;
+        // The first byte is the first control drawn. It is in the head, so
+        // the stream past the input is drawn anew.
+        bytes[0] = 2;
         let changed = decode(&bytes);
         assert_eq!(changed.session.epochs, 3);
         assert_eq!(
             SessionControls {
                 epochs: 1,
+                ..changed.session
+            },
+            base.session
+        );
+        assert_ne!(changed.raw_bytes, base.raw_bytes);
+
+        // The first byte past the head is the ninth control drawn.
+        bytes[0] = 0;
+        bytes[crate::input::SEED_BYTES] = 2;
+        let changed = decode(&bytes);
+        assert_eq!(changed.session.mailbox, 2);
+        assert_eq!(
+            SessionControls {
+                mailbox: 1,
                 ..changed.session
             },
             base.session

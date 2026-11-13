@@ -37,16 +37,19 @@ use super::{
     BOOTSTRAP_RUN_TIMEOUT, DkgBootstrapRestartsFuzzInput, Outcome, PublicKey,
     environment::{self, Landing, Program, Stack, position, processed_height},
     identities,
-    invariants::{self, Ceremony, Counts, Ending, Instance, Observed, Reports},
+    invariants::{self, Bootstrap, Bootstrapper, Counts, Ending, Instance},
     pacing::{PacedCounts, Trace},
     public_keys,
     runner::{self, Report},
     stack,
     store::Secrets,
 };
-use crate::stateful::runner::network_sized;
+use crate::stateful::runner::{Panic, network_sized};
 use commonware_consensus::types::Epoch;
-use commonware_cryptography::{bls12381::primitives::sharing::Mode, ed25519};
+use commonware_cryptography::{
+    bls12381::primitives::{group::Share, sharing::Mode},
+    ed25519,
+};
 use commonware_p2p::simulated::Oracle;
 use commonware_runtime::{Handle, Spawner as _, Supervisor as _, deterministic};
 use commonware_utils::{NZUsize, channel::mpsc, ordered::Set, sync::Mutex};
@@ -167,19 +170,31 @@ fn execute<S: Stack>(
     input: DkgBootstrapRestartsFuzzInput,
     wrap: impl FnOnce(Cluster) -> S,
 ) -> (BootstrapRestartsReport, Trace) {
-    let entropy = input.raw_bytes.clone();
-    let (observed, panics) = runner::execute(entropy.clone(), |context| {
-        run(context, input, entropy, wrap)
-    });
+    measure(observe(input, wrap))
+}
 
+/// Run `input` over the stack `wrap` makes of the cluster of real engines.
+/// Returns what the run observed and every panic it raised.
+fn observe<S: Stack>(
+    input: DkgBootstrapRestartsFuzzInput,
+    wrap: impl FnOnce(Cluster) -> S,
+) -> (Observations, Vec<Panic>) {
+    let entropy = input.raw_bytes.clone();
+    runner::execute(entropy.clone(), |context| {
+        run(context, input, entropy, wrap)
+    })
+}
+
+/// Check what a run observed and the panics it raised. Returns what the run
+/// measured and what its pacing did.
+fn measure((observed, panics): (Observations, Vec<Panic>)) -> (BootstrapRestartsReport, Trace) {
     // Measurement point, outside the runtime so a violation is never caught.
     // No identity is compromised, so no panic is tolerated.
     invariants::check_panics(&panics, &[]);
     let crashes = invariants::check_instances_running(&observed.instances);
-    let repeated_reports =
-        invariants::check_reports_agree(observed.ceremony.epoch, &observed.reports);
+    let repeated_reports = invariants::check_reports_agree(&observed.bootstrap);
     let counts =
-        invariants::check_bootstrap(&observed.ceremony, &observed.committee, &observed.blocked);
+        invariants::check_bootstrap(&observed.bootstrap, &observed.committee, &observed.blocked);
     let report = BootstrapRestartsReport {
         outcome: observed.outcome,
         counts,
@@ -201,11 +216,10 @@ fn execute<S: Stack>(
 /// What a run observed, to be checked once the runtime has stopped.
 struct Observations {
     outcome: Outcome,
-    ceremony: Ceremony,
+    /// What every engine's instances reported and its secret store held.
+    bootstrap: Bootstrap,
     /// The identities the ceremony is among, in identity order.
     committee: Arc<[PublicKey]>,
-    /// What each engine's instances reported.
-    reports: Vec<Reports>,
     /// Every engine instance the run started.
     instances: Vec<Instance>,
     blocked: Vec<(PublicKey, PublicKey)>,
@@ -223,14 +237,18 @@ struct Observations {
     elapsed: Duration,
 }
 
+/// One report of an engine instance: the number of the instance that made
+/// it, how the ceremony ended there, and the share the identity's secret store
+/// held when the report was recorded.
+type Recorded = (usize, Ending, Option<Share>);
+
 /// One identity's engine across its restarts.
 #[derive(Default)]
 struct Node {
     /// Instances of the engine started so far.
     starts: usize,
-    /// The reports of the engine's instances, each with the number of the
-    /// instance that made it, in the order they were made.
-    reports: Arc<Mutex<Vec<(usize, Ending)>>>,
+    /// The reports of the engine's instances, in the order they were made.
+    reports: Arc<Mutex<Vec<Recorded>>>,
 }
 
 /// The cluster of real bootstrap engines: what each identity runs with, kept
@@ -290,7 +308,7 @@ impl Cluster {
                     .reports
                     .lock()
                     .last()
-                    .is_some_and(|(instance, _)| instance + 1 == node.starts)
+                    .is_some_and(|(instance, ..)| instance + 1 == node.starts)
         })
     }
 }
@@ -333,11 +351,15 @@ impl Stack for Cluster {
         // An instance crashed before it reports leaves no record.
         let reports = node.reports.clone();
         let reported = self.reported.clone();
+        let secrets = self.secrets[index].clone();
         drop(node_context.child("completion").spawn(move |_| async move {
             let Ok(completion) = completion.await else {
                 return;
             };
-            reports.lock().push((instance, stack::ending(completion)));
+            let share = secrets.share(Epoch::zero());
+            reports
+                .lock()
+                .push((instance, stack::ending(completion), share));
             let _ = reported.send(());
         }));
         handle
@@ -374,6 +396,7 @@ async fn run<S: Stack>(
     wrap: impl FnOnce(Cluster) -> S,
 ) -> Observations {
     let signers = identities();
+    let mode = input.sharing_mode;
     let link = input.environment.links.link();
     let program = Program::new(&input.environment, entropy, signers.len());
     let cluster = Cluster::new(
@@ -414,36 +437,26 @@ async fn run<S: Stack>(
 
     // Every identity is correct, so every engine is in the records.
     let blocked = runner::blocked(&oracle).await;
-    let reports: Vec<Reports> = reports
+    let nodes = reports
         .iter()
         .enumerate()
-        .map(|(engine, reports)| Reports {
+        .map(|(engine, reports)| Bootstrapper {
             engine,
-            endings: reports
+            identity: participants[engine].clone(),
+            completions: reports
                 .lock()
                 .iter()
-                .map(|(_, ending)| ending.clone())
+                .map(|(_, ending, share)| (ending.clone(), share.clone()))
                 .collect(),
+            held: secrets[engine].held_for(Epoch::zero()),
+            share: secrets[engine].share(Epoch::zero()),
         })
         .collect();
     let last = played.last_restarted().copied();
-    let ceremony = Ceremony {
-        epoch: Epoch::zero(),
-        nodes: reports
-            .iter()
-            .map(|reports| Observed {
-                engine: reports.engine,
-                identity: participants[reports.engine].clone(),
-                ending: reports.endings.first().cloned(),
-                share: secrets[reports.engine].share(Epoch::zero()),
-            })
-            .collect(),
-    };
     Observations {
         outcome: played.outcome,
-        ceremony,
+        bootstrap: Bootstrap { mode, nodes },
         committee: participants,
-        reports,
         followed: played.followed.len(),
         expired: played.expired(),
         after: last.map_or(Duration::ZERO, |last| last.lasted),
@@ -460,18 +473,16 @@ async fn run<S: Stack>(
 mod tests {
     use super::*;
     use crate::dkg::{
-        Cut, CutScope, EnvironmentControls, LinkControls, MockGroup,
+        Cut, CutScope, EnvironmentControls, LinkControls,
         context::EngineContext,
         environment::{CUT_STEP, Event, FOLLOW},
         fixtures::{
-            self, CLEAN, LOSSY, Retaining, Sample, Sampled, Watched, cut, decode, journal, sample,
-            tape,
+            self, CLEAN, LOSSY, Retaining, Sample, Sampled, Watched, cut, decode, forged, journal,
+            sample, tape,
         },
         pacing::{Change, Operation, Partition, Secret, Stage},
     };
-    use commonware_cryptography::bls12381::dkg::feldman_desmedt::deal;
     use commonware_p2p::{Blocker as _, block};
-    use commonware_utils::{N3f1, TestRng};
 
     fn input(
         restarts: u8,
@@ -1096,7 +1107,7 @@ mod tests {
         };
         let run = || execute(input(3, links, cuts.clone(), 21), |cluster| cluster);
         let (report, trace) = run();
-        assert_eq!((report, trace.clone()), run());
+        invariants::check_replay((report, trace.clone()), run());
         let watched = watched(input(3, links, cuts.clone(), 21));
         assert_eq!((watched.report, watched.trace), (report, trace));
     }
@@ -1119,10 +1130,19 @@ mod tests {
     }
 
     /// Run `count` sampled inputs, decoded the way libFuzzer's are, and sum
-    /// what they came to. Every run is checked as libFuzzer's are.
+    /// what they came to. Every run is checked as libFuzzer's are, and once
+    /// more with every report taken out of its records, where the shares
+    /// are judged without the output.
     fn sample(count: usize) -> Sample {
         Sample::of(sample::each(count, |bytes| {
-            let (report, trace) = execute(decode(bytes), |cluster| cluster);
+            let (observed, panics) = observe(decode(bytes), |cluster| cluster);
+            let (mut unreported, committee) =
+                (observed.bootstrap.clone(), observed.committee.clone());
+            let (report, trace) = measure((observed, panics));
+            for node in &mut unreported.nodes {
+                node.completions.clear();
+            }
+            invariants::check_bootstrap(&unreported, &committee, &[]);
             Sampled {
                 outcome: report.outcome,
                 failed: report.counts.completed > 0 && report.counts.successes == 0,
@@ -1185,6 +1205,13 @@ mod tests {
         Swap(usize, usize),
         /// Give this identity a share of an output a trusted dealer dealt.
         Forge(usize),
+        /// Give this identity the share [`Plant::Forge`] gives it, and then
+        /// its own share again, so that it holds its own share and once held
+        /// the other.
+        Overwrite(usize),
+        /// Record the first report of this identity's engine without the
+        /// share the secret store held when the report was recorded.
+        Unheld(usize),
         /// Have the first identity block the second.
         Block(usize, usize),
     }
@@ -1249,17 +1276,19 @@ mod tests {
                     }
                 }
                 Plant::Forge(holder) => {
-                    let (_, shares) = deal::<MockGroup, _, N3f1>(
-                        TestRng::new(1),
-                        Mode::NonZeroCounter,
-                        self.cluster.committee.clone(),
-                    )
-                    .expect("a trusted deal must succeed");
-                    let share = shares
-                        .get_value(&self.cluster.participants[holder])
-                        .expect("every identity is dealt a share")
-                        .clone();
-                    self.cluster.secrets[holder].plant(Epoch::zero(), share);
+                    self.cluster.secrets[holder].plant(Epoch::zero(), forged(holder));
+                }
+                Plant::Overwrite(holder) => {
+                    let secrets = &self.cluster.secrets[holder];
+                    if let Some(share) = secrets.share(Epoch::zero()) {
+                        secrets.plant(Epoch::zero(), forged(holder));
+                        secrets.plant(Epoch::zero(), share);
+                    }
+                }
+                Plant::Unheld(engine) => {
+                    if let Some(first) = self.cluster.nodes[engine].reports.lock().first_mut() {
+                        first.2 = None;
+                    }
                 }
                 Plant::Block(blocker, blocked) => {
                     let participants = &self.cluster.participants;
@@ -1326,6 +1355,98 @@ mod tests {
     #[should_panic(expected = "I2 violated: the share engine 2 holds for epoch 0 does not match")]
     fn share_of_another_output_is_rejected() {
         planted(Plant::Forge(2));
+    }
+
+    /// The share of the other output is overwritten with the engine's own
+    /// before the run ends, so only the record of every share the secret
+    /// store held shows it.
+    #[test]
+    #[should_panic(expected = "I2 violated: the share engine 2 holds for epoch 0 does not match")]
+    fn share_of_another_output_overwritten_before_the_end_is_rejected() {
+        planted(Plant::Overwrite(2));
+    }
+
+    /// Engine 3 holds its share at the end of the run, and is judged at its
+    /// first report by what it held then.
+    #[test]
+    #[should_panic(
+        expected = "I2 violated: engine 3 completed the successful ceremony of epoch 0 \
+                               without a share"
+    )]
+    fn report_recorded_without_a_share_is_rejected() {
+        planted(Plant::Unheld(3));
+    }
+
+    /// Run the input of [`planted`] over the stack `wrap` makes of the
+    /// cluster, take every report out of the records the oracle reads, as a
+    /// run that ends before any instance of any engine has reported leaves
+    /// them, and have `amend` change what else the records hold.
+    fn unreported<S: Stack>(
+        wrap: impl FnOnce(Cluster) -> S,
+        amend: impl FnOnce(&mut Bootstrap),
+    ) -> BootstrapRestartsReport {
+        let (mut observed, panics) = observe(input(1, CLEAN, Vec::new(), 2), wrap);
+        for node in &mut observed.bootstrap.nodes {
+            node.completions.clear();
+        }
+        amend(&mut observed.bootstrap);
+        measure((observed, panics)).0
+    }
+
+    /// With no report on record there is no output to judge the shares
+    /// against, and the four shares the engines hold are judged against the
+    /// committee and against one another.
+    #[test]
+    fn shares_with_no_report_on_record_are_judged() {
+        let report = unreported(|cluster| cluster, |_| {});
+        assert_eq!(report.counts.completed, 0, "{report}");
+        assert_eq!(report.counts.successes, 0, "{report}");
+        assert_eq!(report.counts.shares, 4, "{report}");
+        assert_eq!(report.counts.reconstructions, 4, "{report}");
+    }
+
+    #[test]
+    #[should_panic(expected = "I2 violated: engine 1 holds a share of epoch 0 at index \
+                               Participant(2), but its identity is at Some(Participant(1)) in \
+                               the committee")]
+    fn share_of_another_identity_with_no_report_on_record_is_rejected() {
+        unreported(
+            |cluster| Planted {
+                cluster,
+                plant: Plant::Swap(1, 2),
+            },
+            |_| {},
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "I2 violated: engine 2 held two different shares of epoch 0")]
+    fn second_share_with_no_report_on_record_is_rejected() {
+        unreported(
+            |cluster| Planted {
+                cluster,
+                plant: Plant::Forge(2),
+            },
+            |_| {},
+        );
+    }
+
+    /// Engine 2 is on record as holding only the share of another output,
+    /// at its own index, so I3 is the clause that rejects it.
+    #[test]
+    #[should_panic(
+        expected = "I3 violated: the shares of engines [0, 1, 2] and the shares of \
+                               engines [0, 1, 3] recover different signatures for epoch 0"
+    )]
+    fn share_of_another_output_with_no_report_on_record_is_rejected() {
+        unreported(
+            |cluster| cluster,
+            |bootstrap| {
+                let node = &mut bootstrap.nodes[2];
+                node.held = vec![forged(2)];
+                node.share = Some(forged(2));
+            },
+        );
     }
 
     #[test]

@@ -71,8 +71,10 @@ pub struct DkgReshareFuzzInput {
     /// How the ceremonies, and the trusted deal before them, assign
     /// evaluation points to participants.
     pub sharing_mode: Mode,
-    /// The identity outside the first committee, as a position in identity
-    /// order.
+    /// The identity outside the first committee, as a position among the
+    /// identities other than the compromised one, in identity order, from
+    /// zero to three. The compromised identity is always in the first
+    /// committee.
     pub outsider: u8,
     /// How the player set changes from one epoch's ceremony to the next.
     /// Later epochs keep the last set.
@@ -113,7 +115,7 @@ impl Arbitrary<'_> for DkgReshareFuzzInput {
             epochs: u.int_in_range(1..=MAX_EPOCHS)?,
             masks: u.arbitrary()?,
             sharing_mode: sharing_mode(u)?,
-            outsider: u.int_in_range(0..=RESHARE_IDENTITIES as u8 - 1)?,
+            outsider: u.int_in_range(0..=PEERS as u8 - 1)?,
             rotations: u.arbitrary()?,
             mailbox: mailbox(u)?,
             raw_bytes: tape(u)?,
@@ -149,9 +151,10 @@ mod tests {
         for epochs in 1..=MAX_EPOCHS {
             assert!(any(&|session| session.epochs == epochs));
         }
-        for outsider in 0..RESHARE_IDENTITIES as u8 {
+        for outsider in 0..PEERS as u8 {
             assert!(any(&|session| session.outsider == outsider));
         }
+        assert!(!any(&|session| usize::from(session.outsider) >= PEERS));
         assert!(any(&|session| session.sharing_mode == Mode::RootsOfUnity));
         assert!(any(&|session| session.sharing_mode == Mode::NonZeroCounter));
         assert!(any(&|session| session.masks[0] == DkgMask::WHOLE));

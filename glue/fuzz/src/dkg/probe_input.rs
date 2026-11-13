@@ -20,9 +20,11 @@
 //! - `Replay` delivers a source's response from the identity that is tracked
 //!   and is not a dealer.
 //! - `Truncate` delivers a strict prefix of a source's response from that
-//!   source, and `Fragment` from any identity.
+//!   source, and `Fragment` from another identity: another source, or the
+//!   identity that is not a dealer.
 //! - `Junk` delivers bytes that start with no tag of the probe's wire format.
-//!   Bytes that start with one are not sent.
+//!   The decoder draws no other junk, and bytes that start with a tag, which
+//!   only an input built by hand holds, are not sent.
 //! - `Advance` lets deterministic time pass, possibly across a retry.
 //!
 //! The program is not drawn uniformly. A session that discovers a boundary
@@ -32,7 +34,7 @@
 //! that suits a discovery. Every event kind still occurs within a handful of
 //! short inputs.
 
-use super::input::sharing_mode;
+use super::{input::sharing_mode, invariants::PROBE_TAGS};
 use crate::{
     input::stream,
     stateful::{
@@ -124,6 +126,17 @@ fn origin(u: &mut Unstructured<'_>) -> arbitrary::Result<u8> {
     u.int_in_range(0..=NUM_SOURCES)
 }
 
+/// Draw a sending identity other than the source a selector names: another
+/// source, or the identity that is not a dealer.
+fn other(u: &mut Unstructured<'_>, selector: u8) -> arbitrary::Result<u8> {
+    let origin = u.int_in_range(0..=NUM_SOURCES - 1)?;
+    Ok(if origin < selector % NUM_SOURCES {
+        origin
+    } else {
+        origin + 1
+    })
+}
+
 /// Every order the sources can be released in.
 const ORDERS: [[u8; SOURCES]; 6] = [
     [0, 1, 2],
@@ -193,17 +206,20 @@ fn event(u: &mut Unstructured<'_>, script: &mut Script) -> arbitrary::Result<Pro
             source: response(u)?,
             keep: u.arbitrary()?,
         },
-        29 => ProbeEvent::Fragment {
-            origin: origin(u)?,
-            source: response(u)?,
-            keep: u.arbitrary()?,
-        },
+        29 => {
+            let source = response(u)?;
+            ProbeEvent::Fragment {
+                origin: other(u, source)?,
+                source,
+                keep: u.arbitrary()?,
+            }
+        }
         30 => {
             let len = u.int_in_range(1..=MAX_RAW_PAYLOAD)?;
-            ProbeEvent::Junk {
-                origin: origin(u)?,
-                payload: u.bytes(usize::from(len))?.to_vec(),
-            }
+            let origin = origin(u)?;
+            let mut payload = vec![u.int_in_range(PROBE_TAGS..=u8::MAX)?];
+            payload.extend_from_slice(u.bytes(usize::from(len) - 1)?);
+            ProbeEvent::Junk { origin, payload }
         }
         _ => ProbeEvent::Advance {
             steps: u.int_in_range(1..=MAX_ADVANCE_STEPS)?,
@@ -255,11 +271,12 @@ pub(super) fn drawable(events: &[ProbeEvent]) -> bool {
             | ProbeEvent::Truncate { source, .. } => response(*source),
             ProbeEvent::Duplicate { source } => *source < NUM_SOURCES,
             ProbeEvent::Fragment { origin, source, .. } => {
-                *origin <= NUM_SOURCES && response(*source)
+                *origin <= NUM_SOURCES && *origin != source % NUM_SOURCES && response(*source)
             }
             ProbeEvent::Junk { origin, payload } => {
                 *origin <= NUM_SOURCES
                     && (1..=usize::from(MAX_RAW_PAYLOAD)).contains(&payload.len())
+                    && payload[0] >= PROBE_TAGS
             }
             ProbeEvent::Advance { steps } => (1..=MAX_ADVANCE_STEPS).contains(steps),
         })
@@ -443,9 +460,18 @@ mod tests {
                 source: 0,
                 keep: 0,
             },
+            ProbeEvent::Fragment {
+                origin: 1,
+                source: NUM_SOURCES + 1,
+                keep: 0,
+            },
             ProbeEvent::Junk {
                 origin: 0,
                 payload: Vec::new(),
+            },
+            ProbeEvent::Junk {
+                origin: 0,
+                payload: vec![PROBE_TAGS - 1, 9],
             },
             ProbeEvent::Junk {
                 origin: 0,
@@ -458,6 +484,30 @@ mod tests {
         ] {
             assert!(!drawable(std::slice::from_ref(&event)), "{event:?}");
         }
+    }
+
+    /// A fragment is sent by another identity than the source that built the
+    /// response, and junk starts with no tag of the wire format, in every
+    /// program the decoder draws.
+    #[test]
+    fn fragments_cross_identities_and_junk_has_no_tag() {
+        let (mut fragments, mut junk) = (0, 0);
+        for seed in 0..4_096u16 {
+            for event in decode(&seed.to_le_bytes()).events {
+                match event {
+                    ProbeEvent::Fragment { origin, source, .. } => {
+                        assert_ne!(origin, source % NUM_SOURCES, "{event:?}");
+                        fragments += 1;
+                    }
+                    ProbeEvent::Junk { ref payload, .. } => {
+                        assert!(payload[0] >= PROBE_TAGS, "{event:?}");
+                        junk += 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert!(fragments > 1_000 && junk > 1_000, "{fragments} {junk}");
     }
 
     #[test]

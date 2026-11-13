@@ -636,4 +636,79 @@ mod tests {
             );
         }
     }
+
+    /// A half's vote reaches the identities it addressed that the scenario
+    /// admits at the vote's view: a broadcast reaches all of them, a send to
+    /// some identities those of them it admits, and a send to one identity
+    /// that identity if it is admitted and no one otherwise. Past the script
+    /// every identity is admitted.
+    #[test]
+    fn targeted_votes_reach_only_the_identities_addressed_that_the_scenario_admits() {
+        let identities: Arc<[PublicKey]> = identities().into();
+        let (_, scenario) = select_case(vec![3; 64], identities.len(), 3, false, 5)
+            .expect("the generator yields cases");
+        let (_, script) = TwinsScript::select(vec![3; 64], identities.len(), PREFIX, false, 5)
+            .expect("the generator yields cases");
+        let (forward, _) = Twins::new(identities.clone(), script).simplex(Simplex::Votes);
+        let schemes = committee();
+        let vote = |view: u64| {
+            let proposal = Proposal::new(
+                Round::new(Epoch::new(1), View::new(view)),
+                View::new(view - 1),
+                Sha256::hash(&[b"payload"]),
+            );
+            let notarize = Notarize::sign(&schemes[0], proposal).expect("a signer votes");
+            in_epoch(1, Vote::<Scheme, Digest>::Notarize(notarize).encode())
+        };
+
+        // A scripted view at which one half is kept from some identity.
+        let (view, origin, admitted, excluded) = (1..=scenario.rounds().len() as u64)
+            .flat_map(|view| {
+                let (primary, secondary) =
+                    scenario.partitions(View::new(view), TermLength::ONE, identities.as_ref());
+                [
+                    (SplitOrigin::Primary, primary),
+                    (SplitOrigin::Secondary, secondary),
+                ]
+                .into_iter()
+                .map(move |(origin, partition)| (view, origin, partition))
+            })
+            .find_map(|(view, origin, partition)| {
+                let excluded = identities
+                    .iter()
+                    .find(|identity| !partition.contains(identity))?
+                    .clone();
+                Some((view, origin, partition, excluded))
+            })
+            .expect("the scenario keeps a half from an identity");
+        let message = vote(view);
+
+        assert_eq!(
+            recipients(forward(origin, &Recipients::All, &message)),
+            admitted
+        );
+        assert_eq!(
+            recipients(forward(
+                origin,
+                &Recipients::Some(vec![admitted[0].clone(), excluded.clone()]),
+                &message
+            )),
+            vec![admitted[0].clone()]
+        );
+        assert!(matches!(
+            forward(origin, &Recipients::One(admitted[0].clone()), &message),
+            Some(Recipients::One(peer)) if peer == admitted[0]
+        ));
+        assert!(matches!(
+            forward(origin, &Recipients::One(excluded.clone()), &message),
+            Some(Recipients::Some(peers)) if peers.is_empty()
+        ));
+
+        // Past the script a targeted vote reaches its target.
+        let past = vote(scenario.rounds().len() as u64 + 1);
+        assert!(matches!(
+            forward(origin, &Recipients::One(excluded.clone()), &past),
+            Some(Recipients::One(peer)) if peer == excluded
+        ));
+    }
 }

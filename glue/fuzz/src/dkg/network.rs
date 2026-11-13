@@ -3,9 +3,12 @@
 //! The Simplex, marshal, and dissemination channels follow the twins rule of
 //! [`crate::stateful::network`]: a message that names a view is partitioned by
 //! the scenario for that view, a message that decodes but names none reaches
-//! both halves, and a message that does not decode is dropped. Only the
-//! classification of each channel's messages is defined here, because it
-//! depends on the chain's scheme and block.
+//! both halves, and a message that does not decode is dropped. A half's
+//! message that names a view reaches the identities the half addressed that
+//! the scenario admits ([`Addressing::Narrowed`]): a broadcast reaches every
+//! identity the scenario admits, and a message to one identity it does not
+//! admit reaches no one. Only the classification of each channel's messages
+//! is defined here, because it depends on the chain's scheme and block.
 //!
 //! Which views a scenario partitions is the run's [`TwinsScript`]: the first views
 //! of an epoch, as many as the input's prefix says, or every view.
@@ -18,8 +21,8 @@
 use super::{COMMITTEE, Digest, DkgMask, MockGroup, PublicKey, Side, stack::Endpoint};
 use crate::stateful::{
     network::{
-        Routing, TwinsScript, backfill_routing, certificate_routing, forwarder, router,
-        simplex_resolver_routing, vote_routing,
+        Addressing, Routing, TwinsScript, addressed_forwarder, backfill_routing,
+        certificate_routing, router, simplex_resolver_routing, vote_routing,
     },
     runner::unattributed,
 };
@@ -83,17 +86,19 @@ pub(super) fn halve<F: SplitForwarder<PublicKey>>(
 
 /// Both halves of a channel whose messages `classify` assigns to views, on a
 /// chain whose leader rotates every view: the outbound half and the inbound
-/// half of the twins split under `script`.
+/// half of the twins split under `script`. A half's message that names a view
+/// reaches the identities it addressed that the scenario admits.
 pub(super) fn split(
     participants: Arc<[PublicKey]>,
     script: TwinsScript,
     classify: impl Fn(&IoBuf) -> Routing + Send + Sync + Clone + 'static,
 ) -> (impl SplitForwarder<PublicKey>, impl SplitRouter<PublicKey>) {
     (
-        harness(forwarder(
+        harness(addressed_forwarder(
             participants.clone(),
             script.clone(),
             TERM,
+            Addressing::Narrowed,
             classify.clone(),
         )),
         router(participants, script, TERM, classify),

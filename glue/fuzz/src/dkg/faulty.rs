@@ -18,9 +18,12 @@
 //! Which deviations are armed, and in which rounds one is taken, is drawn once
 //! from the run's tape and then indexed by round, so clones invoked
 //! concurrently agree. The material a deviation proposes is what the
-//! application has seen: the dealer logs of blocks other identities proposed,
-//! the newest epoch description, and one dealer log the harness signs with the
-//! compromised identity's key before the run.
+//! application has seen: the dealer logs other dealers signed, as the blocks
+//! it verified carried them, the newest epoch description, and one dealer log
+//! the harness signs with the compromised identity's key before the run. A
+//! carried log counts as another dealer's only if it verifies, under the
+//! ceremony of the epoch whose block carried it, as signed by a dealer other
+//! than the compromised identity; whoever proposed the block does not matter.
 
 use super::{
     Info, MockGroup, PublicKey, RESHARE_NAMESPACE,
@@ -29,9 +32,9 @@ use super::{
 };
 use crate::stateful::runner::unattributed;
 use commonware_consensus::{
-    Application, CertifiableBlock as _, Heightable as _,
+    Application, Heightable as _,
     marshal::ancestry::Ancestry,
-    types::{EpochPhase, Epocher as _, FixedEpocher, Height, Round},
+    types::{Epoch, EpochPhase, Epocher as _, FixedEpocher, Height, Round},
 };
 use commonware_cryptography::{
     Digested,
@@ -59,7 +62,7 @@ use std::{
 /// Rounds covered by a plan before it repeats.
 const PLAN_ROUNDS: usize = 64;
 
-/// Dealer logs of other proposers the application remembers.
+/// Dealer logs of other dealers the application remembers.
 const REMEMBERED_LOGS: usize = 8;
 
 /// A signed dealer log over the mock group.
@@ -214,11 +217,29 @@ impl Plan {
 
 /// What the application has seen that a deviation may propose.
 struct Seen {
-    /// Dealer logs carried by blocks other identities proposed, oldest first.
-    foreign: Vec<Log>,
+    /// Dealer logs other dealers signed, each with the epoch of the block that
+    /// carried it, oldest first.
+    foreign: Vec<(Epoch, Log)>,
     /// The newest epoch description: the run's first, then each one carried
     /// by a final block.
     info: Info,
+}
+
+/// The ceremony of the epoch `info` describes, whose dealers are the players
+/// of the output it carries, as every engine runs it under `sharing_mode`.
+///
+/// Returns `None` if the description names no valid ceremony.
+fn ceremony(info: &Info, sharing_mode: Mode) -> Option<RoundInfo<MockGroup, PublicKey>> {
+    RoundInfo::new::<N3f1>(
+        RESHARE_NAMESPACE,
+        info.epoch.get(),
+        Some(info.output.clone()),
+        sharing_mode,
+        Reveal::V1,
+        info.output.players().clone(),
+        info.players.clone(),
+    )
+    .ok()
 }
 
 /// A dealer log signed with `signer`'s key for the first ceremony, by a dealer
@@ -232,16 +253,7 @@ pub(super) fn spare_log(
     share: Option<Share>,
     sharing_mode: Mode,
 ) -> Option<Log> {
-    let round = RoundInfo::<MockGroup, PublicKey>::new::<N3f1>(
-        RESHARE_NAMESPACE,
-        genesis.epoch.get(),
-        Some(genesis.output.clone()),
-        sharing_mode,
-        Reveal::V1,
-        genesis.output.players().clone(),
-        genesis.players.clone(),
-    )
-    .ok()?;
+    let round = ceremony(genesis, sharing_mode)?;
     let (dealer, _, _) =
         Dealer::<MockGroup, ed25519::PrivateKey>::start::<N3f1>(rng, round, signer.clone(), share)
             .ok()?;
@@ -255,6 +267,7 @@ pub(super) struct Faulty {
     plan: Plan,
     identity: PublicKey,
     epocher: FixedEpocher,
+    sharing_mode: Mode,
     spare: Option<Log>,
     seen: Arc<Mutex<Seen>>,
     deviations: Arc<AtomicUsize>,
@@ -263,19 +276,21 @@ pub(super) struct Faulty {
 impl Faulty {
     /// The faulty application of `identity`, which follows `plan` from the
     /// epoch `genesis` describes, on a chain of `blocks_per_epoch` blocks per
-    /// epoch.
+    /// epoch whose ceremonies run under `sharing_mode`.
     pub(super) fn new(
         plan: Plan,
         identity: PublicKey,
         genesis: Info,
         spare: Option<Log>,
         blocks_per_epoch: NonZeroU64,
+        sharing_mode: Mode,
     ) -> Self {
         Self {
             inner: App,
             plan,
             identity,
             epocher: FixedEpocher::new(blocks_per_epoch),
+            sharing_mode,
             spare,
             seen: Arc::new(Mutex::new(Seen {
                 foreign: Vec::new(),
@@ -308,13 +323,27 @@ impl Faulty {
         let mut seen = self.seen.lock();
         match block.payload() {
             Some(Payload::DealerLog(log)) => {
-                if block.context().leader == self.identity || seen.foreign.contains(&log) {
+                // A log is another dealer's if it verifies under the
+                // ceremony of the block's epoch as signed by a dealer other
+                // than this identity. The newest description seen is the
+                // only one the application holds, so a log of any other
+                // epoch is not remembered.
+                let Some(epoch) = self.epocher.containing(block.height()).map(|b| b.epoch()) else {
+                    return;
+                };
+                if seen.info.epoch != epoch || seen.foreign.iter().any(|(_, held)| *held == log) {
+                    return;
+                }
+                let signer = ceremony(&seen.info, self.sharing_mode)
+                    .and_then(|round| log.clone().check(&round))
+                    .map(|(dealer, _)| dealer);
+                if signer.is_none_or(|dealer| dealer == self.identity) {
                     return;
                 }
                 if seen.foreign.len() == REMEMBERED_LOGS {
                     seen.foreign.remove(0);
                 }
-                seen.foreign.push(log);
+                seen.foreign.push((epoch, log));
             }
             Some(Payload::EpochInfo(info)) if self.place(block.height()) == Some(Place::Final) => {
                 seen.info = info;
@@ -330,13 +359,22 @@ impl Faulty {
         height: Height,
         selected: Option<BlockPayload>,
     ) -> Option<BlockPayload> {
-        let Some(place) = self.place(height) else {
+        let (Some(place), Some(bounds)) = (self.place(height), self.epocher.containing(height))
+        else {
             return selected;
         };
         let mut seen = self.seen.lock();
+
+        // The other dealers' logs of the ceremony the block belongs to.
+        let current: Vec<Log> = seen
+            .foreign
+            .iter()
+            .filter(|(epoch, _)| *epoch == bounds.epoch())
+            .map(|(_, log)| log.clone())
+            .collect();
         let available = |fault: Fault| match fault {
             Fault::EarlyLog => self.spare.is_some() || !seen.foreign.is_empty(),
-            Fault::ForeignLog => !seen.foreign.is_empty(),
+            Fault::ForeignLog => !current.is_empty(),
             Fault::WrongInfo => matches!(selected, Some(Payload::EpochInfo(_))),
             Fault::MisplacedInfo | Fault::NoPayload => true,
         };
@@ -355,14 +393,12 @@ impl Faulty {
                 let log = seen
                     .foreign
                     .get(variant % choices)
+                    .map(|(_, log)| log)
                     .or(self.spare.as_ref())
                     .expect("an available early log has a source");
                 Some(Payload::DealerLog(log.clone()))
             }
-            Fault::ForeignLog => {
-                let log = &seen.foreign[variant % seen.foreign.len()];
-                Some(Payload::DealerLog(log.clone()))
-            }
+            Fault::ForeignLog => Some(Payload::DealerLog(current[variant % current.len()].clone())),
             Fault::MisplacedInfo => Some(Payload::EpochInfo(seen.info.clone())),
             Fault::WrongInfo => {
                 let Some(Payload::EpochInfo(right)) = selected else {
@@ -463,8 +499,28 @@ mod tests {
             Mode::NonZeroCounter,
         );
         assert!(spare.is_some());
-        let faulty = Faulty::new(plan, signer.public_key(), info.clone(), spare, EPOCH_LENGTH);
+        let faulty = Faulty::new(
+            plan,
+            signer.public_key(),
+            info.clone(),
+            spare,
+            EPOCH_LENGTH,
+            Mode::NonZeroCounter,
+        );
         (faulty, info)
+    }
+
+    /// A dealer log of the first ceremony of `info` that the identity at
+    /// `dealer` signs with its share in `shares`.
+    fn signed_by(dealer: usize, info: &Info, shares: &[Share]) -> Log {
+        spare_log(
+            &mut FuzzRng::new(vec![7]),
+            info,
+            &signers(COMMITTEE.get()).remove(dealer),
+            Some(shares[dealer].clone()),
+            Mode::NonZeroCounter,
+        )
+        .expect("a dealer of the first ceremony signs a log")
     }
 
     fn round(view: u64) -> Round {
@@ -558,28 +614,58 @@ mod tests {
     }
 
     #[test]
-    fn foreign_log_is_one_another_identity_proposed() {
-        let (faulty, _) = application(Plan::always(Fault::ForeignLog));
-        let own = faulty.spare.clone().expect("the fixture signs a spare log");
+    fn foreign_log_is_one_another_dealer_signed() {
+        let (faulty, info) = application(Plan::always(Fault::ForeignLog));
+        let (_, shares) = genesis();
+        let foreign = signed_by(2, &info, &shares);
 
-        // Nothing to propose until another identity's block carried a log,
-        // and the identity's own blocks do not count.
+        // Nothing to propose until a block carried another dealer's log,
+        // whoever proposed the block.
         assert!(faulty.payload(round(1), LATE, None).is_none());
         faulty.remember(&block(
             faulty.identity.clone(),
             LATE.get(),
-            Some(Payload::DealerLog(own.clone())),
+            Some(Payload::DealerLog(foreign.clone())),
+        ));
+        assert!(faulty.payload(round(1), LATE, None) == Some(Payload::DealerLog(foreign)));
+        assert!(faulty.payload(round(1), EARLY, None).is_none());
+    }
+
+    /// The identity's own log is not another dealer's, even in a block
+    /// another identity proposed.
+    #[test]
+    fn own_log_in_another_proposer_s_block_is_not_foreign() {
+        let (faulty, _) = application(Plan::always(Fault::ForeignLog));
+        let own = faulty.spare.clone().expect("the fixture signs a spare log");
+        let other = signers(COMMITTEE.get()).remove(2).public_key();
+        faulty.remember(&block(other, LATE.get(), Some(Payload::DealerLog(own))));
+        assert!(faulty.payload(round(1), LATE, None).is_none());
+    }
+
+    /// A log that does not verify under the ceremony of its block's epoch is
+    /// no dealer's, and a log of one epoch's ceremony is not proposed in
+    /// another epoch.
+    #[test]
+    fn foreign_log_is_one_of_the_block_s_ceremony() {
+        let (faulty, info) = application(Plan::always(Fault::ForeignLog));
+        let (other, shares) = described(6, Epoch::zero());
+        faulty.remember(&block(
+            faulty.identity.clone(),
+            LATE.get(),
+            Some(Payload::DealerLog(signed_by(2, &other, &shares))),
         ));
         assert!(faulty.payload(round(1), LATE, None).is_none());
 
-        let other = signers(COMMITTEE.get()).remove(2).public_key();
+        let (_, shares) = genesis();
+        let foreign = signed_by(3, &info, &shares);
         faulty.remember(&block(
-            other,
+            faulty.identity.clone(),
             LATE.get(),
-            Some(Payload::DealerLog(own.clone())),
+            Some(Payload::DealerLog(foreign.clone())),
         ));
-        assert!(faulty.payload(round(1), LATE, None) == Some(Payload::DealerLog(own)));
-        assert!(faulty.payload(round(1), EARLY, None).is_none());
+        let later = Height::new(EPOCH_LENGTH.get() + LATE.get());
+        assert!(faulty.payload(round(1), later, None).is_none());
+        assert!(faulty.payload(round(1), LATE, None) == Some(Payload::DealerLog(foreign)));
     }
 
     #[test]
