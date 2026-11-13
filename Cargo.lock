@@ -2388,8 +2388,10 @@ name = "commonware-parallel"
 version = "2026.10.0"
 dependencies = [
  "cfg-if",
+ "commonware-allocator",
  "commonware-macros",
  "commonware-utils",
+ "criterion",
  "crossbeam-deque",
  "crossbeam-utils",
  "dashmap",

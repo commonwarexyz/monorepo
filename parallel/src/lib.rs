@@ -1299,6 +1299,7 @@ commonware_macros::stability_scope!(BETA {
         ///
         /// Prefer it to [`sort_by`](Self::sort_by) when equal elements are indistinguishable or
         /// absent. Leaving their order unspecified lets a strategy choose a faster algorithm.
+        /// The chosen algorithm may allocate temporary storage.
         ///
         /// # Examples
         ///
@@ -1454,6 +1455,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     /// pool. It keeps wall-clock and busy-time estimates for each callsite, input-size bucket,
     /// work-size bucket, and planning parallelism, so small inputs can avoid thread-pool scheduling
     /// overhead without disabling parallel execution for larger inputs.
+    /// Unstable sorts also learn whether the stable algorithm is faster, keeping separate
+    /// estimates for each algorithm and execution path.
     ///
     /// Nested calls at the same callsite share estimates across parent paths, so use distinct
     /// callsites (propagating `#[track_caller]` through helpers as needed) to tune them separately.
@@ -1557,6 +1560,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         /// Work the strategy places on a group or on the whole pool.
         Placed,
     }
+
+    /// Smaller sorts use the execution policy without learning an algorithm choice.
+    const MIN_ADAPTIVE_SORT_LEN: usize = 256;
 
     impl Rayon {
         /// Builds the pool from `builder` and groups its workers by last-level cache domain as
@@ -1701,7 +1707,20 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
 
             let caller = Location::caller();
             let own = self.current_placement();
-            let pools = match (own, body) {
+            let pools = self.run_pools(own, body);
+            let plan = policy.choose_run(caller, len, work, self.parallelism, pools);
+            let (result, sample) = self.execute_plan(own, body, plan, run);
+
+            // An error can skip work and bias the estimates down.
+            if let (Some(sample), Ok(_)) = (sample, &result) {
+                policy.record_run(caller, len, work, self.parallelism, plan, sample);
+            }
+            result
+        }
+
+        /// The placements available to this caller's body.
+        fn run_pools(&self, own: Option<rayon::Placement>, body: Body) -> policy::Pools {
+            match (own, body) {
                 (Some(rayon::Placement::Local(_)), _) => {
                     policy::Pools::Fixed(policy::Placement::Local)
                 }
@@ -1714,9 +1733,17 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 (None, Body::Group | Body::Placed) => {
                     policy::Pools::Fixed(policy::Placement::Local)
                 }
-            };
-            let plan = policy.choose_run(caller, len, work, self.parallelism, pools);
+            }
+        }
 
+        /// Execute a chosen plan under its placement, returning a sample only when requested.
+        fn execute_plan<R>(
+            &self,
+            own: Option<rayon::Placement>,
+            body: Body,
+            plan: policy::RunPlan,
+            run: impl FnOnce(policy::RunExecution, rayon::Placement) -> R,
+        ) -> (R, Option<policy::RunSample>) {
             // Resolve where the body runs, holding a lease on the groups it uses until the body
             // returns.
             let mut lease = None;
@@ -1767,14 +1794,12 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             };
             drop(lease);
 
-            // Record only successful runs. An error can skip work and bias the estimates down.
-            if let (Some(start), Ok(_)) = (start, &result) {
+            let sample = start.map(|start| {
                 let wall = start.elapsed();
                 let busy = busy.unwrap_or(wall);
-                let sample = policy::RunSample { wall, busy };
-                policy.record_run(caller, len, work, self.parallelism, plan, sample);
-            }
-            result
+                policy::RunSample { wall, busy }
+            });
+            (result, sample)
         }
 
         /// Sorts `items` by `compare` with `serial`, or with `parallel` on the workers of the
@@ -2339,6 +2364,56 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             T: Send,
             C: Fn(&T, &T) -> Ordering + Send + Sync,
         {
+            if let Some(policy) = &self.policy
+                && items.len() >= MIN_ADAPTIVE_SORT_LEN
+                && core::mem::size_of::<T>() != 0
+            {
+                let caller = Location::caller();
+                let len = items.len();
+                let own = self.current_placement();
+                let policy::Pools::Fixed(placement) = self.run_pools(own, Body::Group) else {
+                    unreachable!("sorts use a fixed placement")
+                };
+                let plan = policy.choose_sort(
+                    caller,
+                    len,
+                    core::mem::size_of::<T>(),
+                    self.parallelism,
+                    placement,
+                );
+                let (_, sample) = self.execute_plan(
+                    own,
+                    Body::Group,
+                    plan.run,
+                    |execution, placement| match execution {
+                        policy::RunExecution::Serial => match plan.algorithm {
+                            policy::SortAlgorithm::Unstable => items.sort_unstable_by(compare),
+                            policy::SortAlgorithm::Stable => items.sort_by(compare),
+                        },
+                        policy::RunExecution::Parallel => {
+                            self.groups.pool().install_in(placement, || match plan.algorithm {
+                                policy::SortAlgorithm::Unstable => {
+                                    rayon::par_quicksort(items, |a, b| compare(a, b) == Ordering::Less)
+                                }
+                                policy::SortAlgorithm::Stable => {
+                                    rayon::par_mergesort(items, |a, b| compare(a, b) == Ordering::Less)
+                                }
+                            })
+                        }
+                    },
+                );
+                if let Some(sample) = sample {
+                    policy.record_sort(
+                        caller,
+                        len,
+                        core::mem::size_of::<T>(),
+                        self.parallelism,
+                        plan,
+                        sample,
+                    );
+                }
+                return;
+            }
             self.sort_with(
                 items,
                 compare,
@@ -2359,6 +2434,9 @@ mod test {
     use crate::{
         Grid, MAX_UNITS, Rayon, Sequential, Strategy,
         mocks::Explorer,
+        policy::{
+            Placement as PolicyPlacement, RunExecution, RunPlan, RunSample, SortAlgorithm, SortPlan,
+        },
         rayon::{self, Placement, ThreadPoolBuilder},
     };
     use commonware_utils::{
@@ -2940,9 +3018,29 @@ mod test {
             }
 
             // The policy timed the sorts only on the group, and it kept its home in domain 0.
-            let (wide, local) = policy
-                .run_placement_estimates(site, 1024, 1024, strategy.parallelism)
-                .unwrap();
+            let (wide, local) = if unstable {
+                let parallel = |placement| {
+                    policy
+                        .sort_estimates(
+                            site,
+                            1024,
+                            size_of::<u64>(),
+                            strategy.parallelism,
+                            placement,
+                        )
+                        .unwrap()
+                        .into_iter()
+                        .find_map(|(_, parallel)| parallel)
+                };
+                (
+                    parallel(crate::policy::Placement::Wide),
+                    parallel(crate::policy::Placement::Local),
+                )
+            } else {
+                policy
+                    .run_placement_estimates(site, 1024, 1024, strategy.parallelism)
+                    .unwrap()
+            };
             assert_eq!(
                 wide, None,
                 "a sort from outside the pool must not be timed on the whole pool"
@@ -5037,6 +5135,139 @@ mod test {
 
         assert_eq!(policy_len(&strategy), 1);
         assert_eq!(policy_len(&clone), 1);
+    }
+
+    #[test]
+    fn adaptive_sort_executes_each_path() {
+        #[track_caller]
+        fn check(strategy: &Rayon, algorithm: SortAlgorithm, execution: RunExecution) {
+            let caller = Location::caller();
+            let policy = strategy.policy.as_ref().unwrap();
+            let len = 1024;
+            for candidate in [SortAlgorithm::Unstable, SortAlgorithm::Stable] {
+                for mode in [RunExecution::Serial, RunExecution::Parallel] {
+                    let wall =
+                        Duration::from_nanos(if candidate == algorithm && mode == execution {
+                            10
+                        } else {
+                            100
+                        });
+                    policy.record_sort(
+                        caller,
+                        len,
+                        size_of::<(usize, usize)>(),
+                        strategy.parallelism,
+                        SortPlan {
+                            algorithm: candidate,
+                            run: RunPlan {
+                                execution: mode,
+                                placement: PolicyPlacement::Local,
+                                measure: true,
+                            },
+                        },
+                        RunSample { wall, busy: wall },
+                    );
+                }
+            }
+
+            let mut items: Vec<_> = (0..len).rev().map(|i| (i % 32, i)).collect();
+            let mut stable = items.clone();
+            stable.sort_by_key(|&(key, _)| key);
+            let on_worker = AtomicBool::new(false);
+            strategy.sort_unstable_by(&mut items, |a, b| {
+                on_worker.fetch_or(strategy.current_placement().is_some(), Ordering::Relaxed);
+                a.0.cmp(&b.0)
+            });
+            assert_eq!(
+                on_worker.load(Ordering::Relaxed),
+                execution == RunExecution::Parallel
+            );
+            assert!(items.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+            if algorithm == SortAlgorithm::Stable {
+                assert_eq!(items, stable);
+            }
+            items.sort_unstable();
+            stable.sort_unstable();
+            assert_eq!(items, stable);
+            assert_eq!(policy.sort_len(), 1);
+            assert_eq!(policy_len(strategy), 0);
+        }
+
+        for algorithm in [SortAlgorithm::Unstable, SortAlgorithm::Stable] {
+            for execution in [RunExecution::Serial, RunExecution::Parallel] {
+                check(&parallel_strategy(), algorithm, execution);
+            }
+        }
+    }
+
+    #[test]
+    fn adaptive_sort_panic_does_not_train_or_hold_a_group() {
+        #[track_caller]
+        fn sort(strategy: &Rayon, fail: bool, caller: &mut Option<&'static Location<'static>>) {
+            *caller = Some(Location::caller());
+            let mut items: Vec<u64> = (0..1024).rev().collect();
+            strategy.sort_unstable_by(&mut items, |a, b| {
+                assert!(!fail, "comparator failure");
+                a.cmp(b)
+            });
+            assert_eq!(items, (0..1024).collect::<Vec<_>>());
+        }
+
+        let strategy = synthetic(&[2, 2]);
+        let policy = strategy.policy.as_ref().unwrap();
+        let mut caller = None;
+        let mut attempt = |fail| {
+            let result =
+                panic::catch_unwind(AssertUnwindSafe(|| sort(&strategy, fail, &mut caller)));
+            (result, caller.unwrap())
+        };
+        for fail in [true, false] {
+            let (result, site) = attempt(fail);
+            assert_eq!(result.is_err(), fail);
+            let estimates = policy
+                .sort_estimates(
+                    site,
+                    1024,
+                    size_of::<u64>(),
+                    strategy.parallelism,
+                    crate::policy::Placement::Local,
+                )
+                .unwrap();
+            assert_eq!(
+                estimates
+                    .iter()
+                    .all(|&(serial, parallel)| serial.is_none() && parallel.is_none()),
+                fail
+            );
+            let report = strategy.groups.describe();
+            assert!(
+                report.lines().all(|line| line.contains("in_flight 0")),
+                "{report}"
+            );
+        }
+    }
+
+    #[test]
+    fn adaptive_sort_one_worker_and_fixed_strategies() {
+        fn sort(strategy: &Rayon) {
+            let mut items: Vec<u64> = (0..1024).rev().collect();
+            strategy.sort_unstable_by(&mut items, |a, b| a.cmp(b));
+            assert_eq!(items, (0..1024).collect::<Vec<_>>());
+        }
+
+        let strategy = Rayon::new(ThreadPoolBuilder::new(NZUsize!(1))).unwrap();
+        sort(&strategy);
+        let clone = strategy.clone();
+        sort(&clone);
+        assert_eq!(strategy.policy.as_ref().unwrap().sort_len(), 1);
+        assert_eq!(clone.policy.as_ref().unwrap().sort_len(), 1);
+        let other = parallel_strategy();
+        sort(&other.without_policy());
+        assert_eq!(other.policy.as_ref().unwrap().sort_len(), 0);
+        let mut small = [3, 1, 2];
+        other.sort_unstable_by(&mut small, |a, b| a.cmp(b));
+        assert_eq!(small, [1, 2, 3]);
+        assert_eq!(other.policy.as_ref().unwrap().sort_len(), 0);
     }
 
     #[test]
