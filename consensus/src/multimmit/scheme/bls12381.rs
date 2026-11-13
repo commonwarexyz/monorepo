@@ -90,6 +90,7 @@ pub mod da_aggregate {
 pub mod nullify {
     use crate::multimmit::{
         checkpoint,
+        faults::N5f1Nullification,
         scheme::{Namespace, NullifySubject},
     };
     use commonware_cryptography::{
@@ -101,7 +102,7 @@ pub mod nullify {
         certificate::{self, AssemblyError, Attestation, Membership, Verification},
     };
     use commonware_parallel::Strategy;
-    use commonware_utils::{faults::N5f1Nullification, iter::NonEmpty, ordered::Set};
+    use commonware_utils::{iter::NonEmpty, ordered::Set};
     use rand_core::CryptoRng;
 
     /// BLS12-381 threshold nullification scheme at the `2f+1` quorum.
