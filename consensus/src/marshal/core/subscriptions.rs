@@ -48,6 +48,9 @@ impl<V: Variant> Subscriptions<V> {
     }
 
     /// Returns whether a caller waiting for `commitment` requested it from peers.
+    ///
+    /// Includes closed callers until [`Self::retain_open`] removes them. This keeps speculative
+    /// demand from sharing a request that pending cancellation can remove.
     pub(super) fn fetching(&self, commitment: &V::Commitment) -> bool {
         self.entries
             .get(commitment)

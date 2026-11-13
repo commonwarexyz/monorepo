@@ -6433,6 +6433,11 @@ mod tests {
             );
         }
 
+        /// Returns whether an automatic delivery awaits [`Self::wait_for_delivery_response`].
+        fn delivered(&self) -> bool {
+            !self.delivery_responses.lock().is_empty()
+        }
+
         /// Returns whether marshal accepted the newest automatic delivery.
         async fn wait_for_delivery_response(&self) -> bool {
             let response = self
@@ -6627,6 +6632,9 @@ mod tests {
         }
     }
 
+    /// Returns once marshal has removed the callers and leases canceled before this call. Marshal
+    /// removes them at the start of a loop turn, so the helper makes two mailbox round trips, and
+    /// the second shows that a turn started after the first.
     async fn prune_canceled(mailbox: &Mailbox<S, Standard<B>>) {
         let _ = mailbox.get_processed().await;
         let _ = mailbox.get_processed().await;
@@ -10161,6 +10169,13 @@ mod tests {
                     handle.await
                 }),
             ))
+        }
+
+        async fn has(
+            &self,
+            digest: &<Self::Block as Digestible>::Digest,
+        ) -> Result<bool, Self::Error> {
+            self.inner.has(digest).await
         }
 
         async fn get(
@@ -14587,6 +14602,71 @@ mod tests {
         });
     }
 
+    /// Local gap repair of a prefetched parent retires its speculative request and frees the only
+    /// slot for the next leased commitment.
+    #[test_traced("WARN")]
+    fn test_standard_local_gap_repair_retires_speculative_fetch() {
+        const PARTITION: &str = "local-gap-repair-retires-prefetch";
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (mut mailbox, resolver, buffer, application, _actor) =
+                start_capped_actor(&context, PARTITION, &schemes, NZUsize!(1)).await;
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "held genesis acknowledgement",
+                || application.pending_ack_heights() == vec![Height::zero()],
+            )
+            .await;
+
+            // A lease on the parent and a later commitment fills the only slot with the parent's
+            // request.
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let parent = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let child = make_raw_block(parent.digest(), Height::new(2), 101);
+            let next = Sha256::hash(&[b"prefetch after locally repaired parent"]);
+            let mut lease = mailbox.prefetch(Arc::from([parent.digest(), next]), 0..2);
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "speculative parent fetch",
+                || resolver.active_subscription(parent.digest()).is_some(),
+            )
+            .await;
+            assert_eq!(buffer.commitment_subscription_count(), 0);
+
+            // Speculation registers no buffer wait, so canonical repair must retire its resolver
+            // request when the parent becomes available locally.
+            buffer.insert(parent.clone());
+            buffer.insert(child.clone());
+            let finalized_parent = mailbox.finalized(parent.height());
+            report_finalized(
+                &mut mailbox,
+                &schemes,
+                Round::new(Epoch::zero(), View::new(2)),
+                View::new(1),
+                child.digest(),
+            )
+            .await;
+            assert_eq!(finalized_parent.await.unwrap().digest(), parent.digest());
+
+            // The freed slot goes to the next commitment, and the lease stays open.
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "local repair releases speculative capacity",
+                || resolver.active_subscription(next).is_some(),
+            )
+            .await;
+            assert!(
+                resolver.active_subscription(parent.digest()).is_none(),
+                "local repair must retire the parent's speculative request",
+            );
+            assert!(matches!(lease.try_recv(), Err(TryRecvError::Empty)));
+        });
+    }
+
     /// Gap repair that archives a block from a buffer without notifications answers the callers
     /// already waiting for its commitment and cancels the request the acquiring caller owned.
     #[test_traced("WARN")]
@@ -14715,6 +14795,196 @@ mod tests {
             assert!(resolver.active_subscription(commitment).is_none());
             assert!(buffer.commitment_subscription_closed(0));
             assert_eq!(resolver.subscriptions(commitment), 1);
+        });
+    }
+
+    /// An acquire takes over an active speculative request, and a lease never keeps a dropped
+    /// direct caller's request alive. Only a request's current owner can cancel it.
+    #[test_traced("WARN")]
+    fn test_standard_prefetch_direct_transfer_preserves_cancellation_ownership() {
+        const PARTITION: &str = "prefetch-direct-transfer";
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (mailbox, resolver, buffer, application, _actor) =
+                start_capped_actor(&context, PARTITION, &schemes, NZUsize!(1)).await;
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "held genesis acknowledgement",
+                || application.pending_ack_heights() == vec![Height::zero()],
+            )
+            .await;
+            let _ = mailbox.get_processed().await;
+
+            // With one slot, a two-body lease activates its first commitment and queues the second.
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let first = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let first_key = handler::Key::Block(first.digest());
+            let second = Sha256::hash(&[b"queued behind first prefetch"]);
+            let second_key = handler::Key::Block(second);
+            let old = mailbox.prefetch(Arc::from([first.digest(), second]), 0..2);
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "first speculative request",
+                || {
+                    resolver
+                        .active_fetches()
+                        .iter()
+                        .any(|fetch| fetch.key == first_key)
+                },
+            )
+            .await;
+            assert!(
+                !resolver
+                    .fetches()
+                    .iter()
+                    .any(|fetch| fetch.key == second_key)
+            );
+
+            // A direct acquire takes over the first request and frees the slot for the second.
+            // A later lease on the first commitment issues no new request.
+            let mut direct = mailbox.acquire(first.digest());
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "direct claim releases speculative capacity",
+                || {
+                    resolver
+                        .active_fetches()
+                        .iter()
+                        .any(|fetch| fetch.key == second_key)
+                },
+            )
+            .await;
+            let duplicate = mailbox.prefetch(Arc::from([first.digest()]), 0..1);
+            let _ = mailbox.get_processed().await;
+            assert_eq!(
+                resolver
+                    .fetches()
+                    .iter()
+                    .filter(|fetch| fetch.key == first_key)
+                    .count(),
+                1
+            );
+
+            // Closing both leases retires the second request. The first request belongs to the
+            // direct caller and stays active.
+            drop(old);
+            drop(duplicate);
+            prune_canceled(&mailbox).await;
+            assert!(
+                !resolver
+                    .active_fetches()
+                    .iter()
+                    .any(|fetch| fetch.key == second_key),
+                "closed leases must release their speculative request"
+            );
+            assert!(matches!(direct.try_recv(), Err(TryRecvError::Empty)));
+            assert!(!buffer.commitment_subscription_closed(0));
+
+            // The direct caller receives the body through the request it took over.
+            let fetch = resolver
+                .active_fetches()
+                .into_iter()
+                .find(|fetch| fetch.key == first_key)
+                .expect("old leases must not cancel the direct request");
+            assert_eq!(fetch.subscriber, handler::Annotation::Subscription);
+            deliver_acquisition_test_block(&resolver, fetch, &first).await;
+            select! {
+                result = direct => assert_eq!(result.unwrap().digest(), first.digest()),
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("direct caller must receive its block");
+                },
+            }
+
+            // A lease on a commitment that a direct caller already fetches issues no new request.
+            let inverse = Sha256::hash(&[b"direct before speculative lease"]);
+            let inverse_key = handler::Key::Block(inverse);
+            let direct = mailbox.acquire(inverse);
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "inverse direct request",
+                || {
+                    resolver
+                        .active_fetches()
+                        .iter()
+                        .any(|fetch| fetch.key == inverse_key)
+                },
+            )
+            .await;
+            let old = mailbox.prefetch(Arc::from([inverse]), 0..1);
+            let _ = mailbox.get_processed().await;
+            assert_eq!(
+                resolver
+                    .fetches()
+                    .iter()
+                    .filter(|fetch| fetch.key == inverse_key)
+                    .count(),
+                1
+            );
+
+            // A best-effort lease cannot extend a direct caller's lifetime.
+            drop(direct);
+            prune_canceled(&mailbox).await;
+            assert!(
+                !resolver
+                    .active_fetches()
+                    .iter()
+                    .any(|fetch| fetch.key == inverse_key),
+                "a lease must not keep a dropped caller's request"
+            );
+            assert!(
+                buffer
+                    .commitment_subscriptions
+                    .lock()
+                    .iter()
+                    .all(|sender| sender.is_closed())
+            );
+
+            // A later lease requests the commitment again and owns its cancellation. Dropping the
+            // older lease leaves the renewed request active.
+            let mut renewed = mailbox.prefetch(Arc::from([inverse]), 0..1);
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "renewed speculative request",
+                || {
+                    resolver
+                        .active_fetches()
+                        .iter()
+                        .any(|fetch| fetch.key == inverse_key)
+                },
+            )
+            .await;
+            assert_eq!(
+                resolver
+                    .fetches()
+                    .iter()
+                    .filter(|fetch| fetch.key == inverse_key)
+                    .count(),
+                2
+            );
+            drop(old);
+            prune_canceled(&mailbox).await;
+            assert!(
+                resolver
+                    .active_fetches()
+                    .iter()
+                    .any(|fetch| fetch.key == inverse_key)
+            );
+            assert!(matches!(renewed.try_recv(), Err(TryRecvError::Empty)));
+            drop(renewed);
+            prune_canceled(&mailbox).await;
+            assert!(
+                !resolver
+                    .active_fetches()
+                    .iter()
+                    .any(|fetch| fetch.key == inverse_key),
+                "the renewed lease must cancel its own request"
+            );
         });
     }
 
@@ -15231,6 +15501,8 @@ mod tests {
         }
     }
 
+    /// Starts a marshal actor on prunable stores whose speculative capacity is `max_repair`,
+    /// with a recording resolver and buffer and an application that holds acknowledgements.
     async fn start_capped_actor(
         context: &deterministic::Context,
         partition: &str,
@@ -15258,6 +15530,401 @@ mod tests {
             (resolver_rx, resolver.clone()),
         );
         (mailbox, resolver, buffer, application, handle)
+    }
+
+    /// A wait-only subscriber receives a ready prefetched body without consuming it, so a later
+    /// acquire needs no fetch. The subscriber registers before or after the body arrives.
+    #[test_traced("WARN")]
+    fn test_standard_wait_only_subscriber_preserves_prefetch() {
+        const PARTITION: &str = "wait-only-subscriber-prefetch";
+        for subscribe_first in [true, false] {
+            deterministic::Runner::timed(Duration::from_secs(30)).start(
+                move |mut context| async move {
+                    let Fixture { schemes, .. } = bls12381_threshold_vrf::fixture::<V, _>(
+                        &mut context,
+                        NAMESPACE,
+                        NUM_VALIDATORS,
+                    );
+                    let (mailbox, resolver, _, application, _actor) =
+                        start_capped_actor(&context, PARTITION, &schemes, NZUsize!(1)).await;
+                    assert_eq!(application.acknowledged().await, Height::zero());
+
+                    let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+                    let block = make_raw_block(genesis.digest(), Height::new(1), 100);
+                    let commitment = block.digest();
+
+                    // A wait-only subscriber receives the prefetched body whether it registers
+                    // before or after the delivery.
+                    let waiter = subscribe_first.then(|| mailbox.subscribe(commitment));
+                    resolver.respond_to_next_fetch(block.encode());
+                    let _lease = mailbox.prefetch(Arc::from([commitment]), 0..1);
+                    wait_until(
+                        &context,
+                        Duration::from_secs(1),
+                        "prefetched body delivered",
+                        || resolver.delivered(),
+                    )
+                    .await;
+                    assert!(resolver.wait_for_delivery_response().await);
+                    let waiter = waiter.unwrap_or_else(|| mailbox.subscribe(commitment));
+                    assert_eq!(waiter.await.expect("waiter must wake").digest(), commitment);
+                    assert_eq!(resolver.fetches().len(), 1);
+
+                    // A later acquire finds the same body without another fetch.
+                    let acquired = mailbox.acquire(commitment);
+                    let _ = mailbox.get_processed().await;
+                    assert_eq!(
+                        resolver.fetches().len(),
+                        1,
+                        "acquire must reuse the prefetched body without another fetch"
+                    );
+                    select! {
+                        result = acquired => {
+                            assert_eq!(result.expect("acquire must resolve").digest(), commitment);
+                        },
+                        _ = context.sleep(Duration::from_secs(1)) => {
+                            panic!("acquire must find the prefetched body");
+                        },
+                    }
+                },
+            );
+        }
+    }
+
+    /// A speculative fetch that finds its body only in the buffer keeps it in the reserved
+    /// slot, so a later exact acquisition needs no peer fetch after the buffer evicts it.
+    #[test_traced("WARN")]
+    fn test_standard_prefetch_retains_buffer_hit_after_eviction() {
+        const PARTITION: &str = "prefetch-retains-buffer-hit";
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (mailbox, resolver, buffer, application, _actor) =
+                start_capped_actor(&context, PARTITION, &schemes, NZUsize!(1)).await;
+            assert_eq!(application.acknowledged().await, Height::zero());
+
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let block = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let commitment = block.digest();
+
+            // The buffer serves the body once, then evicts it.
+            buffer.insert_transient(block);
+            let _lease = mailbox.prefetch(Arc::from([commitment]), 0..1);
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "prefetch consumed the buffered body",
+                || !buffer.contains(commitment),
+            )
+            .await;
+
+            // An acquire takes the body from its slot without a peer fetch.
+            let acquired = mailbox.acquire(commitment);
+            let _ = mailbox.get_processed().await;
+            assert!(
+                resolver.fetches().is_empty(),
+                "acquire must reuse the buffered prefetch without a peer fetch"
+            );
+            select! {
+                result = acquired => {
+                    assert_eq!(result.expect("acquire must resolve").digest(), commitment);
+                },
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("acquire must find the prefetched body");
+                },
+            }
+        });
+    }
+
+    /// Stored bodies and later local writes release speculative capacity without an acquire.
+    /// Pruned writes must preserve the Ready body when storage cannot serve it.
+    #[test_traced("WARN")]
+    fn test_standard_prefetch_durable_body_does_not_occupy_slot() {
+        for (writer, pruned) in [
+            ("stored", false),
+            ("verified", false),
+            ("proposed", false),
+            ("certified", false),
+            ("notarization", false),
+            ("verified", true),
+        ] {
+            deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+                let Fixture { schemes, .. } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let partition = format!("prefetch-durable-{writer}-{pruned}");
+                let (mut mailbox, resolver, buffer, application, _actor) =
+                    start_capped_actor(&context, &partition, &schemes, NZUsize!(1)).await;
+                assert_eq!(application.acknowledged().await, Height::zero());
+
+                let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+                if pruned {
+                    // Processing two newer rounds prunes the old candidate's round.
+                    let mut parent = genesis.digest();
+                    for height in 1..=2 {
+                        let block = make_raw_block(parent, Height::new(height), height);
+                        parent = block.digest();
+                        buffer.insert(block.clone());
+                        let round = Round::new(Epoch::zero(), View::new(19 + height));
+                        let finalization = StandardHarness::make_finalization(
+                            Proposal::new(round, View::zero(), block.digest()),
+                            &schemes,
+                            QUORUM,
+                        );
+                        StandardHarness::report_finalization(&mut mailbox, finalization).await;
+                        assert_eq!(application.acknowledged().await, Height::new(height));
+                        wait_until(
+                            &context,
+                            Duration::from_secs(1),
+                            "processed finalization",
+                            || parse_processed_height(&context.encode()) == Some(height),
+                        )
+                        .await;
+                    }
+                }
+
+                // A lease on a body and its missing child holds the only slot. The body is already
+                // stored, or the buffer serves it once.
+                let stored = make_raw_block(genesis.digest(), Height::new(3), 100);
+                let missing = make_raw_block(stored.digest(), Height::new(4), 200);
+                let round = Round::new(Epoch::zero(), View::new(1));
+                if writer == "stored" {
+                    assert!(mailbox.verified(round, ready(stored.clone())).await);
+                    buffer.insert(stored.clone());
+                } else {
+                    buffer.insert_transient(stored.clone());
+                }
+                let _lease = mailbox.prefetch(Arc::from([stored.digest(), missing.digest()]), 0..2);
+
+                // After the lease consumes the buffered body, the writer under test hands it to
+                // marshal.
+                if writer != "stored" {
+                    wait_until(
+                        &context,
+                        Duration::from_secs(1),
+                        "prefetch consumed transient body",
+                        || !buffer.contains(stored.digest()),
+                    )
+                    .await;
+                    assert!(resolver.fetches().is_empty());
+                    match writer {
+                        "verified" => assert!(mailbox.verified(round, ready(stored.clone())).await),
+                        "proposed" => {
+                            let (ack, persisted) = oneshot::channel();
+                            mailbox.proposed(round, ready(stored.clone()), Recipients::All, ack);
+                            assert!(persisted.await.unwrap().durable(round, "proposed").await);
+                        }
+                        "certified" => {
+                            assert!(mailbox.certified(round, ready(stored.clone())).await)
+                        }
+                        "notarization" => {
+                            let notarization = StandardHarness::make_notarization(
+                                Proposal::new(round, View::zero(), stored.digest()),
+                                &schemes,
+                                QUORUM,
+                            );
+                            StandardHarness::report_notarization(&mut mailbox, notarization).await;
+                            let _ = mailbox.get_processed().await;
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+
+                // A pruned write stores nothing, so the ready body keeps its slot and serves the
+                // acquire. Any other write frees the slot for the missing child.
+                if pruned {
+                    assert!(
+                        mailbox.get_block(&stored.digest()).await.is_none(),
+                        "a pruned write must not store the body"
+                    );
+                    context.sleep(Duration::from_millis(100)).await;
+                    assert!(
+                        resolver.fetches().is_empty(),
+                        "a pruned write must keep the only ready body"
+                    );
+                    let acquired = mailbox.acquire(stored.digest());
+                    let _ = mailbox.get_processed().await;
+                    assert!(
+                        !resolver
+                            .fetches()
+                            .iter()
+                            .any(|fetch| fetch.key == handler::Key::Block(stored.digest())),
+                        "acquire must not fetch the retained body from peers"
+                    );
+                    select! {
+                        result = acquired => assert_eq!(result.unwrap().digest(), stored.digest()),
+                        _ = context.sleep(Duration::from_secs(1)) => {
+                            panic!("the ready body must survive a pruned {writer} write");
+                        },
+                    }
+                } else {
+                    wait_until(
+                        &context,
+                        Duration::from_secs(1),
+                        "durable body releases the only speculative slot",
+                        || resolver.active_subscription(missing.digest()).is_some(),
+                    )
+                    .await;
+                }
+
+                // No path fetches the local body from peers.
+                assert!(
+                    !resolver
+                        .fetches()
+                        .iter()
+                        .any(|fetch| fetch.key == handler::Key::Block(stored.digest())),
+                    "a local body must not be fetched from peers ({writer}, pruned={pruned})"
+                );
+            });
+        }
+    }
+
+    /// Only active speculative demand owns a resolver request. A body that arrives while the
+    /// request is active cancels it, whether it comes from local ingress or from the resolver.
+    /// Retiring queued or completed demand needs no resolver cancellation.
+    #[test_traced("WARN")]
+    fn test_standard_prefetch_demand_cancels_resolver_only_while_active() {
+        const PARTITION: &str = "prefetch-cancels-only-active";
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (mailbox, resolver, buffer, application, _actor) =
+                start_capped_actor(&context, PARTITION, &schemes, NZUsize!(1)).await;
+            assert_eq!(application.acknowledged().await, Height::zero());
+
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let active_fetch = |key| {
+                resolver.active_fetches().into_iter().find(|fetch| {
+                    fetch.key == key && fetch.subscriber == handler::Annotation::Subscription
+                })
+            };
+
+            // A body ingested locally while its speculative request is active retires that
+            // request. Consuming the completed body afterwards needs no cancellation.
+            let local = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let local_key = handler::Key::Block(local.digest());
+            let _local_lease = mailbox.prefetch(Arc::from([local.digest()]), 0..1);
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "active local prefetch",
+                || active_fetch(local_key).is_some(),
+            )
+            .await;
+            let retains = resolver.retain_count();
+            let round = Round::new(Epoch::zero(), View::new(1));
+            assert!(mailbox.verified(round, ready(local.clone())).await);
+            assert_eq!(resolver.retain_count(), retains + 1);
+            assert!(active_fetch(local_key).is_none());
+            assert_eq!(
+                mailbox.acquire(local.digest()).await.unwrap().digest(),
+                local.digest()
+            );
+            assert_eq!(resolver.retain_count(), retains + 1);
+
+            // A resolver delivery cancels the active request it answers. A local body for queued
+            // demand, a local re-ingest of the completed body, and its consumption then leave the
+            // resolver untouched.
+            let completed = make_raw_block(local.digest(), Height::new(2), 200);
+            let queued = make_raw_block(completed.digest(), Height::new(3), 300);
+            let ready_key = handler::Key::Block(completed.digest());
+            let queued_key = handler::Key::Block(queued.digest());
+            let _lease = mailbox.prefetch(Arc::from([completed.digest(), queued.digest()]), 0..2);
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "active ready prefetch",
+                || active_fetch(ready_key).is_some(),
+            )
+            .await;
+            assert!(
+                !resolver
+                    .fetches()
+                    .iter()
+                    .any(|fetch| fetch.key == queued_key)
+            );
+            let retains = resolver.retain_count();
+            let fetch = active_fetch(ready_key).unwrap();
+            deliver_acquisition_test_block(&resolver, fetch, &completed).await;
+            assert_eq!(resolver.retain_count(), retains + 1);
+            assert!(active_fetch(ready_key).is_none());
+            let retains = resolver.retain_count();
+            let round = Round::new(Epoch::zero(), View::new(3));
+            assert!(mailbox.verified(round, ready(queued.clone())).await);
+            assert_eq!(
+                resolver.retain_count(),
+                retains,
+                "a local body for queued demand must not cancel requests"
+            );
+            let round = Round::new(Epoch::zero(), View::new(2));
+            assert!(mailbox.verified(round, ready(completed.clone())).await);
+            assert_eq!(
+                resolver.retain_count(),
+                retains,
+                "re-ingesting a completed body must not cancel requests"
+            );
+            assert_eq!(
+                mailbox.acquire(completed.digest()).await.unwrap().digest(),
+                completed.digest()
+            );
+            assert_eq!(
+                resolver.retain_count(),
+                retains,
+                "consuming a completed body must not cancel requests"
+            );
+            assert!(
+                !resolver
+                    .fetches()
+                    .iter()
+                    .any(|fetch| fetch.key == queued_key)
+            );
+
+            // An acquire can find a newly buffered body while its peer request is still
+            // active. It must cancel that request and release the slot for queued demand.
+            let buffered = make_raw_block(queued.digest(), Height::new(4), 400);
+            let next = make_raw_block(buffered.digest(), Height::new(5), 500);
+            let buffered_key = handler::Key::Block(buffered.digest());
+            let next_key = handler::Key::Block(next.digest());
+            let fetches = resolver.fetches().len();
+            let _buffered_lease =
+                mailbox.prefetch(Arc::from([buffered.digest(), next.digest()]), 0..2);
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "active buffered prefetch",
+                || active_fetch(buffered_key).is_some(),
+            )
+            .await;
+            assert_eq!(resolver.fetches().len(), fetches + 1);
+            assert!(active_fetch(next_key).is_none());
+            let retains = resolver.retain_count();
+            buffer.insert(buffered.clone());
+            assert_eq!(
+                mailbox.acquire(buffered.digest()).await.unwrap().digest(),
+                buffered.digest()
+            );
+            assert_eq!(resolver.retain_count(), retains + 1);
+            assert!(active_fetch(buffered_key).is_none());
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "buffered acquire releases the speculative slot",
+                || active_fetch(next_key).is_some(),
+            )
+            .await;
+            let recorded = resolver.fetches();
+            assert_eq!(recorded.len(), fetches + 2);
+            for key in [buffered_key, next_key] {
+                assert_eq!(
+                    recorded.iter().filter(|fetch| fetch.key == key).count(),
+                    1,
+                    "each commitment must be fetched exactly once"
+                );
+            }
+            assert_eq!(resolver.retain_count(), retains + 1);
+        });
     }
 
     /// Builds `block`'s finalization in the view equal to its height, parented by the view below.
@@ -15317,6 +15984,306 @@ mod tests {
                 .expect("finalized delivery must receive a verdict"),
             Outcome::Resolved(Resolution::Complete)
         );
+    }
+
+    /// A finalized delivery satisfies speculative demand in every phase. It cancels an active
+    /// request, retires queued demand without the resolver, and frees a ready body's slot once
+    /// canonical storage holds the body.
+    #[test_traced("WARN")]
+    fn test_standard_finalized_delivery_satisfies_prefetch_demand() {
+        const PARTITION: &str = "finalized-prefetch-demand";
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (mailbox, resolver, _, application, _actor) =
+                start_capped_actor(&context, PARTITION, &schemes, NZUsize!(1)).await;
+            assert_eq!(application.acknowledged().await, Height::zero());
+            let finalization = |block: &B| finalize_test_block(&schemes, block);
+            let active = |block: &B| resolver.active_subscription(block.digest());
+            let fetched = |block: &B| resolver.subscriptions(block.digest()) > 0;
+
+            // A lease over three heights activates the first in the only slot and queues the rest.
+            let anchor = make_raw_block(Sha256::hash(&[b"predecessor"]), Height::new(5), 500);
+            let next = make_raw_block(anchor.digest(), Height::new(6), 600);
+            let queued = make_raw_block(next.digest(), Height::new(7), 700);
+            let lease = mailbox.prefetch(
+                Arc::from([anchor.digest(), next.digest(), queued.digest()]),
+                0..3,
+            );
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "active anchor prefetch",
+                || active(&anchor).is_some(),
+            )
+            .await;
+
+            // A finalized delivery of the first body as the floor anchor cancels its active request
+            // and frees the slot.
+            let canonical = mailbox.finalized(anchor.height());
+            mailbox.set_floor(finalization(&anchor));
+            mailbox.hint_finalized(anchor.height(), NonEmptyVec::new(participants[1].clone()));
+            let _ = mailbox.get_processed().await;
+            deliver_finalized_test_block(&resolver, finalization(&anchor), &anchor).await;
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Absent(Height::new(4)))
+            );
+            assert_eq!(canonical.await.unwrap().digest(), anchor.digest());
+            assert!(
+                active(&anchor).is_none(),
+                "finalized anchor must cancel active exact demand"
+            );
+            assert!(resolver.active_fetches().iter().any(|fetch| {
+                fetch.key
+                    == handler::Key::Finalized {
+                        height: anchor.height(),
+                    }
+                    && fetch.subscriber == handler::Annotation::Height(anchor.height())
+            }));
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "anchor releases prefetch slot",
+                || active(&next).is_some(),
+            )
+            .await;
+
+            // Queued demand owns no resolver request, so a finalized body retires it locally.
+            assert!(!fetched(&queued));
+            mailbox.hint_finalized(queued.height(), NonEmptyVec::new(participants[1].clone()));
+            let _ = mailbox.get_processed().await;
+            let retains = resolver.retain_count();
+            deliver_finalized_test_block(&resolver, finalization(&queued), &queued).await;
+            let _ = mailbox.get_processed().await;
+            assert_eq!(
+                resolver.retain_count(),
+                retains,
+                "a finalized body for queued demand must not cancel requests"
+            );
+            assert!(!fetched(&queued));
+
+            // Closing the lease cancels the next height's request.
+            drop(lease);
+            prune_canceled(&mailbox).await;
+            assert!(active(&next).is_none());
+
+            // A delivered body occupies capacity until canonical storage claims it.
+            let completed = make_raw_block(queued.digest(), Height::new(8), 800);
+            let tail = make_raw_block(completed.digest(), Height::new(9), 900);
+            let _lease = mailbox.prefetch(Arc::from([completed.digest(), tail.digest()]), 0..2);
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "ready body prefetch",
+                || active(&completed).is_some(),
+            )
+            .await;
+            let fetch = active(&completed).unwrap();
+            deliver_acquisition_test_block(&resolver, fetch, &completed).await;
+            let _ = mailbox.get_processed().await;
+            assert!(!fetched(&tail));
+            mailbox.hint_finalized(
+                completed.height(),
+                NonEmptyVec::new(participants[1].clone()),
+            );
+            let _ = mailbox.get_processed().await;
+            let retains = resolver.retain_count();
+            deliver_finalized_test_block(&resolver, finalization(&completed), &completed).await;
+            let _ = mailbox.get_processed().await;
+            assert_eq!(
+                resolver.retain_count(),
+                retains,
+                "a finalized body for ready demand must not cancel requests"
+            );
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "canonical storage releases ready slot",
+                || active(&tail).is_some(),
+            )
+            .await;
+            assert!(!fetched(&queued));
+            assert_eq!(
+                mailbox.acquire(completed.digest()).await.unwrap().digest(),
+                completed.digest()
+            );
+            assert_eq!(resolver.retain_count(), retains);
+        });
+    }
+
+    /// A forward range fetches through its own window of `max_repair` bodies while an unrelated
+    /// lease fills the shared speculative capacity, and the window advances only as its head is
+    /// consumed.
+    #[test_traced("WARN")]
+    fn test_standard_ranges_use_max_repair_with_parked_leases() {
+        const LENGTH: u64 = 10;
+        for max_repair in [NZUsize!(1), NZUsize!(3)] {
+            deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+                let Fixture { schemes, .. } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let partition = format!("range-window-{max_repair}");
+                let (finalizations, stored) = prunable_finalized_stores(&context, &partition).await;
+                let mut config = test_config(
+                    &partition,
+                    ConstantProvider::new(schemes[0].clone()),
+                    NZUsize!(1),
+                );
+                config.max_repair = max_repair;
+                let (actor, mailbox, _) =
+                    Actor::init(context.child("actor"), finalizations, stored, config).await;
+                let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+                let (application, started) = HoldingBlockReporter::new();
+                let _actor = actor.start(
+                    application,
+                    RecordingBuffer::default(),
+                    (resolver_rx, resolver.clone()),
+                );
+                assert_eq!(started.await.unwrap(), Height::zero());
+                let _ = mailbox.get_processed().await;
+
+                // An unrelated lease fills the shared speculative capacity. The selected range must
+                // still fetch through its own window of `max_repair` bodies.
+                let parked: Arc<[_]> = (0..max_repair.get())
+                    .map(|index| Sha256::hash(&[b"parked dependency", &index.to_be_bytes()]))
+                    .collect();
+                let parked_keys: Vec<_> = parked.iter().copied().map(handler::Key::Block).collect();
+                let mut lease = mailbox.prefetch(parked, 0..max_repair.get());
+                wait_until(&context, Duration::from_secs(1), "parked prefetch", || {
+                    resolver.active_fetches().len() == max_repair.get()
+                })
+                .await;
+
+                // A range over an anchored history of unstored blocks requests the lowest
+                // `max_repair` bodies.
+                let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+                let mut selected = vec![genesis.digest()];
+                let blocks: Vec<_> = (1..=LENGTH)
+                    .map(|height| {
+                        let block =
+                            make_raw_block(*selected.last().unwrap(), Height::new(height), height);
+                        selected.push(block.digest());
+                        block
+                    })
+                    .collect();
+                let source = mailbox.blocks_with_parent(
+                    Height::new(LENGTH),
+                    *selected.last().unwrap(),
+                    History::anchored(selected),
+                );
+                let mut range = source.range(Height::new(1)..=Height::new(LENGTH));
+                assert!(range.next().now_or_never().is_none());
+                let _ = mailbox.get_processed().await;
+                let fetched_keys = || {
+                    resolver
+                        .fetches()
+                        .iter()
+                        .map(|fetch| fetch.key)
+                        .collect::<Vec<_>>()
+                };
+                let mut expected = parked_keys.clone();
+                expected.extend(
+                    blocks[..max_repair.get()]
+                        .iter()
+                        .map(|block| handler::Key::Block(block.digest())),
+                );
+                assert_eq!(fetched_keys(), expected);
+                assert_eq!(
+                    resolver
+                        .active_fetches()
+                        .iter()
+                        .map(|fetch| fetch.key)
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+
+                // Completed positions still occupy the window until the head
+                // is consumed, even when their bodies arrive in reverse order.
+                for block in blocks[1..max_repair.get()].iter().rev() {
+                    let fetch = resolver
+                        .active_fetches()
+                        .into_iter()
+                        .find(|fetch| fetch.key == handler::Key::Block(block.digest()))
+                        .expect("selected request must exist");
+                    deliver_acquisition_test_block(&resolver, fetch, block).await;
+                    assert!(range.next().now_or_never().is_none());
+                    let _ = mailbox.get_processed().await;
+                    assert_eq!(fetched_keys(), expected);
+                }
+                assert!(range.next().now_or_never().is_none());
+                let _ = mailbox.get_processed().await;
+                assert_eq!(fetched_keys(), expected);
+
+                // Delivering the head lets the range yield the whole window. The window then
+                // advances by `max_repair` bodies.
+                let head = &blocks[0];
+                let fetch = resolver
+                    .active_fetches()
+                    .into_iter()
+                    .find(|fetch| fetch.key == handler::Key::Block(head.digest()))
+                    .expect("head request must exist");
+                deliver_acquisition_test_block(&resolver, fetch, head).await;
+                assert_eq!(range.next().await.unwrap().unwrap().digest(), head.digest());
+                let _ = mailbox.get_processed().await;
+                assert_eq!(fetched_keys(), expected);
+                for block in &blocks[1..max_repair.get()] {
+                    assert_eq!(
+                        range
+                            .next()
+                            .now_or_never()
+                            .unwrap()
+                            .unwrap()
+                            .unwrap()
+                            .digest(),
+                        block.digest()
+                    );
+                }
+                assert!(range.next().now_or_never().is_none());
+                let next_key = handler::Key::Block(blocks[max_repair.get()].digest());
+                wait_until(
+                    &context,
+                    Duration::from_secs(1),
+                    "range window advances",
+                    || {
+                        resolver
+                            .active_fetches()
+                            .iter()
+                            .any(|fetch| fetch.key == next_key)
+                    },
+                )
+                .await;
+                let _ = mailbox.get_processed().await;
+                expected.extend(
+                    blocks[max_repair.get()..2 * max_repair.get()]
+                        .iter()
+                        .map(|block| handler::Key::Block(block.digest())),
+                );
+                assert_eq!(fetched_keys(), expected);
+
+                // Dropping the range cancels its own requests but not the parked lease's.
+                drop(range);
+                prune_canceled(&mailbox).await;
+                assert_eq!(
+                    resolver
+                        .active_fetches()
+                        .iter()
+                        .map(|fetch| fetch.key)
+                        .collect::<Vec<_>>(),
+                    parked_keys
+                );
+                assert!(matches!(lease.try_recv(), Err(TryRecvError::Empty)));
+                drop(lease);
+                prune_canceled(&mailbox).await;
+                assert!(resolver.active_fetches().is_empty());
+                assert_eq!(fetched_keys(), expected);
+            });
+        }
     }
 
     /// A range over locally stored blocks that its consumer stops polling decodes at most a window
