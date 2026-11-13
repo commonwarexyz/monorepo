@@ -417,6 +417,45 @@ stability_scope!(BETA {
             Fut: Future<Output = T> + Send + 'static,
             T: Send + 'static;
 
+        /// Spawn a task whose future need not be [Send] on a dedicated thread.
+        ///
+        /// `f` runs on the thread that polls the task, and the future it returns is polled and
+        /// dropped only on that thread, so only `f` (and its output) must be [Send]. This allows
+        /// a long-lived task to hold `Rc`, `RefCell` or borrowed state across `.await` points.
+        ///
+        /// The task runs as if spawned with [Spawner::dedicated] and [Spawner::spawn], with the
+        /// same supervision. A runtime whose dedicated tasks can move between threads panics
+        /// when such a task is polled from a thread other than the one that first polled it.
+        ///
+        /// # Examples
+        ///
+        /// ```rust
+        /// use commonware_runtime::{Runner, Spawner, deterministic};
+        /// use std::{cell::RefCell, rc::Rc};
+        ///
+        /// deterministic::Runner::default().start(|context| async move {
+        ///     let handle = context.spawn_pinned(|_| {
+        ///         let state = Rc::new(RefCell::new(0));
+        ///         async move {
+        ///             commonware_runtime::reschedule().await;
+        ///             *state.borrow_mut() += 1;
+        ///             *state.borrow()
+        ///         }
+        ///     });
+        ///     assert_eq!(handle.await.unwrap(), 1);
+        /// });
+        /// ```
+        fn spawn_pinned<F, Fut, T>(self, f: F) -> Handle<T>
+        where
+            Self: Sized,
+            F: FnOnce(Self) -> Fut + Send + 'static,
+            Fut: Future<Output = T> + 'static,
+            T: Send + 'static,
+        {
+            self.dedicated()
+                .spawn(move |context| utils::Pinned::new(move || f(context)))
+        }
+
         /// Signals the runtime to stop execution and waits for all outstanding tasks
         /// to perform any required cleanup and exit.
         ///
@@ -2359,6 +2398,59 @@ mod tests {
 
             // Ensure waker is registered
             reschedule().await;
+        });
+    }
+
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default()))]
+    fn test_spawn_pinned<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Spawner + Clock,
+    {
+        runner.start(|context| async move {
+            let handle = context.child("pinned").spawn_pinned(move |context| {
+                // Built on the task's thread and held across awaits.
+                let built = std::thread::current().id();
+                let state = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+                async move {
+                    state.borrow_mut().push(1);
+                    context.sleep(Duration::from_millis(1)).await;
+                    assert_eq!(std::thread::current().id(), built);
+                    let child = context.child("child").spawn(|_| async move { 2 });
+                    let value = child.await.unwrap();
+                    state.borrow_mut().push(value);
+                    assert_eq!(std::thread::current().id(), built);
+                    state.borrow().clone()
+                }
+            });
+            assert_eq!(handle.await.unwrap(), vec![1, 2]);
+        });
+    }
+
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default()))]
+    fn test_spawn_pinned_abort<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Spawner + Clock,
+    {
+        runner.start(|context| async move {
+            let (dropped_tx, dropped_rx) = oneshot::channel::<()>();
+            let handle = context.child("pinned").spawn_pinned(move |_| {
+                let guard = std::rc::Rc::new(dropped_tx);
+                async move {
+                    let _guard = guard;
+                    futures::future::pending::<()>().await;
+                }
+            });
+            context.sleep(Duration::from_millis(1)).await;
+            handle.abort();
+            // The future, and the sender it holds, is dropped on its own thread.
+            assert!(dropped_rx.await.is_err());
+            assert!(matches!(handle.await, Err(Error::Closed)));
         });
     }
 
