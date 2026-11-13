@@ -471,8 +471,36 @@ where
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use super::{State, ThreadBackend, ThreadInner};
+    use crate::{
+        telemetry::metrics::raw::Gauge,
+        threads::builder::RootGuard,
+        utils::{
+            Aborter,
+            supervision::{Tree, tests::set_before_thread_abort},
+        },
+    };
     use commonware_utils::sync::Mutex;
-    use std::sync::Arc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    use {
+        super::Job,
+        crate::{
+            Error, Handle,
+            utils::{MetricHandle, Panicker},
+        },
+        futures::FutureExt as _,
+        std::{
+            future::Future,
+            pin::Pin,
+            sync::mpsc,
+            task::{Context, Poll},
+            time::Duration,
+        },
+    };
 
     /// A callback run between an admission check and the enqueue or registration it guards.
     type AdmissionHook = Arc<dyn Fn() + Send + Sync>;
@@ -493,5 +521,206 @@ pub(crate) mod tests {
         if let Some(hook) = hook {
             hook();
         }
+    }
+
+    /// A thread backend that counts host wakes.
+    #[derive(Default)]
+    struct Wakes(AtomicUsize);
+
+    impl ThreadBackend for Wakes {
+        fn wake(&self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// An open thread occupying `node`.
+    fn open(node: &Arc<Tree>) -> Arc<ThreadInner> {
+        ThreadInner::new(
+            1,
+            0,
+            "thread".to_string(),
+            None,
+            node,
+            Gauge::default(),
+            Box::new(Wakes::default()),
+        )
+    }
+
+    /// How many times `thread`'s host was woken.
+    fn wakes(thread: &ThreadInner) -> usize {
+        thread.backend::<Wakes>().unwrap().0.load(Ordering::SeqCst)
+    }
+
+    /// A task future that never completes and takes its thread's admission lock when dropped.
+    #[cfg(not(target_arch = "wasm32"))]
+    struct LockOnDrop(Arc<ThreadInner>);
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl Future for LockOnDrop {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<()> {
+            Poll::Pending
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl Drop for LockOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.state();
+        }
+    }
+
+    /// A root guard closes admission itself, so once the root ends, submissions are rejected
+    /// even while a concurrent abort holds N's aborter without having run it (test 27).
+    #[test]
+    fn test_root_guard_closes_admission_before_node_aborter_runs() {
+        let node = Tree::root();
+        let thread = open(&node);
+        assert!(
+            node.try_register(Aborter::thread(Arc::downgrade(&thread)))
+                .is_ok()
+        );
+
+        // Run the root's end between taking N's aborter and running it.
+        let observed = Arc::new(Mutex::new(None));
+        set_before_thread_abort(Some(Arc::new({
+            let thread = thread.clone();
+            let observed = observed.clone();
+            move || {
+                drop(RootGuard::new(thread.clone()));
+                let admitted = thread.admit(|| ()).is_some();
+                *observed.lock() = Some((thread.state(), admitted));
+            }
+        })));
+        node.abort();
+        set_before_thread_abort(None);
+
+        // Admission was closing before the aborter ran, and the aborter did not wake again.
+        assert_eq!(*observed.lock(), Some((State::Closing, false)));
+        assert_eq!(thread.state(), State::Closing);
+        assert_eq!(wakes(&thread), 1);
+    }
+
+    /// A placed wrapper pushed into a closing ingress comes back to the caller, who drops it
+    /// after the admission lock is released. Its drop aborts the task's node and closes the
+    /// handle (5.1 rule 7 step 3, test 30). The wrapper's future takes the admission lock when
+    /// dropped, so a drop under the lock deadlocks.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_rejected_placed_wrapper_drops_outside_lock() {
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let thread = open(&Tree::root());
+            thread.begin_close();
+
+            // A placed spawn's wrapper, supervised by the consumed context's node, with a
+            // context wired from that node.
+            let node = Tree::root();
+            let (wired, _) = Tree::child(&node);
+            let gauge = Gauge::default();
+            let (prepared, handle) = Handle::<()>::prepare(MetricHandle::new(gauge.clone()), node);
+            let abort = prepared.abort_handle();
+            let (panicker, _panicked) = Panicker::new(false);
+            let wrapper = Box::pin(Handle::wrap(prepared, LockOnDrop(thread.clone()), panicker));
+            let Err(job) = thread.submit(Job::placed(wrapper, abort)) else {
+                panic!("a closing thread admitted a job");
+            };
+            assert_eq!(thread.queued(), 0);
+            drop(job);
+
+            assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
+            assert!(Tree::child(&wired).1, "the wired context was not aborted");
+            assert_eq!(gauge.get(), 0);
+            done_tx.send(()).unwrap();
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("dropping a rejected wrapper deadlocked on the admission lock");
+    }
+}
+
+#[cfg(all(test, feature = "loom"))]
+mod loom_tests {
+    //! Loom models of admission. A submission checks the state and enqueues in one critical
+    //! section, and the closer sets the closing state before it detaches the ingress, so every
+    //! admitted job reaches the host or the detached ingress and none stays queued behind a
+    //! close.
+
+    use super::*;
+    use crate::telemetry::metrics::raw::Gauge;
+    use loom::thread;
+
+    /// Submits a job, returning it if the thread rejects it.
+    type Submit = fn(&ThreadInner, Job) -> Result<(), Job>;
+
+    /// A thread backend whose host wakes do nothing.
+    struct Idle;
+
+    impl ThreadBackend for Idle {
+        fn wake(&self) {}
+    }
+
+    /// A placed job whose wrapper completes at once.
+    fn job() -> Job {
+        let (abort, _registration) = AbortHandle::new_pair();
+        Job::placed(Box::pin(std::future::ready(())), abort)
+    }
+
+    /// A submission that checks the state and enqueues in two critical sections.
+    fn submit_split(thread: &ThreadInner, job: Job) -> Result<(), Job> {
+        if thread.lock().state != State::Open {
+            return Err(job);
+        }
+        thread.lock().ingress.push_back(job);
+        Ok(())
+    }
+
+    /// Race `submit` against an aborter that moves admission to closing and a host that
+    /// takes one batch and then detaches the ingress, and check that every admitted job is
+    /// either in the batch or detached, with none left queued.
+    fn model(submit: Submit) {
+        loom::model(move || {
+            let node = Tree::root();
+            let thread = ThreadInner::new(
+                1,
+                0,
+                "thread".to_string(),
+                None,
+                &node,
+                Gauge::default(),
+                Box::new(Idle),
+            );
+            let submitter = {
+                let thread = thread.clone();
+                thread::spawn(move || submit(&thread, job()).is_ok())
+            };
+            let aborter = {
+                let thread = thread.clone();
+                thread::spawn(move || thread.begin_close())
+            };
+
+            let mut batch = VecDeque::new();
+            thread.take_batch(64, &mut batch);
+            let detached = thread.detach();
+            let admitted = submitter.join().unwrap();
+            aborter.join().unwrap();
+
+            assert_eq!(thread.queued(), 0, "a job was queued behind the close");
+            assert_eq!(batch.len() + detached.len(), usize::from(admitted));
+            assert_ne!(thread.state(), State::Open);
+        });
+    }
+
+    #[test]
+    fn test_admission_submission_against_close() {
+        model(|thread, job| thread.submit(job));
+    }
+
+    /// The model detects a submission whose state check and enqueue are split.
+    #[test]
+    #[should_panic(expected = "a job was queued behind the close")]
+    fn test_admission_split_submission_strands_job() {
+        model(submit_split);
     }
 }

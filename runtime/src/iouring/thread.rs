@@ -172,7 +172,8 @@ impl WakeState {
         let root = self.root().clone();
         if let Some(root) = root {
             #[cfg(test)]
-            self.root_wakes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.root_wakes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             root.wake();
         }
     }
@@ -560,5 +561,152 @@ impl Drop for ThreadRoot {
         // The worker drops an unfinished root after a retained failure, when admission may
         // still be open.
         self.close();
+    }
+}
+
+#[cfg(all(test, feature = "loom"))]
+mod loom_tests {
+    //! Loom models of the wake path of io_uring runtime threads: a resident
+    //! wake (push, then the `notified` swap) against a host turn (clear, then
+    //! drain), and the thread's aborter against the host's first turn. Each
+    //! model checks that the host either finds the work in its turn or has its
+    //! root woken for another turn, so no wakeup is lost.
+
+    use super::*;
+    use crate::telemetry::metrics::raw::Gauge;
+    use loom::{sync::atomic::AtomicUsize, thread};
+
+    /// A root waker that counts its wakes.
+    struct Root(AtomicUsize);
+
+    impl Root {
+        /// A root waker and the counter of its wakes.
+        fn new() -> (Arc<Self>, Waker) {
+            let root = Arc::new(Self(AtomicUsize::new(0)));
+            let waker = Waker::from(root.clone());
+            (root, waker)
+        }
+
+        /// Number of wakes so far.
+        fn wakes(&self) -> usize {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Wake for Root {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// The waker of a resident whose last poll returned pending.
+    fn resident(wake: &Arc<WakeState>) -> Arc<ResidentWaker> {
+        let id = Slab::with_capacity(1).insert(());
+        Arc::new(ResidentWaker {
+            id,
+            queued: AtomicBool::new(false),
+            wake: wake.clone(),
+        })
+    }
+
+    /// Number of ids on the ready list.
+    fn ready(wake: &WakeState) -> usize {
+        wake.lock().ids.len()
+    }
+
+    /// A resident woken from another thread while the host starts a turn,
+    /// takes its batch and polls it. A burst before this turn set `notified`.
+    /// Afterwards the resident is queued exactly when its id is on the ready
+    /// list, and a queued id comes with a root wake for the next turn.
+    #[test]
+    fn test_resident_wake_racing_a_host_turn_is_not_lost() {
+        loom::model(|| {
+            let wake = Arc::new(WakeState::new());
+            let (root, waker) = Root::new();
+            wake.begin_turn(&waker);
+            wake.notified.store(true, Ordering::SeqCst);
+            let resident = resident(&wake);
+
+            let foreign = thread::spawn({
+                let resident = resident.clone();
+                move || Wake::wake_by_ref(&resident)
+            });
+
+            // A host turn: clear notified, take the batch, then poll it.
+            wake.begin_turn(&waker);
+            let mut batch = Vec::new();
+            wake.take(BATCH, &mut batch);
+            for _ in batch {
+                resident.queued.store(false, Ordering::SeqCst);
+            }
+            foreign.join().unwrap();
+
+            let left = ready(&wake);
+            assert!(left <= 1, "a resident is queued at most once");
+            assert_eq!(resident.queued.load(Ordering::SeqCst), left == 1);
+            assert!(left == 0 || root.wakes() == 1, "a resident wake was lost");
+        });
+    }
+
+    /// Two wakes of one resident from other threads queue it once and wake
+    /// the root once.
+    #[test]
+    fn test_concurrent_resident_wakes_queue_once_and_wake_the_root_once() {
+        loom::model(|| {
+            let wake = Arc::new(WakeState::new());
+            let (root, waker) = Root::new();
+            wake.begin_turn(&waker);
+            let resident = resident(&wake);
+
+            let wakers: Vec<_> = (0..2)
+                .map(|_| {
+                    let resident = resident.clone();
+                    thread::spawn(move || Wake::wake_by_ref(&resident))
+                })
+                .collect();
+            for waker in wakers {
+                waker.join().unwrap();
+            }
+
+            assert_eq!(ready(&wake), 1);
+            assert_eq!(root.wakes(), 1);
+        });
+    }
+
+    /// The thread's aborter closes admission while the host takes its first
+    /// turn, before which no root waker was stored. The host either finds the
+    /// thread closing in that turn or has its root woken for another.
+    #[test]
+    fn test_abort_racing_the_first_turn_is_not_lost() {
+        loom::model(|| {
+            let wake = Arc::new(WakeState::new());
+            let node = Tree::root();
+            let inner = ThreadInner::new(
+                0,
+                0,
+                "thread".to_string(),
+                None,
+                &node,
+                Gauge::default(),
+                Box::new(IouringThread { wake: wake.clone() }),
+            );
+            let (root, waker) = Root::new();
+
+            let aborter = Aborter::thread(Arc::downgrade(&inner));
+            let aborter = thread::spawn(move || aborter.abort());
+
+            // The first turn: store the root waker and clear notified, then
+            // check admission.
+            wake.begin_turn(&waker);
+            let mut batch = VecDeque::new();
+            let closing = inner.take_batch(BATCH, &mut batch) == Turn::Closing;
+            aborter.join().unwrap();
+
+            assert!(closing || root.wakes() == 1, "the close was lost");
+        });
     }
 }

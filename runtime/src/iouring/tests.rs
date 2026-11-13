@@ -1437,7 +1437,10 @@ fn test_factories_execute_synchronously_on_the_caller() {
             let target = context.child("target").thread().build().unwrap();
             for parent_mode in modes {
                 let target = target.clone();
-                spawn_mode(context.child("parent"), parent_mode, move |context| async move {
+                spawn_mode(
+                    context.child("parent"),
+                    parent_mode,
+                    move |context| async move {
                         let caller = thread::current().id();
                         let place = |context: Context, mode| match mode {
                             Mode::Default => context,
@@ -1478,9 +1481,10 @@ fn test_factories_execute_synchronously_on_the_caller() {
                                 7
                             );
                         }
-                    })
-                    .await
-                    .unwrap();
+                    },
+                )
+                .await
+                .unwrap();
             }
         });
     }
@@ -1497,28 +1501,28 @@ fn test_blocking_parents_can_wait_for_ordinary_descendants() {
                 Mode::Thread
             };
             spawn_mode(context.child("parent"), mode, move |context| async move {
-                    assert_ne!(thread::current().id(), ordinary);
-                    for explicit in [false, true] {
-                        // Children of a thread's task inherit the thread, so a
-                        // parent that blocks its thread sends them to the pool.
-                        let (sender, receiver) = mpsc::channel();
-                        let child = context.child("child");
-                        let child = if explicit || !blocking {
-                            child.shared(false)
-                        } else {
-                            child
-                        };
-                        child.spawn(move |_| async move {
-                            sender.send(thread::current().id()).unwrap();
-                        });
+                assert_ne!(thread::current().id(), ordinary);
+                for explicit in [false, true] {
+                    // Children of a thread's task inherit the thread, so a
+                    // parent that blocks its thread sends them to the pool.
+                    let (sender, receiver) = mpsc::channel();
+                    let child = context.child("child");
+                    let child = if explicit || !blocking {
+                        child.shared(false)
+                    } else {
+                        child
+                    };
+                    child.spawn(move |_| async move {
+                        sender.send(thread::current().id()).unwrap();
+                    });
 
-                        // The root awaits this parent asynchronously, leaving the ordinary
-                        // worker available while this thread blocks.
-                        assert_eq!(receiver.recv_timeout(TEST_TIMEOUT).unwrap(), ordinary);
-                    }
-                })
-                .await
-                .unwrap();
+                    // The root awaits this parent asynchronously, leaving the ordinary
+                    // worker available while this thread blocks.
+                    assert_eq!(receiver.recv_timeout(TEST_TIMEOUT).unwrap(), ordinary);
+                }
+            })
+            .await
+            .unwrap();
         }
     });
 }
@@ -1566,12 +1570,9 @@ fn test_aborted_context_skips_factories_for_every_placement() {
 
             assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
         }
-        let thread = context
-            .child("rejected")
-            .thread()
-            .spawn(|_| -> Ready<()> {
-                panic!("an aborted context must not invoke its factory");
-            });
+        let thread = context.child("rejected").thread().spawn(|_| -> Ready<()> {
+            panic!("an aborted context must not invoke its factory");
+        });
         assert!(matches!(thread, Err(crate::ThreadError::Closed)));
 
         assert_eq!(context.shared.workers.state.lock().active, 0);
@@ -1616,12 +1617,9 @@ fn test_closed_registry_skips_worker_factories() {
                 panic!("a closed registry must not invoke its factory");
             });
         assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
-        let thread = context
-            .child("rejected")
-            .thread()
-            .spawn(|_| -> Ready<()> {
-                panic!("a closed registry must not invoke its factory");
-            });
+        let thread = context.child("rejected").thread().spawn(|_| -> Ready<()> {
+            panic!("a closed registry must not invoke its factory");
+        });
         assert!(matches!(thread, Err(crate::ThreadError::Closed)));
 
         assert_eq!(context.shared.workers.state.lock().active, 0);
@@ -1925,7 +1923,10 @@ fn test_worker_completion_cancels_local_and_remote_descendants() {
 fn test_root_shutdown_cancels_descendants_across_workers() {
     let handles = Runner::new(config()).start(|context| async move {
         let (published, descendants) = oneshot::channel();
-        let parent = spawn_mode(context.child("parent"), Mode::Thread, |context| async move {
+        let parent = spawn_mode(
+            context.child("parent"),
+            Mode::Thread,
+            |context| async move {
                 let local = context.child("local").spawn(|_| pending::<()>());
                 let remote = context
                     .child("remote")
@@ -1933,7 +1934,8 @@ fn test_root_shutdown_cancels_descendants_across_workers() {
                     .spawn(|_| pending::<()>());
                 assert!(published.send([local, remote]).is_ok());
                 pending::<()>().await;
-            });
+            },
+        );
         let [local, remote] = descendants.await.unwrap();
         [parent, local, remote]
     });
@@ -1955,15 +1957,19 @@ fn test_completed_thread_does_not_close_sibling_registry() {
             .unwrap();
 
         // Spawning remains available to a later sibling and its own threads.
-        let result = spawn_mode(context.child("second"), Mode::Thread, |context| async move {
-            context
-                .child("nested")
-                .thread()
-                .spawn(|_| async { 11 })
-                .expect("thread")
-                .await
-                .unwrap()
-        })
+        let result = spawn_mode(
+            context.child("second"),
+            Mode::Thread,
+            |context| async move {
+                context
+                    .child("nested")
+                    .thread()
+                    .spawn(|_| async { 11 })
+                    .expect("thread")
+                    .await
+                    .unwrap()
+            },
+        )
         .await
         .unwrap();
 
@@ -5279,17 +5285,17 @@ fn test_paged_replay_survives_the_worker_that_issued_its_reads_closing(
             Mode::Shared(true)
         };
         let mut replay = spawn_mode(context.child("child"), mode, move |context| async move {
-                let mut replay = sealed
-                    .replay(NZUsize!(buffer), ReadOptions::default())
-                    .unwrap();
-                assert!(replay.ensure(1).await.unwrap());
-                if landed {
-                    context.sleep(Duration::from_millis(50)).await;
-                }
-                replay
-            })
-            .await
-            .unwrap();
+            let mut replay = sealed
+                .replay(NZUsize!(buffer), ReadOptions::default())
+                .unwrap();
+            assert!(replay.ensure(1).await.unwrap());
+            if landed {
+                context.sleep(Duration::from_millis(50)).await;
+            }
+            replay
+        })
+        .await
+        .unwrap();
 
         // Handle completion can precede worker cleanup. Wait for the worker to retire so its
         // registrations are gone before the replay is driven again.
@@ -5386,4 +5392,1024 @@ fn test_direct_reads_outlive_their_origin_worker() {
 
     // The runner shut down before the handle was first polled, so it reports closure.
     assert!(matches!(block_on(unobserved), Err(Error::ReadFailed)));
+}
+
+// ---------------------------------------------------------------------------
+// Runtime threads
+// ---------------------------------------------------------------------------
+
+/// Tests of runtime threads on io_uring: registration on the thread's worker,
+/// the wake path, close and startup failures, failure observation, disposal,
+/// fairness and accounting.
+mod threads {
+    use super::{super::thread::IouringThread, *};
+    use crate::{ThreadError, utils::thread::tests::fail_spawns};
+    use std::panic::resume_unwind;
+
+    /// Bound on a whole run in tests that fail by deadlock.
+    const RUN_TIMEOUT: Duration = Duration::from_secs(60);
+
+    /// Run `f` on a helper thread and return its result, resuming its panic
+    /// here. Fails if `f` does not finish within [RUN_TIMEOUT].
+    fn within_timeout<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (done, finished) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = done.send(catch_unwind(AssertUnwindSafe(f)));
+        });
+        match finished.recv_timeout(RUN_TIMEOUT) {
+            Ok(Ok(value)) => value,
+            Ok(Err(panic)) => resume_unwind(panic),
+            Err(_) => panic!("the run did not finish in time"),
+        }
+    }
+
+    /// The io_uring backend state of `thread`.
+    fn backend(thread: &Thread) -> &IouringThread {
+        thread
+            .inner()
+            .backend::<IouringThread>()
+            .expect("an io_uring thread has io_uring backend state")
+    }
+
+    /// Number of workers the runner of `context` still counts.
+    fn active(context: &Context) -> usize {
+        context.shared.workers.state.lock().active
+    }
+
+    /// Yield until the runner of `context` counts `count` workers. Handles
+    /// resolve before a thread releases its reservation.
+    async fn active_reaches(context: &Context, count: usize) {
+        poll_fn(|cx| {
+            if active(context) == count {
+                Poll::Ready(())
+            } else {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
+        .await;
+    }
+
+    /// The message of a run's failure.
+    fn failure<T>(result: std::thread::Result<T>) -> String {
+        let panic = result.err().expect("the run must fail");
+        extract_panic_message(&*panic)
+    }
+
+    /// A waker that panics with its message when woken.
+    struct PanicOnWake(&'static str);
+
+    impl ArcWake for PanicOnWake {
+        fn wake_by_ref(this: &Arc<Self>) {
+            panic!("{}", this.0);
+        }
+    }
+
+    /// A waker that panics with its message when its last reference drops.
+    struct PanicOnRelease(&'static str);
+
+    impl ArcWake for PanicOnRelease {
+        fn wake_by_ref(_: &Arc<Self>) {}
+    }
+
+    impl Drop for PanicOnRelease {
+        fn drop(&mut self) {
+            if !thread::panicking() {
+                panic!("{}", self.0);
+            }
+        }
+    }
+
+    /// The output of a local task that, when the thread clears it at close,
+    /// spawns from a `Local` whose thread already closed, then panics.
+    struct StaleSpawner {
+        /// The `Local` used after close.
+        local: Option<ThreadLocal<Context>>,
+        /// Counts destruction of the late factory's capture.
+        factory_drops: Arc<AtomicUsize>,
+        /// Whether the late factory ran.
+        invoked: Arc<AtomicBool>,
+        /// Whether the late spawn's handle resolved `Closed` at once.
+        closed: Arc<Mutex<Option<bool>>>,
+        /// Counts destruction of this output.
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl Drop for StaleSpawner {
+        fn drop(&mut self) {
+            let payload = PanickingDrop(self.factory_drops.clone());
+            let invoked = self.invoked.clone();
+            let handle = self
+                .local
+                .take()
+                .expect("a local context")
+                .spawn_local(move |_| {
+                    let _payload = payload;
+                    invoked.store(true, Ordering::SeqCst);
+                    async {}
+                });
+            *self.closed.lock() = Some(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
+            self.drops.fetch_add(1, Ordering::SeqCst);
+            panic!("unconsumed local output destructor panic");
+        }
+    }
+
+    /// A resident's sleep and storage read complete on its thread's worker,
+    /// whose ring they registered on, never on the pool.
+    #[test]
+    fn test_thread_resident_sleep_and_read_complete_on_its_worker() {
+        let cfg = config();
+        let directory = cfg.storage_directory().clone();
+        Runner::new(cfg).start(|context| async move {
+            let pool = thread::current().id();
+            let thread = context.child("io").thread().build().expect("thread");
+            let data = context
+                .child("resident")
+                .spawn_on(&thread, move |local| async move {
+                    let worker = thread::current().id();
+                    assert_ne!(worker, pool);
+                    let role = Local::current().unwrap().borrow().role();
+                    assert_eq!(role, Role::Dedicated);
+
+                    local.sleep(Duration::from_millis(5)).await;
+                    assert_eq!(thread::current().id(), worker);
+
+                    let (blob, _) = local.open("partition", b"resident").await.unwrap();
+                    assert_eq!(thread::current().id(), worker);
+                    blob.write_at(0, b"thread".to_vec(), WriteOptions::default())
+                        .await
+                        .unwrap();
+                    let data = blob.read_at(0, 6, ReadOptions::default()).await.unwrap();
+                    assert_eq!(thread::current().id(), worker);
+                    data.coalesce().as_ref().to_vec()
+                })
+                .await
+                .unwrap();
+            assert_eq!(data, b"thread");
+        });
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A resident awaiting a channel that a plain thread completes is woken
+    /// through the thread's root waker.
+    #[test]
+    fn test_thread_resident_wakes_from_a_foreign_thread() {
+        within_timeout(|| {
+            Runner::new(config()).start(|context| async move {
+                let thread = context.child("wake").thread().build().expect("thread");
+                let (sender, receiver) = oneshot::channel::<u32>();
+                let (waiting, wait) = mpsc::channel();
+                let resident = context
+                    .child("resident")
+                    .spawn_on(&thread, move |_| async move {
+                        let worker = thread::current().id();
+                        let mut receiver = receiver;
+                        let mut waiting = Some(waiting);
+                        let value = poll_fn(|cx| {
+                            let poll = Pin::new(&mut receiver).poll(cx);
+                            if poll.is_pending()
+                                && let Some(waiting) = waiting.take()
+                            {
+                                waiting.send(()).unwrap();
+                            }
+                            poll
+                        })
+                        .await
+                        .unwrap();
+                        assert_eq!(thread::current().id(), worker);
+                        value
+                    });
+
+                // Complete the channel only once the resident waits on it.
+                let completer = thread::spawn(move || {
+                    wait.recv_timeout(TEST_TIMEOUT).unwrap();
+                    sender.send(7).unwrap();
+                });
+                assert_eq!(resident.await.unwrap(), 7);
+                completer.join().unwrap();
+                assert!(backend(&thread).root_wakes() >= 1);
+            });
+        });
+    }
+
+    /// A burst of foreign wakes between two turns queues the resident once,
+    /// wakes the root once, and polls the resident once in the next turn.
+    #[test]
+    fn test_thread_wake_storm_queues_a_resident_once() {
+        within_timeout(|| {
+            Runner::new(config()).start(|context| async move {
+                context
+                    .child("storm")
+                    .thread()
+                    .spawn(|local| async move {
+                        let backend = backend(local.home());
+                        let polls = Rc::new(Cell::new(0usize));
+                        let slot = Rc::new(RefCell::new(None::<Waker>));
+                        let target = local.child("target").spawn_local({
+                            let polls = polls.clone();
+                            let slot = slot.clone();
+                            move |_| {
+                                poll_fn(move |cx| {
+                                    polls.set(polls.get() + 1);
+                                    *slot.borrow_mut() = Some(cx.waker().clone());
+                                    Poll::<()>::Pending
+                                })
+                            }
+                        });
+                        while slot.borrow().is_none() {
+                            reschedule().await;
+                        }
+                        assert_eq!(polls.get(), 1);
+
+                        // The host is in this poll, so it takes no turn during the
+                        // storm. This turn cleared notified, so the first wake
+                        // wakes the root and the rest find it set.
+                        let waker = slot.borrow().clone().unwrap();
+                        let wakes = backend.root_wakes();
+                        thread::spawn(move || {
+                            for _ in 0..1000 {
+                                waker.wake_by_ref();
+                            }
+                        })
+                        .join()
+                        .unwrap();
+                        assert_eq!(backend.ready_len(), 1);
+                        assert_eq!(backend.root_wakes() - wakes, 1);
+
+                        // The next turn polls the target once, before this root.
+                        reschedule().await;
+                        assert_eq!(polls.get(), 2);
+                        assert_eq!(backend.ready_len(), 0);
+                        drop(target);
+                    })
+                    .expect("thread")
+                    .await
+                    .unwrap();
+            });
+        });
+    }
+
+    /// A resident that wakes itself in its final poll leaves a stale id on the
+    /// ready list. A resident admitted into the freed slot in the next turn is
+    /// polled once for its own id, the stale id is ignored, and a wake of the
+    /// retired resident's waker queues nothing.
+    #[test]
+    // The first resident returns the second's handle so it stays unconsumed.
+    #[allow(clippy::async_yields_async)]
+    fn test_thread_stale_resident_wake_after_slot_reuse_is_ignored() {
+        Runner::new(config()).start(|context| async move {
+            context
+                .child("stale")
+                .thread()
+                .spawn(|local| async move {
+                    let backend = backend(local.home());
+                    let polls = Rc::new(Cell::new(0usize));
+                    let stale = Rc::new(RefCell::new(None::<Waker>));
+
+                    // The reusing resident is supervised by this root, so it
+                    // outlives the resident that spawns it.
+                    let spawner = local.child("reuser");
+                    let first = local.child("first").spawn_local({
+                        let polls = polls.clone();
+                        let stale = stale.clone();
+                        move |_| async move {
+                            // Queued now, admitted in the next turn into the
+                            // slot this resident frees.
+                            let reuser = spawner.spawn_local(move |_| {
+                                poll_fn(move |_| {
+                                    polls.set(polls.get() + 1);
+                                    Poll::<()>::Pending
+                                })
+                            });
+                            poll_fn(|cx| {
+                                cx.waker().wake_by_ref();
+                                *stale.borrow_mut() = Some(cx.waker().clone());
+                                Poll::Ready(())
+                            })
+                            .await;
+                            reuser
+                        }
+                    });
+                    let reuser = first.await.unwrap();
+                    for _ in 0..4 {
+                        reschedule().await;
+                    }
+                    assert_eq!(polls.get(), 1);
+
+                    // The retired resident's waker queues nothing.
+                    stale.borrow().as_ref().unwrap().wake_by_ref();
+                    assert_eq!(backend.ready_len(), 0);
+                    for _ in 0..4 {
+                        reschedule().await;
+                    }
+                    assert_eq!(polls.get(), 1);
+                    drop(reuser);
+                })
+                .expect("thread")
+                .await
+                .unwrap();
+        });
+    }
+
+    /// A wake during a resident's poll, from the resident itself or from
+    /// another thread, schedules its next poll.
+    #[test]
+    fn test_thread_wake_during_a_poll_schedules_the_next_turn() {
+        within_timeout(|| {
+            Runner::new(config()).start(|context| async move {
+                let thread = context.child("waking").thread().build().expect("thread");
+                for foreign in [false, true] {
+                    let polls = context
+                        .child("resident")
+                        .spawn_on(&thread, move |_| {
+                            let mut polls = 0;
+                            poll_fn(move |cx| {
+                                polls += 1;
+                                if polls == 3 {
+                                    return Poll::Ready(polls);
+                                }
+                                let waker = cx.waker().clone();
+                                if foreign {
+                                    thread::spawn(move || waker.wake()).join().unwrap();
+                                } else {
+                                    waker.wake();
+                                }
+                                Poll::Pending
+                            })
+                        })
+                        .await
+                        .unwrap();
+                    assert_eq!(polls, 3);
+                }
+            });
+        });
+    }
+
+    /// Closing a thread while a resident holds a receive in its ring and a
+    /// sleep raises no panic, and `start` returns after the worker's cleanup.
+    #[test]
+    fn test_thread_close_with_pending_io_returns_after_cleanup() {
+        let (socket, peer) = UnixStream::pair().unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let registry = within_timeout(move || {
+            Runner::new(config().with_catch_panics(false)).start(|context| async move {
+                let registry = context.shared.workers.clone();
+                let (started, waiting) = oneshot::channel();
+                let (published, resident) = oneshot::channel();
+                let lineage = context.child("lineage").spawn(move |context| async move {
+                    let thread = context.child("io").thread().build().expect("thread");
+                    let handle = context
+                        .child("recv")
+                        .spawn_on(&thread, move |local| async move {
+                            let fd: Arc<OwnedFd> = Arc::new(socket.into());
+                            let mut recv = pin!(Operation::register(Request::Recv(RecvRequest {
+                                fd,
+                                buf: IoBufMut::with_capacity(1),
+                                offset: 0,
+                                len: 1,
+                                exact: true,
+                                deadline: None,
+                            })));
+                            let mut sleep = pin!(local.sleep(Duration::from_secs(3600)));
+                            let mut started = Some(started);
+                            poll_fn(|cx| {
+                                assert!(recv.as_mut().poll(cx).is_pending());
+                                assert!(sleep.as_mut().poll(cx).is_pending());
+                                if let Some(started) = started.take() {
+                                    started.send(()).unwrap();
+                                }
+                                Poll::<()>::Pending
+                            })
+                            .await;
+                        });
+                    assert!(published.send(handle).is_ok());
+                    pending::<()>().await;
+                });
+
+                // Close the thread with both registrations pending.
+                let resident = resident.await.unwrap();
+                waiting.await.unwrap();
+                lineage.abort();
+                assert!(matches!(resident.await, Err(Error::Closed)));
+                registry
+            })
+        });
+        assert_eq!(registry.state.lock().active, 0);
+        drop(peer);
+    }
+
+    /// Case A of a thread whose ring fails to start: the root handle resolves
+    /// `Closed` without running the factory. With caught panics the runner
+    /// goes on and a later thread works. Otherwise `start` fails with the
+    /// startup error.
+    #[rstest::rstest]
+    #[case::caught(true)]
+    #[case::uncaught(false)]
+    fn test_thread_startup_failure_closes_an_unrun_root(#[case] catch: bool) {
+        let invoked = Arc::new(AtomicBool::new(false));
+        let ran = invoked.clone();
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            within_timeout(move || {
+                Runner::new(config().with_catch_panics(catch)).start(|context| async move {
+                    let fault = inject_worker_fault(&context.shared.workers, WorkerFault::Startup);
+                    let root = context
+                        .child("failed")
+                        .thread()
+                        .spawn(move |_| {
+                            ran.store(true, Ordering::SeqCst);
+                            async {}
+                        })
+                        .expect("thread");
+                    assert!(matches!(root.await, Err(Error::Closed)));
+                    drop(fault);
+                    if !catch {
+                        // Wait until the root observes the thread's failure.
+                        pending::<()>().await;
+                    }
+
+                    active_reaches(&context, 0).await;
+                    context
+                        .child("later")
+                        .thread()
+                        .spawn(|_| async { 7 })
+                        .expect("thread")
+                        .await
+                        .unwrap()
+                })
+            })
+        }));
+        assert!(!invoked.load(Ordering::SeqCst));
+        if catch {
+            assert_eq!(result.unwrap(), 7);
+        } else {
+            assert!(failure(result).contains("injected native worker initialization failure"));
+        }
+    }
+
+    /// Case B of a thread whose ring fails to start: a `spawn_on` task and a
+    /// placed spawn toward the built thread resolve `Closed` unpolled, whether
+    /// queued before the failure or rejected after it, and a later thread works.
+    #[test]
+    fn test_thread_startup_failure_closes_work_sent_to_a_built_thread() {
+        Runner::new(config().with_catch_panics(true)).start(|context| async move {
+            let invoked = Arc::new(AtomicBool::new(false));
+            let polled = Arc::new(AtomicBool::new(false));
+            let fault = inject_worker_fault(&context.shared.workers, WorkerFault::Startup);
+            let thread = context.child("failed").thread().build().expect("thread");
+            let submit = |label| {
+                let invoked = invoked.clone();
+                let polled = polled.clone();
+                [
+                    context.child(label).spawn_on(&thread, move |_| {
+                        invoked.store(true, Ordering::SeqCst);
+                        async {}
+                    }),
+                    context.child(label).on(&thread).spawn(move |_| async move {
+                        polled.store(true, Ordering::SeqCst);
+                    }),
+                ]
+            };
+
+            // Submitted while the thread starts, so queued or already rejected.
+            for handle in submit("early") {
+                assert!(matches!(handle.await, Err(Error::Closed)));
+            }
+
+            // Submitted after the failure closed admission, so rejected at once.
+            for handle in submit("late") {
+                assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
+            }
+            assert!(!invoked.load(Ordering::SeqCst));
+            assert!(!polled.load(Ordering::SeqCst));
+            drop(fault);
+
+            active_reaches(&context, 0).await;
+            let later = context
+                .child("later")
+                .thread()
+                .spawn(|_| async { 7 })
+                .expect("thread");
+            assert_eq!(later.await.unwrap(), 7);
+        });
+    }
+
+    /// A callback failure makes the thread's worker stop driving its root with
+    /// a resident pending. The resident is disposed of, the reservation is
+    /// released, and the failure follows the panic policy.
+    #[rstest::rstest]
+    #[case::caught(true)]
+    #[case::uncaught(false)]
+    fn test_thread_callback_failure_disposes_pending_residents(#[case] catch: bool) {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let registry = Arc::new(Mutex::new(None));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let drops = drops.clone();
+            let registry = registry.clone();
+            within_timeout(move || {
+                Runner::new(config().with_catch_panics(catch)).start(|context| async move {
+                    *registry.lock() = Some(context.shared.workers.clone());
+                    let before = active(&context);
+                    let thread = context.child("failing").thread().build().expect("thread");
+                    let resident =
+                        context
+                            .child("pending")
+                            .spawn_on(&thread, move |_| async move {
+                                let _guard = DropCount(drops);
+                                pending::<()>().await;
+                            });
+
+                    // A timer already due whose callback panics fails the
+                    // worker in the same turn.
+                    let failing = context.child("callback").spawn_on(&thread, |_| {
+                        let mut armed = true;
+                        poll_fn(move |_| {
+                            if mem::take(&mut armed) {
+                                let waker = waker(Arc::new(PanicOnWake(
+                                    "injected thread callback failure",
+                                )));
+                                Local::current()
+                                    .unwrap()
+                                    .borrow_mut()
+                                    .timers
+                                    .insert_due(waker);
+                            }
+                            Poll::<()>::Pending
+                        })
+                    });
+                    assert!(matches!(resident.await, Err(Error::Closed)));
+                    assert!(matches!(failing.await, Err(Error::Closed)));
+                    if !catch {
+                        // Wait until the root observes the thread's failure.
+                        pending::<()>().await;
+                    }
+
+                    active_reaches(&context, before).await;
+                    context
+                        .child("later")
+                        .thread()
+                        .spawn(|_| async { 7 })
+                        .expect("thread")
+                        .await
+                        .unwrap()
+                })
+            })
+        }));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        let registry = registry.lock().take().unwrap();
+        assert_eq!(registry.state.lock().active, 0);
+        if catch {
+            assert_eq!(result.unwrap(), 7);
+        } else {
+            assert_eq!(failure(result), "injected thread callback failure");
+        }
+    }
+
+    /// A callback of the thread worker's cleanup fails after the runner root
+    /// completed. The resident is disposed of, the reservation is released,
+    /// and the failure follows the panic policy.
+    #[rstest::rstest]
+    #[case::caught(true)]
+    #[case::uncaught(false)]
+    fn test_thread_cleanup_callback_failure_after_the_root_completed(#[case] catch: bool) {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let registry = Arc::new(Mutex::new(None));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let drops = drops.clone();
+            let registry = registry.clone();
+            within_timeout(move || {
+                Runner::new(config().with_catch_panics(catch)).start(|context| async move {
+                    *registry.lock() = Some(context.shared.workers.clone());
+                    let thread = context.child("sleeper").thread().build().expect("thread");
+                    let (polled, polling) = oneshot::channel();
+
+                    // Dropping the resident at close cancels its timer, which
+                    // releases the waker in a callback of the worker's cleanup.
+                    drop(
+                        context
+                            .child("resident")
+                            .spawn_on(&thread, move |local| async move {
+                                let _guard = DropCount(drops);
+                                let mut sleep = pin!(local.sleep(Duration::from_secs(3600)));
+                                let waker = waker(Arc::new(PanicOnRelease(
+                                    "injected thread cleanup failure",
+                                )));
+                                assert!(
+                                    sleep
+                                        .as_mut()
+                                        .poll(&mut TaskContext::from_waker(&waker))
+                                        .is_pending()
+                                );
+                                drop(waker);
+                                polled.send(()).unwrap();
+                                pending::<()>().await;
+                            }),
+                    );
+                    polling.await.unwrap();
+                    7
+                })
+            })
+        }));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        let registry = registry.lock().take().unwrap();
+        assert_eq!(registry.state.lock().active, 0);
+        if catch {
+            assert_eq!(result.unwrap(), 7);
+        } else {
+            assert_eq!(failure(result), "injected thread cleanup failure");
+        }
+    }
+
+    /// A resident's poll panics only after the runner root completed, before
+    /// shutdown closes its thread. The panic follows the panic policy.
+    #[rstest::rstest]
+    #[case::caught(true)]
+    #[case::uncaught(false)]
+    fn test_thread_late_resident_panic_follows_the_panic_policy(#[case] catch: bool) {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            within_timeout(move || {
+                let late = Arc::new(Mutex::new(None));
+                let trigger = late.clone();
+                BEFORE_ABORT.with(|slot| {
+                    *slot.borrow_mut() = Some(Box::new(move || {
+                        let (go, handle): (oneshot::Sender<()>, Handle<()>) =
+                            trigger.lock().take().unwrap();
+                        go.send(()).unwrap();
+
+                        // The panic is published before the handle resolves.
+                        assert!(matches!(block_on(handle), Err(Error::Exited)));
+                    }));
+                });
+                Runner::new(config().with_catch_panics(catch)).start(|context| async move {
+                    let thread = context.child("late").thread().build().expect("thread");
+                    let (go, triggered) = oneshot::channel();
+                    let handle = context
+                        .child("resident")
+                        .spawn_on(&thread, move |_| async move {
+                            triggered.await.unwrap();
+                            panic!("late resident panic");
+                        });
+                    *late.lock() = Some((go, handle));
+                    7
+                })
+            })
+        }));
+        if catch {
+            assert_eq!(result.unwrap(), 7);
+        } else {
+            assert_eq!(failure(result), "late resident panic");
+        }
+    }
+
+    /// A resident's destructor that panics when shutdown closes its thread is
+    /// contained under both panic policies.
+    #[rstest::rstest]
+    #[case::caught(true)]
+    #[case::uncaught(false)]
+    fn test_thread_late_resident_destructor_panic_is_contained(#[case] catch: bool) {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let guard = PanickingDrop(drops.clone());
+        let output = Runner::new(config().with_catch_panics(catch)).start(|context| async move {
+            let thread = context.child("late").thread().build().expect("thread");
+            let (started, starting) = oneshot::channel();
+            drop(
+                context
+                    .child("resident")
+                    .spawn_on(&thread, move |_| async move {
+                        let _guard = guard;
+                        started.send(()).unwrap();
+                        pending::<()>().await;
+                    }),
+            );
+            starting.await.unwrap();
+            7
+        });
+        assert_eq!(output, 7);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    /// Disposals in shared thread code are contained on io_uring, even with
+    /// uncaught panics: a parked `spawn_local` factory dropped after its task
+    /// was aborted, a factory dropped at step 0 of `spawn_local` on a closed
+    /// thread, and an unconsumed `LocalHandle` output cleared at close.
+    #[test]
+    fn test_thread_shared_code_disposal_is_contained() {
+        let aborted_drops = Arc::new(AtomicUsize::new(0));
+        let aborted_invoked = Arc::new(AtomicBool::new(false));
+        let factory_drops = Arc::new(AtomicUsize::new(0));
+        let invoked = Arc::new(AtomicBool::new(false));
+        let closed = Arc::new(Mutex::new(None));
+        let output_drops = Arc::new(AtomicUsize::new(0));
+        let counts = (
+            factory_drops.clone(),
+            invoked.clone(),
+            closed.clone(),
+            output_drops.clone(),
+        );
+        let aborted_payload = PanickingDrop(aborted_drops.clone());
+        let aborted_ran = aborted_invoked.clone();
+
+        Runner::new(config().with_catch_panics(false)).start(|context| async move {
+            let thread = context.child("disposal").thread().build().expect("thread");
+            let (done, finished) = oneshot::channel();
+            drop(
+                context
+                    .child("owner")
+                    .spawn_on(&thread, move |local| async move {
+                        // A parked factory whose task is aborted before the thread
+                        // admits its job is dropped, unrun, in the next turn.
+                        let aborted = local.child("aborted").spawn_local(move |_| {
+                            let _payload = aborted_payload;
+                            aborted_ran.store(true, Ordering::SeqCst);
+                            async {}
+                        });
+                        aborted.abort();
+                        assert_eq!(local.owner().parked(), 1);
+                        reschedule().await;
+                        assert_eq!(local.owner().parked(), 0);
+                        assert!(matches!(aborted.await, Err(Error::Closed)));
+
+                        // A completed output whose handle is never consumed, so the
+                        // thread clears it at close. Leaking the handle keeps its slot
+                        // registered past the disposal of this resident.
+                        let (factory_drops, invoked, closed, drops) = counts;
+                        let stale = StaleSpawner {
+                            local: Some(local.child("stale")),
+                            factory_drops,
+                            invoked,
+                            closed,
+                            drops,
+                        };
+                        let completed = Rc::new(Cell::new(false));
+                        let output = local.child("output").spawn_local({
+                            let completed = completed.clone();
+                            move |_| async move {
+                                completed.set(true);
+                                stale
+                            }
+                        });
+                        while !completed.get() {
+                            reschedule().await;
+                        }
+                        mem::forget(output);
+                        done.send(()).unwrap();
+                        pending::<()>().await;
+                    }),
+            );
+            finished.await.unwrap();
+        });
+
+        assert_eq!(aborted_drops.load(Ordering::SeqCst), 1);
+        assert!(!aborted_invoked.load(Ordering::SeqCst));
+        assert_eq!(output_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(factory_drops.load(Ordering::SeqCst), 1);
+        assert!(!invoked.load(Ordering::SeqCst));
+        assert_eq!(*closed.lock(), Some(true));
+    }
+
+    /// A resident's poll panic interrupts a runner root that waits on nothing,
+    /// so the thread failure receiver wakes worker zero.
+    #[test]
+    fn test_thread_panic_interrupts_an_idle_root() {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            within_timeout(|| {
+                Runner::new(config().with_catch_panics(false)).start(|context| async move {
+                    let thread = context.child("panics").thread().build().expect("thread");
+                    drop(
+                        context
+                            .child("resident")
+                            .spawn_on(&thread, |local| async move {
+                                // Panic once the root has gone idle.
+                                local.sleep(Duration::from_millis(20)).await;
+                                panic!("resident poll panic");
+                            }),
+                    );
+                    pending::<()>().await;
+                })
+            })
+        }));
+        assert_eq!(failure(result), "resident poll panic");
+    }
+
+    /// A resident that wakes itself on every poll does not keep the thread's
+    /// worker from firing another resident's timer.
+    #[test]
+    fn test_thread_self_waking_resident_does_not_starve_a_timer() {
+        within_timeout(|| {
+            Runner::new(config()).start(|context| async move {
+                let thread = context.child("busy").thread().build().expect("thread");
+                let spinner = context.child("spinner").spawn_on(&thread, |_| {
+                    poll_fn(|cx| {
+                        cx.waker().wake_by_ref();
+                        Poll::<()>::Pending
+                    })
+                });
+                let timer = context
+                    .child("timer")
+                    .spawn_on(&thread, |local| async move {
+                        local.sleep(Duration::from_millis(10)).await;
+                        7
+                    });
+                assert_eq!(timer.await.unwrap(), 7);
+                spinner.abort();
+                assert!(matches!(spinner.await, Err(Error::Closed)));
+            });
+        });
+    }
+
+    /// While a plain thread keeps the ingress full, a resident's `spawn_local`
+    /// child has its factory run after exactly the jobs queued ahead of it,
+    /// within the turns its position allows at 64 admissions per turn.
+    #[test]
+    fn test_thread_spawn_local_factory_runs_within_its_fifo_bound_under_a_busy_producer() {
+        within_timeout(|| {
+            Runner::new(config()).start(|context| async move {
+                let thread = context.child("busy").thread().build().expect("thread");
+                let admitted = Arc::new(AtomicUsize::new(0));
+                let stop = Arc::new(AtomicBool::new(false));
+                let producer = thread::spawn({
+                    let context = context.child("producer");
+                    let thread = thread.clone();
+                    let admitted = admitted.clone();
+                    let stop = stop.clone();
+                    move || {
+                        while !stop.load(Ordering::SeqCst) {
+                            if thread.inner().queued() >= 256 {
+                                thread::yield_now();
+                                continue;
+                            }
+                            let admitted = admitted.clone();
+                            drop(context.child("job").spawn_on(&thread, move |_| {
+                                admitted.fetch_add(1, Ordering::SeqCst);
+                                async {}
+                            }));
+                        }
+                    }
+                });
+
+                let measured = context
+                    .child("waiter")
+                    .spawn_on(&thread, move |local| async move {
+                        // Polled once per turn, so it counts turns.
+                        let turns = Rc::new(Cell::new(0usize));
+                        let ticker = local.child("ticker").spawn_local({
+                            let turns = turns.clone();
+                            move |_| {
+                                poll_fn(move |cx| {
+                                    turns.set(turns.get() + 1);
+                                    cx.waker().wake_by_ref();
+                                    Poll::<()>::Pending
+                                })
+                            }
+                        });
+                        // Wait until the ticker runs, so its own job is no
+                        // longer queued, and the producer filled the ingress.
+                        while turns.get() == 0 || local.home().inner().queued() < 200 {
+                            reschedule().await;
+                        }
+
+                        // The host takes no turn during this poll, so the
+                        // ingress only grows between the two reads, and the
+                        // child sits behind at least the first and at most the
+                        // second count less one.
+                        let ahead = local.home().inner().queued();
+                        let (start, started_at) = (admitted.load(Ordering::SeqCst), turns.get());
+                        let child = local.child("child").spawn_local({
+                            let admitted = admitted.clone();
+                            let turns = turns.clone();
+                            move |_| {
+                                let at = (admitted.load(Ordering::SeqCst), turns.get());
+                                async move { at }
+                            }
+                        });
+                        let behind = local.home().inner().queued() - 1;
+                        let (ran, ran_at) = child.await.unwrap();
+                        ticker.abort();
+                        (ahead, behind, ran - start, ran_at - started_at)
+                    });
+                let (ahead, behind, before_child, turns) = measured.await.unwrap();
+                stop.store(true, Ordering::SeqCst);
+                producer.join().unwrap();
+
+                assert!(ahead >= 200);
+                assert!(
+                    (ahead..=behind).contains(&before_child),
+                    "{before_child} jobs ran before the child, expected {ahead} to {behind}"
+                );
+                assert!(
+                    turns <= behind / 64 + 2,
+                    "the child ran {turns} turns after its spawn, behind {behind} jobs"
+                );
+            });
+        });
+    }
+
+    /// A `Thread` held past `start` keeps nothing of the runner alive, and a
+    /// later runner's spawn toward it resolves `Closed`.
+    #[test]
+    fn test_thread_held_past_start_does_not_retain_shared() {
+        let (shared, thread) = Runner::new(config()).start(|context| async move {
+            let shared = Arc::downgrade(&context.shared);
+            let thread = context.child("held").thread().build().expect("thread");
+            context
+                .child("resident")
+                .spawn_on(&thread, |local| async move {
+                    local.sleep(Duration::from_millis(1)).await;
+                })
+                .await
+                .unwrap();
+            (shared, thread)
+        });
+        assert!(
+            shared.upgrade().is_none(),
+            "a Thread held past start must not keep Shared alive"
+        );
+
+        Runner::new(config()).start(|context| async move {
+            let invoked = Arc::new(AtomicBool::new(false));
+            let ran = invoked.clone();
+            let handle = context.child("later").spawn_on(&thread, move |_| {
+                ran.store(true, Ordering::SeqCst);
+                async {}
+            });
+            assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
+            assert!(!invoked.load(Ordering::SeqCst));
+        });
+    }
+
+    /// A finisher called after its run ended, from an escaped context or on a
+    /// builder kept past the run, validates its CPUs, then returns `Closed`
+    /// from admission, dropping the root factory unrun.
+    #[test]
+    fn test_thread_finisher_after_the_run_is_rejected() {
+        let (escaped, kept) = Runner::new(config()).start(|context| async move {
+            let kept = context.child("kept").thread();
+            (context, kept)
+        });
+        let drops = Arc::new(AtomicUsize::new(0));
+        let payload = DropCount(drops.clone());
+        let result = escaped
+            .child("closed")
+            .thread()
+            .spawn(move |_| -> Ready<()> {
+                let _payload = payload;
+                panic!("a closed runner invoked the root factory");
+            });
+        assert!(matches!(result, Err(ThreadError::Closed)));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+
+        let empty: Vec<usize> = Vec::new();
+        assert!(matches!(
+            escaped.child("empty").thread().pin(empty).build(),
+            Err(ThreadError::EmptyCpus)
+        ));
+        assert!(matches!(kept.build(), Err(ThreadError::Closed)));
+    }
+
+    /// Every finisher refused by the OS returns `ThreadError::Spawn` and
+    /// releases its worker reservation at once, the residents series of its
+    /// label reads zero, and a later thread from the same parent works.
+    #[test]
+    fn test_thread_spawn_failure_releases_the_active_worker() {
+        Runner::new(config()).start(|context| async move {
+            let before = active(&context);
+            let invoked = Arc::new(AtomicBool::new(false));
+            let drops = Arc::new(AtomicUsize::new(0));
+            for finisher in 0..3 {
+                let builder = context.child("spawn_failure").thread();
+                let payload = DropCount(drops.clone());
+                let ran = invoked.clone();
+
+                // The failure hook is armed for this thread, which calls the finisher.
+                fail_spawns(1);
+                let error = match finisher {
+                    0 => builder.build().map(drop),
+                    1 => builder.attach().map(drop),
+                    _ => builder
+                        .spawn(move |_| {
+                            let _payload = payload;
+                            ran.store(true, Ordering::SeqCst);
+                            async {}
+                        })
+                        .map(drop),
+                }
+                .expect_err("the OS refused the thread");
+                assert!(matches!(error, ThreadError::Spawn(_)));
+                assert_eq!(active(&context), before);
+            }
+            assert_eq!(drops.load(Ordering::SeqCst), 3);
+            assert!(!invoked.load(Ordering::SeqCst));
+            for line in context.encode().lines() {
+                if line.contains("thread_residents{") && line.contains("spawn_failure") {
+                    assert!(line.ends_with(" 0"), "{line}");
+                }
+            }
+
+            let later = context
+                .child("later")
+                .thread()
+                .spawn(|_| async { 7 })
+                .expect("thread");
+            assert_eq!(later.await.unwrap(), 7);
+        });
+    }
 }

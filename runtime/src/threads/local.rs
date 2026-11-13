@@ -65,7 +65,7 @@ static PARKED_IDS: AtomicU64 = AtomicU64::new(0);
 ///
 /// deterministic::Runner::default().start(|context| async move {
 ///     context.child("t").thread().spawn(|local| async move {
-///         std::thread::spawn(move || drop(local));
+///         std::thread::spawn(move || drop(local)).join().unwrap();
 ///     }).unwrap().await.unwrap();
 /// });
 /// ```
@@ -77,8 +77,8 @@ static PARKED_IDS: AtomicU64 = AtomicU64::new(0);
 ///
 /// deterministic::Runner::default().start(|context| async move {
 ///     context.child("t").thread().spawn(|local| async move {
-///         let context = local.into_inner();
-///         std::thread::spawn(move || drop(context)).join().unwrap();
+///         let local = local.into_inner();
+///         std::thread::spawn(move || drop(local)).join().unwrap();
 ///     }).unwrap().await.unwrap();
 /// });
 /// ```
@@ -118,20 +118,20 @@ static PARKED_IDS: AtomicU64 = AtomicU64::new(0);
 /// deterministic::Runner::default().start(|context| async move {
 ///     context.child("t").thread().spawn(|local| async move {
 ///         let handle = local.child("task").spawn_local(|_| async {});
-///         std::thread::spawn(move || drop(handle));
+///         std::thread::spawn(move || drop(handle)).join().unwrap();
 ///     }).unwrap().await.unwrap();
 /// });
 /// ```
 ///
-/// It can be awaited on its thread:
+/// The [Handle] of an ordinary spawn can:
 ///
 /// ```
 /// use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
 ///
 /// deterministic::Runner::default().start(|context| async move {
 ///     context.child("t").thread().spawn(|local| async move {
-///         let handle = local.child("task").spawn_local(|_| async {});
-///         handle.await.unwrap();
+///         let handle = local.child("task").into_inner().spawn(|_| async {});
+///         std::thread::spawn(move || drop(handle)).join().unwrap();
 ///     }).unwrap().await.unwrap();
 /// });
 /// ```

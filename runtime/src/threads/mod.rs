@@ -17,3 +17,5 @@ pub(crate) use local::Owner;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod close_tests;

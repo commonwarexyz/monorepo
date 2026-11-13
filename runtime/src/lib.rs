@@ -21,7 +21,6 @@
 //!
 //! Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#stability) for details.
 
-#![cfg_attr(test, allow(dead_code))] // TEMPORARY: until the thread tests use every hook
 #![doc(
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
     html_favicon_url = "https://commonware.xyz/favicon.ico"
@@ -556,11 +555,10 @@ stability_scope!(BETA {
         ///
         /// ```compile_fail
         /// use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
-        /// use std::rc::Rc;
         ///
         /// deterministic::Runner::default().start(|context| async move {
         ///     let thread = context.child("exec").thread().build().unwrap();
-        ///     let state = Rc::new(5);
+        ///     let state = std::rc::Rc::new(5);
         ///     let handle = context.child("execute").spawn_on(&thread, move |_| async move {
         ///         *state + 1
         ///     });
@@ -568,14 +566,42 @@ stability_scope!(BETA {
         /// });
         /// ```
         ///
-        /// Neither can the factory of a thread's root task:
+        /// It can capture a `Send` value:
+        ///
+        /// ```
+        /// use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
+        ///
+        /// deterministic::Runner::default().start(|context| async move {
+        ///     let thread = context.child("exec").thread().build().unwrap();
+        ///     let state = std::sync::Arc::new(5);
+        ///     let handle = context.child("execute").spawn_on(&thread, move |_| async move {
+        ///         *state + 1
+        ///     });
+        ///     assert_eq!(handle.await.unwrap(), 6);
+        /// });
+        /// ```
+        ///
+        /// The same holds for the factory of a thread's root task:
         ///
         /// ```compile_fail
         /// use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
-        /// use std::rc::Rc;
         ///
         /// deterministic::Runner::default().start(|context| async move {
-        ///     let state = Rc::new(5);
+        ///     let state = std::rc::Rc::new(5);
+        ///     let handle = context.child("exec").thread().spawn(move |_| async move {
+        ///         *state + 1
+        ///     });
+        ///     assert_eq!(handle.unwrap().await.unwrap(), 6);
+        /// });
+        /// ```
+        ///
+        /// With a `Send` value it compiles:
+        ///
+        /// ```
+        /// use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
+        ///
+        /// deterministic::Runner::default().start(|context| async move {
+        ///     let state = std::sync::Arc::new(5);
         ///     let handle = context.child("exec").thread().spawn(move |_| async move {
         ///         *state + 1
         ///     });
@@ -588,11 +614,25 @@ stability_scope!(BETA {
         ///
         /// ```compile_fail
         /// use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
-        /// use std::rc::Rc;
         ///
         /// deterministic::Runner::default().start(|context| async move {
         ///     let thread = context.child("exec").thread().build().unwrap();
-        ///     let state = Rc::new(5);
+        ///     let state = std::rc::Rc::new(5);
+        ///     let handle = context.child("execute").on(&thread).spawn(move |_| async move {
+        ///         *state + 1
+        ///     });
+        ///     assert_eq!(handle.await.unwrap(), 6);
+        /// });
+        /// ```
+        ///
+        /// With a `Send` value it compiles:
+        ///
+        /// ```
+        /// use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
+        ///
+        /// deterministic::Runner::default().start(|context| async move {
+        ///     let thread = context.child("exec").thread().build().unwrap();
+        ///     let state = std::sync::Arc::new(5);
         ///     let handle = context.child("execute").on(&thread).spawn(move |_| async move {
         ///         *state + 1
         ///     });

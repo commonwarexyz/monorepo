@@ -12,10 +12,7 @@ use commonware_utils::{
     channel::oneshot,
     sync::{Exclusive, Mutex, Once},
 };
-use futures::{
-    future::poll_fn,
-    pin_mut,
-};
+use futures::{future::poll_fn, pin_mut};
 use std::{
     any::Any,
     cell::UnsafeCell,
@@ -799,6 +796,15 @@ mod tests {
 
     const METRIC_PREFIX: &str = "runtime_tasks_running{";
 
+    /// A panic payload whose destructor notifies its panicker again.
+    struct Renotify(Panicker);
+
+    impl Drop for Renotify {
+        fn drop(&mut self) {
+            self.0.notify(Box::new("nested"));
+        }
+    }
+
     fn running_tasks_for_label(metrics: &str, label: &str) -> Option<u64> {
         let label_fragment = format!("name=\"{label}\"");
         metrics.lines().find_map(|line| {
@@ -1288,6 +1294,28 @@ mod tests {
         }));
         let panic = result.expect_err("panic sent while completing was dropped");
         assert_eq!(extract_panic_message(&*panic), "late");
+    }
+
+    /// `notify` drops a payload it cannot deliver, or one it ignores, only after it releases
+    /// its lock, so a payload whose destructor notifies again does not deadlock. With
+    /// `catch` set, `notify` returns before it locks, so only `false` can fail here.
+    #[test]
+    fn notify_drops_payload_outside_lock() {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (panicker, panicked) = Panicker::new(false);
+            drop(panicked);
+
+            // The receiver is gone, so the send fails and hands the payload back to drop.
+            panicker.notify(Box::new(Renotify(panicker.clone())));
+
+            // The sender is gone, so the payload is ignored and dropped.
+            panicker.notify(Box::new(Renotify(panicker.clone())));
+            done_tx.send(()).unwrap();
+        });
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("notify deadlocked dropping a payload that notifies again");
     }
 
     /// A task whose supervisor closed before initialization is cancelled before its future can
