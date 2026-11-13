@@ -210,6 +210,8 @@ where
     ES: Epocher,
 {
     /// Creates a new [`Deferred`] wrapper.
+    ///
+    /// Per-round tasks run on the shared executor regardless of the supplied context's placement.
     pub fn new(context: E, application: A, marshal: Mailbox<S, Standard<B>>, epocher: ES) -> Self {
         let build_histogram = context.histogram(
             "build_duration",
@@ -231,6 +233,7 @@ where
         let ancestor_fetch_duration = Timed::new(ancestor_fetch_histogram);
 
         Self {
+            // Per-round tasks spawn on demand, so this context must not carry the caller's placement.
             context: Arc::new(context.shared()),
             application,
             marshal,

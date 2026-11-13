@@ -68,7 +68,7 @@ where
     let (mut tx, rx) = oneshot::channel();
     let round = consensus_context.round;
     let context = context.child("prepare").with_attribute("round", round);
-    context.shared().spawn(move |runtime_context| {
+    context.spawn(move |runtime_context| {
         async move {
             // Consensus abandons the request by dropping the receiver, which cancels the wait
             // for the parent and the build.
@@ -187,7 +187,7 @@ where
     let (mut tx, rx) = oneshot::channel();
     let round = consensus_context.round;
     let context = context.child("propose").with_attribute("round", round);
-    context.shared().spawn(move |runtime_context| {
+    context.spawn(move |runtime_context| {
         async move {
             // Consensus abandons the request by dropping the receiver, which cancels the wait
             // for the parent and the build.

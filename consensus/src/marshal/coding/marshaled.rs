@@ -247,6 +247,7 @@ where
     ES: Epocher,
 {
     /// Creates a new [`Marshaled`] wrapper.
+    /// Per-round tasks run on the shared executor regardless of the supplied context's placement.
     ///
     /// # Panics
     ///
@@ -297,6 +298,7 @@ where
         let erasure_encode_duration = Timed::new(erasure_histogram);
 
         Self {
+            // Per-round tasks spawn on demand, so this context must not carry the caller's placement.
             context: Arc::new(context.shared()),
             application,
             marshal,
@@ -1198,26 +1200,111 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::Marshaled;
+    use super::{Marshaled, MarshaledConfig};
     use crate::{
+        Automaton, Relay,
         marshal::{
             application::gates::Gates,
             coding::types::CodedBlock,
             mocks::{
-                harness::{CodingB, P, S},
+                harness::{
+                    BLOCKS_PER_EPOCH, CodingB, CodingCtx, CodingHarness, NAMESPACE, NUM_VALIDATORS,
+                    P, S, TestHarness, V, make_coding_block, setup_network_with_participants,
+                },
                 verifying::MockVerifyingApp,
             },
         },
-        types::{FixedEpocher, coding::Commitment},
+        simplex::{Plan, scheme::bls12381_threshold::vrf},
+        types::{Epoch, FixedEpocher, Height, Round, View, coding::Commitment},
     };
     use commonware_coding::ReedSolomon;
-    use commonware_cryptography::sha256::Sha256;
+    use commonware_cryptography::{
+        Digestible,
+        certificate::{ConstantProvider, mocks::Fixture},
+        sha256::Sha256,
+    };
     use commonware_parallel::Sequential;
-    use commonware_runtime::deterministic;
-    use std::sync::Arc;
+    use commonware_runtime::{Metrics, Runner, Spawner, Supervisor as _, deterministic};
+    use commonware_utils::NZUsize;
+    use std::{sync::Arc, time::Duration};
 
     type TestCommitment = Commitment<CodingB, ReedSolomon<Sha256>, Sha256>;
     type TestCodedBlock = CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>;
+
+    #[test]
+    fn test_coding_per_round_tasks_shared() {
+        deterministic::Runner::timed(Duration::from_secs(60)).start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+                1024 * 1024,
+            )
+            .await;
+            let provider = ConstantProvider::new(schemes[0].clone());
+            let setup = CodingHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                participants[0].clone(),
+                provider.clone(),
+            )
+            .await;
+            let genesis = CodingHarness::genesis_block(NUM_VALIDATORS as u16);
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let consensus_context = CodingCtx {
+                round,
+                leader: participants[0].clone(),
+                parent: (View::zero(), CodingHarness::commitment(&genesis)),
+            };
+            let block = make_coding_block(
+                consensus_context.clone(),
+                genesis.digest(),
+                Height::new(1),
+                100,
+            );
+            let thread = context.child("thread").thread().build().unwrap();
+            let mut marshaled = Marshaled::new(
+                context.child("marshaled").on(&thread),
+                MarshaledConfig {
+                    application: MockVerifyingApp::<CodingB, S>::new().with_propose_result(block),
+                    marshal: setup.mailbox,
+                    shards: setup.extra,
+                    scheme_provider: provider,
+                    epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                    strategy: Sequential,
+                },
+            );
+            let commitment = marshaled
+                .propose(consensus_context.clone())
+                .await
+                .await
+                .unwrap();
+            let _ = marshaled.broadcast(commitment, Plan::Propose { round });
+            let _verification = marshaled.verify(consensus_context, commitment).await;
+            let metrics = context.encode();
+            for task in ["propose", "deferred_verify", "shard_validity_wait"] {
+                let name = format!("name=\"marshaled_{task}\"");
+                let tasks: Vec<_> = metrics
+                    .lines()
+                    .filter(|line| {
+                        line.starts_with("runtime_tasks_spawned_total{") && line.contains(&name)
+                    })
+                    .collect();
+                assert!(!tasks.is_empty(), "missing {name}: {metrics}");
+                assert!(
+                    tasks
+                        .iter()
+                        .all(|line| line.contains("execution=\"Shared\"")),
+                    "{name}: {metrics}"
+                );
+            }
+        });
+    }
 
     impl
         Marshaled<

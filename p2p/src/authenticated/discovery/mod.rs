@@ -395,48 +395,13 @@ mod tests {
 
             loop {
                 let metrics = context.encode();
-                let spawned: Vec<_> = metrics
-                    .lines()
-                    .filter(|line| line.starts_with("runtime_tasks_spawned_total{"))
-                    .collect();
-                let peer_spawned = |network: &str| {
-                    let name = format!("name=\"{network}_spawner_peer\"");
-                    spawned.iter().any(|line| line.contains(&name))
-                };
-                if !peer_spawned("network0") || !peer_spawned("network1") {
-                    context.sleep(Duration::from_millis(100)).await;
-                    continue;
+                if crate::authenticated::assert_thread_placement(
+                    &metrics,
+                    &["network0", "network1"],
+                ) {
+                    break;
                 }
-                for network in ["network0", "network1"] {
-                    for actor in [
-                        "",
-                        "_tracker",
-                        "_router",
-                        "_spawner",
-                        "_listener",
-                        "_dialer",
-                    ] {
-                        let name = format!("name=\"{network}{actor}\"");
-                        let lines: Vec<_> =
-                            spawned.iter().filter(|line| line.contains(&name)).collect();
-                        assert!(!lines.is_empty(), "missing {name}: {metrics}");
-                        assert!(
-                            lines
-                                .iter()
-                                .all(|line| line.contains("execution=\"Thread\"")),
-                            "{name}: {metrics}"
-                        );
-                    }
-                    let name = format!("name=\"{network}_spawner_peer\"");
-                    assert!(
-                        spawned
-                            .iter()
-                            .filter(|line| line.contains(&name))
-                            .all(|line| line.contains("execution=\"Shared\"")),
-                        "{name}: {metrics}"
-                    );
-                }
-                break;
+                context.sleep(Duration::from_millis(100)).await;
             }
         });
     }

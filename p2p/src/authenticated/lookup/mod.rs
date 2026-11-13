@@ -277,6 +277,45 @@ mod tests {
     const MAX_MESSAGE_SIZE: u32 = 1_024 * 1_024; // 1MB
 
     #[test]
+    fn test_network_thread_placement() {
+        deterministic::Runner::timed(Duration::from_secs(60)).start(|context| async move {
+            let thread = context.child("t").thread().build().unwrap();
+            let signer0 = ed25519::PrivateKey::from_seed(0);
+            let signer1 = ed25519::PrivateKey::from_seed(1);
+            let socket0 = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 3000);
+            let socket1 = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 3001);
+            let peers = Map::try_from(vec![
+                (signer0.public_key(), socket0.into()),
+                (signer1.public_key(), socket1.into()),
+            ])
+            .unwrap();
+            let (network0, mut oracle0) = Network::new(
+                context.child("network0").on(&thread),
+                Config::test(signer0, socket0, MAX_MESSAGE_SIZE),
+            );
+            let (network1, mut oracle1) = Network::new(
+                context.child("network1").on(&thread),
+                Config::test(signer1, socket1, MAX_MESSAGE_SIZE),
+            );
+            oracle0.track(0, peers.clone());
+            oracle1.track(0, peers);
+            network0.start();
+            network1.start();
+
+            loop {
+                let metrics = context.encode();
+                if crate::authenticated::assert_thread_placement(
+                    &metrics,
+                    &["network0", "network1"],
+                ) {
+                    break;
+                }
+                context.sleep(Duration::from_millis(100)).await;
+            }
+        });
+    }
+
+    #[test]
     fn test_drop_before_start_closes_channels() {
         deterministic::Runner::default().start(|context| async move {
             // Register a channel without starting the network.

@@ -753,8 +753,11 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         if !self.peers.contains_key(public_key) {
             // Create peer
             let socket = self.get_next_socket();
+
+            // Peers can be registered before the network starts, so keep their per-peer tasks on
+            // the shared executor whatever the network's placement.
             let peer = Peer::new(
-                self.context.child("peer"),
+                self.context.child("peer").shared(),
                 public_key.clone(),
                 socket,
                 self.max_frame_size,
