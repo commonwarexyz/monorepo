@@ -76,10 +76,9 @@ pub(in crate::sha256::simd) unsafe fn hash_pair_72(
             // speed: the kernel gives the same result if they are dirty.
             //
             // The SHA instructions have only a legacy SSE encoding, and the
-            // rounds alternate them with VEX instructions. If the upper halves
-            // are dirty, some Intel CPUs pay a state transition at each switch
-            // between the two encodings. On Ice Lake this is about 60 ns per
-            // switch, and one call makes 256 switches.
+            // rounds alternate them with VEX instructions. While an upper half
+            // is dirty, some Intel and AMD CPUs trap into microcode at every
+            // switch between the two encodings. One call makes 256 switches.
             //
             // The compiler adds `vzeroupper` before a call but not before
             // inline asm. The upper halves are thus dirty if the compiler
