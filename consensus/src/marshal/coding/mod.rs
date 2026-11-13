@@ -801,6 +801,123 @@ mod tests {
         });
     }
 
+    /// A coded block names its parent twice. Its consensus context carries the parent's
+    /// commitment, and the vote binds that context to consensus. Its parent field carries the
+    /// parent's digest. The ancestry walk fetches by the commitment and checks the digest, so a
+    /// block whose parent field names another block ends the walk without a request for that
+    /// block.
+    #[test_traced("WARN")]
+    fn test_coding_walk_ends_at_mismatched_parent_digest() {
+        for linked in [true, false] {
+            let runner = deterministic::Runner::timed(Duration::from_secs(30));
+            runner.start(|mut context| async move {
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let provider = ConstantProvider::new(schemes[0].clone());
+                let (mailbox, resolver, _actor_handle) = start_coding_actor_with_recording(
+                    context.child("validator"),
+                    "walk-mismatched-parent-digest",
+                    provider.clone(),
+                    RecordingCodingBuffer::default(),
+                )
+                .await;
+
+                // The parent's context names genesis, and its parent field names genesis only
+                // when `linked`. The candidate names the parent in both places.
+                let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+                let genesis = genesis_block();
+                let parent_field = if linked {
+                    genesis.digest()
+                } else {
+                    Sha256::hash(&[b"not the context parent"])
+                };
+                let parent_round = Round::new(Epoch::zero(), View::new(1));
+                let parent: TestCodedBlock = encode_block(
+                    make_coding_block(
+                        CodingCtx {
+                            round: parent_round,
+                            leader: participants[0].clone(),
+                            parent: (View::zero(), genesis_coding_commitment(&genesis)),
+                        },
+                        parent_field,
+                        Height::new(1),
+                        100,
+                    ),
+                    coding_config,
+                );
+                let round = Round::new(Epoch::zero(), View::new(2));
+                let candidate: TestCodedBlock = encode_block(
+                    make_coding_block(
+                        CodingCtx {
+                            round,
+                            leader: participants[0].clone(),
+                            parent: (parent_round.view(), parent.commitment()),
+                        },
+                        parent.digest(),
+                        Height::new(2),
+                        200,
+                    ),
+                    coding_config,
+                );
+                assert!(mailbox.verified(parent_round, parent.clone()).await);
+                assert!(mailbox.verified(round, candidate.clone()).await);
+
+                // Verify the candidate with an application that reads its ancestry down to
+                // genesis and accepts only if it gets there.
+                let shards =
+                    start_shard_mailbox(context.child("shards"), participants, provider.clone())
+                        .await;
+                let application = WalkingVerifyingApp::default();
+                let mut marshaled = Marshaled::new(
+                    context.child("marshaled"),
+                    MarshaledConfig {
+                        application: application.clone(),
+                        marshal: mailbox,
+                        shards,
+                        scheme_provider: provider,
+                        epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                        strategy: Sequential,
+                    },
+                );
+                let _shard_verdict = marshaled
+                    .verify(candidate.context(), candidate.commitment())
+                    .await;
+                let verdict = marshaled
+                    .certify(round, candidate.commitment())
+                    .await
+                    .await
+                    .expect("certify must resolve");
+
+                // A linked parent leads the walk to genesis. A mismatched one ends it at the
+                // parent, and nothing is requested from peers in either case.
+                let mut walked = vec![candidate.digest(), parent.digest()];
+                if linked {
+                    walked.push(genesis.digest());
+                }
+                assert_eq!(
+                    *application.blocks.lock(),
+                    walked,
+                    "linked={linked}: the walk must end at the first parent that does not match"
+                );
+                assert_eq!(
+                    verdict, linked,
+                    "linked={linked}: the candidate must certify only on linked ancestry"
+                );
+                assert!(
+                    resolver.fetches().is_empty(),
+                    "linked={linked}: the walk must request nothing from peers"
+                );
+            });
+        }
+    }
+
     #[test_traced("WARN")]
     fn test_coding_verify_missing_candidate_waits_without_fetching() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
