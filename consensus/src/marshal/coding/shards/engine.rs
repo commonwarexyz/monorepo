@@ -3198,9 +3198,9 @@ mod tests {
             });
             assert_eq!(engine.records.len(), 4);
 
-            // The leader equivocates at view 5: the engine verifies one commitment and certifies
-            // the notarization of another, and discovers both. Both evict the records at views 1
-            // and 2.
+            // The leader equivocates at view 5. Consensus verifies one commitment and certifies the
+            // notarization of another, so the engine discovers both. Both evict the records at
+            // views 1 and 2.
             let tied = [make_block(20).commitment(), make_block(21).commitment()];
             engine.handle_discovered(&mut sender, tied[0], round(5));
             engine.trim();
@@ -3216,7 +3216,10 @@ mod tests {
             for (id, view) in [(22, 5), (23, 4)] {
                 let declined = make_block(id).commitment();
                 engine.handle_discovered(&mut sender, declined, round(view));
-                assert!(!engine.records.contains_key(&declined), "view {view}");
+                assert!(
+                    !engine.records.contains_key(&declined),
+                    "a commitment at view {view} must create no record"
+                );
             }
             assert_eq!(engine.records.len(), 4);
 
@@ -3431,8 +3434,8 @@ mod tests {
                 assert!(matches!(verified.try_recv(), Ok(())));
             }
 
-            // Two shards decode the block: the assigned shard and one gossip shard, or two
-            // gossip shards when the assigned shard has yet to arrive.
+            // Two shards decode the block. They are the assigned shard and one gossip shard, or
+            // two gossip shards when the assigned shard has yet to arrive.
             let gossip: &[u16] = if early { &[2] } else { &[2, 3] };
             for &index in gossip {
                 let shard = block.shard(index).expect("missing shard");
@@ -3474,7 +3477,7 @@ mod tests {
         });
     }
 
-    /// A cached record whose assigned shard is unverified still classifies arrivals: a gossip
+    /// A cached record whose assigned shard is unverified still classifies arrivals. A gossip
     /// shard is ignored without blocking its sender, and a shard at any other index blocks its
     /// sender at once. Once the assigned shard is verified, the record ignores every arrival.
     #[test_traced]
@@ -3572,11 +3575,11 @@ mod tests {
                 .control(peer_keys[1].clone())
                 .register(0, TEST_QUOTA)
                 .await
-                .expect("registration should succeed");
+                .expect("the observer channel must register");
             oracle
                 .add_link(peer_keys[0].clone(), peer_keys[1].clone(), DEFAULT_LINK)
                 .await
-                .expect("link should be added");
+                .expect("the observer link must be added");
             oracle.manager().track(0, participants.clone());
             context.sleep(Duration::from_millis(10)).await;
 
@@ -3856,11 +3859,9 @@ mod tests {
         );
     }
 
-    /// Peer 1 sends peer 3's shard, which is neither the receiver's nor peer 1's own. The
-    /// receiver blocks peer 1 as soon as the shard reaches the commitment's record: on arrival
-    /// when the receiver has discovered the commitment, or when the discovery creates the record
-    /// and drains the buffered shard. A non-participant receiver, which has no index of its own,
-    /// blocks peer 1 the same way.
+    /// Peer 1 sends peer 3's shard, which is neither the receiver's nor peer 1's own, to a
+    /// participant or to a non-participant. When `buffered`, the shard arrives before the
+    /// receiver discovers the commitment.
     fn wrong_index_shard_blocks_sender(non_participant: bool, buffered: bool) {
         let fixture = Fixture::<C> {
             num_secondary_peers: 1,
@@ -3880,7 +3881,7 @@ mod tests {
                 };
                 let shard = coded_block
                     .shard(peers[3].index.get() as u16)
-                    .expect("missing shard")
+                    .expect("shard must exist")
                     .encode();
 
                 if !buffered {
@@ -3902,21 +3903,30 @@ mod tests {
         );
     }
 
+    /// A participant that discovered the commitment blocks the sender of a shard at an index that
+    /// is neither its own nor the sender's as soon as the shard arrives.
     #[test_traced]
     fn test_wrong_index_shard_blocks_sender() {
         wrong_index_shard_blocks_sender(false, false);
     }
 
+    /// A shard at an index that is neither the receiver's nor its sender's waits in its sender's
+    /// buffer when it arrives before the discovery. The discovery that creates the record drains
+    /// the shard and blocks its sender.
     #[test_traced]
     fn test_buffered_wrong_index_shard_blocks_sender_on_discovery() {
         wrong_index_shard_blocks_sender(false, true);
     }
 
+    /// A non-participant has no index of its own. Once it discovered the commitment, it blocks
+    /// the sender of a shard at any index but the sender's as soon as the shard arrives.
     #[test_traced]
     fn test_non_participant_wrong_index_shard_blocks_sender() {
         wrong_index_shard_blocks_sender(true, false);
     }
 
+    /// A non-participant blocks the sender of a buffered shard at any index but the sender's
+    /// when the discovery creates the record and drains the shard.
     #[test_traced]
     fn test_non_participant_buffered_wrong_index_shard_blocks_sender_on_discovery() {
         wrong_index_shard_blocks_sender(true, true);
@@ -4069,8 +4079,10 @@ mod tests {
         );
     }
 
+    /// A shard from a peer that is not a primary of any tracked peer set is not buffered before
+    /// its commitment is discovered. The discovery finds nothing to drain and blocks no one.
     #[test_traced]
-    fn test_shard_from_non_participant_before_discovery_is_not_buffered() {
+    fn test_shard_from_secondary_peer_before_discovery_is_not_buffered() {
         let fixture = Fixture {
             num_future_peers: 1,
             ..Fixture::<C>::default()
@@ -4130,11 +4142,11 @@ mod tests {
                     .any(|(a, b)| a == &peers[2].public_key && b == &non_participant_pk);
                 assert!(
                     !non_participant_blocked,
-                    "non-participant should not be blocked for a dropped shard"
+                    "the sender of a dropped shard must not be blocked"
                 );
                 assert!(
                     matches!(shard_sub.try_recv(), Err(TryRecvError::Empty)),
-                    "a non-participant's shard before discovery should not be buffered"
+                    "a secondary peer's shard before discovery must not be buffered"
                 );
             },
         );
@@ -4512,7 +4524,7 @@ mod tests {
                         .get(live_commitment)
                         .await
                         .is_some(),
-                    "block should be cached before its round is refreshed"
+                    "the block must be cached before its round is refreshed"
                 );
 
                 // The receiver discovers the cached commitment again at view 4.
@@ -4542,7 +4554,7 @@ mod tests {
                 );
                 assert!(
                     matches!(assigned_sub.try_recv(), Err(TryRecvError::Empty)),
-                    "cached discovery should keep reconstruction state live"
+                    "cached discovery must keep reconstruction state live"
                 );
                 assert!(
                     peers[receiver_idx]
@@ -4550,22 +4562,22 @@ mod tests {
                         .get(live_commitment)
                         .await
                         .is_some(),
-                    "cached discovery should keep the reconstructed block live"
+                    "cached discovery must keep the reconstructed block live"
                 );
 
                 // The proposer's delivery of the assigned shard resolves the subscription.
                 let assigned = live
                     .shard(peers[receiver_idx].index.get() as u16)
-                    .expect("missing assigned shard");
+                    .expect("assigned shard must exist");
                 peers[0]
                     .sender
                     .send(Recipients::One(receiver_pk), assigned.encode(), true);
                 select! {
                     result = assigned_sub => {
-                        result.expect("cached record should accept the assigned shard");
+                        result.expect("cached record must accept the assigned shard");
                     },
                     _ = context.sleep(config.link.latency * 10) => {
-                        panic!("cached record did not accept the assigned shard");
+                        panic!("cached record must accept the assigned shard");
                     },
                 }
             },
@@ -4708,10 +4720,10 @@ mod tests {
         );
     }
 
+    /// Shards received before the commitment is discovered do not progress reconstruction until
+    /// the discovery is delivered.
     #[test_traced]
     fn test_peer_shards_buffered_until_discovered() {
-        // Test that shards received before the commitment is discovered do not progress
-        // reconstruction until Discovered is delivered.
         let fixture: Fixture<C> = Fixture {
             num_primary_peers: 10,
             ..Default::default()
@@ -4756,11 +4768,11 @@ mod tests {
                 // Before discovery, the shard subscription is pending and the block unavailable.
                 assert!(
                     matches!(shard_sub.try_recv(), Err(TryRecvError::Empty)),
-                    "shard subscription should not resolve before discovery"
+                    "shard subscription must not resolve before discovery"
                 );
                 assert!(
                     peers[receiver_idx].mailbox.get(commitment).await.is_none(),
-                    "block should not reconstruct before discovery"
+                    "block must not reconstruct before discovery"
                 );
 
                 // Discovery drains buffered shards and should progress immediately.
@@ -4771,7 +4783,7 @@ mod tests {
                 select! {
                     _ = shard_sub => {},
                     _ = context.sleep(Duration::from_secs(5)) => {
-                        panic!("shard subscription did not resolve after discovery");
+                        panic!("shard subscription must resolve after discovery");
                     },
                 }
 
@@ -4880,7 +4892,7 @@ mod tests {
 
                 assert!(
                     peers[receiver_idx].mailbox.get(commitment).await.is_none(),
-                    "block should not reconstruct before the commitment is discovered"
+                    "block must not reconstruct before the commitment is discovered"
                 );
 
                 peers[receiver_idx].mailbox.discovered(commitment, round);
@@ -4888,7 +4900,7 @@ mod tests {
                 select! {
                     _ = block_sub => {},
                     _ = context.sleep(Duration::from_secs(5)) => {
-                        panic!("block subscription did not resolve after discovery");
+                        panic!("block subscription must resolve after discovery");
                     },
                 }
 
@@ -4909,7 +4921,7 @@ mod tests {
 
                 let assigned_shard = coded_block
                     .shard(peers[receiver_idx].index.get() as u16)
-                    .expect("missing assigned shard")
+                    .expect("assigned shard must exist")
                     .encode();
                 peers[0]
                     .sender
@@ -4918,7 +4930,7 @@ mod tests {
                 select! {
                     _ = assigned => {},
                     _ = context.sleep(Duration::from_secs(5)) => {
-                        panic!("assigned shard subscription did not resolve after its delivery");
+                        panic!("assigned shard subscription must resolve after its delivery");
                     },
                 }
 
@@ -4930,6 +4942,9 @@ mod tests {
         );
     }
 
+    /// A block reconstructed on discovery stays cached through a later discovery, whatever the
+    /// peer buffers hold. With one buffered shard per peer, a peer's second shard evicts its
+    /// first, so only the commitment whose shard was retained reconstructs.
     #[test_traced]
     fn test_late_subscription_uses_cache_after_peer_buffer_pressure() {
         let fixture: Fixture<C> = Fixture {
@@ -4969,11 +4984,11 @@ mod tests {
                 let target_sub = peers[receiver_idx].mailbox.subscribe(target_commitment);
                 select! {
                     result = target_sub => {
-                        let block = result.expect("discovered target should reconstruct");
+                        let block = result.expect("discovered target must reconstruct");
                         assert_eq!(block.commitment(), target_commitment);
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
-                        panic!("discovered target did not reconstruct");
+                        panic!("discovered target must reconstruct");
                     },
                 }
 
@@ -4988,7 +5003,7 @@ mod tests {
                         .get(target_commitment)
                         .await
                         .is_some(),
-                    "target should remain cached after a later discovery"
+                    "target must remain cached after a later discovery"
                 );
 
                 // The fixture buffers one shard per peer. One authenticated peer sends two distinct
@@ -5139,10 +5154,9 @@ mod tests {
         );
     }
 
+    /// Shards that arrive after the discovery are processed without waiting for another signal.
     #[test_traced]
     fn test_shards_after_discovery_processed_immediately() {
-        // Test that shards arriving after discovery are processed
-        // without waiting for any extra trigger.
         let fixture: Fixture<C> = Fixture {
             num_primary_peers: 10,
             ..Default::default()
@@ -5177,7 +5191,7 @@ mod tests {
                 select! {
                     _ = shard_sub => {},
                     _ = context.sleep(Duration::from_secs(5)) => {
-                        panic!("shard subscription did not resolve after the assigned shard");
+                        panic!("shard subscription must resolve after the assigned shard");
                     },
                 }
 
@@ -5197,12 +5211,12 @@ mod tests {
                     .mailbox
                     .get(commitment)
                     .await
-                    .expect("block should reconstruct from shards after discovery");
+                    .expect("block must reconstruct from shards after discovery");
                 assert_eq!(reconstructed.commitment(), commitment);
 
                 assert!(
                     oracle.blocked().await.unwrap().is_empty(),
-                    "no peers should be blocked for valid shards after discovery"
+                    "valid shards after discovery must block no peer"
                 );
             },
         );
@@ -5269,10 +5283,10 @@ mod tests {
         );
     }
 
+    /// Duplicate shards that arrive before the commitment is discovered are buffered and do not
+    /// block their sender.
     #[test_traced]
     fn test_duplicate_buffered_shard_does_not_block_before_discovery() {
-        // Test that duplicate shards before the commitment is discovered are
-        // buffered and do not immediately block the sender.
         let fixture: Fixture<C> = Fixture {
             ..Default::default()
         };
@@ -5311,7 +5325,7 @@ mod tests {
                 let blocked = oracle.blocked().await.unwrap();
                 assert!(
                     blocked.is_empty(),
-                    "no peers should be blocked before discovery"
+                    "shards before discovery must block no peer"
                 );
             },
         );
@@ -5364,7 +5378,7 @@ mod tests {
 
     /// A Byzantine participant can race the proposer with garbage at the victim's assigned index,
     /// since the assigned index is accepted from any participant. The sender is blocked without
-    /// poisoning the slot: the proposer's genuine shard still verifies afterward.
+    /// poisoning the slot, and the proposer's genuine shard still verifies afterward.
     #[test_traced]
     fn test_invalid_assigned_shard_blocks_only_sender() {
         let fixture: Fixture<C> = Fixture {
@@ -5910,7 +5924,7 @@ mod tests {
                 let blocked = oracle.blocked().await.unwrap();
                 assert!(
                     blocked.is_empty(),
-                    "future-epoch participant should not be blocked: {blocked:?}"
+                    "a future-epoch participant must not be blocked: {blocked:?}"
                 );
             } else {
                 assert_blocked(&oracle, &receiver_pk, &future_peer_pk).await;
@@ -7061,7 +7075,7 @@ mod tests {
                     assert!(np.mailbox.get(commitment).await.is_some());
                     assert!(
                         matches!(ready.try_recv(), Err(TryRecvError::Empty)),
-                        "a non-participant has no assigned shard to verify"
+                        "a non-participant's assigned shard subscription must stay pending"
                     );
                 }
 
@@ -7161,11 +7175,11 @@ mod tests {
                 .control(peer_keys[1].clone())
                 .register(0, TEST_QUOTA)
                 .await
-                .expect("registration should succeed");
+                .expect("the observer channel must register");
             oracle
                 .add_link(local.clone(), peer_keys[1].clone(), DEFAULT_LINK)
                 .await
-                .expect("link should be added");
+                .expect("the observer link must be added");
             oracle.manager().track(
                 0,
                 TrackedPeers::new(participants.clone(), Set::from_iter_dedup([local.clone()])),
@@ -7227,7 +7241,7 @@ mod tests {
 
             // The engine relayed nothing, although its sender reaches peer 1.
             select! {
-                _ = observer.recv() => panic!("a non-participant relays no shard"),
+                _ = observer.recv() => panic!("a non-participant must relay no shard"),
                 _ = context.sleep(Duration::from_millis(100)) => {},
             }
             let probe = block.shard(3).expect("shard must exist");
@@ -7912,7 +7926,7 @@ mod tests {
             select! {
                 _ = block_sub => {},
                 _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("block subscription did not resolve after discovery");
+                    panic!("block subscription must resolve after discovery");
                 },
             }
 
