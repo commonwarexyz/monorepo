@@ -145,6 +145,11 @@ type HandoffController<D> =
 type VerifyObserver<H, P> =
     Box<dyn Fn(Context<<H as Hasher>::Digest, P>, <H as Hasher>::Digest) + Send + 'static>;
 
+/// Callback that takes ownership of a verification request's response sender,
+/// so a test decides when (or whether) to answer it.
+type VerifyHolder<H, P> =
+    Box<dyn Fn(Context<<H as Hasher>::Digest, P>, oneshot::Sender<bool>) + Send + 'static>;
+
 /// Callback that receives a certification request's round, payload, and response sender.
 type CertificationController<D> = Box<dyn Fn(Round, D, oneshot::Sender<bool>) + Send + 'static>;
 
@@ -223,6 +228,9 @@ pub struct Application<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> {
     /// of a leader-owned proposal).
     verify_observer: Option<VerifyObserver<H, P>>,
 
+    /// Takes every verification response sender instead of answering it.
+    verify_holder: Option<VerifyHolder<H, P>>,
+
     /// Handoff response senders held alive while `stall_proposals` is set.
     pending_prepares: Vec<oneshot::Sender<Handoff<H::Digest>>>,
     /// Senders held alive to simulate proposals that hang indefinitely
@@ -273,6 +281,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                 propose_observer: None,
                 handoff_controller: None,
                 verify_observer: None,
+                verify_holder: None,
                 pending_prepares: Vec::new(),
                 pending_proposes: Vec::new(),
                 pending_certifications: Vec::new(),
@@ -317,6 +326,10 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
 
     pub fn set_verify_observer(&mut self, observer: VerifyObserver<H, P>) {
         self.verify_observer = Some(observer);
+    }
+
+    pub fn set_verify_holder(&mut self, holder: VerifyHolder<H, P>) {
+        self.verify_holder = Some(holder);
     }
 
     #[cfg(not(feature = "mocks"))]
@@ -537,6 +550,10 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                             observer(context.clone(), payload);
                         }
                         if self.drop_verifications {
+                            continue;
+                        }
+                        if let Some(holder) = &self.verify_holder {
+                            holder(context, response);
                             continue;
                         }
                         if let Some(contents) = self.seen.get(&payload) {

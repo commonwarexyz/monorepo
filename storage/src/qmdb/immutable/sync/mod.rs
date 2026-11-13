@@ -125,6 +125,13 @@ where
         Ok(self)
     }
 
+    async fn discard_local_state(
+        context: Self::Context,
+        config: &Self::Config,
+    ) -> Result<(), Error<F>> {
+        sync::discard_local_state::<F, _, H, S>(context, config.merkle.clone()).await
+    }
+
     async fn local_pinned_nodes(
         context: Self::Context,
         config: &Self::Config,

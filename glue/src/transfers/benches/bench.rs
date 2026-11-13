@@ -33,6 +33,10 @@ const BALANCE: u64 = 1 << 40;
 struct Balance(u64);
 
 impl Account for Balance {
+    /// The balance and the amounts a payment debits and credits.
+    type Amount = u64;
+
+    /// No effect exists, since the account keeps no state other than its balance.
     type Effect = Infallible;
 
     fn balance(&self) -> u64 {
@@ -64,6 +68,9 @@ impl Nonced {
 }
 
 impl Account for Nonced {
+    /// The balance and the amounts a payment debits and credits.
+    type Amount = u64;
+
     /// The nonce a payment consumes.
     type Effect = u64;
 
@@ -96,7 +103,7 @@ impl Transfer for Payment {
     type Key = Digest;
     type Account = Balance;
 
-    fn changes(&self) -> impl Iterator<Item = (&Digest, Change)> {
+    fn changes(&self) -> impl Iterator<Item = (&Self::Key, Change<Self::Account>)> {
         [
             (&self.from, Change::debit(self.amount)),
             (&self.to, Change::credit(self.amount)),
@@ -115,7 +122,7 @@ impl Transfer for Signed {
     type Key = Digest;
     type Account = Nonced;
 
-    fn changes(&self) -> impl Iterator<Item = (&Digest, Change<u64>)> {
+    fn changes(&self) -> impl Iterator<Item = (&Self::Key, Change<Self::Account>)> {
         let Payment { from, to, amount } = &self.payment;
         let sender = Change::debit(*amount).with_effect(self.nonce);
         [(from, sender), (to, Change::credit(*amount))].into_iter()

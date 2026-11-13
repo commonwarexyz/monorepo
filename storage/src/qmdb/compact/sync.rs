@@ -67,6 +67,15 @@ where
         self.sync().await
     }
 
+    /// Discards nothing. The sync journal lives in memory, and the stored witnesses are never
+    /// read to build the synced state.
+    async fn discard_local_state(
+        _context: Self::Context,
+        _config: &Self::Config,
+    ) -> Result<(), Error<F>> {
+        Ok(())
+    }
+
     async fn local_pinned_nodes(
         _context: Self::Context,
         _config: &Self::Config,

@@ -5,7 +5,7 @@
 //! both standard and coding variants.
 
 use crate::{CertifiableBlock, Epochable, Handoff, marshal::ancestry::Ancestry};
-use commonware_cryptography::Digested;
+use commonware_cryptography::{Digested, Digestible};
 use commonware_parallel::Sequential;
 use commonware_runtime::deterministic;
 use commonware_utils::{
@@ -217,5 +217,99 @@ where
             .expect("release receiver missing");
         let _ = release.await;
         true
+    }
+}
+
+/// An event a [`RecordingVerifyingApp`] observed for one block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verification<D> {
+    /// Verification of the block started.
+    Started(D),
+    /// Verification of the block was cancelled before it resolved.
+    Cancelled(D),
+}
+
+/// A verifying mock application whose `verify()` never resolves. It records, by block digest,
+/// when each verification starts and when it is cancelled.
+#[derive(Clone)]
+pub struct RecordingVerifyingApp<B: Digestible, S> {
+    observed: Arc<Mutex<Vec<Verification<B::Digest>>>>,
+    _phantom: PhantomData<S>,
+}
+
+impl<B: Digestible, S> RecordingVerifyingApp<B, S> {
+    /// Creates an application that has observed nothing.
+    pub fn new() -> Self {
+        Self {
+            observed: Arc::default(),
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Returns what the application and its clones have observed, in order.
+    pub fn observed(&self) -> Vec<Verification<B::Digest>> {
+        self.observed.lock().clone()
+    }
+}
+
+impl<B: Digestible, S> Default for RecordingVerifyingApp<B, S> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Records the cancellation of a verification that is dropped before it resolves.
+struct Cancellation<D: Copy> {
+    digest: D,
+    observed: Arc<Mutex<Vec<Verification<D>>>>,
+}
+
+impl<D: Copy> Drop for Cancellation<D> {
+    fn drop(&mut self) {
+        self.observed
+            .lock()
+            .push(Verification::Cancelled(self.digest));
+    }
+}
+
+impl<B, S> crate::Application<deterministic::Context> for RecordingVerifyingApp<B, S>
+where
+    B: CertifiableBlock,
+    B::Context: Epochable + Send + Sync + 'static,
+    S: commonware_cryptography::certificate::Scheme,
+{
+    type Block = B;
+    type Context = B::Context;
+    type SigningScheme = S;
+    type Input = ();
+
+    async fn propose(
+        &mut self,
+        _context: (deterministic::Context, Self::Context),
+        _ancestry: impl Ancestry<Self::Block>,
+        _input: Self::Input,
+    ) -> Option<Digested<Self::Block>> {
+        None
+    }
+
+    async fn verify(
+        &mut self,
+        _context: (deterministic::Context, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
+    ) -> bool {
+        // Record that verification of the block at the head of the ancestry has started.
+        let digest = ancestry
+            .peek()
+            .expect("ancestry must start at the block under verification")
+            .digest();
+        self.observed.lock().push(Verification::Started(digest));
+
+        // Never resolve. The guard records the cancellation of this digest when it is dropped,
+        // which happens only when the caller drops this future.
+        let _cancellation = Cancellation {
+            digest,
+            observed: self.observed.clone(),
+        };
+        pending().await
     }
 }

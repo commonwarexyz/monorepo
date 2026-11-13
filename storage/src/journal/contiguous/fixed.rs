@@ -145,6 +145,7 @@ use crate::{
     journal::{
         Error,
         contiguous::{Many, Mutable, metrics::Metrics},
+        decode_sync,
         durability::Barrier,
     },
 };
@@ -166,9 +167,9 @@ use std::{
 };
 use tracing::warn;
 
-// Reusable scratch for the synchronous read paths ([`Reader::try_read_sync`] and
-// [`Reader::probe_items`]), grown to the largest probe served on the thread. Both run on the
-// hot read path, where a fresh zeroed allocation per call contends under the pool's fan-out.
+// Reusable scratch for [`Reader::probe_items`], grown to the largest probe served on the thread.
+// It runs on the hot read path, where a fresh zeroed allocation per call contends under the
+// pool's fan-out.
 commonware_utils::thread_local_cache!(static PROBE_SCRATCH: Vec<u8>);
 
 /// Items encoded for a deferred append, created by [`Journal::prepare_append`] and consumed by
@@ -1512,14 +1513,27 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
 
     /// See [Journal::destroy].
     pub(crate) async fn destroy(self) -> Result<(), Error> {
+        self.destroy_cleared(|| async { Ok(()) }).await
+    }
+
+    /// Stage a clear to zero, await `clear_dependents`, then remove this journal's blobs and
+    /// checkpoint. A crash after staging leaves an intent that the next open completes.
+    pub(super) async fn destroy_cleared<F, Fut>(self, clear_dependents: F) -> Result<(), Error>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<(), Error>>,
+    {
         // A failed checkpoint sync must surface before any data is removed, since the surviving
         // checkpoint would otherwise acknowledge items the removed blobs no longer back.
         let mut journal = self.wait_for_sync().await?;
 
-        // Stage a clear to zero before removing anything: a destroy interrupted after the intent is
-        // durable reopens as a fresh journal, and one interrupted before it reopens as a crash
-        // would recover it.
+        // A destroy interrupted after the staged clear is durable reopens as a fresh journal, and
+        // one interrupted before it reopens as a crash would recover it.
         journal.checkpoint = journal.checkpoint.stage_clear(0).await?;
+
+        // Dependent state is removed under the same intent before this journal's own blobs, and
+        // the checkpoint holding the intent goes last.
+        clear_dependents().await?;
         journal.blobs.destroy().await?;
         journal.checkpoint.destroy().await
     }
@@ -1638,6 +1652,10 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// A cap above the recovered end preserves that end. A cap below the retained start returns
     /// [Error::ItemPruned]. Successful initialization durably discards the suffix. Subsequent
     /// appends may exceed the cap.
+    ///
+    /// Blobs that hold only positions at or above the cap are removed without being opened.
+    /// Every blob name in the partition must still decode as a blob index, including those above
+    /// the cap.
     pub async fn init_at_most(context: E, cfg: Config, max_size: u64) -> Result<Self, Error> {
         let checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
         let recovery = Recovery::<E, A>::open(context, cfg, checkpoint, Some(max_size)).await?;
@@ -1663,6 +1681,12 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     pub(crate) async fn clear_to_size(mut self, new_size: u64) -> Result<Self, Error> {
         self.0 = self.0.clear_to_size(new_size).await?;
         Ok(self)
+    }
+
+    /// Wait for every started sync to complete, surfacing a failure without changing storage.
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) async fn wait_for_sync(self) -> Result<Self, Error> {
+        Ok(Self(Box::new(self.0.wait_for_sync().await?)))
     }
 
     /// Durably persists the current state of the structure.
@@ -1786,8 +1810,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ///
     /// # Crash Safety
     ///
-    /// An interrupted destroy leaves a journal that reopens either as a crash would recover it or
-    /// as a fresh journal at position zero, and that a retried destroy removes.
+    /// If destruction is interrupted, reopening either recovers the journal normally or creates an
+    /// empty journal at position zero.
     pub async fn destroy(self) -> Result<(), Error> {
         self.0.destroy().await
     }
@@ -2012,17 +2036,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
 
     fn try_read_sync(&self, pos: u64) -> Option<A> {
         let (blob, offset) = self.locate(pos).ok()?;
-        let mut scratch =
-            Cached::take(&PROBE_SCRATCH, || Ok::<_, ()>(Vec::new()), |_| Ok(())).unwrap();
-        if scratch.len() < A::SIZE {
-            scratch.resize(A::SIZE, 0);
-        }
-        let buf = &mut scratch[..A::SIZE];
-        let item = if blob.try_read_sync_into(buf, offset) {
-            A::decode(Copying(buf)).ok()
-        } else {
-            None
-        };
+        let item = decode_sync::<A>(|buf| blob.try_read_sync_into(buf, offset));
         if item.is_some() {
             self.metrics.cache_hits.inc();
             self.metrics.items_read.inc();
@@ -2299,7 +2313,7 @@ mod tests {
     use super::*;
     use crate::{
         journal::{
-            authenticated,
+            SYNC_READ_STACK_SIZE, authenticated,
             contiguous::{
                 Contiguous as _,
                 tests::{replay_items, tear_page_rewrite},
@@ -2316,8 +2330,9 @@ mod tests {
         buffer::paged::{Writer, corrupt_page},
         deterministic::{self, Context},
         mocks::{
-            DelayedSyncContext, PendingSyncs, RecordingContext, WriteFaultContext, WriteFaults,
-            drive_pending_syncs, fail_pending_syncs, next_pending_sync, release_pending_syncs,
+            DelayedSyncContext, MutationFaultContext, MutationFaults, PendingSyncs,
+            RecordingContext, WriteFaultContext, WriteFaults, drive_pending_syncs,
+            fail_pending_syncs, next_pending_sync, release_pending_syncs,
         },
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, probability};
@@ -2534,6 +2549,25 @@ mod tests {
             journal.destroy().await.unwrap();
             assert_eq!(decoded.bytes.as_ref(), &7u64.to_be_bytes());
             assert_eq!(next.bytes.as_ref(), &8u64.to_be_bytes());
+        });
+    }
+
+    /// Append two `SIZE`-byte items and read both back through the synchronous path.
+    async fn check_cached_read<const SIZE: usize>(context: deterministic::Context) {
+        let cfg = test_cfg(NZU64!(3));
+        let mut journal = Journal::<_, [u8; SIZE]>::init(context, cfg).await.unwrap();
+        (journal, _) = journal.append(&[7u8; SIZE]).await.unwrap();
+        (journal, _) = journal.append(&[8u8; SIZE]).await.unwrap();
+        assert_eq!(journal.try_read_sync(0).unwrap(), [7u8; SIZE]);
+        assert_eq!(journal.try_read_sync(1).unwrap(), [8u8; SIZE]);
+        journal.destroy().await.unwrap();
+    }
+
+    #[test_traced]
+    fn test_fixed_cached_read_at_stack_buffer_boundary() {
+        deterministic::Runner::default().start(|context| async move {
+            check_cached_read::<SYNC_READ_STACK_SIZE>(context.child("stack")).await;
+            check_cached_read::<{ SYNC_READ_STACK_SIZE + 1 }>(context.child("scratch")).await;
         });
     }
 
@@ -4396,6 +4430,86 @@ mod tests {
             let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
+    }
+
+    /// A reset to a new size stopped before any one of its mutations leaves a journal that
+    /// reopens with its prior contents or empty at the new size, and that accepts appends.
+    #[test_traced]
+    fn test_interrupted_init_at_size_reopens() {
+        // New sizes below the retained items, among them, and past them, on and off a blob
+        // boundary.
+        for target in [0u64, 2, 8, 13, 15] {
+            // Stop the reset before its first mutation, then its second, and so on until one
+            // reset completes.
+            let mut interrupted = 0;
+            loop {
+                let faults = MutationFaults::default();
+                let (completed, checkpoint) = deterministic::Runner::default().start_and_recover({
+                    let faults = faults.clone();
+                    |context| async move {
+                        let context = MutationFaultContext {
+                            inner: context,
+                            faults: faults.clone(),
+                        };
+                        let cfg = test_cfg(NZU64!(5));
+                        let mut journal = Journal::<_, Digest>::init_at_size(
+                            context.child("first"),
+                            cfg.clone(),
+                            7,
+                        )
+                        .await
+                        .unwrap();
+                        for i in 7..12 {
+                            (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+                        }
+                        drop(journal.sync().await.unwrap());
+                        faults.allow(interrupted);
+                        Journal::<_, Digest>::init_at_size(context.child("reset"), cfg, target)
+                            .await
+                            .is_ok()
+                    }
+                });
+                let stopped = faults.failed();
+                let scenario = format!("new size {target}, stopped after {interrupted} mutations");
+                assert_eq!(completed, !stopped, "{scenario}");
+
+                deterministic::Runner::from(checkpoint).start(|context| async move {
+                    let cfg = test_cfg(NZU64!(5));
+                    let journal = Journal::<_, Digest>::init(context.child("reopen"), cfg.clone())
+                        .await
+                        .unwrap_or_else(|err| panic!("{scenario}: {err}"));
+                    let bounds = journal.bounds();
+                    if completed {
+                        assert_eq!(bounds, target..target, "{scenario}");
+                    } else {
+                        assert!(
+                            bounds == (7..12) || bounds == (target..target),
+                            "{scenario}: {bounds:?}"
+                        );
+                    }
+                    for i in bounds.clone() {
+                        assert_eq!(journal.read(i).await.unwrap(), test_digest(i), "{scenario}");
+                    }
+
+                    // An append lands at the end and survives another reopen.
+                    let (journal, position) = journal.append(&test_digest(99)).await.unwrap();
+                    assert_eq!(position, bounds.end, "{scenario}");
+                    drop(journal.sync().await.unwrap());
+                    let journal = Journal::<_, Digest>::init(context.child("again"), cfg)
+                        .await
+                        .unwrap_or_else(|err| panic!("{scenario}: {err}"));
+                    assert_eq!(journal.read(position).await.unwrap(), test_digest(99));
+                });
+                if !stopped {
+                    break;
+                }
+                interrupted += 1;
+            }
+
+            // A reset stages its intent, removes the stored blobs, creates the new tail and
+            // publishes it, so it can stop in at least three places.
+            assert!(interrupted >= 3, "new size {target}: {interrupted}");
+        }
     }
 
     /// A destroy interrupted at any point leaves a journal that reopens as a crash would recover

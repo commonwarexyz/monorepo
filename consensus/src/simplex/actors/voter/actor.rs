@@ -508,9 +508,10 @@ impl<
         pending_verify: &mut PendingVerification,
     ) {
         // Retain requests for the current and optimistic future views. Drop requests for exited
-        // views, and a proposal request whose captured parent is no longer valid once a
-        // replacement parent is selectable. Certification of an exited view continues after its
-        // verification receiver is dropped.
+        // views, a verification request whose proposal a certificate replaced, and a proposal
+        // request whose captured parent is no longer valid once a replacement parent is
+        // selectable. Certification of a view continues after its verification receiver is
+        // dropped.
         let current_view = self.state.current_view();
         if let Some(request) = pending_propose.as_ref() {
             let reason = if request.view() < current_view {
@@ -527,10 +528,9 @@ impl<
                 *pending_propose = None;
             }
         }
-        if pending_verify
-            .as_ref()
-            .is_some_and(|request| request.view() < current_view)
-        {
+        if pending_verify.as_ref().is_some_and(|request| {
+            request.view() < current_view || self.state.verification_superseded(request.view())
+        }) {
             *pending_verify = None;
         }
 
@@ -1066,8 +1066,9 @@ impl<
         let mut vote_sender = WrappedSender::new(vote_sender);
         let mut certificate_sender = WrappedSender::new(certificate_sender);
 
-        // Initialize journal
-        let journal = Journal::<_, Artifact<S, D>>::init(
+        // Open the journal. Replayed artifacts become in-memory state, so journal pages don't
+        // need to stay in the OS page cache.
+        let mut replay = Journal::<_, Artifact<S, D>>::init(
             self.context.child("journal"),
             JConfig {
                 partition: self.partition.clone(),
@@ -1075,7 +1076,9 @@ impl<
                 codec_config: self.certificate_config.clone(),
                 page_cache: self.page_cache.clone(),
                 write_buffer: self.write_buffer,
+                replay_buffer: self.replay_buffer,
             },
+            ReadOptions::DONT_CACHE,
         )
         .await
         .expect("unable to open journal");
@@ -1105,14 +1108,8 @@ impl<
         });
 
         // Rebuild from journal, nested under the startup span.
-        // Replayed artifacts become in-memory state, so journal pages need not
-        // remain in the OS page cache.
         let replayed;
         (self, replayed) = async {
-            let mut replay = journal
-                .replay(0, 0, self.replay_buffer, ReadOptions::DONT_CACHE)
-                .await
-                .expect("unable to replay journal");
             while let Some(artifact) = replay.next().await {
                 let (_, _, _, artifact) = artifact.expect("unable to replay journal");
 
