@@ -38,6 +38,17 @@ struct Peer<P: PublicKey> {
 /// unlikely to match the ID of a new request.
 pub type ID = u64;
 
+/// The order in which pending keys are tried. Fields compare in declaration order.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Order {
+    /// Whether the key was already attempted. Fresh requests precede retries.
+    retry: bool,
+    /// The earliest time the key may be attempted.
+    deadline: SystemTime,
+    /// The key's arrival position. It orders keys of one class with equal deadlines.
+    sequence: u64,
+}
+
 /// Tracks an active request that has been sent to a peer.
 struct ActiveRequest<P, Key> {
     key: Key,
@@ -209,11 +220,7 @@ where
 
     /// Manages pending requests. When a request is registered (for both the first time and after
     /// a retry), it is added to this set.
-    ///
-    /// Fresh requests precede retries. Within each class, requests are ordered
-    /// by the next time they should be attempted, with FIFO ordering for equal
-    /// deadlines.
-    pending: PrioritySet<Key, (bool, SystemTime, u64)>,
+    pending: PrioritySet<Key, Order>,
 
     /// Next sequence number for pending requests.
     pending_sequence: u64,
@@ -384,7 +391,7 @@ where
         // Detach the queue to leave skipped entries untouched and remove only the sent key.
         let pending = mem::replace(&mut self.pending, PrioritySet::new());
         let mut sent = None;
-        for (key, (_, deadline, _)) in pending.iter() {
+        for (key, Order { deadline, .. }) in pending.iter() {
             // Each key must wait for its own deadline. Preserve the earliest future
             // wakeup and keep scanning: fresh keys precede retries, so later keys
             // may already be due.
@@ -495,7 +502,14 @@ where
         // because no eligible peer could serve it. A newly queued key can still
         // be fetchable, so wake pending processing immediately.
         self.waiter = None;
-        self.pending.put(key, (retry, deadline, sequence));
+        self.pending.put(
+            key,
+            Order {
+                retry,
+                deadline,
+                sequence,
+            },
+        );
     }
 
     /// Adds a fresh key to the pending queue, ahead of retries.
@@ -529,7 +543,7 @@ where
         }
 
         // Return the greater of the waiter and the next pending deadline
-        let pending_deadline = self.pending.peek().map(|(_, (_, deadline, _))| *deadline);
+        let pending_deadline = self.pending.peek().map(|(_, order)| order.deadline);
         pending_deadline.max(self.waiter)
     }
 
