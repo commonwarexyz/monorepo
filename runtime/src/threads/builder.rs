@@ -418,7 +418,8 @@ impl<C: Spawner> ThreadBuilder<C> {
     ///
     /// # Errors
     ///
-    /// See [ThreadBuilder::build].
+    /// See [ThreadBuilder::build]. On an error, `f` never runs and is dropped on the caller
+    /// before this returns.
     pub fn spawn<F, Fut, T>(self, f: F) -> Result<Handle<T>, ThreadError>
     where
         F: FnOnce(Local<C>) -> Fut + Send + 'static,

@@ -17,8 +17,9 @@ use std::{
     any::Any,
     cell::UnsafeCell,
     future::Future,
+    mem,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
-    pin::Pin,
+    pin::{Pin, pin},
     sync::{Arc, Weak},
     task::{Context, Poll},
     vec::IntoIter,
@@ -326,9 +327,40 @@ where
             let _guard = guard;
 
             // Only this task's wakers poll this block, so the wrapper can skip re-registering
-            // an unchanged one. `f` is dropped at the end of this statement, before its result
-            // is sent.
-            let result = Abortable::task(FutureCell(UnsafeCell::new(f)), abort_registration).await;
+            // an unchanged one. The future sits in an `Option` so it can be dropped in place
+            // once it resolves, before its result is sent.
+            let mut task = pin!(Some(Abortable::task(
+                FutureCell(UnsafeCell::new(f)),
+                abort_registration
+            )));
+            let result = poll_fn(|cx| {
+                task.as_mut()
+                    .as_pin_mut()
+                    .expect("a task is not polled after it resolves")
+                    .poll(cx)
+            })
+            .await;
+
+            // Drop the future in its own boundary. A destructor panic of a resolved future is a
+            // disposal panic, which the caller of this poll handles. Before resuming it, publish
+            // a poll panic the future raised first, so that failure is not lost, and drop an
+            // output that can no longer be delivered.
+            if let Err(panic) = catch_unwind(AssertUnwindSafe(|| task.set(None))) {
+                match result {
+                    Ok(Ok(output)) => {
+                        if let Err(secondary) = catch_unwind(AssertUnwindSafe(move || drop(output)))
+                        {
+                            mem::forget(secondary);
+                        }
+                    }
+                    Ok(Err(poll_panic)) => {
+                        panicker.notify(poll_panic);
+                        let _ = sender.send(Err(Error::Exited));
+                    }
+                    Err(Aborted) => {}
+                }
+                resume_unwind(panic);
+            }
 
             // Handle result
             match result {

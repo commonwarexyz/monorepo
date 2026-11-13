@@ -22,13 +22,14 @@ use std::{
     cell::Cell,
     future::{Future, Ready, poll_fn, ready},
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
+    pin::Pin,
     rc::Rc,
     sync::{
         Arc, Barrier,
         atomic::{AtomicBool, Ordering},
         mpsc::{RecvTimeoutError, channel},
     },
-    task::Poll,
+    task::{self, Poll},
     thread::JoinHandle,
     time::{Duration, Instant},
 };
@@ -777,6 +778,75 @@ fn capturing<L>(
     }
 }
 
+/// Payload of a destructor panic that follows a poll panic.
+const DROP_PANIC: &str = "thread test drop panic";
+
+/// A future that panics with [PANIC] when polled, then panics with [DROP_PANIC] when dropped,
+/// after setting its flag.
+struct PollThenDrop {
+    /// Set when the future is dropped.
+    dropped: Arc<AtomicBool>,
+    /// Whether the future was polled.
+    polled: bool,
+}
+
+impl Future for PollThenDrop {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, _: &mut task::Context<'_>) -> Poll<()> {
+        self.polled = true;
+        panic!("{PANIC}");
+    }
+}
+
+impl Drop for PollThenDrop {
+    fn drop(&mut self) {
+        self.dropped.store(true, Ordering::SeqCst);
+        if self.polled {
+            panic!("{DROP_PANIC}");
+        }
+    }
+}
+
+/// A kind of task whose future the runtime's task handle wraps.
+#[derive(Clone, Copy, Debug)]
+enum Wrapped {
+    /// An ordinary spawn.
+    Spawn,
+    /// A spawn placed on a thread.
+    Placed,
+    /// A `spawn_on` resident.
+    SpawnOn,
+    /// The root of a new thread.
+    Root,
+}
+
+impl Wrapped {
+    /// Spawn the future `make` builds from the task's context as a task of this kind, with
+    /// `thread` the thread placed tasks run on.
+    fn spawn<C, F>(
+        self,
+        context: C,
+        thread: &Thread,
+        make: impl FnOnce(C) -> F + Send + 'static,
+    ) -> Handle<F::Output>
+    where
+        C: Spawner,
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        match self {
+            Self::Spawn => context.spawn(make),
+            Self::Placed => context.on(thread).spawn(make),
+            Self::SpawnOn => context.spawn_on(thread, move |local| make(local.into_inner())),
+            Self::Root => context
+                .thread()
+                .spawn(move |local| make(local.into_inner()))
+                .expect("thread"),
+        }
+    }
+}
+
 /// A panic of the panic matrix.
 #[derive(Clone, Copy, Debug)]
 enum Scenario {
@@ -828,11 +898,16 @@ enum Scenario {
     /// A placed spawn's factory capture panics when a closed thread rejects it before the
     /// factory runs.
     RejectedPlaced,
+    /// A task completes with an output holding its context, then its future panics when
+    /// dropped, before the output is delivered.
+    ReadyOutput(Wrapped),
+    /// A task's future panics in a poll, then panics again when dropped.
+    PollThenDrop(Wrapped),
 }
 
 impl Scenario {
     /// Whether the panic is reported through the runner's panicker. Disposal panics are
-    /// contained on io_uring.
+    /// contained on io_uring, but a poll panic that precedes one is still reported.
     const fn reported(self, backend: Backend) -> bool {
         match self {
             Self::SpawnOnFactory
@@ -841,7 +916,8 @@ impl Scenario {
             | Self::SpawnOnPoll
             | Self::SpawnLocalPoll
             | Self::PlacedPoll
-            | Self::RootPoll => true,
+            | Self::RootPoll
+            | Self::PollThenDrop(_) => true,
             _ => {
                 #[cfg(target_os = "linux")]
                 if matches!(backend, Backend::Iouring) {
@@ -850,6 +926,17 @@ impl Scenario {
                 let _ = backend;
                 true
             }
+        }
+    }
+
+    /// The payload of a panic that fails the run whether or not panics are caught, if any. The
+    /// deterministic runtime polls ordinary tasks without a panic boundary, so their disposal
+    /// panics escape the run.
+    const fn escapes(self, backend: Backend) -> Option<&'static str> {
+        match (self, backend) {
+            (Self::ReadyOutput(Wrapped::Spawn), Backend::Deterministic) => Some(PANIC),
+            (Self::PollThenDrop(Wrapped::Spawn), Backend::Deterministic) => Some(DROP_PANIC),
+            _ => None,
         }
     }
 }
@@ -1136,6 +1223,26 @@ where
             assert!(matches!(handle.await, Err(Error::Closed)));
             assert!(!ran.load(Ordering::SeqCst), "the rejected factory ran");
         }
+        Scenario::ReadyOutput(wrapped) => {
+            let output = flag();
+            let held = output.clone();
+            let handle = wrapped.spawn(context.child("ready"), thread, move |context| {
+                ready_then_panic(dropped, (context, DropFlag(held)))
+            });
+            assert!(matches!(handle.await, Err(Error::Closed)));
+
+            // The output that could not be delivered is dropped before the handle resolves.
+            assert!(output.load(Ordering::SeqCst), "the output was leaked");
+        }
+        Scenario::PollThenDrop(wrapped) => {
+            let guard = dropped.clone();
+            let handle = wrapped.spawn(context.child("poll"), thread, move |_| PollThenDrop {
+                dropped: guard,
+                polled: false,
+            });
+            assert!(matches!(handle.await, Err(Error::Exited)));
+            assert!(dropped.load(Ordering::SeqCst));
+        }
     }
 }
 
@@ -1166,7 +1273,10 @@ fn panic_matrix<R: Runner>(
             assert!(matches!(after.await, Ok(7)));
         })
     }));
-    if scenario.reported(backend) && !catch {
+    if let Some(payload) = scenario.escapes(backend) {
+        let panic = result.expect_err("an escaping panic did not fail the run");
+        assert_eq!(extract_panic_message(&*panic), payload);
+    } else if scenario.reported(backend) && !catch {
         let panic = result.expect_err("a reported panic did not fail the run");
         assert_eq!(extract_panic_message(&*panic), PANIC);
     } else {
@@ -1202,7 +1312,15 @@ fn test_thread_panic_matrix(
         Scenario::RejectedClosed,
         Scenario::RejectedForeign,
         Scenario::RejectedAborted,
-        Scenario::RejectedPlaced
+        Scenario::RejectedPlaced,
+        Scenario::ReadyOutput(Wrapped::Spawn),
+        Scenario::ReadyOutput(Wrapped::Placed),
+        Scenario::ReadyOutput(Wrapped::SpawnOn),
+        Scenario::ReadyOutput(Wrapped::Root),
+        Scenario::PollThenDrop(Wrapped::Spawn),
+        Scenario::PollThenDrop(Wrapped::Placed),
+        Scenario::PollThenDrop(Wrapped::SpawnOn),
+        Scenario::PollThenDrop(Wrapped::Root)
     )]
     scenario: Scenario,
     #[values(false, true)] catch: bool,
