@@ -5,92 +5,88 @@
 ### Marshal
 
 The coding marshal's `shards::Mailbox` drops its public-key type parameter, so
-name it `Mailbox<B, C, H>`, including in `MarshaledConfig::shards` ([#5681]).
+name it `Mailbox<B, C, H>`, including in `MarshaledConfig::shards`.
 `Mailbox::gather(commitment, round)` replaces `discovered` and `notarized`, and
-`proposed` is renamed to `disperse` ([#5681]). When certification is the first
-call to report a commitment to the shard engine, the engine can now check the
-shard the leader sent this validator, count it toward rebuilding the block, and
-relay it without learning the leader ([#5681]). The engine also no longer needs
-to know the leader to block the sender of a shard whose index is neither the
-sender's nor the engine's own ([#5681]). A node outside the participant set no
-longer receives a successful `subscribe_assigned_shard_verified` notification,
-so do not wait for one on such a node ([#5681]). Vote, certificate, and shard
-encodings are unchanged ([#5681]).
+`proposed` is renamed to `disperse`. When certification is the first call to
+report a commitment to the shard engine, the engine can now check the shard the
+leader sent this validator, count it toward rebuilding the block, and relay it
+without learning the leader. The engine also no longer needs to know the leader
+to block the sender of a shard whose index is neither the sender's nor the
+engine's own. A node outside the participant set no longer receives a successful
+`subscribe_assigned_shard_verified` notification, so do not wait for one on such
+a node. Vote, certificate, and shard encodings are unchanged ([#5681]).
 
 `Deferred` and coding `Marshaled` now stop verifying a block once certification
-is requested for a different block of its round ([#5682]). That request cancels
-a verification that is running or still waiting for its block or parent
-([#5682]). The `Application::verify` docs now state that several calls can be
-outstanding for one round when its leader equivocates, and that an
-implementation must give each its own verdict without cancelling or replacing an
-earlier one ([#5682]).
+is requested for a different block of its round. That request cancels a
+verification that is running or still waiting for its block or parent. The
+`Application::verify` docs now state that several calls can be outstanding for
+one round when its leader equivocates, and that an implementation must give each
+its own verdict without cancelling or replacing an earlier one ([#5682]).
 
 When the `view_retention` window reaches back past the start of the epoch of the
 previously witnessed finalization round, marshal now counts each view the window
 lacks in that epoch as one block height below the epoch instead of as one whole
-earlier epoch, and keeps the whole epoch containing the lowest such height
-([#5646]). Where the `epocher` cannot place those heights, each earlier epoch
-still counts for one view ([#5646]). The first prune after upgrading destroys
-the caches of earlier epochs that the window no longer covers ([#5646]).
+earlier epoch, and keeps the whole epoch containing the lowest such height.
+Where the `epocher` cannot place those heights, each earlier epoch still counts
+for one view. The first prune after upgrading destroys the caches of earlier
+epochs that the window no longer covers ([#5646]).
 
 ### Simplex
 
 Once Simplex has requested `certify` for a view, it no longer requests `verify`
-for that view before a restart ([#5681]). Under marshal's `Deferred`, that later
-`verify` could run the application's verification a second time ([#5681]). A
-validator whose `certify` request comes first therefore no longer casts a late
-notarize vote for that view or nullifies it early on a `false` verification
-verdict ([#5681]). That validator can still vote to finalize if certification
-succeeds before the view is nullified ([#5681]). The voter now also drops the
-receiver of a pending `verify` when a certificate for a conflicting proposal of
-the same view arrives ([#5681]).
+for that view before a restart. Under marshal's `Deferred`, that later `verify`
+could run the application's verification a second time. A validator whose
+`certify` request comes first therefore no longer casts a late notarize vote for
+that view or nullifies it early on a `false` verification verdict. That
+validator can still vote to finalize if certification succeeds before the view
+is nullified. The voter now also drops the receiver of a pending `verify` when a
+certificate for a conflicting proposal of the same view arrives ([#5681]).
 
 The `Automaton::verify` docs now state that consensus may drop the receiver
-before a verdict arrives ([#5681]). The `CertifiableAutomaton::certify` docs
-clarify that a round can carry conflicting payloads, so state must be keyed by
-`(round, payload)` and not by either alone, and that certification can be
-requested for a payload this participant was never asked to verify ([#5681]).
+before a verdict arrives. The `CertifiableAutomaton::certify` docs clarify that
+a round can carry conflicting payloads, so state must be keyed by `(round,
+payload)` and not by either alone, and that certification can be requested for a
+payload this participant was never asked to verify ([#5681]).
 
 ### Crash Recovery
 
 Opening a paged blob for writing, as journals and the stores built on them do at
 startup, now clears a checksum slot that a torn write left on its partial last
-page ([#5660]). A torn shrink or append could leave part of a checksum in that
-slot, and a second torn write to the page after a restart could complete it,
-revalidating bytes that the shrink or the earlier recovery had discarded
-([#5660]). `paged::Recovery::open` durably zeroes such a slot before opening
-completes, including on pages written by earlier releases ([#5660]). The page
-format is unchanged ([#5660]).
+page. A torn shrink or append could leave part of a checksum in that slot, and a
+second torn write to the page after a restart could complete it, revalidating
+bytes that the shrink or the earlier recovery had discarded.
+`paged::Recovery::open` durably zeroes such a slot before opening completes,
+including on pages written by earlier releases. The page format is unchanged
+([#5660]).
 
 ### Memory and Metrics
 
 Commonware's `futures` and `futures-util` dependencies now require at least
-0.3.34, including in downstream builds ([#5583]). Version 0.3.32 has a
+0.3.34, including in downstream builds. Version 0.3.32 has a
 `FuturesUnordered::into_iter` leak that can retain task allocations when
 `glue::stateful` verification resumes after a finalization or prune ([#5583]).
 
 The resolver's `peer_performance` gauge drops a peer's series when the peer
-leaves the tracked set ([#5528]). When the DKG reshare actor prepares an epoch,
-it drops the `latest_share` series of peers outside that epoch's dealers and the
-`latest_ack` series of peers outside its players ([#5528]). A peer that keeps
-its role keeps its value ([#5528]).
+leaves the tracked set. When the DKG reshare actor prepares an epoch, it drops
+the `latest_share` series of peers outside that epoch's dealers and the
+`latest_ack` series of peers outside its players. A peer that keeps its role
+keeps its value ([#5528]).
 
 ### Resolver
 
 The p2p resolver now tries pending requests in queue order when their deadlines
-match, with fresh requests still ahead of retries ([#5698]). Marshal's fresh
-requests for blocks by commitment that queue at the same instant behind a
-rate-limited peer are therefore tried in that order instead of digest order
-([#5698]).
+match, with fresh requests still ahead of retries. Marshal's fresh requests for
+blocks by commitment that queue at the same instant behind a rate-limited peer
+are therefore tried in that order instead of digest order ([#5698]).
 
 ### Cryptography
 
 The `lthash` docs no longer estimate at least 200 bits of security and instead
 describe a published collision attack on its 1024-element, 16-bit state, which
-puts collision resistance far below 128 bits ([#5590]). The attack needs
-colliding sets of at least 2^72 elements combined, so it does not apply while an
-adversary cannot get that many elements of its choosing into the sets being
-compared ([#5590]). The hash function is unchanged ([#5590]).
+puts collision resistance far below 128 bits. The attack needs colliding sets of
+at least 2^72 elements combined, so it does not apply while an adversary cannot
+get that many elements of its choosing into the sets being compared. The hash
+function is unchanged ([#5590]).
 
 [#5528]: https://github.com/commonwarexyz/monorepo/pull/5528
 [#5583]: https://github.com/commonwarexyz/monorepo/pull/5583
