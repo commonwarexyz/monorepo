@@ -111,6 +111,8 @@ struct Ready {
 
 impl WakeState {
     /// An empty, open ready list without a root waker.
+    // Loom's Mutex::new is not const.
+    #[allow(clippy::missing_const_for_fn)]
     pub(super) fn new() -> Self {
         Self {
             ready: Mutex::new(Ready {

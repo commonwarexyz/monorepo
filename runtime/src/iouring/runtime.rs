@@ -984,8 +984,8 @@ impl crate::Spawner for Context {
     }
 }
 
-impl From<ThreadLocal<Context>> for Context {
-    fn from(local: ThreadLocal<Context>) -> Self {
+impl From<ThreadLocal<Self>> for Context {
+    fn from(local: ThreadLocal<Self>) -> Self {
         local.into_inner()
     }
 }

@@ -46,13 +46,13 @@ impl AffinityState {
     /// Set up the calling runtime-created thread: apply `pin` if it is pinned, or reset an
     /// inherited mask narrower than the base set once the reset is armed (best effort).
     pub(crate) fn enter(&self, pin: Option<&Cpus>) -> std::io::Result<()> {
-        match pin {
-            Some(cpus) => apply(cpus),
-            None => {
+        pin.map_or_else(
+            || {
                 self.reset_if_narrowed();
                 Ok(())
-            }
-        }
+            },
+            apply,
+        )
     }
 
     /// Write the base set if the reset is armed and the calling thread's mask is a strict

@@ -85,6 +85,7 @@ impl Cpus {
     }
 
     /// The smallest requested id at or above 1024, which is not stored.
+    #[commonware_macros::stability(ALPHA)]
     pub(crate) const fn beyond(&self) -> Option<usize> {
         self.beyond
     }
@@ -186,10 +187,8 @@ pub(crate) fn validate(cpus: &Cpus, base: Option<&Cpus>) -> Result<(), ThreadErr
     let Some(base) = base else {
         return Err(ThreadError::UnsupportedAffinity);
     };
-    match cpus.first_outside(base) {
-        Some(id) => Err(ThreadError::CpuUnavailable(id)),
-        None => Ok(()),
-    }
+    cpus.first_outside(base)
+        .map_or(Ok(()), |id| Err(ThreadError::CpuUnavailable(id)))
 }
 
 /// Why a runtime thread could not be created.

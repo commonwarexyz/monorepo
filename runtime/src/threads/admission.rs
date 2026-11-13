@@ -223,10 +223,8 @@ impl ThreadInner {
         drop(admission);
         Some(registered)
     }
-}
 
-#[cfg(not(target_arch = "wasm32"))]
-impl ThreadInner {
+    #[cfg(not(target_arch = "wasm32"))]
     /// Queue `job` for the host and wake it, or return `job` if the thread is not open. The
     /// caller drops a rejected job after this returns, outside the lock.
     pub(crate) fn submit(&self, mut job: Job) -> Result<(), Job> {
@@ -246,6 +244,7 @@ impl ThreadInner {
         Ok(())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// Move up to `max` queued jobs, oldest first, into `batch`, unless the thread is closing.
     pub(crate) fn take_batch(&self, max: usize, batch: &mut VecDeque<Job>) -> Turn {
         let mut admission = self.lock();
@@ -261,6 +260,7 @@ impl ThreadInner {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// Move admission to closing, if it is open, and detach every queued job for disposal
     /// outside the lock.
     pub(crate) fn detach(&self) -> VecDeque<Job> {
@@ -272,7 +272,7 @@ impl ThreadInner {
     }
 
     /// Number of queued jobs.
-    #[cfg(test)]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) fn queued(&self) -> usize {
         self.lock().ingress.len()
     }

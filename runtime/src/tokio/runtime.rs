@@ -762,8 +762,8 @@ impl crate::Spawner for Context {
     }
 }
 
-impl From<Local<Context>> for Context {
-    fn from(local: Local<Context>) -> Self {
+impl From<Local<Self>> for Context {
+    fn from(local: Local<Self>) -> Self {
         local.into_inner()
     }
 }
