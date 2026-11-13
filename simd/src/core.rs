@@ -421,6 +421,53 @@ pub trait Simd: Copy {
     /// `r[i] = (mask[i] & a[i]) | (!mask[i] & b[i])` (bitwise selection).
     fn u64_select(self, mask: Self::U64, a: Self::U64, b: Self::U64) -> Self::U64;
 
+    /// `r[i] = min(a[i], b[i])`.
+    fn u64_min(self, a: Self::U64, b: Self::U64) -> Self::U64;
+
+    /// `r[i] = value[(i + N) mod L]`.
+    fn u64_rotate_lanes<const N: usize>(self, value: Self::U64) -> Self::U64;
+
+    /// Let `p = (a[i] mod 2^52) * (b[i] mod 2^52)`.
+    /// `r[i] = (acc[i] + (p mod 2^52)) mod 2^64`.
+    ///
+    /// Multi-precision arithmetic in radix `2^52` builds on this pair of instructions
+    /// (AVX-512 IFMA's VPMADD52LUQ); other backends emulate them.
+    fn u64_madd52lo(self, acc: Self::U64, a: Self::U64, b: Self::U64) -> Self::U64;
+
+    /// Let `p = (a[i] mod 2^52) * (b[i] mod 2^52)`.
+    /// `r[i] = (acc[i] + (floor(p / 2^52))) mod 2^64` (VPMADD52HUQ).
+    fn u64_madd52hi(self, acc: Self::U64, a: Self::U64, b: Self::U64) -> Self::U64;
+
+    /// `r[i] = a[first(i)] * b[first(i)]`, the full unsigned 64-bit product, for
+    /// `i < Self::U64_LANES`.
+    ///
+    /// The widening instructions split the 32-bit lanes of a vector between two 64-bit
+    /// vectors. Every backend has `Self::U32_LANES == 2 * Self::U64_LANES`. The maps
+    /// `first` and `second` on `0..Self::U64_LANES` send their lanes to distinct 32-bit lanes,
+    /// together covering `0..Self::U32_LANES`. Each backend fixes the maps to suit its
+    /// multiplier: x86v4c sends `first(i) = 2i` and `second(i) = 2i + 1` (VPMULUDQ), while
+    /// NEON sends `first(i) = i` and `second(i) = i + 2` (UMULL and UMULL2), and the scalar
+    /// backend has `first(0) = 0` and `second(0) = 1`. [`Self::u64_narrow_pair`] reverses the
+    /// split, so multi-precision arithmetic can keep 32-bit limbs and 64-bit column sums.
+    fn u32_widen_mul_first(self, a: Self::U32, b: Self::U32) -> Self::U64;
+
+    /// `r[i] = a[second(i)] * b[second(i)]`, the full unsigned 64-bit product, for
+    /// `i < Self::U64_LANES`, with the split of [`Self::u32_widen_mul_first`].
+    fn u32_widen_mul_second(self, a: Self::U32, b: Self::U32) -> Self::U64;
+
+    /// `r[first(i)] = first[i] mod 2^32` and `r[second(i)] = second[i] mod 2^32`
+    /// for `i < Self::U64_LANES`, with the split of [`Self::u32_widen_mul_first`].
+    fn u64_narrow_pair(self, first: Self::U64, second: Self::U64) -> Self::U32;
+
+    /// `r[i] = (a[i] * b[i]) mod 2^32`.
+    fn u32_mul_lo(self, a: Self::U32, b: Self::U32) -> Self::U32;
+
+    /// `r[i] = (a[i] * b[i]) mod 2^64`.
+    fn u64_mul_lo(self, a: Self::U64, b: Self::U64) -> Self::U64;
+
+    /// `r[i] = floor(a[i] * b[i] / 2^64)`.
+    fn u64_mul_hi(self, a: Self::U64, b: Self::U64) -> Self::U64;
+
     /// `r = value[N]`.
     ///
     /// # Panics
@@ -570,14 +617,6 @@ pub trait X86V4C: Simd {
     /// `P(r[i]) = (P(a[i]) * P(b[i])) mod (X^8 + X^4 + X^3 + X + 1)`
     /// in `GF(2)[X]` (AES modulus `0x11b`).
     fn u8_gf_mul(self, a: Self::U8, b: Self::U8) -> Self::U8;
-
-    /// Let `p = (a[i] mod 2^52) * (b[i] mod 2^52)`.
-    /// `r[i] = (acc[i] + (p mod 2^52)) mod 2^64`.
-    fn u64_madd52lo(self, acc: Self::U64, a: Self::U64, b: Self::U64) -> Self::U64;
-
-    /// Let `p = (a[i] mod 2^52) * (b[i] mod 2^52)`.
-    /// `r[i] = (acc[i] + (floor(p / 2^52))) mod 2^64`.
-    fn u64_madd52hi(self, acc: Self::U64, a: Self::U64, b: Self::U64) -> Self::U64;
 
     /// `r[4*g+j] = value[4*g + ((MASK >> (2*j)) & 3)]`
     /// for `0 <= g < 4`, `0 <= j < 4`.
@@ -734,6 +773,26 @@ pub trait Neon: Simd {
 
     /// `r[i] = (acc[i] + a[i] * b[i]) mod 2^64` for `0 <= i < 2`.
     fn u32_widen_madd(self, acc: Self::U64, a: Self::U32Half, b: Self::U32Half) -> Self::U64;
+
+    /// `r[i] = a[i] * b[L]` (full unsigned 64-bit product), for `0 <= i < 2` (UMULL by
+    /// element).
+    ///
+    /// This is [`Simd::u32_widen_mul_first`] with lane `L` of `b` in every lane.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `L >= 4`.
+    fn u32_widen_mul_first_lane<const L: u32>(self, a: Self::U32, b: Self::U32) -> Self::U64;
+
+    /// `r[i] = a[i + 2] * b[L]` (full unsigned 64-bit product), for `0 <= i < 2` (UMULL2 by
+    /// element).
+    ///
+    /// This is [`Simd::u32_widen_mul_second`] with lane `L` of `b` in every lane.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `L >= 4`.
+    fn u32_widen_mul_second_lane<const L: u32>(self, a: Self::U32, b: Self::U32) -> Self::U64;
 }
 
 /// Equivalent algorithm paths selected by a concrete backend token.

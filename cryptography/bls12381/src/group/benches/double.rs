@@ -1,0 +1,33 @@
+//! Doubling an element.
+//!
+//! One doubling uses one lane, so this measures latency.
+
+use super::utils::{Curve, scalars};
+use commonware_cryptography_bls12381::{G1, G2};
+use criterion::{Criterion, Throughput, criterion_group};
+use std::hint::black_box;
+
+fn bench<C: Curve>(c: &mut Criterion) {
+    let mut group = c.benchmark_group(module_path!());
+    let a = C::generator() * &scalars(1, 4)[0];
+    group.throughput(Throughput::Elements(1));
+    group.bench_function(format!("curve={} n=1", C::NAME), |bencher| {
+        bencher.iter(|| {
+            let mut doubled = black_box(a);
+            doubled.double();
+            black_box(doubled)
+        })
+    });
+    group.finish();
+}
+
+fn bench_double(c: &mut Criterion) {
+    bench::<G1>(c);
+    bench::<G2>(c);
+}
+
+criterion_group! {
+    name = benches;
+    config = Criterion::default().sample_size(10);
+    targets = bench_double
+}

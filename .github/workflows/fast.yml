@@ -215,14 +215,14 @@ jobs:
           # AVX-512 slowly on runners without it, so the SDE rows split their tests in two.
           - os: ubuntu-latest
             package: commonware-cryptography
-            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-cryptography-bls12381 -p commonware-simd"
             sde: icx
             simd-backend: x86_v4c
             cpu-features: "avx2 bmi2 adx sha avx512f avx512bw avx512vl avx512ifma avx512vnni gfni vaes vpclmulqdq"
             partition: 1/2
           - os: ubuntu-latest
             package: commonware-cryptography
-            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-cryptography-bls12381 -p commonware-simd"
             sde: icx
             simd-backend: x86_v4c
             cpu-features: "avx2 bmi2 adx sha avx512f avx512bw avx512vl avx512ifma avx512vnni gfni vaes vpclmulqdq"
@@ -231,7 +231,7 @@ jobs:
           # Skylake-SP has AVX-512 without SHA-NI, IFMA, VNNI, GFNI, VAES, or VPCLMULQDQ.
           - os: ubuntu-latest
             package: commonware-cryptography
-            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-cryptography-bls12381 -p commonware-simd"
             sde: skx
             simd-backend: x86_v3
             cpu-features: "avx2 bmi2 adx avx512f avx512bw avx512vl"
@@ -239,7 +239,7 @@ jobs:
             skip-cache-save: true
           - os: ubuntu-latest
             package: commonware-cryptography
-            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-cryptography-bls12381 -p commonware-simd"
             sde: skx
             simd-backend: x86_v3
             cpu-features: "avx2 bmi2 adx avx512f avx512bw avx512vl"
@@ -249,7 +249,7 @@ jobs:
           # every runner without that exact feature set, so the full row splits its tests in two.
           - os: ubuntu-latest
             package: commonware-cryptography
-            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-cryptography-bls12381 -p commonware-simd"
             qemu: EPYC-Rome
             simd-backend: x86_v3
             cpu-features: "avx2 bmi2 adx sha"
@@ -257,7 +257,7 @@ jobs:
             skip-cache-save: true
           - os: ubuntu-latest
             package: commonware-cryptography
-            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-cryptography-bls12381 -p commonware-simd"
             qemu: EPYC-Rome
             simd-backend: x86_v3
             cpu-features: "avx2 bmi2 adx sha"
@@ -265,7 +265,7 @@ jobs:
             skip-cache-save: true
           - os: ubuntu-latest
             package: commonware-cryptography
-            flags: "--cargo-profile release --target x86_64-unknown-linux-gnu --no-default-features --lib -p commonware-cryptography-curve25519"
+            flags: "--cargo-profile release --target x86_64-unknown-linux-gnu --no-default-features --lib -p commonware-cryptography-curve25519 -p commonware-cryptography-bls12381"
             rustflags: "-C target-feature=+avx2,+sha"
             static-features: "avx2 sha !avx512f"
             qemu: EPYC-Rome
@@ -274,7 +274,7 @@ jobs:
           # tests in two as well.
           - os: ubuntu-latest
             package: commonware-cryptography
-            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-cryptography-bls12381 -p commonware-simd"
             qemu: Broadwell
             simd-backend: x86_v3
             cpu-features: "avx2 bmi2 adx"
@@ -282,7 +282,7 @@ jobs:
             skip-cache-save: true
           - os: ubuntu-latest
             package: commonware-cryptography
-            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-cryptography-bls12381 -p commonware-simd"
             qemu: Broadwell
             simd-backend: x86_v3
             cpu-features: "avx2 bmi2 adx"
@@ -291,13 +291,13 @@ jobs:
           # Neoverse N2 has SHA-3 and SVE2.
           - os: ubuntu-26.04-arm
             package: commonware-cryptography
-            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-cryptography-bls12381 -p commonware-simd"
             qemu: neoverse-n2
             simd-backend: arm_v9
             cpu-features: "neon sha2 sha3 sve sve2"
           - os: ubuntu-26.04-arm
             package: commonware-cryptography
-            flags: "--cargo-profile release --target aarch64-unknown-linux-gnu --no-default-features --lib -p commonware-cryptography-curve25519"
+            flags: "--cargo-profile release --target aarch64-unknown-linux-gnu --no-default-features --lib -p commonware-cryptography-curve25519 -p commonware-cryptography-bls12381"
             rustflags: "-C target-feature=+sha2,+sve2"
             static-features: "sha2 sve2 !sha3"
             qemu: neoverse-n2
@@ -305,14 +305,14 @@ jobs:
           # Neoverse N1 has SHA-2 without SHA-3 or SVE.
           - os: ubuntu-26.04-arm
             package: commonware-cryptography
-            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-cryptography-bls12381 -p commonware-simd"
             qemu: neoverse-n1
             simd-backend: neon
             cpu-features: "neon sha2"
             skip-cache-save: true
           - os: ubuntu-26.04-arm
             package: commonware-cryptography
-            flags: "--cargo-profile release --no-default-features --lib -p commonware-cryptography-curve25519"
+            flags: "--cargo-profile release --no-default-features --lib -p commonware-cryptography-curve25519 -p commonware-cryptography-bls12381"
             static-features: "!sha2 !sha3 !sve2"
             qemu: neoverse-n1
             cpu-features: "neon sha2"
@@ -674,6 +674,8 @@ jobs:
       run: cargo rustc --target wasm32-unknown-unknown --release --manifest-path cryptography/Cargo.toml --crate-type cdylib && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_cryptography.wasm"
     - name: Build cryptography-curve25519
       run: cargo rustc --target wasm32-unknown-unknown --release --manifest-path cryptography/curve25519/Cargo.toml --crate-type cdylib && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_cryptography_curve25519.wasm"
+    - name: Build cryptography-bls12381
+      run: cargo rustc --target wasm32-unknown-unknown --release --manifest-path cryptography/bls12381/Cargo.toml --crate-type cdylib && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_cryptography_bls12381.wasm"
     - name: Build macros
       run: cargo build --target wasm32-unknown-unknown --release --manifest-path macros/Cargo.toml # can't check size because it is a proc-macro
     - name: Build math

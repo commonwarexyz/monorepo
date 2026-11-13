@@ -465,6 +465,16 @@ impl Simd for NativeArmV9 {
     }
 
     #[inline]
+    fn u64_min(self, a: Self::U64, b: Self::U64) -> Self::U64 {
+        self.0.u64_min(a, b)
+    }
+
+    #[inline]
+    fn u64_rotate_lanes<const N: usize>(self, value: Self::U64) -> Self::U64 {
+        self.0.u64_rotate_lanes::<N>(value)
+    }
+
+    #[inline]
     fn u64_extract<const N: usize>(self, value: Self::U64) -> u64 {
         self.0.u64_extract::<N>(value)
     }
@@ -502,6 +512,46 @@ impl Simd for NativeArmV9 {
     #[inline]
     fn u64_as_u32(self, value: Self::U64) -> Self::U32 {
         self.0.u64_as_u32(value)
+    }
+
+    #[inline]
+    fn u64_madd52lo(self, acc: Self::U64, a: Self::U64, b: Self::U64) -> Self::U64 {
+        self.0.u64_madd52lo(acc, a, b)
+    }
+
+    #[inline]
+    fn u64_madd52hi(self, acc: Self::U64, a: Self::U64, b: Self::U64) -> Self::U64 {
+        self.0.u64_madd52hi(acc, a, b)
+    }
+
+    #[inline]
+    fn u32_widen_mul_first(self, a: Self::U32, b: Self::U32) -> Self::U64 {
+        self.0.u32_widen_mul_first(a, b)
+    }
+
+    #[inline]
+    fn u32_widen_mul_second(self, a: Self::U32, b: Self::U32) -> Self::U64 {
+        self.0.u32_widen_mul_second(a, b)
+    }
+
+    #[inline]
+    fn u64_narrow_pair(self, first: Self::U64, second: Self::U64) -> Self::U32 {
+        self.0.u64_narrow_pair(first, second)
+    }
+
+    #[inline]
+    fn u32_mul_lo(self, a: Self::U32, b: Self::U32) -> Self::U32 {
+        self.0.u32_mul_lo(a, b)
+    }
+
+    #[inline]
+    fn u64_mul_lo(self, a: Self::U64, b: Self::U64) -> Self::U64 {
+        self.0.u64_mul_lo(a, b)
+    }
+
+    #[inline]
+    fn u64_mul_hi(self, a: Self::U64, b: Self::U64) -> Self::U64 {
+        self.0.u64_mul_hi(a, b)
     }
 
     #[inline]
@@ -596,6 +646,16 @@ impl Neon for NativeArmV9 {
     #[inline]
     fn u32_widen_madd(self, acc: Self::U64, a: Self::U32Half, b: Self::U32Half) -> Self::U64 {
         self.0.u32_widen_madd(acc, a, b)
+    }
+
+    #[inline]
+    fn u32_widen_mul_first_lane<const L: u32>(self, a: Self::U32, b: Self::U32) -> Self::U64 {
+        self.0.u32_widen_mul_first_lane::<L>(a, b)
+    }
+
+    #[inline]
+    fn u32_widen_mul_second_lane<const L: u32>(self, a: Self::U32, b: Self::U32) -> Self::U64 {
+        self.0.u32_widen_mul_second_lane::<L>(a, b)
     }
 }
 

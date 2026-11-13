@@ -1,0 +1,584 @@
+//! Arithmetic on points of G2, the curve `y^2 = x^3 + 4 (1 + i)` over the quadratic extension.
+//!
+//! A [`Point`] holds one projective point per lane, in any base field representation.
+//!
+//! # Coordinate bounds
+//!
+//! Every coordinate component a formula accepts or returns has positional limb bound `1` and
+//! integer bound at most [`BOUND`], as defined by the
+//! [base field arithmetic](crate::core::field::arithmetic). Loaded coordinates and every formula's
+//! outputs satisfy this, so points chain through any number of operations without carrying or
+//! canonicalizing between them.
+//!
+//! Raw coordinates hold each lane of a point in the representation's own form, through
+//! [`Field::store_raw`] with bound [`BOUND`], so storing and loading them costs no conversion and
+//! loaded raw coordinates satisfy the coordinate bounds.
+
+use crate::core::{
+    curve::Points,
+    field::{
+        MAX_LANES,
+        arithmetic::{Field, Signed},
+        fp::{self, MINUS_ONE, ONE},
+        fp2::{self, BYTES, Fp2, Product, encode},
+        gather, lanes_of, scatter,
+    },
+};
+use commonware_formatting::hex;
+use commonware_simd::Simd;
+
+/// Projective coordinates `[X, Y, Z]` as big-endian extension elements.
+pub type Coordinates = [[u8; BYTES]; 3];
+
+/// The identity `(0 : 1 : 0)` as projective coordinates.
+pub const IDENTITY: Coordinates = [[0; BYTES], fp2::ONE, [0; BYTES]];
+
+/// The generator in projective coordinates, with `Z = 1`. Each coordinate is `c1` followed by
+/// `c0`.
+pub const GENERATOR: Coordinates = [
+    hex!(
+        "13e02b6052719f607dacd3a088274f65596bd0d09920b61ab5da61bbdc7f5049334cf11213945d57e5ac7d055d042b7e"
+        "024aa2b2f08f0a91260805272dc51051c6e47ad4fa403b02b4510b647ae3d1770bac0326a805bbefd48056c8c121bdb8"
+    ),
+    hex!(
+        "0606c4a02ea734cc32acd2b02bc28b99cb3e287e85a763af267492ab572e99ab3f370d275cec1da1aaa9075ff05f79be"
+        "0ce5d527727d6e118cc9cdc6da2e351aadfd9baa8cbdd3a76d429a695160d12c923ac9cc3baca289e193548608b82801"
+    ),
+    fp2::ONE,
+];
+
+/// Largest integer bound of a coordinate component, in units of `p`.
+// The positional representations return at most 32 from the reduction of the Y coordinate of
+// Point::add, and residues reduce to at most 17.
+pub const BOUND: u64 = 32;
+
+/// `c` such that `c i = (1 + i)^(-(p - 1) / 3)`, the coefficient of the untwisted Frobenius
+/// map on `X` (RFC 9380, Appendix G.3). The coefficient is purely imaginary.
+const PSI_X: [u8; fp::BYTES] = fp::encode([
+    0x8bfd_0000_0000_aaad,
+    0x4094_27eb_4f49_fffd,
+    0x897d_2965_0fb8_5f9b,
+    0xaa0d_857d_8975_9ad4,
+    0xec02_4086_63d4_de85,
+    0x1a01_11ea_397f_e699,
+]);
+
+/// `(1 + i)^(-(p - 1) / 2)`, the coefficient of the untwisted Frobenius map on `Y`.
+const PSI_Y: [u8; BYTES] = encode(
+    [
+        0xf1ee_7b04_121b_dea2,
+        0x3044_66cf_3e67_fa0a,
+        0xef39_6489_f61e_b45e,
+        0x1c3d_edd9_30b1_cf60,
+        0xe2e9_c448_d77a_2cd9,
+        0x1352_03e6_0180_a68e,
+    ],
+    [
+        0xc810_84fb_ede3_cc09,
+        0xee67_992f_72ec_05f4,
+        0x77f7_6e17_0092_41c5,
+        0x4839_5dab_c2d3_435e,
+        0x6831_e36d_6bd1_7ffe,
+        0x06af_0e04_37ff_400b,
+    ],
+);
+
+/// Projective points, one per lane of the extension values.
+///
+/// See the [module documentation](self) for the bounds every coordinate satisfies.
+#[derive(Clone, Copy)]
+pub struct Point<F> {
+    /// The `X` coordinates.
+    pub x: Fp2<F>,
+    /// The `Y` coordinates.
+    pub y: Fp2<F>,
+    /// The `Z` coordinates.
+    pub z: Fp2<F>,
+}
+
+// Multiplications by 3b = 12 (1 + i) scale a factor by 12 before a product and multiply the
+// product by 1 + i, which only rearranges its signed sums (Signed). Scaling before the product
+// keeps positional bounds small, since a positional product divides its factors' bounds by 2048.
+// Products whose factors are sums or scaled values use Fp2::product_schoolbook, whose positional
+// bounds stay below Karatsuba's for such factors.
+//
+// Each reduction uses the smallest positional bias covering its negative sums for coordinates
+// within BOUND, and each value subtraction the smallest bias covering its subtrahend in every
+// representation. Inside a formula, values reach integer bounds of at most 384 and positional
+// limb bounds of at most 12, and wide sums of products reach at most 334848.
+//
+// load, store, endomorphism, add, and double each run as their own kernel through
+// Simd::execute, so that their callers share one copy.
+impl<S: Simd, F: Field<S>> Points<S> for Point<F> {
+    type Coordinates = Coordinates;
+    type Raw = [[F::Raw; 2]; 3];
+
+    #[inline(always)]
+    fn load(simd: S, points: &[Coordinates], fill: &Coordinates) -> Self {
+        simd.execute(
+            #[inline(always)]
+            move |simd: S| {
+                const { assert!(F::LANES <= MAX_LANES) };
+                let lanes = points.len().min(F::LANES);
+                let mut coordinates = [[[0; BYTES]; MAX_LANES]; 3];
+                gather(&mut coordinates, &points[..lanes], |point| point.each_ref());
+                Self {
+                    x: Fp2::load(simd, &coordinates[0][..lanes], &fill[0]),
+                    y: Fp2::load(simd, &coordinates[1][..lanes], &fill[1]),
+                    z: Fp2::load(simd, &coordinates[2][..lanes], &fill[2]),
+                }
+            },
+        )
+    }
+
+    #[inline(always)]
+    fn store(self, simd: S, points: &mut [Coordinates]) {
+        simd.execute(
+            #[inline(always)]
+            move |simd: S| {
+                const { assert!(F::LANES <= MAX_LANES) };
+                let mut coordinates = [[[0; BYTES]; MAX_LANES]; 3];
+                let lanes = points.len().min(F::LANES);
+                self.x.store(simd, &mut coordinates[0][..lanes]);
+                self.y.store(simd, &mut coordinates[1][..lanes]);
+                self.z.store(simd, &mut coordinates[2][..lanes]);
+                scatter(&coordinates, &mut points[..lanes], |point, [x, y, z]| {
+                    *point = [*x, *y, *z]
+                });
+            },
+        )
+    }
+
+    #[inline(always)]
+    fn store_raw(self, simd: S, points: &mut [[[F::Raw; 2]; 3]]) {
+        const { assert!(F::LANES <= MAX_LANES) };
+        let mut coordinates = [[[F::Raw::default(); 2]; MAX_LANES]; 3];
+        let lanes = points.len().min(F::LANES);
+        self.x
+            .store_raw::<BOUND, S>(simd, &mut coordinates[0][..lanes]);
+        self.y
+            .store_raw::<BOUND, S>(simd, &mut coordinates[1][..lanes]);
+        self.z
+            .store_raw::<BOUND, S>(simd, &mut coordinates[2][..lanes]);
+        scatter(&coordinates, &mut points[..lanes], |point, [x, y, z]| {
+            *point = [*x, *y, *z]
+        });
+    }
+
+    #[inline(always)]
+    fn load_raw(simd: S, points: &[&[[F::Raw; 2]; 3]]) -> Self {
+        const { assert!(F::LANES <= MAX_LANES) };
+        let coordinate = |i| Fp2::load_raw::<BOUND, S>(simd, &lanes_of(points, i, F::LANES));
+        Self {
+            x: coordinate(0),
+            y: coordinate(1),
+            z: coordinate(2),
+        }
+    }
+
+    #[inline(always)]
+    fn select(self, simd: S, rhs: Self, lanes: u64) -> Self {
+        Self {
+            x: self.x.select(simd, rhs.x, lanes),
+            y: self.y.select(simd, rhs.y, lanes),
+            z: self.z.select(simd, rhs.z, lanes),
+        }
+    }
+
+    #[inline(always)]
+    fn negate(self, simd: S) -> Self {
+        // Multiply Y by -1 rather than subtracting it, so the coordinates keep their bounds.
+        let minus_one = F::load(simd, &[], &MINUS_ONE);
+        Self {
+            y: self.y.ready::<1, S>(simd).mul_base(simd, minus_one),
+            ..self
+        }
+    }
+
+    #[inline(always)]
+    fn negate_lanes(self, simd: S, lanes: u64) -> Self {
+        // Multiply Y by 1 or -1, selected without branching on lanes.
+        let sign = F::load(simd, &[], &ONE).select(simd, F::load(simd, &[], &MINUS_ONE), lanes);
+        Self {
+            y: self.y.ready::<1, S>(simd).mul_base(simd, sign),
+            ..self
+        }
+    }
+
+    /// Returns the image of every lane under the endomorphism `psi`, the Frobenius map carried
+    /// through the twist, which multiplies points of the prime-order subgroup by the curve
+    /// parameter `x`.
+    #[inline(always)]
+    fn endomorphism(self, simd: S) -> Self {
+        // Conjugate each coordinate and multiply X by PSI_X i and Y by PSI_Y, forming
+        // conj(y) PSI_Y from its four base field products so that no conjugate needs a bias. Z's
+        // conjugate multiplies its imaginary component by -1 instead, as negate does, so the
+        // coordinates keep their bounds. Seven base field products and five reductions in all.
+        simd.execute(
+            #[inline(always)]
+            move |simd: S| {
+                let psi_x = F::load(simd, &[], &PSI_X);
+                let psi_y = Fp2::load(simd, &[], &PSI_Y);
+                let minus_one = F::load(simd, &[], &MINUS_ONE);
+                let (x, y, z) = (
+                    self.x.ready::<1, S>(simd),
+                    self.y.ready::<1, S>(simd),
+                    self.z.ready::<1, S>(simd),
+                );
+                // conj(x) c i = (x1 c) + (x0 c) i.
+                let x = Fp2 {
+                    c0: x.c1.mul(simd, psi_x),
+                    c1: x.c0.mul(simd, psi_x),
+                };
+                // conj(y) (p0 + p1 i) = (y0 p0 + y1 p1) + (y0 p1 - y1 p0) i.
+                let product = Fp2 {
+                    c0: Signed::positive(F::accumulate_product(
+                        simd,
+                        y.c0.product(simd, psi_y.c0),
+                        y.c1,
+                        psi_y.c1,
+                    )),
+                    c1: Signed {
+                        pos: y.c0.product(simd, psi_y.c1),
+                        neg: Some(y.c1.product(simd, psi_y.c0)),
+                    },
+                };
+                let y = Fp2::reduce::<3, S>(simd, product);
+                let z = Fp2 {
+                    c0: z.c0,
+                    c1: z.c1.mul(simd, minus_one),
+                };
+                Self { x, y, z }
+            },
+        )
+    }
+
+    #[inline(always)]
+    fn add(self, simd: S, rhs: Self) -> Self {
+        // Algorithm 7 of Renes, Costello, and Batina, "Complete addition formulas for prime order
+        // elliptic curves" (2016). Each cross term is a schoolbook product of sums less the two
+        // known products, or the two products accumulated for Field::SCHOOLBOOK, and 3b Z1 Z2
+        // comes from one more product, so that Y1 Y2 + 3b Z1 Z2 and Y1 Y2 - 3b Z1 Z2 each take one
+        // reduction. That leaves thirteen extension products, or fifteen for Field::SCHOOLBOOK,
+        // reduced in two stages of six and three values.
+        simd.execute(
+            #[inline(always)]
+            move |simd: S| {
+                let first = Addition::new(simd, self, rhs);
+                let first = Fp2::<F>::reduce_each::<6, 12, S>(
+                    simd,
+                    #[cfg_attr(not(debug_assertions), inline(always))]
+                    |k| first.stage(simd, k),
+                );
+                let [x, y, z] = Fp2::<F>::reduce_each::<3, 6, S>(
+                    simd,
+                    #[cfg_attr(not(debug_assertions), inline(always))]
+                    |k| Addition::coordinate(simd, &first, k),
+                );
+                Self { x, y, z }
+            },
+        )
+    }
+
+    #[inline(always)]
+    fn double(self, simd: S) -> Self {
+        // Algorithm 9 of Renes, Costello, and Batina, with seven extension products and one
+        // squaring, reduced in two stages of four and three values. It returns the same point as
+        // add of self with itself.
+        simd.execute(
+            #[inline(always)]
+            move |simd: S| {
+                let first = Fp2::<F>::reduce_each::<4, 8, S>(
+                    simd,
+                    #[cfg_attr(not(debug_assertions), inline(always))]
+                    |k| self.doubling_stage(simd, k),
+                );
+                let [x, y, z] = Fp2::<F>::reduce_each::<3, 6, S>(
+                    simd,
+                    #[cfg_attr(not(debug_assertions), inline(always))]
+                    |k| Self::doubled_coordinate(simd, &first, k),
+                );
+                Self { x, y, z }
+            },
+        )
+    }
+}
+
+impl<F> Point<F> {
+    /// Returns the `k`th of the four values of the first stage of a doubling, as a sum of
+    /// products to reduce: `Y^2`, `X Y`, `Y Z`, and `3b Z^2`.
+    ///
+    /// Within the coordinate bounds, the reduced values have limb bound `1` and integer bounds at
+    /// most `17`, `5`, `5`, and `43` in every representation.
+    #[inline(always)]
+    pub fn doubling_stage<S: Simd>(self, simd: S, k: usize) -> Fp2<F::Product>
+    where
+        F: Field<S>,
+    {
+        let (x, y, z) = (
+            self.x.ready::<1, S>(simd),
+            self.y.ready::<1, S>(simd),
+            self.z.ready::<1, S>(simd),
+        );
+        match k {
+            0 => Fp2::<F>::difference::<{ BOUND + 1 }, S>(
+                simd,
+                y.square_product::<{ BOUND + 1 }, S>(simd),
+            ),
+            1 => Fp2::<F>::difference::<5, S>(simd, x.product(simd, y)),
+            2 => Fp2::<F>::difference::<5, S>(simd, y.product(simd, z)),
+            // 3b z^2 = (1 + i) (12 z) z.
+            _ => {
+                let z12 = z.mul_small::<12, S>(simd).carry(simd);
+                let product =
+                    Fp2::<F>::product_mul_by_nonresidue(simd, z12.product_schoolbook(simd, z));
+                Fp2::<F>::difference::<22, S>(simd, product)
+            }
+        }
+    }
+
+    /// Returns the `k`th coordinate of the doubled point, as a sum of products to reduce, given the
+    /// reduced values of [`Self::doubling_stage`].
+    #[inline(always)]
+    pub fn doubled_coordinate<S: Simd>(
+        simd: S,
+        &[yy, xy, yz, b3zz]: &[Fp2<F>; 4],
+        k: usize,
+    ) -> Fp2<F::Product>
+    where
+        F: Field<S>,
+    {
+        // 9b z^2, 8 y^2, and y^2 - 9b z^2 and y^2 + 3b z^2.
+        let b9zz = b3zz.mul_small::<3, S>(simd).carry(simd);
+        let yy8 = yy.mul_small::<8, S>(simd).carry(simd);
+        let difference = yy.sub::<130, S>(simd, b9zz).carry(simd);
+        let sum = yy.add(simd, b3zz).carry(simd);
+        match k {
+            0 => {
+                let xy2 = xy.double(simd).carry(simd);
+                Fp2::<F>::difference::<6, S>(simd, difference.product(simd, xy2))
+            }
+            1 => Fp2::<F>::difference::<13, S>(
+                simd,
+                Fp2::<F>::accumulate_product(simd, difference.product(simd, sum), b3zz, yy8),
+            ),
+            _ => Fp2::<F>::difference::<5, S>(simd, yy8.product(simd, yz)),
+        }
+    }
+}
+
+/// The first stage of an addition: the ready coordinates of both points and the products
+/// `X1 X2`, `Y1 Y2`, `Z1 Z2`, and `3b Z1 Z2`.
+pub struct Addition<F, S: Simd>
+where
+    F: Field<S>,
+{
+    a: [Fp2<F>; 3],
+    b: [Fp2<F>; 3],
+    xx: Product<F, S>,
+    yy: Product<F, S>,
+    zz: Product<F, S>,
+    b3zz: Product<F, S>,
+}
+
+impl<F, S: Simd> Addition<F, S>
+where
+    F: Field<S>,
+{
+    /// Readies the coordinates and forms the shared products.
+    ///
+    /// Under [`Field::SCHOOLBOOK`] the cross terms take their own products, so `Z1 Z2` goes
+    /// unused.
+    #[inline(always)]
+    pub fn new(simd: S, lhs: Point<F>, rhs: Point<F>) -> Self {
+        let a = [
+            lhs.x.ready::<1, S>(simd),
+            lhs.y.ready::<1, S>(simd),
+            lhs.z.ready::<1, S>(simd),
+        ];
+        let b = [
+            rhs.x.ready::<1, S>(simd),
+            rhs.y.ready::<1, S>(simd),
+            rhs.z.ready::<1, S>(simd),
+        ];
+        // 3b z1 z2 = (1 + i) (12 z1) z2.
+        let z12 = a[2].mul_small::<12, S>(simd).carry(simd);
+        Self {
+            a,
+            b,
+            xx: a[0].product(simd, b[0]),
+            yy: a[1].product(simd, b[1]),
+            zz: a[2].product(simd, b[2]),
+            b3zz: Fp2::<F>::product_mul_by_nonresidue(simd, z12.product_schoolbook(simd, b[2])),
+        }
+    }
+
+    /// Returns the `k`th of the six values of the first stage, as a sum of products to reduce: the
+    /// cross terms `X1 Y2 + Y1 X2`, `Y1 Z2 + Z1 Y2`, and `X1 Z2 + Z1 X2`, then
+    /// `Y1 Y2 + 3b Z1 Z2`, `Y1 Y2 - 3b Z1 Z2`, and `X1 X2`.
+    #[inline(always)]
+    pub fn stage(&self, simd: S, k: usize) -> Fp2<F::Product> {
+        match k {
+            0 => Fp2::<F>::difference::<8, S>(simd, self.cross(simd, 0, 1, (self.xx, self.yy))),
+            1 => Fp2::<F>::difference::<8, S>(simd, self.cross(simd, 1, 2, (self.yy, self.zz))),
+            2 => Fp2::<F>::difference::<8, S>(simd, self.cross(simd, 0, 2, (self.xx, self.zz))),
+            3 => {
+                Fp2::<F>::difference::<24, S>(simd, Fp2::<F>::accumulate(simd, self.yy, self.b3zz))
+            }
+            4 => {
+                Fp2::<F>::difference::<26, S>(simd, Fp2::<F>::product_sub(simd, self.yy, self.b3zz))
+            }
+            _ => Fp2::<F>::difference::<5, S>(simd, self.xx),
+        }
+    }
+
+    /// Returns `a[i] b[j] + a[j] b[i]` as a product, given the products `(a[i] b[i], a[j] b[j])`.
+    ///
+    /// Karatsuba takes a schoolbook product of the sums less the two known products; under
+    /// [`Field::SCHOOLBOOK`] the two products accumulate as they form.
+    #[inline(always)]
+    fn cross(
+        &self,
+        simd: S,
+        i: usize,
+        j: usize,
+        (pi, pj): (Product<F, S>, Product<F, S>),
+    ) -> Product<F, S> {
+        let (a, b) = (&self.a, &self.b);
+        if F::SCHOOLBOOK {
+            return Fp2::<F>::accumulate_product(simd, a[i].product(simd, b[j]), a[j], b[i]);
+        }
+        let sum_a = a[i].add(simd, a[j]).carry(simd);
+        let sum_b = b[i].add(simd, b[j]).carry(simd);
+        let product = Fp2::<F>::product_sub(simd, sum_a.product_schoolbook(simd, sum_b), pi);
+        Fp2::<F>::product_sub(simd, product, pj)
+    }
+
+    /// Returns the `k`th coordinate of the sum, as a sum of products to reduce, given the reduced
+    /// values of [`Self::stage`].
+    #[inline(always)]
+    pub fn coordinate(
+        simd: S,
+        &[xy, yz, xz, sum, difference, xx]: &[Fp2<F>; 6],
+        k: usize,
+    ) -> Fp2<F::Product> {
+        let xx3 = xx.mul_small::<3, S>(simd).carry(simd);
+        let xz12 = xz.mul_small::<12, S>(simd).carry(simd);
+        match k {
+            0 => Fp2::<F>::difference::<14, S>(
+                simd,
+                Fp2::<F>::product_sub(
+                    simd,
+                    xy.product(simd, difference),
+                    Self::by_b3xz(simd, yz, xz12),
+                ),
+            ),
+            1 => Fp2::<F>::difference::<16, S>(
+                simd,
+                Fp2::<F>::accumulate_product(simd, Self::by_b3xz(simd, xx3, xz12), difference, sum),
+            ),
+            _ => Fp2::<F>::difference::<9, S>(
+                simd,
+                Fp2::<F>::accumulate_product(simd, sum.product(simd, yz), xx3, xy),
+            ),
+        }
+    }
+
+    /// Returns `factor * 3b xz` as a product, given `xz12 = 12 xz`.
+    ///
+    /// Since `3b xz = (1 + i) (12 xz)`, this multiplies the product by `1 + i`, or under
+    /// [`Field::SCHOOLBOOK`] multiplies `12 xz` by `1 + i` before the product.
+    #[inline(always)]
+    fn by_b3xz(simd: S, factor: Fp2<F>, xz12: Fp2<F>) -> Product<F, S> {
+        if F::SCHOOLBOOK {
+            let twisted = xz12
+                .mul_by_nonresidue::<{ 12 * BOUND + 1 }, S>(simd)
+                .carry(simd);
+            return factor.product(simd, twisted);
+        }
+        Fp2::<F>::product_mul_by_nonresidue(simd, factor.product_schoolbook(simd, xz12))
+    }
+}
+
+/// Reference arithmetic and coordinate bound hooks for the
+/// [curve formula checks](crate::core::curve::fuzz).
+#[cfg(any(test, feature = "fuzz"))]
+pub mod fuzz {
+    use super::*;
+    use crate::core::{
+        curve::fuzz::Curve,
+        field::fp2::reference::{self, Element},
+    };
+    use arbitrary::Unstructured;
+
+    /// G2 over the reference extension field.
+    pub struct G2;
+
+    impl Curve for G2 {
+        const NAME: &'static str = "G2";
+
+        type Element = Element;
+        type Encoded = [u8; BYTES];
+
+        const ZERO: Element = reference::ZERO;
+        const ONE: Element = reference::ONE;
+        const B: Element = reference::mul(reference::small(4), reference::NONRESIDUE);
+        const GENERATOR: Coordinates = GENERATOR;
+        const IDENTITY: Coordinates = IDENTITY;
+
+        type Point<S: Simd, F: Field<S>> = Point<F>;
+
+        fn add(a: Element, b: Element) -> Element {
+            reference::add(a, b)
+        }
+
+        fn sub(a: Element, b: Element) -> Element {
+            reference::sub(a, b)
+        }
+
+        fn mul(a: Element, b: Element) -> Element {
+            reference::mul(a, b)
+        }
+
+        fn invert(a: Element) -> Element {
+            reference::invert(a)
+        }
+
+        fn encode(a: Element) -> [u8; BYTES] {
+            reference::encode(a)
+        }
+
+        fn decode(bytes: &[u8; BYTES]) -> Element {
+            reference::decode(bytes)
+        }
+
+        fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Element> {
+            reference::canonical(u)
+        }
+
+        /// Scales loaded coordinate components, with integer bound `2`, by `16`, to integer
+        /// bound [`BOUND`].
+        fn widen<S: Simd, F: Field<S>>(simd: S, point: Point<F>) -> Point<F> {
+            const { assert!(2 * 2 * 8 == BOUND) };
+            let widen = |value: Fp2<F>| {
+                value
+                    .double(simd)
+                    .carry(simd)
+                    .mul_small::<8, S>(simd)
+                    .carry(simd)
+            };
+            Point {
+                x: widen(point.x),
+                y: widen(point.y),
+                z: widen(point.z),
+            }
+        }
+
+        fn check_bound<S: Simd, F: Field<S>>(simd: S, point: Point<F>) -> Point<F> {
+            for value in [point.x, point.y, point.z] {
+                value.neg::<{ BOUND + 1 }, S>(simd);
+            }
+            point
+        }
+    }
+}

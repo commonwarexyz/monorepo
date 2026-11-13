@@ -387,6 +387,25 @@ mod test_utils {
                 .map(|i| (mask[i] & a[i]) | (!mask[i] & b[i]))
                 .collect::<Vec<_>>()
         );
+        assert_eq!(
+            longs(simd, simd.u64_min(av, bv)),
+            a.iter().zip(&b).map(|(x, y)| *x.min(y)).collect::<Vec<_>>()
+        );
+        for x in boundaries {
+            for y in boundaries {
+                assert_eq!(
+                    longs(simd, simd.u64_min(simd.u64_splat(x), simd.u64_splat(y))),
+                    vec![x.min(y); S::U64_LANES]
+                );
+            }
+        }
+        macro_rules! lane_rotations { ($($n:literal),*) => { $(
+            assert_eq!(
+                longs(simd, simd.u64_rotate_lanes::<$n>(av)),
+                (0..S::U64_LANES).map(|i| a[(i + $n) % S::U64_LANES]).collect::<Vec<_>>()
+            );
+        )* }; }
+        lane_rotations!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 15, 16, 17);
         macro_rules! lanes { ($($n:literal),*) => { $(
             if $n < S::U64_LANES {
                 assert_eq!(simd.u64_extract::<$n>(av),a[$n]);
@@ -399,6 +418,68 @@ mod test_utils {
             }
         )* }; }
         lanes!(0, 1, 2, 3, 4, 5, 6, 7, 8, 64);
+        let values = [0, 1, (1 << 52) - 1, 1 << 52, u64::MAX];
+        let mask = (1u128 << 52) - 1;
+        for x in values {
+            for y in values {
+                for accumulator in values {
+                    let product = (x as u128 & mask) * (y as u128 & mask);
+                    let (xv, yv, acc) = (
+                        simd.u64_splat(x),
+                        simd.u64_splat(y),
+                        simd.u64_splat(accumulator),
+                    );
+                    assert_eq!(
+                        longs(simd, simd.u64_madd52lo(acc, xv, yv)),
+                        vec![accumulator.wrapping_add((product & mask) as u64); S::U64_LANES]
+                    );
+                    assert_eq!(
+                        longs(simd, simd.u64_madd52hi(acc, xv, yv)),
+                        vec![accumulator.wrapping_add((product >> 52) as u64); S::U64_LANES]
+                    );
+                }
+            }
+        }
+        let values = [
+            0,
+            1,
+            u64::from(u32::MAX),
+            1 << 32,
+            0xffff_ffff_0000_0001,
+            u64::MAX - 1,
+            u64::MAX,
+        ];
+        for x in values {
+            for y in values {
+                let product = u128::from(x) * u128::from(y);
+                let (xv, yv) = (simd.u64_splat(x), simd.u64_splat(y));
+                assert_eq!(
+                    longs(simd, simd.u64_mul_lo(xv, yv)),
+                    vec![product as u64; S::U64_LANES]
+                );
+                assert_eq!(
+                    longs(simd, simd.u64_mul_hi(xv, yv)),
+                    vec![(product >> 64) as u64; S::U64_LANES]
+                );
+            }
+        }
+        let products: Vec<u128> = a
+            .iter()
+            .zip(&b)
+            .map(|(x, y)| u128::from(*x) * u128::from(*y))
+            .collect();
+        assert_eq!(
+            longs(simd, simd.u64_mul_lo(av, bv)),
+            products.iter().map(|p| *p as u64).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            longs(simd, simd.u64_mul_hi(av, bv)),
+            products
+                .iter()
+                .map(|p| (*p >> 64) as u64)
+                .collect::<Vec<_>>()
+        );
+        widening_split(simd);
 
         // Casts rely on all three element types sharing one vector width.
         assert_eq!(S::U8_LANES, 4 * S::U32_LANES);
@@ -615,6 +696,52 @@ mod test_utils {
         assert_eq!(bytes(simd, simd.u8_unzip_odd(lo, hi)), b);
     }
 
+    /// Checks the widening split through its inverse, which suffices for any lane pairing.
+    fn widening_split<S: Simd>(simd: S) {
+        assert_eq!(S::U32_LANES, 2 * S::U64_LANES);
+        let distinct = |seed: u32| -> Vec<u32> {
+            (0..S::U32_LANES as u32)
+                .map(|i| {
+                    seed.wrapping_add(i)
+                        .wrapping_mul(0x9e37_79b9)
+                        .rotate_left(i)
+                })
+                .collect()
+        };
+        let cases = [
+            (distinct(1), distinct(2)),
+            (vec![u32::MAX; S::U32_LANES], vec![u32::MAX; S::U32_LANES]),
+            (vec![u32::MAX; S::U32_LANES], distinct(3)),
+            (vec![0; S::U32_LANES], distinct(4)),
+        ];
+        for (a, b) in cases {
+            let (av, bv) = (simd.u32_load(&a), simd.u32_load(&b));
+            let products: Vec<u64> = a
+                .iter()
+                .zip(&b)
+                .map(|(x, y)| u64::from(*x) * u64::from(*y))
+                .collect();
+            let first = simd.u32_widen_mul_first(av, bv);
+            let second = simd.u32_widen_mul_second(av, bv);
+            assert_eq!(
+                words(simd, simd.u64_narrow_pair(first, second)),
+                products.iter().map(|p| *p as u32).collect::<Vec<_>>()
+            );
+            let (first_high, second_high) = (simd.u64_shr::<32>(first), simd.u64_shr::<32>(second));
+            assert_eq!(
+                words(simd, simd.u64_narrow_pair(first_high, second_high)),
+                products
+                    .iter()
+                    .map(|p| (*p >> 32) as u32)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                words(simd, simd.u32_mul_lo(av, bv)),
+                products.iter().map(|p| *p as u32).collect::<Vec<_>>()
+            );
+        }
+    }
+
     pub fn basic_common<S: Simd>(simd: S) {
         let a: Vec<u64> = (0..S::U64_LANES).map(|i| u64::MAX >> i).collect();
         let b: Vec<u64> = (0..S::U64_LANES).map(|i| 1u64 << i).collect();
@@ -818,6 +945,34 @@ mod test_utils {
             &mut output,
         );
         assert_eq!(output, input.map(|v| ((v as u32) << 31) as u64));
+        // Multiplication by a lane matches multiplication by a splat of that lane.
+        let b = [3, u32::MAX, 0x89ab_cdef, 1 << 31];
+        let a = simd.u32_load(&[u32::MAX, 0x1234_5678, 7, 0x8000_0001]);
+        let (lanes, mut expected) = (simd.u32_load(&b), [0; 2]);
+        macro_rules! lanes {
+            ($($lane:literal)*) => {$(
+                let splat = simd.u32_splat(b[$lane]);
+                simd.u64_store(simd.u32_widen_mul_first_lane::<$lane>(a, lanes), &mut output);
+                simd.u64_store(simd.u32_widen_mul_first(a, splat), &mut expected);
+                assert_eq!(output, expected);
+                simd.u64_store(simd.u32_widen_mul_second_lane::<$lane>(a, lanes), &mut output);
+                simd.u64_store(simd.u32_widen_mul_second(a, splat), &mut expected);
+                assert_eq!(output, expected);
+            )*};
+        }
+        lanes!(0 1 2 3);
+        assert!(
+            catch_unwind(AssertUnwindSafe(
+                || simd.u32_widen_mul_first_lane::<4>(a, lanes)
+            ))
+            .is_err()
+        );
+        assert!(
+            catch_unwind(AssertUnwindSafe(
+                || simd.u32_widen_mul_second_lane::<4>(a, lanes)
+            ))
+            .is_err()
+        );
     }
 }
 

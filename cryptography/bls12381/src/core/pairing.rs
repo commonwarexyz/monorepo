@@ -1,0 +1,583 @@
+//! The optimal ate pairing on BLS12-381, on several pairs at once, one per lane.
+//!
+//! [`miller_loop`] maps pairs of a G1 point and a G2 point to elements of `Fp12`, and
+//! [`final_exponentiation`] maps those to the target group, so their composition is the pairing.
+//! A product of pairings needs one final exponentiation, so a pairing check, which asks whether
+//! such a product is one, exponentiates once. A lane's Miller loop over several pairs shares its
+//! squarings among them, and [`Fp12::product_of_lanes`] multiplies the lanes.
+//!
+//! # Inputs
+//!
+//! Points are affine and must lie in the prime-order subgroups. The identity has no affine
+//! coordinates, so callers must handle pairs that contain it: such a pair contributes one.
+//!
+//! A pair of the G1 coordinates `(0, 0)`, which are not a point, and a G2 point whose lines have
+//! nonzero constant terms, such as the generator, contributes one after the final exponentiation.
+//! Such a pair fills a lane's unused slots.
+//!
+//! [`to_affine`] converts projective pairs without the identity to affine pairs with one shared
+//! inversion. [`FILL`] is a filling pair, and [`P_FILL`] a G1 point with denominator one that
+//! [`to_affine`] accepts in place of the identity.
+
+use crate::core::{
+    curve::{
+        Points, X_ABS, g1,
+        g2::{self, Addition, Point},
+    },
+    field::{
+        MAX_LANES,
+        arithmetic::{Field, TIGHT},
+        fp::{self, BYTES as FP_BYTES},
+        fp2::{self, BYTES as FP2_BYTES, Fp2},
+        fp12::{Fp12, LINE_BOUND},
+        gather,
+    },
+};
+use alloc::{vec, vec::Vec};
+use commonware_simd::Simd;
+
+/// Affine coordinates `[x, y]` of a G1 point as big-endian integers.
+type G1Affine = [[u8; FP_BYTES]; 2];
+
+/// Affine coordinates `[x, y]` of a G2 point as big-endian extension elements.
+type G2Affine = [[u8; FP2_BYTES]; 2];
+
+/// `|x| / 2`.
+const HALF_X_ABS: u64 = X_ABS / 2;
+
+/// Most pairs whose Miller loops share squarings, which bounds the points held at once.
+pub const SHARED: usize = 8;
+
+/// Largest integer bound of a component of a line of the Miller loop, in units of `p`.
+// The points of the Miller loop satisfy the coordinate bounds of G2, and its lines the bounds of
+// Fp12::mul_by_line: every line component has limb bound 1 and integer bound at most
+// LINE_COMPONENT_BOUND, below LINE_BOUND. Every element of Fp12 satisfies the element bounds of
+// the fp12 module.
+const LINE_COMPONENT_BOUND: u64 = 61;
+const _: () = assert!(LINE_COMPONENT_BOUND <= LINE_BOUND);
+
+/// A pair that pairs to one and fills unused lanes: its G1 coordinates are zero, which the final
+/// exponentiation maps to one, and its G2 point is the generator, whose lines have nonzero
+/// constant terms.
+pub const FILL: (G1Affine, G2Affine) = ([[0; FP_BYTES]; 2], [g2::GENERATOR[0], g2::GENERATOR[1]]);
+
+/// The G1 point `(0 : 1 : 1)`, whose denominator is one.
+pub const P_FILL: g1::Coordinates = {
+    let mut fill = g1::IDENTITY;
+    fill[2] = fp::ONE;
+    fill
+};
+
+/// The G2 point `(0 : 1 : 1)`, whose denominator is one.
+const Q_FILL: g2::Coordinates = {
+    let mut fill = g2::IDENTITY;
+    fill[2] = fp2::ONE;
+    fill
+};
+
+/// Pairs of affine points, one per lane, prepared for the Miller loop.
+#[derive(Clone, Copy)]
+pub struct Pair<F> {
+    /// The `x` coordinates of the G1 points.
+    x: F,
+    /// The negated `y` coordinates of the G1 points.
+    negated_y: F,
+    /// The G2 points, with `Z = 1`.
+    q: Point<F>,
+}
+
+impl<F> Pair<F> {
+    /// Loads up to one pair per lane, filling the remaining lanes with `fill`.
+    ///
+    /// See the [module documentation](self) for the points the pairs must hold.
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    pub fn load<S: Simd>(
+        simd: S,
+        pairs: &[(G1Affine, G2Affine)],
+        fill: &(G1Affine, G2Affine),
+    ) -> Self
+    where
+        F: Field<S>,
+    {
+        const { assert!(F::LANES <= MAX_LANES) };
+        let lanes = pairs.len().min(F::LANES);
+        let mut p = [[[0; FP_BYTES]; MAX_LANES]; 2];
+        let mut q = [[[0; FP2_BYTES]; MAX_LANES]; 2];
+        gather(&mut p, &pairs[..lanes], |(g1, _)| g1.each_ref());
+        gather(&mut q, &pairs[..lanes], |(_, g2)| g2.each_ref());
+        let (g1, g2) = fill;
+        let y = F::load(simd, &p[1][..lanes], &g1[1]);
+        Self {
+            x: F::load(simd, &p[0][..lanes], &g1[0]),
+            // Loaded values are below 2p.
+            negated_y: y.neg::<3>(simd).carry(simd),
+            q: Point {
+                x: Fp2::load(simd, &q[0][..lanes], &g2[0]),
+                y: Fp2::load(simd, &q[1][..lanes], &g2[1]),
+                z: Fp2::load(simd, &[], &fp2::ONE),
+            },
+        }
+    }
+}
+
+/// Returns the affine coordinates of each pair of points, none of which may be the identity.
+///
+/// One inversion serves every pair, as Montgomery's trick: the G1 denominators and the norms of
+/// the G2 denominators multiply up in turn, the total inverts, and each inverse unwinds from the
+/// total with the running products. Runs its body through [`Simd::execute`], so that the body
+/// inlines into the backend's target-feature scope.
+#[cfg_attr(not(debug_assertions), inline(always))]
+pub fn to_affine<S: Simd, F: Field<S>>(
+    simd: S,
+    points: &[(g1::Coordinates, g2::Coordinates)],
+) -> Vec<(G1Affine, G2Affine)> {
+    const { assert!(F::LANES <= MAX_LANES) };
+    if points.is_empty() {
+        return Vec::new();
+    }
+    simd.execute(
+        #[inline(always)]
+        move |simd: S| {
+            let groups = points.len().div_ceil(F::LANES);
+            let mut loaded = Vec::with_capacity(groups);
+            // The G1 denominator and the norm of the G2 denominator of each group, tight with
+            // limb bound one, as inversion requires.
+            let mut denominators = Vec::with_capacity(2 * groups);
+            for group in points.chunks(F::LANES) {
+                // Unused lanes hold points with denominator one, which leave the products
+                // unchanged.
+                let mut g1 = [P_FILL; MAX_LANES];
+                let mut g2 = [Q_FILL; MAX_LANES];
+                for (lane, (p, q)) in group.iter().enumerate() {
+                    g1[lane] = *p;
+                    g2[lane] = *q;
+                }
+                let p = g1::Point::<F>::load(simd, &g1[..group.len()], &P_FILL);
+                let q = g2::Point::<F>::load(simd, &g2[..group.len()], &Q_FILL);
+                let norm =
+                    F::accumulate_product(simd, q.z.c0.product(simd, q.z.c0), q.z.c1, q.z.c1);
+                denominators.push(p.z);
+                denominators.push(F::reduce_tight(simd, norm));
+                loaded.push((p, q));
+            }
+            let mut running = Vec::with_capacity(denominators.len());
+            let mut total = denominators[0];
+            running.push(total);
+            for &denominator in &denominators[1..] {
+                total = F::reduce_tight(simd, total.product(simd, denominator));
+                running.push(total);
+            }
+            let mut inverse = total.invert(simd);
+            let mut inverses = vec![inverse; denominators.len()];
+            for i in (1..denominators.len()).rev() {
+                inverses[i] = F::reduce_tight(simd, inverse.product(simd, running[i - 1]));
+                inverse = F::reduce_tight(simd, inverse.product(simd, denominators[i]));
+            }
+            inverses[0] = inverse;
+
+            let mut affine = Vec::with_capacity(points.len());
+            for (group, (p, q)) in loaded.into_iter().enumerate() {
+                let lanes = (points.len() - group * F::LANES).min(F::LANES);
+                let (p_inverse, norm_inverse) = (inverses[2 * group], inverses[2 * group + 1]);
+                // The inverse of the G2 denominator is its conjugate over its norm.
+                let conjugate = q.z.conjugate::<{ TIGHT + 1 }, S>(simd).carry(simd);
+                let q_inverse =
+                    Fp2::reduce_tight::<1, S>(simd, conjugate.product_base(simd, norm_inverse));
+                // Multiplying tight coordinates by tight inverses stays within every product
+                // bound.
+                let mut px = [[0; FP_BYTES]; MAX_LANES];
+                let mut py = [[0; FP_BYTES]; MAX_LANES];
+                let mut qx = [[0; FP2_BYTES]; MAX_LANES];
+                let mut qy = [[0; FP2_BYTES]; MAX_LANES];
+                p.x.mul(simd, p_inverse).store(simd, &mut px);
+                p.y.mul(simd, p_inverse).store(simd, &mut py);
+                Fp2::mul::<64, S>(q.x, simd, q_inverse).store(simd, &mut qx);
+                Fp2::mul::<64, S>(q.y, simd, q_inverse).store(simd, &mut qy);
+                for lane in 0..lanes {
+                    affine.push(([px[lane], py[lane]], [qx[lane], qy[lane]]));
+                }
+            }
+            affine
+        },
+    )
+}
+
+/// Returns, in each lane, the product of the Miller loops of that lane's pairs, or one for no
+/// pairs.
+///
+/// Every group of up to [`SHARED`] pairs shares its squarings. The result is only defined up to the
+/// factors that [`final_exponentiation`] removes.
+pub fn miller_loop<S: Simd, F: Field<S>>(simd: S, pairs: &[Pair<F>]) -> Fp12<F> {
+    // A pair with G1 coordinates (0, 0) has lines without terms in w, so its Miller loop is an
+    // element of Fp2, which the final exponentiation maps to one.
+    let mut chunks = pairs.chunks(SHARED);
+    let Some(first) = chunks.next() else {
+        return Fp12::one(simd);
+    };
+    let mut product = shared_miller_loop(simd, first);
+    for chunk in chunks {
+        product.mul(simd, &shared_miller_loop(simd, chunk));
+    }
+    product
+}
+
+/// Returns the product of the Miller loops of up to [`SHARED`] pairs, which share their squarings.
+///
+/// This is the Miller function of `|x|`, conjugated because `x` is negative.
+fn shared_miller_loop<S: Simd, F: Field<S>>(simd: S, pairs: &[Pair<F>]) -> Fp12<F> {
+    // The loop runs on the twist y^2 = x^3 + 4 (1 + i) of G2 in the projective coordinates of
+    // Point, with affine inputs, and evaluates each line as the sparse element
+    // l0 + l2 w^2 + l3 w^3 of Fp12. Lines are scaled by factors in Fp2 that the final
+    // exponentiation removes. Each step runs as its own kernel, so the loop calls one copy, and
+    // updates its point in place, so that the loop copies nothing.
+    debug_assert!(!pairs.is_empty() && pairs.len() <= SHARED);
+    let mut points = [pairs[0].q; SHARED];
+    for (point, pair) in points.iter_mut().zip(pairs) {
+        *point = pair.q;
+    }
+    let mut f = Fp12::one(simd);
+    // The bits of |x| below the leading one. The first square of one is skipped.
+    for bit in (0..X_ABS.ilog2()).rev() {
+        if bit != X_ABS.ilog2() - 1 {
+            f.square(simd);
+        }
+        for (point, pair) in points.iter_mut().zip(pairs) {
+            let line = double_step(simd, point, pair);
+            f.mul_by_line(simd, &line);
+        }
+        if (X_ABS >> bit) & 1 == 1 {
+            for (point, pair) in points.iter_mut().zip(pairs) {
+                let line = add_step(simd, point, pair);
+                f.mul_by_line(simd, &line);
+            }
+        }
+    }
+    f.conjugate(simd)
+}
+
+/// Doubles `t` in place and returns the line tangent at it, evaluated at the pair's G1 point.
+///
+/// The line is `[3b z^2 - y^2, 3 x^2 xp, -2 y z yp]` and the point is
+/// [`Points::double`]'s.
+#[cfg_attr(not(debug_assertions), inline(always))]
+fn double_step<S: Simd, F: Field<S>>(simd: S, t: &mut Point<F>, pair: &Pair<F>) -> [Fp2<F>; 3] {
+    // The tangent at (x / z, y / z), scaled by -2 y z, is the line above once the curve equation
+    // turns 3 x^3 - 2 y^2 z into z (y^2 - 3b z^2). Its values join the stages of the doubling: x^2
+    // reduces with the first stage and the last two coefficients with the coordinates.
+    simd.execute(
+        #[inline(always)]
+        move |simd: S| {
+            let [yy, xy, yz, b3zz, xx] = Fp2::<F>::reduce_each::<5, 10, S>(
+                simd,
+                #[cfg_attr(not(debug_assertions), inline(always))]
+                |k| {
+                    if k < 4 {
+                        return t.doubling_stage(simd, k);
+                    }
+                    let x = t.x.ready::<1, S>(simd);
+                    let square = x.square_product::<{ g2::BOUND + 1 }, S>(simd);
+                    Fp2::<F>::difference::<1, S>(simd, square)
+                },
+            );
+            let doubling = [yy, xy, yz, b3zz];
+            let xx3 = xx.mul_small::<3, S>(simd).carry(simd);
+            // y^2 is below 18p in every representation.
+            let l0 = b3zz.sub::<18, S>(simd, yy).carry(simd);
+            let yz2 = yz.double(simd).carry(simd);
+            let [x, y, z, l2, l3] = Fp2::<F>::reduce_each::<5, 10, S>(
+                simd,
+                #[cfg_attr(not(debug_assertions), inline(always))]
+                |k| match k {
+                    0..=2 => Point::doubled_coordinate(simd, &doubling, k),
+                    3 => Fp2::<F>::difference::<1, S>(simd, xx3.product_base(simd, pair.x)),
+                    _ => {
+                        let product = yz2.product_base(simd, pair.negated_y);
+                        Fp2::<F>::difference::<1, S>(simd, product)
+                    }
+                },
+            );
+            *t = Point { x, y, z };
+            [l0, l2, l3]
+        },
+    )
+}
+
+/// Adds the pair's G2 point to `t` in place and returns the line through them, evaluated at the
+/// pair's G1 point.
+///
+/// The line is `[qx y - qy x, (qy z - y) xp, -(qx z - x) yp]` and the point is
+/// [`Points::add`]'s.
+#[cfg_attr(not(debug_assertions), inline(always))]
+fn add_step<S: Simd, F: Field<S>>(simd: S, t: &mut Point<F>, pair: &Pair<F>) -> [Fp2<F>; 3] {
+    // The line's first products join the second stage of the addition.
+    simd.execute(
+        #[inline(always)]
+        move |simd: S| {
+            let (x, y, z) = (
+                t.x.ready::<1, S>(simd),
+                t.y.ready::<1, S>(simd),
+                t.z.ready::<1, S>(simd),
+            );
+            let (qx, qy) = (pair.q.x, pair.q.y);
+            let first = Addition::new(simd, *t, pair.q);
+            let first = Fp2::<F>::reduce_each::<6, 12, S>(
+                simd,
+                #[cfg_attr(not(debug_assertions), inline(always))]
+                |k| first.stage(simd, k),
+            );
+            let [sx, sy, sz, l0, qyz, qxz] = Fp2::<F>::reduce_each::<6, 12, S>(
+                simd,
+                #[cfg_attr(not(debug_assertions), inline(always))]
+                |k| match k {
+                    0..=2 => Addition::coordinate(simd, &first, k),
+                    3 => Fp2::<F>::difference::<7, S>(
+                        simd,
+                        Fp2::<F>::subtract_product(simd, qx.product(simd, y), qy, x),
+                    ),
+                    4 => Fp2::<F>::difference::<5, S>(simd, qy.product(simd, z)),
+                    _ => Fp2::<F>::difference::<5, S>(simd, qx.product(simd, z)),
+                },
+            );
+            let [l2, l3] = Fp2::<F>::reduce_each::<2, 4, S>(
+                simd,
+                #[cfg_attr(not(debug_assertions), inline(always))]
+                |k| {
+                    let (value, point, scale) = if k == 0 {
+                        (qyz, y, pair.x)
+                    } else {
+                        (qxz, x, pair.negated_y)
+                    };
+                    let factor = value.sub::<{ g2::BOUND + 1 }, S>(simd, point).carry(simd);
+                    Fp2::<F>::difference::<1, S>(simd, factor.product_base(simd, scale))
+                },
+            );
+            *t = Point {
+                x: sx,
+                y: sy,
+                z: sz,
+            };
+            [l0, l2, l3]
+        },
+    )
+}
+
+/// Returns `f^(3 (p^12 - 1) / r)` in each lane, or zero for zero.
+///
+/// The cube of `f^((p^12 - 1) / r)` keeps the pairing bilinear and nondegenerate, since `3` does
+/// not divide `r`. The final exponentiation of [`miller_loop`] of one pair is its pairing.
+pub fn final_exponentiation<S: Simd, F: Field<S>>(simd: S, f: Fp12<F>) -> Fp12<F> {
+    let coefficients = Fp12::<F>::frobenius_coefficients(simd);
+    // The easy part: f^((p^6 - 1) (p^2 + 1)) lies in the cyclotomic subgroup.
+    let mut inverse = f.conjugate(simd);
+    inverse.mul(simd, &f.invert(simd));
+    let mut easy = inverse
+        .frobenius(simd, &coefficients)
+        .frobenius(simd, &coefficients);
+    easy.mul(simd, &inverse);
+
+    // The hard part: an addition chain over x that computes the cube of
+    // easy^((p^4 - p^2 + 1) / r) (see "Faster Squaring in the Cyclotomic Subgroup of Sixth Degree
+    // Extensions", Granger and Scott, 2010, and the chain of the zkcrypto pairing crate).
+    let mut y0 = easy;
+    y0.cyclotomic_square(simd);
+    let mut y1 = raise_to_x(simd, y0);
+    let y2 = raise_to_half_x(simd, y1);
+    y1.mul(simd, &easy.conjugate(simd));
+    let mut y1 = y1.conjugate(simd);
+    y1.mul(simd, &y2);
+    let y2 = raise_to_x(simd, y1);
+    let mut y3 = raise_to_x(simd, y2);
+    y3.mul(simd, &y1.conjugate(simd));
+    let mut y1 = y1
+        .frobenius(simd, &coefficients)
+        .frobenius(simd, &coefficients)
+        .frobenius(simd, &coefficients);
+    let y2 = y2
+        .frobenius(simd, &coefficients)
+        .frobenius(simd, &coefficients);
+    y1.mul(simd, &y2);
+    let mut y2 = raise_to_x(simd, y3);
+    y2.mul(simd, &y0);
+    y2.mul(simd, &easy);
+    y1.mul(simd, &y2);
+    y1.mul(simd, &y3.frobenius(simd, &coefficients));
+    y1
+}
+
+/// Returns `a^(x / 2)` for `a` in the cyclotomic subgroup.
+fn raise_to_half_x<S: Simd, F: Field<S>>(simd: S, a: Fp12<F>) -> Fp12<F> {
+    // Square and multiply over the bits of |x| / 2 below its leading one, then conjugate for the
+    // sign of x.
+    let mut result = a;
+    for bit in (0..HALF_X_ABS.ilog2()).rev() {
+        result.cyclotomic_square(simd);
+        if (HALF_X_ABS >> bit) & 1 == 1 {
+            result.mul(simd, &a);
+        }
+    }
+    result.conjugate(simd)
+}
+
+/// Returns `a^x` for `a` in the cyclotomic subgroup.
+fn raise_to_x<S: Simd, F: Field<S>>(simd: S, a: Fp12<F>) -> Fp12<F> {
+    let mut result = raise_to_half_x(simd, a);
+    result.cyclotomic_square(simd);
+    result
+}
+
+/// Fuzzing of the final exponentiation, and the bounds of the Miller loop's steps.
+#[cfg(any(test, feature = "fuzz"))]
+pub mod fuzz {
+    use super::*;
+    use crate::core::field::{
+        fp::testing::{Kernel, Target},
+        fp12::{
+            BYTES, ONE,
+            fuzz::{element, even},
+            reference,
+        },
+    };
+    use arbitrary::{Arbitrary, Unstructured};
+    use std::{vec, vec::Vec};
+
+    /// A fuzzing operation on the pairing.
+    #[derive(Clone, Copy, Debug, Arbitrary)]
+    pub enum Plan {
+        /// Checks that the final exponentiation of any elements is multiplicative, maps zero to
+        /// zero and the subfield `Fp6` (so every line scaling factor) to one, and maps each
+        /// nonzero element to a `y` with `conj(y) y = 1` and `y^p = y^x`, as on the target
+        /// group, where `p = x mod r`.
+        FinalExponentiation,
+    }
+
+    impl Plan {
+        /// Runs the check on the remaining input.
+        pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+            match self {
+                Self::FinalExponentiation => final_exponentiations(u),
+            }
+        }
+    }
+
+    /// Returns the final exponentiations of elements, one per lane of as few values as hold them.
+    struct Exponentiate<'a>(&'a [[u8; BYTES]]);
+
+    impl Kernel for Exponentiate<'_> {
+        type Output = Vec<[u8; BYTES]>;
+
+        fn run<S: Simd, F: Field<S>>(self, simd: S) -> Self::Output {
+            let mut output = vec![[0; BYTES]; self.0.len()];
+            for (elements, output) in self.0.chunks(F::LANES).zip(output.chunks_mut(F::LANES)) {
+                let f = Fp12::<F>::load(simd, elements, &ONE);
+                final_exponentiation(simd, f).store(simd, output);
+            }
+            output
+        }
+    }
+
+    /// Runs [`Plan::FinalExponentiation`].
+    fn final_exponentiations(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+        let target = Target::draw(u)?;
+        // Elements and the products of neighbors fill the lanes of one value where it holds two
+        // or more.
+        let count = target.lanes().div_ceil(2);
+        let count = count - u.int_in_range(0..=count - 1)?;
+        let a = (0..count)
+            .map(|_| element(u))
+            .collect::<arbitrary::Result<Vec<_>>>()?;
+        let mut elements: Vec<_> = a.iter().map(reference::encode).collect();
+        for (k, x) in a.iter().enumerate() {
+            elements.push(reference::encode(&reference::mul(x, &a[(k + 1) % count])));
+        }
+        let outputs = target.run(Exponentiate(&elements));
+        let (images, products) = outputs.split_at(count);
+        for lane in 0..count {
+            let label = std::format!("{target:?}, element {lane} of {count}");
+            let image = reference::decode(&images[lane]);
+            let next = reference::decode(&images[(lane + 1) % count]);
+            assert!(
+                products[lane] == reference::encode(&reference::mul(&image, &next)),
+                "multiplicative, {label}"
+            );
+            if a[lane] == reference::ZERO {
+                assert!(image == reference::ZERO, "zero, {label}");
+                continue;
+            }
+            // Elements of Fp6 have no coefficients of odd degree in w.
+            if even(&a[lane]) == a[lane] {
+                assert!(image == reference::ONE, "subfield, {label}");
+            }
+            assert!(
+                reference::mul(&reference::conjugate(&image), &image) == reference::ONE,
+                "cyclotomic, {label}"
+            );
+            // x is negative, and conjugation inverts in the cyclotomic subgroup.
+            assert!(
+                reference::frobenius(&image)
+                    == reference::conjugate(&reference::power(&image, &[X_ABS])),
+                "frobenius is x, {label}"
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::core::{
+            curve::g1,
+            field::{
+                fp::{rns::Rns, unsat28::Unsat28, unsat49::Unsat49},
+                fp12::fuzz::widen,
+            },
+        };
+        use commonware_invariants::minifuzz;
+        use commonware_simd::emulated::{EmulatedScalar, EmulatedX86V4C};
+
+        #[test]
+        fn minifuzz_final_exponentiation() {
+            minifuzz::Builder::default()
+                .with_min_iterations(MIN_ITERATIONS)
+                .test(|u| Plan::FinalExponentiation.run(u));
+        }
+
+        /// Least number of cases [`minifuzz_final_exponentiation`] runs, even past its time limit.
+        const MIN_ITERATIONS: u64 = 10;
+
+        /// Checks, in debug builds, that steps from points at the coordinate bounds return points
+        /// within them and lines within the documented bounds.
+        fn check_steps<S: Simd, F: Field<S>>(simd: S) {
+            let widen = |value| widen::<{ g2::BOUND - 2 }, S, F>(simd, value);
+            let p = [g1::GENERATOR[0], g1::GENERATOR[1]];
+            let q = [g2::GENERATOR[0], g2::GENERATOR[1]];
+            let pair = Pair::<F>::load(simd, &[], &(p, q));
+            let t = Point {
+                x: widen(pair.q.x),
+                y: widen(pair.q.y),
+                z: widen(pair.q.z),
+            };
+            let (mut doubled, mut sum) = (t, t);
+            let steps = [
+                (double_step(simd, &mut doubled, &pair), doubled),
+                (add_step(simd, &mut sum, &pair), sum),
+            ];
+            for (line, point) in steps {
+                for coordinate in [point.x, point.y, point.z] {
+                    coordinate.neg::<{ g2::BOUND + 1 }, S>(simd);
+                }
+                for component in line {
+                    component.neg::<{ LINE_COMPONENT_BOUND + 1 }, S>(simd);
+                }
+            }
+        }
+
+        #[test]
+        fn steps_satisfy_their_bounds() {
+            EmulatedScalar.execute(|simd: EmulatedScalar| {
+                check_steps::<_, Unsat49<_>>(simd);
+                check_steps::<_, Unsat28<_>>(simd);
+            });
+            EmulatedX86V4C.execute(|simd: EmulatedX86V4C| check_steps::<_, Rns<_>>(simd));
+        }
+    }
+}

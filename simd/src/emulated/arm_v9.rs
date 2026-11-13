@@ -18,7 +18,7 @@ use crate::{ArmV9, Neon};
 #[derive(Clone, Copy, Debug, Default)]
 pub struct EmulatedArmV9;
 
-super::common::impl_common!(EmulatedArmV9, 16, 4, 2, arm_v9);
+super::common::impl_common!(EmulatedArmV9, 16, 4, 2, false, arm_v9);
 
 impl ArmV9 for EmulatedArmV9 {
     #[inline]
@@ -119,6 +119,16 @@ impl Neon for EmulatedArmV9 {
     #[inline]
     fn u32_widen_madd(self, acc: Self::U64, a: Self::U32Half, b: Self::U32Half) -> Self::U64 {
         super::neon::EmulatedNeon.u32_widen_madd(acc, a, b)
+    }
+
+    #[inline]
+    fn u32_widen_mul_first_lane<const L: u32>(self, a: Self::U32, b: Self::U32) -> Self::U64 {
+        super::neon::EmulatedNeon.u32_widen_mul_first_lane::<L>(a, b)
+    }
+
+    #[inline]
+    fn u32_widen_mul_second_lane<const L: u32>(self, a: Self::U32, b: Self::U32) -> Self::U64 {
+        super::neon::EmulatedNeon.u32_widen_mul_second_lane::<L>(a, b)
     }
 }
 

@@ -35,6 +35,8 @@ jobs:
             test_flags: ""
           - package: commonware-cryptography-curve25519
             test_flags: ""
+          - package: commonware-cryptography-bls12381
+            test_flags: ""
           - package: commonware-storage
             test_flags: "--features test-traits"
             partition: "1/4"
@@ -109,6 +111,7 @@ jobs:
             partition: "3/4"
           - fuzz_dir: cryptography/fuzz
             partition: "4/4"
+          - fuzz_dir: cryptography/bls12381/fuzz
           - fuzz_dir: cryptography/curve25519/fuzz
           - fuzz_dir: math/fuzz
           - fuzz_dir: p2p/fuzz

@@ -1,0 +1,525 @@
+//! The pairing of G1 and G2 into the target group.
+
+use super::{
+    G1, G2,
+    kernel::{Batch, Group, Kernel},
+};
+use crate::core::{
+    curve::g2,
+    field::{
+        MAX_LANES,
+        arithmetic::Field,
+        fp12::{self, BYTES, Fp12},
+    },
+    pairing::{FILL, P_FILL, Pair, SHARED, final_exponentiation, miller_loop, to_affine},
+};
+use alloc::vec::Vec;
+use commonware_formatting::Hex;
+use commonware_math::algebra::{Multiplicative, Object};
+use commonware_parallel::{Sequential, Strategy};
+use commonware_simd::Simd;
+use core::{
+    fmt::{self, Debug, Formatter},
+    mem,
+    ops::{Mul, MulAssign, Range},
+};
+
+/// An element of GT, the subgroup of prime order `r` of the multiplicative group of the degree-12
+/// extension, which the pairing maps into.
+///
+/// Elements arise only from pairings and their products, so every element lies in the subgroup.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct GT([u8; BYTES]);
+
+impl GT {
+    /// The identity, `e(P, 0)` for any `P`.
+    pub const ONE: Self = Self(fp12::ONE);
+
+    /// Returns the canonical encoding, 576 bytes.
+    ///
+    /// The encoding writes an element of `Fp12 = Fp6[w] / (w^2 - v)` as `c1` then `c0`, an
+    /// element of `Fp6 = Fp2[v] / (v^3 - (1 + i))` as `c2`, `c1`, then `c0`, an element of
+    /// `Fp2 = Fp[i] / (i^2 + 1)` as `c1` then `c0`, and an element of the base field as 48
+    /// big-endian bytes.
+    pub const fn to_bytes(&self) -> [u8; BYTES] {
+        self.0
+    }
+}
+
+impl Debug for GT {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("GT").field(&Hex(&self.0)).finish()
+    }
+}
+
+impl Object for GT {}
+
+impl<'a> MulAssign<&'a Self> for GT {
+    fn mul_assign(&mut self, rhs: &'a Self) {
+        *self = Product(*self, *rhs).dispatch();
+    }
+}
+
+impl<'a> Mul<&'a Self> for GT {
+    type Output = Self;
+
+    fn mul(mut self, rhs: &'a Self) -> Self {
+        self *= rhs;
+        self
+    }
+}
+
+impl Multiplicative for GT {}
+
+/// Returns the pairing `e(p, q)`.
+///
+/// To check an equation between pairings, [`multi_pairing`] costs less than comparing
+/// separate pairings.
+pub fn pairing(p: &G1, q: &G2) -> GT {
+    multi_pairing(&[(*p, *q)], &Sequential)
+}
+
+/// Computes the pairing of each pair into the output at the same index, as when verifying many
+/// signatures separately.
+///
+/// Outputs beyond the pairs are unchanged, and pairs beyond the outputs are ignored. Costs less
+/// per pair than calling [`pairing`] for each. The strategy may split the pairs into batches
+/// and run them on several threads.
+pub fn pairings(pairs: &[(G1, G2)], outputs: &mut [GT], strategy: &impl Strategy) {
+    Pairings(pairs, outputs).dispatch_batches(strategy);
+}
+
+/// Returns the product of the pairings of `pairs`, with one shared final exponentiation, or
+/// [`GT::ONE`] for no pairs.
+///
+/// A product of pairings is cheaper than the pairings it multiplies, so checks such as
+/// `e(a, b) = e(c, d)` should compare `multi_pairing(&[(a, b), (-c, d)], strategy)` with
+/// [`GT::ONE`]. The strategy may split the pairs into batches and run their Miller loops on
+/// several threads. The final exponentiation runs on the calling thread.
+pub fn multi_pairing(pairs: &[(G1, G2)], strategy: &impl Strategy) -> GT {
+    MillerLoops(pairs)
+        .dispatch_batches(strategy)
+        .map_or(GT::ONE, exponentiate)
+}
+
+/// Returns the final exponentiation of a product of Miller loops.
+// The function has no type parameters, so the kernel compiles once, in this crate, and not for
+// every strategy and crate that calls multi_pairing.
+fn exponentiate(product: [u8; BYTES]) -> GT {
+    Exponentiate(product).dispatch()
+}
+
+/// Multiplies two elements of GT.
+#[derive(Clone, Copy)]
+struct Product(GT, GT);
+
+impl Kernel for Product {
+    type Output = GT;
+
+    #[inline(always)]
+    fn run<S: Simd, F: Field<S>>(self, simd: S) -> GT {
+        let mut a = Fp12::<F>::load(simd, &[], &self.0.0);
+        let b = Fp12::<F>::load(simd, &[], &self.1.0);
+        let mut output = [fp12::ONE];
+        a.mul(simd, &b);
+        a.store(simd, &mut output);
+        GT(output[0])
+    }
+}
+
+/// Returns the canonical encoding of the product of the Miller loops of the pairs that contain
+/// no identity, or `None` when every pair contains one.
+#[derive(Clone, Copy)]
+struct MillerLoops<'a>(&'a [(G1, G2)]);
+
+impl Kernel for MillerLoops<'_> {
+    type Output = Option<[u8; BYTES]>;
+
+    // Up to SHARED groups of F::LANES pairs, one pair per lane, share their squarings, and the
+    // lanes of their product multiply into one element.
+    //
+    // Debug builds keep this a call so that each representation's frame stays separate.
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    fn run<S: Simd, F: Field<S>>(self, simd: S) -> Option<[u8; BYTES]> {
+        const { assert!(F::LANES <= MAX_LANES) };
+        // Pairs with an identity contribute one, so only the others are prepared. Unused lanes
+        // hold the fill pair.
+        let points: Vec<_> = self
+            .0
+            .iter()
+            .filter(|(p, q)| !p.is_identity() && !q.is_identity())
+            .map(|(p, q)| (*p.coordinates(), *q.coordinates()))
+            .collect();
+        let affine = to_affine::<S, F>(simd, &points);
+        let mut prepared = [Pair::<F>::load(simd, &[], &FILL); SHARED];
+        let mut product: Option<Fp12<F>> = None;
+        for batch in affine.chunks(SHARED * F::LANES) {
+            let groups = batch.chunks(F::LANES);
+            let count = groups.len();
+            for (prepared, group) in prepared.iter_mut().zip(groups) {
+                *prepared = Pair::load(simd, group, &FILL);
+            }
+            let lines = miller_loop(simd, &prepared[..count]);
+            match &mut product {
+                Some(product) => product.mul(simd, &lines),
+                None => product = Some(lines),
+            }
+        }
+        let mut output = [fp12::ONE];
+        product?.product_of_lanes(simd).store(simd, &mut output);
+        Some(output[0])
+    }
+}
+
+impl Batch for MillerLoops<'_> {
+    // Each of the 68 steps of the Miller loop evaluates a line for the pair and multiplies it
+    // into the product, which costs about eight additions of G1.
+    const WORK: usize = 512;
+
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn split(self, ranges: Vec<Range<usize>>) -> Vec<Self> {
+        ranges
+            .into_iter()
+            .map(|range| Self(&self.0[range]))
+            .collect()
+    }
+
+    fn dispatch_one(self) -> Option<[u8; BYTES]> {
+        self.dispatch()
+    }
+
+    fn join(outputs: &[Option<[u8; BYTES]>]) -> Option<[u8; BYTES]> {
+        Products(outputs).dispatch()
+    }
+}
+
+/// Multiplies products of Miller loops given as their canonical encodings, skipping those that
+/// are `None`. Returns `None` when all are.
+#[derive(Clone, Copy)]
+struct Products<'a>(&'a [Option<[u8; BYTES]>]);
+
+impl Kernel for Products<'_> {
+    type Output = Option<[u8; BYTES]>;
+
+    #[inline(always)]
+    fn run<S: Simd, F: Field<S>>(self, simd: S) -> Option<[u8; BYTES]> {
+        let mut product: Option<Fp12<F>> = None;
+        for output in self.0.iter().flatten() {
+            let factor = Fp12::<F>::load(simd, &[], output);
+            match &mut product {
+                Some(product) => product.mul(simd, &factor),
+                None => product = Some(factor),
+            }
+        }
+        let mut output = [fp12::ONE];
+        product?.store(simd, &mut output);
+        Some(output[0])
+    }
+}
+
+/// Returns the final exponentiation of a product of Miller loops, given as its canonical
+/// encoding.
+#[derive(Clone, Copy)]
+struct Exponentiate([u8; BYTES]);
+
+impl Kernel for Exponentiate {
+    type Output = GT;
+
+    // Debug builds keep this a call so that each representation's frame stays separate.
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    fn run<S: Simd, F: Field<S>>(self, simd: S) -> GT {
+        let mut output = [fp12::ONE];
+        final_exponentiation(simd, Fp12::<F>::load(simd, &[], &self.0)).store(simd, &mut output);
+        GT(output[0])
+    }
+}
+
+/// Computes the pairing of each pair, one pair per lane.
+struct Pairings<'a>(&'a [(G1, G2)], &'a mut [GT]);
+
+impl Kernel for Pairings<'_> {
+    type Output = ();
+
+    // Debug builds keep this a call so that each representation's frame stays separate.
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    fn run<S: Simd, F: Field<S>>(self, simd: S) {
+        const { assert!(F::LANES <= MAX_LANES) };
+        // Pairs with an identity hold points with denominator one, which the conversion to
+        // affine coordinates accepts; their outputs are replaced by one.
+        let filler = (P_FILL, g2::GENERATOR);
+        let count = self.0.len().min(self.1.len());
+        let points: Vec<_> = self.0[..count]
+            .iter()
+            .map(|(p, q)| {
+                if p.is_identity() || q.is_identity() {
+                    filler
+                } else {
+                    (*p.coordinates(), *q.coordinates())
+                }
+            })
+            .collect();
+        let affine = to_affine::<S, F>(simd, &points);
+        for ((pairs, affine), outputs) in self.0[..count]
+            .chunks(F::LANES)
+            .zip(affine.chunks(F::LANES))
+            .zip(self.1[..count].chunks_mut(F::LANES))
+        {
+            let prepared = Pair::<F>::load(simd, affine, &FILL);
+            let lines = miller_loop(simd, &[prepared]);
+            let mut results = [fp12::ONE; MAX_LANES];
+            final_exponentiation(simd, lines).store(simd, &mut results[..pairs.len()]);
+            for ((output, (p, q)), result) in outputs.iter_mut().zip(pairs).zip(results) {
+                *output = if p.is_identity() || q.is_identity() {
+                    GT::ONE
+                } else {
+                    GT(result)
+                };
+            }
+        }
+    }
+}
+
+impl Batch for Pairings<'_> {
+    // A pairing, with its own squarings and final exponentiation, takes about four times as long
+    // as one pair of a product of pairings.
+    const WORK: usize = 2048;
+
+    fn len(&self) -> usize {
+        self.0.len().min(self.1.len())
+    }
+
+    fn split(self, ranges: Vec<Range<usize>>) -> Vec<Self> {
+        let mut rest = self.1;
+        ranges
+            .into_iter()
+            .map(|range| {
+                let (outputs, tail) = mem::take(&mut rest).split_at_mut(range.len());
+                rest = tail;
+                Self(&self.0[range], outputs)
+            })
+            .collect()
+    }
+
+    fn dispatch_one(self) {
+        self.dispatch();
+    }
+
+    fn join(_: &[()]) {}
+}
+
+/// Fuzzing operations for the pairing.
+#[cfg(any(test, feature = "fuzz"))]
+pub mod fuzz {
+    use super::*;
+    use crate::group::{
+        Scalar,
+        fuzz::{check_representations, dot, elements, strategy},
+    };
+    use arbitrary::{Arbitrary, Unstructured};
+    use commonware_math::algebra::{CryptoGroup, test_suites};
+    use std::{sync::LazyLock, vec};
+
+    /// The pairing of the generators, which generates the target group.
+    static GENERATOR: LazyLock<GT> = LazyLock::new(|| pairing(&G1::generator(), &G2::generator()));
+
+    impl<'a> Arbitrary<'a> for GT {
+        fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+            // A power of the generator below the 256th, which costs at most 16 multiplications.
+            let exponent: u8 = u.arbitrary()?;
+            let mut power = Self::ONE;
+            for bit in (0..u8::BITS).rev() {
+                power = power * &power;
+                if (exponent >> bit) & 1 == 1 {
+                    power *= &GENERATOR;
+                }
+            }
+            Ok(power)
+        }
+    }
+
+    /// Draws pairs of elements with the discrete logarithm of the product of their pairings to
+    /// the pairing of the generators: by bilinearity, the sum of the products of the discrete
+    /// logarithms of each pair.
+    fn pairs(u: &mut Unstructured<'_>, count: usize) -> arbitrary::Result<(Vec<(G1, G2)>, Scalar)> {
+        let (p, a) = elements::<G1>(u, count)?;
+        let (q, b) = elements::<G2>(u, count)?;
+        Ok((p.into_iter().zip(q).collect(), dot(&a, &b)))
+    }
+
+    /// Returns the power of the pairing of the generators by a scalar, multiplying either
+    /// generator by it.
+    fn power(u: &mut Unstructured<'_>, logarithm: &Scalar) -> arbitrary::Result<GT> {
+        Ok(if u.arbitrary()? {
+            pairing(&G1::generator(), &(G2::generator() * logarithm))
+        } else {
+            pairing(&(G1::generator() * logarithm), &G2::generator())
+        })
+    }
+
+    /// Computes the pairing of each pair, returning the pairings.
+    #[derive(Clone, Copy)]
+    struct Separate<'a>(&'a [(G1, G2)]);
+
+    impl Kernel for Separate<'_> {
+        type Output = Vec<GT>;
+
+        fn run<S: Simd, F: Field<S>>(self, simd: S) -> Vec<GT> {
+            let mut outputs = vec![GT::ONE; self.0.len()];
+            Pairings(self.0, &mut outputs).run::<S, F>(simd);
+            outputs
+        }
+    }
+
+    /// Multiplies the pairings of pairs of elements.
+    #[derive(Clone, Copy)]
+    struct MultiPairing<'a>(&'a [(G1, G2)]);
+
+    impl Kernel for MultiPairing<'_> {
+        type Output = GT;
+
+        fn run<S: Simd, F: Field<S>>(self, simd: S) -> GT {
+            MillerLoops(self.0)
+                .run::<S, F>(simd)
+                .map_or(GT::ONE, |product| Exponentiate(product).run::<S, F>(simd))
+        }
+    }
+
+    /// A kernel that [`Plan::Representations`] runs on a drawn target.
+    #[derive(Clone, Copy, Debug, Arbitrary)]
+    enum PairingKernel {
+        MultiPairing,
+        Separate,
+        Product,
+    }
+
+    /// A pairing fuzzing operation.
+    #[derive(Clone, Copy, Debug, Arbitrary)]
+    pub enum Plan {
+        /// Checks the laws of multiplication in the target group.
+        Multiplicative,
+        /// Checks that a product of pairings, whole or in two parts, is the power of the pairing
+        /// of the generators that bilinearity gives.
+        Product,
+        /// Checks the pairings of a slice against one pairing at a time.
+        Each,
+        /// Checks that every representation and backend computes what each kernel's dispatch
+        /// does.
+        Representations,
+    }
+
+    impl Plan {
+        /// Runs the operation using the remaining input.
+        pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+            match self {
+                Self::Multiplicative => {
+                    test_suites::fuzz_multiplicative::<GT>(u)?;
+                    let a = GT::arbitrary(u)?;
+                    assert_eq!(a * &GT::ONE, a);
+                }
+                Self::Product => {
+                    // More pairs than share their squarings on one lane.
+                    let count = SHARED + 1 - u.int_in_range(0..=SHARED + 1)?;
+                    let (pairs, logarithm) = pairs(u, count)?;
+                    let expected = power(u, &logarithm)?;
+                    let strategy = strategy(u)?;
+                    assert_eq!(multi_pairing(&pairs, &strategy), expected);
+                    let (first, second) = pairs.split_at(u.int_in_range(0..=count)?);
+                    assert_eq!(
+                        multi_pairing(first, &strategy) * &multi_pairing(second, &strategy),
+                        expected
+                    );
+                }
+                Self::Each => {
+                    // Outputs beyond the pairs are unchanged, and pairs beyond the outputs are
+                    // ignored. A few pairs suffice, since each costs a pairing:
+                    // Representations covers the lane counts of every representation.
+                    const LONGEST: usize = 6;
+                    let count = LONGEST - u.int_in_range(0..=LONGEST)?;
+                    let (pairs, _) = pairs(u, count)?;
+                    let unchanged = GT::arbitrary(u)?;
+                    let mut outputs = vec![unchanged; LONGEST - u.int_in_range(0..=LONGEST)?];
+                    pairings(&pairs, &mut outputs, &strategy(u)?);
+                    for (i, output) in outputs.iter().enumerate() {
+                        let expected = pairs.get(i).map_or(unchanged, |(p, q)| pairing(p, q));
+                        assert_eq!(*output, expected, "output {i}");
+                    }
+                }
+                Self::Representations => {
+                    let kernel = PairingKernel::arbitrary(u)?;
+                    // More pairs than share their squarings on one lane, or than the lanes of
+                    // the widest representation.
+                    let longest = match kernel {
+                        PairingKernel::Separate => MAX_LANES,
+                        PairingKernel::MultiPairing | PairingKernel::Product => SHARED,
+                    } + 1;
+                    let count = longest - u.int_in_range(0..=longest)?;
+                    let (pairs, _) = pairs(u, count)?;
+                    match kernel {
+                        PairingKernel::MultiPairing => {
+                            check_representations(u, MultiPairing(&pairs))?
+                        }
+                        PairingKernel::Separate => check_representations(u, Separate(&pairs))?,
+                        PairingKernel::Product => {
+                            let product = Product(GT::arbitrary(u)?, GT::arbitrary(u)?);
+                            check_representations(u, product)?;
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::group::vectors::PAIRING;
+        use commonware_invariants::minifuzz;
+        use commonware_math::algebra::Additive;
+
+        #[test]
+        fn minifuzz_multiplicative() {
+            minifuzz::Builder::default()
+                .with_min_iterations(32)
+                .test(|u| Plan::Multiplicative.run(u));
+        }
+
+        // The remaining cases compute several pairings, so debug builds run few of them.
+
+        #[test]
+        fn minifuzz_product() {
+            minifuzz::Builder::default()
+                .with_min_iterations(2)
+                .test(|u| Plan::Product.run(u));
+        }
+
+        #[test]
+        fn minifuzz_each() {
+            minifuzz::Builder::default()
+                .with_min_iterations(2)
+                .test(|u| Plan::Each.run(u));
+        }
+
+        #[test]
+        fn minifuzz_representations() {
+            minifuzz::Builder::default()
+                .with_min_iterations(4)
+                .test(|u| Plan::Representations.run(u));
+        }
+
+        #[test]
+        fn generators_pair_to_known_answer() {
+            assert_eq!(GENERATOR.to_bytes(), PAIRING);
+        }
+
+        #[test]
+        fn identities_pair_to_one() {
+            assert_eq!(multi_pairing(&[], &Sequential), GT::ONE);
+            assert_eq!(pairing(&G1::zero(), &G2::generator()), GT::ONE);
+            assert_eq!(pairing(&G1::generator(), &G2::zero()), GT::ONE);
+        }
+    }
+}

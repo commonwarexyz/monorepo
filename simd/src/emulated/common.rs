@@ -1,7 +1,26 @@
 //! Shared array semantics for emulated backends.
 
+/// Returns the 32-bit lane held by lane `i` of part `part` (zero for the first, one for the
+/// second) of a widening split.
+///
+/// Interleaved splits pair even and odd lanes; others pair the low and high lanes.
+pub(super) const fn pair_lane(interleaved: bool, u64_lanes: usize, part: usize, i: usize) -> usize {
+    if interleaved {
+        2 * i + part
+    } else {
+        part * u64_lanes + i
+    }
+}
+
 macro_rules! impl_common {
-    ($backend:ty, $u8_lanes:literal, $u32_lanes:literal, $u64_lanes:literal, $execute:ident) => {
+    (
+        $backend:ty,
+        $u8_lanes:literal,
+        $u32_lanes:literal,
+        $u64_lanes:literal,
+        $interleaved:literal,
+        $execute:ident
+    ) => {
         const _: () = $crate::core::assert_lane_relation::<$backend>();
 
         impl $crate::Simd for $backend {
@@ -423,6 +442,18 @@ macro_rules! impl_common {
             }
 
             #[inline]
+            fn u64_min(self, a: Self::U64, b: Self::U64) -> Self::U64 {
+                core::array::from_fn(|i| a[i].min(b[i]))
+            }
+
+            #[inline]
+            fn u64_rotate_lanes<const N: usize>(self, value: Self::U64) -> Self::U64 {
+                let mut rotated = value;
+                rotated.rotate_left(N.rem_euclid(Self::U64_LANES));
+                rotated
+            }
+
+            #[inline]
             fn u64_extract<const N: usize>(self, value: Self::U64) -> u64 {
                 assert!(N < Self::U64_LANES);
                 value[N]
@@ -484,10 +515,84 @@ macro_rules! impl_common {
                 words
             }
 
+            #[inline]
+            fn u64_madd52lo(self, acc: Self::U64, a: Self::U64, b: Self::U64) -> Self::U64 {
+                const MASK: u64 = (1 << 52) - 1;
+                core::array::from_fn(|i| {
+                    let product = u128::from(a[i] & MASK) * u128::from(b[i] & MASK);
+                    acc[i].wrapping_add(product as u64 & MASK)
+                })
+            }
+
+            #[inline]
+            fn u64_madd52hi(self, acc: Self::U64, a: Self::U64, b: Self::U64) -> Self::U64 {
+                const MASK: u64 = (1 << 52) - 1;
+                core::array::from_fn(|i| {
+                    let product = u128::from(a[i] & MASK) * u128::from(b[i] & MASK);
+                    acc[i].wrapping_add((product >> 52) as u64)
+                })
+            }
+
+            #[inline]
+            fn u32_widen_mul_first(self, a: Self::U32, b: Self::U32) -> Self::U64 {
+                self.widen_part(0, a, b)
+            }
+
+            #[inline]
+            fn u32_widen_mul_second(self, a: Self::U32, b: Self::U32) -> Self::U64 {
+                self.widen_part(1, a, b)
+            }
+
+            #[inline]
+            fn u64_narrow_pair(self, first: Self::U64, second: Self::U64) -> Self::U32 {
+                let mut narrowed = [0; $u32_lanes];
+                for (part, values) in [first, second].into_iter().enumerate() {
+                    for (i, value) in values.into_iter().enumerate() {
+                        narrowed[Self::pair_lane(part, i)] = value as u32;
+                    }
+                }
+                narrowed
+            }
+
+            #[inline]
+            fn u32_mul_lo(self, a: Self::U32, b: Self::U32) -> Self::U32 {
+                core::array::from_fn(|i| a[i].wrapping_mul(b[i]))
+            }
+
+            #[inline]
+            fn u64_mul_lo(self, a: Self::U64, b: Self::U64) -> Self::U64 {
+                core::array::from_fn(|i| a[i].wrapping_mul(b[i]))
+            }
+
+            #[inline]
+            fn u64_mul_hi(self, a: Self::U64, b: Self::U64) -> Self::U64 {
+                core::array::from_fn(|i| ((u128::from(a[i]) * u128::from(b[i])) >> 64) as u64)
+            }
+
             // Inline nested adapters across consumer code generation units.
             #[inline]
             fn execute<O: $crate::Operation<Self>>(self, operation: O) -> O::Output {
                 operation.$execute(self)
+            }
+        }
+
+        impl $backend {
+            /// Returns the 32-bit lane held by lane `i` of part `part` of a widening split.
+            const fn pair_lane(part: usize, i: usize) -> usize {
+                $crate::emulated::common::pair_lane($interleaved, $u64_lanes, part, i)
+            }
+
+            /// Returns the widening products held by part `part` of a split.
+            fn widen_part(
+                self,
+                part: usize,
+                a: [u32; $u32_lanes],
+                b: [u32; $u32_lanes],
+            ) -> [u64; $u64_lanes] {
+                core::array::from_fn(|i| {
+                    let lane = Self::pair_lane(part, i);
+                    u64::from(a[lane]) * u64::from(b[lane])
+                })
             }
         }
     };

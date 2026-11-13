@@ -1,0 +1,197 @@
+//! Debug-only upper bounds for nonnegative arithmetic intermediates.
+//!
+//! Callers choose the units of a bound and supply input limits, subtraction biases, and the
+//! output bounds of reductions. The counter does not inspect field values or perform reductions.
+//!
+//! With debug assertions disabled, the counter is zero-sized and its operations are no-ops.
+//! The caller still evaluates their arguments.
+
+/// A conservative, inclusive upper bound that is checked only in debug builds.
+///
+/// Copies retain the bound. After a reduction, construct a new counter using the reduction's
+/// proven output bound. Preserve counters alongside any stored arithmetic intermediates.
+#[derive(Clone, Copy, Debug)]
+pub struct DebugCounter {
+    #[cfg(debug_assertions)]
+    upper: u64,
+}
+
+impl DebugCounter {
+    /// Creates a counter with the supplied upper bound.
+    pub const fn new(upper: u64) -> Self {
+        let _ = upper;
+        Self {
+            #[cfg(debug_assertions)]
+            upper,
+        }
+    }
+
+    /// Sets this bound `a` to `a + bias`, which bounds `x + bias - y` for `x <= a` and
+    /// `y <= b`, where `b` is the bound of `rhs`. Requires `b <= bias`.
+    ///
+    /// The check shows that the represented integer stays nonnegative. Limb and residue
+    /// constraints remain for the caller to check.
+    ///
+    /// # Panics
+    ///
+    /// With debug assertions enabled, panics if the right-hand bound exceeds `bias` or the
+    /// resulting bound exceeds [`u64::MAX`].
+    pub fn sub_with_bias(&mut self, rhs: Self, bias: u64) {
+        rhs.assert_le(bias);
+        self.add(Self::new(bias));
+    }
+
+    /// Raises this bound to cover either input, for example after a conditional selection.
+    pub fn max(&mut self, rhs: Self) {
+        let _ = rhs;
+        #[cfg(debug_assertions)]
+        {
+            self.upper = self.upper.max(rhs.upper);
+        }
+    }
+
+    /// Checks that this bound is at most `limit`.
+    ///
+    /// # Panics
+    ///
+    /// With debug assertions enabled, panics if the bound exceeds `limit`.
+    pub fn assert_le(&self, limit: u64) {
+        let _ = limit;
+        #[cfg(debug_assertions)]
+        assert!(
+            self.upper <= limit,
+            "bound {} exceeds limit {limit}",
+            self.upper
+        );
+    }
+
+    /// Adds the right-hand bound to this bound.
+    ///
+    /// # Panics
+    ///
+    /// With debug assertions enabled, panics if the resulting bound exceeds [`u64::MAX`].
+    pub const fn add(&mut self, rhs: Self) {
+        let _ = rhs;
+        #[cfg(debug_assertions)]
+        {
+            self.upper = self
+                .upper
+                .checked_add(rhs.upper)
+                .expect("bound addition overflow");
+        }
+    }
+
+    /// Multiplies this bound by the right-hand bound.
+    ///
+    /// The caller must account for the resulting units, such as `p^2` for two bounds in `p`.
+    ///
+    /// # Panics
+    ///
+    /// With debug assertions enabled, panics if the resulting bound exceeds [`u64::MAX`].
+    pub const fn mul(&mut self, rhs: Self) {
+        let _ = rhs;
+        #[cfg(debug_assertions)]
+        {
+            self.upper = self
+                .upper
+                .checked_mul(rhs.upper)
+                .expect("bound multiplication overflow");
+        }
+    }
+
+    /// Divides this bound by `divisor`, rounding up.
+    ///
+    /// # Panics
+    ///
+    /// With debug assertions enabled, panics if `divisor` is zero.
+    pub const fn div_ceil(&mut self, divisor: u64) {
+        let _ = divisor;
+        #[cfg(debug_assertions)]
+        {
+            self.upper = self.upper.div_ceil(divisor);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[cfg(debug_assertions)]
+    use std::panic::catch_unwind;
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn bounds_follow_a_formula() {
+        let a = DebugCounter::new(3);
+        let b = DebugCounter::new(5);
+        let mut result = a;
+        result.add(b);
+        result.sub_with_bias(b, 8);
+        result.mul(a);
+        result.div_ceil(5);
+        result.assert_le(10);
+        assert!(catch_unwind(|| result.assert_le(9)).is_err());
+        result.mul(DebugCounter::new(5));
+        result.max(DebugCounter::new(47));
+        result.assert_le(50);
+        assert!(catch_unwind(|| result.assert_le(49)).is_err());
+        result.max(DebugCounter::new(49));
+        result.assert_le(50);
+        result.max(DebugCounter::new(51));
+        result.assert_le(51);
+        assert!(catch_unwind(|| result.assert_le(50)).is_err());
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn rejects_insufficient_subtraction_bias() {
+        assert!(
+            catch_unwind(|| {
+                DebugCounter::new(0).sub_with_bias(DebugCounter::new(9), 8);
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn rejects_counter_addition_overflow() {
+        assert!(
+            catch_unwind(|| {
+                DebugCounter::new(u64::MAX).add(DebugCounter::new(1));
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn rejects_counter_multiplication_overflow() {
+        assert!(
+            catch_unwind(|| {
+                DebugCounter::new(u64::MAX).mul(DebugCounter::new(2));
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn rejects_zero_divisor() {
+        assert!(catch_unwind(|| DebugCounter::new(1).div_ceil(0)).is_err());
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn disabled_counter_has_no_storage_or_checks() {
+        assert_eq!(core::mem::size_of::<DebugCounter>(), 0);
+        let a = DebugCounter::new(u64::MAX);
+        let mut result = a;
+        result.add(a);
+        result.mul(a);
+        result.div_ceil(0);
+        result.sub_with_bias(a, 0);
+        result.max(a);
+        result.assert_le(0);
+    }
+}
