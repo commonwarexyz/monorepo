@@ -86,7 +86,7 @@
 //! - The final public polynomial (sum of dealer polynomials for DKG, interpolation for reshare),
 //! - The list of dealers who distributed dealings,
 //! - The list of players who received shares,
-//! - The set of players whose shares may have been revealed,
+//! - The set of players whose shares the selected dealers may have revealed,
 //! - A digest of the round's [`Info`] (including the counter, and the list of dealers and players).
 //!
 //! ## Trusted Dealing Functions
@@ -177,10 +177,10 @@
 //! plus the `f` dealings held by Byzantine players and `f` revealed dealings give the `2f + 1`
 //! values that fix every dealing from that dealer.
 //!
-//! The adversary may then work out new shares of honest players from fewer reveals than
-//! [`Output::revealed`] counts, so those players may not be listed. The `2f` bound still holds
-//! because a dealer with an unknown previous share exposes at most `2f` dealings, one short of
-//! fixing it, so the shared secret stays safe.
+//! The adversary may then work out new shares of honest players from fewer reveals than a player
+//! needs to be listed in [`Output::revealed`], so those players may be missing from it. The
+//! adversary still holds at most `2f` shares because a dealer with an unknown previous share
+//! exposes at most `2f` dealings, one short of fixing it, so the shared secret stays safe.
 //!
 //! While not entirely revealed, a secret with more than `f` revealed shares may no longer be safe for some applications (like when used to
 //! form threshold certificates for consensus). Consider an equivocating leader (one of the `f` Byzantine players) that sends one block `B_1` to `f`
