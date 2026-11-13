@@ -136,6 +136,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Actor<E, C> {
                 // Send the updated listenable IPs to the listener.
                 let _ = self.listener.set(self.directory.listenable());
 
+                // A new peer set may have flushed blocks earned under an
+                // earlier set; keep blocked-set subscribers current.
+                self.notify_blocked();
+
                 // Notify all subscribers about the new peer set
                 let update = self
                     .directory
