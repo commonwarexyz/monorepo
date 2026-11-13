@@ -172,15 +172,6 @@ where
         }
     }
 
-    /// Return the inactive_peaks count for the given leaf count and inactivity floor.
-    pub(crate) fn inactive_peaks(
-        &self,
-        leaves: Location<F>,
-        inactivity_floor: Location<F>,
-    ) -> usize {
-        F::inactive_peaks(leaves, inactivity_floor)
-    }
-
     /// Return a reference to the merkleization strategy.
     pub const fn strategy(&self) -> &S {
         self.log.strategy()

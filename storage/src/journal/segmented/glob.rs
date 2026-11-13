@@ -748,9 +748,7 @@ mod tests {
             assert!(glob.get(2, 0, 8).await.is_err());
 
             // Sections 3-5 should still exist
-            assert!(glob.0.manager.blobs.contains_key(&3));
-            assert!(glob.0.manager.blobs.contains_key(&4));
-            assert!(glob.0.manager.blobs.contains_key(&5));
+            assert_eq!(glob.sections().collect::<Vec<_>>(), [3, 4, 5]);
 
             glob.destroy().await.expect("Failed to destroy");
         });

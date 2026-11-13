@@ -1498,7 +1498,7 @@ where
         // add THIS batch's operations. Parent operations are never re-cloned,
         // re-encoded, or re-hashed.
         let leaves = commit_loc + 1;
-        let inactive_peaks = db.inactive_peaks(leaves, floor);
+        let inactive_peaks = F::inactive_peaks(leaves, floor);
 
         // Leaf and node hashing dominate merkleization, so run them as one job through the
         // strategy (see `Journal::merkleize`).

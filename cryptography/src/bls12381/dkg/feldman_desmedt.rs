@@ -86,7 +86,7 @@
 //! - The final public polynomial (sum of dealer polynomials for DKG, interpolation for reshare),
 //! - The list of dealers who distributed dealings,
 //! - The list of players who received shares,
-//! - The set of players whose shares may have been revealed,
+//! - The set of players whose shares the selected dealers may have revealed,
 //! - A digest of the round's [`Info`] (including the counter, and the list of dealers and players).
 //!
 //! ## Trusted Dealing Functions
@@ -171,6 +171,17 @@
 //! shares and the revealed `f` shares. If the Byzantine adversary reveals all of their (still private) shares at this time, each of the
 //! `f + 1` honest players that were in the second partition will be able to derive the shared secret without collusion (using their private share
 //! and the `2f` revealed shares). **It will not be possible for any external observer (or a Byzantine adversary), however, to recover the shared secret.**
+//!
+//! A revealed share alone does not expose the holder's new share in the next reshare. But with
+//! `3f + 1` players, the holder deals from a degree `2f` polynomial whose constant term is the
+//! revealed share. The adversary already has the revealed share and the `f` dealings sent to
+//! Byzantine players. Once the holder reveals `f` more dealings, these `2f + 1` values fix the
+//! polynomial, so every dealing can be worked out. The adversary may now derive an honest player's
+//! new share from fewer than `f + 1` reveals. Because [`Output::revealed`] lists a player only when
+//! `f + 1` selected dealers reveal its dealing, that player may be missing from the list. Even so,
+//! the shared secret stays safe if the adversary knew at most `f` honest players' previous shares.
+//! The adversary then holds at most `2f` new shares, one short of the `2f + 1` needed to recover
+//! the shared secret.
 //!
 //! While not entirely revealed, a secret with more than `f` revealed shares may no longer be safe for some applications (like when used to
 //! form threshold certificates for consensus). Consider an equivocating leader (one of the `f` Byzantine players) that sends one block `B_1` to `f`
@@ -602,9 +613,14 @@ impl<V: Variant, P: Ord> Output<V, P> {
         &self.players
     }
 
-    /// Return the set of players whose shares may have been revealed.
+    /// Return the players whose shares the selected dealers may have revealed in this round.
     ///
-    /// These are players whose shares can be reconstructed from the selected dealer reveals.
+    /// A Byzantine player can reveal its own share outside the protocol. An adversary that knew an
+    /// honest player's share before a reshare (from a reveal or some other path) may use it with
+    /// this round's reveals to rebuild new shares of honest players who are not listed.
+    ///
+    /// See [Share Reveals](self#share-reveals) for a detailed discussion about shared secret safety
+    /// under faults.
     pub const fn revealed(&self) -> &Set<P> {
         &self.revealed
     }

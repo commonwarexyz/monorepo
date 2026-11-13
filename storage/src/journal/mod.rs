@@ -5,6 +5,8 @@
 //! to serve as a backing store for some in-memory data structure, or as a building block for a more
 //! complex construction that prescribes some meaning to items in the log.
 
+use commonware_codec::{CodecFixedShared, Copying, DecodeExt as _};
+use commonware_utils::Cached;
 use thiserror::Error;
 
 commonware_macros::stability_mod!(ALPHA, pub mod authenticated);
@@ -74,4 +76,34 @@ pub enum Error {
     ChecksumMismatch(u32, u32),
     #[error("empty append")]
     EmptyAppend,
+}
+
+// Reusable scratch for [`decode_sync`] on items larger than [`SYNC_READ_STACK_SIZE`], grown to
+// the largest item served on the thread.
+commonware_utils::thread_local_cache!(static SYNC_READ_SCRATCH: Vec<u8>);
+
+/// Largest item [`decode_sync`] reads into a stack buffer instead of a thread-local scratch.
+const SYNC_READ_STACK_SIZE: usize = 128;
+
+/// Decode an `A` from the `A::SIZE` bytes `read_into` copies into the buffer it is given,
+/// returning `None` if `read_into` reports the bytes are not in memory or they fail to decode.
+fn decode_sync<A: CodecFixedShared>(read_into: impl FnOnce(&mut [u8]) -> bool) -> Option<A> {
+    let decode = |buf: &mut [u8]| {
+        if read_into(buf) {
+            A::decode(Copying(buf)).ok()
+        } else {
+            None
+        }
+    };
+    // Small items fit on the stack, skipping the thread-local scratch handoff.
+    if const { A::SIZE <= SYNC_READ_STACK_SIZE } {
+        decode(&mut [0u8; SYNC_READ_STACK_SIZE][..A::SIZE])
+    } else {
+        let mut scratch =
+            Cached::take(&SYNC_READ_SCRATCH, || Ok::<_, ()>(Vec::new()), |_| Ok(())).unwrap();
+        if scratch.len() < A::SIZE {
+            scratch.resize(A::SIZE, 0);
+        }
+        decode(&mut scratch[..A::SIZE])
+    }
 }

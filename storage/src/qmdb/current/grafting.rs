@@ -173,9 +173,8 @@ pub(super) fn chunk_aligned_inactive_peaks<F: Family>(
 // 2. **Ops position**: Position in the full operations tree.
 // 3. **Grafted position**: Position in the grafted tree, whose leaves correspond 1:1 with chunks.
 //
-// All conversions rely on a single family identity: given the leftmost leaf at position P of a
-// perfect subtree, the subtree root at height h is at `P + 2^(h+1) - 2`, and conversely the
-// leftmost leaf under a subtree root at position P and height h is at `P + 2 - 2^(h+1)`.
+// All conversions go through the family's `subtree_root_position` and `leftmost_leaf`, which map
+// between the leftmost leaf of a perfect subtree and that subtree's root at a given height.
 
 /// Convert an ops-family position (at or above the grafting height) to a grafted-tree position.
 ///

@@ -38,7 +38,7 @@ pub trait Operation<F: Family>: Floored<F> {
     /// Consumes the operation and returns its owned key, if any.
     fn into_key(self) -> Option<Self::Key>;
 
-    /// If this operation updates its key's value.
+    /// If this operation replaces its key's value, making the key's previous location inactive.
     fn is_update(&self) -> bool;
 
     /// If this operation deletes its key's value.

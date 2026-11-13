@@ -134,7 +134,10 @@ mod tests {
     };
     use commonware_runtime::{
         Clock, Handle, Metrics, Quota, Runner, Spawner, Storage as _, Supervisor as _,
-        buffer::paged::CacheRef, deterministic, utils::reschedule,
+        buffer::paged::CacheRef,
+        deterministic,
+        mocks::{MutationFaultContext, MutationFaults},
+        utils::reschedule,
     };
     use commonware_storage::{
         archive::{Archive as _, Identifier as ArchiveID, immutable, prunable},
@@ -2366,6 +2369,122 @@ mod tests {
                 assert!(remaining(context.child("retired")).await.is_empty());
             });
         }
+    }
+
+    // A prune destroys the archives of every epoch below its round and only then raises
+    // the persisted floor. A prune that stops inside those destroys leaves an epoch that
+    // is still at or above the floor, so a restart reopens it and the next prune finishes
+    // retiring it.
+    #[test_traced("WARN")]
+    fn test_cache_prune_stopped_inside_epoch_destroy_finishes_after_restart() {
+        let prefix = "test-cache-interrupted-prune";
+        let make_cfg = || cache::Config {
+            partition_prefix: prefix.to_string(),
+            prunable_items_per_section: NZU64!(10),
+            replay_buffer: NonZeroUsize::new(1024).unwrap(),
+            key_write_buffer: NonZeroUsize::new(1024).unwrap(),
+            value_write_buffer: NonZeroUsize::new(1024).unwrap(),
+            key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        };
+        let epoch = Epoch::new(64);
+        let pruned = Round::new(Epoch::new(65), View::zero());
+        let cfg = make_cfg();
+        let partitions: Vec<String> = cache::ARCHIVES
+            .into_iter()
+            .flat_map(|name| {
+                cache::Manager::<deterministic::Context, Standard<B>, S>::partitions(
+                    &cfg, epoch, name,
+                )
+            })
+            .collect();
+
+        // Stop the prune before its first mutation, then its second, and so on until one
+        // prune completes.
+        let mut interrupted = 0;
+        loop {
+            let faults = MutationFaults::default();
+            let executor = deterministic::Runner::timed(Duration::from_secs(60));
+            let (completed, checkpoint) = executor.start_and_recover({
+                let faults = faults.clone();
+                |mut context| async move {
+                    let Fixture { schemes, .. } = bls12381_threshold_vrf::fixture::<V, _>(
+                        &mut context,
+                        NAMESPACE,
+                        NUM_VALIDATORS,
+                    );
+                    let context = MutationFaultContext {
+                        inner: context,
+                        faults: faults.clone(),
+                    };
+
+                    // Write a finalization into the epoch the prune retires.
+                    let block = make_raw_block(Sha256::hash(&[b"far"]), Height::new(1290), 100);
+                    let digest = block.digest();
+                    let round = Round::new(epoch, View::new(1290));
+                    let finalization = StandardHarness::make_finalization(
+                        Proposal::new(round, View::new(1289), digest),
+                        &schemes,
+                        QUORUM,
+                    );
+                    let mgr = cache::Manager::<_, Standard<B>, S>::init(
+                        context.child("write"),
+                        make_cfg(),
+                        (),
+                    )
+                    .await
+                    .put_finalization(round, digest, &finalization)
+                    .await;
+
+                    // A storage failure is fatal to the cache, so the prune is stopped by
+                    // parking one of its mutations and dropping it.
+                    faults.park_after(interrupted);
+                    let mut prune = Box::pin(mgr.prune_by_view(pruned));
+                    loop {
+                        if futures::poll!(prune.as_mut()).is_ready() {
+                            break true;
+                        }
+                        if faults.parked() {
+                            break false;
+                        }
+                        context.sleep(Duration::from_millis(1)).await;
+                    }
+                }
+            });
+            assert_eq!(completed, !faults.parked());
+
+            // A restart reopens what the prune left, and pruning again removes every
+            // partition of the retired epoch.
+            let partitions = partitions.clone();
+            deterministic::Runner::from(checkpoint).start(|context| async move {
+                let _mgr = cache::Manager::<_, Standard<B>, S>::init(
+                    context.child("restart"),
+                    make_cfg(),
+                    (),
+                )
+                .await
+                .load_persisted_epochs()
+                .await
+                .prune_by_view(pruned)
+                .await;
+                for partition in partitions {
+                    assert!(
+                        matches!(
+                            context.scan(&partition).await,
+                            Err(commonware_runtime::Error::PartitionMissing(_))
+                        ),
+                        "stopped after {interrupted} mutations: {partition} remains"
+                    );
+                }
+            });
+            if completed {
+                break;
+            }
+            interrupted += 1;
+        }
+
+        // Destroying the epoch removes the partitions of each of its archives, so the prune
+        // can stop at least once before each.
+        assert!(interrupted >= partitions.len() as u64, "{interrupted}");
     }
 
     // The certify barrier folds in notarization durability via

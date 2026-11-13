@@ -2389,6 +2389,10 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// The discarded suffix is durably removed before success. Subsequent appends may exceed
     /// the cap. A cap below the retained start returns [Error::ItemPruned].
+    ///
+    /// Data and offsets blobs that hold only positions at or above the cap are removed without
+    /// being opened. Every blob name in their partitions must still decode as a blob index,
+    /// including those above the cap.
     pub async fn init_at_most(
         context: E,
         cfg: Config<V::Cfg>,
@@ -2871,8 +2875,9 @@ mod tests {
         buffer::paged::{CacheRef, Writer, corrupt_page},
         deterministic,
         mocks::{
-            DelayedSyncContext, PendingSyncs, RecordingContext, drive_pending_syncs,
-            fail_pending_syncs, next_pending_sync, release_pending_syncs,
+            DelayedSyncContext, MutationFaultContext, MutationFaults, PendingSyncs,
+            RecordingContext, drive_pending_syncs, fail_pending_syncs, next_pending_sync,
+            release_pending_syncs,
         },
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, probability, sequence::FixedBytes};
@@ -11301,12 +11306,23 @@ mod tests {
     /// or as a fresh journal, and that a retried destroy removes.
     #[test_traced]
     fn issue_5668_regression_variable_interrupted_destroy_reopens() {
+        const SECTIONS: u64 = 4;
+
+        // Stop the destroy before its first mutation, then its second, and so on until one
+        // destroy completes.
         let (mut unchanged, mut emptied) = (0, 0);
-        for seed in 0..32u64 {
-            let executor = deterministic::Runner::seeded(seed);
-            let outcome = executor.start(|context| async move {
+        let mut interrupted = 0;
+        loop {
+            let executor = deterministic::Runner::default();
+            let reopened = executor.start(|context| async move {
                 // Record the digest of empty storage. A completed destroy must restore it.
                 let empty = context.storage_audit();
+
+                let faults = MutationFaults::default();
+                let context = MutationFaultContext {
+                    inner: context,
+                    faults: faults.clone(),
+                };
 
                 // Sync twice around a prune, leaving seven items in four sections above a
                 // pruned boundary.
@@ -11324,49 +11340,61 @@ mod tests {
                 }
                 let journal = journal.sync().await.unwrap();
                 assert_eq!(journal.bounds(), 4..11);
+                let sections = context.scan(&cfg.data_partition()).await.unwrap();
+                assert_eq!(sections.len() as u64, SECTIONS);
 
-                // Fail a sample of syncs and removals so destroy stops at varying depths, from
-                // the staged clear through the offsets checkpoint.
-                context.storage_fault_config().write().sync_rate = Some(probability!(0.3));
-                context.storage_fault_config().write().remove_rate = Some(probability!(0.1));
-                let result = journal.destroy().await;
-                context.storage_fault_config().write().sync_rate = None;
-                context.storage_fault_config().write().remove_rate = None;
-                if result.is_ok() {
-                    assert_eq!(context.storage_audit(), empty, "seed {seed}");
-                    return 0;
+                // Destroy fails exactly when one of its mutations was refused.
+                faults.allow(interrupted);
+                let destroyed = journal.destroy().await.is_ok();
+                let stopped = faults.failed();
+                faults.disarm();
+                let scenario = format!("stopped after {interrupted} mutations");
+                assert_eq!(destroyed, !stopped, "{scenario}");
+                if destroyed {
+                    assert_eq!(context.inner.storage_audit(), empty, "{scenario}");
+                    return None;
                 }
 
                 // The reopened journal is the synced one or a fresh one.
                 let journal = Journal::<_, u64>::init(context.child("second"), cfg)
                     .await
-                    .unwrap_or_else(|err| panic!("seed {seed} must reopen: {err}"));
+                    .unwrap_or_else(|err| panic!("{scenario}: must reopen: {err}"));
                 let bounds = journal.bounds();
-                let outcome = if bounds == (4..11) {
-                    for pos in bounds {
-                        assert_eq!(journal.read(pos).await.unwrap(), pos);
+                if bounds == (4..11) {
+                    for pos in bounds.clone() {
+                        assert_eq!(journal.read(pos).await.unwrap(), pos, "{scenario}");
                     }
-                    1
                 } else {
-                    assert_eq!(bounds, 0..0, "seed {seed} must reopen unchanged or empty");
-                    2
-                };
+                    assert_eq!(bounds, 0..0, "{scenario}: must reopen unchanged or empty");
+                }
 
                 // A retried destroy completes and leaves no blob behind.
                 journal.destroy().await.unwrap();
-                assert_eq!(context.storage_audit(), empty, "seed {seed}");
-                outcome
+                assert_eq!(context.inner.storage_audit(), empty, "{scenario}");
+                Some(bounds)
             });
-            match outcome {
-                1 => unchanged += 1,
-                2 => emptied += 1,
-                _ => {}
+            let Some(bounds) = reopened else {
+                break;
+            };
+
+            // Once a stop leaves the journal empty, no later stop leaves it unchanged.
+            if bounds.is_empty() {
+                emptied += 1;
+            } else {
+                assert_eq!(emptied, 0, "stopped after {interrupted} mutations");
+                unchanged += 1;
             }
+            interrupted += 1;
         }
         assert!(
             unchanged > 0 && emptied > 0,
             "both outcomes must occur: unchanged {unchanged} emptied {emptied}"
         );
+
+        // Destroy stages the clear, removes every data section and the data partition, then
+        // removes the blobs and the checkpoint of the offsets journal, so it can stop at least
+        // once before each.
+        assert!(interrupted >= SECTIONS + 4, "{interrupted}");
     }
 
     /// A bounded open whose cap lies in a page below the watermark's page truncates the torn

@@ -23,22 +23,19 @@
 use super::manager::{
     AppendFactory, Config as ManagerConfig, Manager, section_from_name, stored_names,
 };
-use crate::journal::Error;
+use crate::journal::{Error, decode_sync};
 use commonware_codec::{CodecFixed, CodecFixedShared, Copying, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
     Blob, Error as RError, Handle, Metrics, ReadOptions, Storage,
-    buffer::paged::{CacheRef, Recovery as PagedRecovery, Replay as BlobReplay, Writer},
+    buffer::paged::{CacheRef, Replay as BlobReplay, Writer},
 };
-use commonware_utils::{Cached, NZUsize};
+use commonware_utils::NZUsize;
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, VecDeque},
     marker::PhantomData,
     num::{NonZeroU16, NonZeroUsize},
 };
 use tracing::{trace, warn};
-
-// Reusable scratch for [`Inner::try_get_sync`], sized to one item
-commonware_utils::thread_local_cache!(static READ_SCRATCH: Vec<u8>);
 
 /// State for replaying a single section's blob.
 struct SectionReplay<B: Blob> {
@@ -58,80 +55,25 @@ pub struct Config {
 
     /// The size of the write buffer to use for each blob.
     pub write_buffer: NonZeroUsize,
+
+    /// The size of the buffer used to replay each blob when the journal opens, through the
+    /// [Recovery] that [Journal::preflight_floors] returns or inside [Journal::init_at_most].
+    pub replay_buffer: NonZeroUsize,
 }
 
 /// The journal's state, boxed so the public [Journal] handle stays pointer-sized.
 struct Inner<E: Storage + Metrics, A: CodecFixed> {
     manager: Manager<E, AppendFactory>,
-
-    /// Sections with an unvalidated retained suffix. Public replay may repair them, and appends
-    /// are blocked until their full replay succeeds.
-    unrecovered: BTreeSet<u64>,
-
-    /// Logical byte prefixes protected by durable validation markers.
-    floors: BTreeMap<u64, u64>,
-
     _array: PhantomData<A>,
 }
 
-/// Recovery work authorized at open. Every value follows a completed non-mutating preflight.
-enum PreflightMode {
-    /// Preserve each durable validation floor while replay repairs its suffix.
-    Floors {
-        /// Logical byte prefix of each section protected by a durable validation marker.
-        floors: BTreeMap<u64, u64>,
-    },
-
-    /// Restore one checkpoint section and discard every later section.
-    Restore {
-        /// The checkpoint section.
-        section: u64,
-
-        /// Logical byte size the checkpoint section is truncated to.
-        size: u64,
-    },
-}
-
-/// Non-mutating recovery evidence and authorized work bound to the storage that produced it.
-pub struct Recovery<E: Storage + Metrics, A: CodecFixed> {
-    context: E,
-    cfg: Config,
-
-    /// Terminal entry at each validated logical boundary.
-    boundaries: BTreeMap<u64, Option<A>>,
-
-    /// Mutations permitted after sibling storage validates these boundaries.
-    mode: PreflightMode,
-}
-
-impl<E: Storage + Metrics, A: CodecFixedShared> Recovery<E, A> {
-    /// Terminal entries captured at each validated boundary.
-    pub(crate) const fn boundaries(&self) -> &BTreeMap<u64, Option<A>> {
-        &self.boundaries
-    }
-
-    /// Apply the preflighted recovery work and open the journal writer.
-    pub async fn finish(self) -> Result<Journal<E, A>, Error> {
-        Ok(Journal(Box::new(
-            Inner::init(self.context, self.cfg, self.mode).await?,
-        )))
-    }
-}
-
-impl<E: Storage + Metrics, A: CodecFixed> Inner<E, A> {
-    /// The section's writer. Only a failed or cancelled repair removes a replayed section, and
-    /// either ends the replay.
-    fn writer(&self, section: u64) -> Result<&PagedRecovery<E::Blob>, Error> {
-        Ok(self
-            .manager
-            .get(section)?
-            .expect("replayed section is present"))
-    }
-}
-
 impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
-    /// Size of each entry.
-    const CHUNK_SIZE: usize = A::SIZE;
+    /// Size of each entry in bytes. Evaluating this rejects zero-size item types at compile
+    /// time, which would otherwise divide by zero in the chunk math.
+    const CHUNK_SIZE: usize = {
+        assert!(A::SIZE > 0, "journal item size must be nonzero");
+        A::SIZE
+    };
     const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE as u64;
 
     /// Return canonical section names in numeric order without opening writers.
@@ -150,6 +92,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         context: E,
         cfg: Config,
         minimum_items: &BTreeMap<u64, u64>,
+        read_options: ReadOptions,
     ) -> Result<Recovery<E, A>, Error> {
         let stored = Self::stored(&context, &cfg).await?;
         let page_size = cfg.page_cache.page_size();
@@ -182,11 +125,13 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
             boundaries.insert(section, Some(entry));
         }
 
+        let buffer = cfg.replay_buffer;
         Ok(Recovery {
-            context,
-            cfg,
             boundaries,
-            mode: PreflightMode::Floors { floors },
+            floors,
+            finished: stored.is_empty(),
+            unopened: Some((context, cfg)),
+            ..Recovery::new(buffer, read_options)
         })
     }
 
@@ -247,11 +192,12 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
             boundaries.insert(candidate, entry);
         }
         boundaries.entry(section).or_insert(None);
+        let buffer = cfg.replay_buffer;
         Ok(Recovery {
-            context,
-            cfg,
             boundaries,
-            mode: PreflightMode::Restore { section, size },
+            restore: Some((section, size)),
+            unopened: Some((context, cfg)),
+            ..Recovery::new(buffer, ReadOptions::default())
         })
     }
 
@@ -287,17 +233,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         }
     }
 
-    /// See [Recovery::finish].
-    async fn init(context: E, cfg: Config, mode: PreflightMode) -> Result<Self, Error> {
-        // Restore never opens a section above its checkpoint. The truncation below removes those
-        // sections unread.
-        let (floors, restore, ceiling) = match mode {
-            PreflightMode::Floors { floors } => (floors, None, u64::MAX),
-            PreflightMode::Restore { section, size } => {
-                (BTreeMap::new(), Some((section, size)), section)
-            }
-        };
-
+    /// Open the writer of every stored section through `ceiling`. Opening a writer discards a
+    /// torn tail page. Later sections stay closed until a truncation removes them.
+    async fn init(context: E, cfg: Config, ceiling: u64) -> Result<Self, Error> {
         let manager_cfg = ManagerConfig {
             partition: cfg.partition,
             factory: AppendFactory {
@@ -305,52 +243,14 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
                 page_cache_ref: cfg.page_cache,
             },
         };
-        let manager = Manager::init_bounded(context, manager_cfg, ceiling).await?;
-        if let Some((section, size)) = restore {
-            // The checkpoint preflight authorized this exact truncation. Make it durable before
-            // the paired value journal can release any corresponding bytes.
-            let manager = manager
-                .truncate_pending(section, size)
-                .await?
-                .sync(section)
-                .await?;
-            return Ok(Self {
-                manager,
-                unrecovered: BTreeSet::new(),
-                floors,
-                _array: PhantomData,
-            });
-        }
-
-        let mut unrecovered = BTreeSet::new();
-        for section in manager.sections() {
-            let size = manager.size(section)?;
-            let floor = floors.get(&section).copied().unwrap_or(0);
-            if size < floor {
-                return Err(Error::Corruption(format!(
-                    "section {section} retains {size} of its {floor}-byte validation floor"
-                )));
-            }
-            if size > floor {
-                unrecovered.insert(section);
-            }
-        }
-
         Ok(Self {
-            manager,
-            unrecovered,
-            floors,
+            manager: Manager::init_bounded(context, manager_cfg, ceiling).await?,
             _array: PhantomData,
         })
     }
 
     /// See [Journal::append].
     async fn append(&mut self, section: u64, item: &A) -> Result<u64, Error> {
-        assert!(
-            !self.unrecovered.contains(&section),
-            "section {section} must be replayed before append"
-        );
-
         // Buffer the item in place when it fits. Otherwise own the writer across the flush.
         let blob = self.manager.get_or_create(section).await?;
         let offset = match blob.try_append_value(item) {
@@ -446,16 +346,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         if remaining < Self::CHUNK_SIZE_U64 {
             return None;
         }
-        let mut scratch =
-            Cached::take(&READ_SCRATCH, || Ok::<_, ()>(Vec::new()), |_| Ok(())).unwrap();
-        if scratch.len() < Self::CHUNK_SIZE {
-            scratch.resize(Self::CHUNK_SIZE, 0);
-        }
-        let buf = &mut scratch[..Self::CHUNK_SIZE];
-        if !blob.try_read_sync_into(buf, offset) {
-            return None;
-        }
-        A::decode(Copying(buf)).ok()
+        decode_sync::<A>(|buf| blob.try_read_sync_into(buf, offset))
     }
 
     /// See [Journal::last].
@@ -502,10 +393,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
     async fn prune(mut self: Box<Self>, min: u64) -> Result<(Box<Self>, bool), Error> {
         let (manager, pruned) = self.manager.prune(min).await?;
         self.manager = manager;
-        if pruned {
-            self.unrecovered.retain(|section| *section >= min);
-            self.floors.retain(|section, _| *section >= min);
-        }
         Ok((self, pruned))
     }
 
@@ -547,12 +434,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         size: u64,
     ) -> Result<Box<Self>, Error> {
         self.manager = self.manager.truncate_pending_section(section, size).await?;
-        if size == 0 {
-            self.unrecovered.remove(&section);
-        }
-        if let Some(floor) = self.floors.get_mut(&section) {
-            *floor = (*floor).min(size);
-        }
         Ok(self)
     }
 
@@ -564,8 +445,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
     /// See [Journal::clear].
     async fn clear(mut self: Box<Self>) -> Result<Box<Self>, Error> {
         self.manager = self.manager.clear().await?;
-        self.unrecovered.clear();
-        self.floors.clear();
         Ok(self)
     }
 }
@@ -576,9 +455,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
 ///
 /// # Repair
 ///
-/// Opening reads each blob's last page to determine its length. If that page is incomplete or
-/// fails its checksum check, opening searches backward for a valid page and discards the damaged
-/// suffix. It does not scan the earlier pages.
+/// Opening a section reads its blob's last page to determine its length. If that page is
+/// incomplete or fails its checksum check, opening searches backward for a valid page and
+/// discards the damaged suffix. It does not scan the earlier pages.
 ///
 /// Replay checks items in order. Torn pages or incomplete trailing items cause the section to be
 /// truncated to the last complete, validated item.
@@ -586,15 +465,16 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
 /// Each section has a validation floor marking the prefix already known to be durable. Recovery
 /// must preserve that prefix. Damage requiring truncation below the floor is an error.
 ///
-/// A section with data beyond its floor must be replayed from position zero before accepting new
-/// appends. Sections restored from a checkpoint, or ending at their floor, can accept appends
-/// immediately.
+/// A journal is available only once its contents are replayed or proven by a checkpoint.
+/// [Journal::preflight_floors] returns a [Recovery] that replays and repairs every section from
+/// position zero, and [Recovery::finish] returns the journal only after that replay completes.
+/// [Journal::preflight_restore] returns a [Recovery] with nothing to replay: its checkpoint
+/// proves the retained prefix, and [Recovery::finish] truncates the journal to it.
 ///
 /// Mutating functions consume the journal and return it only on success: an error (or a dropped
-/// future) destroys the handle. [Journal::replay] consumes the journal into an owned [Replay]
-/// reader, which returns it via [Replay::finish] once exhausted. Mutations on pruned sections
-/// fail with [Error::AlreadyPrunedToSection] without mutating. Check [Journal::pruned] first to
-/// keep the handle.
+/// future) destroys the handle. Mutations on pruned sections fail with
+/// [Error::AlreadyPrunedToSection] without mutating. Check [Journal::pruned] first to keep the
+/// handle.
 pub struct Journal<E: Storage + Metrics, A: CodecFixed>(Box<Inner<E, A>>);
 
 impl<E: Storage + Metrics, A: CodecFixedShared> std::fmt::Debug for Journal<E, A> {
@@ -607,20 +487,22 @@ impl<E: Storage + Metrics, A: CodecFixedShared> std::fmt::Debug for Journal<E, A
 }
 
 impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
-    /// Size of each entry.
+    /// Size of each entry in bytes.
     pub const CHUNK_SIZE: usize = Inner::<E, A>::CHUNK_SIZE;
 
     /// Open through `(section, logical byte end)` and remove later sections.
     ///
-    /// An end inside an item rounds down. All retained data is validated before returning. Payload
-    /// reads stop at the bound, but every section name is validated, including names above it.
+    /// An end inside an item rounds down. All retained data is validated before returning.
+    /// Nothing above the page containing the bound is read, and later sections are removed
+    /// without being opened. Every blob name in the partition must still decode as a section
+    /// number, including those above the bound.
     pub async fn init_at_most(
         context: E,
         cfg: Config,
         section: u64,
         end: u64,
     ) -> Result<Self, Error> {
-        let replay_buffer = cfg.write_buffer;
+        let replay_buffer = cfg.replay_buffer;
         let mut end = end - end % Self::CHUNK_SIZE as u64;
         super::manager::truncate_paged_tail(
             &context,
@@ -630,10 +512,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             end,
         )
         .await?;
-        let mut journal = Self::preflight_floors(context, cfg, &BTreeMap::new())
-            .await?
-            .finish()
-            .await?;
+        let mut journal = Self(Box::new(Inner::init(context, cfg, u64::MAX).await?));
 
         // Resolve a torn page before truncation tries to rewrite its partial checksum.
         if end > 0
@@ -652,31 +531,46 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             .manager
             .truncate_pending(section, end - end % Self::CHUNK_SIZE as u64)
             .await?;
-        let mut replay = journal
-            .replay(0, 0, replay_buffer, ReadOptions::default())
-            .await?;
-        while let Some(item) = replay.next().await {
+        let mut recovery = journal.recover(replay_buffer).await?;
+        while let Some(item) = recovery.next().await {
             item?;
         }
-        replay.finish()
+        recovery.finish().await
     }
 
-    /// Prove validation floors without opening a writer or mutating their blobs.
+    /// Consumes the opened journal into a [Recovery] that replays every section with no floor.
+    async fn recover(self, buffer: NonZeroUsize) -> Result<Recovery<E, A>, Error> {
+        let mut recovery = Recovery::new(buffer, ReadOptions::default());
+        recovery.begin(self).await?;
+        Ok(recovery)
+    }
+
+    /// Prove validation floors without opening a writer or mutating their blobs, and return the
+    /// [Recovery] that replays every section.
     ///
     /// `minimum_items` maps a section to the number of items its durable marker protects. An
-    /// empty map opens every section with no floor.
+    /// empty map opens every section with no floor. Every section it names must exist, even with
+    /// a count of zero: a floor for a missing section fails with [Error::Corruption].
+    ///
+    /// The caller must drain the recovery and call [Recovery::finish] to obtain the journal. Each
+    /// section is replayed from position zero with a buffer of [Config::replay_buffer] bytes,
+    /// allocated lazily as the recovery advances. Every backing blob read performed by the replay
+    /// uses `read_options`, including reads after advancing to another section. Opening the
+    /// writers on the first [Recovery::next] reads each section's last page with the default
+    /// options.
     pub async fn preflight_floors(
         context: E,
         cfg: Config,
         minimum_items: &BTreeMap<u64, u64>,
+        read_options: ReadOptions,
     ) -> Result<Recovery<E, A>, Error> {
-        Inner::preflight_floors(context, cfg, minimum_items).await
+        Inner::preflight_floors(context, cfg, minimum_items, read_options).await
     }
 
     /// Return the longest item-aligned prefix of `section` within `end` that lies within validated
     /// page prefixes, or `end` itself when the section does not exist. Reads only pages that
     /// intersect the prefix below `end`.
-    pub(crate) async fn recoverable_prefix_len_at_most(
+    async fn recoverable_prefix_len_at_most(
         &self,
         section: u64,
         end: u64,
@@ -692,11 +586,14 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     }
 
     /// Validate the terminal boundary of every checkpoint-covered section without mutating
-    /// storage. Interior pages are not read.
+    /// storage, and return the [Recovery] that restores the checkpoint. Interior pages are not
+    /// read.
     ///
     /// `size` is the logical byte size of `section` and must be a multiple of
-    /// [Self::CHUNK_SIZE]. [Recovery::finish] then durably truncates `section` to `size` bytes
-    /// and removes every later section.
+    /// [Self::CHUNK_SIZE]. The checkpoint proves the retained items, so the recovery replays
+    /// nothing: [Recovery::finish] durably truncates `section` to `size` bytes and removes every
+    /// later section without opening it. Every blob name in the partition must still decode as a
+    /// section number, including those of later sections.
     pub async fn preflight_restore(
         context: E,
         cfg: Config,
@@ -709,11 +606,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Append a new item to the journal in the given section.
     ///
     /// Returns the position of the item within the section (0-indexed).
-    ///
-    /// # Panics
-    ///
-    /// Panics when `section` contained an unvalidated suffix at initialization and has not
-    /// completed a replay from position zero.
     pub async fn append(mut self, section: u64, item: &A) -> Result<(Self, u64), Error> {
         let position = self.0.append(section, item).await?;
         Ok((self, position))
@@ -761,70 +653,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// - [Error::SectionOutOfRange] if the section doesn't exist.
     pub async fn last(&self, section: u64) -> Result<Option<A>, Error> {
         self.0.last(section).await
-    }
-
-    /// Consumes the journal and returns an owned [Replay] reader over all items starting
-    /// from `start_position` in `start_section`.
-    ///
-    /// Setup flushes buffered pages so the reader observes every accepted write. It
-    /// validates replay setup and copies each replayed section's partial tail page, but
-    /// does not allocate `buffer` bytes per blob. Read buffers are allocated lazily as the
-    /// reader advances. Every backing blob read performed by the returned replay uses
-    /// `read_options`, including reads after advancing to another section.
-    ///
-    /// A nonzero start must be a boundary already validated by a prior replay or a durable
-    /// marker: torn-page repair treats everything below it as proven.
-    pub async fn replay(
-        mut self,
-        start_section: u64,
-        start_position: u64,
-        buffer: NonZeroUsize,
-        read_options: ReadOptions,
-    ) -> Result<Replay<E, A>, Error> {
-        // Capture independent replay views while returning each writer to the manager.
-        let mut sections = VecDeque::new();
-        let replayed: Vec<_> = self.0.manager.sections_from(start_section).collect();
-        for section in replayed {
-            let blob = self.0.manager.take(section).await?;
-            let blob_size = blob.size();
-            let (blob, mut reader) = blob.replay(buffer, read_options).await?;
-            self.0.manager.put(section, blob);
-
-            // For the first section, seek to the start position
-            let position = if section == start_section {
-                let start = start_position
-                    .checked_mul(Inner::<E, A>::CHUNK_SIZE_U64)
-                    .ok_or(Error::ItemOutOfRange(start_position))?;
-                if start > blob_size {
-                    return Err(Error::ItemOutOfRange(start_position));
-                }
-                reader.seek_to(start)?;
-                start_position
-            } else {
-                0
-            };
-            sections.push_back(SectionReplay {
-                section,
-                reader,
-                position,
-            });
-        }
-        let finished = sections.is_empty();
-        Ok(Replay {
-            journal: self,
-            sections,
-            recovered_from: if start_position == 0 {
-                Some(start_section)
-            } else {
-                start_section.checked_add(1)
-            },
-            buffer,
-            read_options,
-            finished,
-            errored: false,
-            repairing: false,
-            in_progress: false,
-        })
     }
 
     /// Sync the given `sections` to storage.
@@ -918,17 +746,37 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     }
 }
 
-/// Owned replay reader over a [Journal]'s items.
+/// Startup recovery returned by [Journal::preflight_floors] and [Journal::preflight_restore].
 ///
-/// Yields `(section, position, item)` in order. Dropping the reader before it is exhausted
-/// destroys the journal: recovery is re-initialization. Call [Replay::finish] on an
-/// exhausted reader to get the journal back.
-pub struct Replay<E: Storage + Metrics, A: CodecFixed> {
-    journal: Journal<E, A>,
+/// The recovery holds the evidence its preflight read and modifies nothing until it is asked to.
+///
+/// A recovery from [Journal::preflight_floors] yields `(section, position, item)` in order from
+/// position zero of every section and repairs invalid trailing data as it is encountered, never
+/// below a section's validation floor. Its first [Recovery::next] opens the writers, and
+/// [Recovery::finish] returns the journal once the replay is drained.
+///
+/// A recovery from [Journal::preflight_restore] has nothing to replay. [Recovery::finish]
+/// restores its checkpoint.
+///
+/// Dropping the recovery before [Recovery::finish] destroys the handle, and the owner must
+/// initialize again.
+pub struct Recovery<E: Storage + Metrics, A: CodecFixed> {
+    /// Terminal entry at each validated logical boundary.
+    boundaries: BTreeMap<u64, Option<A>>,
+
+    /// Logical byte prefix of each section protected by a durable validation marker. Repair
+    /// never truncates below it.
+    floors: BTreeMap<u64, u64>,
+
+    /// Checkpoint `(section, size)` that [Recovery::finish] restores in place of a replay.
+    restore: Option<(u64, u64)>,
+
+    /// Preflighted storage, held until its writers are opened.
+    unopened: Option<(E, Config)>,
+
+    /// The journal under replay, present once its writers are open.
+    journal: Option<Journal<E, A>>,
     sections: VecDeque<SectionReplay<E::Blob>>,
-    /// The first section this replay fully covers: [Replay::finish] marks it and every
-    /// later section recovered.
-    recovered_from: Option<u64>,
     buffer: NonZeroUsize,
     read_options: ReadOptions,
     finished: bool,
@@ -937,7 +785,77 @@ pub struct Replay<E: Storage + Metrics, A: CodecFixed> {
     in_progress: bool,
 }
 
-impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
+impl<E: Storage + Metrics, A: CodecFixedShared> Recovery<E, A> {
+    /// A recovery with no evidence, no storage to open, and no section to replay.
+    const fn new(buffer: NonZeroUsize, read_options: ReadOptions) -> Self {
+        Self {
+            boundaries: BTreeMap::new(),
+            floors: BTreeMap::new(),
+            restore: None,
+            unopened: None,
+            journal: None,
+            sections: VecDeque::new(),
+            buffer,
+            read_options,
+            finished: false,
+            errored: false,
+            repairing: false,
+            in_progress: false,
+        }
+    }
+
+    /// Terminal entries captured at each validated boundary.
+    pub(crate) const fn boundaries(&self) -> &BTreeMap<u64, Option<A>> {
+        &self.boundaries
+    }
+
+    /// Open the preflighted writers and start replaying them.
+    async fn open(&mut self, context: E, cfg: Config) -> Result<(), Error> {
+        let journal = Journal(Box::new(Inner::init(context, cfg, u64::MAX).await?));
+
+        // Opening a writer may discard a torn tail, which must not reach into a proven prefix.
+        for (&section, &floor) in &self.floors {
+            let size = journal.size(section)?;
+            if size < floor {
+                return Err(Error::Corruption(format!(
+                    "section {section} retains {size} of its {floor}-byte validation floor"
+                )));
+            }
+        }
+        self.begin(journal).await
+    }
+
+    /// Take the opened `journal` and capture a replay view of every section from position zero.
+    async fn begin(&mut self, mut journal: Journal<E, A>) -> Result<(), Error> {
+        // Capture independent replay views while returning each writer to the manager.
+        let mut sections = VecDeque::new();
+        let replayed: Vec<_> = journal.sections().collect();
+        for section in replayed {
+            let blob = journal.0.manager.take(section).await?;
+            let (blob, reader) = blob.replay(self.buffer, self.read_options).await?;
+            journal.0.manager.put(section, blob);
+            sections.push_back(SectionReplay {
+                section,
+                reader,
+                position: 0,
+            });
+        }
+        self.sections = sections;
+        self.journal = Some(journal);
+        Ok(())
+    }
+
+    /// The manager of the journal under replay. A section is replayed only while its journal is
+    /// open.
+    fn manager(&mut self) -> &mut Manager<E, AppendFactory> {
+        &mut self
+            .journal
+            .as_mut()
+            .expect("replayed section has an open journal")
+            .0
+            .manager
+    }
+
     /// Validate that the front section's checksum failure is a repairable torn page, returning
     /// the item-aligned truncation target and the validated replay prefix.
     async fn plan_repair(&mut self, source: RError) -> Result<(u64, u64), Error> {
@@ -950,21 +868,21 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
         // The bytes already replayed are validated: they bound the truncation from below.
         let current = self.sections.front().expect("replayed section is present");
         let section = current.section;
-        if !self.journal.0.unrecovered.contains(&section) {
-            return Err(source.into());
-        }
-        let position = current.position;
         let size = current.reader.blob_size();
+        let position = current.position;
         let valid_size = position
             .checked_mul(Inner::<E, A>::CHUNK_SIZE_U64)
             .ok_or(Error::OffsetOverflow)?;
 
-        // Forward-validate from the replayed prefix to find where well-formed pages end.
+        // Forward-validate from the replayed prefix to find where well-formed pages end. Only a
+        // failed or cancelled repair removes a replayed section's writer, and either ends the
+        // replay.
+        let (buffer, read_options) = (self.buffer, self.read_options);
         let recoverable = self
-            .journal
-            .0
-            .writer(section)?
-            .recoverable_prefix_len(valid_size, self.buffer, self.read_options)
+            .manager()
+            .get(section)?
+            .expect("replayed section is present")
+            .recoverable_prefix_len(valid_size, buffer, read_options)
             .await?;
 
         // A whole-blob recoverable prefix means the checksum failure did not come from a torn
@@ -1011,10 +929,10 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
             .pop_front()
             .expect("repaired section is present");
         drop(current.reader);
-        let writer = self.journal.0.manager.take(section).await?;
+        let writer = self.manager().take(section).await?;
         let writer = writer.truncate(target).await?;
         let (writer, mut reader) = writer.replay(self.buffer, self.read_options).await?;
-        self.journal.0.manager.put(section, writer);
+        self.manager().put(section, writer);
         reader.seek_to(valid_size)?;
         self.sections.push_front(SectionReplay {
             section,
@@ -1029,16 +947,16 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
     async fn repair_tail(&mut self, section: u64, size: u64) -> Result<(), Error> {
         // Mark the repair incomplete until it is durable.
         self.repairing = true;
-        let writer = self.journal.0.manager.take(section).await?;
+        let writer = self.manager().take(section).await?;
         let writer = writer.truncate(size).await?;
-        self.journal.0.manager.put(section, writer);
+        self.manager().put(section, writer);
         self.repairing = false;
         Ok(())
     }
 
     /// Reject a repair that would remove any marker-protected item.
     fn ensure_above_floor(&self, section: u64, target: u64) -> Result<(), Error> {
-        let floor = self.journal.0.floors.get(&section).copied().unwrap_or(0);
+        let floor = self.floors.get(&section).copied().unwrap_or(0);
         if target < floor {
             return Err(Error::Corruption(format!(
                 "section {section} recovery target {target} is below its {floor}-byte validation floor"
@@ -1048,12 +966,16 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
     }
 
     /// Returns the next `(section, position, item)`, or `None` once every section is
-    /// exhausted.
+    /// exhausted. A recovery from [Journal::preflight_restore] has no item to return: this
+    /// returns `None` without opening a writer.
     ///
-    /// An error ends the section that produced it, and iteration continues with the
-    /// next section. Errors while mutating storage to repair a section end the replay.
-    /// Dropping a pending call also ends it. The next call returns
-    /// [Error::ReplayInterrupted] and [Self::finish] fails.
+    /// For a recovery from [Journal::preflight_floors], the first call opens the writers and may
+    /// discard a torn tail page. Nothing is modified before it, and an error opening them ends
+    /// the replay.
+    ///
+    /// An error ends the section that produced it, and iteration continues with the next section.
+    /// Errors while mutating storage to repair a section end the replay. Dropping a pending call
+    /// also ends it. The next call returns [Error::ReplayInterrupted] and [Self::finish] fails.
     pub async fn next(&mut self) -> Option<Result<(u64, u64, A), Error>> {
         if self.in_progress {
             self.in_progress = false;
@@ -1070,6 +992,18 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
     }
 
     async fn next_inner(&mut self) -> Option<Result<(u64, u64, A), Error>> {
+        // A checkpoint proves its retained items, and only [Self::finish] applies it.
+        if self.restore.is_some() {
+            return None;
+        }
+
+        // The first call applies the preflighted floors by opening the writers.
+        if let Some((context, cfg)) = self.unopened.take()
+            && let Err(err) = self.open(context, cfg).await
+        {
+            return self.fail(err);
+        }
+
         // A failed storage repair may have dropped its writer. Stop after its error.
         if self.repairing {
             self.repairing = false;
@@ -1088,11 +1022,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
                     let blob_size = current.reader.blob_size();
                     if valid_size < blob_size {
                         let section = current.section;
-                        if !self.journal.0.unrecovered.contains(&section) {
-                            let position = current.position;
-                            self.sections.pop_front();
-                            return self.fail(Error::ItemOutOfRange(position));
-                        }
                         if let Err(err) = self.ensure_above_floor(section, valid_size) {
                             self.sections.pop_front();
                             return self.fail(err);
@@ -1144,26 +1073,55 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
 
     /// Returns the journal.
     ///
-    /// Fails when the reader was not fully drained or yielded an error: the journal is
-    /// destroyed and recovery is re-initialization.
-    pub fn finish(mut self) -> Result<Journal<E, A>, Error> {
+    /// A recovery from [Journal::preflight_floors] fails with [Error::ReplayFailed] when it was
+    /// not fully drained, yielded an error, or was interrupted. Storage without any section has
+    /// nothing to drain.
+    ///
+    /// A recovery from [Journal::preflight_restore] opens the sections through its checkpoint,
+    /// truncates the checkpoint section, and removes every later section unread. The truncation
+    /// is durable when this returns.
+    pub async fn finish(mut self) -> Result<Journal<E, A>, Error> {
+        if let Some((section, size)) = self.restore {
+            let (context, cfg) = self
+                .unopened
+                .take()
+                .expect("only finish opens a restored journal");
+            let mut inner = Inner::init(context, cfg, section).await?;
+
+            // The checkpoint preflight authorized this exact truncation. Make it durable before
+            // the paired value journal can release any corresponding bytes.
+            inner.manager = inner
+                .manager
+                .truncate_pending(section, size)
+                .await?
+                .sync(section)
+                .await?;
+            return Ok(Journal(Box::new(inner)));
+        }
         if self.in_progress || self.errored || !self.finished {
             return Err(Error::ReplayFailed);
         }
-        if let Some(start) = self.recovered_from {
-            self.journal
-                .0
-                .unrecovered
-                .retain(|section| *section < start);
+
+        // Storage without any section is drained before a call to [Self::next] opens it.
+        if let Some((context, cfg)) = self.unopened.take() {
+            self.open(context, cfg).await?;
         }
-        Ok(self.journal)
+        self.journal.ok_or(Error::ReplayFailed)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::codec::View;
+    use crate::{
+        journal::{
+            SYNC_READ_STACK_SIZE,
+            segmented::manager::tests::{
+                BoundedOpen, FaultedContext, check_interrupted_bounded_open,
+            },
+        },
+        utils::codec::View,
+    };
     use commonware_codec::FixedSize;
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
@@ -1179,22 +1137,47 @@ mod tests {
     use commonware_utils::{NZU16, NZUsize, Widen};
     use core::num::NonZeroU16;
     use std::{
-        ops::RangeInclusive,
+        ops::{Range, RangeInclusive},
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
         },
     };
 
+    /// Drain a recovery, returning its journal with every replayed item.
+    async fn drain<E: Storage + Metrics, A: CodecFixedShared>(
+        mut recovery: Recovery<E, A>,
+    ) -> Result<(Journal<E, A>, Vec<(u64, u64, A)>), Error> {
+        let mut items = Vec::new();
+        while let Some(item) = recovery.next().await {
+            items.push(item?);
+        }
+        Ok((recovery.finish().await?, items))
+    }
+
+    /// Start the recovery of a journal with no validation floors.
+    async fn recover<E: Storage + Metrics, A: CodecFixedShared>(
+        context: E,
+        cfg: Config,
+        read_options: ReadOptions,
+    ) -> Result<Recovery<E, A>, Error> {
+        Journal::preflight_floors(context, cfg, &BTreeMap::new(), read_options).await
+    }
+
+    /// Open a journal with no validation floors, returning it with every replayed item.
+    async fn replay_journal<E: Storage + Metrics, A: CodecFixedShared>(
+        context: E,
+        cfg: Config,
+    ) -> Result<(Journal<E, A>, Vec<(u64, u64, A)>), Error> {
+        drain(recover(context, cfg, ReadOptions::default()).await?).await
+    }
+
     /// Open a journal with no validation floors.
     async fn init_journal<E: Storage + Metrics, A: CodecFixedShared>(
         context: E,
         cfg: Config,
     ) -> Result<Journal<E, A>, Error> {
-        Journal::preflight_floors(context, cfg, &BTreeMap::new())
-            .await?
-            .finish()
-            .await
+        Ok(replay_journal(context, cfg).await?.0)
     }
 
     impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
@@ -1207,6 +1190,7 @@ mod tests {
             let cfg = Config {
                 partition,
                 write_buffer: factory.write_buffer,
+                replay_buffer: factory.write_buffer,
                 page_cache: factory.page_cache_ref,
             };
             _ = self.sync_all().await?;
@@ -1219,22 +1203,57 @@ mod tests {
             let cfg = Config {
                 partition,
                 write_buffer: replay_buffer,
+                replay_buffer,
                 page_cache: factory.page_cache_ref,
             };
             _ = self.sync_all().await?;
-            let mut journal = init_journal(context, cfg).await?;
+            let mut journal = Self(Box::new(Inner::init(context, cfg, u64::MAX).await?));
             journal.0.manager = journal
                 .0
                 .manager
                 .truncate_pending_section(section, end)
                 .await?;
-            let mut replay = journal
-                .replay(0, 0, replay_buffer, ReadOptions::default())
-                .await?;
-            while let Some(item) = replay.next().await {
-                item?;
+            Ok(drain(journal.recover(replay_buffer).await?).await?.0)
+        }
+    }
+
+    impl BoundedOpen for Journal<FaultedContext, u64> {
+        const ITEM_SIZE: u64 = Self::CHUNK_SIZE as u64;
+
+        async fn open(
+            context: FaultedContext,
+            page_cache: CacheRef,
+            bound: Option<(u64, u64)>,
+        ) -> Result<Self, Error> {
+            let cfg = Config {
+                partition: "bounded-open".into(),
+                page_cache,
+                write_buffer: NZUsize!(64),
+                replay_buffer: NZUsize!(64),
+            };
+            match bound {
+                Some((section, end)) => Self::init_at_most(context, cfg, section, end).await,
+                None => init_journal(context, cfg).await,
             }
-            replay.finish()
+        }
+
+        async fn extend(mut self, section: u64, items: Range<u64>) -> Self {
+            for item in items {
+                (self, _) = self.append(section, &item).await.unwrap();
+            }
+            self.sync_all().await.unwrap()
+        }
+
+        async fn items(&self, section: u64) -> Vec<u64> {
+            let mut items = Vec::new();
+            for position in 0..self.section_len(section).unwrap() {
+                items.push(self.get(section, position).await.unwrap());
+            }
+            items
+        }
+
+        fn last_section(&self) -> Option<u64> {
+            self.newest_section()
         }
     }
 
@@ -1250,6 +1269,7 @@ mod tests {
             partition: "test-partition".into(),
             page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: NZUsize!(2048),
+            replay_buffer: NZUsize!(1024),
         }
     }
 
@@ -1258,6 +1278,7 @@ mod tests {
             partition: "segmented-fixed-aligned".into(),
             page_cache: CacheRef::new(NZU16!(16), NZUsize!(4)),
             write_buffer: NZUsize!(128),
+            replay_buffer: NZUsize!(1024),
         }
     }
 
@@ -1273,27 +1294,32 @@ mod tests {
         });
     }
 
+    /// Append two `SIZE`-byte items and read both back through the synchronous path.
+    async fn check_cached_get<const SIZE: usize>(context: deterministic::Context) {
+        let cfg = test_cfg();
+        let mut journal = init_journal::<_, [u8; SIZE]>(context, cfg).await.unwrap();
+        (journal, _) = journal.append(1, &[7u8; SIZE]).await.unwrap();
+        (journal, _) = journal.append(1, &[8u8; SIZE]).await.unwrap();
+        assert_eq!(journal.try_get_sync(1, 0), Some([7u8; SIZE]));
+        assert_eq!(journal.try_get_sync(1, 1), Some([8u8; SIZE]));
+        journal.destroy().await.unwrap();
+    }
+
+    #[test_traced]
+    fn test_fixed_cached_get_at_stack_buffer_boundary() {
+        deterministic::Runner::default().start(|context| async move {
+            check_cached_get::<SYNC_READ_STACK_SIZE>(context.child("stack")).await;
+            check_cached_get::<{ SYNC_READ_STACK_SIZE + 1 }>(context.child("scratch")).await;
+        });
+    }
+
     fn lazy_recovery_cfg(partition: &str) -> Config {
         Config {
             partition: partition.into(),
             page_cache: CacheRef::new(NZU16!(16), NZUsize!(4)),
             write_buffer: NZUsize!(1),
+            replay_buffer: NZUsize!(1024),
         }
-    }
-
-    async fn replay_all<E, A>(journal: Journal<E, A>) -> Journal<E, A>
-    where
-        E: Storage + Metrics,
-        A: CodecFixedShared,
-    {
-        let mut replay = journal
-            .replay(0, 0, NZUsize!(1024), ReadOptions::default())
-            .await
-            .expect("failed to start recovery replay");
-        while let Some(item) = replay.next().await {
-            item.expect("failed to recover journal");
-        }
-        replay.finish().expect("failed to finish recovery replay")
     }
 
     /// Seed each section with sixteen durable u64 items.
@@ -1337,6 +1363,7 @@ mod tests {
                             partition,
                             page_cache: CacheRef::new(NZU16!(72), NZUsize!(4)),
                             write_buffer: NZUsize!(144),
+                            replay_buffer: NZUsize!(144),
                         };
                         let (recorded, recordings) = RecordingContext::new(context.child("cap"));
                         let mut journal =
@@ -1350,18 +1377,10 @@ mod tests {
                         // Appending after the cap must not reconnect any discarded items.
                         (journal, _) = journal.append(0, &999).await.unwrap();
                         drop(journal.sync_all().await.unwrap());
-                        let journal = init_journal::<_, u64>(context.child("reopen"), cfg)
+                        let (_, items) = replay_journal::<_, u64>(context.child("reopen"), cfg)
                             .await
                             .unwrap();
-                        let mut replay = journal
-                            .replay(0, 0, NZUsize!(144), ReadOptions::default())
-                            .await
-                            .unwrap();
-                        let mut actual = Vec::new();
-                        while let Some(item) = replay.next().await {
-                            actual.push(item.unwrap().2);
-                        }
-                        replay.finish().unwrap();
+                        let actual: Vec<_> = items.into_iter().map(|item| item.2).collect();
                         let expected = if retained == 0 {
                             vec![999]
                         } else {
@@ -1390,6 +1409,7 @@ mod tests {
                     partition: format!("fixed-cap-scan-{count}"),
                     page_cache: CacheRef::new(NZU16!(64), NZUsize!(4)),
                     write_buffer: NZUsize!(65536),
+                    replay_buffer: NZUsize!(65536),
                 };
                 let mut journal = init_journal::<_, u64>(
                     context.child(if count == 128 {
@@ -1440,6 +1460,7 @@ mod tests {
                     partition: format!("capped-torn-{cap}"),
                     page_cache: CacheRef::new(NZU16!(5), NZUsize!(4)),
                     write_buffer: NZUsize!(256),
+                    replay_buffer: NZUsize!(256),
                 };
                 let mut journal = init_journal::<_, u64>(context.child("first"), cfg.clone())
                     .await
@@ -1477,28 +1498,27 @@ mod tests {
                 drop(journal);
 
                 // A normal restart must retain the repaired prefix and append at its exact end.
-                let journal = init_journal::<_, u64>(context.child("reopen"), cfg)
-                    .await
-                    .unwrap();
-                let mut replay = journal
-                    .replay(0, 0, NZUsize!(256), ReadOptions::default())
+                let (mut journal, items) = replay_journal::<_, u64>(context.child("reopen"), cfg)
                     .await
                     .unwrap();
                 let mut count = 0;
-                while let Some(item) = replay.next().await {
-                    let item = item.unwrap();
+                for item in items {
                     assert_eq!(item.0, 0);
                     assert_eq!(item.2, count);
                     count += 1;
                 }
                 assert_eq!(count, expected_bytes / 8);
-                let mut journal = replay.finish().unwrap();
                 let position;
                 (journal, position) = journal.append(0, &99).await.unwrap();
                 assert_eq!(position, expected_bytes / 8);
                 journal.destroy().await.unwrap();
             }
         });
+    }
+
+    #[test]
+    fn test_bounded_initialization_retries_after_storage_faults() {
+        check_interrupted_bounded_open::<Journal<FaultedContext, u64>>();
     }
 
     #[test_traced]
@@ -1567,6 +1587,7 @@ mod tests {
                 partition: "segmented-fixed-buffers".into(),
                 page_cache: CacheRef::new(NZU16!(PAGE_SIZE as u16), NZUsize!(CACHE_PAGES)),
                 write_buffer: NZUsize!(WRITE_BUFFER),
+                replay_buffer: NZUsize!(WRITE_BUFFER),
             };
             let mut journal = init_journal::<_, u64>(context.child("journal"), cfg)
                 .await
@@ -1600,6 +1621,7 @@ mod tests {
                     partition: "buffer-boundaries".into(),
                     page_cache: CacheRef::new(page_size, PAGE_CACHE_SIZE),
                     write_buffer: NZUsize!(1),
+                    replay_buffer: NZUsize!(128),
                 };
                 let mut journal = init_journal(context.child("initial"), cfg.clone())
                     .await
@@ -1617,21 +1639,17 @@ mod tests {
                 journal = journal.sync_all().await.unwrap();
                 drop(journal);
 
-                let journal = init_journal::<_, Digest>(context, cfg).await.unwrap();
-                let mut replay = journal
-                    .replay(0, 0, NZUsize!(128), ReadOptions::default())
-                    .await
-                    .unwrap();
+                let (mut journal, items) = replay_journal::<_, Digest>(context, cfg).await.unwrap();
+                let mut items = items.into_iter();
                 for section in [1, 3] {
                     for position in 0..10 {
                         assert_eq!(
-                            replay.next().await.unwrap().unwrap(),
+                            items.next().unwrap(),
                             (section, position, test_digest(section * 100 + position))
                         );
                     }
                 }
-                assert!(replay.next().await.is_none());
-                let mut journal = replay.finish().unwrap();
+                assert!(items.next().is_none());
                 let position;
                 (journal, position) = journal.append(3, &test_digest(310)).await.unwrap();
                 assert_eq!(position, 10);
@@ -1646,16 +1664,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
-            let journal = init_journal::<_, Digest>(context.child("storage"), cfg)
-                .await
-                .expect("failed to init");
 
-            // An empty journal's reader is exhausted from the start
-            let replay = journal
-                .replay(0, 0, NZUsize!(1024), ReadOptions::default())
-                .await
-                .expect("failed to replay");
-            let journal = replay.finish().expect("failed to finish replay");
+            // Storage without any section is drained from the start
+            let replay =
+                recover::<_, Digest>(context.child("storage"), cfg, ReadOptions::default())
+                    .await
+                    .expect("failed to replay");
+            let journal = replay.finish().await.expect("failed to finish replay");
             journal.destroy().await.expect("failed to destroy");
         });
     }
@@ -1665,8 +1680,11 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (context, recordings) = RecordingContext::new(context);
-            let cfg = aligned_cfg();
-            let mut journal = init_journal(context.child("storage"), cfg)
+            let cfg = Config {
+                replay_buffer: NZUsize!(56),
+                ..aligned_cfg()
+            };
+            let mut journal = init_journal(context.child("storage"), cfg.clone())
                 .await
                 .expect("failed to init");
 
@@ -1676,14 +1694,15 @@ mod tests {
                     .await
                     .expect("failed to append");
             }
+            drop(journal.sync_all().await.expect("failed to sync"));
 
-            let mut replay = journal
-                .replay(1, 0, NZUsize!(56), ReadOptions::DONT_CACHE)
+            let mut replay = recover(context.child("replay"), cfg, ReadOptions::DONT_CACHE)
                 .await
                 .expect("failed to replay");
             recordings.clear();
 
-            // The first lazy refill must carry the caller's policy.
+            // The first call opens both writers, each reading its tail page once. The first lazy
+            // refill follows and must carry the caller's policy.
             let (section, position, item) = replay
                 .next()
                 .await
@@ -1691,9 +1710,11 @@ mod tests {
                 .expect("failed to read first replay item");
             assert_eq!((section, position, item), (1, 0, test_digest(1)));
             let reads = recordings.snapshot().reads;
-            assert!(!reads.is_empty());
+            let (opened, replayed) = reads.split_at(2);
+            assert_eq!(opened, [ReadOptions::default(); 2]);
+            assert!(!replayed.is_empty());
             assert!(
-                reads
+                replayed
                     .iter()
                     .all(|options| *options == ReadOptions::DONT_CACHE)
             );
@@ -1715,7 +1736,7 @@ mod tests {
             );
             assert!(replay.next().await.is_none());
 
-            let journal = replay.finish().expect("failed to finish replay");
+            let journal = replay.finish().await.expect("failed to finish replay");
             journal.destroy().await.expect("failed to destroy");
         });
     }
@@ -1726,7 +1747,7 @@ mod tests {
             let (context, recordings) = RecordingContext::new(context);
             let cfg = aligned_cfg();
             let page_cache = cfg.page_cache.clone();
-            let mut journal = init_journal::<_, [u8; 16]>(context.child("storage"), cfg)
+            let mut journal = init_journal::<_, [u8; 16]>(context.child("storage"), cfg.clone())
                 .await
                 .unwrap();
 
@@ -1734,21 +1755,15 @@ mod tests {
             for value in 0..2 {
                 (journal, _) = journal.append(1, &[value; 16]).await.unwrap();
             }
-            journal = journal.sync(1).await.unwrap();
+            drop(journal.sync(1).await.unwrap());
             page_cache.clear();
 
-            let mut replay = journal
-                .replay(0, 0, NZUsize!(1024), ReadOptions::DONT_CACHE)
-                .await
-                .unwrap();
-            for value in 0..2 {
-                assert_eq!(
-                    replay.next().await.unwrap().unwrap(),
-                    (1, u64::from(value), [value; 16])
-                );
-            }
-            assert!(replay.next().await.is_none());
-            let journal = replay.finish().unwrap();
+            let replay =
+                recover::<_, [u8; 16]>(context.child("replay"), cfg, ReadOptions::DONT_CACHE)
+                    .await
+                    .unwrap();
+            let (journal, items) = drain(replay).await.unwrap();
+            assert_eq!(items, vec![(1, 0, [0; 16]), (1, 1, [1; 16])]);
             for position in 0..2 {
                 assert!(journal.try_get_sync(1, position).is_none());
             }
@@ -1775,71 +1790,22 @@ mod tests {
             // buffer would force an eager recovery scan to issue one read per page.
             seed(&context, &cfg, 1..=1).await;
 
-            // Initialization needs only the terminal page used to open Writer. Recovery belongs to
-            // replay, whose 448-byte budget holds sixteen 28-byte physical pages and reads them
-            // four pages at a time.
+            // A preflight without floors reads nothing. Opening needs only the terminal page used
+            // to open Writer. Recovery belongs to replay, whose 448-byte budget holds sixteen
+            // 28-byte physical pages and reads them four pages at a time.
             recordings.clear();
-            let journal = init_journal::<_, u64>(context.child("reopen"), cfg)
+            let cfg = Config {
+                replay_buffer: NZUsize!(448),
+                ..cfg
+            };
+            let replay = recover::<_, u64>(context.child("reopen"), cfg, ReadOptions::default())
                 .await
                 .expect("failed to reopen");
-            assert_eq!(recordings.snapshot().reads.len(), 1);
+            assert!(recordings.snapshot().reads.is_empty());
 
-            let mut replay = journal
-                .replay(0, 0, NZUsize!(448), ReadOptions::default())
-                .await
-                .expect("failed to replay");
-            while let Some(item) = replay.next().await {
-                item.expect("failed to read replay item");
-            }
+            let (journal, _) = drain(replay).await.expect("failed to replay");
             assert_eq!(recordings.snapshot().reads.len(), 3);
-            replay
-                .finish()
-                .expect("failed to finish replay")
-                .destroy()
-                .await
-                .expect("failed to destroy");
-        });
-    }
-
-    #[test_traced]
-    #[should_panic(expected = "must be replayed before append")]
-    fn test_segmented_fixed_append_requires_replay_after_reopen() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg();
-            let mut journal = init_journal(context.child("seed"), cfg.clone())
-                .await
-                .expect("failed to init");
-            (journal, _) = journal
-                .append(1, &test_digest(0))
-                .await
-                .expect("failed to append");
-            journal = journal.sync_all().await.expect("failed to sync");
-            drop(journal);
-
-            // A tail page can hide an earlier torn page. Reopened sections remain append-locked
-            // until ordered replay has validated their full retained prefix.
-            let journal = init_journal(context.child("reopen"), cfg)
-                .await
-                .expect("failed to reopen");
-            journal.append(1, &test_digest(1)).await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    #[should_panic(expected = "must be replayed before append")]
-    fn test_segmented_fixed_gates_older_section_after_reopen() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg();
-            seed(&context, &cfg, 1..=3).await;
-
-            // Every nonempty retained section is append-locked, not only the oldest or the
-            // newest.
-            let journal = init_journal::<_, u64>(context.child("reopen"), cfg)
-                .await
-                .expect("failed to reopen");
-            journal.append(2, &2).await.unwrap();
+            journal.destroy().await.expect("failed to destroy");
         });
     }
 
@@ -1852,21 +1818,73 @@ mod tests {
             seed(&context, &cfg, 1..=1).await;
 
             // A durable floor proves its prefix. Preflight reads only the page containing the
-            // terminal entry and leaves the ordinary replay pass to inspect the suffix.
+            // terminal entry and leaves the rest of the section to the replay.
             recordings.clear();
             let floors = BTreeMap::from([(1, 16)]);
-            let preflight =
-                Journal::<_, u64>::preflight_floors(context.child("preflight"), cfg, &floors)
-                    .await
-                    .expect("failed to preflight");
+            let preflight = Journal::<_, u64>::preflight_floors(
+                context.child("preflight"),
+                cfg,
+                &floors,
+                ReadOptions::default(),
+            )
+            .await
+            .expect("failed to preflight");
             assert_eq!(recordings.snapshot().reads.len(), 1);
-            preflight
-                .finish()
+            let (journal, items) = drain(preflight).await.expect("failed to replay");
+            assert_eq!(items.len(), 16);
+            journal.destroy().await.expect("failed to destroy");
+        });
+    }
+
+    /// A recovery leaves a torn tail in place until its first call opens the writers.
+    #[test_traced]
+    fn test_segmented_fixed_recovery_modifies_nothing_before_next() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = lazy_recovery_cfg("segmented-fixed-untouched-preflight");
+            seed(&context, &cfg, 1..=1).await;
+
+            // Tear the terminal page, which opening the writer discards.
+            let name = 1u64.to_be_bytes();
+            let (blob, size) = context
+                .open(&cfg.partition, &name)
                 .await
-                .expect("failed to finish preflight")
-                .destroy()
+                .expect("failed to open");
+            blob.resize(size - 1).await.expect("failed to truncate");
+            blob.sync().await.expect("failed to sync");
+            drop(blob);
+
+            // A floor below the tear is proven by reading it, and a dropped recovery leaves the
+            // torn page in place.
+            let floors = BTreeMap::from([(1, 14)]);
+            let preflight = Journal::<_, u64>::preflight_floors(
+                context.child("preflight"),
+                cfg.clone(),
+                &floors,
+                ReadOptions::default(),
+            )
+            .await
+            .expect("failed to preflight");
+            assert_eq!(preflight.boundaries()[&1], Some(13));
+            drop(preflight);
+            let (_, untouched) = context
+                .open(&cfg.partition, &name)
                 .await
-                .expect("failed to destroy");
+                .expect("failed to open");
+            assert_eq!(untouched, size - 1);
+
+            // The first call opens the writer and discards the torn page: seven 28-byte physical
+            // pages remain, holding the fourteen items the replay returns.
+            let (journal, items) = replay_journal::<_, u64>(context.child("replay"), cfg.clone())
+                .await
+                .expect("failed to replay");
+            assert_eq!(items.len(), 14);
+            drop(journal);
+            let (_, repaired) = context
+                .open(&cfg.partition, &name)
+                .await
+                .expect("failed to open");
+            assert_eq!(repaired, 7 * 28);
         });
     }
 
@@ -1881,7 +1899,7 @@ mod tests {
             // The checkpoint makes both retained sections durable. Restore needs one terminal
             // boundary read per section, independent of the eight pages stored in each.
             recordings.clear();
-            let preflight = Journal::<_, u64>::preflight_restore(
+            let mut preflight = Journal::<_, u64>::preflight_restore(
                 context.child("preflight"),
                 cfg,
                 1,
@@ -1889,6 +1907,10 @@ mod tests {
             )
             .await
             .expect("failed to preflight");
+            assert_eq!(recordings.snapshot().reads.len(), 2);
+
+            // The checkpoint leaves nothing to replay, and asking opens no writer.
+            assert!(preflight.next().await.is_none());
             assert_eq!(recordings.snapshot().reads.len(), 2);
             preflight
                 .finish()
@@ -1935,34 +1957,31 @@ mod tests {
         });
     }
 
-    #[test_traced]
-    fn test_segmented_fixed_restore_rejects_below_checkpoint_repair() {
+    /// Replay never repairs below a floor. A torn page under it is committed damage, reported
+    /// as corruption whether the section ends at its floor or keeps a suffix above it.
+    #[rstest::rstest]
+    #[case::section_ends_at_floor(16)]
+    #[case::suffix_above_floor(8)]
+    fn test_segmented_fixed_floor_rejects_below_floor_repair(#[case] floor: u64) {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = lazy_recovery_cfg("segmented-fixed-restore-repair");
+            let cfg = lazy_recovery_cfg("segmented-fixed-floor-repair");
             seed(&context, &cfg, 0..=1).await;
 
-            // Tear an interior page below the checkpoint boundary. The preflight reads only the
-            // terminal boundary page, so restore succeeds without validating the interior.
+            // Tear the page holding items four and five, below either floor. The preflight reads
+            // only the terminal boundary page, so it succeeds without validating the interior.
             corrupt_page(&context, &cfg.partition, &1u64.to_be_bytes(), 2, 16).await;
-            let size = 16 * u64::SIZE as u64;
-            let journal = Journal::<_, u64>::preflight_restore(
-                context.child("restore"),
+            let floors = BTreeMap::from([(1, floor)]);
+            let mut replay = Journal::<_, u64>::preflight_floors(
+                context.child("floors"),
                 cfg.clone(),
-                1,
-                size,
+                &floors,
+                ReadOptions::default(),
             )
             .await
-            .expect("failed to preflight")
-            .finish()
-            .await
-            .expect("failed to finish preflight");
+            .expect("failed to preflight");
 
-            // The checkpoint covers the whole retained section, so replay cannot repair it.
-            let mut replay = journal
-                .replay(0, 0, NZUsize!(1024), ReadOptions::default())
-                .await
-                .expect("failed to start replay");
+            // The floor covers the torn page, so replay cannot repair it.
             let mut outcome = None;
             while let Some(item) = replay.next().await {
                 if let Err(err) = item {
@@ -1970,13 +1989,10 @@ mod tests {
                     break;
                 }
             }
-            assert!(matches!(
-                outcome,
-                Some(Error::Runtime(RError::InvalidChecksum))
-            ));
-            drop(replay);
+            assert!(matches!(outcome, Some(Error::Corruption(_))));
+            assert!(matches!(replay.finish().await, Err(Error::ReplayFailed)));
 
-            // The checkpoint-proven bytes stay untouched: eight 28-byte physical pages.
+            // The floor-proven bytes stay untouched: eight 28-byte physical pages.
             let (_, blob_size) = context
                 .open(&cfg.partition, &1u64.to_be_bytes())
                 .await
@@ -2039,17 +2055,20 @@ mod tests {
 
             recordings.clear();
             let floors = BTreeMap::from([(1, 2)]);
-            let journal =
-                Journal::<_, Digest>::preflight_floors(context.child("reopen"), cfg, &floors)
-                    .await
-                    .expect("failed to preflight")
-                    .finish()
-                    .await
-                    .expect("failed to reopen");
+            let preflight = Journal::<_, Digest>::preflight_floors(
+                context.child("reopen"),
+                cfg,
+                &floors,
+                ReadOptions::default(),
+            )
+            .await
+            .expect("failed to preflight");
 
             // Two 32-byte items occupy four 16-byte pages. The terminal entry spans two pages, and
-            // Writer reads the tail once when opening. No earlier entry page is scanned.
-            assert_eq!(recordings.snapshot().reads.len(), 3);
+            // no earlier entry page is read before the replay.
+            assert_eq!(recordings.snapshot().reads.len(), 2);
+            let (journal, items) = drain(preflight).await.expect("failed to reopen");
+            assert_eq!(items.len(), 2);
             journal.destroy().await.expect("failed to destroy");
         });
     }
@@ -2059,20 +2078,19 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg();
-            let mut journal = init_journal::<_, Digest>(context.child("storage"), cfg)
+            let mut journal = init_journal::<_, Digest>(context.child("storage"), cfg.clone())
                 .await
                 .expect("failed to init");
             (journal, _) = journal
                 .append(1, &test_digest(0))
                 .await
                 .expect("failed to append");
-            journal = journal.sync_all().await.expect("failed to sync");
+            drop(journal.sync_all().await.expect("failed to sync"));
 
-            let replay = journal
-                .replay(0, 0, NZUsize!(1024), ReadOptions::default())
+            let replay = recover::<_, Digest>(context.child("replay"), cfg, ReadOptions::default())
                 .await
                 .expect("failed to replay");
-            assert!(matches!(replay.finish(), Err(Error::ReplayFailed)));
+            assert!(matches!(replay.finish().await, Err(Error::ReplayFailed)));
         });
     }
 
@@ -2101,26 +2119,10 @@ mod tests {
             journal = journal.sync_all().await.expect("failed to sync");
             drop(journal);
 
-            let mut journal = init_journal::<_, Digest>(context.child("second"), cfg.clone())
-                .await
-                .expect("failed to re-init");
-
-            let items = {
-                let mut replay = journal
-                    .replay(0, 0, NZUsize!(1024), ReadOptions::default())
+            let (journal, items) =
+                replay_journal::<_, Digest>(context.child("second"), cfg.clone())
                     .await
                     .expect("failed to replay");
-
-                let mut items = Vec::new();
-                while let Some(result) = replay.next().await {
-                    match result {
-                        Ok((section, pos, item)) => items.push((section, pos, item)),
-                        Err(err) => panic!("replay error: {err}"),
-                    }
-                }
-                journal = replay.finish().expect("failed to finish replay");
-                items
-            };
 
             assert_eq!(items.len(), 20);
             for (i, item) in items.iter().enumerate().take(10) {
@@ -2134,140 +2136,6 @@ mod tests {
                 assert_eq!(item.2, test_digest(i as u64));
             }
 
-            journal.destroy().await.expect("failed to destroy");
-        });
-    }
-
-    #[test_traced]
-    fn test_segmented_fixed_replay_with_start_offset() {
-        // Test that replay with a non-zero start_position correctly skips items.
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg();
-            let mut journal = init_journal(context.child("first"), cfg.clone())
-                .await
-                .expect("failed to init");
-
-            // Append 10 items to section 1
-            for i in 0u64..10 {
-                (journal, _) = journal
-                    .append(1, &test_digest(i))
-                    .await
-                    .expect("failed to append");
-            }
-            // Append 5 items to section 2
-            for i in 10u64..15 {
-                (journal, _) = journal
-                    .append(2, &test_digest(i))
-                    .await
-                    .expect("failed to append");
-            }
-            journal = journal.sync_all().await.expect("failed to sync");
-            drop(journal);
-
-            let mut journal = init_journal::<_, Digest>(context.child("second"), cfg.clone())
-                .await
-                .expect("failed to re-init");
-
-            // Replay from section 1, position 5 - should get items 5-9 from section 1 and all of section 2
-            {
-                let mut replay = journal
-                    .replay(1, 5, NZUsize!(1024), ReadOptions::default())
-                    .await
-                    .expect("failed to replay");
-
-                let mut items = Vec::new();
-                while let Some(result) = replay.next().await {
-                    let (section, pos, item) = result.expect("replay error");
-                    items.push((section, pos, item));
-                }
-                journal = replay.finish().expect("failed to finish replay");
-
-                assert_eq!(
-                    items.len(),
-                    10,
-                    "Should have 5 items from section 1 + 5 from section 2"
-                );
-
-                // Check section 1 items (positions 5-9)
-                for (i, (section, pos, item)) in items.iter().enumerate().take(5) {
-                    assert_eq!(*section, 1);
-                    assert_eq!(*pos, (i + 5) as u64);
-                    assert_eq!(*item, test_digest((i + 5) as u64));
-                }
-
-                // Check section 2 items (positions 0-4)
-                for (i, (section, pos, item)) in items.iter().enumerate().skip(5) {
-                    assert_eq!(*section, 2);
-                    assert_eq!(*pos, (i - 5) as u64);
-                    assert_eq!(*item, test_digest((i + 5) as u64));
-                }
-            }
-
-            // Replay from section 1, position 9 - should get only item 9 from section 1 and all of section 2
-            {
-                let mut replay = journal
-                    .replay(1, 9, NZUsize!(1024), ReadOptions::default())
-                    .await
-                    .expect("failed to replay");
-
-                let mut items = Vec::new();
-                while let Some(result) = replay.next().await {
-                    let (section, pos, item) = result.expect("replay error");
-                    items.push((section, pos, item));
-                }
-                journal = replay.finish().expect("failed to finish replay");
-
-                assert_eq!(
-                    items.len(),
-                    6,
-                    "Should have 1 item from section 1 + 5 from section 2"
-                );
-                assert_eq!(items[0], (1, 9, test_digest(9)));
-                for (i, (section, pos, item)) in items.iter().enumerate().skip(1) {
-                    assert_eq!(*section, 2);
-                    assert_eq!(*pos, (i - 1) as u64);
-                    assert_eq!(*item, test_digest((i + 9) as u64));
-                }
-            }
-
-            // Replay from section 2, position 3 - should get only items 3-4 from section 2
-            {
-                let mut replay = journal
-                    .replay(2, 3, NZUsize!(1024), ReadOptions::default())
-                    .await
-                    .expect("failed to replay");
-
-                let mut items = Vec::new();
-                while let Some(result) = replay.next().await {
-                    let (section, pos, item) = result.expect("replay error");
-                    items.push((section, pos, item));
-                }
-                journal = replay.finish().expect("failed to finish replay");
-
-                assert_eq!(items.len(), 2, "Should have 2 items from section 2");
-                assert_eq!(items[0], (2, 3, test_digest(13)));
-                assert_eq!(items[1], (2, 4, test_digest(14)));
-            }
-
-            // Replay from position past the end should return ItemOutOfRange error.
-            // A failed replay consumes the journal, so re-initialize between attempts.
-            let result = journal
-                .replay(1, 100, NZUsize!(1024), ReadOptions::default())
-                .await;
-            assert!(matches!(result, Err(Error::ItemOutOfRange(100))));
-
-            let journal = init_journal::<_, Digest>(context.child("third"), cfg.clone())
-                .await
-                .expect("failed to re-init");
-            let result = journal
-                .replay(1, u64::MAX, NZUsize!(1024), ReadOptions::default())
-                .await;
-            assert!(matches!(result, Err(Error::ItemOutOfRange(u64::MAX))));
-
-            let journal = init_journal::<_, Digest>(context.child("fourth"), cfg.clone())
-                .await
-                .expect("failed to re-init");
             journal.destroy().await.expect("failed to destroy");
         });
     }
@@ -2451,22 +2319,14 @@ mod tests {
             }
 
             // Verify data integrity via replay
-            {
-                let mut replay = journal
-                    .replay(0, 0, NZUsize!(1024), ReadOptions::default())
-                    .await
-                    .expect("failed to replay");
-                let mut items = Vec::new();
-                while let Some(result) = replay.next().await {
-                    let (section, _, item) = result.expect("failed to read");
-                    items.push((section, item));
-                }
-                journal = replay.finish().expect("failed to finish replay");
-                assert_eq!(items.len(), 5);
-                for (i, (section, item)) in items.iter().enumerate() {
-                    assert_eq!(*section, (i + 1) as u64);
-                    assert_eq!(*item, test_digest((i + 1) as u64));
-                }
+            drop(journal);
+            let (journal, items) = replay_journal::<_, Digest>(context.child("replay"), cfg)
+                .await
+                .expect("failed to replay");
+            assert_eq!(items.len(), 5);
+            for (i, (section, _, item)) in items.iter().enumerate() {
+                assert_eq!(*section, (i + 1) as u64);
+                assert_eq!(*item, test_digest((i + 1) as u64));
             }
 
             journal.destroy().await.expect("failed to destroy");
@@ -2553,25 +2413,11 @@ mod tests {
             blob.sync().await.expect("failed to sync");
 
             drop(blob);
-            let mut journal = init_journal::<_, Digest>(context.child("second"), cfg.clone())
-                .await
-                .expect("failed to re-init");
-
-            let count = {
-                let mut replay = journal
-                    .replay(0, 0, NZUsize!(1024), ReadOptions::default())
+            let (journal, items) =
+                replay_journal::<_, Digest>(context.child("second"), cfg.clone())
                     .await
                     .expect("failed to replay");
-
-                let mut count = 0;
-                while let Some(result) = replay.next().await {
-                    result.expect("should be ok");
-                    count += 1;
-                }
-                journal = replay.finish().expect("failed to finish replay");
-                count
-            };
-            assert_eq!(count, 4);
+            assert_eq!(items.len(), 4);
 
             journal.destroy().await.expect("failed to destroy");
         });
@@ -2724,48 +2570,16 @@ mod tests {
 
             // Drop and reopen to test replay
             drop(journal);
-            let mut journal = init_journal::<_, Digest>(context.child("second"), cfg.clone())
-                .await
-                .expect("failed to re-init");
-
-            // Replay and verify all items in order
-            {
-                let mut replay = journal
-                    .replay(0, 0, NZUsize!(1024), ReadOptions::default())
+            let (journal, items) =
+                replay_journal::<_, Digest>(context.child("second"), cfg.clone())
                     .await
                     .expect("failed to replay");
 
-                let mut items = Vec::new();
-                while let Some(result) = replay.next().await {
-                    let (section, _, item) = result.expect("replay error");
-                    items.push((section, item));
-                }
-                journal = replay.finish().expect("failed to finish replay");
-
-                assert_eq!(items.len(), 3, "Should have 3 items");
-                assert_eq!(items[0], (1, test_digest(100)));
-                assert_eq!(items[1], (5, test_digest(500)));
-                assert_eq!(items[2], (10, test_digest(1000)));
-            }
-
-            // Test replay starting from middle section (5)
-            {
-                let mut replay = journal
-                    .replay(5, 0, NZUsize!(1024), ReadOptions::default())
-                    .await
-                    .expect("failed to replay from section 5");
-
-                let mut items = Vec::new();
-                while let Some(result) = replay.next().await {
-                    let (section, _, item) = result.expect("replay error");
-                    items.push((section, item));
-                }
-                journal = replay.finish().expect("failed to finish replay");
-
-                assert_eq!(items.len(), 2, "Should have 2 items from section 5 onwards");
-                assert_eq!(items[0], (5, test_digest(500)));
-                assert_eq!(items[1], (10, test_digest(1000)));
-            }
+            // Verify all items replayed in order
+            assert_eq!(items.len(), 3, "Should have 3 items");
+            assert_eq!(items[0], (1, 0, test_digest(100)));
+            assert_eq!(items[1], (5, 0, test_digest(500)));
+            assert_eq!(items[2], (10, 0, test_digest(1000)));
 
             journal.destroy().await.expect("failed to destroy");
         });
@@ -2814,50 +2628,19 @@ mod tests {
 
             // Drop and reopen to test replay
             drop(journal);
-            let mut journal = init_journal::<_, Digest>(context.child("second"), cfg.clone())
-                .await
-                .expect("failed to re-init");
-
-            // Replay all - should get items from sections 1 and 3, skipping empty section 2
-            {
-                let mut replay = journal
-                    .replay(0, 0, NZUsize!(1024), ReadOptions::default())
+            let (journal, items) =
+                replay_journal::<_, Digest>(context.child("second"), cfg.clone())
                     .await
                     .expect("failed to replay");
 
-                let mut items = Vec::new();
-                while let Some(result) = replay.next().await {
-                    let (section, _, item) = result.expect("replay error");
-                    items.push((section, item));
-                }
-                journal = replay.finish().expect("failed to finish replay");
-
-                assert_eq!(
-                    items.len(),
-                    2,
-                    "Should have 2 items (skipping empty section)"
-                );
-                assert_eq!(items[0], (1, test_digest(100)));
-                assert_eq!(items[1], (3, test_digest(300)));
-            }
-
-            // Replay starting from empty section 2 - should get only section 3
-            {
-                let mut replay = journal
-                    .replay(2, 0, NZUsize!(1024), ReadOptions::default())
-                    .await
-                    .expect("failed to replay from section 2");
-
-                let mut items = Vec::new();
-                while let Some(result) = replay.next().await {
-                    let (section, _, item) = result.expect("replay error");
-                    items.push((section, item));
-                }
-                journal = replay.finish().expect("failed to finish replay");
-
-                assert_eq!(items.len(), 1, "Should have 1 item from section 3");
-                assert_eq!(items[0], (3, test_digest(300)));
-            }
+            // Replay all - should get items from sections 1 and 3, skipping empty section 2
+            assert_eq!(
+                items.len(),
+                2,
+                "Should have 2 items (skipping empty section)"
+            );
+            assert_eq!(items[0], (1, 0, test_digest(100)));
+            assert_eq!(items[1], (3, 0, test_digest(300)));
 
             journal.destroy().await.expect("failed to destroy");
         });
@@ -2874,6 +2657,7 @@ mod tests {
                 partition: "segmented-fixed-validate-before-tail-trim".into(),
                 page_cache: CacheRef::new(NZU16!(LOGICAL_PAGE_SIZE as u16), NZUsize!(4)),
                 write_buffer: NZUsize!(128),
+                replay_buffer: NZUsize!(1024),
             };
             let mut journal = init_journal::<_, u64>(context.child("first"), cfg.clone())
                 .await
@@ -2920,7 +2704,6 @@ mod tests {
             let journal = init_journal::<_, u64>(context.child("recover"), cfg)
                 .await
                 .unwrap();
-            let journal = replay_all(journal).await;
             assert_eq!(journal.section_len(SECTION).unwrap(), 2);
             assert_eq!(journal.get(SECTION, 0).await.unwrap(), 11);
             assert_eq!(journal.get(SECTION, 1).await.unwrap(), 22);
@@ -2958,7 +2741,6 @@ mod tests {
             let mut journal = init_journal::<_, u64>(context.child("recover"), cfg.clone())
                 .await
                 .unwrap();
-            journal = replay_all(journal).await;
             assert_eq!(journal.section_len(SECTION).unwrap(), 2);
             assert_eq!(journal.get(SECTION, 0).await.unwrap(), 0);
             assert_eq!(journal.get(SECTION, 1).await.unwrap(), 1);
@@ -2985,7 +2767,7 @@ mod tests {
         });
     }
 
-    /// Dropping [Replay::next] while a tail or torn-page repair awaits durability fails the
+    /// Dropping [Recovery::next] while a tail or torn-page repair awaits durability fails the
     /// replay, and re-initialization repairs from durable state.
     #[rstest::rstest]
     #[case::tail(false)]
@@ -3035,9 +2817,7 @@ mod tests {
                 inner: context.child("second"),
                 pending: pending.clone(),
             };
-            let journal = init_journal::<_, u64>(gated, cfg.clone()).await.unwrap();
-            let mut replay = journal
-                .replay(0, 0, NZUsize!(1024), ReadOptions::default())
+            let mut replay = recover::<_, u64>(gated, cfg.clone(), ReadOptions::default())
                 .await
                 .unwrap();
             for value in 0..drained {
@@ -3060,13 +2840,12 @@ mod tests {
                 Some(Err(Error::ReplayInterrupted))
             ));
             assert!(replay.next().await.is_none());
-            assert!(matches!(replay.finish(), Err(Error::ReplayFailed)));
+            assert!(matches!(replay.finish().await, Err(Error::ReplayFailed)));
 
             // Re-initialization repairs from durable state.
             let journal = init_journal::<_, u64>(context.child("third"), cfg)
                 .await
                 .unwrap();
-            let journal = replay_all(journal).await;
             assert_eq!(journal.section_len(SECTION).unwrap(), retained);
             for value in 0..retained {
                 assert_eq!(journal.get(SECTION, value).await.unwrap(), value);
@@ -3125,7 +2904,6 @@ mod tests {
             let journal = init_journal::<_, Digest>(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to re-init");
-            let journal = replay_all(journal).await;
 
             // Verify section now has only 2 items
             assert_eq!(journal.section_len(1).unwrap(), 2);
@@ -3160,6 +2938,7 @@ mod tests {
                 partition: "clear-test".into(),
                 page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
             };
 
             let mut journal: Journal<_, Digest> =
@@ -3608,32 +3387,49 @@ mod tests {
         });
     }
 
-    /// Cancelling an ordinary read invalidates the replay without changing its durable data.
+    /// Cancelling the read that opens the writers or an ordinary replay read invalidates the
+    /// replay without changing its durable data.
     #[rstest::rstest]
     #[case::finish(false)]
     #[case::next(true)]
-    fn test_segmented_fixed_replay_dropped_during_read_fails_replay(#[case] resume: bool) {
+    fn test_segmented_fixed_replay_dropped_during_read_fails_replay(
+        #[case] resume: bool,
+        #[values(0, 2)] drained: u64,
+    ) {
         deterministic::Runner::default().start(|context| async move {
             const SECTION: u64 = 0;
-            let cfg = aligned_cfg();
+
+            // Twelve u64 items fill six 16-byte pages. The replay reads one page at a time and
+            // keeps three more in flight, so the call after the first page's two items starts
+            // another read.
+            let cfg = Config {
+                replay_buffer: NZUsize!(16),
+                ..aligned_cfg()
+            };
             let mut journal = init_journal::<_, u64>(context.child("seed"), cfg.clone())
                 .await
                 .unwrap();
-            for value in 0..6 {
+            for value in 0..12 {
                 (journal, _) = journal.append(SECTION, &value).await.unwrap();
             }
             drop(journal.sync_all().await.unwrap());
 
             let (gated, gate) =
                 ReadGateContext::new(context.child("cancel"), cfg.partition.clone());
-            let journal = init_journal::<_, u64>(gated, cfg.clone()).await.unwrap();
-            let mut replay = journal
-                .replay(SECTION, 0, NZUsize!(16), ReadOptions::default())
+            let mut replay = recover::<_, u64>(gated, cfg.clone(), ReadOptions::default())
                 .await
                 .unwrap();
 
             // Dropping a call before it is polled starts no read and leaves the replay usable.
+            // The first polled call opens the writer, so with nothing drained the gate parks its
+            // tail read.
             drop(replay.next());
+            for value in 0..drained {
+                assert_eq!(
+                    replay.next().await.unwrap().unwrap(),
+                    (SECTION, value, value)
+                );
+            }
             gate.arm();
             {
                 let next = replay.next();
@@ -3651,23 +3447,14 @@ mod tests {
                 assert!(replay.next().await.is_none());
                 assert!(replay.next().await.is_none());
             }
-            assert!(matches!(replay.finish(), Err(Error::ReplayFailed)));
+            assert!(matches!(replay.finish().await, Err(Error::ReplayFailed)));
 
-            let journal = init_journal::<_, u64>(context.child("reopen"), cfg)
+            let (journal, items) = replay_journal::<_, u64>(context.child("reopen"), cfg)
                 .await
                 .unwrap();
-            let mut replay = journal
-                .replay(SECTION, 0, NZUsize!(16), ReadOptions::default())
-                .await
-                .unwrap();
-            for value in 0..6 {
-                assert_eq!(
-                    replay.next().await.unwrap().unwrap(),
-                    (SECTION, value, value)
-                );
-            }
-            assert!(replay.next().await.is_none());
-            replay.finish().unwrap().destroy().await.unwrap();
+            let expected: Vec<_> = (0..12).map(|value| (SECTION, value, value)).collect();
+            assert_eq!(items, expected);
+            journal.destroy().await.unwrap();
         });
     }
 }
