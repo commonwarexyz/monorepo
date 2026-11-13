@@ -99,7 +99,7 @@ impl Transfer for Payment {
     type Key = Digest;
     type Account = Balance;
 
-    fn changes(&self) -> impl Iterator<Item = (&Digest, Change<Balance>)> {
+    fn changes(&self) -> impl Iterator<Item = (&Self::Key, Change<Self::Account>)> {
         [
             (&self.from, Change::debit(self.amount)),
             (&self.to, Change::credit(self.amount)),
@@ -118,7 +118,7 @@ impl Transfer for Signed {
     type Key = Digest;
     type Account = Nonced;
 
-    fn changes(&self) -> impl Iterator<Item = (&Digest, Change<Nonced>)> {
+    fn changes(&self) -> impl Iterator<Item = (&Self::Key, Change<Self::Account>)> {
         let Payment { from, to, amount } = &self.payment;
         let sender = Change::debit(*amount).with_effect(self.nonce);
         [(from, sender), (to, Change::credit(*amount))].into_iter()

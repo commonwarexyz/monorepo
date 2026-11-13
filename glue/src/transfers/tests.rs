@@ -81,7 +81,7 @@ impl<A: Account> Transfer for Payment<A> {
     type Key = Key;
     type Account = A;
 
-    fn changes(&self) -> impl Iterator<Item = (&Key, Change<A>)> {
+    fn changes(&self) -> impl Iterator<Item = (&Self::Key, Change<Self::Account>)> {
         [
             (&self.from, Change::debit(self.amount)),
             (&self.to, Change::credit(self.amount)),
@@ -98,7 +98,7 @@ impl Transfer for Multi {
     type Key = Key;
     type Account = Balance;
 
-    fn changes(&self) -> impl Iterator<Item = (&Key, Change<Balance>)> {
+    fn changes(&self) -> impl Iterator<Item = (&Self::Key, Change<Self::Account>)> {
         self.0.iter().map(|(key, change)| (key, *change))
     }
 }
@@ -1519,7 +1519,7 @@ impl Transfer for Signed {
     type Key = Key;
     type Account = Nonced;
 
-    fn changes(&self) -> impl Iterator<Item = (&Key, Change<Nonced>)> {
+    fn changes(&self) -> impl Iterator<Item = (&Self::Key, Change<Self::Account>)> {
         // A self-transfer moves nothing, but its sender must hold the amount. The sender's change
         // comes last, so a selection that refuses its nonce must undo the transfer's other changes.
         let (moves, sender) = if self.from == self.to {
@@ -1555,7 +1555,7 @@ impl Transfer for NoncedMulti {
     type Key = Key;
     type Account = Nonced;
 
-    fn changes(&self) -> impl Iterator<Item = (&Key, Change<Nonced>)> {
+    fn changes(&self) -> impl Iterator<Item = (&Self::Key, Change<Self::Account>)> {
         self.0.iter().map(|(key, change)| (key, change.clone()))
     }
 }

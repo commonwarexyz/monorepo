@@ -116,7 +116,7 @@
 //!     type Key = Address;
 //!     type Account = Balance;
 //!
-//!     fn changes(&self) -> impl Iterator<Item = (&Address, Change<Balance>)> {
+//!     fn changes(&self) -> impl Iterator<Item = (&Self::Key, Change<Self::Account>)> {
 //!         [
 //!             (&self.from, Change::debit(self.amount)),
 //!             (&self.to, Change::credit(self.amount)),
@@ -190,7 +190,7 @@
 //! # impl Transfer for Payment {
 //! #     type Key = Address;
 //! #     type Account = Balance;
-//! #     fn changes(&self) -> impl Iterator<Item = (&Address, Change<Balance>)> {
+//! #     fn changes(&self) -> impl Iterator<Item = (&Self::Key, Change<Self::Account>)> {
 //! #         [(&self.from, Change::debit(self.amount)), (&self.to, Change::credit(self.amount))]
 //! #             .into_iter()
 //! #     }
@@ -315,7 +315,7 @@ pub trait Transfer {
 ///     type Key = Address;
 ///     type Account = Sequenced;
 ///
-///     fn changes(&self) -> impl Iterator<Item = (&Address, Change<Sequenced>)> {
+///     fn changes(&self) -> impl Iterator<Item = (&Self::Key, Change<Self::Account>)> {
 ///         // The sender's change consumes the nonce and debits the amount.
 ///         let sender = Change::debit(self.amount).with_effect(self.nonce);
 ///         [(&self.from, sender), (&self.to, Change::credit(self.amount))].into_iter()
