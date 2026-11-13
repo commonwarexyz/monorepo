@@ -5,6 +5,7 @@ use crate::dkg::{
     reshare::{Actor, EpochInfoResponse, Message, actor::Mode, metrics::Phase, store::Store},
     types::{EpochInfo, Participants, Payload},
 };
+use commonware_codec::Codec;
 use commonware_consensus::{
     Heightable as _,
     marshal::{Identifier, core::Variant as MarshalVariant},
@@ -27,7 +28,7 @@ use tracing::{debug, info_span, warn};
 impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
     E: Spawner + CryptoRng + Metrics + Clock + RuntimeStorage,
-    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey> + Codec,
     V: BlsVariant,
     C: Signer,
     M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,

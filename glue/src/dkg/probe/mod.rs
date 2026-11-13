@@ -1,9 +1,9 @@
 //! Discovery of the public epoch material a joining node needs before consensus starts.
 //!
 //! A node that is starting fresh cannot construct epoch-scoped state until it learns the current
-//! epoch's participant set. That set lives in the [`EpochInfo`] of a finalized boundary block.
-//! The [`Actor`] discovers that block, publishes the resulting [`Artifact`] (which also carries
-//! the sampled state-sync floor), and then serves the same boundary material to other joining peers.
+//! epoch's participant set. That set lives in the [`EpochInfo`] of a finalized boundary block. The
+//! [`Actor`] discovers that block and publishes its epoch info with the sampled state-sync floor as
+//! an [`Artifact`]. It then serves the boundaries its own node checkpointed to other joining peers.
 //!
 //! This protocol extends [`stateful::probe`](crate::stateful::probe): it begins with the same
 //! solicit-and-sample floor discovery and adds requests for the floor epoch's boundary
@@ -114,12 +114,18 @@
 //!
 //! ## Serving
 //!
-//! Once marshal is attached and no subscriber is pending, the actor enters service and answers
-//! peers' latest-finalization, boundary finalization, and boundary block requests for the rest of
-//! the process lifetime.
+//! Once marshal and the node's [`state_sync::Plan`](crate::dkg::state_sync::Plan) are attached
+//! through [`Mailbox::attach`] and no subscriber is pending, the actor enters service and answers
+//! peers' requests for the rest of the process lifetime. A latest-finalization request reads
+//! marshal. A boundary finalization or block request for epoch `e` reads the plan's checkpoint for
+//! `e`. The orchestrator records that checkpoint when it enters `e` from its boundary block.
 //!
-//! An epoch with no known boundary block is answered with nothing, as is a latest-finalization
-//! request when marshal has no finalization yet.
+//! The actor answers a boundary request only when that checkpoint holds the boundary finalization.
+//! The genesis checkpoint of epoch zero has none, a node that entered an epoch by state sync has no
+//! checkpoint for it, and marshal may hold a boundary block without its finalization, so the actor
+//! serves none of those epochs. It also answers nothing to a latest-finalization request while
+//! marshal has no finalization. [Marshal Retention](crate::dkg#marshal-retention) describes which
+//! peers can serve an epoch.
 //!
 //! # Message Sizes
 //!
@@ -164,9 +170,9 @@
 //! every certificate at `S::max_certificate_size` for the given committee size, and every block at
 //! the backfill block for the application block bound of the given codec configuration.
 //!
-//! The actor serves the finalizations and blocks marshal holds, so compute [`max_payload_size`]
-//! with the committee size and block codec configuration given to marshal's
-//! [`max_payload_size`][marshal].
+//! The actor serves only finalizations and blocks that marshal stored, whether it reads them from
+//! marshal or from the plan's checkpoints. Compute [`max_payload_size`] with the committee size and
+//! block codec configuration given to marshal's [`max_payload_size`][marshal].
 //!
 //! [marshal]: commonware_consensus::marshal::max_payload_size
 
@@ -253,7 +259,7 @@ mod tests {
     use crate::{
         dkg::{
             probe::Artifact,
-            state_sync::{Config as StateSyncConfig, Plan as StateSyncPlan, StateSync},
+            state_sync::{Checkpoint, Config as StateSyncConfig, Plan as StateSyncPlan, StateSync},
             tests::{max_supported_mode, mocks},
             types::{EpochInfo, EpochOutcome, Payload},
         },
@@ -346,10 +352,34 @@ mod tests {
             Self::start_full(context, fixture, source_boundaries, Epoch::zero(), None).await
         }
 
+        /// Starts a harness whose source stores each of `source_boundaries` in both its
+        /// marshal and its plan.
         async fn start_full(
             context: &mut deterministic::Context,
             fixture: mocks::SchemeFixture,
             source_boundaries: Vec<Epoch>,
+            bootstrap_epoch: Epoch,
+            floor: Option<Finalization<mocks::TestScheme, mocks::TestDigest>>,
+        ) -> Self {
+            let checkpoints = source_boundaries
+                .iter()
+                .map(|&epoch| {
+                    let checkpoint =
+                        boundary_checkpoint(epoch, &fixture.participants, &fixture.schemes, true);
+                    (epoch, checkpoint)
+                })
+                .collect();
+            let source = Source {
+                marshal: source_boundaries,
+                checkpoints,
+            };
+            Self::start_source(context, fixture, source, bootstrap_epoch, floor).await
+        }
+
+        async fn start_source(
+            context: &mut deterministic::Context,
+            fixture: mocks::SchemeFixture,
+            source: Source,
             bootstrap_epoch: Epoch,
             floor: Option<Finalization<mocks::TestScheme, mocks::TestDigest>>,
         ) -> Self {
@@ -383,15 +413,30 @@ mod tests {
             let genesis = genesis_info(&participants);
             let first_boundary_finalization =
                 boundary_finalization(Epoch::new(1), boundary.digest(), &fixture.schemes);
-            let source_boundaries = source_boundaries
-                .into_iter()
-                .map(|epoch| {
-                    let (block, _) = boundary_block(epoch, participants[0].clone(), &participants);
-                    let finalization =
-                        boundary_finalization(epoch, block.digest(), &fixture.schemes);
-                    (block, finalization)
-                })
-                .collect::<Vec<_>>();
+
+            // The source serves boundaries from its plan. A running node's orchestrator records
+            // them there as it processes the boundary blocks.
+            let source_plan = StateSyncPlan::<mocks::TestScheme, mocks::TestMarshalVariant>::init(
+                context.child("source_plan"),
+                StateSyncConfig {
+                    partition_prefix: "source".into(),
+                    max_participants: NZU32!(16),
+                    max_supported_mode: max_supported_mode(),
+                    block_codec_config: (),
+                },
+                None,
+            )
+            .await;
+            for (epoch, checkpoint) in source.checkpoints {
+                source_plan
+                    .record(
+                        context.child("source_record"),
+                        epoch,
+                        checkpoint,
+                        Epoch::zero(),
+                    )
+                    .await;
+            }
 
             let (source_marshal, marshal_handle) = start_marshal(
                 context.child("source_marshal"),
@@ -399,7 +444,17 @@ mod tests {
                 &fixture.participants,
                 &fixture.schemes,
                 0,
-                source_boundaries,
+                source
+                    .marshal
+                    .into_iter()
+                    .map(|epoch| {
+                        let (block, _) =
+                            boundary_block(epoch, participants[0].clone(), &participants);
+                        let finalization =
+                            boundary_finalization(epoch, block.digest(), &fixture.schemes);
+                        (block, finalization)
+                    })
+                    .collect(),
             )
             .await;
 
@@ -427,7 +482,7 @@ mod tests {
                 mailbox_size: NZUsize!(16),
                 block_codec_config: (),
             });
-            source_mailbox.attach(source_marshal.clone());
+            source_mailbox.attach(source_marshal.clone(), source_plan);
             let source_handle = source_actor.start(source_boundaries);
 
             let joiner_control = oracle.control(participants[1].clone());
@@ -579,6 +634,44 @@ mod tests {
         async fn next_client_boundary_request(&mut self) -> Epoch {
             Self::next_boundary_request(&mut self.client_boundary_receiver).await
         }
+
+        /// Sends `request` from the client to the source.
+        fn request_from_source(
+            &mut self,
+            request: wire::Message<mocks::TestScheme, mocks::TestMarshalVariant>,
+        ) {
+            self.client_boundary_sender.send(
+                Recipients::One(self.participants[0].clone()),
+                request.encode().to_vec(),
+                false,
+            );
+        }
+    }
+
+    type TestCheckpoint = Checkpoint<mocks::TestScheme, mocks::TestMarshalVariant>;
+
+    /// Boundaries the source node stores in its marshal and in its plan.
+    struct Source {
+        /// Epochs whose boundary block and finalization the source's marshal stores.
+        marshal: Vec<Epoch>,
+        /// Checkpoints the source's plan holds, by epoch.
+        checkpoints: Vec<(Epoch, TestCheckpoint)>,
+    }
+
+    /// A checkpoint of the boundary block that introduces `epoch`, with its finalization if
+    /// `finalized`.
+    fn boundary_checkpoint(
+        epoch: Epoch,
+        participants: &[mocks::TestPublicKey],
+        schemes: &[mocks::TestScheme],
+        finalized: bool,
+    ) -> TestCheckpoint {
+        let (block, _) = boundary_block(epoch, participants[0].clone(), participants);
+        let finalization = finalized.then(|| boundary_finalization(epoch, block.digest(), schemes));
+        Checkpoint::new(
+            Digested::precomputed(block.clone(), block.digest()),
+            finalization,
+        )
     }
 
     async fn start_marshal(
@@ -1096,12 +1189,13 @@ mod tests {
             // material pairs the plan's floor with the discovered info.
             let plan = plan.set_floor(artifact.floor.clone()).await;
             assert_eq!(plan.floor(), Some(&persisted));
-            StateSyncPlan::init(
+            StateSyncPlan::<mocks::TestScheme, mocks::TestMarshalVariant>::init(
                 context.child("dkg"),
                 StateSyncConfig {
                     partition_prefix: "floor".into(),
                     max_participants: NZU32!(16),
                     max_supported_mode: max_supported_mode(),
+                    block_codec_config: (),
                 },
                 Some(StateSync {
                     info: artifact.info,
@@ -1536,7 +1630,7 @@ mod tests {
     }
 
     #[test]
-    fn serving_answers_finalization_and_block_requests_from_marshal() {
+    fn serving_answers_finalization_and_block_requests_from_checkpoint() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let mut harness = Harness::start(&mut context).await;
@@ -1622,6 +1716,81 @@ mod tests {
                 },
                 _ = context.sleep(Duration::from_millis(100)) => {},
             };
+        });
+    }
+
+    /// The source serves an epoch's boundary from its plan's checkpoint, so a joiner resolves the
+    /// epoch from a source whose marshal stores neither the boundary block nor its finalization.
+    #[test]
+    fn serves_checkpoint_after_marshal_drops_boundary() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let checkpoint =
+                boundary_checkpoint(Epoch::new(1), &fixture.participants, &fixture.schemes, true);
+            let source = Source {
+                marshal: Vec::new(),
+                checkpoints: vec![(Epoch::new(1), checkpoint)],
+            };
+            let mut harness =
+                Harness::start_source(&mut context, fixture, source, Epoch::zero(), None).await;
+            let subscription = harness.joiner.subscribe();
+            let target = harness.complete_target_sample();
+
+            // Only the source answers boundary requests, so the artifact resolves from its
+            // checkpoint.
+            let artifact = subscription.await.expect("artifact must resolve");
+            assert_eq!(artifact.floor, target);
+            assert_artifact(
+                artifact,
+                &harness.boundary_finalization,
+                &harness.boundary_sharing,
+                &harness.participants,
+            );
+        });
+    }
+
+    /// The source answers no boundary request for an epoch whose checkpoint lacks a
+    /// finalization, even when its marshal stores the boundary.
+    #[test]
+    fn serving_ignores_unfinalized_checkpoint() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let unfinalized = boundary_checkpoint(
+                Epoch::new(1),
+                &fixture.participants,
+                &fixture.schemes,
+                false,
+            );
+            let source = Source {
+                marshal: vec![Epoch::new(1)],
+                checkpoints: vec![(Epoch::new(1), unfinalized)],
+            };
+            let mut harness =
+                Harness::start_source(&mut context, fixture, source, Epoch::zero(), None).await;
+
+            // The source handles requests in order and the link delivers its responses in
+            // order, so the first response answers the latest request only if the source
+            // ignored every request before it.
+            harness.request_from_source(wire::Message::BoundaryRequest(Epoch::new(1)));
+            harness.request_from_source(wire::Message::BlockRequest(Epoch::new(1)));
+            harness.request_from_source(wire::Message::LatestRequest);
+            let (_peer, message) = harness
+                .client_boundary_receiver
+                .recv()
+                .await
+                .expect("latest response must be delivered");
+            let response = wire::read_response::<mocks::TestScheme, mocks::TestMarshalVariant, _>(
+                message,
+                &harness.schemes[2].certificate_codec_config(),
+            )
+            .expect("response must decode")
+            .expect("response must carry a response tag");
+            let wire::Response::Latest(finalization) = response else {
+                panic!("source answered a boundary request it must ignore");
+            };
+            assert_eq!(finalization, harness.boundary_finalization);
         });
     }
 

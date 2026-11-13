@@ -1,5 +1,5 @@
 use super::ActorArtifact;
-use crate::dkg::ReshareBlock;
+use crate::dkg::{ReshareBlock, state_sync::Plan};
 use commonware_actor::mailbox::{Policy, Sender};
 use commonware_consensus::{
     marshal::core::{Mailbox as MarshalMailbox, Variant},
@@ -20,10 +20,12 @@ where
         /// Channel used to resolve the subscriber.
         response: oneshot::Sender<ActorArtifact<S, V>>,
     },
-    /// Attach marshal to serve boundary requests (see [`Mailbox::attach`]).
+    /// Attach marshal and the plan to serve peers' requests (see [`Mailbox::attach`]).
     Attach {
-        /// Marshal mailbox used to serve boundary requests.
+        /// Marshal mailbox that serves latest-finalization requests.
         marshal: MarshalMailbox<S, V>,
+        /// Plan whose checkpoints serve boundary requests.
+        plan: Plan<S, V>,
     },
 }
 
@@ -73,12 +75,15 @@ where
         receiver
     }
 
-    /// Attaches marshal so the actor can serve peers' requests.
+    /// Attaches marshal and the [`Plan`] so the actor can serve peers' requests.
+    ///
+    /// The actor answers latest-finalization requests from marshal and boundary requests from the
+    /// plan's checkpoints, so pass a clone of the plan given to the DKG actors.
     ///
     /// If subscribers are pending, the actor starts serving once they are
-    /// resolved or dropped. A source node can attach marshal without ever
-    /// subscribing, so it serves without sending discovery requests.
-    pub fn attach(&self, marshal: MarshalMailbox<S, V>) {
-        let _ = self.sender.enqueue(Message::Attach { marshal });
+    /// resolved or dropped. A source node can attach without ever subscribing,
+    /// so it serves without sending discovery requests.
+    pub fn attach(&self, marshal: MarshalMailbox<S, V>, plan: Plan<S, V>) {
+        let _ = self.sender.enqueue(Message::Attach { marshal, plan });
     }
 }

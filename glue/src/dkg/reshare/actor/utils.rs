@@ -17,8 +17,14 @@ use commonware_utils::{NZU32, NZUsize, acknowledgement::Exact, ordered::Set};
 use std::num::NonZeroU64;
 
 /// Mailbox paired with [`mocks::TestReshareActor`].
-pub(super) type TestMailbox =
-    Mailbox<mocks::TestBlock, mocks::TestBlsVariant, mocks::TestSigner, Exact>;
+pub(super) type TestMailbox = Mailbox<
+    mocks::TestBlock,
+    mocks::TestBlsVariant,
+    mocks::TestSigner,
+    mocks::TestScheme,
+    mocks::TestDigest,
+    Exact,
+>;
 
 /// Builds an unstarted actor with deterministic storage, networking, and marshal fixtures.
 pub(super) async fn new_actor(

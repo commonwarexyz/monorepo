@@ -11,12 +11,12 @@ use crate::dkg::{
     types::{EpochInfo, EpochOutcome, Participants, Payload, SchemeInfo},
 };
 use commonware_consensus::{
-    Block,
+    Block, Heightable as _,
     marshal::{
         Identifier,
-        core::{Processed, Variant as MarshalVariant},
+        core::{CommitmentFallback, Processed, Variant as MarshalVariant},
     },
-    simplex::scheme::Scheme as SimplexScheme,
+    simplex::{scheme::Scheme as SimplexScheme, types::Finalization},
     types::{Epoch, EpochPhase, Epocher, FixedEpocher, Height},
 };
 use commonware_cryptography::{
@@ -143,6 +143,19 @@ async fn register_and_mark<R: Registrar>(
 ) {
     registrar.register(epoch, scheme_info).await;
     fence.mark(epoch);
+}
+
+/// Returns whether a startup can resume from marshal's processed position without
+/// reading the state-sync floor block at `height`.
+///
+/// Marshal may deliver a subscribed block before it stores the block durably, so a
+/// crash can leave the floor's height recorded in the plan while marshal restarts
+/// with no processed position or one below the floor. Marshal is then fetching the
+/// floor block or holds it as its anchor, and the startup must wait for it.
+pub(super) fn floor_processed<B>(processed: &Option<(Processed, B)>, height: Height) -> bool {
+    processed
+        .as_ref()
+        .is_some_and(|(processed, _)| processed.height() >= height)
 }
 
 /// Returns the later of marshal's processed position and the parent of the
@@ -310,13 +323,17 @@ where
     }
 
     /// Returns the [`EpochInfo`] carried by the finalized boundary block that
-    /// introduced `epoch` (`None` if marshal does not have the block).
+    /// introduced `epoch`, read from the epoch's checkpoint in the plan and
+    /// otherwise from marshal (`None` if neither holds the block).
     ///
     /// Panics if the block carries no [`EpochInfo`].
     async fn boundary_epoch_info(
         &mut self,
         epoch: Epoch,
     ) -> Option<EpochInfo<V, C::PublicKey, B::Directory>> {
+        if let Some(checkpoint) = self.state_sync.checkpoint(epoch).await {
+            return Some(checkpoint.info());
+        }
         let height = epoch
             .previous()
             .and_then(|e| self.epocher.last(e))
@@ -346,6 +363,44 @@ where
             share,
         );
         register_and_mark(&self.registrar, &self.fence, info.epoch, scheme_info).await;
+    }
+
+    /// Returns the height of the state-sync `floor` block, and the block itself when
+    /// startup needs it.
+    ///
+    /// When the plan has recorded the height and marshal has processed it, the actor
+    /// resumes from marshal's anchor without the floor block, so marshal may prune it.
+    /// Otherwise this registers the epoch of `info`, so the orchestrator can enter it
+    /// without waiting for the floor block. It then waits for the block from marshal and
+    /// records its height if the plan has none.
+    pub(super) async fn resolve_floor(
+        &mut self,
+        store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
+        anchor: &Option<(Processed, MV::Block)>,
+        info: &EpochInfo<V, C::PublicKey, B::Directory>,
+        floor: Finalization<S, MV::Commitment>,
+    ) -> (Height, Option<MV::Block>) {
+        let known = self.state_sync.floor_height().await;
+        if let Some(height) = known
+            && floor_processed(anchor, height)
+        {
+            return (height, None);
+        }
+
+        let share = self.recovered_share(store, info).await;
+        self.register_epoch(info, share).await;
+        let block = self
+            .marshal
+            .subscribe_by_commitment(floor.proposal.payload, CommitmentFallback::Wait)
+            .await
+            .expect("marshal must yield state sync floor block");
+        let height = block.height();
+        if known.is_none() {
+            self.state_sync
+                .record_floor_height(self.context.as_present().child("state_sync"), height)
+                .await;
+        }
+        (height, Some(block))
     }
 
     pub(super) fn prepare_epoch(
@@ -403,7 +458,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        dealer_for_phase, recovered_share, register_and_mark, startup,
+        dealer_for_phase, floor_processed, recovered_share, register_and_mark, startup,
         state_sync_skips_inclusion_prefix,
     };
     use crate::dkg::{
@@ -473,6 +528,31 @@ mod tests {
         assert_eq!(tip(stored(1), Some(3)), covered(2));
         assert_eq!(tip(absent(2), Some(3)), covered(2));
         assert_eq!(tip(stored(4), Some(3)), covered(4));
+    }
+
+    /// A recorded floor height lets a restart skip the floor block only once marshal
+    /// has processed the floor. With no processed position, or one below the floor,
+    /// the restart must wait for the block.
+    #[test]
+    fn recorded_floor_resumes_only_once_processed() {
+        let floor = Height::new(3);
+        let anchor = |processed| Some((processed, ()));
+
+        assert!(!floor_processed::<()>(&None, floor));
+        assert!(!floor_processed(
+            &anchor(Processed::Absent(Height::new(2))),
+            floor
+        ));
+        assert!(!floor_processed(
+            &anchor(Processed::Block(Height::new(2))),
+            floor
+        ));
+        assert!(floor_processed(&anchor(Processed::Absent(floor)), floor));
+        assert!(floor_processed(&anchor(Processed::Block(floor)), floor));
+        assert!(floor_processed(
+            &anchor(Processed::Block(Height::new(5))),
+            floor
+        ));
     }
 
     #[test]

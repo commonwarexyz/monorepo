@@ -11,6 +11,7 @@ use crate::dkg::{
     types::{EpochInfo, EpochOutcome, Payload},
 };
 use commonware_actor::mailbox::Sender as ActorSender;
+use commonware_codec::Codec;
 use commonware_consensus::{
     Block as _, Heightable as _,
     marshal::{ancestry::BoxedAncestry, core::Variant as MarshalVariant},
@@ -594,7 +595,7 @@ where
 impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
     E: Spawner + CryptoRng + Metrics + Clock + RuntimeStorage,
-    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey> + Codec,
     V: BlsVariant,
     C: Signer,
     M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
@@ -1493,8 +1494,14 @@ mod tests {
     type TestResponse = EpochInfoResponse<TestBlsVariant, PrivateKey>;
     type TestArtifacts = ArtifactCache<TestBlsVariant, PrivateKey, Unit>;
     type TestRequests = ArtifactRequests<TestBlock, TestBlsVariant, PrivateKey>;
-    type TestInclusionMailbox =
-        crate::dkg::reshare::Mailbox<TestBlock, TestBlsVariant, PrivateKey, Exact>;
+    type TestInclusionMailbox = crate::dkg::reshare::Mailbox<
+        TestBlock,
+        TestBlsVariant,
+        PrivateKey,
+        mocks::TestScheme,
+        mocks::TestDigest,
+        Exact,
+    >;
     type TestInclusionStore =
         Store<deterministic::Context, MemorySecretStore, TestBlsVariant, PublicKey>;
 
@@ -1780,7 +1787,7 @@ mod tests {
     ) -> <Exact as Acknowledgement>::Waiter {
         let (ack, waiter) = Exact::handle();
         assert_eq!(
-            mailbox.report(marshal::Update::Block(block.clone(), ack)),
+            mailbox.report(mocks::block_update(block.clone(), ack)),
             Feedback::Ok
         );
         waiter
@@ -2298,7 +2305,7 @@ mod tests {
 
             let (final_ack, final_waiter) = Exact::handle();
             assert_eq!(
-                mailbox.report(marshal::Update::Block(final_block, final_ack)),
+                mailbox.report(mocks::block_update(final_block, final_ack)),
                 Feedback::Ok
             );
             assert!(
@@ -2433,10 +2440,7 @@ mod tests {
             // anchor and resolves the detached request as unavailable.
             let (midpoint_ack, midpoint_waiter) = Exact::handle();
             assert_eq!(
-                mailbox.report(marshal::Update::<TestBlock, Exact>::Block(
-                    canonical_midpoint,
-                    midpoint_ack,
-                )),
+                mailbox.report(mocks::block_update(canonical_midpoint, midpoint_ack)),
                 Feedback::Ok
             );
             midpoint_waiter
@@ -2459,7 +2463,7 @@ mod tests {
 
             let (parent_ack, parent_waiter) = Exact::handle();
             assert_eq!(
-                mailbox.report(marshal::Update::Block(canonical_four.clone(), parent_ack)),
+                mailbox.report(mocks::block_update(canonical_four.clone(), parent_ack)),
                 Feedback::Ok
             );
             parent_waiter
@@ -2494,7 +2498,7 @@ mod tests {
 
             let (final_ack, final_waiter) = Exact::handle();
             assert_eq!(
-                mailbox.report(marshal::Update::Block(final_block, final_ack)),
+                mailbox.report(mocks::block_update(final_block, final_ack)),
                 Feedback::Ok
             );
             final_waiter
@@ -2596,10 +2600,7 @@ mod tests {
             });
             let (midpoint_ack, midpoint_waiter) = Exact::handle();
             assert_eq!(
-                mailbox.report(marshal::Update::<TestBlock, Exact>::Block(
-                    canonical_midpoint,
-                    midpoint_ack,
-                )),
+                mailbox.report(mocks::block_update(canonical_midpoint, midpoint_ack)),
                 Feedback::Ok
             );
             midpoint_waiter
@@ -2635,7 +2636,7 @@ mod tests {
             // scan before its cached losing-view result can escape.
             let (five_ack, five_waiter) = Exact::handle();
             assert_eq!(
-                mailbox.report(marshal::Update::Block(canonical_five, five_ack)),
+                mailbox.report(mocks::block_update(canonical_five, five_ack)),
                 Feedback::Ok
             );
             release.send(()).expect("scan should still be active");
@@ -2646,7 +2647,7 @@ mod tests {
 
             let (six_ack, six_waiter) = Exact::handle();
             assert_eq!(
-                mailbox.report(marshal::Update::Block(canonical_six, six_ack)),
+                mailbox.report(mocks::block_update(canonical_six, six_ack)),
                 Feedback::Ok
             );
             six_waiter
@@ -2655,7 +2656,7 @@ mod tests {
 
             let (final_ack, final_waiter) = Exact::handle();
             assert_eq!(
-                mailbox.report(marshal::Update::Block(canonical_final, final_ack)),
+                mailbox.report(mocks::block_update(canonical_final, final_ack)),
                 Feedback::Ok
             );
             final_waiter

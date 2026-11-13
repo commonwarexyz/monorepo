@@ -1,6 +1,9 @@
 //! Mailbox for the [`super::Stateful`] actor.
 
-use crate::stateful::{Application, actor::core::verifications::VerificationRequest};
+use crate::stateful::{
+    Application,
+    actor::{BlockDigest, core::verifications::VerificationRequest},
+};
 use commonware_actor::{
     Feedback,
     mailbox::{Overflow, Policy, Sender},
@@ -12,6 +15,7 @@ use commonware_consensus::{
         Update,
         ancestry::{Ancestry, BoxedAncestry},
     },
+    simplex::scheme::Scheme,
 };
 use commonware_cryptography::{Digested, Digestible};
 use commonware_runtime::telemetry::traces::TracedExt as _;
@@ -358,13 +362,14 @@ impl<E, A> Reporter for Mailbox<E, A>
 where
     E: Send + 'static,
     A: Application<E>,
+    A::SigningScheme: Scheme<BlockDigest<A, E>>,
 {
-    type Activity = Update<A::Block>;
+    type Activity = Update<A::Block, A::SigningScheme, BlockDigest<A, E>>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         let message = match activity {
             Update::Tip(_, _, _) => return Feedback::Ok,
-            Update::Block(block, acknowledgement) => {
+            Update::Block(block, _, acknowledgement) => {
                 let context = block.context();
                 let span = info_span!(
                     "stateful.mailbox.finalized",
@@ -387,9 +392,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::Mailbox;
-    use crate::stateful::tests::mocks::{TestApp, TestBlock, digested};
+    use crate::stateful::tests::mocks::{TestApp, TestBlock, block_update, digested};
     use commonware_actor::{Feedback, mailbox};
-    use commonware_consensus::{Reporter as _, marshal::Update};
+    use commonware_consensus::Reporter as _;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_utils::{
         NZUsize,
@@ -410,11 +415,11 @@ mod tests {
             let (first_ack, first_receipt) = Exact::handle();
             let (second_ack, second_receipt) = Exact::handle();
             assert_eq!(
-                mailbox.report(Update::Block(digested(TestBlock::new(1, 1)), first_ack)),
+                mailbox.report(block_update(digested(TestBlock::new(1, 1)), first_ack)),
                 Feedback::Ok,
             );
             assert_eq!(
-                mailbox.report(Update::Block(digested(TestBlock::new(2, 2)), second_ack)),
+                mailbox.report(block_update(digested(TestBlock::new(2, 2)), second_ack)),
                 Feedback::Backoff,
             );
 

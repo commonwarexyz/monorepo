@@ -186,6 +186,16 @@
 //! follows the reshare ceremony for the remainder of the epoch and resumes at
 //! the next boundary.
 //!
+//! ```text
+//!   epoch f:  |-------- dealing --------|--- dealer log inclusion ---|
+//!           first                   midpoint                       final
+//!                   ^                       ^
+//!                   floor here: every dealer log is delivered,
+//!                   so the actor participates
+//!                                           floor here: logs before it
+//!                                           were skipped, so the actor follows
+//! ```
+//!
 //! State-sync startup registers the certified current-epoch consensus scheme
 //! before entering follower mode. A follower with a recovered share may sign
 //! ordinary non-boundary blocks, but cannot locally derive the next
@@ -199,6 +209,13 @@
 //! without it. The actor logs a warning when state sync makes such a validator
 //! follow the epoch.
 //!
+//! Startup from state-sync material records the floor block's height with the
+//! material once marshal yields that block. A later restart in the synced epoch
+//! that is not given the material again takes the height from the plan, so it
+//! makes the same choice to participate or follow even once marshal has pruned
+//! the floor block. [Marshal Retention](crate::dkg#marshal-retention) describes
+//! when a restart still reads the floor block.
+//!
 //! A `player` that missed private dealings may need public reveals to reconstruct
 //! its share, but a revealed share is no longer private. Announcing a node as a
 //! `next_player` one epoch early gives it time to state sync and be online for the
@@ -206,13 +223,16 @@
 //!
 //! # Persistence and Recovery
 //!
-//! Public protocol messages (dealer public messages, player acknowledgements,
-//! and finalized dealer logs) are journaled under [`Config::partition_prefix`].
+//! Public protocol messages (dealer public messages, player acknowledgements, and
+//! finalized dealer logs) are journaled under [`Config::partition_prefix`].
 //! Secret material is held only in the [`SecretStore`](crate::dkg::SecretStore).
 //! The current epoch's [`EpochInfo`](crate::dkg::types::EpochInfo) is not
-//! journaled: after a restart it is read from the finalized boundary block, or
-//! from the [`state_sync::Plan`](crate::dkg::state_sync::Plan) after state sync.
-//! If neither is available locally, the actor follows that epoch.
+//! journaled. After a restart, the actor reads it from the first available of
+//! state-sync material in the [`state_sync::Plan`](crate::dkg::state_sync::Plan),
+//! the boundary block in the epoch's checkpoint there, and that block in marshal.
+//! If none is available locally, the actor follows that epoch.
+//! [Marshal Retention](crate::dkg#marshal-retention) describes when each source
+//! applies.
 //!
 //! A player records a dealing before acknowledging it. Before acknowledging a
 //! finalized inclusion-window block, a participating actor records any dealer log

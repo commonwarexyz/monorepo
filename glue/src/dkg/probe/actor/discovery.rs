@@ -107,7 +107,7 @@ where
         BSE: Sender<PublicKey = S::PublicKey>,
         BRE: Receiver<PublicKey = S::PublicKey>,
     {
-        let mut marshal = None;
+        let mut attached = None;
         let mut deadline = self.context.current() + self.retry_timeout.get();
 
         select_loop! {
@@ -115,7 +115,7 @@ where
             on_start => {
                 self.subscribers
                     .retain(|subscriber| !subscriber.is_closed());
-                if marshal.is_some() && self.subscribers.is_empty() {
+                if attached.is_some() && self.subscribers.is_empty() {
                     break;
                 }
 
@@ -150,8 +150,8 @@ where
                         }
                     }
                 }
-                Message::Attach { marshal: attached } => {
-                    marshal = Some(attached);
+                Message::Attach { marshal: attached_marshal, plan: attached_plan } => {
+                    attached = Some((attached_marshal, attached_plan));
                 }
             },
             Ok((peer, message)) = boundary_receiver.recv() else {
@@ -173,12 +173,13 @@ where
             },
         }
 
+        let (marshal, plan) = attached.expect("marshal and plan must be attached before serving");
         Service {
             context: self.context,
             mailbox: self.mailbox,
-            marshal: marshal.expect("serving requires attached marshal"),
+            marshal,
+            plan,
             blocker: self.blocker,
-            epocher: self.epocher,
             artifact: self.artifact,
         }
         .run(boundary_sender, boundary_receiver)

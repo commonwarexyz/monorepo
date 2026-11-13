@@ -284,6 +284,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
             partition_prefix: partition_prefix.to_string(),
             max_participants: MAX_PARTICIPANTS,
             max_supported_mode: MAX_SUPPORTED_MODE,
+            block_codec_config: (),
         },
         state_sync,
     )
@@ -376,7 +377,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
                 track_historical_votes: false,
             },
             gate,
-            state_sync,
+            state_sync: state_sync.clone(),
             blocks_per_epoch: BLOCKS_PER_EPOCH,
             mailbox_size: MAILBOX_SIZE,
             partition_prefix: format!("{partition_prefix}-orchestrator"),
@@ -393,7 +394,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
         )),
     ));
     let marshal_handle = marshal_actor.start(reporters, buffer, resolver);
-    probe_mailbox.attach(marshal.clone());
+    probe_mailbox.attach(marshal.clone(), state_sync);
     let stateful_handle = stateful_actor.start();
 
     if let Err(err) = Handle::select([
