@@ -297,11 +297,15 @@ where
         _context: (deterministic::Context, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
     ) -> bool {
+        // Record that verification of the block at the head of the ancestry has started.
         let digest = ancestry
             .peek()
             .expect("ancestry must start at the block under verification")
             .digest();
         self.observed.lock().push(Verification::Started(digest));
+
+        // Never resolve. The guard records the cancellation of this digest when it is dropped,
+        // which happens only when the caller drops this future.
         let _cancellation = Cancellation {
             digest,
             observed: self.observed.clone(),

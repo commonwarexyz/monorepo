@@ -6221,6 +6221,7 @@ mod tests {
     fn test_certify_releases_conflicting_verification() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
+            // Create the validator set and start the simulated network.
             let Fixture {
                 participants,
                 schemes,
@@ -6234,6 +6235,7 @@ mod tests {
             )
             .await;
 
+            // Start the marshal and the shard engine of this validator, participant 0.
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
             let setup = CodingHarness::setup_validator(
                 context.child("validator").with_attribute("index", 0),
@@ -6245,6 +6247,7 @@ mod tests {
             let marshal = setup.mailbox;
             let shards = setup.extra;
 
+            // Build the genesis block that the parent extends.
             let genesis_ctx = CodingCtx {
                 round: Round::zero(),
                 leader: default_leader(),
@@ -6253,6 +6256,7 @@ mod tests {
             let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
             let genesis_parent_commitment = genesis_coding_commitment(&genesis);
 
+            // The parent at view 1 is available locally.
             let parent_round = Round::new(Epoch::zero(), View::new(1));
             let parent_ctx = CodingCtx {
                 round: parent_round,
@@ -6264,6 +6268,8 @@ mod tests {
             let parent_commitment = coded_parent.commitment();
             assert!(marshal.verified(parent_round, coded_parent).await);
 
+            // Participant 1 equivocates at view 2. It proposes two different children of the
+            // parent, A and B, with the same context. Their commitments differ.
             let round = Round::new(Epoch::zero(), View::new(2));
             let ctx = CodingCtx {
                 round,
@@ -6278,6 +6284,8 @@ mod tests {
             let (a_commitment, b_commitment) = (coded_a.commitment(), coded_b.commitment());
             assert_ne!(a_commitment, b_commitment);
 
+            // Wrap an application that records each verification it is asked to start and
+            // never resolves it, so a started verification stays observable.
             let application: RecordingVerifyingApp<CodingB, S> = RecordingVerifyingApp::new();
             let cfg = MarshaledConfig {
                 application: application.clone(),
@@ -6311,6 +6319,9 @@ mod tests {
                 vec![Verification::Started(b_digest)],
                 "the application must not verify a block that conflicts with the certified one"
             );
+
+            // The test keeps both receivers until here, so the wrapper never sees consensus drop
+            // a request.
             drop((verify_a, certify_b));
         });
     }
@@ -6322,6 +6333,7 @@ mod tests {
     fn test_certify_releases_conflicting_reproposal() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
+            // Create the validator set and start the simulated network.
             let Fixture {
                 participants,
                 schemes,
@@ -6335,6 +6347,7 @@ mod tests {
             )
             .await;
 
+            // Start the marshal of this validator, participant 0.
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
             let setup = CodingHarness::setup_validator(
                 context.child("validator").with_attribute("index", 0),
@@ -6344,6 +6357,7 @@ mod tests {
             )
             .await;
 
+            // Wrap an application whose verification passes.
             let application: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new();
             let cfg = MarshaledConfig {
                 application,
@@ -6373,6 +6387,9 @@ mod tests {
             let coded_boundary: TestCodedBlock = encode_block(boundary, coding_config);
             let boundary_commitment = coded_boundary.commitment();
 
+            // The round after the boundary block's view, led by participant 1 with the boundary
+            // block as parent. B builds on the boundary block at the next height, and is the
+            // block the rest of the network notarizes in this round.
             let round = Round::new(Epoch::zero(), boundary_view.next());
             let ctx = CodingCtx {
                 round,

@@ -925,6 +925,7 @@ mod tests {
         NZUsize,
         channel::{fallible::OneshotExt, oneshot::error::TryRecvError},
     };
+    use rstest::rstest;
     use std::time::Duration;
 
     #[test_traced("INFO")]
@@ -1461,9 +1462,15 @@ mod tests {
     /// A leader that equivocates sends this validator block A while the rest of the network
     /// notarizes block B of the same round. Certifying B claims the round, so the application
     /// must not start verifying A afterwards and must stop if it already started.
-    fn certify_releases_conflicting_verification(progress: Progress) {
+    #[rstest]
+    #[case::awaiting_block(Progress::AwaitingBlock)]
+    #[case::awaiting_parent(Progress::AwaitingParent)]
+    #[case::verifying(Progress::Verifying)]
+    #[test_traced("WARN")]
+    fn test_certify_releases_conflicting_verification(#[case] progress: Progress) {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
+            // Create the validator set and start the simulated network.
             let Fixture {
                 participants,
                 schemes,
@@ -1477,6 +1484,8 @@ mod tests {
             )
             .await;
 
+            // Start the marshal of this validator, participant 0. Blocks arrive through the
+            // broadcast buffer.
             let me = participants[0].clone();
             let setup = StandardHarness::setup_validator(
                 context.child("validator").with_attribute("index", 0),
@@ -1488,6 +1497,8 @@ mod tests {
             let marshal = setup.mailbox;
             let buffer = setup.extra;
 
+            // Wrap an application that records when verification of a block starts and when it
+            // is cancelled. Its verification never resolves, so it can only end by cancellation.
             let application: RecordingVerifyingApp<B, S> = RecordingVerifyingApp::new();
             let mut marshaled = Deferred::new(
                 context.child("deferred"),
@@ -1496,6 +1507,8 @@ mod tests {
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
             );
 
+            // Build a parent at height 1 and two different blocks at height 2, A and B. Both
+            // carry the same context of round 2. That is the leader's equivocation.
             let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let parent = make_raw_block(genesis.digest(), Height::new(1), 100);
             let parent_digest = parent.digest();
@@ -1528,6 +1541,9 @@ mod tests {
             // Consensus asks to verify A, the proposal the leader sent this validator.
             let mut verify_a = marshaled.verify(ctx, a_digest).await;
             context.sleep(Duration::from_millis(10)).await;
+
+            // The optimistic verdict is delivered only if A is available, and the application
+            // starts verifying A only if the parent is available too.
             let (optimistic, started) = match progress {
                 Progress::AwaitingBlock => (Err(TryRecvError::Empty), vec![]),
                 Progress::AwaitingParent => (Ok(true), vec![]),
@@ -1539,6 +1555,9 @@ mod tests {
             // B is notarized, so consensus asks to certify it.
             let certify_b = marshaled.certify(round, b_digest).await;
             context.sleep(Duration::from_millis(10)).await;
+
+            // A verdict that was still pending is closed without an answer, because B claimed
+            // the round.
             if matches!(progress, Progress::AwaitingBlock) {
                 assert_eq!(
                     verify_a.try_recv(),
@@ -1570,23 +1589,11 @@ mod tests {
                         .all(|verification| observed.contains(verification)),
                 "the application must observe exactly {expected:?}, observed {observed:?}"
             );
+
+            // The test keeps both receivers until here, so the wrapper never sees consensus drop
+            // a request.
             drop((verify_a, certify_b));
         });
-    }
-
-    #[test_traced("WARN")]
-    fn test_certify_releases_conflicting_verification_awaiting_block() {
-        certify_releases_conflicting_verification(Progress::AwaitingBlock);
-    }
-
-    #[test_traced("WARN")]
-    fn test_certify_releases_conflicting_verification_awaiting_parent() {
-        certify_releases_conflicting_verification(Progress::AwaitingParent);
-    }
-
-    #[test_traced("WARN")]
-    fn test_certify_releases_conflicting_verification_in_flight() {
-        certify_releases_conflicting_verification(Progress::Verifying);
     }
 
     /// A boundary re-proposal stores the parent block itself at the
