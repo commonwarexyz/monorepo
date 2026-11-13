@@ -72,12 +72,14 @@ pub(in crate::sha256::simd) unsafe fn hash_pair_72(
     unsafe {
         core::arch::asm!(
             include_str!("sha256_pair_macros.asm"),
-            // The kernel must start with clean upper halves of the vector
-            // registers. The SHA instructions have only a legacy SSE encoding,
-            // and the rounds alternate them with VEX instructions. If the
-            // upper halves are dirty, some Intel CPUs pay a state transition
-            // at each switch between the two encodings. On Ice Lake this is
-            // about 60 ns per switch, and one call makes 256 switches.
+            // Clear the upper halves of the vector registers. This is only for
+            // speed: the kernel gives the same result if they are dirty.
+            //
+            // The SHA instructions have only a legacy SSE encoding, and the
+            // rounds alternate them with VEX instructions. If the upper halves
+            // are dirty, some Intel CPUs pay a state transition at each switch
+            // between the two encodings. On Ice Lake this is about 60 ns per
+            // switch, and one call makes 256 switches.
             //
             // The compiler adds `vzeroupper` before a call but not before
             // inline asm. The upper halves are thus dirty if the compiler
@@ -139,7 +141,7 @@ pub(in crate::sha256::simd) unsafe fn hash_pair_64(
     unsafe {
         core::arch::asm!(
             include_str!("sha256_pair_macros.asm"),
-            // See `hash_pair_72` for why the upper halves must be clean.
+            // See `hash_pair_72` for why the upper halves are cleared.
             "vzeroupper",
             include_str!("sha256_pair_block1_64.asm"),
             include_str!("sha256_pair_tail0.asm"),
