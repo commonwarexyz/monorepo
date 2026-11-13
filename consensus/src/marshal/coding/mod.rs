@@ -3451,11 +3451,45 @@ mod tests {
     /// A validator can hold its assigned shard from the leader and too few gossip shards when a
     /// notarization arrives before the proposal could be verified. Certification reports the
     /// commitment to the shard engine, and the buffered assigned shard counts toward
-    /// reconstruction and is gossiped exactly once.
+    /// reconstruction and is gossiped.
     #[test_traced("WARN")]
     fn test_certify_reconstructs_with_buffered_assigned_shard() {
+        assigned_shard_is_checked_and_gossiped(Asked::Certify);
+    }
+
+    /// A re-proposal's verification fetches the block before it reports the commitment to the
+    /// shard engine. When the re-proposal is notarized while that fetch is pending, certification
+    /// reports the commitment, and the buffered assigned shard counts toward reconstruction and
+    /// is gossiped.
+    #[test_traced("WARN")]
+    fn test_certify_reconstructs_while_reproposal_verify_awaits_block() {
+        assigned_shard_is_checked_and_gossiped(Asked::CertifyDuringVerify);
+    }
+
+    /// A signer's verification of a proposal waits for its assigned shard. Verification reports
+    /// the commitment to the shard engine, so the shard is checked when the leader delivers it,
+    /// the verification resolves, and the shard is gossiped.
+    #[test_traced("WARN")]
+    fn test_verify_resolves_once_assigned_shard_arrives() {
+        assigned_shard_is_checked_and_gossiped(Asked::Verify);
+    }
+
+    /// What consensus asks of the validator in [`assigned_shard_is_checked_and_gossiped`].
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Asked {
+        /// `verify`, before the assigned shard arrives.
+        Verify,
+        /// `certify`, without `verify`.
+        Certify,
+        /// `certify`, while the `verify` of a re-proposal awaits its block.
+        CertifyDuringVerify,
+    }
+
+    /// Runs one validator whose peers only send shards, and asks it to verify or certify a
+    /// proposal of peer 1.
+    fn assigned_shard_is_checked_and_gossiped(asked: Asked) {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
+        runner.start(move |mut context| async move {
             let Fixture {
                 participants,
                 schemes,
@@ -3527,40 +3561,85 @@ mod tests {
             let parent_commitment = coded_parent.commitment();
             assert!(marshal.verified(parent_round, coded_parent).await);
 
+            // Peer 1 proposes a child of the parent at view 2. Only the epoch's boundary block
+            // can be re-proposed, so the child is that block when a re-proposal is verified.
             let child_round = Round::new(Epoch::zero(), View::new(2));
             let child_ctx = CodingCtx {
                 round: child_round,
                 leader: participants[1].clone(),
                 parent: (View::new(1), parent_commitment),
             };
-            let child = make_coding_block(child_ctx, parent.digest(), Height::new(2), 200);
+            let height = match asked {
+                Asked::CertifyDuringVerify => Height::new(BLOCKS_PER_EPOCH.get() - 1),
+                Asked::Verify | Asked::Certify => Height::new(2),
+            };
+            let child = make_coding_block(child_ctx.clone(), parent.digest(), height, 200);
             let coded_child: TestCodedBlock = encode_block(child, coding_config);
             let child_commitment = coded_child.commitment();
-
-            // The leader delivers this validator's assigned shard, and one peer gossips its own.
-            // Two shards decode the block.
             let assigned = coded_child.shard(0).expect("shard must exist").encode();
-            peer_senders[0].send(Recipients::One(me.clone()), assigned.clone(), true);
-            let gossip = coded_child.shard(2).expect("shard must exist").encode();
-            peer_senders[1].send(Recipients::One(me.clone()), gossip, true);
-            context.sleep(Duration::from_millis(250)).await;
 
-            // Certification is requested without a verification request.
-            let certify_rx = marshaled.certify(child_round, child_commitment).await;
-            select! {
-                result = certify_rx => {
-                    assert!(
-                        result.expect("certify must resolve"),
-                        "certify must reconstruct the candidate with the buffered assigned shard"
-                    );
-                },
-                _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("certify must reconstruct with the buffered assigned shard");
-                },
+            if asked == Asked::Verify {
+                // Verification is requested before the assigned shard arrives, and waits for it.
+                let mut verify_rx = marshaled.verify(child_ctx, child_commitment).await;
+                context.sleep(Duration::from_millis(250)).await;
+                assert!(matches!(verify_rx.try_recv(), Err(TryRecvError::Empty)));
+
+                // The leader delivers the assigned shard, and verification resolves.
+                peer_senders[0].send(Recipients::One(me.clone()), assigned.clone(), true);
+                select! {
+                    result = verify_rx => {
+                        assert!(
+                            result.expect("verify must resolve"),
+                            "verify must accept the proposal once its assigned shard is checked"
+                        );
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("verify must resolve once the assigned shard arrives");
+                    },
+                }
+            } else {
+                // A re-proposal of the block at view 3 is verified first. That verification
+                // fetches the block before it reports the commitment, and no peer answers the
+                // fetch. Otherwise no verification is requested.
+                let (round, mut pending) = match asked {
+                    Asked::CertifyDuringVerify => {
+                        let round = Round::new(Epoch::zero(), View::new(3));
+                        let ctx = CodingCtx {
+                            round,
+                            leader: participants[1].clone(),
+                            parent: (View::new(2), child_commitment),
+                        };
+                        (round, Some(marshaled.verify(ctx, child_commitment).await))
+                    }
+                    Asked::Verify | Asked::Certify => (child_round, None),
+                };
+
+                // The leader delivers this validator's assigned shard, and one peer gossips its
+                // own. Two shards decode the block.
+                peer_senders[0].send(Recipients::One(me.clone()), assigned.clone(), true);
+                let gossip = coded_child.shard(2).expect("shard must exist").encode();
+                peer_senders[1].send(Recipients::One(me.clone()), gossip, true);
+                context.sleep(Duration::from_millis(250)).await;
+
+                // Certification is requested while any verification is still pending.
+                if let Some(verify_rx) = pending.as_mut() {
+                    assert!(matches!(verify_rx.try_recv(), Err(TryRecvError::Empty)));
+                }
+                let certify_rx = marshaled.certify(round, child_commitment).await;
+                select! {
+                    result = certify_rx => {
+                        assert!(
+                            result.expect("certify must resolve"),
+                            "certify must reconstruct the candidate with the buffered assigned shard"
+                        );
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("certify must reconstruct with the buffered assigned shard");
+                    },
+                }
             }
 
-            // The assigned shard reaches the other participants as gossip exactly once, also
-            // after certification holds the block.
+            // The assigned shard reaches the other participants as gossip.
             select! {
                 message = peer_receivers[2].recv() => {
                     let (from, shard) = message.expect("gossip must arrive");
@@ -3570,12 +3649,6 @@ mod tests {
                 _ = context.sleep(Duration::from_secs(5)) => {
                     panic!("the assigned shard must be gossiped");
                 },
-            }
-            select! {
-                _ = peer_receivers[2].recv() => {
-                    panic!("the assigned shard must be gossiped once");
-                },
-                _ = context.sleep(Duration::from_millis(500)) => {},
             }
         })
     }
