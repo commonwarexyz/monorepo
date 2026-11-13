@@ -153,9 +153,10 @@ use tracing::{Instrument as _, debug, info_span};
 ///
 /// Verifying only the immediate parent is sufficient. The parent was either notarized by consensus
 /// or voted for by this participant (optimistic validation), and an honest vote is cast only after
-/// the block's context and parent digest are checked. Every parent digest in the ancestry chain
-/// back to genesis was therefore named by a round of consensus, and each ancestor certifies only
-/// after its own verification checks its height.
+/// the block's context and parent digest are checked. Each earlier ancestor was likewise voted for
+/// by an honest validator, so every parent digest in the ancestry chain back to genesis was named
+/// by a round of consensus. Each ancestor certifies only after its own verification checks its
+/// height.
 ///
 /// Applications do not need to re-implement these checks in their own verification logic.
 ///
