@@ -1953,6 +1953,7 @@ dependencies = [
  "commonware-utils",
  "criterion",
  "futures",
+ "num-traits",
  "paste",
  "pin-project",
  "rand 0.10.2",
