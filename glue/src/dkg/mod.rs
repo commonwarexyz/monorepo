@@ -105,10 +105,17 @@
 //! Ordinary restart loads the active epoch's [`types::EpochInfo`] from the boundary block
 //! that introduced it: genesis for epoch zero, or the previous epoch's final block.
 //!
-//! With stateful pruning, retain at least one epoch of marshal blocks so this boundary survives:
-//! `max_pending_acks + 1 + retained_marshal_blocks >= blocks_per_epoch`. Configure this through
-//! [`PruneConfig`](crate::stateful::PruneConfig). The settings are independent and no runtime
-//! check enforces their relationship. Without the boundary, the orchestrator cannot restart.
+//! With stateful pruning, set `retained_marshal_blocks >= blocks_per_epoch - 1` in
+//! [`PruneConfig`](crate::stateful::PruneConfig) so this boundary survives. The boundary can sit
+//! `blocks_per_epoch - 1` blocks below marshal's processed height, and while another reporter
+//! lags, that height can trail [`Stateful`](crate::stateful::Stateful) by marshal's whole pending
+//! acknowledgement window, leaving only `retained_marshal_blocks` blocks below it. The settings
+//! are independent and no runtime check enforces their relationship. Without the boundary, the
+//! orchestrator cannot restart.
+//!
+//! Installing a live marshal floor prunes finalized blocks below the floor's predecessor, so a
+//! live floor must also be the first block of an epoch, whose predecessor is the boundary that
+//! restart loads.
 //!
 //! Serving [`probe`] requests also requires the boundary finalization and block for every
 //! epoch served.
