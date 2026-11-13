@@ -181,9 +181,10 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// height that is not known to be finalized.
     ///
     /// With no finalized block recorded there, the step acquires the body by its commitment and
-    /// takes the parent it names as the next commitment. The first step reads the body of the
-    /// history's first commitment. When `history` is empty or holds only the parent, that is the
-    /// bound parent's body.
+    /// takes the parent it names as the next commitment. A full mailbox may discard a sample for a
+    /// height below a pending prune, and the step treats that as no block recorded. The first step
+    /// reads the body of the history's first commitment. When `history` is empty or holds only the
+    /// parent, that is the bound parent's body.
     ///
     /// An anchored history gives each commitment a height by its position, with the last at
     /// `parent_height`. If a block on the branch declares a height that is not one above its
