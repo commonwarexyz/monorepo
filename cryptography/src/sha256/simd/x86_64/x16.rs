@@ -75,9 +75,9 @@ pub(in crate::sha256::simd) unsafe fn hash_x16_equal(inputs: [&[u8]; LANES]) -> 
 
     let mut output = [Digest([0u8; DIGEST_LENGTH]); LANES];
     for (lane, digest) in output.iter_mut().enumerate() {
-        for word in 0..DIGEST_WORDS {
+        for (word, lanes) in state.0.iter().enumerate() {
             let offset = word * 4;
-            digest.0[offset..offset + 4].copy_from_slice(&state.0[word][lane].to_be_bytes());
+            digest.0[offset..offset + 4].copy_from_slice(&lanes[lane].to_be_bytes());
         }
     }
     output

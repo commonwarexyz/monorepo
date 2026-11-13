@@ -98,6 +98,11 @@ large_futures = "warn"
 # to avoid triggering this method make the code worse.
 suspicious_op_assign_impl = "allow"
 
+# cargo-udeps checks unused dependencies, so disable Cargo's built-in checks.
+[workspace.lints.cargo]
+unused_dependencies = "allow"
+unused_workspace_dependencies = "allow"
+
 [workspace.dependencies]
 ahash = { version = "0.8.12", default-features = false }
 anyhow = { version = "1.0.103", default-features = false }
@@ -192,7 +197,7 @@ opentelemetry = "0.32.0"
 opentelemetry-otlp = "0.32.0"
 opentelemetry_sdk = "0.32.1"
 p256 = { version = "0.14.0", default-features = false }
-parking_lot = "0.12.5"
+parking_lot = "0.13.0"
 paste = "1.0.15"
 pin-project = "1.1.13"
 proc-macro-crate = "3.5.0"

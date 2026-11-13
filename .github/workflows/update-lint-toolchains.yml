@@ -1,0 +1,83 @@
+name: Update Lint Toolchains
+
+on:
+  schedule:
+    - cron: '17 6 1 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: update-lint-toolchains
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+        with:
+          ref: main
+      - name: Configure swap
+        uses: ./.github/actions/swap
+      - name: Update pinned versions
+        run: |
+          python3 - <<'PY'
+          import datetime
+          from pathlib import Path
+          import re
+          import tomllib
+          import urllib.request
+
+          def manifest(channel):
+              url = f"https://static.rust-lang.org/dist/channel-rust-{channel}.toml"
+              with urllib.request.urlopen(url, timeout=60) as response:
+                  return tomllib.loads(response.read().decode())
+
+          stable = manifest("stable")
+          nightly = manifest("nightly")
+          clippy = stable["pkg"]["rust"]["version"].split()[0]
+          if not re.fullmatch(r"\d+\.\d+\.\d+", clippy):
+              raise ValueError(f"invalid stable version: {clippy}")
+          date = datetime.date.fromisoformat(nightly["date"])
+          rustfmt = f"nightly-{date.isoformat()}"
+          target = "x86_64-unknown-linux-gnu"
+          for channel, component in [(stable, "clippy-preview"), (nightly, "rustfmt-preview")]:
+              if not channel["pkg"][component]["target"][target]["available"]:
+                  raise ValueError(f"{component} is unavailable for {target}")
+
+          path = Path(".github/toolchains.toml")
+          contents = path.read_text()
+          for name, version in [("clippy", clippy), ("rustfmt", rustfmt)]:
+              contents, count = re.subn(
+                  rf'^{name} = "[^"]+"$',
+                  f'{name} = "{version}"',
+                  contents,
+                  flags=re.MULTILINE,
+              )
+              if count != 1:
+                  raise ValueError(f"expected exactly one {name} pin, found {count}")
+              print(f"{name}: {version}")
+          path.write_text(contents)
+          PY
+      - name: Open update PR
+        uses: peter-evans/create-pull-request@3ffccacd46053766916f087ce41d627c0b8cf2d1 # v8.1.3
+        with:
+          branch: ci/update-lint-toolchains
+          base: main
+          add-paths: .github/toolchains.toml
+          sign-commits: true
+          commit-message: '[ci] Bump Clippy and rustfmt toolchains'
+          title: '[ci] Bump Clippy and rustfmt toolchains'
+          draft: true
+          body: |
+            ## Overview
+
+            Monthly update of the Clippy and rustfmt pins in `.github/toolchains.toml`.
+            Review new lint and formatting rules and fix any failures before merging.
+
+            Approve the generated CI runs on this PR if GitHub requests it.

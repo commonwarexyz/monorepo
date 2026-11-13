@@ -28,6 +28,16 @@ Document public APIs clearly. Use `//!` for module docs, `///` for items, and in
 
 ## Tests and validation
 
+### Toolchain policy
+
+- Floating `stable`: builds and tests must pass before merging.
+- Pinned MSRV: must pass before merging; the version lives in `Cargo.toml`.
+- Floating `nightly` builds: informational; report and investigate failures.
+- Required nightly tooling (Miri, dependency checks, API checks, coverage, and fuzzing) uses a pinned nightly; Dylint uses its own pinned compiler.
+- Clippy/rustfmt: pin when needed to avoid lint and formatting churn. Keep all tooling pins in `.github/toolchains.toml` for local checks and CI.
+
+Compiler upgrades are inputs CI should test immediately so we catch compatibility regressions when Rust releases ship.
+
 Use `just` commands, which run tests through `nextest`. Start with the narrowest useful check:
 
 ```bash

@@ -1006,8 +1006,8 @@ impl Model for Workload {
                 }
             }
             if budget.sends > 0 {
-                for user in 0..users {
-                    if world.pending[user].is_some() {
+                for (user, pending) in world.pending.iter().enumerate().take(users) {
+                    if pending.is_some() {
                         continue;
                     }
                     for receiver in (0..users).filter(|receiver| *receiver != user) {
@@ -1022,8 +1022,8 @@ impl Model for Workload {
                 }
             }
             if budget.duplicates > 0 {
-                for user in 0..users {
-                    if world.pending[user].is_some() {
+                for (user, pending) in world.pending.iter().enumerate().take(users) {
+                    if pending.is_some() {
                         actions.push(Action::Resend { user });
                     }
                 }
@@ -1087,8 +1087,8 @@ impl Model for Workload {
             }
         }
         let last = world.last_posted();
-        for user in 0..users {
-            if world.resolved[user] < last {
+        for (user, resolved) in world.resolved.iter().enumerate().take(users) {
+            if *resolved < last {
                 actions.push(Action::Resolve { user });
             }
         }

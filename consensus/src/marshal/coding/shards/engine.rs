@@ -2316,7 +2316,7 @@ mod tests {
 
                     let config = Config {
                         scheme_provider,
-                        blocker: control.clone(),
+                        blocker: control,
                         block_codec_config: (),
                         strategy: STRATEGY,
                         mailbox_size: NZUsize!(1024),
@@ -2358,7 +2358,7 @@ mod tests {
 
                     let config = Config {
                         scheme_provider,
-                        blocker: control.clone(),
+                        blocker: control,
                         block_codec_config: (),
                         strategy: STRATEGY,
                         mailbox_size: NZUsize!(1024),
@@ -3058,7 +3058,7 @@ mod tests {
                     // Peer 0 proposes, and every other participant reconstructs the block.
                     let block = {
                         let inner = B::new(Sha256Digest::EMPTY, Height::new(view), view);
-                        encode_block::<B, C, H>(inner.clone(), coding_config)
+                        encode_block::<B, C, H>(inner, coding_config)
                     };
                     let commitment = block.commitment();
                     let round = Round::new(Epoch::zero(), View::new(view));
@@ -6213,7 +6213,7 @@ mod tests {
                 // Two own-index shards reach the minimum and start a job for the commitment.
                 let block = {
                     let inner = B::new(Sha256Digest::EMPTY, Height::new(1), id as u64);
-                    encode_block::<B, C, H>(inner.clone(), coding_config)
+                    encode_block::<B, C, H>(inner, coding_config)
                 };
                 let commitment = block.commitment();
                 engine.insert_reconstruction_record(commitment, round, ReconstructionState::new());

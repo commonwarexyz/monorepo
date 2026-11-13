@@ -4085,7 +4085,7 @@ mod tests {
 
             // The newest node blob starts at or past `end_pos`, so the open bounded at the range
             // end discards it without opening it.
-            let newest = (*merkle.size() - 1) / cfg.items_per_blob.get();
+            let newest = (*merkle.size() - 1) / cfg.items_per_blob;
             assert!(newest * cfg.items_per_blob.get() >= *end_pos);
             drop(merkle);
 
@@ -4203,7 +4203,7 @@ mod tests {
             let merkle = merkle.prune(Location::new(30)).await.unwrap();
             let merkle = merkle.sync().await.unwrap();
             assert!(merkle.bounds().start > end);
-            let newest = (*merkle.size() - 1) / cfg.items_per_blob.get();
+            let newest = (*merkle.size() - 1) / cfg.items_per_blob;
             drop(merkle);
             if torn {
                 tear_node_blob(&context, &cfg, newest).await;

@@ -221,7 +221,7 @@ fn cast_bytes_to_words_and_back() {
             for group in expected.as_chunks_mut::<4>().0 {
                 group.rotate_left(1);
             }
-            let mut actual = input.clone();
+            let mut actual = input;
             rotate_groups(simd, &mut actual);
             assert_eq!(actual, expected, "len {len}");
         }

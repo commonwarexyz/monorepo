@@ -837,7 +837,7 @@ mod tests {
 
     #[test]
     fn native_register_contracts() {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
         {
             if let Some(simd) = crate::native::NativeX86V4C::new() {
                 register_contracts(simd);
@@ -864,7 +864,7 @@ mod tests {
             partial_contracts(simd);
             permutation_contracts(simd);
         }
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
         {
             if let Some(simd) = crate::native::NativeX86V4C::new() {
                 check(simd);

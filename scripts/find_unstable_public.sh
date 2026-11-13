@@ -141,10 +141,12 @@ echo "Generating rustdoc JSON..." >&2
 # Use RUSTFLAGS and RUSTDOCFLAGS for consistent cfg propagation
 # Allow broken intra-doc links since stability-gated types won't be available
 #
-# Prefer cargo +$NIGHTLY_VERSION (rustup, CI's pinned nightly) but fall back to
+# Use the pinned tooling nightly with rustup, or fall back to
 # RUSTC_BOOTSTRAP=1 for non-rustup toolchains (e.g. Nix).
-CARGO_NIGHTLY="cargo +${NIGHTLY_VERSION:-nightly}"
-if ! $CARGO_NIGHTLY --version &>/dev/null; then
+TOOLING_NIGHTLY=$(sed -n 's/^nightly = "\(.*\)"/\1/p' "$SCRIPT_DIR/../.github/toolchains.toml")
+NIGHTLY_VERSION="${NIGHTLY_VERSION-$TOOLING_NIGHTLY}"
+CARGO_NIGHTLY="cargo +$NIGHTLY_VERSION"
+if [ -n "${COMMONWARE_NO_RUSTUP:-}" ] || [ -z "$NIGHTLY_VERSION" ] || ! $CARGO_NIGHTLY --version &>/dev/null; then
     CARGO_NIGHTLY="cargo"
     export RUSTC_BOOTSTRAP=1
 fi

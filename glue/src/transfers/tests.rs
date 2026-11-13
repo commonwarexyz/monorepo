@@ -189,15 +189,13 @@ fn expected_flat<A: Account>(
                 let sum = debits.entry(key.clone()).or_insert(A::Amount::ZERO);
                 *sum = sum
                     .checked_add(amount)
-                    .ok_or(Rejection::Insufficient(key.clone()))?;
+                    .ok_or(Rejection::Insufficient(key))?;
             }
             Flat::Credit(amount) => {
                 let sum = credits.entry(key.clone()).or_insert(A::Amount::ZERO);
-                *sum = sum
-                    .checked_add(amount)
-                    .ok_or(Rejection::Overflow(key.clone()))?;
+                *sum = sum.checked_add(amount).ok_or(Rejection::Overflow(key))?;
             }
-            Flat::Effect(effect) => effects.entry(key.clone()).or_default().push(effect),
+            Flat::Effect(effect) => effects.entry(key).or_default().push(effect),
         }
     }
 

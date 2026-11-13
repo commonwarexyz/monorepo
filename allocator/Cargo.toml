@@ -1,6 +1,7 @@
 [package]
 name = "commonware-allocator"
 edition.workspace = true
+rust-version.workspace = true
 publish = true
 version.workspace = true
 # The vendored mimalloc sources in `mimalloc/` are MIT licensed.
