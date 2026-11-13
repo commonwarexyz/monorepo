@@ -168,7 +168,7 @@ pub trait DbAny: BatchableDb<Key: Key, Value: CodecShared + Clone> + Send + Sync
 /// Proof generation for Any database variants.
 ///
 /// Only Any variants implement this trait. Current variants have a different
-/// proof structure (grafted MMR + activity bitmap) that is incompatible with
+/// proof structure (grafted tree + activity bitmap) that is incompatible with
 /// the ops-level proofs returned here.
 pub trait Provable: DbAny {
     /// The operation type stored in the log.
