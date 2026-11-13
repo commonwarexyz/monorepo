@@ -28,7 +28,10 @@
 //! bug that makes `f + 1` honest validators compute the same wrong digest, together with `f`
 //! faulty ones, certifies that digest, where an `n - f` quorum would need `3f + 1` of them.
 
-use crate::aggregation::types::{Item, Namespace};
+use crate::{
+    aggregation::types::{Item, Namespace},
+    multimmit::faults::MultimmitFaults as _,
+};
 use commonware_cryptography::impl_certificate_bls12381_threshold;
 use commonware_utils::{Faults, N5f1};
 use num_traits::ToPrimitive;
