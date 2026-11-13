@@ -34,6 +34,11 @@
 //! that the block's embedded context matches the consensus context before allowing the block to be
 //! certified. If certification fails, the voter can still emit a nullify vote to advance the view.
 //!
+//! A certificate can form for a block this participant was never asked to verify. Certification
+//! then recovers the block and verifies it under its embedded context, so the application can be
+//! asked to verify more than one block of a round. Certifying a block stops the verification of
+//! any conflicting block of its round, since at most one block of a round is notarized.
+//!
 //! # Usage
 //!
 //! Wrap your [`Application`] implementation with [`Marshaled::new`] and provide it to your
@@ -908,7 +913,7 @@ where
 
             // Register a certification gate task synchronously before spawning work so
             // `certify` can always find it (no race with task startup).
-            let (task_tx, task_rx) = oneshot::channel();
+            let (mut task_tx, task_rx) = oneshot::channel();
             gates.insert(round, payload, task_rx);
 
             let (mut tx, rx) = oneshot::channel();
@@ -918,10 +923,20 @@ where
                 .with_attribute("round", round);
             context.spawn(move |_| {
                 async move {
+                    // Stop waiting for the block if consensus drops the verification request or
+                    // `Gates` drops the certification gate. Consensus uses no verdict from this
+                    // request after either.
                     let block = select! {
                         _ = tx.closed() => {
                             debug!(
                                 reason = "consensus dropped receiver",
+                                "skipping re-proposal verification"
+                            );
+                            return;
+                        },
+                        _ = task_tx.closed() => {
+                            debug!(
+                                reason = "certification gate dropped",
                                 "skipping re-proposal verification"
                             );
                             return;

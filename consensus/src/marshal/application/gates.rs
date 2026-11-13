@@ -65,8 +65,11 @@ struct Inner<D: Digest, B> {
 /// proposal holds the block itself until consensus locks it in with a propose
 /// broadcast via [`crate::Relay::broadcast`] (or certification demands
 /// durability first), keeping marshal's mailbox free of any propose-time
-/// handshake. The wrapper that owns these gates prunes stale entries when
-/// consensus reports a finalization (see [`retain_after`](Self::retain_after)).
+/// handshake.
+///
+/// [`claim`](Self::claim) drops a gate when certification claims its round for another
+/// block, and [`retain_after`](Self::retain_after) drops it once consensus finalizes its
+/// round or a later one.
 #[derive(Clone)]
 pub(crate) struct Gates<D: Digest, B> {
     inner: Arc<Mutex<Inner<D, B>>>,
@@ -151,6 +154,10 @@ impl<D: Digest, B: Clone> Gates<D, B> {
     /// proposal are therefore removed under one lock, so the returned gate waits on an ack
     /// that `persist` receives here or that the lock-in broadcast already took. A later stage
     /// of the same block only leaves entries that pruning discards.
+    ///
+    /// Consensus certifies at most one block per round, so the gates registered for the
+    /// round's other blocks can never be claimed. Dropping them here closes their senders, so
+    /// the tasks behind them can stop.
     pub(crate) fn claim(
         &self,
         round: Round,
@@ -162,10 +169,16 @@ impl<D: Digest, B: Clone> Gates<D, B> {
 
             // Certification consumes the staged entry but is not a send, so the block's sent
             // mark, if any, stays for a later stage of the same block.
-            (
+            let claimed = (
                 inner.certifications.remove(&(round, digest)),
                 inner.proposals.remove(&(round, digest)),
-            )
+            );
+
+            // No certification can claim the round's other gates.
+            inner
+                .certifications
+                .retain(|(gate_round, _), _| *gate_round != round);
+            claimed
         };
         if let Some(Staged { block, ack }) = staged {
             persist(block, ack);
@@ -338,6 +351,7 @@ mod tests {
     use commonware_cryptography::{Hasher, Sha256, sha256::Digest as Sha256Digest};
     use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
     use futures::FutureExt as _;
+    use rstest::rstest;
 
     type D = Sha256Digest;
     type TestGates = Gates<D, u64>;
@@ -686,6 +700,58 @@ mod tests {
                 "the claimed gate must belong to the persisted proposal",
             );
         });
+    }
+
+    /// Certification claims its round. The gates registered for the round's other blocks are
+    /// dropped, whether or not the certified block registered a gate, and earlier and later
+    /// rounds keep theirs.
+    #[rstest]
+    // This validator was asked to verify the certified block before certification, so the
+    // block has a gate.
+    #[case::certified_with_gate(true)]
+    // Certification is the first request for the certified block, so it has no gate.
+    #[case::certified_without_gate(false)]
+    fn test_claim_releases_other_gates_of_round(#[case] certified_has_gate: bool) {
+        // Two blocks compete in round 2. Each sender stands for the verification task that
+        // holds it, and closes when its gate is dropped.
+        let gates = TestGates::new();
+        let certified = Sha256::hash(&[b"certified"]);
+        let conflicting = Sha256::hash(&[b"conflicting"]);
+        let (_certified_tx, certified_rx) = oneshot::channel();
+        let (conflicting_tx, conflicting_rx) = oneshot::channel();
+        let (earlier_tx, earlier_rx) = oneshot::channel();
+        let (later_tx, later_rx) = oneshot::channel();
+
+        // Register the certified block's gate when the case has one.
+        if certified_has_gate {
+            gates.insert(round(2), certified, certified_rx);
+        }
+
+        // The conflicting block has a gate in round 2, and rounds 1 and 3 each hold a gate.
+        gates.insert(round(2), conflicting, conflicting_rx);
+        gates.insert(round(1), conflicting, earlier_rx);
+        gates.insert(round(3), conflicting, later_rx);
+
+        // Certification claims round 2 for the certified block. No proposal is staged, so the
+        // persist closure must not run.
+        let gate = gates.claim(round(2), certified, |_, _| {
+            unreachable!("a claim must not persist a proposal that was never staged")
+        });
+
+        // The claim returns the certified block's gate exactly when one was registered.
+        assert_eq!(gate.is_some(), certified_has_gate);
+
+        // Dropping the conflicting gate of round 2 closes its sender.
+        assert!(
+            conflicting_tx.is_closed(),
+            "a gate for another block of the certified round must be dropped"
+        );
+
+        // The senders of rounds 1 and 3 stay open, so their gates are still registered.
+        assert!(
+            !earlier_tx.is_closed() && !later_tx.is_closed(),
+            "the gates of earlier and later rounds must be kept"
+        );
     }
 
     /// Sending a staged block keeps it staged and marks it sent. Staging the same block for the
