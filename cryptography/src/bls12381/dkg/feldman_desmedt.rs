@@ -604,11 +604,11 @@ impl<V: Variant, P: Ord> Output<V, P> {
 
     /// Return the set of players whose shares may have been revealed.
     ///
-    /// These are players whose shares can be reconstructed from the selected dealer reveals. Shares
-    /// of other players can also be exposed. A Byzantine player can publish its own share outside
-    /// the protocol. In a reshare, an adversary that knows an honest player's previous share (for
-    /// example, one revealed in the previous round) may reconstruct shares of players that this set
-    /// does not list.
+    /// The set lists only the players whose shares can be reconstructed from the dealings that the
+    /// selected dealers revealed in this round, so it is not a complete list. A Byzantine player
+    /// can reveal its own share outside the protocol. In a reshare, an adversary that already knows
+    /// an honest player's previous share may combine it with this round's reveals to reconstruct
+    /// new shares of honest players that are not listed.
     pub const fn revealed(&self) -> &Set<P> {
         &self.revealed
     }
