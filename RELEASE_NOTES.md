@@ -10,48 +10,40 @@ name it `Mailbox<B, C, H>`, including in `MarshaledConfig::shards` ([#5681]).
 `proposed` is renamed to `disperse` ([#5681]). When certification is the first
 call to report a commitment to the shard engine, the engine can now check the
 shard the leader sent this validator, count it toward rebuilding the block, and
-relay it without learning the leader ([#5681]). v2026.10.0 held that shard until
-`verify` or the recovered block named the leader ([#5681]). The engine also no
-longer needs to know the leader to block the sender of a shard whose index is
-neither the sender's nor the engine's own ([#5681]). A node outside the
-participant set no longer receives a successful
-`subscribe_assigned_shard_verified` notification, so do not wait for one on such
-a node ([#5681]). v2026.10.0 could send this notification after verifying the
-known leader's own shard ([#5681]). Vote, certificate, and shard encodings are
-unchanged ([#5681]).
+relay it without learning the leader ([#5681]). The engine also no longer needs
+to know the leader to block the sender of a shard whose index is neither the
+sender's nor the engine's own ([#5681]). A node outside the participant set no
+longer receives a successful `subscribe_assigned_shard_verified` notification,
+so do not wait for one on such a node ([#5681]). Vote, certificate, and shard
+encodings are unchanged ([#5681]).
 
-`Deferred` and coding `Marshaled` stop verifying a block once certification is
-requested for a different block of its round ([#5682]). That request cancels a
-verification that is running or still waiting for its block or parent ([#5682]).
-v2026.10.0 let such a verification proceed after certification of the other
-block had begun ([#5682]). The `Application::verify` docs now state that several
-calls can be outstanding for one round when its leader equivocates, and that an
+`Deferred` and coding `Marshaled` now stop verifying a block once certification
+is requested for a different block of its round ([#5682]). That request cancels
+a verification that is running or still waiting for its block or parent
+([#5682]). The `Application::verify` docs now state that several calls can be
+outstanding for one round when its leader equivocates, and that an
 implementation must give each its own verdict without cancelling or replacing an
 earlier one ([#5682]).
 
 When the `view_retention` window reaches back past the start of the epoch of the
 previously witnessed finalization round, marshal now counts each view the window
-lacks in that epoch as one block height below the epoch and keeps the whole
-epoch containing the lowest such height ([#5646]). v2026.10.0 kept one whole
-earlier epoch for each missing view, leaving up to `view_retention` earlier
-epochs open, each with its own archives and metric series ([#5646]). Where the
-`epocher` cannot place those heights, each earlier epoch still counts for one
-view ([#5646]). The first prune after upgrading destroys the caches of earlier
-epochs that the window no longer covers ([#5646]).
+lacks in that epoch as one block height below the epoch instead of as one whole
+earlier epoch, and keeps the whole epoch containing the lowest such height
+([#5646]). Where the `epocher` cannot place those heights, each earlier epoch
+still counts for one view ([#5646]). The first prune after upgrading destroys
+the caches of earlier epochs that the window no longer covers ([#5646]).
 
 ### Simplex
 
-Once Simplex has requested `certify` for a view, it does not request `verify`
-for that view until a restart ([#5681]). v2026.10.0 could still request it once
-the proposal became verifiable, which could run the application's verification
-twice through marshal's `Deferred` ([#5681]). A validator whose `certify`
-request comes first therefore no longer casts a late notarize vote for that view
-or nullifies it early on a `false` verification verdict ([#5681]). That
-validator can still vote to finalize if certification succeeds before the view
-is nullified ([#5681]). The voter also drops the receiver of a pending `verify`
-when a certificate for a conflicting proposal of the same view arrives
-([#5681]). v2026.10.0 kept that request until it completed or the view ended,
-discarding any stale verdict ([#5681]).
+Once Simplex has requested `certify` for a view, it no longer requests `verify`
+for that view before a restart ([#5681]). Under marshal's `Deferred`, that later
+`verify` could run the application's verification a second time ([#5681]). A
+validator whose `certify` request comes first therefore no longer casts a late
+notarize vote for that view or nullifies it early on a `false` verification
+verdict ([#5681]). That validator can still vote to finalize if certification
+succeeds before the view is nullified ([#5681]). The voter now also drops the
+receiver of a pending `verify` when a certificate for a conflicting proposal of
+the same view arrives ([#5681]).
 
 The `Automaton::verify` docs now state that consensus may drop the receiver
 before a verdict arrives ([#5681]). The `CertifiableAutomaton::certify` docs
@@ -86,9 +78,9 @@ its role keeps its value ([#5528]).
 ### Resolver
 
 The p2p resolver now tries pending requests in queue order when their deadlines
-match, with fresh requests still ahead of retries ([#5698]). v2026.10.0 broke
-such ties by key order, so marshal's requests for blocks by commitment could be
-tried in digest order when queued at the same instant behind a rate-limited peer
+match, with fresh requests still ahead of retries ([#5698]). Marshal's fresh
+requests for blocks by commitment that queue at the same instant behind a
+rate-limited peer are therefore tried in that order instead of digest order
 ([#5698]).
 
 ### Cryptography
