@@ -2641,7 +2641,7 @@ impl TestHarness for DeferredHarness {
 pub struct CodingHarness;
 
 type CodingVariant = Coding<CodingB, ReedSolomon<Sha256>, Sha256, K>;
-type ShardsMailbox = shards::Mailbox<CodingB, ReedSolomon<Sha256>, Sha256, K>;
+type ShardsMailbox = shards::Mailbox<CodingB, ReedSolomon<Sha256>, Sha256>;
 
 /// Genesis blocks use a special coding config that doesn't actually encode.
 pub const GENESIS_CODING_CONFIG: commonware_coding::Config = commonware_coding::Config {
