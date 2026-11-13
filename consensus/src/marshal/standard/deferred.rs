@@ -14,12 +14,17 @@
 //!
 //! # Deferred Verification
 //!
-//! Before casting a notarize vote, [`Deferred`] waits for the block to become available and
-//! then verifies that the block's embedded context matches the consensus context. However, it does not
-//! wait for the application to finish verifying the block contents before voting. This enables verification
-//! to run while we wait for a quorum of votes to form a certificate (hiding verification latency behind network
-//! latency). Once a certificate is formed, we wait on the verification result in [`CertifiableAutomaton::certify`]
-//! before voting to finalize (ensuring no invalid blocks are admitted to the canonical chain).
+//! Before casting a notarize vote, [`Deferred`] waits for the block to become available and then
+//! verifies that the block's embedded context matches the consensus context and that the block
+//! names that context's parent as its own. A re-proposal of the epoch's last block skips both
+//! comparisons. It is the context's parent itself and was checked when it was first proposed.
+//! [`Deferred`] votes without waiting for the check of the block's height against its parent or for
+//! the application to finish verifying the block contents.
+//!
+//! This enables verification to run while we wait for a quorum of votes to form a certificate
+//! (hiding verification latency behind network latency). Once a certificate is formed, we wait on
+//! the verification result in [`CertifiableAutomaton::certify`] before voting to finalize (ensuring
+//! no invalid blocks are admitted to the canonical chain).
 //!
 //! A certificate can form for a block this validator was never asked to verify. Certification
 //! then fetches the block and verifies it under its embedded context, so the application can be
@@ -146,10 +151,11 @@ use tracing::{Instrument as _, debug, info_span};
 /// - Parent digest matches the consensus context's expected parent
 /// - Block height is exactly one greater than the parent's height
 ///
-/// Verifying only the immediate parent is sufficient since the parent was either notarized by
-/// consensus, whose honest voters verified its context, or verified locally before this
-/// participant voted for it (optimistic validation). Either way the entire ancestry chain back
-/// to genesis is transitively validated.
+/// Verifying only the immediate parent is sufficient. The parent was either notarized by consensus
+/// or voted for by this participant (optimistic validation), and an honest vote is cast only after
+/// the block's context and parent digest are checked. Every parent digest in the ancestry chain
+/// back to genesis was therefore named by a round of consensus, and each ancestor certifies only
+/// after its own verification checks its height.
 ///
 /// Applications do not need to re-implement these checks in their own verification logic.
 ///
@@ -523,25 +529,6 @@ where
             };
             parent_timer.observe(&*context);
 
-            // Deferred verification votes before it checks that a block's parent field
-            // matches the parent named by its consensus context, so an uncertified
-            // handoff parent may be unlinked. Build only on a linked parent. A parent at
-            // view zero is the epoch's genesis block, which needs no link check. The first
-            // epoch's genesis has no context parent to match, and a later epoch's genesis
-            // is the previous epoch's finalized boundary block.
-            //
-            // The coding variant needs no such check: it fetches each parent by the
-            // commitment in its child's consensus context, and its ancestry stream ends
-            // at a fetched parent that does not match the child's link.
-            if parent_view != View::zero() && parent.parent() != parent.context().parent.1 {
-                debug!(
-                    ?parent_commitment,
-                    reason = "parent does not link to its context parent",
-                    "skipping proposal"
-                );
-                return Resolved::Skip;
-            }
-
             // Special case: If the parent block is the last block in the epoch,
             // re-propose it so as not to produce any blocks that will be cut out
             // by the epoch transition.
@@ -753,6 +740,26 @@ where
                         "block-embedded context does not match consensus context during optimistic verification"
                     );
                     task_tx.send_lossy(GateOutcome::Recover);
+                    tx.send_lossy(false);
+                    return;
+                }
+
+                // The block must also name the context's parent as its own. Consensus can
+                // verify a child of a block we voted for, or ask us to build on one, before
+                // that block certifies, and both walk ancestry by following parent digests.
+                // Checking the link before the vote ensures that every digest such a walk
+                // requests was named by a round of consensus.
+                //
+                // The rejection is safe to publish as a gate verdict. The embedded context
+                // matched, so certification would verify the block under that same context
+                // and reject the same parent link.
+                if block.parent() != context.parent.1 {
+                    debug!(
+                        expected_parent = %context.parent.1,
+                        block_parent = %block.parent(),
+                        "block does not name its context parent during optimistic verification"
+                    );
+                    task_tx.send_lossy(GateOutcome::Ready(false));
                     tx.send_lossy(false);
                     return;
                 }
