@@ -36,6 +36,10 @@ Before making a PR, to run all lints and tests, run:
 $ just pre-pr
 ```
 
+Lint recipes use the pinned rustup toolchains. Required nightly tools use [`.github/rust-toolchain.toml`](.github/rust-toolchain.toml), and Dylint uses [its own pin](.github/dylints/rust-toolchain). Set `NIGHTLY_VERSION` to override the tooling nightly, or to an empty value to use `cargo` from `PATH`.
+
+Without rustup (for example, Nix), set `COMMONWARE_NO_RUSTUP=1` to use tools from `PATH` without toolchain selectors or installs. `RUSTFMT` can select a standalone formatter. Match the documented pins when running checks for CI, including Dylint's compiler.
+
 Use `just test -p <crate>` for routine development and reserve workspace-wide tests for changes that need them. The root [agent guidance](AGENTS.md) records the always-applicable repository constraints.
 
 When creating a new crate, follow the `lib.rs` header conventions used across the workspace: crates that support `no_std` gate `std` behind a feature flag or `cfg(test)` (e.g. `#![cfg_attr(not(any(feature = "std", test)), no_std)]`), and every crate sets the Commonware logos:

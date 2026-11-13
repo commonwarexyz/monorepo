@@ -148,7 +148,7 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
       with:
-        additional-toolchain: nightly
+        additional-toolchain: nightly-tools
         additional-cache-key: ${{ matrix.fuzz_dir }}-${{ matrix.os || 'ubuntu-latest' }}
         rust-cache-save: ${{ startsWith(matrix.partition || '1/1', '1/') }}
         kache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
@@ -157,7 +157,7 @@ jobs:
         kache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Get Rust version
       id: rust-version
-      run: echo "rust_version=$(rustc +nightly --version)" >> "$GITHUB_OUTPUT"
+      run: echo "rust_version=$(rustc +"$NIGHTLY_VERSION" --version)" >> "$GITHUB_OUTPUT"
     - name: Cache cargo-fuzz
       id: cargo-fuzz-cache
       uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
@@ -166,7 +166,7 @@ jobs:
         key: ${{ runner.os }}-${{ runner.arch }}-${{ env.FUZZ_VERSION }}-cargo-fuzz-${{ steps.rust-version.outputs.rust_version }}
     - name: Install cargo-fuzz
       if: steps.cargo-fuzz-cache.outputs.cache-hit != 'true'
-      run: cargo +nightly install cargo-fuzz --version ${{ env.FUZZ_VERSION }} --locked
+      run: cargo +"$NIGHTLY_VERSION" install cargo-fuzz --version ${{ env.FUZZ_VERSION }} --locked
     - name: Install just
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
@@ -219,7 +219,7 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
       with:
-        toolchain: nightly
+        toolchain: nightly-tools
         components: miri
         rust-cache-save: ${{ matrix.partition == 1 }}
         kache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}

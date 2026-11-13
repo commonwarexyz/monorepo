@@ -74,7 +74,7 @@ jobs:
       - name: Run setup
         uses: ./.github/actions/setup
         with:
-          toolchain: nightly
+          toolchain: nightly-tools
           kache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
           kache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
           kache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}

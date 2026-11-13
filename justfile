@@ -1,11 +1,16 @@
 set positional-arguments := true
 
-env_nightly_version := env("NIGHTLY_VERSION", "nightly")
-nightly_version := if env_nightly_version != "" { "+" + env_nightly_version } else { "" }
+tools_nightly_version := `sed -n 's/^channel = "\(.*\)"/\1/p' .github/rust-toolchain.toml`
+env_nightly_version := env("NIGHTLY_VERSION", tools_nightly_version)
+use_rustup := if env("COMMONWARE_NO_RUSTUP", "") == "" { "true" } else { "false" }
+nightly_version := if use_rustup == "true" { if env_nightly_version != "" { "+" + env_nightly_version } else { "" } } else { "" }
 clippy_version := "1.100.0"
 rustfmt_version := "nightly-2026-11-12"
 dylint_version := `sed -n 's/^channel = "\(.*\)"/\1/p' .github/dylints/rust-toolchain`
 rustfmt := env("RUSTFMT", "rustfmt")
+clippy_toolchain := if use_rustup == "true" { "+" + clippy_version } else { "" }
+rustfmt_toolchain := if use_rustup == "true" { if env("RUSTFMT", "") == "" { "+" + rustfmt_version } else { "" } } else { "" }
+dylint_toolchain := if use_rustup == "true" { "+" + dylint_version } else { "" }
 partition := "1/1"
 
 alias f := fix-fmt
@@ -27,12 +32,12 @@ pre-pr: lint test-docs test
 
 # Install the pinned tools used by CI and local lint checks
 install-lint-toolchains:
-    rustup toolchain install {{ clippy_version }} --profile minimal --component clippy
-    rustup toolchain install {{ rustfmt_version }} --profile minimal --component rustfmt
+    if [ "{{ use_rustup }}" = "true" ]; then rustup toolchain install {{ clippy_version }} --profile minimal --component clippy; fi
+    if [ "{{ use_rustup }}" = "true" ]; then rustup toolchain install {{ rustfmt_version }} --profile minimal --component rustfmt; fi
 
 # Fixes the formatting of the workspace
 fix-fmt *args='':
-    find . -path ./target -prune -o -name '*.rs' -type f -print0 | xargs -0 {{ rustfmt }} +{{ rustfmt_version }} --edition 2024 {{ args }}
+    find . -path ./target -prune -o -name '*.rs' -type f -print0 | xargs -0 {{ rustfmt }} {{ rustfmt_toolchain }} --edition 2024 {{ args }}
 
 # Fixes the formatting of the `Cargo.toml` files in the workspace
 fix-toml-fmt:
@@ -48,11 +53,11 @@ check-fmt:
 
 # Run clippy lints
 clippy *args='':
-    cargo +{{ clippy_version }} clippy --all-targets $@ -- -D warnings
+    cargo {{ clippy_toolchain }} clippy --all-targets $@ -- -D warnings
 
 # Fix clippy lints
 fix-clippy *args='':
-    cargo +{{ clippy_version }} clippy --all-targets --fix --allow-dirty $@
+    cargo {{ clippy_toolchain }} clippy --all-targets --fix --allow-dirty $@
 
 # Runs all lints (fmt, clippy, docs, features, toml, custom, publish order, and stability)
 lint: check-fmt check-toml-fmt clippy check-docs check-features dylint check-publish-order check-stability
@@ -198,11 +203,11 @@ cooldown:
 #
 # Enables `commonware-utils/analysis`, which a benchmark requires, so that `benchmark_allocator` checks it.
 dylint: install-dylint-toolchain
-    cargo +{{ dylint_version }} dylint --all --workspace -- --all-targets --features commonware-utils/analysis
+    cargo {{ dylint_toolchain }} dylint --all --workspace -- --all-targets --features commonware-utils/analysis
 
-# Install the compiler and components pinned for the custom lints
+# Install the compiler and components pinned for the custom lints (skipped when COMMONWARE_NO_RUSTUP is set)
 install-dylint-toolchain:
-    rustup toolchain install {{ dylint_version }} --profile minimal --component rustc-dev --component llvm-tools-preview
+    if [ "{{ use_rustup }}" = "true" ]; then rustup toolchain install {{ dylint_version }} --profile minimal --component rustc-dev --component llvm-tools-preview; fi
 
 # Run all fuzz tests in a given directory.
 #
@@ -239,11 +244,11 @@ udeps:
 
 # Run the tests in the `miri` test group under Miri (optionally filtered: just miri -p commonware-runtime iobuf::)
 miri *args='':
-    MIRIFLAGS="-Zmiri-disable-isolation" cargo miri nextest run --profile miri --lib --no-tests=warn {{ args }}
+    MIRIFLAGS="-Zmiri-disable-isolation" cargo {{ nightly_version }} miri nextest run --profile miri --lib --no-tests=warn {{ args }}
 
 # Like `miri`, under Tree Borrows with the leak check off, for crates whose dependencies fail `miri` (crossbeam-epoch)
 miri-lenient *args='':
-    MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-tree-borrows -Zmiri-ignore-leaks" cargo miri nextest run --profile miri --lib --no-tests=warn {{ args }}
+    MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-tree-borrows -Zmiri-ignore-leaks" cargo {{ nightly_version }} miri nextest run --profile miri --lib --no-tests=warn {{ args }}
 
 # Run zepter feature checks
 check-features:
@@ -280,7 +285,7 @@ _conformance-fixtures mode *args='':
 
 # Find public items missing stability annotations.
 unstable-public *args='':
-    ./scripts/find_unstable_public.sh {{ args }}
+    NIGHTLY_VERSION="{{ env_nightly_version }}" ./scripts/find_unstable_public.sh {{ args }}
 
 # Check stability builds. Optionally specify level (1-4 or BETA/GAMMA/DELTA/EPSILON) and/or crate (-p <crate>).
 # ALPHA (level 0) is the default state and doesn't require a cfg flag.
@@ -333,6 +338,7 @@ check-stability *args='':
     # Save and clear RUSTC_WRAPPER so Cargo doesn't nest it outside the workspace
     # wrapper (which breaks sccache). The wrapper script invokes it internally.
     export COMMONWARE_RUSTC_WRAPPER="${RUSTC_WRAPPER:-}"
+    export NIGHTLY_VERSION="{{ env_nightly_version }}"
     if [ -z "$level" ]; then
         for name in "${LEVEL_NAMES[@]:1}"; do
             echo "Checking commonware_stability_${name}..."

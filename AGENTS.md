@@ -32,7 +32,8 @@ Document public APIs clearly. Use `//!` for module docs, `///` for items, and in
 
 - Floating `stable`: builds and tests must pass before merging.
 - Pinned MSRV: must pass before merging; the version lives in `Cargo.toml`.
-- Floating `nightly`: informational; report and investigate failures.
+- Floating `nightly` builds: informational; report and investigate failures.
+- Required nightly tooling (Miri, dependency checks, API checks, coverage, and fuzzing) uses the pin in `.github/rust-toolchain.toml`. Dylint uses its own compiler pin in `.github/dylints/rust-toolchain`.
 - Clippy/rustfmt: pin when needed to avoid lint and formatting churn. Keep their versions centralized in the `justfile` for local checks and CI.
 
 Compiler upgrades are inputs CI should test immediately so we catch compatibility regressions when Rust releases ship.

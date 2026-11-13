@@ -1,7 +1,7 @@
 name: Setup
 inputs:
   toolchain:
-    description: "The Rust toolchain to install."
+    description: "The Rust toolchain to install. Use nightly-tools for the pinned nightly tooling compiler."
     required: false
   components:
     description: "Rust components to install."
@@ -12,7 +12,7 @@ inputs:
     required: false
     default: ""
   additional-toolchain:
-    description: "An additional Rust toolchain to install."
+    description: "An additional Rust toolchain to install. Use nightly-tools for the pinned nightly tooling compiler."
     required: false
     default: ""
   additional-components:
@@ -86,6 +86,29 @@ runs:
         echo "CARGO_TARGET_DIR=/mnt/target" >> "$GITHUB_ENV"
         echo "CARGO_HOME=/mnt/.cargo" >> "$GITHUB_ENV"
         echo "/mnt/.cargo/bin" >> "$GITHUB_PATH"
+    - name: Resolve toolchains
+      id: toolchains
+      shell: bash
+      env:
+        TOOLCHAIN: ${{ inputs.toolchain || 'stable' }}
+        ADDITIONAL_TOOLCHAIN: ${{ inputs.additional-toolchain }}
+      run: |
+        if [ "$TOOLCHAIN" = "nightly-tools" ] || [ "$ADDITIONAL_TOOLCHAIN" = "nightly-tools" ]; then
+          nightly=$(sed -n 's/^channel = "\(.*\)"/\1/p' .github/rust-toolchain.toml)
+          if [[ ! "$nightly" =~ ^nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            echo "Invalid nightly tooling pin" >&2
+            exit 1
+          fi
+          echo "NIGHTLY_VERSION=$nightly" >> "$GITHUB_ENV"
+          if [ "$TOOLCHAIN" = "nightly-tools" ]; then
+            TOOLCHAIN="$nightly"
+          fi
+          if [ "$ADDITIONAL_TOOLCHAIN" = "nightly-tools" ]; then
+            ADDITIONAL_TOOLCHAIN="$nightly"
+          fi
+        fi
+        echo "toolchain=$TOOLCHAIN" >> "$GITHUB_OUTPUT"
+        echo "additional-toolchain=$ADDITIONAL_TOOLCHAIN" >> "$GITHUB_OUTPUT"
     - name: Remove preinstalled Rust toolchains
       if: inputs.rust-cache-enabled == 'true'
       shell: bash
@@ -106,13 +129,13 @@ runs:
       if: inputs.additional-toolchain != ''
       uses: dtolnay/rust-toolchain@f7ccc83f9ed1e5b9c81d8a67d7ad1a747e22a561
       with:
-        toolchain: ${{ inputs.additional-toolchain }}
+        toolchain: ${{ steps.toolchains.outputs.additional-toolchain }}
         components: ${{ inputs.additional-components }}
         targets: ${{ inputs.additional-targets }}
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@f7ccc83f9ed1e5b9c81d8a67d7ad1a747e22a561
       with:
-        toolchain: ${{ inputs.toolchain || 'stable' }}
+        toolchain: ${{ steps.toolchains.outputs.toolchain }}
         components: ${{ inputs.components }}
         targets: ${{ inputs.targets }}
     - name: Normalize cache key
