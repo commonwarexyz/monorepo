@@ -17,6 +17,7 @@ use crate::core::{
     field::{MAX_LANES, arithmetic::Field},
 };
 use alloc::{vec, vec::Vec};
+use commonware_parallel::Strategy;
 use commonware_simd::Simd;
 use core::{
     num::NonZeroUsize,
@@ -496,4 +497,15 @@ impl<G: Group> Batch for Msm<'_, G> {
     fn join(outputs: &[G]) -> G {
         G::dispatch_sum(Sum(outputs))
     }
+}
+
+/// Returns the sum of the elements times their scalars, in variable time, in the batches that
+/// the strategy supplies.
+pub fn msm<G: Group>(elements: &[G], scalars: &[Scalar], strategy: &impl Strategy) -> G {
+    Msm {
+        elements,
+        scalars,
+        method: None,
+    }
+    .dispatch_batches(strategy)
 }

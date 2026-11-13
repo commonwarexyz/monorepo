@@ -117,10 +117,6 @@ pub fn lanes() -> usize {
 /// items, whose results join into the result of the whole.
 pub trait Batch: Kernel<Output: Send> + Send {
     /// Estimated work of one item, in additions of G1.
-    // A strategy keeps its measurements by call site and by the powers of two that the count
-    // and the work lie between. Every operation shares the call site of dispatch_batches, so
-    // the estimates are distinct powers of two, which keeps the measurements of two operations
-    // apart.
     const WORK: usize;
 
     /// Returns the number of items.
@@ -141,6 +137,10 @@ pub trait Batch: Kernel<Output: Send> + Send {
     ///
     /// The strategy cuts batches of whole groups of [`lanes`] items. Each batch dispatches on
     /// its own, so it runs in the representation that finishes its own items soonest.
+    // A strategy keeps its measurements by call site. Tracking the caller gives each operation
+    // its own, as long as no macro makes the call: every call in a macro reports the line that
+    // invokes the macro.
+    #[track_caller]
     fn dispatch_batches(self, strategy: &impl Strategy) -> Self::Output {
         let len = self.len();
         let lanes = lanes();
@@ -149,6 +149,8 @@ pub trait Batch: Kernel<Output: Send> + Send {
         if groups < 2 {
             return self.dispatch_one();
         }
+        // G1 and G2 share the call site of an operation. Their estimates of work, which differ
+        // fourfold, keep the strategy's measurements of them apart.
         let work = Self::WORK.saturating_mul(lanes);
         strategy.run_batches(groups, NonZeroUsize::MIN, work, |batches| {
             if batches.is_whole() {
@@ -527,6 +529,11 @@ impl<G: Group> Batch for Sum<'_, G> {
     }
 }
 
+/// Returns the sum of the elements, in the batches that the strategy supplies.
+pub fn sum<G: Group>(elements: &[G], strategy: &impl Strategy) -> G {
+    Sum(elements).dispatch_batches(strategy)
+}
+
 /// Multiplies each element by the scalar at the same index, one element per lane, in time
 /// independent of the scalars.
 pub struct MultiplyEach<'a, G> {
@@ -592,4 +599,10 @@ impl<G: Group> Batch for MultiplyEach<'_, G> {
     }
 
     fn join(_: &[()]) {}
+}
+
+/// Multiplies each element by the scalar at the same index, in the batches that the strategy
+/// supplies.
+pub fn multiply_each<G: Group>(elements: &mut [G], scalars: &[Scalar], strategy: &impl Strategy) {
+    MultiplyEach { elements, scalars }.dispatch_batches(strategy);
 }
