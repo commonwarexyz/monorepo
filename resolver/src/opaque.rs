@@ -305,6 +305,12 @@ where
         let FetchKey {
             key, subscribers, ..
         } = fetch;
+
+        // Apply a verdict the consumer already sent before adding these subscribers so
+        // it cannot retire them. They then start a new fetch or join those that remain.
+        if let Some(completed) = self.deliveries.try_completion(&key) {
+            self.handle_delivered(completed);
+        }
         let is_new = self.subscribers.insert(key.clone(), subscribers);
 
         if is_new {
@@ -994,6 +1000,117 @@ mod tests {
                 });
             }
         }
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5720.
+    ///
+    /// A verdict sent before the consumer fetches the key again does not retire that fetch,
+    /// even when the actor takes the fetch before it polls the verdict.
+    #[test]
+    fn issue_5720_regression() {
+        for outcome in [
+            Some(Outcome::Resolved(Resolution::Complete)),
+            Some(Outcome::Ignored),
+            None,
+        ] {
+            Runner::default().start(move |context| async move {
+                let fetcher = MockFetcher::default();
+                fetcher.push(1, Some(Bytes::from_static(b"old")));
+                fetcher.push(1, Some(Bytes::from_static(b"new")));
+                let consumer = MockConsumer::default();
+                let (_sender, receiver) =
+                    mailbox::new(context.child("mailbox"), NonZeroUsize::new(16).unwrap());
+                let mut actor = Actor::new(
+                    context.child("actor"),
+                    fetcher.clone(),
+                    receiver,
+                    consumer.clone(),
+                    RETRY_DELAY,
+                );
+                let fetch = || FetchKey {
+                    key: 1,
+                    metadata: (),
+                    subscribers: non_empty_vec![(10, tracing::Span::none())],
+                };
+                actor.add_fetch(fetch());
+                let completed = actor.fetches.next_completed().await.unwrap();
+                actor.handle_fetched(completed.key, completed.value);
+                let first = consumer.pop().unwrap();
+
+                // The consumer answers, then fetches again. The actor takes the fetch
+                // before it polls the verdict.
+                match outcome {
+                    Some(outcome) => first.response.send(outcome).unwrap(),
+                    None => drop(first.response),
+                }
+                actor.add_fetch(fetch());
+                if let Some(Ok(completed)) = actor.deliveries.next_completion().now_or_never() {
+                    actor.handle_delivered(completed);
+                }
+
+                // The repeat causes a second source fetch and a second delivery.
+                let completed = actor
+                    .fetches
+                    .next_completed()
+                    .now_or_never()
+                    .expect("fetch issued after the verdict must start")
+                    .unwrap();
+                actor.handle_fetched(completed.key, completed.value);
+                let second = consumer.pop().unwrap();
+                assert_eq!(second.value, Bytes::from_static(b"new"));
+                assert_eq!(fetcher.calls(), 2);
+            });
+        }
+
+        // When a later subscriber keeps the key in flight, the repeat joins it and
+        // both are served from the accepted response.
+        Runner::default().start(|context| async move {
+            let fetcher = MockFetcher::default();
+            fetcher.push(1, Some(Bytes::from_static(b"value")));
+            let consumer = MockConsumer::default();
+            let (_sender, receiver) =
+                mailbox::new(context.child("mailbox"), NonZeroUsize::new(16).unwrap());
+            let mut actor = Actor::new(
+                context.child("actor"),
+                fetcher.clone(),
+                receiver,
+                consumer.clone(),
+                RETRY_DELAY,
+            );
+            let fetch = |subscriber| FetchKey {
+                key: 1,
+                metadata: (),
+                subscribers: non_empty_vec![(subscriber, tracing::Span::none())],
+            };
+            actor.add_fetch(fetch(10));
+            let completed = actor.fetches.next_completed().await.unwrap();
+            actor.handle_fetched(completed.key, completed.value);
+            let first = consumer.pop().unwrap();
+            actor.add_fetch(fetch(11));
+            first
+                .response
+                .send(Outcome::Resolved(Resolution::Complete))
+                .unwrap();
+            actor.add_fetch(fetch(10));
+
+            for subscriber in [11, 10] {
+                while let Some(completed) = actor.deliveries.next_completion().now_or_never() {
+                    if let Ok(completed) = completed {
+                        actor.handle_delivered(completed);
+                    }
+                }
+                let delivery = consumer
+                    .pop()
+                    .expect("fetch issued after the verdict must be delivered");
+                assert_eq!(delivery.delivery.subscribers.len().get(), 1);
+                assert_eq!(delivery.delivery.subscribers.first().0, subscriber);
+                delivery
+                    .response
+                    .send(Outcome::Resolved(Resolution::Complete))
+                    .unwrap();
+            }
+            assert_eq!(fetcher.calls(), 1);
+        });
     }
 
     #[test]

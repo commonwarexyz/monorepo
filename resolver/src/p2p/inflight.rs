@@ -8,6 +8,11 @@ use commonware_runtime::{Clock, telemetry::metrics::histogram};
 use futures::future::Aborted;
 use std::time::Duration;
 
+/// Verdict on a delivery, with the peer that served the response, how long the
+/// response took, and its size.
+type Verdict<Con, P> =
+    Completion<<Con as Consumer>::Key, <Con as Consumer>::Subscriber, (P, Duration, usize)>;
+
 /// Tracks all in-flight fetch state.
 pub(super) struct Inflight<Con, P>
 where
@@ -102,11 +107,16 @@ where
         self.deliveries.discard_response(key);
     }
 
-    /// Returns the next verdict, or [Aborted] for cancellation without a verdict.
-    /// Canceled completions retain source feedback but cannot affect current demand.
-    pub(super) async fn next_delivery(
-        &mut self,
-    ) -> Result<Completion<Con::Key, Con::Subscriber, (P, Duration, usize)>, Aborted> {
+    /// Returns the key's verdict if the consumer has already sent it or dropped its
+    /// sender, without waiting for [`next_delivery`](Self::next_delivery) to report it.
+    pub(super) fn try_delivery(&mut self, key: &Con::Key) -> Option<Verdict<Con, P>> {
+        self.deliveries.try_completion(key)
+    }
+
+    /// Returns the next verdict, or [Aborted] for cancellation without a verdict and for
+    /// a delivery [`try_delivery`](Self::try_delivery) returned. Canceled completions
+    /// retain source feedback but cannot affect current demand.
+    pub(super) async fn next_delivery(&mut self) -> Result<Verdict<Con, P>, Aborted> {
         self.deliveries.next_completion().await
     }
 }
