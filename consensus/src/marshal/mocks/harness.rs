@@ -7,13 +7,12 @@ use crate::{
     BoundedBlock, CertifiableBlock, Heightable, Reporter,
     marshal::{
         Identifier,
-        ancestry::BlockProvider,
         coding::{
             Coding, shards,
             types::{CodedBlock, coding_config_for_participants, hash_context},
         },
         config::{Config, Start},
-        core::{Actor, CommitmentFallback, DigestFallback, Mailbox, Processed},
+        core::{Actor, Mailbox, Processed},
         mocks::{
             application::Application,
             block::{Block, encode_block, ready},
@@ -38,17 +37,10 @@ use commonware_cryptography::{
     ed25519::{PrivateKey, PublicKey},
     sha256::{Digest as Sha256Digest, Sha256},
 };
-use commonware_macros::select;
 use commonware_p2p::simulated::{self, Link, Network, Oracle};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    Clock, Quota, Runner, Supervisor as _,
-    buffer::paged::CacheRef,
-    deterministic,
-    telemetry::metrics::{
-        MetricsExt as _,
-        histogram::{Buckets, Timed},
-    },
+    Clock, Quota, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::{
     archive::{immutable, prunable},
@@ -58,7 +50,6 @@ use commonware_utils::{
     NZDuration, NZU16, NZU32, NZU64, NZUsize, TestRng, non_empty, probability, test_rng,
     vec::NonEmptyVec,
 };
-use futures::StreamExt;
 use rand::{
     RngExt as _,
     seq::{IteratorRandom, SliceRandom},
@@ -67,7 +58,6 @@ use std::{
     collections::BTreeMap,
     future::Future,
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
-    sync::Arc,
     time::{Duration, Instant},
 };
 use tracing::info;
@@ -3133,8 +3123,9 @@ pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization:
         setup_network_links(&mut oracle, &participants, link.clone()).await;
 
         let mut blocks = Vec::new();
-        let mut parent = Sha256::hash(&[b""]);
-        let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
+        let genesis = H::genesis_block(participants.len() as u16);
+        let mut parent = H::digest(&genesis);
+        let mut parent_commitment = H::commitment(&genesis);
         for i in 1..=NUM_BLOCKS {
             let block = H::make_test_block(
                 parent,
@@ -3550,8 +3541,9 @@ pub fn sync_height_floor<H: TestHarness>() {
         setup_network_links(&mut oracle, &participants[1..], LINK).await;
 
         let mut blocks = Vec::new();
-        let mut parent = Sha256::hash(&[b""]);
-        let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
+        let genesis = H::genesis_block(participants.len() as u16);
+        let mut parent = H::digest(&genesis);
+        let mut parent_commitment = H::commitment(&genesis);
         for i in 1..=NUM_BLOCKS {
             let block = H::make_test_block(
                 parent,
@@ -4127,140 +4119,6 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
     });
 }
 
-/// Commitment fetch height metadata bounds caching without changing response delivery.
-pub fn commitment_fetch_height_hint_mismatch_wakes_subscriber<H: TestHarness>() {
-    let runner = deterministic::Runner::timed(Duration::from_secs(60));
-    runner.start(|mut context| async move {
-        let Fixture {
-            participants,
-            schemes,
-            ..
-        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-
-        let victim = participants[0].clone();
-        let server = participants[1].clone();
-        let peers = vec![victim.clone(), server.clone()];
-        let mut oracle = setup_network_with_participants(
-            context.child("network"),
-            NZUsize!(1),
-            peers.clone(),
-            1024 * 1024,
-        )
-        .await;
-
-        let victim_setup = H::setup_validator(
-            context.child("victim"),
-            &mut oracle,
-            victim.clone(),
-            ConstantProvider::new(schemes[0].clone()),
-        )
-        .await;
-        let server_setup = H::setup_validator(
-            context.child("server"),
-            &mut oracle,
-            server.clone(),
-            ConstantProvider::new(schemes[1].clone()),
-        )
-        .await;
-
-        let victim_handle: ValidatorHandle<H> = ValidatorHandle {
-            mailbox: victim_setup.mailbox,
-            extra: victim_setup.extra,
-        };
-        let mut server_handle: ValidatorHandle<H> = ValidatorHandle {
-            mailbox: server_setup.mailbox,
-            extra: server_setup.extra,
-        };
-
-        let actual_height = Height::new(7);
-        let expected_height = Height::new(1_000_000);
-        let block = H::make_test_block(
-            Sha256::hash(&[b"commitment-fetch-height-hint-mismatch"]),
-            H::genesis_parent_commitment(NUM_VALIDATORS as u16),
-            actual_height,
-            7,
-            NUM_VALIDATORS as u16,
-        );
-        let commitment = H::commitment(&block);
-        H::propose(
-            &mut server_handle,
-            Round::new(Epoch::zero(), View::new(actual_height.get())),
-            &block,
-        )
-        .await;
-
-        let subscription = victim_handle.mailbox.subscribe_by_commitment(
-            commitment,
-            CommitmentFallback::FetchByCommitment {
-                height: expected_height,
-            },
-        );
-
-        setup_network_links(&mut oracle, &peers, LINK).await;
-
-        let received = select! {
-            result = subscription => {
-                result.expect("commitment subscription should receive the fetched block")
-            },
-            _ = context.sleep(Duration::from_secs(5)) => {
-                panic!("commitment subscription was not woken by height-hint-mismatched block");
-            },
-        };
-        assert_eq!(
-            <<H as TestHarness>::Variant as crate::marshal::core::Variant>::commitment(&received),
-            commitment
-        );
-        assert_eq!(received.height(), actual_height);
-        let cached = victim_handle
-            .mailbox
-            .get_block(&received.digest())
-            .await
-            .expect("height-hint-mismatched fetch should cache by decoded height");
-        assert_eq!(cached.height(), actual_height);
-
-        let expected_height = Height::new(7);
-        let actual_height = Height::new(1_000_000);
-        let block = H::make_test_block(
-            Sha256::hash(&[b"commitment-fetch-height-above-hint"]),
-            H::genesis_parent_commitment(NUM_VALIDATORS as u16),
-            actual_height,
-            8,
-            NUM_VALIDATORS as u16,
-        );
-        let commitment = H::commitment(&block);
-        H::propose(
-            &mut server_handle,
-            Round::new(Epoch::zero(), View::new(8)),
-            &block,
-        )
-        .await;
-
-        let subscription = victim_handle.mailbox.subscribe_by_commitment(
-            commitment,
-            CommitmentFallback::FetchByCommitment {
-                height: expected_height,
-            },
-        );
-        let received = select! {
-            result = subscription => {
-                result.expect("commitment subscription should receive the block above its hint")
-            },
-            _ = context.sleep(Duration::from_secs(5)) => {
-                panic!("commitment subscription was not woken by block above height hint");
-            },
-        };
-        assert_eq!(received.height(), actual_height);
-        assert!(
-            victim_handle
-                .mailbox
-                .get_block(&received.digest())
-                .await
-                .is_none(),
-            "block above the local height hint must not be cached"
-        );
-    });
-}
-
 /// Test basic block subscription delivery.
 pub fn subscribe_basic_block_delivery<H: TestHarness>() {
     let runner = deterministic::Runner::timed(Duration::from_secs(60));
@@ -4308,12 +4166,7 @@ pub fn subscribe_basic_block_delivery<H: TestHarness>() {
         let digest = H::digest(&block);
         let commitment = H::commitment(&block);
 
-        let subscription_rx = handle.mailbox.subscribe_by_digest(
-            digest,
-            DigestFallback::FetchByRound {
-                round: Round::new(Epoch::zero(), View::new(1)),
-            },
-        );
+        let subscription_rx = handle.mailbox.acquire(commitment);
         H::propose(&mut handle, Round::new(Epoch::zero(), View::new(1)), &block).await;
         H::verify(
             &mut handle,
@@ -4394,24 +4247,9 @@ pub fn subscribe_multiple_subscriptions<H: TestHarness>() {
         let digest1 = H::digest(&block1);
         let digest2 = H::digest(&block2);
 
-        let sub1_rx = handle.mailbox.subscribe_by_digest(
-            digest1,
-            DigestFallback::FetchByRound {
-                round: Round::new(Epoch::zero(), View::new(1)),
-            },
-        );
-        let sub2_rx = handle.mailbox.subscribe_by_digest(
-            digest2,
-            DigestFallback::FetchByRound {
-                round: Round::new(Epoch::zero(), View::new(2)),
-            },
-        );
-        let sub3_rx = handle.mailbox.subscribe_by_digest(
-            digest1,
-            DigestFallback::FetchByRound {
-                round: Round::new(Epoch::zero(), View::new(1)),
-            },
-        );
+        let sub1_rx = handle.mailbox.acquire(H::commitment(&block1));
+        let sub2_rx = handle.mailbox.acquire(H::commitment(&block2));
+        let sub3_rx = handle.mailbox.acquire(H::commitment(&block1));
         for (view, block) in [(1u64, &block1), (2, &block2)] {
             let round = Round::new(Epoch::zero(), View::new(view));
             H::propose(&mut handle, round, block).await;
@@ -4493,21 +4331,10 @@ pub fn subscribe_canceled_subscriptions<H: TestHarness>() {
             2,
             participants.len() as u16,
         );
-        let digest1 = H::digest(&block1);
         let digest2 = H::digest(&block2);
 
-        let sub1_rx = handle.mailbox.subscribe_by_digest(
-            digest1,
-            DigestFallback::FetchByRound {
-                round: Round::new(Epoch::zero(), View::new(1)),
-            },
-        );
-        let sub2_rx = handle.mailbox.subscribe_by_digest(
-            digest2,
-            DigestFallback::FetchByRound {
-                round: Round::new(Epoch::zero(), View::new(2)),
-            },
-        );
+        let sub1_rx = handle.mailbox.acquire(H::commitment(&block1));
+        let sub2_rx = handle.mailbox.acquire(H::commitment(&block2));
         drop(sub1_rx);
 
         for (view, block) in [(1u64, &block1), (2, &block2)] {
@@ -4606,21 +4433,11 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
             n,
         );
 
-        let sub1_rx = handle
-            .mailbox
-            .subscribe_by_digest(H::digest(&block1), DigestFallback::Wait);
-        let sub2_rx = handle
-            .mailbox
-            .subscribe_by_digest(H::digest(&block2), DigestFallback::Wait);
-        let sub3_rx = handle
-            .mailbox
-            .subscribe_by_digest(H::digest(&block3), DigestFallback::Wait);
-        let sub4_rx = handle
-            .mailbox
-            .subscribe_by_digest(H::digest(&block4), DigestFallback::Wait);
-        let sub5_rx = handle
-            .mailbox
-            .subscribe_by_digest(H::digest(&block5), DigestFallback::Wait);
+        let sub1_rx = handle.mailbox.acquire(H::commitment(&block1));
+        let sub2_rx = handle.mailbox.acquire(H::commitment(&block2));
+        let sub3_rx = handle.mailbox.acquire(H::commitment(&block3));
+        let sub4_rx = handle.mailbox.acquire(H::commitment(&block4));
+        let sub5_rx = handle.mailbox.acquire(H::commitment(&block5));
 
         // Block1: Broadcasted by the actor
         H::propose(
@@ -5289,98 +5106,6 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
             .await
             .expect("finalization should be fetched");
         assert_eq!(finalization.proposal.round.view(), View::new(5));
-    })
-}
-
-/// Test ancestry stream.
-pub fn ancestry_stream<H: TestHarness>()
-where
-    Mailbox<S, H::Variant>: BlockProvider<Block = H::ApplicationBlock>,
-{
-    let runner = deterministic::Runner::timed(Duration::from_secs(60));
-    runner.start(|mut context| async move {
-        let Fixture {
-            participants,
-            schemes,
-            ..
-        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let mut oracle = setup_network_with_participants(
-            context.child("network"),
-            NZUsize!(1),
-            participants.clone(),
-            1024 * 1024,
-        )
-        .await;
-
-        let me = participants[0].clone();
-        let setup = H::setup_validator(
-            context.child("validator").with_attribute("index", 0),
-            &mut oracle,
-            me,
-            ConstantProvider::new(schemes[0].clone()),
-        )
-        .await;
-        let mut handle = ValidatorHandle {
-            mailbox: setup.mailbox,
-            extra: setup.extra,
-        };
-
-        // Finalize blocks at heights 1-5
-        let mut parent = Sha256::hash(&[b""]);
-        let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
-        for i in 1..=5u64 {
-            let block = H::make_test_block(
-                parent,
-                parent_commitment,
-                Height::new(i),
-                i,
-                participants.len() as u16,
-            );
-            let digest = H::digest(&block);
-            let commitment = H::commitment(&block);
-            let round = Round::new(Epoch::zero(), View::new(i));
-
-            H::propose(&mut handle, round, &block).await;
-            context.sleep(LINK.latency).await;
-
-            let proposal = Proposal {
-                round,
-                parent: View::new(i - 1),
-                payload: commitment,
-            };
-            let finalization = H::make_finalization(proposal, &schemes, QUORUM);
-            H::report_finalization(&mut handle.mailbox, finalization).await;
-
-            parent = digest;
-            parent_commitment = commitment;
-        }
-
-        // Stream from latest -> height 1
-        let (_, commitment) = handle.mailbox.get_info(Identifier::Latest).await.unwrap();
-        let fetch_duration = Timed::new(context.histogram(
-            "ancestor_fetch_duration",
-            "Histogram of time taken to fetch a block via the ancestry stream, in seconds",
-            Buckets::LOCAL,
-        ));
-        let ancestry = handle
-            .mailbox
-            .ancestry(
-                Arc::new(context.child("ancestor_stream")),
-                (DigestFallback::Wait, commitment),
-                fetch_duration,
-            )
-            .await
-            .unwrap();
-
-        // Consume the known finalized range. The stream may keep waiting for
-        // an older parent while that parent can still become available.
-        let blocks = ancestry.take(5).collect::<Vec<_>>().await;
-
-        // Ensure correct delivery order: 5,4,3,2,1
-        assert_eq!(blocks.len(), 5);
-        (0..5).for_each(|i| {
-            assert_eq!(blocks[i].height().get(), 5 - i as u64);
-        });
     })
 }
 
