@@ -258,10 +258,13 @@ pub trait BlockProvider: Send + 'static {
     ///
     /// `bound` limits how long the caller needs the parent. It is the round consensus assigned to
     /// `block` or to a descendant the caller walks from, or the round of the consensus request the
-    /// caller serves. Once every block of that round is processed or can never be finalized, the
-    /// provider may stop fetching the parent, and the subscription then completes only if the
-    /// parent becomes available locally. Pass `None` only when `block` has been checked against its
-    /// own parent, such as a finalized block.
+    /// caller serves. Pass `None` only when `block` has been checked against its own parent, such
+    /// as a finalized block.
+    ///
+    /// The provider may stop fetching the parent once the parent is processed or `block` can never
+    /// be finalized. One of those two conditions holds once a block finalized at `bound` or a later
+    /// round is processed. After the provider stops, the subscription completes only if the parent
+    /// becomes available locally.
     ///
     /// Returns `None` only when the provider can no longer obtain the parent from any source.
     /// Dropping the returned future cancels the subscription.
@@ -359,11 +362,10 @@ impl<M: BlockProvider, C: Clock> AncestorStream<M, C> {
     /// already safe to verify, certify, build on, or repair from, and do not use the stream to
     /// wait for pending candidate proposal data.
     ///
-    /// `bound` is passed with every request (see [`BlockProvider::subscribe_parent`]). It is the
-    /// round consensus assigned to the newest initial block or to a descendant of it, or the
-    /// round of the consensus request the stream serves. Without a bound, every block the stream
-    /// reaches must have been checked against its own parent, as in certified or finalized
-    /// ancestry.
+    /// `bound` is the round consensus assigned to the newest initial block or to a descendant of
+    /// it, or the round of the consensus request the stream serves. The stream passes it to every
+    /// [`BlockProvider::subscribe_parent`] call. Without a bound, every block the stream reaches
+    /// must have been checked against its own parent, as in certified or finalized ancestry.
     ///
     /// # Panics
     ///

@@ -996,7 +996,7 @@ where
     /// delivering a parent.
     ///
     /// Each parent is requested under `target`'s round. Once marshal's processed round floor
-    /// covers that round, every block of the path is processed or can never be finalized.
+    /// covers that round, every ancestor of `target` is processed or can never be finalized.
     async fn prepare_replay<P>(
         &self,
         context: &E,

@@ -318,8 +318,8 @@ where
     }
 }
 
-/// A mock application that reads the ancestry it is given block by block. It verifies a block
-/// only once it reaches the height-zero block, and it never builds one.
+/// A mock application that reads the ancestry it is given block by block. It accepts a block
+/// only if that ancestry reaches the height-zero block, and it never builds one.
 #[derive(Clone)]
 pub struct WalkingVerifyingApp<B: Digestible, S> {
     /// The digest of each block the application and its clones have read, in order.

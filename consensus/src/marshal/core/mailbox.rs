@@ -296,7 +296,7 @@ pub enum CommitmentFallback {
     /// the in-flight resolver key or retention bound.
     FetchByRound { round: Round },
     /// Request the exact commitment from peers and prune the request once the processed height
-    /// reaches `height` or, like [`Self::FetchByRound`], the processed round floor covers `round`.
+    /// reaches `height` or, for an uncertified block, the processed round floor covers `round`.
     ///
     /// Use this when the caller reads the block's height from the block above it. Examples
     /// include repairing a finalized gap or walking a block's ancestry. Peers serve the block
@@ -306,8 +306,8 @@ pub enum CommitmentFallback {
     ///
     /// At least one bound must be locally validated. A height read from a block counts only once
     /// that block has been checked against its own parent. Otherwise supply a `round` that ends
-    /// the need for the block. That is the round consensus bound to the commitment, such as the
-    /// parent round in a block's consensus context, or the round of the consensus request the
+    /// the need for the block. That is either the round consensus bound to the commitment, such as
+    /// the parent round in a block's consensus context, or the round of the consensus request the
     /// block is fetched for.
     ///
     /// Neither bound is sent to peers, and neither is part of response validity. A fetched block
