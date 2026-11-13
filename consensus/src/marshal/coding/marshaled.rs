@@ -16,7 +16,7 @@
 //! # Erasure Coding
 //!
 //! This wrapper integrates with a variant of marshal that supports erasure coded broadcast. When a leader
-//! proposes a new block, it is automatically erasure encoded and its shards are broadcasted to active
+//! proposes a new block, it is automatically erasure encoded and its shards are dispersed to active
 //! participants. When verifying a proposed block (the precondition for notarization), the wrapper
 //! ensures the commitment's context digest matches the consensus context and, when this node can
 //! sign, waits for validation of the shard assigned to it by the proposer. If that shard is valid,
@@ -962,7 +962,7 @@ where
                     // the shard engine reads the participant set from the round's epoch,
                     // so announcing an unvalidated round would classify this block's
                     // shards against the wrong epoch.
-                    shards.discovered(payload, round);
+                    shards.gather(payload, round);
 
                     // Valid re-proposal: notify the marshal and complete the
                     // certification gate task for `certify`.
@@ -984,7 +984,7 @@ where
 
         // Inform the shard engine of an externally proposed commitment. The context
         // digest validated above binds this round to the commitment.
-        self.shards.discovered(payload, consensus_context.round);
+        self.shards.gather(payload, consensus_context.round);
 
         // Kick off deferred verification early to hide verification latency behind
         // shard validity checks and network latency for collecting votes.
@@ -1102,10 +1102,10 @@ where
     #[tracing::instrument(name = "marshal.coding.certify", level = "info", skip_all, fields(round = %round, commitment = %payload))]
     async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
         // Certify may be reached without an earlier `verify`, or while the `verify`
-        // of a re-proposal still awaits its block. This can then be the shard
-        // engine's first report of the commitment. A first report starts
-        // reconstruction from the shards already buffered for the commitment.
-        self.shards.discovered(payload, round);
+        // of a re-proposal still awaits its block. This can then be the first call
+        // that asks the shard engine to gather the commitment, and such a call
+        // starts reconstruction from the shards already buffered for it.
+        self.shards.gather(payload, round);
 
         // Check for an in-progress certification gate task.
         let task = self.gates.claim(round, payload, |block, ack| {

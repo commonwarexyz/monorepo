@@ -28,7 +28,7 @@
 //!
 //! 1. The application produces a block through [`Marshaled`], which encodes the payload and
 //!    obtains a [`crate::types::coding::Commitment`] describing the shard layout.
-//! 2. The block is broadcast via [`shards::Engine`]; each participant receives exactly one shard
+//! 2. The block is dispersed via [`shards::Engine`]. Each participant receives exactly one shard
 //!    and reshares it to everyone else once it verifies the fragment.
 //! 3. The actor ingests notarizations/finalizations from `simplex`, pulls reconstructed blocks
 //!    from the shard engine or backfills them through [`crate::marshal::resolver`], and durably
@@ -1526,7 +1526,7 @@ mod tests {
             let block = make_coding_block(block_ctx.clone(), genesis.digest(), Height::new(1), 100);
             let coded_block = encode_block(block.clone(), coding_config);
             let commitment = coded_block.commitment();
-            shards.proposed(round, coded_block);
+            shards.disperse(round, coded_block);
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -1612,8 +1612,8 @@ mod tests {
             let descendant_commitment = CodingHarness::commitment(&descendant_block);
 
             // Cache both blocks in the shard engine only.
-            shards.proposed(Round::new(Epoch::new(0), View::new(1)), parent_block);
-            shards.proposed(Round::new(Epoch::new(0), View::new(2)), descendant_block);
+            shards.disperse(Round::new(Epoch::new(0), View::new(1)), parent_block);
+            shards.disperse(Round::new(Epoch::new(0), View::new(2)), descendant_block);
             assert!(shards.get(parent_commitment).await.is_some());
             assert!(shards.get(descendant_commitment).await.is_some());
 
@@ -1715,7 +1715,7 @@ mod tests {
             let parent_digest = parent.digest();
             let coded_parent = encode_block(parent.clone(), coding_config);
             let parent_commitment = coded_parent.commitment();
-            shards.proposed(Round::new(Epoch::new(0), View::new(1)), coded_parent);
+            shards.disperse(Round::new(Epoch::new(0), View::new(1)), coded_parent);
 
             // Block A at view 5 (height 2), created with context matching what verify will receive
             let round_a = Round::new(Epoch::new(0), View::new(5));
@@ -1727,7 +1727,7 @@ mod tests {
             let block_a = make_coding_block(context_a.clone(), parent_digest, Height::new(2), 200);
             let coded_block_a = encode_block(block_a.clone(), coding_config);
             let commitment_a = coded_block_a.commitment();
-            shards.proposed(round_a, coded_block_a);
+            shards.disperse(round_a, coded_block_a);
 
             // Block B at view 10 (height 2, different block same height, as could happen with
             // different proposers or re-proposals)
@@ -1740,7 +1740,7 @@ mod tests {
             let block_b = make_coding_block(context_b.clone(), parent_digest, Height::new(2), 300);
             let coded_block_b = encode_block(block_b.clone(), coding_config);
             let commitment_b = coded_block_b.commitment();
-            shards.proposed(round_b, coded_block_b);
+            shards.disperse(round_b, coded_block_b);
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -1857,7 +1857,7 @@ mod tests {
                 if i == 10 {
                     non_boundary = Some((View::new(i), last_commitment));
                 }
-                shards.proposed(round, coded_block);
+                shards.disperse(round, coded_block);
                 parent = block.digest();
                 last_view = View::new(i);
             }
@@ -1880,8 +1880,8 @@ mod tests {
             );
             let coded_boundary = encode_block(boundary_block.clone(), coding_config);
             let boundary_commitment = coded_boundary.commitment();
-            shards.discovered(boundary_commitment, boundary_round);
-            shards.proposed(boundary_round, coded_boundary.clone());
+            shards.gather(boundary_commitment, boundary_round);
+            shards.disperse(boundary_round, coded_boundary.clone());
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -2134,10 +2134,9 @@ mod tests {
         })
     }
 
-    /// The shard engine's window can evict a commitment's record on either side of
-    /// re-proposal verification. The re-proposal must remain live through core marshal's
-    /// verified cache, while a `discovered` announcement after eviction must recreate shard
-    /// state needed before notarization.
+    /// The shard engine's window can evict a commitment's record on either side of re-proposal
+    /// verification. The re-proposal must remain live through core marshal's verified cache, while
+    /// a `gather` call after eviction must recreate shard state needed before notarization.
     #[test_traced("WARN")]
     fn test_coding_reproposal_recreates_shard_state_after_eviction() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -2183,7 +2182,7 @@ mod tests {
             };
             let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
-            // Discovers a window of commitments in the views starting at `first`.
+            // Gathers a window of commitments in the views starting at `first`.
             let fill = |first: u64| {
                 for view in first..first + harness::RECORDS.get() as u64 {
                     let commitment = TestCommitment::from((
@@ -2192,7 +2191,7 @@ mod tests {
                         Sha256::hash(&[b"filler_context"]),
                         coding_config,
                     ));
-                    shards.discovered(commitment, Round::new(Epoch::new(0), View::new(view)));
+                    shards.gather(commitment, Round::new(Epoch::new(0), View::new(view)));
                 }
             };
 
@@ -2219,8 +2218,8 @@ mod tests {
                     .verified(boundary_round, coded_boundary.clone())
                     .await
             );
-            shards.discovered(boundary_commitment, boundary_round);
-            shards.proposed(boundary_round, coded_boundary.clone());
+            shards.gather(boundary_commitment, boundary_round);
+            shards.disperse(boundary_round, coded_boundary.clone());
             assert!(shards.get(boundary_commitment).await.is_some());
 
             // Records for a window of later views evict the cached block.
@@ -2228,8 +2227,8 @@ mod tests {
             assert!(shards.get(boundary_commitment).await.is_none());
 
             // Re-propose the boundary block above those views in the same epoch.
-            // Verification must fetch the block from the core backstop and re-announce
-            // discovery.
+            // Verification must fetch the block from the core backstop and call
+            // `gather` again.
             let reproposal_round = Round::new(Epoch::new(0), View::new(40));
             let reproposal_context = CodingCtx {
                 round: reproposal_round,
@@ -2451,7 +2450,7 @@ mod tests {
             let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
             let coded_parent = encode_block(parent.clone(), coding_config);
             let parent_commitment = coded_parent.commitment();
-            shards.proposed(Round::new(Epoch::zero(), View::new(1)), coded_parent);
+            shards.disperse(Round::new(Epoch::zero(), View::new(1)), coded_parent);
 
             // Build a block with context A (commitment hash uses this context).
             let round_a = Round::new(Epoch::zero(), View::new(2));
@@ -2567,7 +2566,7 @@ mod tests {
             drop(verify_rx);
             context.sleep(Duration::from_millis(10)).await;
 
-            shards.proposed(boundary_round, coded_boundary);
+            shards.disperse(boundary_round, coded_boundary);
             context.sleep(Duration::from_millis(10)).await;
 
             // Certify should not return the stale closed certification gate task; it
@@ -2654,7 +2653,7 @@ mod tests {
             // Once the certification gate task's subscription reaches the shard engine, a
             // failed reconstruction of the payload closes it.
             marshal.get_processed().await;
-            shards.discovered(missing_payload, round);
+            shards.gather(missing_payload, round);
             for (sender, shard) in senders.iter_mut().zip(&missing_shards[1..]) {
                 sender.send(Recipients::One(me.clone()), shard.encode(), true);
             }
@@ -2741,7 +2740,7 @@ mod tests {
             // Once the underlying buffer subscription reaches the shard engine, a failed
             // reconstruction of the commitment closes it.
             marshal.get_processed().await;
-            shards.discovered(missing_commitment, round);
+            shards.gather(missing_commitment, round);
             for (sender, shard) in senders.iter_mut().zip(&missing_shards[1..]) {
                 sender.send(Recipients::One(me.clone()), shard.encode(), true);
             }
@@ -2797,7 +2796,7 @@ mod tests {
                 NUM_VALIDATORS as u16,
             );
             let missing_commitment = missing.commitment();
-            shards.discovered(missing_commitment, missing_round);
+            shards.gather(missing_commitment, missing_round);
 
             let subscription =
                 marshal.subscribe_by_commitment(missing_commitment, core::CommitmentFallback::Wait);
@@ -2812,7 +2811,7 @@ mod tests {
                 NUM_VALIDATORS as u16,
             );
             let floor_commitment = floor.commitment();
-            shards.proposed(floor_round, floor);
+            shards.disperse(floor_round, floor);
             assert!(shards.get(floor_commitment).await.is_some());
             marshal.set_floor(CodingHarness::make_finalization(
                 Proposal {
@@ -2828,7 +2827,7 @@ mod tests {
                 context.sleep(Duration::from_millis(10)).await;
             }
 
-            shards.proposed(Round::new(Epoch::zero(), View::new(3)), missing);
+            shards.disperse(Round::new(Epoch::zero(), View::new(3)), missing);
             select! {
                 result = subscription => {
                     let block = result.expect("floor update closed commitment subscription");
@@ -2936,7 +2935,7 @@ mod tests {
             let parent_digest = parent.digest();
             let coded_parent = encode_block(parent.clone(), coding_config);
             let parent_commitment = coded_parent.commitment();
-            shards.proposed(Round::new(Epoch::zero(), View::new(19)), coded_parent);
+            shards.disperse(Round::new(Epoch::zero(), View::new(19)), coded_parent);
 
             // Create a block at height 20 (first block in epoch 1, which is NOT supported)
             let block_ctx = CodingCtx {
@@ -2947,7 +2946,7 @@ mod tests {
             let block = make_coding_block(block_ctx, parent_digest, Height::new(20), 2000);
             let coded_block = encode_block(block.clone(), coding_config);
             let block_commitment = coded_block.commitment();
-            shards.proposed(Round::new(Epoch::new(1), View::new(20)), coded_block);
+            shards.disperse(Round::new(Epoch::new(1), View::new(20)), coded_block);
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -3048,9 +3047,9 @@ mod tests {
             let parent_digest = honest_parent.digest();
             let coded_parent = encode_block(honest_parent.clone(), coding_config);
             let parent_commitment = coded_parent.commitment();
-            shards.proposed(Round::new(Epoch::new(1), View::new(21)), coded_parent);
+            shards.disperse(Round::new(Epoch::new(1), View::new(21)), coded_parent);
 
-            // Byzantine proposer broadcasts malicious block at height 35
+            // Byzantine proposer disperses malicious block at height 35
             // The block has the correct context (matching what consensus will provide)
             // but contains invalid content (non-contiguous height: 21 -> 35 instead of 21 -> 22)
             let byzantine_round = Round::new(Epoch::new(1), View::new(35));
@@ -3067,9 +3066,9 @@ mod tests {
             );
             let coded_malicious = encode_block(malicious_block.clone(), coding_config);
             let malicious_commitment = coded_malicious.commitment();
-            shards.proposed(byzantine_round, coded_malicious);
+            shards.disperse(byzantine_round, coded_malicious);
 
-            // Small delay to ensure broadcast is processed
+            // Small delay to ensure the dispersal is processed
             context.sleep(Duration::from_millis(10)).await;
 
             // Marshaled.verify() kicks off deferred verification in the background.
@@ -3111,9 +3110,9 @@ mod tests {
             );
             let coded_malicious2 = encode_block(malicious_block2.clone(), coding_config);
             let malicious_commitment2 = coded_malicious2.commitment();
-            shards.proposed(byzantine_round2, coded_malicious2);
+            shards.disperse(byzantine_round2, coded_malicious2);
 
-            // Small delay to ensure broadcast is processed
+            // Small delay to ensure the dispersal is processed
             context.sleep(Duration::from_millis(10)).await;
 
             // Marshaled.verify() kicks off deferred verification in the background.
@@ -3204,7 +3203,7 @@ mod tests {
             let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
             let coded_parent = encode_block(parent.clone(), coding_config);
             let parent_commitment = coded_parent.commitment();
-            shards.proposed(parent_round, coded_parent);
+            shards.disperse(parent_round, coded_parent);
 
             // Create child at height 2.
             let child_round = Round::new(Epoch::zero(), View::new(2));
@@ -3216,7 +3215,7 @@ mod tests {
             let child = make_coding_block(child_ctx, parent.digest(), Height::new(2), 200);
             let coded_child = encode_block(child.clone(), coding_config);
             let child_commitment = coded_child.commitment();
-            shards.proposed(child_round, coded_child);
+            shards.disperse(child_round, coded_child);
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -3297,7 +3296,7 @@ mod tests {
             let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
             let coded_parent = encode_block(parent.clone(), coding_config);
             let parent_commitment = coded_parent.commitment();
-            shards.proposed(parent_round, coded_parent);
+            shards.disperse(parent_round, coded_parent);
 
             // Create child at height 2.
             let child_round = Round::new(Epoch::zero(), View::new(2));
@@ -3309,7 +3308,7 @@ mod tests {
             let child = make_coding_block(child_ctx, parent.digest(), Height::new(2), 200);
             let coded_child = encode_block(child.clone(), coding_config);
             let child_commitment = coded_child.commitment();
-            shards.proposed(child_round, coded_child);
+            shards.disperse(child_round, coded_child);
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -3335,7 +3334,7 @@ mod tests {
     /// able to serve a full-block fetch. A validator that never saw the
     /// proposal then holds only buffered sender-indexed gossip shards, and
     /// draining them requires the report that `certify` sends the shard
-    /// engine (`shards.discovered`).
+    /// engine (`shards.gather`).
     #[test_traced("WARN")]
     fn test_certify_reconstructs_from_buffered_gossip_shards() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -3409,7 +3408,7 @@ mod tests {
             let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
             let coded_parent = encode_block(parent.clone(), coding_config);
             let parent_commitment = coded_parent.commitment();
-            shards.proposed(parent_round, coded_parent);
+            shards.disperse(parent_round, coded_parent);
 
             let child_round = Round::new(Epoch::zero(), View::new(2));
             let child_ctx = CodingCtx {
@@ -3421,8 +3420,8 @@ mod tests {
             let coded_child: TestCodedBlock = encode_block(child.clone(), coding_config);
             let child_commitment = coded_child.commitment();
 
-            // Deliver each peer's sender-indexed gossip shard. Until the
-            // commitment is discovered, the shard engine only buffers them.
+            // Deliver each peer's sender-indexed gossip shard. Until the gather call for the
+            // commitment, the shard engine only buffers them.
             for (i, sender) in peer_senders.iter_mut().enumerate() {
                 let index = u16::try_from(i + 1).expect("peer index fits in u16");
                 let shard = coded_child.shard(index).expect("missing shard").encode();
@@ -3746,7 +3745,7 @@ mod tests {
             let parent = make_coding_block(parent_context, genesis.digest(), Height::new(1), 100);
             let coded_parent = encode_block(parent.clone(), coding_config);
             let parent_commitment = coded_parent.commitment();
-            shards.proposed(parent_round, coded_parent);
+            shards.disperse(parent_round, coded_parent);
 
             // 3) Publish a valid child so optimistic verify can succeed.
             let round = Round::new(Epoch::zero(), View::new(2));
@@ -3759,7 +3758,7 @@ mod tests {
                 make_coding_block(verify_context.clone(), parent.digest(), Height::new(2), 200);
             let coded_block = encode_block(block.clone(), coding_config);
             let commitment = coded_block.commitment();
-            shards.proposed(round, coded_block);
+            shards.disperse(round, coded_block);
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -3842,7 +3841,7 @@ mod tests {
             let certified_digest = certified.digest();
             let coded_certified = encode_block(certified.clone(), coding_config);
             let certified_commitment = coded_certified.commitment();
-            shards.proposed(certified_round, coded_certified);
+            shards.disperse(certified_round, coded_certified);
 
             // The view-2 block: notarized by the network but only nullified
             // here, so this validator never certified it.
@@ -3856,7 +3855,7 @@ mod tests {
             let notarized_digest = notarized.digest();
             let coded_notarized = encode_block(notarized.clone(), coding_config);
             let notarized_commitment = coded_notarized.commitment();
-            shards.proposed(notarized_round, coded_notarized);
+            shards.disperse(notarized_round, coded_notarized);
 
             // The view-3 block builds on the view-2 block.
             let round = Round::new(Epoch::zero(), View::new(3));
@@ -3868,7 +3867,7 @@ mod tests {
             let block = make_coding_block(block_ctx, notarized_digest, Height::new(3), 300);
             let coded_block = encode_block(block.clone(), coding_config);
             let commitment = coded_block.commitment();
-            shards.proposed(round, coded_block);
+            shards.disperse(round, coded_block);
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -5158,7 +5157,7 @@ mod tests {
             let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
             let coded_parent = encode_block(parent.clone(), coding_config);
             let parent_commitment = coded_parent.commitment();
-            shards.proposed(parent_round, coded_parent);
+            shards.disperse(parent_round, coded_parent);
 
             let child_round = Round::new(Epoch::zero(), View::new(2));
             let child_ctx = CodingCtx {
@@ -5170,7 +5169,7 @@ mod tests {
             let coded_child = encode_block(child.clone(), coding_config);
             let child_commitment = coded_child.commitment();
             let child_digest = coded_child.digest();
-            shards.proposed(child_round, coded_child);
+            shards.disperse(child_round, coded_child);
 
             context.sleep(Duration::from_millis(10)).await;
 

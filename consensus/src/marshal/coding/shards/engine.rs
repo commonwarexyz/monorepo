@@ -6,7 +6,7 @@
 //! # Overview
 //!
 //! The shard engine serves two primary functions:
-//! 1. Broadcast: When a node proposes a block, the engine broadcasts
+//! 1. Dispersal: When a node proposes a block, the engine disperses
 //!    erasure-coded shards to all participants and to non-participants in
 //!    aggregate membership (peers in [`commonware_p2p::PeerSetUpdate::all`]
 //!    but not in the epoch participant list).
@@ -29,13 +29,13 @@
 //! ```text
 //!                           PROPOSER
 //!                              |
-//!                              | Proposed(block)
+//!                              | Disperse(block)
 //!                              v
 //!                    +------------------+
 //!                    |   Shard Engine   |
 //!                    +------------------+
 //!                              |
-//!            broadcast_shards (each participant's indexed shard)
+//!            disperse_shards (each participant's indexed shard)
 //!                              |
 //!         +--------------------+--------------------+
 //!         |                    |                    |
@@ -158,14 +158,15 @@
 //! assigned shard is unverified, it still verifies that shard and blocks the
 //! sender of a shard at any other index. Otherwise it ignores every arrival.
 //!
-//! _Until consensus reports a commitment via [`Mailbox::discovered`], its shards
-//! wait in fixed-size per-peer queues. The report supplies the round, and with it
-//! the epoch whose participant set classifies them._
+//! _Until consensus asks the engine to gather a commitment via
+//! [`Mailbox::gather`], its shards wait in fixed-size per-peer queues. The call
+//! supplies the round, and with it the epoch whose participant set classifies
+//! them._
 //!
 //! # Record Window
 //!
 //! The engine retains at most [`Config::records`] commitment records. Only
-//! local signals ([`Mailbox::proposed`] and [`Mailbox::discovered`]) create
+//! local signals ([`Mailbox::disperse`] and [`Mailbox::gather`]) create
 //! records. Once the window is full, records with the lowest rounds are evicted
 //! first, and a signal at or below the lowest retained round creates no record
 //! and leaves the commitment's shards in the per-peer queues. Eviction closes
@@ -375,7 +376,7 @@ where
     /// A scheme registered for an epoch in which this node is a committee member must report
     /// the node's membership ([`CertificateScheme::me`]) even when it cannot sign. The leader
     /// sends each committee member the shard at its index, and the engine needs that index to
-    /// accept the shard, gossip it once verified, and broadcast the node's own proposals.
+    /// accept the shard, gossip it once verified, and disperse the node's own proposals.
     pub scheme_provider: S,
 
     /// The peer blocker.
@@ -392,7 +393,7 @@ where
     /// the whole block.
     pub block_codec_config: B::Cfg,
 
-    /// The strategy that checks and decodes received shards, encodes shards for broadcast, and
+    /// The strategy that checks and decodes received shards, encodes shards for dispersal, and
     /// runs reconstruction jobs.
     pub strategy: T,
 
@@ -403,8 +404,8 @@ where
     ///
     /// Shards for commitments without a reconstruction state are buffered per
     /// peer in a fixed-size ring to bound memory under Byzantine spam. These
-    /// shards are only ingested when consensus reports their commitment via
-    /// [`Mailbox::discovered`].
+    /// shards are only ingested when consensus asks the engine to gather their
+    /// commitment via [`Mailbox::gather`].
     ///
     /// Shards wait here in memory until consensus signals their commitment: at most
     /// `peer_buffer_size` per tracked primary peer, each carrying data up to the scheme's widest
@@ -628,7 +629,7 @@ where
     /// [`commonware_codec::Read`] configuration for decoding [`CodedBlock`]s.
     block_codec_config: B::Cfg,
 
-    /// The strategy that checks and decodes received shards, encodes shards for broadcast, and
+    /// The strategy that checks and decodes received shards, encodes shards for dispersal, and
     /// runs reconstruction jobs.
     strategy: T,
 
@@ -791,11 +792,11 @@ where
                 }
 
                 match message {
-                    Message::Proposed { block, round } => {
-                        self.broadcast_shards(&mut sender, round, block);
+                    Message::Disperse { block, round } => {
+                        self.disperse_shards(&mut sender, round, block);
                     }
-                    Message::Discovered { commitment, round } => {
-                        self.handle_discovered(&mut sender, commitment, round);
+                    Message::Gather { commitment, round } => {
+                        self.handle_gather(&mut sender, commitment, round);
                     }
                     Message::GetByCommitment {
                         commitment,
@@ -1032,7 +1033,7 @@ where
     /// A commitment that already has a record only records the observation. A reconstructing
     /// record ingested its buffered shards when it was created and handles later ones on
     /// arrival, and a cached block needs no buffered shard.
-    fn handle_discovered<Sr: Sender<PublicKey = P>>(
+    fn handle_gather<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<B, C, H>>,
         commitment: Commitment<B, C, H>,
@@ -1050,7 +1051,7 @@ where
             return;
         }
         let Some(scheme) = self.scheme_provider.scheme(round.epoch()) else {
-            warn!(%commitment, "no scheme for epoch, ignoring discovered commitment");
+            warn!(%commitment, "no scheme for epoch, ignoring gather call");
             return;
         };
 
@@ -1059,7 +1060,7 @@ where
             debug!(
                 %commitment,
                 %round,
-                "discovered commitment at or below the lowest retained round"
+                "gather call at or below the lowest retained round"
             );
             return;
         }
@@ -1208,11 +1209,11 @@ where
         Ok(cached)
     }
 
-    /// Broadcasts the shards of a [`CodedBlock`] and caches the block.
+    /// Disperses the shards of a [`CodedBlock`] and caches the block.
     ///
     /// - Participants receive the shard matching their participant index.
     /// - Non-participants in aggregate membership receive the leader's shard.
-    fn broadcast_shards<Sr: Sender<PublicKey = P>>(
+    fn disperse_shards<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<B, C, H>>,
         round: Round,
@@ -1233,14 +1234,14 @@ where
         }
 
         let Some(scheme) = self.scheme_provider.scheme(round.epoch()) else {
-            warn!(%commitment, "no scheme available, cannot broadcast shards");
+            warn!(%commitment, "no scheme available, cannot disperse shards");
             return;
         };
         let participants = scheme.participants();
         let Some(my_index) = scheme.me().map(|m| Widen::widen(m.index().get())) else {
             warn!(
                 %commitment,
-                "cannot broadcast shards: local proposer is not a participant"
+                "cannot disperse shards: local proposer is not a participant"
             );
             return;
         };
@@ -1253,7 +1254,7 @@ where
                 %commitment,
                 shard_count,
                 participants = participants.len(),
-                "cannot broadcast shards: participant/shard count mismatch"
+                "cannot disperse shards: participant/shard count mismatch"
             );
             return;
         }
@@ -1262,7 +1263,7 @@ where
             .shard(my_index as u16)
             .expect("proposer's shard must exist");
 
-        // Broadcast each participant their corresponding shard.
+        // Send each participant their corresponding shard.
         for (index, peer) in participants.iter().enumerate() {
             if index == my_index {
                 continue;
@@ -1272,7 +1273,7 @@ where
                 warn!(
                     %commitment,
                     index,
-                    "cannot broadcast shards: missing shard for participant index"
+                    "cannot disperse shards: missing shard for participant index"
                 );
                 return;
             };
@@ -1293,7 +1294,7 @@ where
         // Cache the block so we don't have to reconstruct it again. The window may decline a
         // block from an old round.
         self.cache_block(round, block)
-            .expect("local proposal epoch was validated before broadcast");
+            .expect("local proposal epoch must be validated before dispersal");
         if let Some(record) = self.records.get_mut(&commitment) {
             record.mark_proposed();
         }
@@ -1302,7 +1303,7 @@ where
         // for "our valid shard arrived" still need a notification.
         self.notify_assigned_shard_verified_subscribers(commitment);
 
-        debug!(?commitment, "broadcasted shards");
+        debug!(?commitment, "dispersed shards");
     }
 
     /// Gossips a validated [`Shard`] using [`commonware_p2p::Recipients::All`].
@@ -1658,7 +1659,7 @@ where
     ///   ones that conflict with earlier shards. An assigned shard for our
     ///   index is still verified in `Ready` state.
     /// - Before a reconstruction state exists, shards are buffered at the
-    ///   engine level in bounded per-peer queues until [`Mailbox::discovered`]
+    ///   engine level in bounded per-peer queues until [`Mailbox::gather`]
     ///   creates state for this commitment.
     fn on_network_shard<Sch, X>(
         &mut self,
@@ -2189,7 +2190,7 @@ mod tests {
         additional_scheme_epochs: Vec<Epoch>,
         /// Network link configuration.
         link: Link,
-        /// Per-peer capacity for shards received before their commitment is discovered.
+        /// Per-peer capacity for shards received before the gather call for their commitment.
         peer_buffer_size: NonZeroUsize,
         /// Maximum number of commitment records each engine retains.
         records: NonZeroUsize,
@@ -2489,7 +2490,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_e2e_broadcast_and_reconstruction() {
+    fn test_e2e_dispersal_and_reconstruction() {
         let fixture = Fixture {
             num_primary_peers: 10,
             ..Default::default()
@@ -2502,11 +2503,11 @@ mod tests {
                 let commitment = coded_block.commitment();
 
                 let round = Round::new(Epoch::zero(), View::new(1));
-                peers[0].mailbox.proposed(round, coded_block.clone());
+                peers[0].mailbox.disperse(round, coded_block.clone());
 
                 // Inform every other peer of the commitment so it processes the shards.
                 for peer in peers[1..].iter_mut() {
-                    peer.mailbox.discovered(commitment, round);
+                    peer.mailbox.gather(commitment, round);
                 }
                 context.sleep(config.link.latency).await;
 
@@ -2547,15 +2548,15 @@ mod tests {
 
                 let round = Round::new(Epoch::zero(), View::new(1));
 
-                // Subscribe before broadcasting.
+                // Subscribe before dispersing.
                 let commitment_sub = peers[1].mailbox.subscribe(commitment);
                 let digest_sub = peers[2].mailbox.subscribe_by_digest(digest);
 
-                peers[0].mailbox.proposed(round, coded_block.clone());
+                peers[0].mailbox.disperse(round, coded_block.clone());
 
                 // Inform every other peer of the commitment so it processes the shards.
                 for peer in peers[1..].iter_mut() {
-                    peer.mailbox.discovered(commitment, round);
+                    peer.mailbox.gather(commitment, round);
                 }
                 context.sleep(config.link.latency * 2).await;
 
@@ -2598,7 +2599,7 @@ mod tests {
             let commitment_sub = peers[0].mailbox.subscribe(commitment);
             let digest_sub = peers[0].mailbox.subscribe_by_digest(digest);
 
-            peers[0].mailbox.proposed(round, coded_block.clone());
+            peers[0].mailbox.disperse(round, coded_block.clone());
             context.sleep(config.link.latency).await;
 
             select! {
@@ -2655,11 +2656,11 @@ mod tests {
                 let mut invalid_shard = valid_shard.clone();
                 invalid_shard.index = peers[3].index.get() as u16;
 
-                // Receiver discovers the commitment and subscribes to its assigned shard.
+                // Receiver gathers the commitment and subscribes to its assigned shard.
                 let receiver_pk = peers[2].public_key.clone();
                 peers[2]
                     .mailbox
-                    .discovered(commitment, Round::new(Epoch::zero(), View::new(1)));
+                    .gather(commitment, Round::new(Epoch::zero(), View::new(1)));
                 let mut shard_sub = peers[2]
                     .mailbox
                     .subscribe_assigned_shard_verified(commitment);
@@ -2720,15 +2721,15 @@ mod tests {
             let middle_commitment = middle.commitment();
             let refreshed_commitment = refreshed.commitment();
 
-            // Cache four blocks via `proposed`. Re-proposals raise the first and fourth
+            // Cache four blocks via `disperse`. Re-proposals raise the first and fourth
             // blocks above the other two, independently of their original context rounds.
             let peer = &peers[0];
-            peer.mailbox.proposed(round(1), reproposed.clone());
-            peer.mailbox.proposed(round(2), low);
-            peer.mailbox.proposed(round(3), middle);
-            peer.mailbox.proposed(round(1), refreshed.clone());
-            peer.mailbox.proposed(round(5), reproposed);
-            peer.mailbox.proposed(round(4), refreshed);
+            peer.mailbox.disperse(round(1), reproposed.clone());
+            peer.mailbox.disperse(round(2), low);
+            peer.mailbox.disperse(round(3), middle);
+            peer.mailbox.disperse(round(1), refreshed.clone());
+            peer.mailbox.disperse(round(5), reproposed);
+            peer.mailbox.disperse(round(4), refreshed);
             for commitment in [
                 reproposed_commitment,
                 low_commitment,
@@ -2743,7 +2744,7 @@ mod tests {
 
             // Two blocks proposed in later rounds evict the two lowest-round blocks.
             for (block, view) in later.iter().zip([6, 7]) {
-                peer.mailbox.proposed(round(view), block.clone());
+                peer.mailbox.disperse(round(view), block.clone());
             }
             assert!(
                 peer.mailbox.get(low_commitment).await.is_none(),
@@ -2789,12 +2790,12 @@ mod tests {
 
             // The receiver tracks the commitment at view 1 and caches its own proposal at
             // view 2.
-            peers[2].mailbox.discovered(commitment, round(1));
+            peers[2].mailbox.gather(commitment, round(1));
             let mut assigned = peers[2]
                 .mailbox
                 .subscribe_assigned_shard_verified(commitment);
             let mut subscription = peers[2].mailbox.subscribe(commitment);
-            peers[2].mailbox.proposed(round(2), cached);
+            peers[2].mailbox.disperse(round(2), cached);
             assert!(peers[2].mailbox.get(cached_commitment).await.is_some());
 
             // Records at views 3 and 4 evict both, lowest round first. The commitment's
@@ -2802,15 +2803,15 @@ mod tests {
             for view in [3, 4] {
                 peers[2]
                     .mailbox
-                    .discovered(make_block(view).commitment(), round(view));
+                    .gather(make_block(view).commitment(), round(view));
             }
             assert!(peers[2].mailbox.get(cached_commitment).await.is_none());
             assert!(matches!(assigned.try_recv(), Err(TryRecvError::Empty)));
             assert!(matches!(subscription.try_recv(), Err(TryRecvError::Empty)));
 
-            // Rediscovery at view 5 recreates the record. The assigned shard and one gossip
+            // A later gather call at view 5 recreates the record. The assigned shard and one gossip
             // shard reconstruct the block and resolve both subscriptions.
-            peers[2].mailbox.discovered(commitment, round(5));
+            peers[2].mailbox.gather(commitment, round(5));
             for (sender, index) in [(0, peers[2].index), (1, peers[1].index)] {
                 let shard = block.shard(index.get() as u16).expect("missing shard");
                 peers[sender].sender.send(
@@ -2855,7 +2856,7 @@ mod tests {
             // The candidate at view 10 receives three of the four shards needed.
             let block = make_block(1);
             let commitment = block.commitment();
-            engine.handle_discovered(&mut sender, commitment, round(10));
+            engine.handle_gather(&mut sender, commitment, round(10));
             let (response, mut subscription) = oneshot::channel();
             engine
                 .handle_block_subscription(BlockSubscriptionKey::Commitment(commitment), response);
@@ -2870,14 +2871,14 @@ mod tests {
 
             // Records for three later views fill the window, and the candidate survives.
             for view in 11..=13 {
-                engine.handle_discovered(&mut sender, make_block(view).commitment(), round(view));
+                engine.handle_gather(&mut sender, make_block(view).commitment(), round(view));
                 engine.trim();
                 assert!(engine.records.contains_key(&commitment), "view {view}");
             }
 
             // The record for the next view evicts the candidate. Its block subscription stays
             // open.
-            engine.handle_discovered(&mut sender, make_block(14).commitment(), round(14));
+            engine.handle_gather(&mut sender, make_block(14).commitment(), round(14));
             engine.trim();
             assert!(!engine.records.contains_key(&commitment));
             assert_eq!(engine.records.len(), records.get());
@@ -2895,9 +2896,9 @@ mod tests {
         });
     }
 
-    /// Once the window is full, a discovery at or below its lowest round creates no record and
+    /// Once the window is full, a gather call at or below its lowest round creates no record and
     /// leaves the commitment's shards in their sender's buffer, and a block from such a round
-    /// still resolves its subscribers. A discovery above the lowest round creates the record and
+    /// still resolves its subscribers. A gather call above the lowest round creates the record and
     /// drains the buffer.
     #[test_traced]
     fn test_full_window_declines_rounds_at_or_below_lowest() {
@@ -2922,9 +2923,9 @@ mod tests {
             };
             let round = |view| Round::new(Epoch::zero(), View::new(view));
 
-            // Discoveries at views 5 and 6 fill the window.
+            // Gather calls at views 5 and 6 fill the window.
             for view in [5, 6] {
-                engine.handle_discovered(&mut sender, make_block(view).commitment(), round(view));
+                engine.handle_gather(&mut sender, make_block(view).commitment(), round(view));
                 engine.trim();
             }
             assert_eq!(engine.records.len(), records.get());
@@ -2938,10 +2939,10 @@ mod tests {
             engine.handle_network_shard(&mut sender, gossiper.clone(), shard);
             assert_eq!(buffered(&engine, &gossiper, commitment), 1);
 
-            // Discoveries at and below the lowest retained view create no record, and the shard
+            // Gather calls at and below the lowest retained view create no record, and the shard
             // stays buffered.
             for view in [5, 4] {
-                engine.handle_discovered(&mut sender, commitment, round(view));
+                engine.handle_gather(&mut sender, commitment, round(view));
                 engine.trim();
                 assert!(!engine.records.contains_key(&commitment), "view {view}");
                 assert_eq!(buffered(&engine, &gossiper, commitment), 1, "view {view}");
@@ -2973,9 +2974,9 @@ mod tests {
             assert!(engine.records.contains_key(&lowest));
             assert_eq!(engine.records.len(), records.get());
 
-            // A discovery above the lowest retained view creates the record and drains the
+            // A gather call above the lowest retained view creates the record and drains the
             // buffered shard. The window then evicts view 5.
-            engine.handle_discovered(&mut sender, commitment, round(7));
+            engine.handle_gather(&mut sender, commitment, round(7));
             engine.trim();
             assert!(engine.records.contains_key(&commitment));
             assert_eq!(buffered(&engine, &gossiper, commitment), 0);
@@ -2992,7 +2993,7 @@ mod tests {
     /// A local proposal from a round the full window declines still delivers each participant
     /// its shard and resolves the proposer's subscriptions without retaining the block.
     #[test_traced]
-    fn test_declined_proposal_still_broadcasts() {
+    fn test_declined_proposal_still_dispersed() {
         let fixture = Fixture::<C> {
             records: NZUsize!(2),
             ..Default::default()
@@ -3008,13 +3009,13 @@ mod tests {
 
             // The proposer fills its window with proposals at views 5 and 6.
             for view in [5, 6] {
-                proposer.mailbox.proposed(round(view), make_block(view));
+                proposer.mailbox.disperse(round(view), make_block(view));
             }
 
-            // The receiver discovers a proposal at view 4, and both peers subscribe to it.
+            // The receiver gathers a commitment at view 4, and both peers subscribe to it.
             let block = make_block(4);
             let commitment = block.commitment();
-            receiver.mailbox.discovered(commitment, round(4));
+            receiver.mailbox.gather(commitment, round(4));
             let verified = receiver
                 .mailbox
                 .subscribe_assigned_shard_verified(commitment);
@@ -3023,9 +3024,9 @@ mod tests {
                 .subscribe_assigned_shard_verified(commitment);
             let subscription = proposer.mailbox.subscribe(commitment);
 
-            // The proposer broadcasts the declined proposal and resolves its subscriptions, but
+            // The proposer disperses the declined proposal and resolves its subscriptions, but
             // retains only the blocks at views 5 and 6.
-            proposer.mailbox.proposed(round(4), block);
+            proposer.mailbox.disperse(round(4), block);
             verified.await.expect("receiver should verify its shard");
             ready.await.expect("proposer should be ready");
             let delivered = subscription
@@ -3061,10 +3062,10 @@ mod tests {
                     };
                     let commitment = block.commitment();
                     let round = Round::new(Epoch::zero(), View::new(view));
-                    peers[0].mailbox.proposed(round, block);
+                    peers[0].mailbox.disperse(round, block);
                     let mut subscriptions = Vec::new();
                     for peer in &peers[1..] {
-                        peer.mailbox.discovered(commitment, round);
+                        peer.mailbox.gather(commitment, round);
                         subscriptions.push(peer.mailbox.subscribe(commitment));
                     }
                     for subscription in subscriptions {
@@ -3123,7 +3124,7 @@ mod tests {
             for (block, view) in earlier.iter().zip([100, 101]) {
                 receiver
                     .mailbox
-                    .proposed(Round::new(Epoch::zero(), View::new(view)), block.clone());
+                    .disperse(Round::new(Epoch::zero(), View::new(view)), block.clone());
             }
             for block in &earlier {
                 assert!(receiver.mailbox.get(block.commitment()).await.is_some());
@@ -3134,7 +3135,7 @@ mod tests {
             for (block, view) in later.iter().zip([1, 2]) {
                 receiver
                     .mailbox
-                    .proposed(Round::new(Epoch::new(1), View::new(view)), block.clone());
+                    .disperse(Round::new(Epoch::new(1), View::new(view)), block.clone());
             }
             for block in &earlier {
                 assert!(receiver.mailbox.get(block.commitment()).await.is_none());
@@ -3174,19 +3175,19 @@ mod tests {
             let [first, second, tenth, eleventh] = [1, 2, 10, 11].map(|view| {
                 let block = make_block(view);
                 let commitment = block.commitment();
-                engine.broadcast_shards(&mut sender, round(view), Arc::new(block));
+                engine.disperse_shards(&mut sender, round(view), Arc::new(block));
                 engine.trim();
                 commitment
             });
             assert_eq!(engine.records.len(), 4);
 
             // The leader equivocates at view 5. Consensus verifies one commitment and certifies the
-            // notarization of another, so the engine discovers both. Both evict the records at
-            // views 1 and 2.
+            // notarization of another, so the engine is asked to gather both. Both evict the
+            // records at views 1 and 2.
             let tied = [make_block(20).commitment(), make_block(21).commitment()];
-            engine.handle_discovered(&mut sender, tied[0], round(5));
+            engine.handle_gather(&mut sender, tied[0], round(5));
             engine.trim();
-            engine.handle_discovered(&mut sender, tied[1], round(5));
+            engine.handle_gather(&mut sender, tied[1], round(5));
             engine.trim();
             assert!(!engine.records.contains_key(&first));
             assert!(!engine.records.contains_key(&second));
@@ -3197,7 +3198,7 @@ mod tests {
             // Further commitments at and below view 5 create no record.
             for (id, view) in [(22, 5), (23, 4)] {
                 let declined = make_block(id).commitment();
-                engine.handle_discovered(&mut sender, declined, round(view));
+                engine.handle_gather(&mut sender, declined, round(view));
                 assert!(
                     !engine.records.contains_key(&declined),
                     "a commitment at view {view} must create no record"
@@ -3207,7 +3208,7 @@ mod tests {
 
             // A record above view 5 evicts the lower commitment of the tied pair.
             let (lower, higher) = (tied[0].min(tied[1]), tied[0].max(tied[1]));
-            engine.handle_discovered(&mut sender, make_block(24).commitment(), round(12));
+            engine.handle_gather(&mut sender, make_block(24).commitment(), round(12));
             engine.trim();
             assert!(!engine.records.contains_key(&lower));
             for commitment in [higher, tenth, eleventh] {
@@ -3260,7 +3261,7 @@ mod tests {
 
             // Gossip shards from peers 2 and 3 reconstruct the block before the assigned shard
             // arrives.
-            engine.handle_discovered(
+            engine.handle_gather(
                 &mut sender,
                 commitment,
                 Round::new(Epoch::zero(), View::new(1)),
@@ -3310,11 +3311,11 @@ mod tests {
         });
     }
 
-    /// The proposer's delivery of the assigned shard can precede the discovery and wait in the
-    /// proposer's buffer. The discovery that creates the record drains that shard, which is then
+    /// The proposer's delivery of the assigned shard can precede the gather call and wait in the
+    /// proposer's buffer. The gather call that creates the record drains that shard, which is then
     /// verified, gossiped, and counted toward reconstruction.
     #[test_traced]
-    fn test_discovery_verifies_buffered_assigned_shard() {
+    fn test_gather_verifies_buffered_assigned_shard() {
         record_verifies_assigned_shard(false, true);
     }
 
@@ -3328,7 +3329,7 @@ mod tests {
     /// A committee member without a signing key still has an assigned shard, so the buffered
     /// shard is verified and gossiped exactly as it is for a signer.
     #[test_traced]
-    fn test_member_discovery_verifies_buffered_assigned_shard() {
+    fn test_member_gather_verifies_buffered_assigned_shard() {
         record_verifies_assigned_shard(true, true);
     }
 
@@ -3403,14 +3404,14 @@ mod tests {
             engine.handle_assigned_shard_verified_subscription(commitment, response);
 
             // Without a record, the proposer's delivery of the assigned shard enters the proposer's
-            // buffer. The discovery creates the record and drains it. Readiness resolves before the
-            // block is reconstructed.
+            // buffer. The gather call creates the record and drains it. Readiness resolves before
+            // the block is reconstructed.
             if early {
                 engine.handle_network_shard(&mut sender, proposer.clone(), assigned.clone());
                 assert_eq!(buffered(&engine, &proposer, commitment), 1);
                 assert!(matches!(verified.try_recv(), Err(TryRecvError::Empty)));
             }
-            engine.handle_discovered(&mut sender, commitment, round);
+            engine.handle_gather(&mut sender, commitment, round);
             if early {
                 assert_eq!(buffered(&engine, &proposer, commitment), 0);
                 assert!(matches!(verified.try_recv(), Ok(())));
@@ -3444,12 +3445,12 @@ mod tests {
                 assert!(matches!(verified.try_recv(), Ok(())));
             }
 
-            // The assigned shard is gossiped once. A repeated discovery and a duplicate delivery
+            // The assigned shard is gossiped once. A repeated gather call and a duplicate delivery
             // gossip nothing more.
             let (from, gossip) = observer.recv().await.expect("gossip must arrive");
             assert_eq!(from, peer_keys[0]);
             assert_eq!(gossip.as_ref(), assigned.encode().as_ref());
-            engine.handle_discovered(&mut sender, commitment, round);
+            engine.handle_gather(&mut sender, commitment, round);
             engine.handle_network_shard(&mut sender, proposer, assigned);
             select! {
                 _ = observer.recv() => panic!("the assigned shard must be gossiped once"),
@@ -3491,7 +3492,7 @@ mod tests {
 
             // Gossip shards from peers 2 and 3 reconstruct the block before the assigned shard
             // arrives.
-            engine.handle_discovered(&mut sender, commitment, round);
+            engine.handle_gather(&mut sender, commitment, round);
             for index in [2, 3] {
                 let shard = block.shard(index).expect("shard must exist");
                 engine.handle_network_shard(
@@ -3533,10 +3534,10 @@ mod tests {
         });
     }
 
-    /// A repeated discovery of a commitment that already has a record, whether reconstructing or
+    /// A repeated gather call for a commitment that already has a record, whether reconstructing or
     /// cached, only raises the record's round. It relays nothing more and blocks no one.
     #[test_traced]
-    fn test_repeated_discovery_only_refreshes_round() {
+    fn test_repeated_gather_only_refreshes_round() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
@@ -3573,17 +3574,17 @@ mod tests {
             let commitment = block.commitment();
             let round = |view| Round::new(Epoch::zero(), View::new(view));
 
-            // The first discovery creates the record, and peer 1's delivery of the assigned shard
+            // The first gather call creates the record, and peer 1's delivery of the assigned shard
             // is verified and gossiped.
-            engine.handle_discovered(&mut sender, commitment, round(1));
+            engine.handle_gather(&mut sender, commitment, round(1));
             let assigned = block.shard(0).expect("shard must exist");
             engine.handle_network_shard(&mut sender, peer_keys[1].clone(), assigned.clone());
             let (from, gossip) = observer.recv().await.expect("gossip must arrive");
             assert_eq!(from, peer_keys[0]);
             assert_eq!(gossip.as_ref(), assigned.encode().as_ref());
 
-            // A repeated discovery of the reconstructing record raises its round.
-            engine.handle_discovered(&mut sender, commitment, round(3));
+            // A repeated gather call for the reconstructing record raises its round.
+            engine.handle_gather(&mut sender, commitment, round(3));
             let record = engine.records.get(&commitment).expect("record must exist");
             assert!(record.block().is_none());
             assert_eq!(record.round(), round(3));
@@ -3594,13 +3595,13 @@ mod tests {
             let reconstructed = finished(&mut engine).await;
             engine.complete(reconstructed);
 
-            // A repeated discovery of the cached record raises its round.
-            engine.handle_discovered(&mut sender, commitment, round(5));
+            // A repeated gather call for the cached record raises its round.
+            engine.handle_gather(&mut sender, commitment, round(5));
             let record = engine.records.get(&commitment).expect("record must exist");
             assert!(record.block().is_some());
             assert_eq!(record.round(), round(5));
 
-            // Neither repeated discovery gossiped the assigned shard again or blocked anyone.
+            // Neither repeated gather call gossiped the assigned shard again or blocked anyone.
             select! {
                 _ = observer.recv() => panic!("the assigned shard must be gossiped once"),
                 _ = context.sleep(Duration::from_millis(100)) => {},
@@ -3645,7 +3646,7 @@ mod tests {
             ));
 
             // The engine tracks the commitment and subscribes before any shard arrives.
-            engine.handle_discovered(
+            engine.handle_gather(
                 &mut sender,
                 commitment,
                 Round::new(Epoch::zero(), View::new(1)),
@@ -3708,13 +3709,13 @@ mod tests {
             let reproposal_round = round(8);
             let peer = &mut peers[0];
 
-            // The peer discovers a commitment at view 1 and re-proposes it at view 8. It also
-            // discovers another commitment at view 8 and then proposes it at view 5.
-            peer.mailbox.discovered(live_commitment, round(1));
-            peer.mailbox.proposed(reproposal_round, live);
+            // The peer gathers a commitment at view 1 and re-proposes it at view 8. It also
+            // gathers another commitment at view 8 and then proposes it at view 5.
+            peer.mailbox.gather(live_commitment, round(1));
+            peer.mailbox.disperse(reproposal_round, live);
             peer.mailbox
-                .discovered(state_first_commitment, reproposal_round);
-            peer.mailbox.proposed(round(5), state_first);
+                .gather(state_first_commitment, reproposal_round);
+            peer.mailbox.disperse(round(5), state_first);
             assert!(peer.mailbox.get(live_commitment).await.is_some());
 
             // A later assigned-shard subscription resolves from the local re-proposal.
@@ -3729,8 +3730,8 @@ mod tests {
 
             // Caching blocks at views 6 and 9 exceeds the window by one record. Both earlier
             // records were last observed at view 8, so the window evicts the block at view 6.
-            peer.mailbox.proposed(round(6), lower);
-            peer.mailbox.proposed(round(9), later);
+            peer.mailbox.disperse(round(6), lower);
+            peer.mailbox.disperse(round(9), later);
             assert!(peer.mailbox.get(lower_commitment).await.is_none());
             assert!(peer.mailbox.get(live_commitment).await.is_some());
             assert!(peer.mailbox.get(state_first_commitment).await.is_some());
@@ -3761,10 +3762,10 @@ mod tests {
 
                 let peer2_pk = peers[2].public_key.clone();
 
-                // Peer 2 discovers the commitment.
+                // Peer 2 gathers the commitment.
                 peers[2]
                     .mailbox
-                    .discovered(commitment, Round::new(Epoch::zero(), View::new(1)));
+                    .gather(commitment, Round::new(Epoch::zero(), View::new(1)));
 
                 // Send peer 2 their shard from peer 0 (leader, first time, should succeed).
                 peers[0]
@@ -3818,10 +3819,10 @@ mod tests {
 
                 let peer2_pk = peers[2].public_key.clone();
 
-                // Peer 2 discovers the commitment.
+                // Peer 2 gathers the commitment.
                 peers[2]
                     .mailbox
-                    .discovered(commitment, Round::new(Epoch::zero(), View::new(1)));
+                    .gather(commitment, Round::new(Epoch::zero(), View::new(1)));
 
                 // Send peer 2 their shard from the leader (first time, succeeds).
                 peers[0]
@@ -3843,7 +3844,7 @@ mod tests {
 
     /// Peer 1 sends peer 3's shard, which is neither the receiver's nor peer 1's own, to a
     /// participant or to a non-participant. When `buffered`, the shard arrives before the
-    /// receiver discovers the commitment.
+    /// receiver gathers the commitment.
     fn wrong_index_shard_blocks_sender(non_participant: bool, buffered: bool) {
         let fixture = Fixture::<C> {
             num_secondary_peers: 1,
@@ -3867,16 +3868,16 @@ mod tests {
                     .encode();
 
                 if !buffered {
-                    mailbox.discovered(commitment, round);
+                    mailbox.gather(commitment, round);
                 }
                 peers[1]
                     .sender
                     .send(Recipients::One(receiver.clone()), shard, true);
                 context.sleep(config.link.latency * 2).await;
                 if buffered {
-                    // The shard waits in peer 1's buffer until the discovery drains it.
+                    // The shard waits in peer 1's buffer until the gather call drains it.
                     assert!(oracle.blocked().await.unwrap().is_empty());
-                    mailbox.discovered(commitment, round);
+                    mailbox.gather(commitment, round);
                     context.sleep(Duration::from_millis(10)).await;
                 }
 
@@ -3885,7 +3886,7 @@ mod tests {
         );
     }
 
-    /// A participant that discovered the commitment blocks the sender of a shard at an index that
+    /// A participant that is gathering the commitment blocks the sender of a shard at an index that
     /// is neither its own nor the sender's as soon as the shard arrives.
     #[test_traced]
     fn test_wrong_index_shard_blocks_sender() {
@@ -3893,14 +3894,14 @@ mod tests {
     }
 
     /// A shard at an index that is neither the receiver's nor its sender's waits in its sender's
-    /// buffer when it arrives before the discovery. The discovery that creates the record drains
-    /// the shard and blocks its sender.
+    /// buffer when it arrives before the gather call. The gather call that creates the record
+    /// drains the shard and blocks its sender.
     #[test_traced]
-    fn test_buffered_wrong_index_shard_blocks_sender_on_discovery() {
+    fn test_buffered_wrong_index_shard_blocks_sender_on_gather() {
         wrong_index_shard_blocks_sender(false, true);
     }
 
-    /// A non-participant has no index of its own. Once it discovered the commitment, it blocks
+    /// A non-participant has no index of its own. Once it is gathering the commitment, it blocks
     /// the sender of a shard at any index but the sender's as soon as the shard arrives.
     #[test_traced]
     fn test_non_participant_wrong_index_shard_blocks_sender() {
@@ -3908,9 +3909,9 @@ mod tests {
     }
 
     /// A non-participant blocks the sender of a buffered shard at any index but the sender's
-    /// when the discovery creates the record and drains the shard.
+    /// when the gather call creates the record and drains the shard.
     #[test_traced]
-    fn test_non_participant_buffered_wrong_index_shard_blocks_sender_on_discovery() {
+    fn test_non_participant_buffered_wrong_index_shard_blocks_sender_on_gather() {
         wrong_index_shard_blocks_sender(true, true);
     }
 
@@ -3935,10 +3936,10 @@ mod tests {
                     .mailbox
                     .subscribe_assigned_shard_verified(commitment);
 
-                // Peer 2 discovers the commitment.
+                // Peer 2 gathers the commitment.
                 peers[2]
                     .mailbox
-                    .discovered(commitment, Round::new(Epoch::zero(), View::new(1)));
+                    .gather(commitment, Round::new(Epoch::zero(), View::new(1)));
 
                 // The assigned shard is commitment-bound, so another participant
                 // may deliver it without being treated as a conflicting proposer.
@@ -3979,24 +3980,24 @@ mod tests {
             let receiver = &peers[2];
 
             // The receiver caches its own proposal and tracks another commitment at view 1.
-            receiver.mailbox.proposed(round(1), cached);
-            receiver.mailbox.discovered(incomplete_commitment, round(1));
+            receiver.mailbox.disperse(round(1), cached);
+            receiver.mailbox.gather(incomplete_commitment, round(1));
 
-            // A proposal and discoveries from epoch 1 conflict with both records and are ignored.
+            // A proposal and gather calls from epoch 1 conflict with both records and are ignored.
             let conflicting_round = Round::new(Epoch::new(1), View::new(10));
-            receiver.mailbox.proposed(conflicting_round, incomplete);
+            receiver.mailbox.disperse(conflicting_round, incomplete);
             receiver
                 .mailbox
-                .discovered(cached_commitment, conflicting_round);
+                .gather(cached_commitment, conflicting_round);
             receiver
                 .mailbox
-                .discovered(incomplete_commitment, conflicting_round);
+                .gather(incomplete_commitment, conflicting_round);
 
             // Blocks cached at views 2 and 3 exceed the window by two records. The ignored
             // observations left both records at view 1, so the window evicts them.
             let later = [make_block(3), make_block(4)];
             for (block, view) in later.iter().zip([2, 3]) {
-                receiver.mailbox.proposed(round(view), block.clone());
+                receiver.mailbox.disperse(round(view), block.clone());
             }
             assert!(receiver.mailbox.get(cached_commitment).await.is_none());
             for block in &later {
@@ -4047,7 +4048,7 @@ mod tests {
 
                 peers[2]
                     .mailbox
-                    .discovered(commitment, Round::new(Epoch::zero(), View::new(1)));
+                    .gather(commitment, Round::new(Epoch::zero(), View::new(1)));
 
                 let peer2_index = peers[2].index.get() as u16;
                 let shard = coded_block.shard(peer2_index).expect("missing shard");
@@ -4062,9 +4063,9 @@ mod tests {
     }
 
     /// A shard from a peer that is not a primary of any tracked peer set is not buffered before
-    /// its commitment is discovered. The discovery finds nothing to drain and blocks no one.
+    /// the gather call for its commitment. That call finds nothing to drain and blocks no one.
     #[test_traced]
-    fn test_shard_from_secondary_peer_before_discovery_is_not_buffered() {
+    fn test_shard_from_secondary_peer_before_gather_is_not_buffered() {
         let fixture = Fixture {
             num_future_peers: 1,
             ..Fixture::<C>::default()
@@ -4115,7 +4116,7 @@ mod tests {
 
                 peers[2]
                     .mailbox
-                    .discovered(commitment, Round::new(Epoch::zero(), View::new(1)));
+                    .gather(commitment, Round::new(Epoch::zero(), View::new(1)));
                 context.sleep(config.link.latency * 2).await;
 
                 let blocked = oracle.blocked().await.unwrap();
@@ -4128,7 +4129,7 @@ mod tests {
                 );
                 assert!(
                     matches!(shard_sub.try_recv(), Err(TryRecvError::Empty)),
-                    "a secondary peer's shard before discovery must not be buffered"
+                    "a secondary peer's shard before the gather call must not be buffered"
                 );
             },
         );
@@ -4157,8 +4158,8 @@ mod tests {
 
                 let peer2_pk = peers[2].public_key.clone();
 
-                // Peer 2 discovers the commitment.
-                peers[2].mailbox.discovered(
+                // Peer 2 gathers the commitment.
+                peers[2].mailbox.gather(
                     coded_block.commitment(),
                     Round::new(Epoch::zero(), View::new(1)),
                 );
@@ -4229,8 +4230,8 @@ mod tests {
 
                 let peer2_pk = peers[2].public_key.clone();
 
-                // Peer 2 discovers the commitment.
-                peers[2].mailbox.discovered(
+                // Peer 2 gathers the commitment.
+                peers[2].mailbox.gather(
                     coded_block1.commitment(),
                     Round::new(Epoch::zero(), View::new(1)),
                 );
@@ -4295,7 +4296,7 @@ mod tests {
                 // Create state for A and ingest one shard from peer1.
                 peers[2]
                     .mailbox
-                    .discovered(commitment_a, Round::new(Epoch::zero(), View::new(1)));
+                    .gather(commitment_a, Round::new(Epoch::zero(), View::new(1)));
                 let shard_a = block_a
                     .shard(peers[1].index.get() as u16)
                     .expect("missing shard")
@@ -4308,7 +4309,7 @@ mod tests {
                 // Create/reconstruct B at higher view.
                 peers[2]
                     .mailbox
-                    .discovered(commitment_b, Round::new(Epoch::zero(), View::new(2)));
+                    .gather(commitment_b, Round::new(Epoch::zero(), View::new(2)));
 
                 // The proposer's shard for peer2.
                 let leader_shard_b = block_b
@@ -4372,10 +4373,10 @@ mod tests {
         );
     }
 
-    /// A later discovery raises a reconstructing record's eviction round. The window then evicts
+    /// A later gather call raises a reconstructing record's eviction round. The window then evicts
     /// a lower-round block, and the record still reconstructs its block.
     #[test_traced]
-    fn test_later_discovery_refreshes_reconstruction_state_round() {
+    fn test_later_gather_refreshes_reconstruction_state_round() {
         let fixture: Fixture<C> = Fixture {
             num_primary_peers: 10,
             records: NZUsize!(2),
@@ -4397,23 +4398,23 @@ mod tests {
                 // The receiver tracks the commitment at view 1 and subscribes to its block.
                 peers[receiver_idx]
                     .mailbox
-                    .discovered(live_commitment, round(1));
+                    .gather(live_commitment, round(1));
                 let mut live_sub = peers[receiver_idx].mailbox.subscribe(live_commitment);
 
                 // The same commitment becomes live in a later round.
                 peers[receiver_idx]
                     .mailbox
-                    .discovered(live_commitment, round(4));
+                    .gather(live_commitment, round(4));
 
                 // Blocks cached at views 2 and 5 exceed the window by one record. The later
-                // discovery raised the commitment to view 4, so the window evicts the block at
+                // gather call raised the commitment to view 4, so the window evicts the block at
                 // view 2.
                 let lower = make_block(3);
                 let lower_commitment = lower.commitment();
-                peers[receiver_idx].mailbox.proposed(round(2), lower);
+                peers[receiver_idx].mailbox.disperse(round(2), lower);
                 peers[receiver_idx]
                     .mailbox
-                    .proposed(round(5), make_block(4));
+                    .disperse(round(5), make_block(4));
                 assert!(
                     peers[receiver_idx]
                         .mailbox
@@ -4460,7 +4461,7 @@ mod tests {
         );
     }
 
-    /// A later discovery of a cached block raises its record's eviction round and keeps its
+    /// A later gather call for a cached block raises its record's eviction round and keeps its
     /// assigned-shard verification pending.
     #[test_traced]
     fn test_cached_observations_refresh_reconstruction_state_round() {
@@ -4485,7 +4486,7 @@ mod tests {
                 // The receiver tracks the commitment at view 1.
                 peers[receiver_idx]
                     .mailbox
-                    .discovered(live_commitment, round(1));
+                    .gather(live_commitment, round(1));
 
                 // Reconstruct from gossip while leaving assigned-shard verification pending.
                 for sender_idx in [1usize, 2usize, 4usize, 5usize] {
@@ -4509,24 +4510,24 @@ mod tests {
                     "the block must be cached before its round is refreshed"
                 );
 
-                // The receiver discovers the cached commitment again at view 4.
+                // The receiver gathers the cached commitment again at view 4.
                 let mut assigned_sub = peers[receiver_idx]
                     .mailbox
                     .subscribe_assigned_shard_verified(live_commitment);
                 peers[receiver_idx]
                     .mailbox
-                    .discovered(live_commitment, round(4));
+                    .gather(live_commitment, round(4));
 
                 // Blocks cached at views 2 and 5 exceed the window by one record. The later
-                // discovery raised the commitment to view 4, so the window evicts the block at
+                // gather call raised the commitment to view 4, so the window evicts the block at
                 // view 2.
                 let lower = make_block(3);
                 peers[receiver_idx]
                     .mailbox
-                    .proposed(round(2), lower.clone());
+                    .disperse(round(2), lower.clone());
                 peers[receiver_idx]
                     .mailbox
-                    .proposed(round(5), make_block(4));
+                    .disperse(round(5), make_block(4));
                 assert!(
                     peers[receiver_idx]
                         .mailbox
@@ -4536,7 +4537,7 @@ mod tests {
                 );
                 assert!(
                     matches!(assigned_sub.try_recv(), Err(TryRecvError::Empty)),
-                    "cached discovery must keep reconstruction state live"
+                    "a gather call for a cached block must keep its reconstruction state live"
                 );
                 assert!(
                     peers[receiver_idx]
@@ -4544,7 +4545,7 @@ mod tests {
                         .get(live_commitment)
                         .await
                         .is_some(),
-                    "cached discovery must keep the reconstructed block live"
+                    "a gather call for a cached block must keep the block cached"
                 );
 
                 // The proposer's delivery of the assigned shard resolves the subscription.
@@ -4595,7 +4596,7 @@ mod tests {
             let peer1 = peer_keys[1].clone();
 
             // The engine tracks A at view 1, and peer 1 contributes its shard.
-            engine.handle_discovered(
+            engine.handle_gather(
                 &mut sender,
                 commitment_a,
                 Round::new(Epoch::zero(), View::new(1)),
@@ -4605,7 +4606,7 @@ mod tests {
             engine.handle_network_shard(&mut sender, peer1.clone(), shard_a);
 
             // The one-record window evicts A for the local proposal of B at view 2.
-            engine.broadcast_shards(
+            engine.disperse_shards(
                 &mut sender,
                 Round::new(Epoch::zero(), View::new(2)),
                 Arc::new(block_b),
@@ -4643,10 +4644,10 @@ mod tests {
 
                 let peer3_pk = peers[3].public_key.clone();
 
-                // Peer 3 discovers the commitment.
+                // Peer 3 gathers the commitment.
                 peers[3]
                     .mailbox
-                    .discovered(commitment, Round::new(Epoch::zero(), View::new(1)));
+                    .gather(commitment, Round::new(Epoch::zero(), View::new(1)));
 
                 // Queue peer-indexed shards until the assigned shard completes quorum.
                 for &sender_idx in &[1, 2, 4, 5, 6, 7, 8] {
@@ -4702,10 +4703,10 @@ mod tests {
         );
     }
 
-    /// Shards received before the commitment is discovered do not progress reconstruction until
-    /// the discovery is delivered.
+    /// Shards received before the gather call for their commitment do not progress reconstruction
+    /// until that call is delivered.
     #[test_traced]
-    fn test_peer_shards_buffered_until_discovered() {
+    fn test_peer_shards_buffered_until_gather() {
         let fixture: Fixture<C> = Fixture {
             num_primary_peers: 10,
             ..Default::default()
@@ -4726,7 +4727,7 @@ mod tests {
                     .subscribe_assigned_shard_verified(commitment);
 
                 // Send the proposer's shard (for receiver's index) and three shards,
-                // all before discovery.
+                // all before the gather call.
                 let leader_shard = coded_block
                     .shard(peers[receiver_idx].index.get() as u16)
                     .expect("missing shard")
@@ -4747,25 +4748,26 @@ mod tests {
 
                 context.sleep(config.link.latency * 2).await;
 
-                // Before discovery, the shard subscription is pending and the block unavailable.
+                // Before the gather call, the shard subscription is pending and the block
+                // unavailable.
                 assert!(
                     matches!(shard_sub.try_recv(), Err(TryRecvError::Empty)),
-                    "shard subscription must not resolve before discovery"
+                    "shard subscription must not resolve before the gather call"
                 );
                 assert!(
                     peers[receiver_idx].mailbox.get(commitment).await.is_none(),
-                    "block must not reconstruct before discovery"
+                    "block must not reconstruct before the gather call"
                 );
 
-                // Discovery drains buffered shards and should progress immediately.
+                // The gather call drains buffered shards and should progress immediately.
                 peers[receiver_idx]
                     .mailbox
-                    .discovered(commitment, Round::new(Epoch::zero(), View::new(1)));
+                    .gather(commitment, Round::new(Epoch::zero(), View::new(1)));
 
                 select! {
                     _ = shard_sub => {},
                     _ = context.sleep(Duration::from_secs(5)) => {
-                        panic!("shard subscription must resolve after discovery");
+                        panic!("shard subscription must resolve after the gather call");
                     },
                 }
 
@@ -4822,11 +4824,11 @@ mod tests {
                 }
                 context.sleep(config.link.latency * 2).await;
 
-                // Discovery ingests the buffered shards and reconstructs inline. The request queued
-                // right behind it observes the cached block.
+                // The gather call ingests the buffered shards and reconstructs inline. The request
+                // queued right behind it observes the cached block.
                 peers[receiver_idx]
                     .mailbox
-                    .discovered(commitment, Round::new(Epoch::zero(), View::new(1)));
+                    .gather(commitment, Round::new(Epoch::zero(), View::new(1)));
                 assert!(
                     peers[receiver_idx].mailbox.get(commitment).await.is_some(),
                     "inline reconstruction must complete before the next message"
@@ -4839,10 +4841,10 @@ mod tests {
         );
     }
 
-    /// Discovery reconstructs the block from buffered gossip shards alone. Reconstruction leaves
-    /// the assigned shard unverified, and its later delivery resolves readiness.
+    /// The gather call reconstructs the block from buffered gossip shards alone. Reconstruction
+    /// leaves the assigned shard unverified, and its later delivery resolves readiness.
     #[test_traced]
-    fn test_discovery_reconstructs_from_buffered_gossip_shards() {
+    fn test_gather_reconstructs_from_buffered_gossip_shards() {
         let fixture: Fixture<C> = Fixture {
             num_primary_peers: 10,
             ..Default::default()
@@ -4874,15 +4876,15 @@ mod tests {
 
                 assert!(
                     peers[receiver_idx].mailbox.get(commitment).await.is_none(),
-                    "block must not reconstruct before the commitment is discovered"
+                    "block must not reconstruct before the gather call"
                 );
 
-                peers[receiver_idx].mailbox.discovered(commitment, round);
+                peers[receiver_idx].mailbox.gather(commitment, round);
 
                 select! {
                     _ = block_sub => {},
                     _ = context.sleep(Duration::from_secs(5)) => {
-                        panic!("block subscription must resolve after discovery");
+                        panic!("block subscription must resolve after the gather call");
                     },
                 }
 
@@ -4924,8 +4926,8 @@ mod tests {
         );
     }
 
-    /// A block reconstructed on discovery stays cached through a later discovery, whatever the
-    /// peer buffers hold. With one buffered shard per peer, a peer's second shard evicts its
+    /// A block reconstructed on the gather call stays cached through a later gather call, whatever
+    /// the peer buffers hold. With one buffered shard per peer, a peer's second shard evicts its
     /// first, so only the commitment whose shard was retained reconstructs.
     #[test_traced]
     fn test_late_subscription_uses_cache_after_peer_buffer_pressure() {
@@ -4962,30 +4964,30 @@ mod tests {
 
                 peers[receiver_idx]
                     .mailbox
-                    .discovered(target_commitment, initial_round);
+                    .gather(target_commitment, initial_round);
                 let target_sub = peers[receiver_idx].mailbox.subscribe(target_commitment);
                 select! {
                     result = target_sub => {
-                        let block = result.expect("discovered target must reconstruct");
+                        let block = result.expect("target must reconstruct after the gather call");
                         assert_eq!(block.commitment(), target_commitment);
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
-                        panic!("discovered target must reconstruct");
+                        panic!("target must reconstruct after the gather call");
                     },
                 }
 
-                // A later discovery leaves the target cached. The record owns the block
+                // A later gather call leaves the target cached. The record owns the block
                 // independently of the bounded peer shard buffers.
                 peers[receiver_idx]
                     .mailbox
-                    .discovered(target_commitment, later_round);
+                    .gather(target_commitment, later_round);
                 assert!(
                     peers[receiver_idx]
                         .mailbox
                         .get(target_commitment)
                         .await
                         .is_some(),
-                    "target must remain cached after a later discovery"
+                    "target must remain cached after a later gather call"
                 );
 
                 // The fixture buffers one shard per peer. One authenticated peer sends two distinct
@@ -5027,7 +5029,7 @@ mod tests {
                     let commitment = block.commitment();
                     peers[receiver_idx]
                         .mailbox
-                        .discovered(commitment, initial_round);
+                        .gather(commitment, initial_round);
                     if should_reconstruct {
                         let block_sub = peers[receiver_idx].mailbox.subscribe(commitment);
                         select! {
@@ -5074,7 +5076,7 @@ mod tests {
 
     /// A leader that relays a candidate before voting may abandon it and relay a replacement
     /// for the same round. The replacement's shards reach every participant. A participant that
-    /// discovers only the replacement verifies its assigned shard and reconstructs that block,
+    /// gathers only the replacement verifies its assigned shard and reconstructs that block,
     /// but never the abandoned candidate.
     #[test_traced]
     fn test_replacement_proposal_in_same_round_reaches_peers() {
@@ -5097,14 +5099,14 @@ mod tests {
                 let round = Round::new(Epoch::zero(), View::new(1));
 
                 // Both candidates are relayed before any participant learns the proposal.
-                peers[0].mailbox.proposed(round, abandoned.clone());
-                peers[0].mailbox.proposed(round, replacement.clone());
+                peers[0].mailbox.disperse(round, abandoned.clone());
+                peers[0].mailbox.disperse(round, replacement.clone());
                 context.sleep(config.link.latency * 2).await;
 
                 // Only the replacement is ever proposed.
                 let commitment = replacement.commitment();
                 for peer in peers[1..].iter_mut() {
-                    peer.mailbox.discovered(commitment, round);
+                    peer.mailbox.gather(commitment, round);
                 }
                 for peer in peers.iter_mut() {
                     peer.mailbox
@@ -5136,9 +5138,9 @@ mod tests {
         );
     }
 
-    /// Shards that arrive after the discovery are processed without waiting for another signal.
+    /// Shards that arrive after the gather call are processed without waiting for another signal.
     #[test_traced]
-    fn test_shards_after_discovery_processed_immediately() {
+    fn test_shards_after_gather_processed_immediately() {
         let fixture: Fixture<C> = Fixture {
             num_primary_peers: 10,
             ..Default::default()
@@ -5158,9 +5160,9 @@ mod tests {
                     .subscribe_assigned_shard_verified(commitment);
                 peers[receiver_idx]
                     .mailbox
-                    .discovered(commitment, Round::new(Epoch::zero(), View::new(1)));
+                    .gather(commitment, Round::new(Epoch::zero(), View::new(1)));
 
-                // Send the proposer's shard (for receiver's index) after discovery.
+                // Send the proposer's shard (for receiver's index) after the gather call.
                 let leader_shard = coded_block
                     .shard(peers[receiver_idx].index.get() as u16)
                     .expect("missing shard")
@@ -5177,7 +5179,7 @@ mod tests {
                     },
                 }
 
-                // Send enough shards after discovery to reconstruct.
+                // Send enough shards after the gather call to reconstruct.
                 for i in [1usize, 2usize, 4usize] {
                     let shard = coded_block
                         .shard(peers[i].index.get() as u16)
@@ -5193,12 +5195,12 @@ mod tests {
                     .mailbox
                     .get(commitment)
                     .await
-                    .expect("block must reconstruct from shards after discovery");
+                    .expect("block must reconstruct from shards after the gather call");
                 assert_eq!(reconstructed.commitment(), commitment);
 
                 assert!(
                     oracle.blocked().await.unwrap().is_empty(),
-                    "valid shards after discovery must block no peer"
+                    "valid shards after the gather call must block no peer"
                 );
             },
         );
@@ -5265,10 +5267,10 @@ mod tests {
         );
     }
 
-    /// Duplicate shards that arrive before the commitment is discovered are buffered and do not
-    /// block their sender.
+    /// Duplicate shards that arrive before the gather call for their commitment are buffered and do
+    /// not block their sender.
     #[test_traced]
-    fn test_duplicate_buffered_shard_does_not_block_before_discovery() {
+    fn test_duplicate_buffered_shard_does_not_block_before_gather() {
         let fixture: Fixture<C> = Fixture {
             ..Default::default()
         };
@@ -5285,7 +5287,7 @@ mod tests {
 
                 let peer2_pk = peers[2].public_key.clone();
 
-                // Peer 2 does NOT discover the commitment. Shards should be buffered.
+                // Peer 2 does NOT gather the commitment. Shards should be buffered.
 
                 // Peer 1 sends the shard to peer 2 (buffered, no record).
                 peers[1]
@@ -5297,17 +5299,17 @@ mod tests {
                 let blocked = oracle.blocked().await.unwrap();
                 assert!(blocked.is_empty(), "no peers should be blocked yet");
 
-                // Peer 1 sends the same shard AGAIN (duplicate before discovery).
+                // Peer 1 sends the same shard AGAIN (duplicate before the gather call).
                 peers[1]
                     .sender
                     .send(Recipients::One(peer2_pk), shard_bytes, true);
                 context.sleep(config.link.latency * 2).await;
 
-                // Still no blocking before discovery.
+                // Still no blocking before the gather call.
                 let blocked = oracle.blocked().await.unwrap();
                 assert!(
                     blocked.is_empty(),
-                    "shards before discovery must block no peer"
+                    "shards before the gather call must block no peer"
                 );
             },
         );
@@ -5341,10 +5343,10 @@ mod tests {
 
                 let peer2_pk = peers[2].public_key.clone();
 
-                // Peer 2 discovers the commitment.
+                // Peer 2 gathers the commitment.
                 peers[2]
                     .mailbox
-                    .discovered(commitment1, Round::new(Epoch::zero(), View::new(1)));
+                    .gather(commitment1, Round::new(Epoch::zero(), View::new(1)));
 
                 // Leader (peer 0) sends the invalid shard.
                 peers[0]
@@ -5392,8 +5394,8 @@ mod tests {
                     .mailbox
                     .subscribe_assigned_shard_verified(commitment1);
 
-                // Peer 2 discovers the commitment.
-                peers[2].mailbox.discovered(commitment1, round);
+                // Peer 2 gathers the commitment.
+                peers[2].mailbox.gather(commitment1, round);
 
                 // Peer 1, not the proposer, sends the invalid shard at peer 2's
                 // assigned index.
@@ -5458,10 +5460,10 @@ mod tests {
 
                 let peer3_pk = peers[3].public_key.clone();
 
-                // Peer 3 discovers the commitment, and the proposer sends its assigned shard.
+                // Peer 3 gathers the commitment, and the proposer sends its assigned shard.
                 peers[3]
                     .mailbox
-                    .discovered(commitment, Round::new(Epoch::zero(), View::new(1)));
+                    .gather(commitment, Round::new(Epoch::zero(), View::new(1)));
                 let shard_bytes = leader_shard.encode();
                 peers[0]
                     .sender
@@ -5512,10 +5514,10 @@ mod tests {
 
                 let peer3_pk = peers[3].public_key.clone();
 
-                // Peer 3 discovers the commitment, and the proposer sends its valid assigned shard.
+                // Peer 3 gathers the commitment, and the proposer sends its valid assigned shard.
                 peers[3]
                     .mailbox
-                    .discovered(commitment1, Round::new(Epoch::zero(), View::new(1)));
+                    .gather(commitment1, Round::new(Epoch::zero(), View::new(1)));
                 let shard_bytes = leader_shard.encode();
                 peers[0]
                     .sender
@@ -5575,10 +5577,10 @@ mod tests {
                 let mut invalid_shard = coded_block2.shard(peer1_index).expect("missing shard");
                 invalid_shard.commitment = commitment1;
 
-                // Discover the commitment and deliver the receiver's assigned shard.
+                // Gather the commitment and deliver the receiver's assigned shard.
                 peers[receiver_idx]
                     .mailbox
-                    .discovered(commitment1, Round::new(Epoch::zero(), View::new(1)));
+                    .gather(commitment1, Round::new(Epoch::zero(), View::new(1)));
                 let leader_shard = coded_block1
                     .shard(peers[receiver_idx].index.get() as u16)
                     .expect("missing shard")
@@ -5662,8 +5664,8 @@ mod tests {
                 let commitment = block.commitment();
                 let receiver = peers[3].public_key.clone();
 
-                // Before discovery, peer 1 sends a shard of another block under this commitment
-                // and peers 2, 4, 5, and 6 send the four valid shards the minimum needs.
+                // Before the gather call, peer 1 sends a shard of another block under this
+                // commitment and peers 2, 4, 5, and 6 send the four valid shards the minimum needs.
                 let mut invalid = other
                     .shard(peers[1].index.get() as u16)
                     .expect("missing shard");
@@ -5683,12 +5685,12 @@ mod tests {
                 }
                 context.sleep(config.link.latency * 2).await;
 
-                // Discovery ingests all five shards. The first job verifies four of them, finds
-                // peer 1's shard invalid, and the leftover shard completes a second job.
+                // The gather call ingests all five shards. The first job verifies four of them,
+                // finds peer 1's shard invalid, and the leftover shard completes a second job.
                 let mut subscription = peers[3].mailbox.subscribe(commitment);
                 peers[3]
                     .mailbox
-                    .discovered(commitment, Round::new(Epoch::zero(), View::new(1)));
+                    .gather(commitment, Round::new(Epoch::zero(), View::new(1)));
                 context.sleep(config.link.latency).await;
                 let reconstructed = subscription.try_recv().expect("block reconstructed");
                 assert_eq!(reconstructed.commitment(), commitment);
@@ -5748,15 +5750,15 @@ mod tests {
                 }
                 context.sleep(config.link.latency * 2).await;
 
-                // No one should be blocked yet (all shards are buffered pending discovery).
+                // No one should be blocked yet (all shards are buffered until the gather call).
                 let blocked = oracle.blocked().await.unwrap();
                 assert!(blocked.is_empty(), "no peers should be blocked yet");
 
-                // Peer 3 then discovers the commitment, and the proposer sends its valid assigned
+                // Peer 3 then gathers the commitment, and the proposer sends its valid assigned
                 // shard.
                 peers[3]
                     .mailbox
-                    .discovered(commitment1, Round::new(Epoch::zero(), View::new(1)));
+                    .gather(commitment1, Round::new(Epoch::zero(), View::new(1)));
                 let peer3_index = peers[3].index.get() as u16;
                 let leader_shard = coded_block1.shard(peer3_index).expect("missing shard");
                 let shard_bytes = leader_shard.encode();
@@ -5773,23 +5775,23 @@ mod tests {
     }
 
     /// A tracked primary that is a participant of epoch 1 only buffers a shard at the receiver
-    /// before discovery. A discovery in an epoch 1 round classifies the shard against epoch 1's
-    /// participant set, and nobody is blocked.
+    /// before the gather call. A gather call in an epoch 1 round classifies the shard against epoch
+    /// 1's participant set, and nobody is blocked.
     #[test_traced]
     fn test_cross_epoch_buffered_shard_not_blocked() {
         buffered_shard_from_tracked_primary(Epoch::new(1));
     }
 
     /// A shard from a tracked primary outside epoch 0's participant set waits in its sender's
-    /// buffer. A discovery in an epoch 0 round creates the record, drains the shard, and blocks
+    /// buffer. A gather call in an epoch 0 round creates the record, drains the shard, and blocks
     /// its sender.
     #[test_traced]
-    fn test_buffered_shard_from_outside_committee_blocks_sender_on_discovery() {
+    fn test_buffered_shard_from_outside_committee_blocks_sender_on_gather() {
         buffered_shard_from_tracked_primary(Epoch::zero());
     }
 
     /// The future peer, a participant of epoch 1 only, buffers a shard for a commitment that the
-    /// receiver then discovers in a round of `epoch`.
+    /// receiver then gathers in a round of `epoch`.
     fn buffered_shard_from_tracked_primary(epoch: Epoch) {
         let executor = deterministic::Runner::default();
         executor.start(move |context| async move {
@@ -5886,7 +5888,7 @@ mod tests {
                 .expect("missing shard");
             let shard_bytes = future_shard.encode();
 
-            // Send the shard BEFORE discovery (goes to the peer buffer).
+            // Send the shard BEFORE the gather call (goes to the peer buffer).
             future_peer_sender.send(Recipients::One(receiver_pk.clone()), shard_bytes, true);
             context.sleep(DEFAULT_LINK.latency * 2).await;
 
@@ -5897,8 +5899,8 @@ mod tests {
                 "no peers should be blocked while shard is buffered"
             );
 
-            // The discovery creates the record and ingests the buffered shard.
-            mailbox.discovered(commitment, Round::new(epoch, View::new(1)));
+            // The gather call creates the record and ingests the buffered shard.
+            mailbox.gather(commitment, Round::new(epoch, View::new(1)));
             context.sleep(DEFAULT_LINK.latency * 2).await;
 
             // The future peer is a participant of epoch 1 and not of epoch 0.
@@ -5978,7 +5980,7 @@ mod tests {
             )
             .expect("signer scheme must be created");
 
-            // `discovered` performs one scoped lookup, and assigned-shard validation is the
+            // `gather` performs one scoped lookup, and assigned-shard validation is the
             // second. Any additional lookup for epoch 0 churns to `None`.
             let broadcaster_provider = ChurningProvider::new(broadcaster_scheme, 2);
             let broadcaster_config: Config<_, _, _, _, _, _> = Config {
@@ -6021,8 +6023,8 @@ mod tests {
             let commitment = coded_block.commitment();
             let round = Round::new(Epoch::zero(), View::new(1));
 
-            broadcaster_mailbox.discovered(commitment, round);
-            receiver_mailbox.discovered(commitment, round);
+            broadcaster_mailbox.gather(commitment, round);
+            receiver_mailbox.gather(commitment, round);
             context.sleep(DEFAULT_LINK.latency).await;
 
             let broadcaster_index = participants
@@ -6145,7 +6147,7 @@ mod tests {
                 engine: thread::current().id(),
             });
             let a = make_block(1);
-            mailbox.discovered(a.commitment(), Round::new(Epoch::zero(), View::new(1)));
+            mailbox.gather(a.commitment(), Round::new(Epoch::zero(), View::new(1)));
             send(&mut senders, &a, 0, 2);
             send(&mut senders, &a, 1, 1);
             while started.try_recv().is_err() {
@@ -6154,7 +6156,7 @@ mod tests {
 
             // The engine verifies the receiver's shard of B while A's decode holds.
             let b = make_block(2);
-            mailbox.discovered(b.commitment(), Round::new(Epoch::zero(), View::new(2)));
+            mailbox.gather(b.commitment(), Round::new(Epoch::zero(), View::new(2)));
             let mut verified = mailbox.subscribe_assigned_shard_verified(b.commitment());
             send(&mut senders, &b, 0, 2);
             while verified.try_recv().is_err() {
@@ -6298,9 +6300,9 @@ mod tests {
                 shard
             };
 
-            // Discovery creates the record. Peer 2's invalid shard and peer 3's valid shard
+            // The gather call creates the record. Peer 2's invalid shard and peer 3's valid shard
             // reach the minimum and start a job.
-            engine.handle_discovered(
+            engine.handle_gather(
                 &mut sender,
                 commitment,
                 Round::new(Epoch::zero(), View::new(1)),
@@ -6394,7 +6396,7 @@ mod tests {
                 size(&shard(0)) + size(&shard(3)) + size(&shard(4)) + size(&shard(5)),
             ];
 
-            // Before discovery, peer 1 delivers the assigned shard, peer 2 sends an invalid
+            // Before the gather call, peer 1 delivers the assigned shard, peer 2 sends an invalid
             // shard, and peers 3 through 6 send their own shards.
             engine.handle_network_shard(&mut sender, peer_keys[1].clone(), shard(0));
             engine.handle_network_shard(&mut sender, peer_keys[2].clone(), invalid);
@@ -6406,9 +6408,9 @@ mod tests {
                 );
             }
 
-            // Discovery verifies the assigned shard and starts a job that takes it and the
+            // The gather call verifies the assigned shard and starts a job that takes it and the
             // shards of peers 2 through 4. The shards of peers 5 and 6 stay pending.
-            engine.handle_discovered(
+            engine.handle_gather(
                 &mut sender,
                 commitment,
                 Round::new(Epoch::zero(), View::new(1)),
@@ -6480,10 +6482,8 @@ mod tests {
                 let receiver_pk = peers[receiver_idx].public_key.clone();
                 let round = Round::new(Epoch::zero(), View::new(1));
 
-                // Discover the fake commitment.
-                peers[receiver_idx]
-                    .mailbox
-                    .discovered(fake_commitment, round);
+                // Gather the fake commitment.
+                peers[receiver_idx].mailbox.gather(fake_commitment, round);
 
                 // Open a block subscription before sending shards.
                 let mut block_sub = peers[receiver_idx].mailbox.subscribe(fake_commitment);
@@ -6543,9 +6543,7 @@ mod tests {
                 // commitment and confirm reconstruction succeeds.
                 let real_commitment1 = coded_block1.commitment();
                 let round2 = Round::new(Epoch::zero(), View::new(2));
-                peers[receiver_idx]
-                    .mailbox
-                    .discovered(real_commitment1, round2);
+                peers[receiver_idx].mailbox.gather(real_commitment1, round2);
 
                 let leader_shard1 = coded_block1
                     .shard(receiver_shard_idx)
@@ -6615,9 +6613,7 @@ mod tests {
                 let receiver_pk = peers[receiver_idx].public_key.clone();
                 let round = Round::new(Epoch::zero(), View::new(1));
 
-                peers[receiver_idx]
-                    .mailbox
-                    .discovered(fake_commitment, round);
+                peers[receiver_idx].mailbox.gather(fake_commitment, round);
                 let mut block_sub = peers[receiver_idx].mailbox.subscribe(fake_commitment);
 
                 let receiver_shard_idx = peers[receiver_idx].index.get() as u16;
@@ -6659,9 +6655,7 @@ mod tests {
 
                 // Verify the receiver still reconstructs valid commitments afterward.
                 let round2 = Round::new(Epoch::zero(), View::new(2));
-                peers[receiver_idx]
-                    .mailbox
-                    .discovered(real_commitment, round2);
+                peers[receiver_idx].mailbox.gather(real_commitment, round2);
 
                 let real_leader_shard = coded_block
                     .shard(receiver_shard_idx)
@@ -6733,10 +6727,10 @@ mod tests {
                 // Receiver learns both commitments in the same round.
                 peers[receiver_idx]
                     .mailbox
-                    .discovered(commitment_a, round);
+                    .gather(commitment_a, round);
                 peers[receiver_idx]
                     .mailbox
-                    .discovered(commitment_b, round);
+                    .gather(commitment_b, round);
 
                 // Subscribe to the certifiable commitment before any reconstruction.
                 let certifiable_sub = peers[receiver_idx].mailbox.subscribe(commitment_b);
@@ -6844,7 +6838,7 @@ mod tests {
                 // Receiver tracks the commitment that peer 0 proposed.
                 peers[receiver_idx]
                     .mailbox
-                    .discovered(tracked_commitment, Round::new(Epoch::zero(), View::new(1)));
+                    .gather(tracked_commitment, Round::new(Epoch::zero(), View::new(1)));
 
                 // Construct an unrelated shard from peer1's slot and retarget
                 // its commitment to the tracked commitment so it hits active state.
@@ -6897,12 +6891,12 @@ mod tests {
 
                 // Leader proposes. The victim will not receive a direct shard
                 // because the link is severed.
-                peers[0].mailbox.proposed(round, coded_block.clone());
+                peers[0].mailbox.disperse(round, coded_block.clone());
 
                 // Inform all non-leader peers of the commitment so they validate
                 // and re-broadcast their shards via Recipients::All.
                 for peer in peers[1..].iter_mut() {
-                    peer.mailbox.discovered(commitment, round);
+                    peer.mailbox.gather(commitment, round);
                 }
                 context.sleep(config.link.latency * 2).await;
 
@@ -6969,18 +6963,18 @@ mod tests {
                     .await
                     .expect("remove_link should succeed");
 
-                // Subscribe to the shard and block BEFORE any broadcasting.
+                // Subscribe to the shard and block BEFORE any dispersal.
                 let mut shard_sub = peers[1]
                     .mailbox
                     .subscribe_assigned_shard_verified(commitment);
                 let block_sub = peers[1].mailbox.subscribe(commitment);
 
-                // Leader broadcasts.
-                peers[0].mailbox.proposed(round, coded_block.clone());
+                // Leader disperses.
+                peers[0].mailbox.disperse(round, coded_block.clone());
 
-                // All non-leader peers discover the commitment.
+                // All non-leader peers gather the commitment.
                 for peer in peers[1..].iter_mut() {
-                    peer.mailbox.discovered(commitment, round);
+                    peer.mailbox.gather(commitment, round);
                 }
 
                 // Wait for gossip to propagate.
@@ -7011,7 +7005,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_broadcast_routes_participant_and_non_participant_shards() {
+    fn test_disperse_routes_participant_and_non_participant_shards() {
         let fixture = Fixture {
             num_secondary_peers: 1,
             ..Default::default()
@@ -7024,13 +7018,13 @@ mod tests {
                 let commitment = coded_block.commitment();
 
                 let round = Round::new(Epoch::zero(), View::new(1));
-                peers[0].mailbox.proposed(round, coded_block.clone());
+                peers[0].mailbox.disperse(round, coded_block.clone());
 
                 for peer in peers[1..].iter_mut() {
-                    peer.mailbox.discovered(commitment, round);
+                    peer.mailbox.gather(commitment, round);
                 }
                 for np in non_participants.iter() {
-                    np.mailbox.discovered(commitment, round);
+                    np.mailbox.gather(commitment, round);
                 }
                 context.sleep(config.link.latency * 2).await;
 
@@ -7071,7 +7065,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_non_participant_reconstructs_after_discovered() {
+    fn test_non_participant_reconstructs_after_gather() {
         let fixture = Fixture {
             num_secondary_peers: 1,
             ..Default::default()
@@ -7084,20 +7078,20 @@ mod tests {
                 let commitment = coded_block.commitment();
                 let round = Round::new(Epoch::zero(), View::new(1));
 
-                peers[0].mailbox.proposed(round, coded_block.clone());
+                peers[0].mailbox.disperse(round, coded_block.clone());
 
                 // Inform participants of the commitment so they validate and re-broadcast
                 // shards.
                 for peer in peers[1..].iter_mut() {
-                    peer.mailbox.discovered(commitment, round);
+                    peer.mailbox.gather(commitment, round);
                 }
                 context.sleep(config.link.latency).await;
 
-                // Non-participant discovers the commitment after shards are already
+                // Non-participant gathers the commitment after shards are already
                 // propagating through the network.
                 let np = &non_participants[0];
                 let block_sub = np.mailbox.subscribe(commitment);
-                np.mailbox.discovered(commitment, round);
+                np.mailbox.gather(commitment, round);
 
                 // Wait for enough shards (leader's shard + shards from
                 // participants) to arrive and reconstruct.
@@ -7177,9 +7171,9 @@ mod tests {
             let (response, mut verified) = oneshot::channel();
             engine.handle_assigned_shard_verified_subscription(commitment, response);
 
-            // The proposer, peer 0, sends its own shard after discovery. The shard is held, since
-            // one shard is below the minimum of two.
-            engine.handle_discovered(
+            // The proposer, peer 0, sends its own shard after the gather call. The shard is held,
+            // since one shard is below the minimum of two.
+            engine.handle_gather(
                 &mut sender,
                 commitment,
                 Round::new(Epoch::zero(), View::new(1)),
@@ -7238,7 +7232,7 @@ mod tests {
     /// Delivers a proposal from peer 0 to peer 1 and checks that peer 1 verifies its assigned shard
     /// and gossips it. Peer 1 runs a member scheme that reports its membership but cannot sign.
     ///
-    /// When `buffered` is set, the shard arrives before peer 1 discovers the commitment. Peer 3
+    /// When `buffered` is set, the shard arrives before peer 1 gathers the commitment. Peer 3
     /// cannot reach peer 2, so with four participants (minimum two shards) peer 2 reconstructs only
     /// if the member gossips its verified shard.
     fn committee_member_without_share_accepts_assigned_shard(buffered: bool) {
@@ -7259,18 +7253,18 @@ mod tests {
                     .await
                     .expect("link from peer 3 to peer 2 must exist");
 
-                // The member receives the leader's shard either after or before discovery.
+                // The member receives the leader's shard either after or before the gather call.
                 if !buffered {
-                    peers[1].mailbox.discovered(commitment, round);
+                    peers[1].mailbox.gather(commitment, round);
                     context.sleep(config.link.latency * 2).await;
                 }
 
-                peers[0].mailbox.proposed(round, coded_block);
+                peers[0].mailbox.disperse(round, coded_block);
                 context.sleep(config.link.latency * 2).await;
 
                 if buffered {
                     assert!(oracle.blocked().await.unwrap().is_empty());
-                    peers[1].mailbox.discovered(commitment, round);
+                    peers[1].mailbox.gather(commitment, round);
                     context.sleep(config.link.latency * 2).await;
                 }
 
@@ -7294,9 +7288,9 @@ mod tests {
                     },
                 }
 
-                // Peers 2 and 3 discover the commitment so they ingest their buffered shards.
+                // Peers 2 and 3 gather the commitment so they ingest their buffered shards.
                 for peer in peers[2..].iter_mut() {
-                    peer.mailbox.discovered(commitment, round);
+                    peer.mailbox.gather(commitment, round);
                 }
 
                 // The member reconstructs from gossip, and peer 2 reaches the minimum only with
@@ -7321,23 +7315,23 @@ mod tests {
     }
 
     /// A committee member without a signing share accepts the leader's shard at its index as its
-    /// assigned shard when the shard arrives after discovery, and no peer is blocked.
+    /// assigned shard when the shard arrives after the gather call, and no peer is blocked.
     #[test_traced]
-    fn test_committee_member_without_share_accepts_assigned_shard_after_discovery() {
+    fn test_committee_member_without_share_accepts_assigned_shard_after_gather() {
         committee_member_without_share_accepts_assigned_shard(false);
     }
 
     /// A committee member without a signing share accepts the leader's shard at its index as its
-    /// assigned shard when the shard is buffered before discovery, and no peer is blocked.
+    /// assigned shard when the shard is buffered before the gather call, and no peer is blocked.
     #[test_traced]
     fn test_committee_member_without_share_accepts_assigned_shard_after_buffered_delivery() {
         committee_member_without_share_accepts_assigned_shard(true);
     }
 
-    /// A leader whose member scheme cannot sign still broadcasts its proposal's shards, and a
+    /// A leader whose member scheme cannot sign still disperses its proposal's shards, and a
     /// peer verifies its assigned shard without blocking the leader.
     #[test_traced]
-    fn test_committee_member_without_share_broadcasts_proposal() {
+    fn test_committee_member_without_share_disperses_proposal() {
         let fixture = Fixture::<C> {
             shareless_member: Some(0),
             ..Default::default()
@@ -7349,10 +7343,10 @@ mod tests {
                 let commitment = coded_block.commitment();
                 let round = Round::new(Epoch::zero(), View::new(1));
 
-                // Peer 1 discovers the commitment before the member leader proposes.
-                peers[1].mailbox.discovered(commitment, round);
+                // Peer 1 gathers the commitment before the member leader proposes.
+                peers[1].mailbox.gather(commitment, round);
                 context.sleep(config.link.latency * 2).await;
-                peers[0].mailbox.proposed(round, coded_block);
+                peers[0].mailbox.disperse(round, coded_block);
 
                 // Peer 1 verifies the shard the member leader sent to its index.
                 let shard_sub = peers[1]
@@ -7363,7 +7357,7 @@ mod tests {
                         result.expect("assigned shard subscription must resolve");
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
-                        panic!("peer must verify the shard broadcast by the member leader");
+                        panic!("peer must verify the shard dispersed by the member leader");
                     },
                 }
 
@@ -7375,9 +7369,9 @@ mod tests {
 
     #[test_traced]
     fn test_peer_set_update_keeps_buffers_of_tracked_primaries() {
-        // Shards from a sender that left the latest set are still buffered before discovery while
-        // an older tracked set lists it as primary, and are evicted once it leaves every tracked
-        // set.
+        // Shards from a sender that left the latest set are still buffered before the gather call
+        // while an older tracked set lists it as primary, and are evicted once it leaves every
+        // tracked set.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let num_peers = 10usize;
@@ -7466,12 +7460,12 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             // Shards arriving from the leader while it is outside the latest set but still a
-            // tracked primary are buffered and ingested once the commitment is discovered.
+            // tracked primary are buffered and ingested by the gather call for the commitment.
             let (commitment, shard_bytes) = receiver_shard(1);
             leader_sender.send(Recipients::One(receiver_pk.clone()), shard_bytes, true);
             context.sleep(DEFAULT_LINK.latency * 2).await;
             let mut shard_sub = mailbox.subscribe_assigned_shard_verified(commitment);
-            mailbox.discovered(commitment, Round::new(Epoch::zero(), View::new(1)));
+            mailbox.gather(commitment, Round::new(Epoch::zero(), View::new(1)));
             context.sleep(DEFAULT_LINK.latency * 2).await;
             assert!(
                 matches!(shard_sub.try_recv(), Ok(())),
@@ -7486,7 +7480,7 @@ mod tests {
             oracle.manager().track(2, remaining);
             context.sleep(Duration::from_millis(10)).await;
             let mut shard_sub = mailbox.subscribe_assigned_shard_verified(commitment);
-            mailbox.discovered(commitment, Round::new(Epoch::zero(), View::new(2)));
+            mailbox.gather(commitment, Round::new(Epoch::zero(), View::new(2)));
             context.sleep(DEFAULT_LINK.latency * 2).await;
             assert!(
                 matches!(shard_sub.try_recv(), Err(TryRecvError::Empty)),
@@ -7610,7 +7604,7 @@ mod tests {
             );
             let shard = coded_block.shard(0).expect("missing shard");
 
-            // Buffer one shard before its commitment is discovered.
+            // Buffer one shard before the gather call for its commitment.
             engine.buffer_peer_shard(sender_pk.clone(), shard);
             assert_eq!(
                 engine.peer_buffers.get(&sender_pk).map(VecDeque::len),
@@ -7628,9 +7622,10 @@ mod tests {
         });
     }
 
-    /// A shard buffered before an epoch cutover survives it while its sender remains a primary of
-    /// a tracked set. Discovery of the old commitment ingests it as the receiver's assigned shard
-    /// at the receiver's index in the old epoch, which differs from its index after the cutover.
+    /// A shard buffered before an epoch cutover survives it while its sender remains a primary of a
+    /// tracked set. The gather call for the old commitment ingests it as the receiver's assigned
+    /// shard at the receiver's index in the old epoch, which differs from its index after the
+    /// cutover.
     #[test_traced]
     fn test_old_epoch_buffered_shards_survive_cutover() {
         let executor = deterministic::Runner::default();
@@ -7722,7 +7717,7 @@ mod tests {
                 .shard(receiver_participant.get() as u16)
                 .expect("missing shard");
 
-            // Inbound: the epoch-0 leader's shard arrives before `Discovered` and is buffered.
+            // Inbound: the epoch-0 leader's shard arrives before `Gather` and is buffered.
             leader_sender.send(
                 Recipients::One(receiver_pk.clone()),
                 leader_shard.encode(),
@@ -7730,14 +7725,14 @@ mod tests {
             );
             context.sleep(DEFAULT_LINK.latency * 2).await;
 
-            // Cutover to epoch 1 primaries before `Discovered`: `leader_pk` (epoch-0-only) left the
+            // Cutover to epoch 1 primaries before `Gather`: `leader_pk` (epoch-0-only) left the
             // latest set but is still a primary of tracked set 0, so its buffered shard survives.
             oracle.manager().track(1, epoch1_set);
             context.sleep(Duration::from_millis(10)).await;
 
-            // Discovery of the old commitment ingests the pre-cutover shard.
+            // The gather call for the old commitment ingests the pre-cutover shard.
             let mut shard_sub = mailbox.subscribe_assigned_shard_verified(commitment);
-            mailbox.discovered(commitment, Round::new(Epoch::zero(), View::new(1)));
+            mailbox.gather(commitment, Round::new(Epoch::zero(), View::new(1)));
             context.sleep(DEFAULT_LINK.latency * 2).await;
 
             assert!(
@@ -7748,9 +7743,9 @@ mod tests {
     }
 
     /// If the evicted node leaves the [`commonware_p2p::PeerSetUpdate::latest`]
-    /// primary set, it must still reconstruct once the commitment is
-    /// discovered, as long as enough buffered shards came from peers that
-    /// remain in `latest.primary`.
+    /// primary set, it must still reconstruct once the gather call for the
+    /// commitment arrives, as long as enough buffered shards came from peers
+    /// that remain in `latest.primary`.
     ///
     /// This does not rely on a self-buffered shard or a leader-delivered shard:
     /// reconstruction should succeed from the remaining buffered peer shards
@@ -7861,8 +7856,9 @@ mod tests {
 
             let block_sub = mailbox.subscribe(commitment);
 
-            // Pre-`Discovered` path: four shards from peers that will still be in `latest.primary` after
-            // the receiver is evicted (indices 2, 4, 5, 6). Together they are enough to reconstruct.
+            // Pre-`Gather` path: four shards from peers that will still be in `latest.primary`
+            // after the receiver is evicted (indices 2, 4, 5, 6). Together they are enough to
+            // reconstruct.
             peer2_sender
                 .send(
                     Recipients::One(receiver_pk.clone()),
@@ -7890,7 +7886,7 @@ mod tests {
             context.sleep(DEFAULT_LINK.latency * 2).await;
 
             // Evict the receiver from `latest.primary`: buffered shards from remaining primaries must
-            // still count toward reconstruction once the commitment is discovered.
+            // still count toward reconstruction once the gather call for the commitment arrives.
             let latest_primary: Set<P> = Set::from_iter_dedup(
                 peer_keys
                     .iter()
@@ -7900,15 +7896,15 @@ mod tests {
             oracle.manager().track(1, latest_primary);
             context.sleep(Duration::from_millis(10)).await;
 
-            // Discovery drains overlap-buffered peer shards. The evicted receiver should
+            // The gather call drains overlap-buffered peer shards. The evicted receiver should
             // still reach quorum without ever receiving the leader's direct shard.
             mailbox
-                .discovered(commitment, Round::new(Epoch::zero(), View::new(1)));
+                .gather(commitment, Round::new(Epoch::zero(), View::new(1)));
 
             select! {
                 _ = block_sub => {},
                 _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("block subscription must resolve after discovery");
+                    panic!("block subscription must resolve after the gather call");
                 },
             }
 
@@ -7961,11 +7957,11 @@ mod tests {
                 // shard from the leader, verify it, and gossip it.
                 peers[leader_idx]
                     .mailbox
-                    .proposed(round, coded_block.clone());
+                    .disperse(round, coded_block.clone());
 
                 // Inform all non-leader peers of the commitment.
                 for peer in peers[1..].iter_mut() {
-                    peer.mailbox.discovered(commitment, round);
+                    peer.mailbox.gather(commitment, round);
                 }
 
                 // Wait for gossip to propagate. The victim should
@@ -8001,7 +7997,7 @@ mod tests {
                     .expect("add_link should succeed");
 
                 // Re-send the leader's shard manually via the leader's
-                // network sender (the engine already broadcast it earlier,
+                // network sender (the engine already dispersed it earlier,
                 // but the link was down).
                 let leader_shard = coded_block
                     .shard(peers[victim_idx].index.get() as u16)

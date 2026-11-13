@@ -20,16 +20,16 @@ where
     C: CodingScheme,
     H: Hasher,
 {
-    /// A request to broadcast a proposed [`CodedBlock`] to all peers.
-    Proposed {
+    /// A request to disperse the shards of a proposed [`CodedBlock`].
+    Disperse {
         /// The erasure coded block.
         block: Arc<CodedBlock<B, C, H>>,
         /// The round in which the block was proposed.
         round: Round,
     },
-    /// A notification that consensus observed a [`Commitment`], through a
-    /// proposal or a notarization.
-    Discovered {
+    /// A request to gather the shards of a [`Commitment`] that consensus
+    /// observed through a proposal or a notarization.
+    Gather {
         /// The [`Commitment`] of the observed block.
         commitment: Commitment<B, C, H>,
         /// The round in which the commitment was observed.
@@ -100,7 +100,7 @@ where
             Self::SubscribeAssignedShardVerified { response, .. } => response.is_closed(),
             Self::SubscribeByCommitment { response, .. }
             | Self::SubscribeByDigest { response, .. } => response.is_closed(),
-            Self::Proposed { .. } | Self::Discovered { .. } => false,
+            Self::Disperse { .. } | Self::Gather { .. } => false,
         }
     }
 }
@@ -203,21 +203,21 @@ where
         Self { sender }
     }
 
-    /// Broadcast a proposed erasure coded block's shards to the participants.
-    pub fn proposed(&self, round: Round, block: CodedBlock<B, C, H>) {
-        self.proposed_shared(round, Arc::new(block));
+    /// Disperse a proposed erasure coded block's shards to the participants.
+    pub fn disperse(&self, round: Round, block: CodedBlock<B, C, H>) {
+        self.disperse_shared(round, Arc::new(block));
     }
 
-    pub(crate) fn proposed_shared(&self, round: Round, block: Arc<CodedBlock<B, C, H>>) {
-        let _ = self.sender.enqueue(Message::Proposed { block, round });
+    pub(crate) fn disperse_shared(&self, round: Round, block: Arc<CodedBlock<B, C, H>>) {
+        let _ = self.sender.enqueue(Message::Disperse { block, round });
     }
 
-    /// Inform the engine that consensus observed [`Commitment`] in `round`,
-    /// through a proposal or a notarization.
+    /// Gather the shards of a [`Commitment`] that consensus observed in
+    /// `round`, through a proposal or a notarization.
     ///
     /// If the engine holds no record of the commitment and its record window
     /// admits `round`, it starts reconstructing the block from the shards its
-    /// peers sent, including those buffered before this call. A later report of
+    /// peers sent, including those buffered before this call. A later call for
     /// the same commitment only raises its round.
     ///
     /// `round` MUST come from a trusted consensus observation, and its epoch
@@ -227,10 +227,8 @@ where
     /// participant set, as proposal verification does and as a notarization
     /// implies. The engine checks and decodes with the config the commitment
     /// claims.
-    pub fn discovered(&self, commitment: Commitment<B, C, H>, round: Round) {
-        let _ = self
-            .sender
-            .enqueue(Message::Discovered { commitment, round });
+    pub fn gather(&self, commitment: Commitment<B, C, H>, round: Round) {
+        let _ = self.sender.enqueue(Message::Gather { commitment, round });
     }
 
     /// Request a reconstructed block by its [`Commitment`].
@@ -334,7 +332,7 @@ mod tests {
         let round = Round::new(Epoch::zero(), View::new(1));
 
         let mut overflow = Pending::default();
-        <TestMessage as Policy>::handle(&mut overflow, Message::Discovered { commitment, round });
+        <TestMessage as Policy>::handle(&mut overflow, Message::Gather { commitment, round });
         let (response, _get_rx) = oneshot::channel();
         <TestMessage as Policy>::handle(
             &mut overflow,
@@ -349,7 +347,7 @@ mod tests {
             None
         });
         assert_eq!(drained.len(), 2);
-        assert!(matches!(&drained[0], TestMessage::Discovered { .. }));
+        assert!(matches!(&drained[0], TestMessage::Gather { .. }));
         assert!(matches!(&drained[1], TestMessage::GetByCommitment { .. }));
     }
 }
