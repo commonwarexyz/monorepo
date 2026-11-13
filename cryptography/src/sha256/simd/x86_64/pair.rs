@@ -72,6 +72,21 @@ pub(in crate::sha256::simd) unsafe fn hash_pair_72(
     unsafe {
         core::arch::asm!(
             include_str!("sha256_pair_macros.asm"),
+            // Clear the upper halves of the vector registers. This is only for
+            // speed: the kernel gives the same result if they are dirty.
+            //
+            // The SHA instructions have only a legacy SSE encoding, and the
+            // rounds alternate them with VEX instructions. While an upper half
+            // is dirty, some Intel and AMD CPUs trap into microcode at every
+            // switch between the two encodings. One call makes 256 switches.
+            //
+            // The compiler adds `vzeroupper` before a call but not before
+            // inline asm. The upper halves are thus dirty if the compiler
+            // inlines this function into code that uses 256-bit registers.
+            // This is possible when the target features are enabled at
+            // compile time. `vzeroupper` writes only registers that are
+            // declared as outputs below.
+            "vzeroupper",
             include_str!("sha256_pair_block1_72.asm"),
             include_str!("sha256_pair_tail8.asm"),
             include_str!("sha256_pair_finish.asm"),
@@ -125,6 +140,8 @@ pub(in crate::sha256::simd) unsafe fn hash_pair_64(
     unsafe {
         core::arch::asm!(
             include_str!("sha256_pair_macros.asm"),
+            // See `hash_pair_72` for why the upper halves are cleared.
+            "vzeroupper",
             include_str!("sha256_pair_block1_64.asm"),
             include_str!("sha256_pair_tail0.asm"),
             left_a = in(reg) left_a.as_ptr(),
