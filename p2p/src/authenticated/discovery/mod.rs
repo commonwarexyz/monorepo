@@ -365,6 +365,83 @@ mod tests {
     }
 
     #[test]
+    fn test_network_thread_placement() {
+        deterministic::Runner::timed(Duration::from_secs(60)).start(|context| async move {
+            let thread = context.child("t").thread().build().unwrap();
+            let signer0 = ed25519::PrivateKey::from_seed(0);
+            let signer1 = ed25519::PrivateKey::from_seed(1);
+            let pk0 = signer0.public_key();
+            let pk1 = signer1.public_key();
+            let peers = Set::try_from(vec![pk0.clone(), pk1]).unwrap();
+            let socket0 = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 3000);
+            let socket1 = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 3001);
+            let (network0, mut oracle0) = Network::new(
+                context.child("network0").on(&thread),
+                Config::test(signer0, socket0, Vec::new(), MAX_MESSAGE_SIZE),
+            );
+            let (network1, mut oracle1) = Network::new(
+                context.child("network1").on(&thread),
+                Config::test(
+                    signer1,
+                    socket1,
+                    vec![(pk0, socket0.into())],
+                    MAX_MESSAGE_SIZE,
+                ),
+            );
+            oracle0.track(0, peers.clone());
+            oracle1.track(0, peers);
+            network0.start();
+            network1.start();
+
+            loop {
+                let metrics = context.encode();
+                let spawned: Vec<_> = metrics
+                    .lines()
+                    .filter(|line| line.starts_with("runtime_tasks_spawned_total{"))
+                    .collect();
+                let peer_spawned = |network: &str| {
+                    let name = format!("name=\"{network}_spawner_peer\"");
+                    spawned.iter().any(|line| line.contains(&name))
+                };
+                if !peer_spawned("network0") || !peer_spawned("network1") {
+                    context.sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+                for network in ["network0", "network1"] {
+                    for actor in [
+                        "",
+                        "_tracker",
+                        "_router",
+                        "_spawner",
+                        "_listener",
+                        "_dialer",
+                    ] {
+                        let name = format!("name=\"{network}{actor}\"");
+                        let lines: Vec<_> =
+                            spawned.iter().filter(|line| line.contains(&name)).collect();
+                        assert!(!lines.is_empty(), "missing {name}: {metrics}");
+                        assert!(
+                            lines
+                                .iter()
+                                .all(|line| line.contains("execution=\"Thread\"")),
+                            "{name}: {metrics}"
+                        );
+                    }
+                    let name = format!("name=\"{network}_spawner_peer\"");
+                    assert!(
+                        spawned
+                            .iter()
+                            .filter(|line| line.contains(&name))
+                            .all(|line| line.contains("execution=\"Shared\"")),
+                        "{name}: {metrics}"
+                    );
+                }
+                break;
+            }
+        });
+    }
+
+    #[test]
     fn test_pre_start_send_is_accepted() {
         deterministic::Runner::default().start(|context| async move {
             let signer = ed25519::PrivateKey::from_seed(0);

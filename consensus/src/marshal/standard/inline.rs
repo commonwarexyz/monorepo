@@ -187,7 +187,7 @@ where
 
 impl<E, S, A, B, ES> Inline<E, S, A, B, ES>
 where
-    E: Metrics + Clock,
+    E: Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<
             E,
@@ -223,7 +223,7 @@ where
         let ancestor_fetch_duration = Timed::new(ancestor_fetch_histogram);
 
         Self {
-            context: Arc::new(context),
+            context: Arc::new(context.shared()),
             application,
             marshal,
             epocher,

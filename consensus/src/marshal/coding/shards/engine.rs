@@ -744,7 +744,7 @@ where
         let mut sender = WrappedSender::<_, Shard<B, C, H>>::new(sender);
         let (receiver_service, mut receiver) =
             WrappedBackgroundReceiver::<_, P, X, _, Shard<B, C, H>, T>::new(
-                self.context.child("shard_ingress"),
+                self.context.child("shard_ingress").placed(),
                 receiver,
                 B::max_encode_size(&self.block_codec_config),
                 self.blocker.clone(),

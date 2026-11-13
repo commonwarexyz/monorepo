@@ -231,7 +231,7 @@ where
         let ancestor_fetch_duration = Timed::new(ancestor_fetch_histogram);
 
         Self {
-            context: Arc::new(context),
+            context: Arc::new(context.shared()),
             application,
             marshal,
             epocher,

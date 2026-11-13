@@ -201,7 +201,7 @@ where
 
         // Start spawner
         let (spawner, spawner_mailbox) = spawner::Actor::new(
-            self.context.child("spawner"),
+            self.context.child("spawner").placed(),
             spawner::Config {
                 mailbox_size: self.cfg.mailbox_size,
                 send_batch_size: self.cfg.send_batch_size,
@@ -220,7 +220,7 @@ where
 
         // Start listener
         let listener = listener::Actor::new(
-            self.context.child("listener"),
+            self.context.child("listener").placed(),
             listener::Config {
                 address: self.cfg.listen,
                 stream: stream.clone(),
@@ -237,7 +237,7 @@ where
 
         // Start dialer
         let dialer = dialer::Actor::new(
-            self.context.child("dialer"),
+            self.context.child("dialer").placed(),
             dialer::Config {
                 stream,
                 dial_timeout: self.cfg.dial_timeout,

@@ -117,7 +117,7 @@ impl<
         let handler = Handler::new(handler_tx);
 
         let (resolver_engine, mut resolver) = p2p::Engine::new(
-            self.context.child("resolver"),
+            self.context.child("resolver").placed(),
             p2p::Config {
                 peer_provider: StaticProvider::new(self.epoch.get(), participants),
                 blocker: self.blocker.take().expect("blocker must be set"),

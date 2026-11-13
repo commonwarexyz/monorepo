@@ -297,7 +297,7 @@ where
         let erasure_encode_duration = Timed::new(erasure_histogram);
 
         Self {
-            context: Arc::new(context),
+            context: Arc::new(context.shared()),
             application,
             marshal,
             shards,

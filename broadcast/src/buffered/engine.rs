@@ -167,7 +167,7 @@ where
     async fn run(mut self, network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>)) {
         let mut sender = WrappedSender::<_, M>::new(network.0);
         let (ingress, mut receiver) = WrappedBackgroundReceiver::<_, P, B, _, M, T>::new(
-            self.context.child("ingress"),
+            self.context.child("ingress").placed(),
             network.1,
             self.codec_config.clone(),
             self.blocker.clone(),

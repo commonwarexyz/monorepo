@@ -513,7 +513,7 @@ where
         let genesis = Digested::compute(genesis, &self.config.strategy).await;
 
         let (buffer, buffer_mailbox) = buffered::Engine::new(
-            context.child("buffer"),
+            context.child("buffer").placed(),
             buffered::Config {
                 public_key: public_key.clone(),
                 mailbox_size: self.config.mailbox_size,
@@ -528,7 +528,7 @@ where
         let buffer_handle = buffer.start(broadcast);
 
         let (backfill_handler, backfill_resolver) = marshal_resolver::init(
-            context.child("backfill"),
+            context.child("backfill").placed(),
             marshal_resolver::Config {
                 public_key: public_key.clone(),
                 peer_provider: self.config.manager.clone(),
@@ -572,7 +572,7 @@ where
         .expect("failed to initialize DKG block archive");
 
         let (marshal_actor, marshal_mailbox, _) = MarshalActor::init(
-            context.child("marshal"),
+            context.child("marshal").placed(),
             finalizations,
             blocks,
             marshal::Config {
@@ -615,7 +615,7 @@ where
         // nothing waits on the fence.
         let (fence, _gate) = Fence::new();
         let (reshare_actor, reshare_mailbox) = reshare::Actor::new_dkg(
-            context.child("reshare"),
+            context.child("reshare").placed(),
             reshare::Config {
                 signer: self.config.signer.clone(),
                 manager: self.config.manager.clone(),
@@ -666,7 +666,7 @@ where
         );
         let floor = Floor::Genesis(genesis.digest());
         let simplex = simplex::Engine::new(
-            context.child("simplex"),
+            context.child("simplex").placed(),
             simplex::Config {
                 scheme,
                 elector: RoundRobin::<Sha256>::default(),
