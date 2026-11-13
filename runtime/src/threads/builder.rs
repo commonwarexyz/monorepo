@@ -21,8 +21,8 @@ const CPU_WORDS: usize = CPU_LIMIT / 64;
 /// A set of logical CPU ids, for [ThreadBuilder::pin].
 ///
 /// Ids below 1024 (`CPU_SETSIZE`) are stored in a fixed bitset, so building a set never
-/// allocates, whatever its range. A larger id is not stored: the set records the smallest such
-/// id, and validation reports it as unavailable. [Cpus::iter] and [Cpus::len] cover the stored
+/// allocates, whatever its range. A larger id is not stored. The set records the smallest such
+/// id instead, and validation reports it as unavailable. [Cpus::iter] and [Cpus::len] cover the stored
 /// ids only.
 ///
 /// # Examples
@@ -100,7 +100,7 @@ impl Cpus {
         self.words.iter().map(|word| word.count_ones() as usize).sum()
     }
 
-    /// Whether no id was requested: none is stored and none at or above 1024 was recorded.
+    /// Whether no id was requested, so none is stored and none at or above 1024 was recorded.
     pub fn is_empty(&self) -> bool {
         self.beyond.is_none() && self.words.iter().all(|&word| word == 0)
     }
@@ -177,9 +177,9 @@ impl From<RangeInclusive<usize>> for Cpus {
     }
 }
 
-/// Check a pin request against the runner's base set: `EmptyCpus` first, then
-/// `UnsupportedAffinity` when the base set is unknown, then the smallest requested id outside
-/// it.
+/// Check a pin request against the runner's base set. An empty request fails first with
+/// `EmptyCpus`, then an unknown base set with `UnsupportedAffinity`, then the smallest
+/// requested id outside the base set with `CpuUnavailable`.
 pub(crate) fn validate(cpus: &Cpus, base: Option<&Cpus>) -> Result<(), ThreadError> {
     if cpus.is_empty() {
         return Err(ThreadError::EmptyCpus);
@@ -216,7 +216,7 @@ pub enum ThreadError {
 /// A runtime thread, created through [Spawner::thread].
 ///
 /// A handle names the thread for [Spawner::on] and [Spawner::spawn_on]. Holding one does not
-/// keep the thread alive: the thread lives as long as the supervision node of the context that
+/// keep the thread alive. The thread lives as long as the supervision node of the context that
 /// created it, and work sent to a closed thread resolves [crate::Error::Closed]. Handles are
 /// cheap to clone and can be sent anywhere. Two handles are equal when they name the same
 /// thread of the same runner.
@@ -283,7 +283,7 @@ pub(crate) trait ThreadRuntime: Send + Sync {
 /// Configures a runtime thread, returned by [Spawner::thread].
 ///
 /// The thread occupies the supervision node of the context consumed by [Spawner::thread] and
-/// lives as long as that node: until the context's lineage finishes or is aborted, or the
+/// lives as long as that node, until the context's lineage finishes or is aborted, or the
 /// runtime shuts down. A thread started by [ThreadBuilder::spawn] also closes when its root task
 /// ends.
 #[must_use = "a thread builder creates nothing until build, attach or spawn"]
@@ -320,7 +320,7 @@ impl<C> ThreadBuilder<C> {
     /// Rewrap the context this builder produces.
     ///
     /// This exists for implementing [Spawner] on a wrapper context that delegates to an inner
-    /// one: the wrapper's [Spawner::thread] maps the inner builder back to the wrapper type.
+    /// one. The wrapper's [Spawner::thread] maps the inner builder back to the wrapper type.
     ///
     /// ```ignore
     /// fn thread(self) -> ThreadBuilder<Self> {
@@ -375,7 +375,7 @@ impl<C: Spawner> ThreadBuilder<C> {
     /// node. Everything spawned from the context runs on the thread unless it moves off with
     /// [Spawner::shared].
     ///
-    /// Such a thread hosts only `Send` work: nothing returns its [Thread], so
+    /// Such a thread hosts only `Send` work. Nothing returns its [Thread], so
     /// [Spawner::spawn_on] cannot target it. It lives as long as its creating lineage, so code
     /// that rebuilds a subsystem per epoch should attach inside a task that lives exactly as long
     /// as the subsystem.

@@ -1,6 +1,6 @@
 //! Thread-bound contexts and `!Send` tasks on runtime threads.
 //!
-//! A [Local] proves that its holder runs on a runtime thread: it holds an [Rc] to the thread's
+//! A [Local] proves that its holder runs on a runtime thread. It holds an [Rc] to the thread's
 //! [Owner], which only the thread creates, so a [Local] cannot leave the thread. The owner keeps
 //! the thread-bound state shared code needs: the factories [Local::spawn_local] parks until its
 //! task runs, and the result slots of [LocalHandle]s.
@@ -45,12 +45,12 @@ static PARKED_IDS: AtomicU64 = AtomicU64::new(0);
 /// allows spawning `!Send` work with [Local::spawn_local].
 ///
 /// A [Local] dereferences to its context, so `&C` and `&mut C` methods (such as the RNG) work
-/// directly. It cannot implement the runtime traits, which require `Send + Sync`: generic
+/// directly. It cannot implement the runtime traits, which require `Send + Sync`, so generic
 /// helpers take `&*local` or `&mut *local`, and code that needs an owned context uses
 /// [Local::into_inner], or `.into()` where the target type is known. Both give up the proof.
 ///
 /// The context inside is replaceable through [DerefMut]. The proof is the owner, not the
-/// context: [Local::spawn_local] always runs its task on [Local::home], supervised by the
+/// context, so [Local::spawn_local] always runs its task on [Local::home], supervised by the
 /// context held at the call.
 ///
 /// A [Local] holds a context, so drop it before its runtime returns from
@@ -151,7 +151,7 @@ impl<C> Local<C> {
     /// Rewrap the context while keeping the proof.
     ///
     /// This exists for implementing [Spawner] on a wrapper context that delegates to an inner
-    /// one: the wrapper's [Spawner::spawn_on] maps the inner [Local] back to the wrapper type.
+    /// one. The wrapper's [Spawner::spawn_on] maps the inner [Local] back to the wrapper type.
     ///
     /// ```ignore
     /// fn spawn_on<F, Fut, T>(self, thread: &Thread, f: F) -> Handle<T>

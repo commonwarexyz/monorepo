@@ -211,7 +211,7 @@ where
         self.registration.handle()
     }
 
-    /// Closes the task without running it: aborts its node, finishes its metric and drops its
+    /// Closes the task without running it. Aborts its node, finishes its metric and drops its
     /// sink, in that order, so its handle resolves [`Error::Closed`].
     pub(crate) fn close(self) {
         let Self {
@@ -661,7 +661,7 @@ impl Panicker {
         }
 
         // If we've already sent a panic, ignore the new one. Take the sender out and release the
-        // lock first: a payload the closed receiver returns, or the ignored one, can run
+        // lock first, because a payload the closed receiver returns, or the ignored one, can run
         // arbitrary destructors, which may notify again.
         let sender = self.sender.lock().take();
         let Some(sender) = sender else {

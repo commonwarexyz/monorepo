@@ -390,22 +390,24 @@ stability_scope!(BETA {
         /// later [`Spawner::on`] replaces it, and this clears a pending blocking flag.
         ///
         /// A spawn from a placed context runs its factory on the caller, as usual, and its
-        /// future on the thread. Tasks on a thread are cooperative: every poll, factory and
+        /// future on the thread. Tasks on a thread are cooperative. Every poll, factory and
         /// destructor must return promptly (see [`Spawner::thread`]). A spawn toward a thread
         /// that is closed or belongs to another runner resolves [`Error::Closed`] without running
         /// its factory, and aborts the consumed context's node.
         ///
-        /// Placement creates no supervision edge: aborting a context placed on a thread does not
+        /// Placement creates no supervision edge. Aborting a context placed on a thread does not
         /// close the thread, and closing the thread aborts only the tasks running on it.
         #[must_use]
         fn on(self, thread: &Thread) -> Self;
 
-        /// Configure a new runtime thread: an OS thread owned by the runtime that runs only the
-        /// tasks placed on it, cooperatively, for their whole lives. Tasks on one thread share its
-        /// core, its wakes and its data.
+        /// Configure a new runtime thread.
         ///
-        /// Consumes the context: the thread occupies this context's supervision node and lives as
-        /// long as that node, until the context's lineage finishes or is aborted, or the runtime
+        /// A runtime thread is an OS thread owned by the runtime that runs only the tasks placed
+        /// on it, cooperatively, for their whole lives. Tasks on one thread share its core, its
+        /// wakes and its data.
+        ///
+        /// This consumes the context. The thread occupies this context's supervision node and lives
+        /// as long as that node, until the context's lineage finishes or is aborted, or the runtime
         /// shuts down. The context's placement and blocking flag are ignored. Holding a [`Thread`]
         /// or a [`Local`] never keeps a thread open. Closing a thread aborts the tasks running on
         /// it, wherever they are supervised.
@@ -420,7 +422,7 @@ stability_scope!(BETA {
         ///
         /// # Cooperation and liveness
         ///
-        /// Tasks on a thread are cooperative: every poll, factory and destructor must return
+        /// Tasks on a thread are cooperative. Every poll, factory and destructor must return
         /// promptly. Blocking work belongs on `shared(true)`, and long CPU work on a
         /// [`Strategizer::strategy`]. Each runtime bounds a thread's turns:
         ///
@@ -446,7 +448,7 @@ stability_scope!(BETA {
         /// use std::{cell::RefCell, rc::Rc};
         ///
         /// deterministic::Runner::default().start(|context| async move {
-        ///     // Replace a dedicated task: run a root task on its own thread.
+        ///     // Run a root task on a thread of its own.
         ///     let handle = context.child("worker").thread().spawn(|_| async { 42 })?;
         ///     assert_eq!(handle.await.unwrap(), 42);
         ///
@@ -482,9 +484,9 @@ stability_scope!(BETA {
         ///
         /// Unlike directly awaiting a future, the task starts running immediately even if the caller
         /// never awaits the returned [`Handle`]. The factory `f` runs on the caller, and the task
-        /// runs where the context is placed (see [Placement](Spawner#placement)): on a blocking
-        /// thread if [`Spawner::shared`] asked for one, otherwise on the context's runtime thread
-        /// if placed on one, otherwise on the shared executor.
+        /// runs where the context is placed (see [Placement](Spawner#placement)). It runs on a
+        /// blocking thread if [`Spawner::shared`] asked for one, otherwise on the context's runtime
+        /// thread if placed on one, and otherwise on the shared executor.
         ///
         /// # Mandatory Supervision
         ///
@@ -529,8 +531,8 @@ stability_scope!(BETA {
         /// consumed context's node.
         ///
         /// A thread admits a bounded batch of spawns per turn, and its queue of spawns is
-        /// unbounded, like any spawn queue: a producer that submits faster than the thread admits
-        /// grows it. Backpressure is the caller's job.
+        /// unbounded, like any spawn queue. A producer that submits faster than the thread admits
+        /// grows it, so backpressure is the caller's job.
         ///
         /// # Examples
         ///

@@ -534,7 +534,7 @@ impl Executor {
         let mut mode = Some(mode);
         let task = inner
             .admit(|| {
-                // The admission lock is the outer lock: the table and task locks below are
+                // The admission lock is the outer lock. The table and task locks below are
                 // leaves, and the loop never takes the admission lock while holding them.
                 let mut threads = self.threads.lock();
                 if threads.closed {
@@ -623,8 +623,8 @@ impl Executor {
                 let job = factory.lock().take();
                 match job {
                     Some(job) => {
-                        // First schedule: skip the factory of an aborted task or a closing
-                        // thread, or run it on this thread with a Local.
+                        // On the first schedule, skip the factory of an aborted task or a
+                        // closing thread, or run it on this thread with a Local.
                         let open = self
                             .threads
                             .lock()
@@ -689,7 +689,7 @@ impl Executor {
         }
     }
 
-    /// Close `thread`: abort its residents, drop their futures and unrun factories in task-id
+    /// Close `thread`. Abort its residents, drop their futures and unrun factories in task-id
     /// order, then its parked factories and result slots, each in its own panic boundary. Then
     /// mark it closed and release its node and entry.
     fn close_thread(&self, table: &RefCell<LocalTable>, id: u64) {

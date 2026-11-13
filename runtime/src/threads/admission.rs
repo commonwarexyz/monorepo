@@ -4,11 +4,12 @@
 //! closed) together with its ingress of queued jobs. A submission checks the state and enqueues
 //! in one critical section, and a closer sets the closing state under the same lock before it
 //! detaches the ingress, so no job is queued behind a close. Nothing runs user code or drops a
-//! job under the lock: a rejected job returns to its submitter, and a closer disposes of the
+//! job under the lock. A rejected job returns to its submitter, and a closer disposes of the
 //! detached ingress after unlocking.
 //!
-//! A job that runs its factory on the thread carries a [`Ticket`]: the task's prepared parts,
-//! which close the task's supervision node and resolve its handle if the job is dropped unrun.
+//! A job that runs its factory on the thread carries a [`Ticket`] with the task's prepared
+//! parts, which close the task's supervision node and resolve its handle if the job is dropped
+//! unrun.
 
 use super::{Cpus, Local, local::Owner};
 use crate::{

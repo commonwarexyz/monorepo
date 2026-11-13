@@ -2,7 +2,7 @@
 //!
 //! Each native runner records the CPUs the thread calling [crate::Runner::start] may run on, its
 //! base set. A pinned runtime thread writes its requested mask before anything else. Linux
-//! threads inherit their creator's mask, so the first pin a runner applies arms a reset: from
+//! threads inherit their creator's mask, so the first pin a runner applies arms a reset. From
 //! then on, every other runtime-created thread whose inherited mask is narrower than the base set
 //! writes the base set at startup. A runner that never pins writes no mask.
 //!
@@ -43,7 +43,7 @@ impl AffinityState {
         self.armed.store(true, Ordering::SeqCst);
     }
 
-    /// Set up the calling runtime-created thread: apply `pin` if it is pinned, or reset an
+    /// Apply `pin` to the calling runtime-created thread if it is pinned. Otherwise reset an
     /// inherited mask narrower than the base set once the reset is armed (best effort).
     pub(crate) fn enter(&self, pin: Option<&Cpus>) -> std::io::Result<()> {
         pin.map_or_else(

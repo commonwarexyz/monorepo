@@ -1,7 +1,7 @@
 //! Runtime threads on io_uring.
 //!
 //! A runtime thread is a worker with a thread and io_uring ring of its own, like the worker of a
-//! blocking task, whose root future is a [ThreadRoot]: a small executor for the thread's
+//! blocking task, whose root future is a [ThreadRoot], a small executor for the thread's
 //! residents. The pool, its run queues and work stealing are not involved. Residents are polled
 //! on the thread's worker, so their I/O and sleeps register on its ring.
 //!
@@ -21,9 +21,9 @@
 //!                                      work left? wake the root
 //! ```
 //!
-//! The thread body runs on every exit path, while it still holds its [ActiveWorker]: it
-//! disposes of every queued job if the worker never started, publishes every failure through
-//! the runner's thread panicker, and only then releases its node and its reservation.
+//! The thread body runs on every exit path while it still holds its [ActiveWorker]. It disposes
+//! of every queued job if the worker never started, publishes every failure through the
+//! runner's thread panicker, and only then releases its node and its reservation.
 
 use super::{ActiveWorker, Panic, Panics, Role, Shared, Worker};
 use crate::{
@@ -168,7 +168,7 @@ impl WakeState {
             return;
         }
 
-        // Wake outside the lock: waking runs no user code, but keeps lock order trivial.
+        // Waking runs no user code, but waking outside the lock keeps lock order trivial.
         let root = self.root().clone();
         if let Some(root) = root {
             #[cfg(test)]
@@ -177,7 +177,7 @@ impl WakeState {
         }
     }
 
-    /// Start a host turn: record the root waker, then clear `notified`, so a wake from here on
+    /// Start a host turn. Record the root waker, then clear `notified`, so a wake from here on
     /// wakes the root again.
     pub(super) fn begin_turn(&self, waker: &Waker) {
         {
@@ -489,7 +489,7 @@ impl ThreadRoot {
         }
     }
 
-    /// Close the thread: close admission if it is still open, abort every resident, then drop
+    /// Close the thread. Close admission if it is still open, abort every resident, then drop
     /// every resident, queued job, parked factory and result slot, each contained.
     fn close(&mut self) {
         if mem::replace(&mut self.closed, true) {
