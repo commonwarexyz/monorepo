@@ -172,15 +172,16 @@
 //! `f + 1` honest players that were in the second partition will be able to derive the shared secret without collusion (using their private share
 //! and the `2f` revealed shares). **It will not be possible for any external observer (or a Byzantine adversary), however, to recover the shared secret.**
 //!
-//! A share revealed in one round stays known in the next, and in a reshare its holder deals from it
-//! as the constant term of a degree `2f` polynomial. With `3f + 1` players, that previous share
-//! plus the `f` dealings held by Byzantine players and `f` revealed dealings give the `2f + 1`
-//! values that fix every dealing from that dealer.
-//!
-//! The adversary may then work out new shares of honest players from fewer reveals than a player
-//! needs to be listed in [`Output::revealed`], so those players may be missing from it. The
-//! adversary still holds at most `2f` shares because a dealer with an unknown previous share
-//! exposes at most `2f` dealings, one short of fixing it, so the shared secret stays safe.
+//! A revealed share alone does not expose the holder's new share in the next reshare. But with
+//! `3f + 1` players, the holder deals from a degree `2f` polynomial whose constant term is the
+//! revealed share. The adversary already has the revealed share and the `f` dealings sent to
+//! Byzantine players. Once the holder reveals `f` more dealings, these `2f + 1` values fix the
+//! polynomial, so every dealing can be worked out. The adversary may now derive an honest player's
+//! new share from fewer than `f + 1` reveals. Because [`Output::revealed`] lists a player only when
+//! `f + 1` selected dealers reveal its dealing, that player may be missing from the list. Even so,
+//! the shared secret stays safe if the adversary knew at most `f` honest players' previous shares.
+//! The adversary then holds at most `2f` new shares, one short of the `2f + 1` needed to recover
+//! the shared secret.
 //!
 //! While not entirely revealed, a secret with more than `f` revealed shares may no longer be safe for some applications (like when used to
 //! form threshold certificates for consensus). Consider an equivocating leader (one of the `f` Byzantine players) that sends one block `B_1` to `f`
