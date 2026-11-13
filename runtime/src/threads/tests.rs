@@ -518,6 +518,14 @@ where
             .spawn(|context| async move { context.child("saved") })
             .await
             .unwrap();
+
+        // The handle resolves before the task's completing poll aborts its node. The thread polls
+        // its residents one at a time, so once another resident has run, that poll is over.
+        context
+            .child("barrier")
+            .spawn_on(&thread, |_| async {})
+            .await
+            .unwrap();
         for placed in [false, true] {
             let line = saved.child("late");
             let line = if placed { line.placed() } else { line };
