@@ -3,8 +3,14 @@
 //! Every L-QC consensus verifies arrives with the finality it proves and the history records
 //! placed since the last one; records are stored at once, connected or not. The order is fed up
 //! to the strongest durable L-QC whose leader history is durable and connected (its target). An
-//! L-QC whose history does not connect starts a walk: records are fetched backward from its
+//! L-QC whose history does not connect starts a walk: records are taken backward from its
 //! history, each authenticated by the one after it, until they meet the stored chain.
+//!
+//! A walk takes each record from those consensus accepted when it can, and fetches it from
+//! peers otherwise. Placement does not report every record consensus accepts: when a node
+//! finalizes a leader while a record between that leader and its order is still missing, it
+//! skips the missing record and every older record it holds below it. When every node skips
+//! one record, no peer stores it, so a walk that only fetched would never connect.
 
 use super::{
     Error, Event, Ledger, PartKey, Verify, failed,
@@ -14,6 +20,7 @@ use crate::{
     Reporter, Viewable as _,
     multimmit::{
         marshal::{
+            input::ACCEPTED_RECORDS,
             types::{Cause, LqcVerifier, Update},
             wire::Key,
         },
@@ -67,6 +74,17 @@ where
                 self.metrics.records.inc();
             }
             self.records.insert(commitment, record);
+        }
+        for (commitment, record) in fed.accepted {
+            if self.accepted.insert(commitment, record).is_some() {
+                continue;
+            }
+            self.accepted_order.push_back(commitment);
+            if self.accepted_order.len() > ACCEPTED_RECORDS
+                && let Some(oldest) = self.accepted_order.pop_front()
+            {
+                self.accepted.remove(&oldest);
+            }
         }
         if !fed.proofs.is_empty() {
             self.last_proof = self.context.current();
@@ -445,7 +463,15 @@ where
             }
         }
         if let Some(before) = fetch {
-            self.fetch(Key::Records { before }, 0);
+            // The walk names the commitment, so hashing authenticates an accepted record.
+            match self.accepted.get(&before) {
+                Some(record) if record.commitment::<H>() == before => {
+                    if self.proofs.insert_record(before, Arc::clone(record)) {
+                        self.metrics.records.inc();
+                    }
+                }
+                _ => self.fetch(Key::Records { before }, 0),
+            }
         }
         let now = self.context.current();
         let quiet = now.duration_since(self.last_proof).unwrap_or_default() >= super::QUIET;

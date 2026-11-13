@@ -95,6 +95,11 @@ const LANE_PROOFS: usize = 16;
 /// Most placement runs the feed holds; older ones are dropped first.
 const LANE_PLACEMENTS: usize = 4096;
 
+/// Most accepted history records the feed and the owner hold; older ones are dropped first.
+///
+/// At 64 chains a record is about 4 KiB.
+pub(crate) const ACCEPTED_RECORDS: usize = 1024;
+
 /// What consensus reported since the owner last drained the feed.
 pub(crate) struct Fed<S: Scheme, D: Digest> {
     /// History records, oldest first. Never dropped.
@@ -103,6 +108,9 @@ pub(crate) struct Fed<S: Scheme, D: Digest> {
     pub(crate) proofs: VecDeque<(LqcProof<S, D>, FinalityFact<D>)>,
     /// Placement runs, oldest first.
     pub(crate) placed: VecDeque<Placement<D>>,
+    /// History records consensus accepted, with the commitments their leaders carry, oldest
+    /// first.
+    pub(crate) accepted: VecDeque<(D, Arc<TipRecord<D>>)>,
     /// The newest released height reported per chain.
     pub(crate) released: Vec<Option<Height>>,
     /// Bytes of the records held.
@@ -113,9 +121,10 @@ pub(crate) struct Fed<S: Scheme, D: Digest> {
 
 /// The consensus feed: a lane that never blocks consensus.
 ///
-/// Placement runs and older L-QCs are dropped under pressure: placement only hints at fetches,
-/// and the newest L-QC authenticates every record below it. Records are never dropped; when
-/// their backlog exceeds its bound, marshal stops rather than lose a link of the history.
+/// Placement runs, older L-QCs and older accepted history records are dropped under pressure:
+/// placement only hints at fetches, the newest L-QC authenticates every record below it, and
+/// accepted records only spare walks a fetch. Proven records are never dropped; when their
+/// backlog exceeds its bound, marshal stops rather than lose a link of the history.
 pub(crate) struct Lane<S: Scheme, D: Digest> {
     fed: Mutex<Fed<S, D>>,
     signal: mpsc::Sender<()>,
@@ -131,6 +140,7 @@ impl<S: Scheme, D: Digest> Lane<S, D> {
                 records: Vec::new(),
                 proofs: VecDeque::new(),
                 placed: VecDeque::new(),
+                accepted: VecDeque::new(),
                 released: vec![None; chains],
                 record_bytes: 0,
                 overflowed: false,
@@ -151,6 +161,7 @@ impl<S: Scheme, D: Digest> Lane<S, D> {
                 records: Vec::new(),
                 proofs: VecDeque::new(),
                 placed: VecDeque::new(),
+                accepted: VecDeque::new(),
                 released: vec![None; chains],
                 record_bytes: 0,
                 overflowed: false,
@@ -187,6 +198,14 @@ impl<S: Scheme, D: Digest> Lane<S, D> {
                         }
                         fed.placed.push_back(run);
                     }
+                }
+                Activity::HistoryAccepted {
+                    commitment, record, ..
+                } => {
+                    if fed.accepted.len() == ACCEPTED_RECORDS {
+                        fed.accepted.pop_front();
+                    }
+                    fed.accepted.push_back((commitment, record));
                 }
                 Activity::CertificateRecorded {
                     certified,

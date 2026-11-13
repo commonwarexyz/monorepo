@@ -72,7 +72,7 @@ use futures::{
 };
 use order::{Order, Slot, Target};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     sync::Arc,
     time::{Duration, SystemTime},
 };
@@ -289,6 +289,10 @@ where
 
     /// The record walk in progress.
     walk: Option<feed::Walk<H::Digest>>,
+    /// The newest history records consensus accepted, by the commitment their leaders carry,
+    /// with those commitments oldest first.
+    accepted: HashMap<H::Digest, Arc<TipRecord<H::Digest>>>,
+    accepted_order: VecDeque<H::Digest>,
     /// When consensus last reported a proof.
     last_proof: SystemTime,
     /// When marshal last asked peers for a proof.
@@ -393,6 +397,8 @@ where
             asked: requests::Requests::new(deliver::MAX_DEFERRED),
             hints: vec![None; codec.chains()],
             walk: None,
+            accepted: HashMap::new(),
+            accepted_order: VecDeque::new(),
             last_proof: now,
             last_ask: None,
             released: vec![None; codec.chains()],

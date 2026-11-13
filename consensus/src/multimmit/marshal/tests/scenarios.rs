@@ -194,6 +194,32 @@ fn a_proof_without_records_walks_the_history_from_peers() {
 }
 
 #[test]
+fn a_record_no_proof_carries_is_taken_from_what_consensus_accepted() {
+    runner(34).start(|context| async move {
+        let mut harness = Harness::new(context, 34, 2).await;
+        harness.start(0).await;
+        harness.start(1).await;
+        harness.script.certify([1, 1]);
+        harness.script.certify([1, 1]);
+        // Both nodes finalize the second leader before they accept the first leader's history
+        // record, so placement skips that record: each proof carries only the second record,
+        // and no marshal stores the first. Only node 0's consensus accepts it, later.
+        for node in 0..2 {
+            let mailbox = harness.mailbox(node);
+            harness.script.stage(&mailbox, 0).await;
+            harness.script.stage(&mailbox, 1).await;
+            harness.script.prove(&mailbox, 1);
+        }
+        harness.script.accept(&harness.mailbox(0), 0);
+        let expected = harness.script.ordered();
+        for node in 0..2 {
+            let delivered = harness.wait_delivered(node, expected.len()).await;
+            assert_eq!(stream(&delivered), numbered(1, &expected));
+        }
+    });
+}
+
+#[test]
 fn views_that_emit_nothing_still_advance_the_history() {
     runner(6).start(|context| async move {
         let mut harness = Harness::new(context, 6, 1).await;
