@@ -23,8 +23,9 @@ const CPU_WORDS: usize = CPU_LIMIT / 64;
 ///
 /// Ids below 1024 (`CPU_SETSIZE`) are stored in a fixed bitset, so building a set never
 /// allocates, whatever its range. A larger id is not stored, so [Cpus::iter], [Cpus::len],
-/// [Cpus::is_empty] and [Cpus::contains] do not see it, and pinning to it fails with
-/// [ThreadError::CpuUnavailable].
+/// [Cpus::is_empty] and [Cpus::contains] do not see it, and pinning to it fails (with
+/// [ThreadError::CpuUnavailable] wherever affinity is available). The set still records the
+/// smallest such id, so equality and hashing distinguish a set that was given one.
 ///
 /// # Examples
 ///
@@ -350,6 +351,9 @@ impl<C> ThreadBuilder<C> {
     ///
     /// This exists for implementing [Spawner] on a wrapper context that delegates to an inner
     /// one. The wrapper's [Spawner::thread] maps the inner builder back to the wrapper type.
+    /// `f` must wrap the context without moving it to another supervision node (no
+    /// [crate::Supervisor::child]), because [ThreadBuilder::attach] closes its thread with the
+    /// node of the context it returns.
     ///
     /// ```ignore
     /// fn thread(self) -> ThreadBuilder<Self> {
@@ -383,8 +387,8 @@ impl<C: Spawner> ThreadBuilder<C> {
     /// Every CPU must be one the thread that started the runner was allowed to run on (on the
     /// deterministic runtime, one of `deterministic::Config::with_cpus`), or the finisher
     /// returns [ThreadError::CpuUnavailable]. [ThreadBuilder::available] returns that set. An
-    /// empty set returns [ThreadError::EmptyCpus], and platforms without CPU affinity return
-    /// [ThreadError::UnsupportedAffinity] for any pin.
+    /// empty set returns [ThreadError::EmptyCpus], and native runners on platforms without CPU
+    /// affinity return [ThreadError::UnsupportedAffinity] for any pin.
     ///
     /// On native runners, a pin that passes validation but that the operating system refuses
     /// when the thread starts is reported after the finisher returned, like a task panic. The
@@ -402,8 +406,8 @@ impl<C: Spawner> ThreadBuilder<C> {
     /// against: the CPUs of the thread that started a native runner, or
     /// `deterministic::Config::with_cpus` on the deterministic runtime.
     ///
-    /// Returns `None` when the runner cannot pin threads, such as on platforms without CPU
-    /// affinity, or once the runtime is shutting down.
+    /// Returns `None` when the runner cannot pin threads, such as a native runner on a platform
+    /// without CPU affinity, or once the runtime is shutting down.
     ///
     /// # Examples
     ///
@@ -430,8 +434,8 @@ impl<C: Spawner> ThreadBuilder<C> {
     /// Create the thread and return a handle for placing work on it, with [Spawner::on] or
     /// [Spawner::spawn_on].
     ///
-    /// The thread lives as long as its creating lineage, the supervision node of the context
-    /// consumed by [Spawner::thread]. Code that rebuilds a subsystem per epoch should use
+    /// The thread lives as long as the supervision node of the context consumed by
+    /// [Spawner::thread], so until that lineage ends or is aborted. Code that rebuilds a subsystem per epoch should use
     /// [ThreadBuilder::attach], whose thread closes with the task that consumes its context.
     ///
     /// # Errors

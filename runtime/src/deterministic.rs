@@ -3514,6 +3514,22 @@ mod tests {
         deterministic::Runner::new(cfg);
     }
 
+    /// A set holding only an id at or above 1024 is also empty, so the range check must run
+    /// before the emptiness check to report it.
+    #[test]
+    #[should_panic(expected = "cpus must be below 1024 (CPU_SETSIZE)")]
+    fn test_bad_cpus_beyond() {
+        let cfg = Config::default().with_cpus(5000);
+        deterministic::Runner::new(cfg);
+    }
+
+    #[test]
+    #[should_panic(expected = "cpus must not be empty")]
+    fn test_bad_cpus_empty() {
+        let cfg = Config::default().with_cpus(Vec::<usize>::new());
+        deterministic::Runner::new(cfg);
+    }
+
     #[cfg(not(feature = "external"))]
     #[test]
     #[should_panic(expected = "runtime stalled")]

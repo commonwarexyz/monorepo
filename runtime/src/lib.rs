@@ -367,10 +367,10 @@ stability_scope!(BETA {
     /// [`Supervisor::child`] and [`Supervisor::with_attribute`] keep it.
     ///
     /// A spawn hands its task an unplaced context. The context remembers where its task runs, but
-    /// its spawns run on the shared executor until [`Spawner::placed`] places it there. Placing a
-    /// subsystem's context therefore places the tasks spawned from it and from the contexts
-    /// derived from it, including actors it wires before spawning, while what those tasks spawn
-    /// runs on the shared executor unless they ask with [`Spawner::placed`].
+    /// its spawns run on the shared executor until [`Spawner::placed`] places it where its task
+    /// runs. Placing a subsystem's context therefore places the tasks spawned from it and from
+    /// the contexts derived from it, including actors it wires before spawning, while what those
+    /// tasks spawn runs on the shared executor unless they ask with [`Spawner::placed`].
     ///
     /// Callers choose where a subsystem runs, with [`Spawner::shared`], [`Spawner::blocking`],
     /// [`Spawner::on`] or [`ThreadBuilder::attach`]. Libraries choose what follows it:
@@ -415,8 +415,9 @@ stability_scope!(BETA {
         /// well.
         ///
         /// Placement creates no supervision edge. Aborting a context placed on a thread does not
-        /// close the thread. Closing the thread aborts the tasks running on it, wherever they are
-        /// supervised, and supervision then aborts their descendants wherever those run.
+        /// close the thread, unless the thread was attached to it (see [`ThreadBuilder::attach`]).
+        /// Closing the thread aborts the tasks running on it, wherever they are supervised, and
+        /// supervision then aborts their descendants wherever those run.
         ///
         /// A component that stores this context, or one derived from it, and spawns from it on
         /// demand runs every such spawn on the thread. Such a component should store its context
@@ -561,7 +562,8 @@ stability_scope!(BETA {
         ///
         /// Unlike directly awaiting a future, the task starts running immediately even if the caller
         /// never awaits the returned [`Handle`]. The factory `f` runs on the caller before this
-        /// returns, so it may borrow or read `!Send` state. The future it returns runs where the
+        /// returns, unless the spawn is rejected and drops it unrun, so it may borrow or read
+        /// `!Send` state. The future it returns runs where the
         /// context's spawns run (see [Placement](Spawner#placement)), so it must be `Send` and
         /// `'static`. The context handed to the task remembers where the task runs, and is
         /// unplaced.

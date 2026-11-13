@@ -53,8 +53,8 @@ pub(crate) enum Placement {
 /// The placement a context carries.
 ///
 /// A spawn hands its task an unplaced context. It remembers where the task runs, but its spawns
-/// run on the shared executor until [`crate::Spawner::placed`] places it there or an explicit
-/// placement replaces what it remembers.
+/// run on the shared executor until [`crate::Spawner::placed`] places it where its task runs, or
+/// an explicit placement replaces what it remembers.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Place {
     /// The explicit placement, or where the context's task runs while unplaced.

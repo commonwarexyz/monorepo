@@ -1394,11 +1394,13 @@ fn test_thread_late_disposal_panic(#[case] backend: Backend, #[values(false, tru
     }
 }
 
-/// Records what each finisher returns when a context is dropped during the shutdown abort.
+/// Records what each finisher and [ThreadBuilder::available] return when a context is dropped
+/// during the shutdown abort.
 struct BuildOnDrop<C: Spawner> {
     /// The context the finishers consume.
     context: Option<C>,
-    /// Whether each finisher returned `Closed`, in order: build, attach, spawn.
+    /// Whether each finisher returned `Closed`, in order: build, attach, spawn. Then whether
+    /// `available` returned `None`.
     closed: Arc<Mutex<Vec<bool>>>,
     /// Set if the root factory ran.
     ran: Arc<AtomicBool>,
@@ -1409,6 +1411,7 @@ impl<C: Spawner> Drop for BuildOnDrop<C> {
         let Some(context) = self.context.take() else {
             return;
         };
+        let available = context.child("probe").thread().available();
         let build = context.child("build").thread().build();
         let attach = context.child("attach").thread().attach();
         let spawn = context.child("spawn").thread().spawn(recording(&self.ran));
@@ -1416,14 +1419,16 @@ impl<C: Spawner> Drop for BuildOnDrop<C> {
             matches!(build, Err(ThreadError::Closed)),
             matches!(attach, Err(ThreadError::Closed)),
             matches!(spawn, Err(ThreadError::Closed)),
+            available.is_none(),
         ]);
     }
 }
 
 /// Every finisher returns `Closed` from an aborted lineage and from a drop during the shutdown
-/// abort, an empty pin on an aborted lineage returns `EmptyCpus` (CPU validation comes first),
-/// and nothing is left behind. With `pin`, a pinned builder returned from the run returns
-/// `Closed` afterwards.
+/// abort, where `available` returns `None`. A builder created before its lineage was aborted
+/// returns `Closed` from `attach`, an empty pin on an aborted lineage returns `EmptyCpus`
+/// (CPU validation comes first), and nothing is left behind. With `pin`, a pinned builder
+/// returned from the run returns `Closed` afterwards.
 fn builder_closed<R: Runner>(
     runner: R,
     stale: Thread,
@@ -1437,6 +1442,9 @@ fn builder_closed<R: Runner>(
         // A placed spawn toward a thread of another runner is rejected and aborts the node of
         // the context it consumed, with its whole lineage.
         let lineage = context.child("lineage");
+        let early = lineage.child("early");
+        let early_name = early.name().label;
+        let early = early.thread();
         let contexts = [
             lineage.child("build"),
             lineage.child("attach"),
@@ -1446,9 +1454,15 @@ fn builder_closed<R: Runner>(
         let rejected = lineage.on(&stale).spawn(|_| async {});
         assert!(matches!(rejected.await, Err(Error::Closed)));
         let [build, attach, spawn, empty] = contexts;
-        let names = [build.name().label, attach.name().label, spawn.name().label];
+        let names = [
+            build.name().label,
+            attach.name().label,
+            spawn.name().label,
+            early_name,
+        ];
         assert!(matches!(build.thread().build(), Err(ThreadError::Closed)));
         assert!(matches!(attach.thread().attach(), Err(ThreadError::Closed)));
+        assert!(matches!(early.attach(), Err(ThreadError::Closed)));
         let spawned = spawn.thread().spawn(recording(&ran));
         assert!(matches!(spawned, Err(ThreadError::Closed)));
         let none: Vec<usize> = Vec::new();
@@ -1504,8 +1518,8 @@ fn test_thread_builder_closed(#[case] backend: Backend) {
     );
     assert_eq!(
         *closed.lock(),
-        [true; 3],
-        "a finisher in a shutdown drop did not return Closed"
+        [true; 4],
+        "a finisher in a shutdown drop did not return Closed, or available was not None"
     );
     assert!(!ran.load(Ordering::SeqCst), "a rejected root ran");
 }

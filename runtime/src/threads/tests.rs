@@ -78,7 +78,7 @@ async fn ran_on<C: Spawner>(context: C) -> (ThreadId, String) {
 }
 
 /// A context whose runtime thread a test can read.
-pub(super) trait PlacedOn {
+trait PlacedOn {
     /// The runtime thread the context's spawns run on.
     fn placed_on(&self) -> Thread;
 }
@@ -157,6 +157,178 @@ fn assert_ran(
             "{name} ran on the wrong OS thread"
         );
     }
+}
+
+/// An actor that spawns its loop the way `spawn_cell!` does, then spawns from the restored
+/// context. The macro itself cannot be named by path inside this crate.
+struct CellActor<E> {
+    /// The actor's context, restored in the spawned closure.
+    context: ContextCell<E>,
+}
+
+impl<E: Spawner> CellActor<E> {
+    /// Spawn the actor's loop, as `spawn_cell!(self.context, self.run())` expands.
+    fn start(mut self) -> Handle<[(ThreadId, String); 2]> {
+        let context = self.context.take();
+        context.spawn(move |context| {
+            self.context.restore(context);
+            self.run()
+        })
+    }
+
+    /// Spawn from the restored context, then again after placing it.
+    async fn run(self) -> [(ThreadId, String); 2] {
+        [
+            ran_on(self.context.child("plain")).await,
+            ran_on(self.context.child("placed").placed()).await,
+        ]
+    }
+}
+
+/// Sets a flag when dropped.
+struct DropFlag(Arc<AtomicBool>);
+
+impl Drop for DropFlag {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Spawns a local task from `Drop` and reports whether its handle resolved Closed at once and
+/// whether its factory ran.
+struct SpawnOnDrop<C: Spawner> {
+    /// The proof to spawn with.
+    local: Option<Local<C>>,
+    /// Receives the outcome.
+    report: Option<oneshot::Sender<(bool, bool)>>,
+}
+
+impl<C: Spawner> Drop for SpawnOnDrop<C> {
+    fn drop(&mut self) {
+        let local = self.local.take().unwrap();
+        let ran = Rc::new(Cell::new(false));
+        let mut handle = local.child("on_drop").spawn_local({
+            let ran = ran.clone();
+            move |_| {
+                ran.set(true);
+                async {}
+            }
+        });
+        let closed = matches!(
+            futures::FutureExt::now_or_never(&mut handle),
+            Some(Err(Error::Closed))
+        );
+        let _ = self.report.take().unwrap().send((closed, ran.get()));
+    }
+}
+
+/// A `!Send` output that reports the OS thread it is dropped on.
+struct Probe {
+    /// Receives the OS thread.
+    report: Option<oneshot::Sender<ThreadId>>,
+    /// Makes the output `!Send`.
+    _local: Rc<()>,
+}
+
+impl Drop for Probe {
+    fn drop(&mut self) {
+        if let Some(report) = self.report.take() {
+            let _ = report.send(os());
+        }
+    }
+}
+
+thread_local! {
+    /// A local handle kept past its thread's close.
+    static HELD: RefCell<Option<LocalHandle<Probe>>> = const { RefCell::new(None) };
+}
+
+/// Run a runner of another instance on its own OS thread, holding a thread of it open until the
+/// returned sender is used. Returns the thread, the sender, and the runner's OS thread.
+fn hold_open<R: Runner + Send + 'static>(
+    runner: R,
+) -> (Thread, mpsc::Sender<()>, std::thread::JoinHandle<()>)
+where
+    R::Context: Spawner,
+{
+    let (hold, held) = mpsc::channel();
+    let (release, released) = mpsc::channel::<()>();
+    let other = std::thread::spawn(move || {
+        runner.start(|context| async move {
+            hold.send(context.child("foreign").thread().build().unwrap())
+                .unwrap();
+            released.recv().unwrap();
+        });
+    });
+    (held.recv().unwrap(), release, other)
+}
+
+/// Spawn toward a thread of each runner in `others` from `runner`, then release them.
+fn wrong_runtime<R: Runner>(
+    runner: R,
+    others: Vec<(Thread, mpsc::Sender<()>, std::thread::JoinHandle<()>)>,
+) where
+    R::Context: Spawner + Clock,
+{
+    let threads: Vec<Thread> = others.iter().map(|(thread, _, _)| thread.clone()).collect();
+    runner.start(|context| async move {
+        for thread in threads {
+            assert!(thread.inner().is_open());
+            let ran = Arc::new(AtomicBool::new(false));
+
+            let placed = context.child("placed").on(&thread);
+            let wired = placed.child("wired").shared().spawn(|_| pending::<()>());
+            let handle = placed.spawn({
+                let ran = ran.clone();
+                move |_| {
+                    ran.store(true, Ordering::SeqCst);
+                    async {}
+                }
+            });
+            assert!(matches!(handle.await, Err(Error::Closed)));
+            assert!(matches!(within(&context, wired).await, Err(Error::Closed)));
+
+            let on = context.child("on");
+            let wired = on.child("wired").spawn(|_| pending::<()>());
+            let handle = on.spawn_on(&thread, {
+                let ran = ran.clone();
+                move |_| {
+                    ran.store(true, Ordering::SeqCst);
+                    async {}
+                }
+            });
+            assert!(matches!(handle.await, Err(Error::Closed)));
+            assert!(matches!(within(&context, wired).await, Err(Error::Closed)));
+            assert!(!ran.load(Ordering::SeqCst));
+        }
+    });
+    for (_, release, other) in others {
+        release.send(()).unwrap();
+        other.join().unwrap();
+    }
+}
+
+/// The series of the residents gauge for threads named `name`, as (count, value of the last).
+fn residents(metrics: &impl Metrics, name: &str) -> (usize, Option<i64>) {
+    let needle = format!("name=\"{name}\"");
+    let values: Vec<i64> = metrics
+        .encode()
+        .lines()
+        .filter(|line| line.starts_with("runtime_thread_residents{") && line.contains(&needle))
+        .filter_map(|line| line.trim_end().rsplit(' ').next()?.parse().ok())
+        .collect();
+    (values.len(), values.last().copied())
+}
+
+/// Wait until the residents gauge of threads named `name` reads `expected`. Gauges lag handles
+/// on native runners.
+async fn settle(context: &(impl Metrics + Clock), name: &str, expected: i64) {
+    within(context, async {
+        while residents(context, name).1 != Some(expected) {
+            context.sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
 }
 
 #[rstest]
@@ -520,32 +692,6 @@ where
     });
 }
 
-/// An actor that spawns its loop the way `spawn_cell!` does, then spawns from the restored
-/// context. The macro itself cannot be named by path inside this crate.
-struct CellActor<E> {
-    /// The actor's context, restored in the spawned closure.
-    context: ContextCell<E>,
-}
-
-impl<E: Spawner> CellActor<E> {
-    /// Spawn the actor's loop, as `spawn_cell!(self.context, self.run())` expands.
-    fn start(mut self) -> Handle<[(ThreadId, String); 2]> {
-        let context = self.context.take();
-        context.spawn(move |context| {
-            self.context.restore(context);
-            self.run()
-        })
-    }
-
-    /// Spawn from the restored context, then again after placing it.
-    async fn run(self) -> [(ThreadId, String); 2] {
-        [
-            ran_on(self.context.child("plain")).await,
-            ran_on(self.context.child("placed").placed()).await,
-        ]
-    }
-}
-
 // An unplaced context belongs to its task's supervision node, so once the task ends a spawn from it
 // resolves Closed without running its factory, whether or not it was placed.
 #[rstest]
@@ -880,7 +1026,8 @@ where
                 threads.push(thread);
             }
 
-            // The OS threads of native runners exit once their close completes.
+            // The OS threads of native runners exit once their close completes. The count covers
+            // the whole process, so this relies on nextest running each test in its own process.
             if let Some(baseline) = baseline {
                 within(&context, async {
                     while os_threads().unwrap() > baseline {
@@ -1029,15 +1176,6 @@ where
     });
 }
 
-/// Sets a flag when dropped.
-struct DropFlag(Arc<AtomicBool>);
-
-impl Drop for DropFlag {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::SeqCst);
-    }
-}
-
 // Closing a thread when its creating lineage finishes aborts residents supervised by an
 // unrelated lineage, which keeps running.
 #[rstest]
@@ -1147,34 +1285,6 @@ where
         let on = context.child("after").spawn_on(&thread, |_| async { 1 });
         assert_eq!(within(&context, on).await.unwrap(), 1);
     });
-}
-
-/// Spawns a local task from `Drop` and reports whether its handle resolved Closed at once and
-/// whether its factory ran.
-struct SpawnOnDrop<C: Spawner> {
-    /// The proof to spawn with.
-    local: Option<Local<C>>,
-    /// Receives the outcome.
-    report: Option<oneshot::Sender<(bool, bool)>>,
-}
-
-impl<C: Spawner> Drop for SpawnOnDrop<C> {
-    fn drop(&mut self) {
-        let local = self.local.take().unwrap();
-        let ran = Rc::new(Cell::new(false));
-        let mut handle = local.child("on_drop").spawn_local({
-            let ran = ran.clone();
-            move |_| {
-                ran.set(true);
-                async {}
-            }
-        });
-        let closed = matches!(
-            futures::FutureExt::now_or_never(&mut handle),
-            Some(Err(Error::Closed))
-        );
-        let _ = self.report.take().unwrap().send((closed, ran.get()));
-    }
 }
 
 // Residents share Rc<RefCell<_>> state, and spawn_local works from a factory, from a poll, and
@@ -1303,27 +1413,6 @@ where
         assert_eq!(value, 42);
         assert!(same);
     });
-}
-
-/// A `!Send` output that reports the OS thread it is dropped on.
-struct Probe {
-    /// Receives the OS thread.
-    report: Option<oneshot::Sender<ThreadId>>,
-    /// Makes the output `!Send`.
-    _local: Rc<()>,
-}
-
-impl Drop for Probe {
-    fn drop(&mut self) {
-        if let Some(report) = self.report.take() {
-            let _ = report.send(os());
-        }
-    }
-}
-
-thread_local! {
-    /// A local handle kept past its thread's close.
-    static HELD: RefCell<Option<LocalHandle<Probe>>> = const { RefCell::new(None) };
 }
 
 // A LocalHandle delivers a !Send output, resolves Closed once aborted, detaches its task when
@@ -1554,26 +1643,6 @@ where
     assert_eq!(local_at_shutdown.try_recv().unwrap(), shutdown_home);
 }
 
-/// Run a runner of another instance on its own OS thread, holding a thread of it open until the
-/// returned sender is used. Returns the thread, the sender, and the runner's OS thread.
-fn hold_open<R: Runner + Send + 'static>(
-    runner: R,
-) -> (Thread, mpsc::Sender<()>, std::thread::JoinHandle<()>)
-where
-    R::Context: Spawner,
-{
-    let (hold, held) = mpsc::channel();
-    let (release, released) = mpsc::channel::<()>();
-    let other = std::thread::spawn(move || {
-        runner.start(|context| async move {
-            hold.send(context.child("foreign").thread().build().unwrap())
-                .unwrap();
-            released.recv().unwrap();
-        });
-    });
-    (held.recv().unwrap(), release, other)
-}
-
 // A placed spawn and a spawn_on toward an open thread of another runner, of the same or another
 // backend, resolve Closed without running the factory, and close the consumed context's node.
 #[rstest]
@@ -1604,74 +1673,6 @@ where
     R::Context: Spawner + Clock,
 {
     wrong_runtime(runner, vec![hold_open(iouring::Runner::default())]);
-}
-
-/// Spawn toward a thread of each runner in `others` from `runner`, then release them.
-fn wrong_runtime<R: Runner>(
-    runner: R,
-    others: Vec<(Thread, mpsc::Sender<()>, std::thread::JoinHandle<()>)>,
-) where
-    R::Context: Spawner + Clock,
-{
-    let threads: Vec<Thread> = others.iter().map(|(thread, _, _)| thread.clone()).collect();
-    runner.start(|context| async move {
-        for thread in threads {
-            assert!(thread.inner().is_open());
-            let ran = Arc::new(AtomicBool::new(false));
-
-            let placed = context.child("placed").on(&thread);
-            let wired = placed.child("wired").shared().spawn(|_| pending::<()>());
-            let handle = placed.spawn({
-                let ran = ran.clone();
-                move |_| {
-                    ran.store(true, Ordering::SeqCst);
-                    async {}
-                }
-            });
-            assert!(matches!(handle.await, Err(Error::Closed)));
-            assert!(matches!(within(&context, wired).await, Err(Error::Closed)));
-
-            let on = context.child("on");
-            let wired = on.child("wired").spawn(|_| pending::<()>());
-            let handle = on.spawn_on(&thread, {
-                let ran = ran.clone();
-                move |_| {
-                    ran.store(true, Ordering::SeqCst);
-                    async {}
-                }
-            });
-            assert!(matches!(handle.await, Err(Error::Closed)));
-            assert!(matches!(within(&context, wired).await, Err(Error::Closed)));
-            assert!(!ran.load(Ordering::SeqCst));
-        }
-    });
-    for (_, release, other) in others {
-        release.send(()).unwrap();
-        other.join().unwrap();
-    }
-}
-
-/// The series of the residents gauge for threads named `name`, as (count, value of the last).
-fn residents(metrics: &impl Metrics, name: &str) -> (usize, Option<i64>) {
-    let needle = format!("name=\"{name}\"");
-    let values: Vec<i64> = metrics
-        .encode()
-        .lines()
-        .filter(|line| line.starts_with("runtime_thread_residents{") && line.contains(&needle))
-        .filter_map(|line| line.trim_end().rsplit(' ').next()?.parse().ok())
-        .collect();
-    (values.len(), values.last().copied())
-}
-
-/// Wait until the residents gauge of threads named `name` reads `expected`. Gauges lag handles
-/// on native runners.
-async fn settle(context: &(impl Metrics + Clock), name: &str, expected: i64) {
-    within(context, async {
-        while residents(context, name).1 != Some(expected) {
-            context.sleep(Duration::from_millis(1)).await;
-        }
-    })
-    .await;
 }
 
 // Thread tasks carry the Thread execution label, including a spawn_on task from a blocking
