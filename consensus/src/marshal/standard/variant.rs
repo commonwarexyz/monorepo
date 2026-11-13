@@ -156,12 +156,16 @@ where
     fn subscribe_parent(
         &self,
         block: &Digested<Self::Block>,
+        bound: Option<Round>,
     ) -> impl Future<Output = Option<Digested<Self::Block>>> + Send + 'static {
+        // A standard block isn't required to carry a consensus context, so the provider reads no
+        // parent round from it. The caller's bound is the only round that can retire the request.
         let receiver = block.height().previous().map(|parent_height| {
             self.subscribe_by_commitment(
                 block.parent(),
                 CommitmentFallback::FetchByCommitment {
                     height: parent_height,
+                    round: bound,
                 },
             )
         });

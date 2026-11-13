@@ -552,8 +552,12 @@ where
                 return Resolved::Reuse(parent.digest(), parent);
             }
 
-            let ancestor_stream =
-                marshal.ancestor_stream(context.clone(), [parent], ancestor_fetch_duration);
+            let ancestor_stream = marshal.ancestor_stream(
+                context.clone(),
+                [parent],
+                Some(consensus_context.round),
+                ancestor_fetch_duration,
+            );
             Resolved::Build(ancestor_stream, build_duration.timer(&*context), ())
         }
     }
