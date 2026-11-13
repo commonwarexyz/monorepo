@@ -107,14 +107,7 @@ macro_rules! impl_group {
                 scalars: &[$crate::group::Scalar],
                 strategy: &impl ::commonware_parallel::Strategy,
             ) -> Self {
-                $crate::group::kernel::Batch::dispatch_batches(
-                    $crate::group::msm::Msm {
-                        elements: points,
-                        scalars,
-                        method: None,
-                    },
-                    strategy,
-                )
+                $crate::group::msm::msm(points, scalars, strategy)
             }
         }
 
@@ -137,10 +130,7 @@ macro_rules! impl_group {
             /// Costs less per element than adding the elements one at a time with `+`. The
             /// strategy may split the elements into batches and run them on several threads.
             pub fn sum(elements: &[Self], strategy: &impl ::commonware_parallel::Strategy) -> Self {
-                $crate::group::kernel::Batch::dispatch_batches(
-                    $crate::group::kernel::Sum(elements),
-                    strategy,
-                )
+                $crate::group::kernel::sum(elements, strategy)
             }
 
             /// Multiplies each element by the scalar at the same index, in place, in time
@@ -155,10 +145,7 @@ macro_rules! impl_group {
                 scalars: &[$crate::group::Scalar],
                 strategy: &impl ::commonware_parallel::Strategy,
             ) {
-                $crate::group::kernel::Batch::dispatch_batches(
-                    $crate::group::kernel::MultiplyEach { elements, scalars },
-                    strategy,
-                );
+                $crate::group::kernel::multiply_each(elements, scalars, strategy);
             }
         }
 
