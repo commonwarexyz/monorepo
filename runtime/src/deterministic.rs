@@ -71,7 +71,7 @@ use crate::{
     threads::{
         Owner, ThreadInner, ThreadRuntime,
         admission::{
-            FactoryJob, Resident, ResidentCount, SpawnJob, ThreadBackend, Ticket, next_runner_id,
+            FactoryJob, Resident, ResidentCount, ThreadBackend, next_runner_id, spawn_job,
         },
         validate,
     },
@@ -655,7 +655,7 @@ impl Executor {
                             }
                             return true;
                         };
-                        let Some(future) = job.run(&owner) else {
+                        let Some(future) = job(&owner) else {
                             return true;
                         };
                         future
@@ -1251,7 +1251,7 @@ enum Mode {
     /// the task, and keeps the future the factory builds in the runner's local table.
     Spawn {
         /// The factory, until the loop takes it.
-        factory: Mutex<Option<Box<dyn FactoryJob>>>,
+        factory: Mutex<Option<FactoryJob>>,
         /// Aborts the task, so the loop can skip the factory of an aborted task.
         abort: AbortHandle,
     },
@@ -1810,14 +1810,13 @@ impl crate::Spawner for Context {
         self.tree = child;
         self.place = Place::unplaced(Placement::Thread(thread.clone()));
 
-        // The factory runs on the thread. A rejected job drops its factory, then its ticket,
-        // which aborts the node and closes the handle.
+        // The factory runs on the thread. A rejected job drops its factory, then its task's
+        // prepared parts, which aborts the node and closes the handle.
         let executor = self.executor();
         let (prepared, handle) = Handle::prepare(metric, parent);
         let abort = prepared.abort_handle();
-        let factory: Box<dyn FactoryJob> = Box::new(SpawnJob::new(f, self, Ticket::new(prepared)));
         let mode = Mode::Spawn {
-            factory: Mutex::new(Some(factory)),
+            factory: Mutex::new(Some(spawn_job(f, self, prepared))),
             abort: abort.clone(),
         };
         if let Err(mode) = executor.register_resident(thread, label, mode, abort) {

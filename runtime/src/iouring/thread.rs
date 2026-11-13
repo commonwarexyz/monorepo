@@ -6,22 +6,11 @@
 //! on the thread's worker, so their I/O and sleeps register on its ring.
 //!
 //! Each turn of the root admits at most [BATCH] queued jobs, in order, then makes at most [BATCH]
-//! polls of ready residents, and wakes itself if work remains. A resident woken during the turn goes to
-//! the back of the ready list and is polled again in the same turn while the budget lasts, as a
-//! pool task woken during its poll is. Each resident owns one waker for its whole life, carrying
-//! a `queued` flag, so a burst of wakes queues it once. Waking the root is coalesced with one
-//! `notified` flag, so a burst sends at most one root wake.
-//!
-//! ```text
-//! resident wake                        host turn
-//! -------------                        ---------
-//! queued: false -> true?               store the root waker, notified := false
-//!   push id onto the ready list        closing? close and return
-//!   notified: false -> true?           admit <= 64 jobs (each marked queued, pushed)
-//!     wake the root                    until 64 polls, take ready ids, then for each:
-//!                                        queued := false, poll, reinsert or retire
-//!                                      work left? wake the root
-//! ```
+//! polls of ready residents, and wakes itself if work remains. A resident woken during the turn
+//! goes to the back of the ready list and is polled again in the same turn while the budget
+//! lasts, as a pool task woken during its poll is. Each resident owns one waker for its whole
+//! life, carrying a `queued` flag, so a burst of wakes queues it once. Waking the root is
+//! coalesced with one `notified` flag, so a burst sends at most one root wake.
 //!
 //! The thread body runs on every exit path while it still holds its [ActiveWorker]. It disposes
 //! of every queued job if the worker never started, publishes every failure through the
@@ -117,7 +106,6 @@ impl WakeState {
         }
     }
 
-    /// Lock the ready list.
     fn lock(&self) -> MutexGuard<'_, Ready> {
         cfg_if::cfg_if! {
             if #[cfg(feature = "loom")] {
@@ -129,7 +117,6 @@ impl WakeState {
         ready
     }
 
-    /// Lock the root waker.
     fn root(&self) -> MutexGuard<'_, Option<Waker>> {
         cfg_if::cfg_if! {
             if #[cfg(feature = "loom")] {
@@ -295,7 +282,6 @@ impl ThreadRuntime for Shared {
 struct ThreadLaunch {
     /// Runtime services, retained until the worker's cleanup finishes.
     shared: Arc<Shared>,
-    /// The thread's shared state.
     inner: Arc<ThreadInner>,
     /// The node the thread occupies, held until its close completes.
     node: Arc<Tree>,
@@ -385,7 +371,6 @@ fn dispose_unstarted(inner: &ThreadInner) {
 
 /// The root future of a runtime thread's worker: an executor for the thread's residents.
 pub(super) struct ThreadRoot {
-    /// The thread's shared state.
     inner: Arc<ThreadInner>,
     /// The thread's ready list and root wake.
     wake: Arc<WakeState>,
@@ -445,7 +430,7 @@ impl ThreadRoot {
                     self.owner.reap();
                     return Ok(());
                 }
-                match factory.run(&self.owner) {
+                match factory(&self.owner) {
                     Some(future) => future,
                     None => return Ok(()),
                 }

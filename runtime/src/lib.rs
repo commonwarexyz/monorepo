@@ -366,11 +366,12 @@ stability_scope!(BETA {
     /// [`Spawner::blocking`] and [`Spawner::on`] set it, and the last of them wins.
     /// [`Supervisor::child`] and [`Supervisor::with_attribute`] keep it.
     ///
-    /// A spawn hands its task an unplaced context. The context remembers where its task runs, but
-    /// its spawns run on the shared executor until [`Spawner::placed`] places it where its task
-    /// runs. Placing a subsystem's context therefore places the tasks spawned from it and from
-    /// the contexts derived from it, including actors it wires before spawning, while what those
-    /// tasks spawn runs on the shared executor unless they ask with [`Spawner::placed`].
+    /// A spawn hands its task an unplaced context, including the one inside a [`Local`]. The
+    /// context remembers where its task runs, but its spawns run on the shared executor until
+    /// [`Spawner::placed`] places it where its task runs. Placing a subsystem's context therefore
+    /// places the tasks spawned from it and from the contexts derived from it, including actors it
+    /// wires before spawning, while what those tasks spawn runs on the shared executor unless they
+    /// ask with [`Spawner::placed`].
     ///
     /// Callers choose where a subsystem runs, with [`Spawner::shared`], [`Spawner::blocking`],
     /// [`Spawner::on`] or [`ThreadBuilder::attach`]. Libraries choose what follows it:
@@ -407,21 +408,11 @@ stability_scope!(BETA {
         /// Place this context on `thread`.
         ///
         /// A spawn from a context placed on a thread runs its factory on the caller, as usual,
-        /// and its future on the thread. Tasks on a thread are cooperative. Every poll, factory
-        /// and destructor must return promptly (see [`Spawner::thread`]). A spawn toward a thread
-        /// that already closed, or belongs to another runner, resolves [`Error::Closed`] without
-        /// running its factory, and aborts the consumed context's node. If the thread closes before
-        /// the task finishes, its future is dropped and the handle resolves [`Error::Closed`] as
-        /// well.
+        /// and its future on the thread. A spawn toward a thread that already closed, or belongs
+        /// to another runner, resolves [`Error::Closed`] (see [`Spawner::spawn_on`]).
         ///
         /// Placement creates no supervision edge. Aborting a context placed on a thread does not
         /// close the thread, unless the thread was attached to it (see [`ThreadBuilder::attach`]).
-        /// Closing the thread aborts the tasks running on it, wherever they are supervised, and
-        /// supervision then aborts their descendants wherever those run.
-        ///
-        /// A component that stores this context, or one derived from it, and spawns from it on
-        /// demand runs every such spawn on the thread. Such a component should store its context
-        /// with [`Spawner::shared`] (see [Placement](Spawner#placement)).
         #[must_use]
         fn on(self, thread: &Thread) -> Self;
 
@@ -476,23 +467,12 @@ stability_scope!(BETA {
         /// on it, its residents, cooperatively, for their whole lives. Tasks on one thread share
         /// its core, its wakes and its data. It suits long-lived tasks that should own a thread.
         ///
-        /// This consumes the context and ignores its placement. A thread created by
-        /// [`ThreadBuilder::build`] or [`ThreadBuilder::spawn`] occupies this context's
-        /// supervision node and lives as long as that node, until the context's lineage finishes
-        /// or is aborted, or the runtime shuts down. A thread created by [`ThreadBuilder::attach`]
-        /// closes when the task that consumes the attached context ends. Holding a [`Thread`] or
-        /// a [`Local`] never keeps a thread open. Closing a thread aborts the tasks running on
-        /// it, wherever they are supervised, and supervision then aborts their descendants
-        /// wherever those run.
-        ///
-        /// The returned [`ThreadBuilder`] can pin the thread to CPUs, then creates it with one of:
-        ///
-        /// - [`ThreadBuilder::build`]: a [`Thread`] handle for [`Spawner::on`] and
-        ///   [`Spawner::spawn_on`].
-        /// - [`ThreadBuilder::attach`]: a context placed on the thread, which closes when the task
-        ///   that consumes the context ends.
-        /// - [`ThreadBuilder::spawn`]: a root task that runs on the thread, which closes when the
-        ///   root task ends.
+        /// This consumes the context and ignores its placement. The returned [`ThreadBuilder`]
+        /// can pin the thread to CPUs, then creates it with [`ThreadBuilder::build`],
+        /// [`ThreadBuilder::attach`] or [`ThreadBuilder::spawn`], which decide how long it lives
+        /// (see [`ThreadBuilder`]). Holding a [`Thread`] or a [`Local`] never keeps a thread
+        /// open. Closing a thread aborts the tasks running on it, wherever they are supervised,
+        /// and supervision then aborts their descendants wherever those run.
         ///
         /// # Cooperation and liveness
         ///
@@ -500,24 +480,20 @@ stability_scope!(BETA {
         /// promptly. Short blocking calls belong on [`Spawner::blocking`], and long CPU work on a
         /// [`Strategizer::strategy`]. A strategy may run work inline on the calling task, as a
         /// sequential strategy or a pool with one worker can, so it does not isolate the thread
-        /// from that work. Each runtime bounds a thread's turns:
+        /// from that work.
         ///
-        /// - io_uring: one turn admits at most 64 queued spawns, in order, then makes at most 64
-        ///   polls of ready tasks, polling a task again if it was woken meanwhile. There is no
-        ///   cooperative budget, so a task whose channels never return `Pending` can starve its
-        ///   thread. The thread's tasks share one io_uring ring and its
-        ///   in-flight limit, so a receive can hold the slot that a dependent send needs.
-        ///   Deadlines break such dependencies. A future first polled elsewhere keeps the
-        ///   registrations of the worker that polled it after it moves onto a thread, so create
-        ///   thread-bound I/O inside [`ThreadBuilder::spawn`] or [`Spawner::spawn_on`].
-        /// - tokio: a thread runs a `LocalSet` inside the owning runtime, which gives each task
-        ///   tokio's cooperative budget. One turn admits at most 64 queued spawns.
-        ///   `tokio::task::block_in_place` panics there. Do not hold the enter guard of another
-        ///   Tokio runtime across an await in a thread's tasks.
-        /// - deterministic: threads are virtual. Their tasks are ordinary seeded tasks with an
-        ///   identity, and pins are validated and recorded but never applied. All virtual threads
+        /// - io_uring: there is no cooperative budget, so a task whose channels never return
+        ///   `Pending` can starve its thread. The thread's tasks share one io_uring ring and its
+        ///   in-flight limit, so a receive can hold the slot that a dependent send needs (deadlines
+        ///   break this). A future first polled elsewhere keeps the registrations of the worker
+        ///   that polled it, so create thread-bound I/O inside [`ThreadBuilder::spawn`] or
+        ///   [`Spawner::spawn_on`].
+        /// - tokio: each task gets tokio's cooperative budget. `tokio::task::block_in_place`
+        ///   panics there. Do not hold the enter guard of another Tokio runtime across an await
+        ///   in a thread's tasks.
+        /// - deterministic: threads are virtual and pins are never applied. All virtual threads
         ///   share one OS thread, so thread-local storage can carry `!Send` values between them,
-        ///   which would not happen in production.
+        ///   unlike in production.
         ///
         /// # Examples
         ///
@@ -529,13 +505,6 @@ stability_scope!(BETA {
         ///     // Run a root task on a thread of its own.
         ///     let handle = context.child("worker").thread().spawn(|_| async { 42 })?;
         ///     assert_eq!(handle.await.unwrap(), 42);
-        ///
-        ///     // Share one pinned thread across subsystems.
-        ///     let core = context.child("core").thread().pin(0).build()?;
-        ///     let a = context.child("a").on(&core);
-        ///     let b = context.child("b").on(&core);
-        ///     let (a, b) = (a.spawn(|_| async { 1 }), b.spawn(|_| async { 2 }));
-        ///     assert_eq!(a.await.unwrap() + b.await.unwrap(), 3);
         ///
         ///     // Keep !Send state on a thread, shared by its tasks.
         ///     let handle = context.child("net").thread().spawn(|local| async move {
@@ -609,25 +578,6 @@ stability_scope!(BETA {
         ///     assert_eq!(handle.unwrap().await.unwrap(), 6);
         /// });
         /// ```
-        ///
-        /// The future cannot hold the `Rc`:
-        ///
-        /// ```compile_fail
-        /// use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
-        /// use std::{cell::RefCell, rc::Rc};
-        ///
-        /// deterministic::Runner::default().start(|context| async move {
-        ///     let handle = context.child("worker").thread().spawn(|local| async move {
-        ///         let config = Rc::new(RefCell::new(5));
-        ///         let task = local.child("task").into_inner().spawn(move |_| async move {
-        ///             let value = *config.borrow();
-        ///             value + 1
-        ///         });
-        ///         task.await.unwrap()
-        ///     });
-        ///     assert_eq!(handle.unwrap().await.unwrap(), 6);
-        /// });
-        /// ```
         fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
         where
             Self: Sized,
@@ -639,10 +589,10 @@ stability_scope!(BETA {
         /// future may be `!Send`.
         ///
         /// The task is supervised by this context, like [`Spawner::spawn`], and `f` receives a
-        /// [`Local`] on `thread`, whose context is unplaced like any context a spawn hands out.
-        /// `f` runs on the thread, in the thread's own runtime environment, never inside the
-        /// caller's poll. A spawn toward a thread that is closed or belongs to another runner
-        /// resolves [`Error::Closed`], drops `f` unrun and aborts the consumed context's node.
+        /// [`Local`] on `thread`. `f` runs on the thread, in the thread's own runtime
+        /// environment, never inside the caller's poll. A spawn toward a thread that is closed or
+        /// belongs to another runner resolves [`Error::Closed`], drops `f` unrun and aborts the
+        /// consumed context's node.
         ///
         /// A thread admits a bounded batch of spawns per turn, and its queue of spawns is
         /// unbounded, like any spawn queue. A producer that submits faster than the thread admits
@@ -681,21 +631,6 @@ stability_scope!(BETA {
         /// });
         /// ```
         ///
-        /// It can capture a `Send` value:
-        ///
-        /// ```
-        /// use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
-        ///
-        /// deterministic::Runner::default().start(|context| async move {
-        ///     let thread = context.child("exec").thread().build().unwrap();
-        ///     let state = std::sync::Arc::new(5);
-        ///     let handle = context.child("execute").spawn_on(&thread, move |_| async move {
-        ///         *state + 1
-        ///     });
-        ///     assert_eq!(handle.await.unwrap(), 6);
-        /// });
-        /// ```
-        ///
         /// The same holds for the factory of a thread's root task:
         ///
         /// ```compile_fail
@@ -710,22 +645,9 @@ stability_scope!(BETA {
         /// });
         /// ```
         ///
-        /// With a `Send` value it compiles:
-        ///
-        /// ```
-        /// use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
-        ///
-        /// deterministic::Runner::default().start(|context| async move {
-        ///     let state = std::sync::Arc::new(5);
-        ///     let handle = context.child("exec").thread().spawn(move |_| async move {
-        ///         *state + 1
-        ///     });
-        ///     assert_eq!(handle.unwrap().await.unwrap(), 6);
-        /// });
-        /// ```
-        ///
         /// An ordinary spawn from a context placed on a thread runs its factory on the caller and
-        /// sends the future it returns to the thread, so that future cannot hold one:
+        /// sends the future it returns to the thread, so that future cannot hold one, though its
+        /// factory can read one (see [`Spawner::spawn`]):
         ///
         /// ```compile_fail
         /// use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
@@ -735,22 +657,6 @@ stability_scope!(BETA {
         ///     let state = std::rc::Rc::new(5);
         ///     let handle = context.child("execute").on(&thread).spawn(move |_| async move {
         ///         *state + 1
-        ///     });
-        ///     assert_eq!(handle.await.unwrap(), 6);
-        /// });
-        /// ```
-        ///
-        /// Its factory can read one, and it compiles once the future holds only `Send` values:
-        ///
-        /// ```
-        /// use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
-        ///
-        /// deterministic::Runner::default().start(|context| async move {
-        ///     let thread = context.child("exec").thread().build().unwrap();
-        ///     let state = std::rc::Rc::new(5);
-        ///     let handle = context.child("execute").on(&thread).spawn(|_| {
-        ///         let value = *state;
-        ///         async move { value + 1 }
         ///     });
         ///     assert_eq!(handle.await.unwrap(), 6);
         /// });

@@ -21,7 +21,7 @@ use crate::{
     },
     threads::{
         ThreadRuntime,
-        admission::{Job, SpawnJob, Ticket, next_runner_id},
+        admission::{Job, next_runner_id, spawn_job},
         affinity::AffinityState,
     },
     utils::{self, FactoryGuard, Panicker, Place, Placement, signal::Stopper, supervision::Tree},
@@ -155,11 +155,9 @@ pub struct Config {
     /// Tokio sets the default value to 512 to avoid hanging on lower-level
     /// operations that require blocking (like `fs` and writing to `Stdout`).
     ///
-    /// Blocking tasks, spawned from a context placed with [`crate::Spawner::blocking`] or
-    /// through [`crate::Spawner::placed`] from a blocking task's context, share this pool with
-    /// the blocking work behind storage operations and name resolution. A blocking task that
-    /// waits on them holds a thread they need, so enough such tasks exhaust the pool and
-    /// deadlock.
+    /// Blocking tasks (see [`crate::Spawner::blocking`]) share this pool with the blocking work
+    /// behind storage operations and name resolution. A blocking task that waits on them holds a
+    /// thread they need, so enough such tasks exhaust the pool and deadlock.
     max_blocking_threads: usize,
 
     /// Stack size to use for runtime-owned threads.
@@ -649,16 +647,13 @@ impl crate::Spawner for Context {
         self.tree = child;
         self.place = Place::unplaced(Placement::Thread(thread.clone()));
 
-        // The factory runs on the thread. A rejected job drops its factory, then its ticket,
-        // outside the admission lock, which aborts the node and closes the handle.
+        // The factory runs on the thread. A rejected job drops its factory, then its task's
+        // prepared parts, outside the admission lock, which aborts the node and closes the handle.
         let executor = self.executor.clone();
         let accepts = executor.targets(thread);
         let (prepared, handle) = Handle::prepare(metric, parent);
         let abort = prepared.abort_handle();
-        let job = Job::factory(
-            Box::new(SpawnJob::new(f, self, Ticket::new(prepared))),
-            abort,
-        );
+        let job = Job::factory(spawn_job(f, self, prepared), abort);
         if !accepts {
             executor.dispose(job);
         } else if let Err(job) = thread.inner().submit(job) {

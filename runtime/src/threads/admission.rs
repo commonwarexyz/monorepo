@@ -6,10 +6,6 @@
 //! detaches the ingress, so no job is queued behind a close. Nothing runs user code or drops a
 //! job under the lock. A rejected job returns to its submitter, and a closer disposes of the
 //! detached ingress after unlocking.
-//!
-//! A job that runs its factory on the thread carries a [`Ticket`] with the task's prepared
-//! parts, which close the task's supervision node and resolve its handle if the job is dropped
-//! unrun.
 
 use super::{Cpus, Local, local::Owner};
 use crate::{
@@ -91,7 +87,6 @@ pub(crate) struct ThreadInner {
     name: String,
     /// CPUs requested with [`ThreadBuilder::pin`](super::ThreadBuilder::pin).
     cpus: Option<Cpus>,
-    /// Admission state and ingress.
     admission: Mutex<Admission>,
     /// Whether the admission state is open, written under the admission lock, so hosts and
     /// pre-checks can read it without locking. The lock stays the authority for admission.
@@ -100,7 +95,6 @@ pub(crate) struct ThreadInner {
     node: Weak<Tree>,
     /// The thread's series of the residents gauge.
     residents: Gauge,
-    /// Backend state.
     backend: Box<dyn ThreadBackend>,
 }
 
@@ -132,7 +126,6 @@ impl ThreadInner {
         })
     }
 
-    /// Lock the admission state.
     fn lock(&self) -> MutexGuard<'_, Admission> {
         cfg_if::cfg_if! {
             if #[cfg(feature = "loom")] {
@@ -144,22 +137,18 @@ impl ThreadInner {
         admission
     }
 
-    /// Instance id of the runner that created the thread.
     pub(crate) const fn runner(&self) -> u64 {
         self.runner
     }
 
-    /// Id of the thread within its runner.
     pub(crate) const fn id(&self) -> u64 {
         self.id
     }
 
-    /// Label of the context that created the thread.
     pub(crate) fn name(&self) -> &str {
         &self.name
     }
 
-    /// CPUs requested for the thread.
     pub(crate) const fn cpus(&self) -> Option<&Cpus> {
         self.cpus.as_ref()
     }
@@ -322,11 +311,10 @@ impl Drop for ResidentCount {
 
 /// Work queued in a thread's ingress.
 ///
-/// Fields drop in order: the work (a factory before its ticket), then the abort handle, then the
-/// resident count.
+/// Fields drop in order: the work (a factory before its task's prepared parts), then the abort
+/// handle, then the resident count.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct Job {
-    /// The queued work.
     pub(crate) work: Work,
     /// Aborts the job's task, so a host can skip a factory whose task was aborted.
     pub(crate) abort: AbortHandle,
@@ -349,7 +337,7 @@ impl Job {
     }
 
     /// A factory that builds its task's future on the thread.
-    pub(crate) fn factory(factory: Box<dyn FactoryJob>, abort: AbortHandle) -> Self {
+    pub(crate) fn factory(factory: FactoryJob, abort: AbortHandle) -> Self {
         Self {
             work: Work::Factory(factory),
             abort,
@@ -364,121 +352,47 @@ pub(crate) enum Work {
     /// A `Send` task wrapper whose factory already ran on the caller.
     Placed(Pin<Box<dyn Future<Output = ()> + Send>>),
     /// A factory to run on the thread.
-    Factory(Box<dyn FactoryJob>),
+    Factory(FactoryJob),
 }
 
 /// A task's resident future: its task wrapper, which need not be `Send`.
 pub(crate) type Resident = Pin<Box<dyn Future<Output = ()>>>;
 
-/// A factory queued toward a thread, with the ticket of its task.
-pub(crate) trait FactoryJob: Send + 'static {
-    /// Run the factory on the thread with `owner`, and wrap the future it returns as the
-    /// task. A factory panic is reported through the owner's panicker, resolves the handle with
-    /// [`crate::Error::Exited`] and returns `None`.
-    fn run(self: Box<Self>, owner: &Rc<Owner>) -> Option<Resident>;
-}
+/// A factory queued toward a thread, which builds its task's future there with the thread's
+/// owner state. A factory panic is reported through the owner's panicker, resolves the handle
+/// with [`crate::Error::Exited`] and returns `None`.
+pub(crate) type FactoryJob = Box<dyn FnOnce(&Rc<Owner>) -> Option<Resident> + Send>;
 
-/// A [`FactoryJob`] built by [`crate::Spawner::spawn_on`].
+/// The [`FactoryJob`] of a [`crate::Spawner::spawn_on`] task, running `factory` with `context`
+/// as the task `prepared` belongs to.
 ///
-/// Fields drop in order, so a job dropped unrun drops its factory, then its context, then its
-/// ticket.
-pub(crate) struct SpawnJob<C, F, T>
-where
-    T: Send + 'static,
-{
-    /// The user's factory, with its captures.
-    factory: F,
-    /// The context handed to the factory, unplaced on the thread.
-    context: C,
-    /// The task's prepared parts.
-    ticket: Ticket<T>,
-}
-
-impl<C, F, T> SpawnJob<C, F, T>
-where
-    T: Send + 'static,
-{
-    /// A job running `factory` with `context` as the task `ticket` belongs to.
-    pub(crate) const fn new(factory: F, context: C, ticket: Ticket<T>) -> Self {
-        Self {
-            factory,
-            context,
-            ticket,
-        }
-    }
-}
-
-impl<C, F, Fut, T> FactoryJob for SpawnJob<C, F, T>
+/// A job dropped unrun drops its factory, then its context, then the task's prepared parts.
+pub(crate) fn spawn_job<C, F, Fut, T>(factory: F, context: C, prepared: Prepared<T>) -> FactoryJob
 where
     C: Send + 'static,
     F: FnOnce(Local<C>) -> Fut + Send + 'static,
     Fut: Future<Output = T> + 'static,
     T: Send + 'static,
 {
-    fn run(self: Box<Self>, owner: &Rc<Owner>) -> Option<Resident> {
-        let Self {
-            factory,
-            context,
-            ticket,
-        } = *self;
+    // The closure captures the tuple whole, so its fields drop in order.
+    let parts = (factory, context, prepared);
+    Box::new(move |owner: &Rc<Owner>| {
+        let parts = parts;
+        let (factory, context, prepared) = parts;
         let local = Local::new(context, owner.clone());
         match catch_unwind(AssertUnwindSafe(move || factory(local))) {
             Ok(future) => Some(Box::pin(Handle::wrap(
-                ticket.take(),
+                prepared,
                 future,
                 owner.panicker().clone(),
             ))),
             Err(panic) => {
                 owner.panicker().notify(panic);
-                ticket.exit();
+                prepared.exit();
                 None
             }
         }
-    }
-}
-
-/// A task's prepared parts while its factory waits to run on a thread.
-///
-/// It replaces [`crate::utils::FactoryGuard`] for factories that run on the thread. When the
-/// task wrapper takes over, the ticket is consumed. Dropped unconsumed, it aborts the task's
-/// node, finishes its metric and drops its result sink, in that order, so the handle resolves
-/// [`crate::Error::Closed`].
-pub(crate) struct Ticket<T>(Option<Prepared<T>>)
-where
-    T: Send + 'static;
-
-impl<T> Ticket<T>
-where
-    T: Send + 'static,
-{
-    /// Hold `prepared` until the factory runs.
-    pub(crate) const fn new(prepared: Prepared<T>) -> Self {
-        Self(Some(prepared))
-    }
-
-    /// Hand the parts to the task wrapper.
-    fn take(mut self) -> Prepared<T> {
-        self.0.take().expect("ticket consumed twice")
-    }
-
-    /// Resolve the task's handle with [`crate::Error::Exited`] after its factory panicked, then
-    /// close its node.
-    fn exit(mut self) {
-        if let Some(prepared) = self.0.take() {
-            prepared.exit();
-        }
-    }
-}
-
-impl<T> Drop for Ticket<T>
-where
-    T: Send + 'static,
-{
-    fn drop(&mut self) {
-        if let Some(prepared) = self.0.take() {
-            prepared.close();
-        }
-    }
+    })
 }
 
 #[cfg(test)]

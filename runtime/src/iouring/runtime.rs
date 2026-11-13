@@ -213,7 +213,7 @@ use crate::{
     },
     threads::{
         ThreadRuntime,
-        admission::{Job, SpawnJob, Ticket, next_runner_id},
+        admission::{Job, next_runner_id, spawn_job},
         affinity::AffinityState,
     },
     utils::{
@@ -791,9 +791,7 @@ impl Shared {
 /// poll on that thread's worker and share its io_uring ring and in-flight limit.
 /// Task factories of ordinary spawns run on their caller, while ordinary futures
 /// on the pool can move between its workers, as can resources and pending I/O
-/// and sleep futures. A runtime thread has no cooperative budget, so a resident
-/// whose channels never return `Pending` can starve the thread's other
-/// residents.
+/// and sleep futures.
 ///
 /// Registrations stay on their original worker. Closing that worker causes
 /// unresolved I/O futures to fail and unresolved sleeps to panic when polled.
@@ -884,15 +882,12 @@ impl crate::Spawner for Context {
         self.tree = child;
         self.place = Place::unplaced(Placement::Thread(thread.clone()));
 
-        // The factory runs on the thread. A rejected job drops its factory, then its ticket,
-        // outside the admission lock, which aborts the node and closes the handle.
+        // The factory runs on the thread. A rejected job drops its factory, then its task's
+        // prepared parts, outside the admission lock, which aborts the node and closes the handle.
         let accepts = self.shared.targets(thread);
         let (prepared, handle) = Handle::prepare(metric, parent);
         let abort = prepared.abort_handle();
-        let job = Job::factory(
-            Box::new(SpawnJob::new(f, self, Ticket::new(prepared))),
-            abort,
-        );
+        let job = Job::factory(spawn_job(f, self, prepared), abort);
         if !accepts {
             Panics::contain(move || drop(job));
         } else if let Err(job) = thread.inner().submit(job) {

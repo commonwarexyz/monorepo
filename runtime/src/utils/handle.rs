@@ -80,18 +80,18 @@ where
     }
 }
 
-/// Closes supervision and finishes metrics when a task exits or is discarded.
-struct TaskGuard {
-    /// Supervision subtree owned by the task.
-    tree: Arc<Tree>,
-    /// Running-task metric, finished once even if cancellation already updated it.
-    metric: MetricHandle,
-}
+/// Closes supervision and finishes metrics when a task exits or is discarded, unless disarmed.
+///
+/// It holds the supervision subtree owned by the task and its running-task metric, which is
+/// finished once even if cancellation already updated it.
+struct TaskGuard(Option<(Arc<Tree>, MetricHandle)>);
 
 impl Drop for TaskGuard {
     fn drop(&mut self) {
-        self.tree.abort();
-        self.metric.finish();
+        if let Some((tree, metric)) = &self.0 {
+            tree.abort();
+            metric.finish();
+        }
     }
 }
 
@@ -180,20 +180,18 @@ impl<F: Future> Future for FutureCell<F> {
     }
 }
 
-/// The parts of a task prepared before its future exists: its supervision node, its
-/// running-task metric, its result sink and its abort registration.
+/// The parts of a task prepared before its future exists: its supervision node and running-task
+/// metric, its result sink and its abort registration.
 ///
 /// [`Handle::prepare`] registers the task's aborter on the node, and [`Handle::wrap`] consumes
-/// the parts. Parts dropped without being wrapped abort no node and finish no metric, so an
-/// owner that may drop them unwrapped calls [`Prepared::close`] or [`Prepared::exit`] instead.
+/// the parts. Parts dropped unwrapped abort the node, finish the metric and drop the sink, in
+/// that order, so the handle resolves [`Error::Closed`].
 pub(crate) struct Prepared<T>
 where
     T: Send + 'static,
 {
-    /// Supervision node the task's aborter is registered on.
-    tree: Arc<Tree>,
-    /// Running-task metric, finished once the task exits.
-    metric: MetricHandle,
+    /// Closes the node the task's aborter is registered on and finishes the metric.
+    guard: TaskGuard,
     /// Sink of the task's result.
     sender: oneshot::Sender<Result<T, Error>>,
     /// Registration consumed by the task's abortable wrapper.
@@ -209,29 +207,16 @@ where
         self.registration.handle()
     }
 
-    /// Closes the task without running it. Aborts its node, finishes its metric and drops its
-    /// sink, in that order, so its handle resolves [`Error::Closed`].
-    pub(crate) fn close(self) {
+    /// Publishes [`Error::Exited`] for a task whose factory panicked, then aborts its node and
+    /// finishes its metric.
+    pub(crate) fn exit(mut self) {
+        // Disarm the guard first, so a panic raised while publishing does not abort the node
+        // during its unwind.
+        let (tree, metric) = self.guard.0.take().expect("prepared parts are armed");
         let Self {
-            tree,
-            metric,
             sender,
             registration,
-        } = self;
-        tree.abort();
-        metric.finish();
-        drop(sender);
-        drop(registration);
-    }
-
-    /// Publishes [`Error::Exited`] for a task whose factory panicked, then closes it like
-    /// [`Prepared::close`].
-    pub(crate) fn exit(self) {
-        let Self {
-            tree,
-            metric,
-            sender,
-            registration,
+            ..
         } = self;
         let _ = sender.send(Err(Error::Exited));
         tree.abort();
@@ -278,8 +263,7 @@ where
 
         (
             Prepared {
-                tree,
-                metric: metric.clone(),
+                guard: TaskGuard(Some((tree, metric.clone()))),
                 sender,
                 registration: abort_registration,
             },
@@ -306,15 +290,10 @@ where
         F: Future<Output = T>,
     {
         let Prepared {
-            tree,
-            metric,
+            guard,
             sender,
             registration: abort_registration,
         } = prepared;
-
-        // Install cleanup before the first poll so rejected tasks also close
-        // supervision and finish their metrics when the future is dropped.
-        let guard = TaskGuard { tree, metric };
 
         // Wrap the future with panic catching, abort support, and cleanup.
         //

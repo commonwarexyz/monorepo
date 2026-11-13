@@ -63,13 +63,8 @@ impl Cpus {
         if id < CPU_LIMIT {
             self.words[id / 64] |= 1 << (id % 64);
         } else {
-            self.record_beyond(id);
+            self.beyond = Some(self.beyond.map_or(id, |beyond| beyond.min(id)));
         }
-    }
-
-    /// Record `id`, at or above 1024, if it is the smallest such id requested.
-    fn record_beyond(&mut self, id: usize) {
-        self.beyond = Some(self.beyond.map_or(id, |beyond| beyond.min(id)));
     }
 
     /// Add every id from `start` to `last` inclusive, storing at most 1024 of them.
@@ -81,7 +76,7 @@ impl Cpus {
             self.insert(id);
         }
         if last >= CPU_LIMIT {
-            self.record_beyond(start.max(CPU_LIMIT));
+            self.insert(start.max(CPU_LIMIT));
         }
     }
 
@@ -123,9 +118,7 @@ impl Cpus {
 
 impl From<usize> for Cpus {
     fn from(id: usize) -> Self {
-        let mut cpus = Self::empty();
-        cpus.insert(id);
-        cpus
+        Self::from([id])
     }
 }
 
@@ -212,9 +205,7 @@ pub enum ThreadError {
     /// CPU affinity is unavailable on this platform, so the thread cannot be pinned.
     #[error("CPU affinity is unavailable on this platform")]
     UnsupportedAffinity,
-    /// A requested CPU is not in the runner's CPU set: the CPUs of the thread that started a
-    /// native runner, or the configured set of the deterministic runtime
-    /// ([ThreadBuilder::available]).
+    /// A requested CPU is not in the runner's CPU set ([ThreadBuilder::available]).
     #[error("CPU {0} is not in the runner's CPU set")]
     CpuUnavailable(usize),
     /// [ThreadBuilder::pin] was given no CPU.
@@ -234,17 +225,14 @@ pub enum ThreadError {
 /// thread of the same runner.
 #[derive(Clone)]
 pub struct Thread {
-    /// The thread's shared state.
     inner: Arc<ThreadInner>,
 }
 
 impl Thread {
-    /// Wrap a thread's shared state.
     pub(crate) const fn new(inner: Arc<ThreadInner>) -> Self {
         Self { inner }
     }
 
-    /// The thread's shared state.
     pub(crate) const fn inner(&self) -> &Arc<ThreadInner> {
         &self.inner
     }
@@ -320,9 +308,7 @@ pub struct ThreadBuilder<C> {
     tree: Arc<Tree>,
     /// The node of the consumed context, which a built or spawned thread occupies.
     node: Arc<Tree>,
-    /// The label of the consumed context.
     name: String,
-    /// CPUs requested with [ThreadBuilder::pin].
     cpus: Option<Cpus>,
     /// The runtime that creates the thread, without keeping it alive.
     host: Weak<dyn ThreadRuntime>,
@@ -354,29 +340,14 @@ impl<C> ThreadBuilder<C> {
     /// `f` must wrap the context without moving it to another supervision node (no
     /// [crate::Supervisor::child]), because [ThreadBuilder::attach] closes its thread with the
     /// node of the context it returns.
-    ///
-    /// ```ignore
-    /// fn thread(self) -> ThreadBuilder<Self> {
-    ///     let state = self.state;
-    ///     self.inner.thread().map(move |inner| Self { inner, state })
-    /// }
-    /// ```
     pub fn map<D>(self, f: impl FnOnce(C) -> D) -> ThreadBuilder<D> {
-        let Self {
-            context,
-            tree,
-            node,
-            name,
-            cpus,
-            host,
-        } = self;
         ThreadBuilder {
-            context: f(context),
-            tree,
-            node,
-            name,
-            cpus,
-            host,
+            context: f(self.context),
+            tree: self.tree,
+            node: self.node,
+            name: self.name,
+            cpus: self.cpus,
+            host: self.host,
         }
     }
 }
@@ -384,11 +355,10 @@ impl<C> ThreadBuilder<C> {
 impl<C: Spawner> ThreadBuilder<C> {
     /// Pin the thread to these logical CPUs. A later call replaces an earlier one.
     ///
-    /// Every CPU must be one the thread that started the runner was allowed to run on (on the
-    /// deterministic runtime, one of `deterministic::Config::with_cpus`), or the finisher
-    /// returns [ThreadError::CpuUnavailable]. [ThreadBuilder::available] returns that set. An
-    /// empty set returns [ThreadError::EmptyCpus], and native runners on platforms without CPU
-    /// affinity return [ThreadError::UnsupportedAffinity] for any pin.
+    /// Every CPU must be in [ThreadBuilder::available], or the finisher returns
+    /// [ThreadError::CpuUnavailable]. An empty set returns [ThreadError::EmptyCpus], and native
+    /// runners on platforms without CPU affinity return [ThreadError::UnsupportedAffinity] for
+    /// any pin.
     ///
     /// On native runners, a pin that passes validation but that the operating system refuses
     /// when the thread starts is reported after the finisher returned, like a task panic. The
@@ -434,10 +404,8 @@ impl<C: Spawner> ThreadBuilder<C> {
     /// Create the thread and return a handle for placing work on it, with [Spawner::on] or
     /// [Spawner::spawn_on].
     ///
-    /// The thread lives as long as the supervision node of the context consumed by
-    /// [Spawner::thread], until that lineage ends or is aborted. Code that rebuilds a subsystem
-    /// per epoch should use [ThreadBuilder::attach], whose thread closes with the task that
-    /// consumes its context.
+    /// The thread lives as long as the consumed context's lineage (see [ThreadBuilder]). Code
+    /// that rebuilds a subsystem per epoch should use [ThreadBuilder::attach].
     ///
     /// # Errors
     ///
@@ -451,8 +419,7 @@ impl<C: Spawner> ThreadBuilder<C> {
     }
 
     /// Create the thread and return a context placed on it. Spawns from the context, and from
-    /// the contexts derived from it, run on the thread. The tasks they start receive unplaced
-    /// contexts, which spawn on the thread again through [Spawner::placed].
+    /// the contexts derived from it, run on the thread.
     ///
     /// The thread lives under the returned context's supervision node. It closes when the task
     /// that consumes the returned context ends, when that context's lineage ends or is aborted,
@@ -465,9 +432,8 @@ impl<C: Spawner> ThreadBuilder<C> {
     /// Such a thread hosts only `Send` work. Nothing returns its [Thread], so
     /// [Spawner::spawn_on] cannot target it.
     ///
-    /// A component that stores the returned context, or one derived from it, and spawns from it
-    /// on demand runs every such spawn on the thread. Such a component should store its context
-    /// with [Spawner::shared] (see [Placement](Spawner#placement)).
+    /// A component that stores the returned context to spawn on demand should store it with
+    /// [Spawner::shared] (see [Placement](Spawner#placement)).
     ///
     /// # Errors
     ///
@@ -485,9 +451,8 @@ impl<C: Spawner> ThreadBuilder<C> {
     /// closing before the root is admitted, this still returns `Ok`, with a handle that
     /// resolves [crate::Error::Closed].
     ///
-    /// The context inside the root's [Local] is unplaced like any context a spawn hands out, so
-    /// its spawns run on the shared executor. A root that wires a subsystem onto its thread hands
-    /// the subsystem `local.into_inner().placed()`.
+    /// A root that wires a subsystem onto its thread hands it `local.into_inner().placed()`,
+    /// since the root's context is unplaced (see [Placement](Spawner#placement)).
     ///
     /// # Errors
     ///

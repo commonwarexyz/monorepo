@@ -3,23 +3,10 @@
 //! A runtime thread is a native thread running a `LocalSet` inside the owning runtime's
 //! `block_on`, so factories and resident polls see the owning runtime and each resident gets
 //! Tokio's per-task cooperative budget. A control future admits queued jobs into the `LocalSet`,
-//! at most [BATCH] per poll, and returns once the thread starts closing. The thread body then
-//! disposes of everything, in order, on every exit path, and only then releases the thread's
-//! node and its tracker guard.
-//!
-//! ```text
-//! thread body
-//!   +-- apply the pin, or the armed reset
-//!   +-- block_on(local_set.run_until(control))      control: admit <= 64 jobs per poll
-//!   |                                                         return once closing
-//!   +-- close admission, detach the ingress
-//!   +-- runtime entered:
-//!   |     abort residents, drop the LocalSet (each resident drops its future and
-//!   |     hands a factory that never ran to the host), drop those factories,
-//!   |     then detached jobs, parked factories and result slots
-//!   +-- publish failures, mark closed
-//!   +-- release the node, then the tracker guard
-//! ```
+//! at most [BATCH] per poll, and returns once the thread starts closing. On every exit path, the
+//! thread body then disposes of the residents, the `LocalSet`, the factories that never ran,
+//! the detached jobs, the parked factories and the result slots, in that order and with the
+//! runtime entered, and only then releases the thread's node and its tracker guard.
 //!
 //! Residents are aborted only through the runtime's own [AbortHandle]s, and each resident
 //! wrapper disposes of its future in its own panic boundary, because Tokio swallows panics
@@ -144,7 +131,6 @@ struct Body {
     panicker: Panicker,
     /// The runner's base set and reset.
     affinity: Arc<AffinityState>,
-    /// The thread's shared state.
     inner: Arc<ThreadInner>,
     /// The node the thread occupies, held until its close completes.
     node: Arc<Tree>,
@@ -215,7 +201,6 @@ fn host(
     let host = Rc::new(Host {
         inner: inner.clone(),
         owner,
-        panicker: panicker.clone(),
         residents: RefCell::new(BTreeMap::new()),
         next: Cell::new(0),
         batch: RefCell::new(VecDeque::new()),
@@ -245,14 +230,14 @@ fn host(
         }
         let deferred = host.deferred.take();
         for factory in deferred {
-            host.dispose(factory);
+            host.owner.dispose(factory);
         }
         loop {
             let job = host.batch.borrow_mut().pop_front();
             let Some(job) = job else {
                 break;
             };
-            host.dispose(job);
+            host.owner.dispose(job);
         }
         host.owner.close();
     }
@@ -302,12 +287,9 @@ async fn control(host: &Rc<Host>, local_set: &LocalSet) {
 
 /// The owner half of a Tokio runtime thread, on its native thread.
 struct Host {
-    /// The thread's shared state.
     inner: Arc<ThreadInner>,
     /// The thread's owner state, handed to every [crate::Local] on it.
     owner: Rc<Owner>,
-    /// Reports task and disposal panics.
-    panicker: Panicker,
     /// Abort handles of residents that have not retired, by resident id.
     residents: RefCell<BTreeMap<u64, AbortHandle>>,
     /// Id of the next resident.
@@ -316,17 +298,10 @@ struct Host {
     batch: RefCell<VecDeque<Job>>,
     /// Factories of admitted residents that never ran because the thread closed, kept so the
     /// close drops them after every resident future.
-    deferred: RefCell<Vec<Box<dyn FactoryJob>>>,
+    deferred: RefCell<Vec<FactoryJob>>,
 }
 
 impl Host {
-    /// Drop `value` in its own panic boundary, reporting a panic.
-    fn dispose<V>(&self, value: V) {
-        if let Err(panic) = catch_unwind(AssertUnwindSafe(move || drop(value))) {
-            self.panicker.notify(panic);
-        }
-    }
-
     /// Abort every resident that has not retired.
     fn abort_residents(&self) {
         let residents: Vec<_> = self.residents.borrow().values().cloned().collect();
@@ -337,9 +312,9 @@ impl Host {
 
     /// Keep the unrun `factory` of a resident for the close if the thread is closing, or drop it
     /// now, after its task was aborted on an open thread.
-    fn discard(&self, factory: Box<dyn FactoryJob>) {
+    fn discard(&self, factory: FactoryJob) {
         if self.inner.is_open() {
-            self.dispose(factory);
+            self.owner.dispose(factory);
             self.owner.reap();
         } else {
             self.deferred.borrow_mut().push(factory);
@@ -377,7 +352,7 @@ impl Host {
 /// What a resident holds.
 enum State {
     /// A factory that has not run.
-    Factory(Box<dyn FactoryJob>),
+    Factory(FactoryJob),
     /// The task wrapper.
     Future(Resident),
 }
@@ -414,7 +389,7 @@ impl Future for ResidentTask {
                 this.host.discard(job);
                 return Poll::Ready(());
             }
-            match job.run(&this.host.owner) {
+            match job(&this.host.owner) {
                 Some(future) => this.state = Some(State::Future(future)),
                 None => return Poll::Ready(()),
             }
@@ -429,13 +404,13 @@ impl Future for ResidentTask {
             Ok(Poll::Pending) => Poll::Pending,
             Ok(Poll::Ready(())) => {
                 let state = this.state.take();
-                this.host.dispose(state);
+                this.host.owner.dispose(state);
                 Poll::Ready(())
             }
             Err(panic) => {
-                this.host.panicker.notify(panic);
+                this.host.owner.panicker().notify(panic);
                 let state = this.state.take();
-                this.host.dispose(state);
+                this.host.owner.dispose(state);
                 Poll::Ready(())
             }
         }
@@ -448,7 +423,7 @@ impl Drop for ResidentTask {
         // or future here, in one that reports.
         match self.state.take() {
             Some(State::Factory(factory)) => self.host.discard(factory),
-            Some(state) => self.host.dispose(state),
+            Some(state) => self.host.owner.dispose(state),
             None => {}
         }
         self.host.residents.borrow_mut().remove(&self.id);

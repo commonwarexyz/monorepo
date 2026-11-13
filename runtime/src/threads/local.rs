@@ -14,12 +14,13 @@
 use super::Thread;
 use crate::{Error, Handle, Spawner, utils::Panicker};
 use commonware_utils::sync::Mutex;
+use futures::future::Either;
 use std::{
     any::Any,
     cell::{Cell, RefCell},
     collections::BTreeMap,
     fmt::Display,
-    future::{Future, ready},
+    future::{Future, Ready, ready},
     marker::PhantomData,
     mem,
     ops::{Deref, DerefMut},
@@ -40,7 +41,8 @@ use std::{
 /// A [Local] dereferences to its context, so `&C` and `&mut C` methods (such as the RNG) work
 /// directly. It cannot implement the runtime traits, which require `Send + Sync`, so generic
 /// helpers take `&*local` or `&mut *local`, and code that needs an owned context uses
-/// [Local::into_inner], which gives up the proof.
+/// [Local::into_inner], which gives up the proof and returns a plain context that can leave the
+/// thread, like the [Handle] of an ordinary spawn.
 ///
 /// The context inside is replaceable through [DerefMut]. The proof is the owner, not the
 /// context, so [Local::spawn_local] always runs its task on [Local::home], supervised by the
@@ -63,19 +65,6 @@ use std::{
 /// });
 /// ```
 ///
-/// The plain context it holds can:
-///
-/// ```
-/// use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
-///
-/// deterministic::Runner::default().start(|context| async move {
-///     context.child("t").thread().spawn(|local| async move {
-///         let local = local.into_inner();
-///         std::thread::spawn(move || drop(local)).join().unwrap();
-///     }).unwrap().await.unwrap();
-/// });
-/// ```
-///
 /// A [Local] cannot move into an ordinary spawn:
 ///
 /// ```compile_fail
@@ -89,20 +78,6 @@ use std::{
 /// });
 /// ```
 ///
-/// Its plain context can:
-///
-/// ```
-/// use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
-///
-/// deterministic::Runner::default().start(|context| async move {
-///     context.child("t").thread().spawn(|local| async move {
-///         let context = local.child("task").into_inner();
-///         let local = local.into_inner();
-///         context.spawn(move |_| async move { drop(local) }).await.unwrap();
-///     }).unwrap().await.unwrap();
-/// });
-/// ```
-///
 /// A [LocalHandle] cannot leave its thread either:
 ///
 /// ```compile_fail
@@ -111,19 +86,6 @@ use std::{
 /// deterministic::Runner::default().start(|context| async move {
 ///     context.child("t").thread().spawn(|local| async move {
 ///         let handle = local.child("task").spawn_local(|_| async {});
-///         std::thread::spawn(move || drop(handle)).join().unwrap();
-///     }).unwrap().await.unwrap();
-/// });
-/// ```
-///
-/// The [Handle] of an ordinary spawn can:
-///
-/// ```
-/// use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
-///
-/// deterministic::Runner::default().start(|context| async move {
-///     context.child("t").thread().spawn(|local| async move {
-///         let handle = local.child("task").into_inner().spawn(|_| async {});
 ///         std::thread::spawn(move || drop(handle)).join().unwrap();
 ///     }).unwrap().await.unwrap();
 /// });
@@ -144,20 +106,8 @@ impl<C> Local<C> {
     /// Rewrap the context while keeping the proof.
     ///
     /// This exists for implementing [Spawner] on a wrapper context that delegates to an inner
-    /// one. The wrapper's [Spawner::spawn_on] maps the inner [Local] back to the wrapper type.
-    ///
-    /// ```ignore
-    /// fn spawn_on<F, Fut, T>(self, thread: &Thread, f: F) -> Handle<T>
-    /// where
-    ///     F: FnOnce(Local<Self>) -> Fut + Send + 'static,
-    ///     Fut: Future<Output = T> + 'static,
-    ///     T: Send + 'static,
-    /// {
-    ///     let state = self.state;
-    ///     self.inner
-    ///         .spawn_on(thread, move |local| f(local.map(|inner| Self { inner, state })))
-    /// }
-    /// ```
+    /// one. The wrapper's [Spawner::spawn_on] maps the inner [Local] back to the wrapper type, as
+    /// in `move |local| f(local.map(|inner| Self { inner }))`.
     pub fn map<D>(self, f: impl FnOnce(C) -> D) -> Local<D> {
         let Self { context, owner } = self;
         Local {
@@ -189,10 +139,9 @@ impl<C: Spawner> Local<C> {
     /// Spawn a resident on this thread. Nothing needs to be `Send`.
     ///
     /// The task always runs on [Local::home], is supervised by the context this value holds,
-    /// and receives a [Local] on the thread, whose context is unplaced like any context a spawn
-    /// hands out. `f` runs on this thread after this call returns and before the task's first
-    /// poll, so it may borrow state the caller holds borrowed now. The returned [LocalHandle]
-    /// cannot leave the thread either.
+    /// and receives a [Local] on the thread. `f` runs on this thread after this call returns and
+    /// before the task's first poll, so it may borrow state the caller holds borrowed now. The
+    /// returned [LocalHandle] cannot leave the thread either.
     ///
     /// If the thread already closed, or the held context belongs to another runner, the
     /// handle resolves [Error::Closed] and `f` is dropped unrun before this returns.
@@ -333,7 +282,6 @@ impl<T> Drop for LocalHandle<T> {
 /// stay for its whole life. The parked factories, the orphan list and the result slots sit in an
 /// [Option] that the thread's close takes.
 pub(crate) struct Owner {
-    /// The thread this owner belongs to.
     home: Thread,
     /// Reports panics of the thread's tasks.
     panicker: Panicker,
@@ -377,7 +325,6 @@ impl Owner {
         &self.home
     }
 
-    /// Reports panics of the thread's tasks.
     pub(crate) const fn panicker(&self) -> &Panicker {
         &self.panicker
     }
@@ -518,7 +465,7 @@ impl<F, T> Shim<F, T> {
     /// Take the parked factory back through `local`'s owner, run it, and return the task's
     /// future. A factory that is missing, for example because a wrapper delivered the shim to
     /// another thread, gives a future that completes at once with an empty slot.
-    fn run<C, Fut>(mut self, local: Local<C>) -> ShimFuture<Fut>
+    fn run<C, Fut>(mut self, local: Local<C>) -> Either<LocalJob<Fut>, Ready<()>>
     where
         F: FnOnce(Local<C>) -> Fut + 'static,
         Fut: Future<Output = T> + 'static,
@@ -527,18 +474,18 @@ impl<F, T> Shim<F, T> {
         // A shim delivered elsewhere stays armed, so its home thread reaps the parked factory.
         let home = local.owner.home().inner();
         if home.runner() != self.runner || home.id() != self.thread {
-            return ShimFuture::Missing;
+            return Either::Right(ready(()));
         }
         self.armed = false;
         let Some(parked) = local.owner.take_parked(self.id) else {
-            return ShimFuture::Missing;
+            return Either::Right(ready(()));
         };
         match parked.downcast::<Parked<F, T>>() {
             Ok(parked) => {
                 let Parked { factory, slot } = *parked;
                 let owner = local.owner.clone();
                 let future = Some(Box::pin(factory(local)));
-                ShimFuture::Job(LocalJob {
+                Either::Left(LocalJob {
                     future,
                     slot,
                     owner,
@@ -546,27 +493,8 @@ impl<F, T> Shim<F, T> {
             }
             Err(other) => {
                 local.owner.dispose(other);
-                ShimFuture::Missing
+                Either::Right(ready(()))
             }
-        }
-    }
-}
-
-/// The future a [Shim] builds on its thread.
-enum ShimFuture<Fut: Future> {
-    /// The parked factory's task.
-    Job(LocalJob<Fut>),
-    /// The parked factory was not there, so the task completes at once with an empty slot.
-    Missing,
-}
-
-impl<Fut: Future> Future for ShimFuture<Fut> {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        match self.get_mut() {
-            Self::Job(job) => Pin::new(job).poll(cx),
-            Self::Missing => Poll::Ready(()),
         }
     }
 }
