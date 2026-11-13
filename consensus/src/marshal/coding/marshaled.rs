@@ -513,11 +513,6 @@ where
         round: Round,
         payload: Commitment<B, C, H>,
     ) -> oneshot::Receiver<bool> {
-        // Certify may be reached without an earlier `verify`, in which case this
-        // is the shard engine's first report of the commitment. It starts
-        // reconstruction from the shards already buffered for the commitment.
-        self.shards.discovered(payload, round);
-
         // No in-progress task means we never verified this proposal locally.
         // We can use the block's embedded context to move to the next view. If a Byzantine
         // proposer embedded a malicious context, the f+1 honest validators from the notarizing quorum
@@ -624,7 +619,6 @@ where
         // certification starts, a notarization exists and the same pending
         // verifier must be unblocked by round-bound recovery if local
         // reconstruction never completes.
-        self.shards.discovered(payload, round);
         self.marshal.hint_notarized(round, payload);
 
         // A completed gate either carries an applicable local verdict or requests
@@ -1107,7 +1101,13 @@ where
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.coding.certify", level = "info", skip_all, fields(round = %round, commitment = %payload))]
     async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
-        // First, check for an in-progress certification gate task.
+        // Certify may be reached without an earlier `verify`, or while the `verify`
+        // of a re-proposal still awaits its block. This can then be the shard
+        // engine's first report of the commitment. A first report starts
+        // reconstruction from the shards already buffered for the commitment.
+        self.shards.discovered(payload, round);
+
+        // Check for an in-progress certification gate task.
         let task = self.gates.claim(round, payload, |block, ack| {
             self.marshal.verified_deferred(round, block, ack)
         });
