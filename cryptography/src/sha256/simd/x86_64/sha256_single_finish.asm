@@ -1,5 +1,3 @@
-            STORE_DIGEST {output}, xmm1, xmm2, xmm5, xmm6, xmm7
-
             .purgem LOAD_STATE
             .purgem STORE_DIGEST
             .purgem ROUNDS4
