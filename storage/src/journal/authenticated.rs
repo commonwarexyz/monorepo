@@ -1233,11 +1233,17 @@ pub(crate) async fn init_sync<E: Context, J: Backing<E>>(
 ) -> Result<J, JournalError> {
     assert!(!range.is_empty(), "range must not be empty");
 
-    // Storage whose span cannot hold the sync start is cleared without reading stored items.
-    // The span end reflects blob capacity, which can overstate the recovered end when the tail
-    // is short or has a gap, so an opened prefix that does not cover the sync start is reset.
+    // Storage whose span cannot hold the sync start is cleared without reading stored items. This
+    // includes a span ending at the sync start, since its items lie in blobs wholly below the
+    // start, which pruning to the start would remove. The span end reflects blob capacity, which
+    // can overstate the recovered end when the tail is short or has a gap, so an opened prefix is
+    // reset unless it covers the sync start or ends at it, where the synced operations append.
     let pending = match Stored::<E, J>::open(context, cfg, range.start, range.end).await? {
-        Stored::Opened(pending) if covers(&pending.bounds(), range.start) => pending,
+        Stored::Opened(pending)
+            if covers(&pending.bounds(), range.start) || pending.bounds().end == range.start =>
+        {
+            pending
+        }
         Stored::Opened(pending) => pending.reset(range.start).await?,
         Stored::Unopened { context, cfg } => J::clear(context, cfg, range.start).await?,
     };
