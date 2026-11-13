@@ -94,6 +94,15 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// A channel to send the retrieved block.
         response: oneshot::Sender<V::Block>,
     },
+    /// A request to wait for a finalized block at a height.
+    AwaitFinalized {
+        /// The span carried with this request.
+        span: Span,
+        /// The height of the finalized block.
+        height: Height,
+        /// A channel to send the finalized block.
+        response: oneshot::Sender<V::Block>,
+    },
     /// A request to retrieve the verified block previously persisted for `round`.
     GetVerified {
         /// The span carried with this request.
@@ -223,6 +232,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             | Self::GetFinalization { span, .. }
             | Self::GetVerified { span, .. }
             | Self::Acquire { span, .. }
+            | Self::AwaitFinalized { span, .. }
             | Self::Forward { span, .. }
             | Self::Proposed { span, .. }
             | Self::Prepared { span, .. }
@@ -249,6 +259,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::GetAnchor { .. } => "get_anchor",
             Self::Acquire { fetch: true, .. } => "acquire",
             Self::Acquire { fetch: false, .. } => "subscribe",
+            Self::AwaitFinalized { .. } => "await_finalized",
             Self::HintFinalized { .. } => "hint_finalized",
             Self::GetVerified { .. } => "get_verified",
             Self::Forward { .. } => "forward",
@@ -291,6 +302,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             | Self::GetProcessed { .. }
             | Self::GetAnchor { .. } => false,
             Self::Acquire { .. }
+            | Self::AwaitFinalized { .. }
             | Self::GetVerified { .. }
             | Self::Forward { .. }
             | Self::Prepared { .. }
@@ -311,7 +323,9 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::GetFinalization { response, .. } => response.is_closed(),
             Self::GetProcessed { response, .. } => response.is_closed(),
             Self::GetAnchor { response, .. } => response.is_closed(),
-            Self::Acquire { response, .. } => response.is_closed(),
+            Self::Acquire { response, .. } | Self::AwaitFinalized { response, .. } => {
+                response.is_closed()
+            }
             Self::HintFinalized { .. }
             | Self::Forward { .. }
             | Self::Proposed { .. }
@@ -558,14 +572,20 @@ impl<S: Scheme, V: Variant> Policy for Message<S, V> {
 pub struct Mailbox<S: Scheme, V: Variant> {
     sender: Sender<Message<S, V>>,
     max_pending_acks: usize,
+    pub(in crate::marshal) max_repair: NonZeroUsize,
 }
 
 impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Creates a new mailbox.
-    pub(crate) const fn new(sender: Sender<Message<S, V>>, max_pending_acks: NonZeroUsize) -> Self {
+    pub(crate) const fn new(
+        sender: Sender<Message<S, V>>,
+        max_pending_acks: NonZeroUsize,
+        max_repair: NonZeroUsize,
+    ) -> Self {
         Self {
             sender,
             max_pending_acks: max_pending_acks.get(),
+            max_repair,
         }
     }
 
@@ -714,6 +734,21 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
             span: info_span!("marshal.mailbox.subscribe", commitment = %commitment),
             commitment,
             fetch: false,
+            response,
+        });
+        receiver
+    }
+
+    /// Wait for the finalized block at `height` to become available locally.
+    ///
+    /// This does not initiate a network request. Drop the receiver to cancel the wait. The
+    /// receiver closes without delivery if marshal shuts down, if a floor update skips the
+    /// height, or if the height is at or below the processed height and not stored.
+    pub fn finalized(&self, height: Height) -> oneshot::Receiver<V::Block> {
+        let (response, receiver) = oneshot::channel();
+        let _ = self.sender.enqueue(Message::AwaitFinalized {
+            span: info_span!("marshal.mailbox.finalized", height = height.traced()),
+            height,
             response,
         });
         receiver
@@ -1131,7 +1166,8 @@ mod tests {
         runner.start(|context| async move {
             let (sender, receiver) =
                 commonware_actor::mailbox::new::<TestMessage>(context, NZUsize!(1));
-            let mailbox = Mailbox::<harness::S, Standard<harness::B>>::new(sender, NZUsize!(1));
+            let mailbox =
+                Mailbox::<harness::S, Standard<harness::B>>::new(sender, NZUsize!(1), NZUsize!(8));
             drop(receiver);
 
             let (ack, receiver) = oneshot::channel();
@@ -1588,5 +1624,53 @@ mod tests {
             Err(TryRecvError::Empty)
         ));
         assert!(matches!(last_receiver.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    /// Overflowed finalized-body waits survive a coalesced prune, including one below its height,
+    /// and drain after it unanswered, so the actor decides whether to answer or drop them. A wait
+    /// whose caller canceled is dropped.
+    #[test]
+    fn finalized_body_waits_preserve_actor_prune_decisions() {
+        // Queue waits at and below the prune height, one of them canceled.
+        let mut overflow = pending();
+        let (older_response, mut older_receiver) = oneshot::channel();
+        let (closed_response, closed_receiver) = oneshot::channel();
+        let (current_response, mut current_receiver) = oneshot::channel();
+        for (height, response) in [
+            (4, older_response),
+            (5, closed_response),
+            (5, current_response),
+        ] {
+            <TestMessage as Policy>::handle(
+                &mut overflow,
+                TestMessage::AwaitFinalized {
+                    span: Span::none(),
+                    height: Height::new(height),
+                    response,
+                },
+            );
+        }
+        drop(closed_receiver);
+        <TestMessage as Policy>::handle(&mut overflow, prune(5));
+
+        // Both open waits stay unanswered and drain after the prune. The canceled one is gone.
+        assert!(matches!(
+            older_receiver.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            current_receiver.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
+        let drained = drain(&mut overflow);
+        assert_eq!(drained.len(), 3);
+        assert!(matches!(
+            drained[1],
+            TestMessage::AwaitFinalized { height, .. } if height == Height::new(4)
+        ));
+        assert!(matches!(
+            drained[2],
+            TestMessage::AwaitFinalized { height, .. } if height == Height::new(5)
+        ));
     }
 }

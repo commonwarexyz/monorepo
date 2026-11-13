@@ -9,7 +9,7 @@ use super::{
     mailbox::{Mailbox, Message},
     staged::Staged,
     stream::Stream,
-    subscriptions::Subscriptions,
+    subscriptions::{Finalized as FinalizedSubscriptions, Subscriptions},
     variant::NoBuffer,
 };
 use crate::{
@@ -139,6 +139,9 @@ where
     tip: Height,
     // Outstanding subscriptions for blocks
     block_subscriptions: Subscriptions<V>,
+    // Local waiters for finalized blocks by height, served independently of application
+    // acknowledgements
+    finalized_subscriptions: FinalizedSubscriptions<V>,
     // Commitments known certified above the finalized tip
     certified: Certified<V::Commitment>,
     // Defers application dispatch of finalized-archive writes until a sync
@@ -283,6 +286,7 @@ where
                 pending_acks: PendingAcks::new(config.max_pending_acks.get()),
                 tip: Height::zero(),
                 block_subscriptions: Subscriptions::new(),
+                finalized_subscriptions: FinalizedSubscriptions::new(),
                 certified: Certified::new(),
                 dispatch_gate: DispatchGate::default(),
                 staged: Staged::new(config.max_pending_acks.get().saturating_mul(2)),
@@ -292,7 +296,7 @@ where
                 finalized_height,
                 processed_height,
             },
-            Mailbox::new(sender, config.max_pending_acks),
+            Mailbox::new(sender, config.max_pending_acks, config.max_repair),
             floor,
         )
     }
@@ -467,6 +471,7 @@ where
                 // Remove any dropped subscribers. If all subscribers dropped, abort the waiter.
                 let released = self.block_subscriptions.retain_open();
                 Self::cancel_subscription_requests(&mut resolver, released);
+                self.finalized_subscriptions.retain_open();
             },
             on_stopped => {
                 debug!("context shutdown, stopping marshal");
@@ -903,6 +908,20 @@ where
                 };
                 response.send_lossy(anchor);
             }
+            Message::AwaitFinalized {
+                span,
+                height,
+                response,
+            } => {
+                // A stored finalized block answers at once. A missing height above the processed
+                // height waits for finalization. A missing height at or below it is not awaited,
+                // so its response closes.
+                if let Some(stored) = self.get_finalized_block(height).await {
+                    response.send_lossy(V::restore_across(stored, &self.strategy).await);
+                } else if height > self.floor.processed_height() {
+                    self.finalized_subscriptions.insert(span, height, response);
+                }
+            }
             Message::HintFinalized {
                 height, targets, ..
             } => {
@@ -1321,7 +1340,7 @@ where
 
         let digest = block.digest();
         let round = finalization.round();
-        let stored: V::StoredBlock = block.into();
+        let stored: V::StoredBlock = block.clone().into();
         (self.finalized_blocks, self.finalizations_by_height) = try_join!(
             self.finalized_blocks
                 .put(digest, &stored)
@@ -1332,6 +1351,7 @@ where
         )
         .expect("failed to store floor anchor");
         self = self.sync_finalized().await;
+        self.finalized_subscriptions.notify(&block);
         self.advance_tip(round, height, digest, application);
 
         // The anchor is durable, but the application still needs to process it.
@@ -1364,6 +1384,10 @@ where
 
         // Keep the processed block so the application can restart from it.
         self = self.prune_after_floor(dispatch_floor).await;
+
+        // Heights below the anchor are skipped and may never be stored, so their waiters are
+        // dropped.
+        self.finalized_subscriptions.prune(height);
 
         // Resume gap repair and dispatch above the new floor.
         let repaired;
@@ -1996,6 +2020,7 @@ where
         if fetching {
             Self::cancel_subscription_requests(resolver, vec![commitment]);
         }
+        self.finalized_subscriptions.notify(block);
 
         // The write above is buffered and readable before it is durable, so
         // hold dispatch at or above it until a sync covers it.

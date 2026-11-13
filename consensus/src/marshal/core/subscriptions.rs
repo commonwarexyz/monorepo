@@ -1,4 +1,5 @@
 use super::{Buffer, Variant};
+use crate::{Heightable, types::Height};
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     futures::{AbortablePool, Aborter},
@@ -126,6 +127,56 @@ impl<V: Variant> Subscriptions<V> {
         } else {
             subscription.waiting.push(subscriber);
         }
+    }
+}
+
+/// Local waiters for canonical block bodies at finalized heights.
+pub(super) struct Finalized<V: Variant> {
+    entries: BTreeMap<Height, Vec<Subscriber<V>>>,
+}
+
+impl<V: Variant> Finalized<V> {
+    pub(super) const fn new() -> Self {
+        Self {
+            entries: BTreeMap::new(),
+        }
+    }
+
+    /// Registers a caller for the finalized block at `height`.
+    pub(super) fn insert(
+        &mut self,
+        span: Span,
+        height: Height,
+        response: oneshot::Sender<V::Block>,
+    ) {
+        self.entries.entry(height).or_default().push(Subscriber {
+            span,
+            sender: response,
+        });
+    }
+
+    /// Delivers a body whose canonical finalization has been established by the actor.
+    pub(super) fn notify(&mut self, block: &V::Block) -> bool {
+        let Some(subscribers) = self.entries.remove(&block.height()) else {
+            return false;
+        };
+        for subscriber in subscribers {
+            deliver(subscriber, block);
+        }
+        true
+    }
+
+    /// Drops waiters below `min`, closing their receivers.
+    pub(super) fn prune(&mut self, min: Height) {
+        self.entries = self.entries.split_off(&min);
+    }
+
+    /// Removes canceled callers.
+    pub(super) fn retain_open(&mut self) {
+        self.entries.retain(|_, subscribers| {
+            subscribers.retain(|subscriber| !subscriber.sender.is_closed());
+            !subscribers.is_empty()
+        });
     }
 }
 
@@ -278,6 +329,62 @@ mod tests {
         assert!(subscriptions.notify(&block));
         assert_receives(first_receiver, &block);
         assert_receives(second_receiver, &block);
+        assert!(subscriptions.entries.is_empty());
+    }
+
+    /// Pruning closes finalized waiters below the prune height and keeps those at it. One delivery
+    /// answers every waiter at the block's height and removes them.
+    #[test]
+    fn finalized_waiters_share_delivery_and_close_below_prune() {
+        // Two waiters at the block's height and one below it.
+        let mut subscriptions = Finalized::<TestVariant>::new();
+        let block = block(5, 50);
+        let (stale_sender, mut stale_receiver) = oneshot::channel();
+        let (first_sender, first_receiver) = oneshot::channel();
+        let (second_sender, second_receiver) = oneshot::channel();
+        subscriptions.insert(Span::none(), Height::new(4), stale_sender);
+        subscriptions.insert(Span::none(), block.height(), first_sender);
+        subscriptions.insert(Span::none(), block.height(), second_sender);
+
+        // Pruning to the block's height closes only the waiter below it.
+        subscriptions.prune(block.height());
+        assert!(matches!(
+            stale_receiver.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        ));
+
+        // One notification answers both remaining waiters and leaves nothing to notify.
+        assert!(subscriptions.notify(&block));
+        assert_receives(first_receiver, &block);
+        assert_receives(second_receiver, &block);
+        assert!(!subscriptions.notify(&block));
+    }
+
+    /// Cleanup removes a canceled finalized waiter and keeps an open one at the same height for its
+    /// delivery. A height whose only waiter cancels loses its entry, though no block arrives there.
+    #[test]
+    fn finalized_retain_open_drops_canceled_waiters() {
+        // Two waiters register at one height, and one cancels.
+        let mut subscriptions = Finalized::<TestVariant>::new();
+        let block = block(5, 50);
+        let (canceled, canceled_receiver) = oneshot::channel();
+        let (open, open_receiver) = oneshot::channel();
+        subscriptions.insert(Span::none(), block.height(), canceled);
+        subscriptions.insert(Span::none(), block.height(), open);
+        drop(canceled_receiver);
+
+        // Cleanup keeps the open waiter, and the delivery answers it.
+        subscriptions.retain_open();
+        assert!(subscriptions.notify(&block));
+        assert_receives(open_receiver, &block);
+
+        // A registered waiter cancels.
+        let (response, receiver) = oneshot::channel();
+        subscriptions.insert(Span::none(), block.height(), response);
+        drop(receiver);
+
+        // Cleanup removes the waiter and leaves no entry for its height.
+        subscriptions.retain_open();
         assert!(subscriptions.entries.is_empty());
     }
 
