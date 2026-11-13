@@ -1,10 +1,10 @@
 //! Worker execution and runner-wide lifecycle.
 //!
 //! A [pool](super::pool) of workers polls ordinary tasks, worker zero on the
-//! calling thread and the others on threads of their own. Dedicated and
-//! blocking tasks each get a separate thread and io_uring ring. All workers
-//! share configuration and services through [`Shared`], while execution state
-//! stays in each worker's [`Local`].
+//! calling thread and the others on threads of their own. Each runtime thread
+//! and each blocking task gets a dedicated worker, with a separate thread and
+//! io_uring ring. All workers share configuration and services through
+//! [`Shared`], while execution state stays in each worker's [`Local`].
 //!
 //! ## State and ownership
 //!
@@ -44,9 +44,10 @@
 //! reenter [`Local`] and append another batch.
 //!
 //! The root is pinned separately and passed to [`Worker::drive`]. On a
-//! dedicated worker, the dedicated or blocking task it was started for runs as
-//! its root. Pool workers after worker zero run a root that ends when worker
-//! zero stops the pool.
+//! dedicated worker, the blocking task it was started for runs as its root, or
+//! a runtime thread's [`ThreadRoot`](thread::ThreadRoot), which polls the
+//! thread's residents. Pool workers after worker zero run a root that ends when
+//! worker zero stops the pool.
 //!
 //! ## Task placement
 //!
@@ -77,7 +78,7 @@
 //!                                                                     +-- first: poll
 //!                                                                     `-- rest: run queue
 //!
-//! dedicated / blocking spawn:
+//! blocking spawn:
 //!   Workers::reserve --> factory --> new thread
 //!                                      |
 //!                                      v
@@ -85,10 +86,19 @@
 //!                                      |
 //!                                      v
 //!                               drop ActiveWorker
+//!
+//! runtime thread:
+//!   Workers::reserve --> register at the node --> new thread
+//!                                                    |
+//!                                                    v
+//!                                     Worker::run with a ThreadRoot
+//!                                                    |
+//!                                                    v
+//!                                publish failures, drop ActiveWorker
 //! ```
 //!
 //! [`ActiveWorker`] keeps the launch counted from before factory construction
-//! until worker cleanup and failure reporting finish. It retains only the
+//! (or thread registration) until worker cleanup and failure reporting finish. It retains only the
 //! [`Workers`] barrier, allowing that worker's [`Shared`] owners to be released first.
 //!
 //! I/O and sleeps register directly with the worker that first polls them. When
@@ -147,7 +157,10 @@
 //!                                  collect a pool worker failure the root missed
 //!                                                    |
 //!                                                    v
-//!                                  wait for dedicated workers to finish
+//!                        wait for thread and blocking workers to finish
+//!                                                    |
+//!                                                    v
+//!                                  collect a runtime thread failure
 //!                                                    |
 //!                                                    v
 //!                                        return result or resume panic
@@ -282,8 +295,8 @@ impl Default for RingConfig {
 /// Configuration for the native io_uring runtime.
 ///
 /// A pool of [`Self::with_worker_threads`] workers polls ordinary tasks, the
-/// first on the thread calling [`crate::Runner::start`]. Tasks marked dedicated
-/// or blocking each receive a fresh thread and io_uring ring. Shutdown
+/// first on the thread calling [`crate::Runner::start`]. Each runtime thread
+/// and each blocking task receives a fresh thread and io_uring ring. Shutdown
 /// completes retained writes and syncs without a configured time limit.
 #[derive(Clone)]
 pub struct Config {
@@ -296,9 +309,9 @@ pub struct Config {
     ring_config: RingConfig,
     /// Idle spinning policy, shared by all workers.
     idle_spinner: SpinnerConfig,
-    /// Stack size for pool, dedicated worker, and Rayon threads.
+    /// Stack size for pool, runtime, blocking worker, and Rayon threads.
     thread_stack_size: usize,
-    /// Whether spawned-task panics and dedicated worker failures are caught.
+    /// Whether spawned-task panics and runtime thread and blocking worker failures are caught.
     /// Task-disposal panics during worker execution are contained with either setting.
     catch_panics: bool,
     /// Base directory held while storage resources or requests remain alive.
@@ -347,7 +360,7 @@ impl Config {
     /// to 2.
     ///
     /// Must be between 1 and 64. Each worker has its own io_uring ring.
-    /// Dedicated and blocking threads are additional to this count.
+    /// Runtime threads and blocking workers are additional to this count.
     pub const fn with_worker_threads(mut self, workers: usize) -> Self {
         self.worker_threads = workers;
         self
@@ -762,16 +775,21 @@ impl Shared {
 
 /// Runtime capabilities and supervision context for the current task.
 ///
-/// Ordinary children run on the pool, including those spawned by dedicated and
-/// blocking tasks. Task factories run on their caller, while ordinary futures
-/// run on the pool and can move between its workers, as can resources and
-/// pending I/O and sleep futures.
+/// Ordinary children run where their context is placed: on the pool, including
+/// those spawned by blocking tasks, or on a runtime thread, whose residents all
+/// poll on that thread's worker and share its io_uring ring and in-flight limit.
+/// Task factories of ordinary spawns run on their caller, while ordinary futures
+/// on the pool can move between its workers, as can resources and pending I/O
+/// and sleep futures. A runtime thread has no cooperative budget, so a resident
+/// whose channels never return `Pending` can starve the thread's other
+/// residents.
 ///
 /// Registrations stay on their original worker. Closing that worker causes
 /// unresolved I/O futures to fail and unresolved sleeps to panic when polled.
 /// Pool workers close only at shutdown, after every pool task has been dropped,
-/// while dedicated and blocking tasks may still run. Detached sync completion
-/// handles can be awaited on any thread.
+/// while runtime threads and blocking tasks may still run. A runtime thread's
+/// worker closes with the thread, so create thread-bound I/O inside its tasks.
+/// Detached sync completion handles can be awaited on any thread.
 pub struct Context {
     /// User-facing task and metric namespace.
     name: String,
@@ -906,9 +924,9 @@ impl crate::Spawner for Context {
             return handle;
         }
 
-        // Dedicated and blocking spawns reserve a dedicated worker before the
-        // factory runs, so shutdown waits for them. Ordinary spawns only check
-        // that the task set still accepts tasks.
+        // Blocking spawns reserve a dedicated worker before the factory runs,
+        // so shutdown waits for them. Ordinary spawns only check that the task
+        // set still accepts tasks.
         let reservation = if blocking {
             let Some(reservation) = shared.workers.reserve() else {
                 return Handle::closed(metric);
@@ -936,8 +954,8 @@ impl crate::Spawner for Context {
             parent.clone(),
         );
 
-        // A dedicated worker polls the future as its root. An ordinary spawn
-        // becomes a task of the pool.
+        // A blocking spawn's dedicated worker polls the future as its root. An
+        // ordinary spawn becomes a task of the pool.
         if let Some(reservation) = reservation {
             shared.launch(Box::pin(future), reservation);
         } else if let Err(task) = shared.tasks.register(future, Arc::downgrade(&shared.pool)) {
@@ -1157,7 +1175,8 @@ pub enum Role {
     /// the thread calling [`crate::Runner::start`] and shuts the runner down.
     Pool(u32),
     /// A worker with a thread and io_uring ring of its own, started for one
-    /// dedicated or blocking task that it polls as its root.
+    /// blocking task that it polls as its root, or for a runtime thread whose
+    /// residents its root polls.
     Dedicated,
 }
 
@@ -2375,8 +2394,8 @@ impl Drop for Worker {
     }
 }
 
-/// Run a dedicated or blocking task as its worker's root, containing poll and
-/// disposal panics.
+/// Run a blocking task as its worker's root, containing poll and disposal
+/// panics.
 struct TaskRoot {
     /// Task retained until the root is destroyed.
     task: Option<BoxedTask>,
@@ -2403,10 +2422,10 @@ impl Drop for TaskRoot {
 ///
 /// The root future doesn't have to be Send and always runs on the calling
 /// thread. Ordinary spawned futures run on whichever pool worker takes them,
-/// and dedicated and blocking ones on threads of their own. The runner waits
-/// for every pool worker, dedicated worker cleanup, and retained writes and
-/// syncs before returning or resuming a panic. Native thread-local destruction
-/// may follow.
+/// blocking ones on threads of their own, and those placed on a runtime thread
+/// on that thread. The runner waits for every pool worker, runtime thread and
+/// blocking worker cleanup, and retained writes and syncs before returning or
+/// resuming a panic. Native thread-local destruction may follow.
 pub struct Runner {
     /// Settings validated before any runtime resources are created.
     cfg: Config,
