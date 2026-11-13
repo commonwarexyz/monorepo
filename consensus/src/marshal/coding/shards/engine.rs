@@ -471,17 +471,6 @@ where
 /// root and configuration.
 type CommitmentRecords<B, C, H, P> = BTreeMap<Commitment<B, C, H>, CommitmentRecord<B, C, H, P>>;
 
-/// The current lifecycle status of a commitment.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CommitmentStatus {
-    /// No record exists for the commitment.
-    Absent,
-    /// The commitment is accumulating or validating shards.
-    Reconstructing,
-    /// The commitment has an available block.
-    Cached,
-}
-
 impl<B, C, H, P> CommitmentRecord<B, C, H, P>
 where
     B: Block,
@@ -1050,10 +1039,15 @@ where
         commitment: Commitment<B, C, H>,
         round: Round,
     ) {
-        let Some(status) = self.observe_existing_commitment(commitment, round) else {
-            return;
-        };
-        if status != CommitmentStatus::Absent {
+        if let Some(record) = self.records.get_mut(&commitment) {
+            if let Err(existing_epoch) = record.observe(round) {
+                warn!(
+                    %commitment,
+                    %existing_epoch,
+                    observed_epoch = %round.epoch(),
+                    "commitment observation has conflicting epoch, ignoring"
+                );
+            }
             return;
         }
         let Some(scheme) = self.scheme_provider.scheme(round.epoch()) else {
@@ -1140,35 +1134,6 @@ where
         progressed
     }
 
-    /// Records a consensus observation on an existing commitment owner.
-    ///
-    /// Returns the record's phase, [`CommitmentStatus::Absent`] if it has no
-    /// owner yet, or `None` when its owner is bound to a different epoch.
-    fn observe_existing_commitment(
-        &mut self,
-        commitment: Commitment<B, C, H>,
-        round: Round,
-    ) -> Option<CommitmentStatus> {
-        let observed_epoch = round.epoch();
-        let Some(record) = self.records.get_mut(&commitment) else {
-            return Some(CommitmentStatus::Absent);
-        };
-        if let Err(existing_epoch) = record.observe(round) {
-            warn!(
-                %commitment,
-                %existing_epoch,
-                %observed_epoch,
-                "commitment observation has conflicting epoch, ignoring"
-            );
-            return None;
-        }
-        Some(if record.block().is_some() {
-            CommitmentStatus::Cached
-        } else {
-            CommitmentStatus::Reconstructing
-        })
-    }
-
     /// Creates the first lifecycle record for a reconstructing commitment.
     fn insert_reconstruction_record(
         &mut self,
@@ -1177,7 +1142,7 @@ where
         reconstruction: ReconstructionState<P, B, C, H>,
     ) {
         let Entry::Vacant(entry) = self.records.entry(commitment) else {
-            unreachable!("commitment status was checked as absent");
+            unreachable!("the commitment must have no record");
         };
         entry.insert(CommitmentRecord::reconstructing(round, reconstruction));
         self.metrics.reconstruction_states_count.inc();
