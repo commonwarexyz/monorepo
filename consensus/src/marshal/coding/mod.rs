@@ -100,7 +100,9 @@ mod tests {
                     setup_network_links, setup_network_with_participants,
                 },
                 store::{Op, Recording},
-                verifying::{GatedVerifyingApp, MockVerifyingApp},
+                verifying::{
+                    GatedVerifyingApp, MockVerifyingApp, RecordingVerifyingApp, Verification,
+                },
             },
             resolver::handler,
         },
@@ -6209,6 +6211,210 @@ mod tests {
                     panic!("certifying a re-proposed boundary block must not run app verification");
                 },
             }
+        });
+    }
+
+    /// A leader that equivocates sends this validator the commitment of block A while the rest
+    /// of the network notarizes block B of the same round. Certifying B claims the round, so
+    /// the application must not start verifying A once A is reconstructed.
+    #[test_traced("WARN")]
+    fn test_certify_releases_conflicting_verification() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            // Create the validator set and start the simulated network.
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+                1024 * 1024,
+            )
+            .await;
+
+            // Start the marshal and the shard engine of this validator, participant 0.
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+            let setup = CodingHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                participants[0].clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let shards = setup.extra;
+
+            // Build the genesis block that the parent extends.
+            let genesis_ctx = CodingCtx {
+                round: Round::zero(),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let genesis = make_coding_block(genesis_ctx, Sha256::hash(&[b""]), Height::zero(), 0);
+            let genesis_parent_commitment = genesis_coding_commitment(&genesis);
+
+            // The parent at view 1 is available locally.
+            let parent_round = Round::new(Epoch::zero(), View::new(1));
+            let parent_ctx = CodingCtx {
+                round: parent_round,
+                leader: default_leader(),
+                parent: (View::zero(), genesis_parent_commitment),
+            };
+            let parent = make_coding_block(parent_ctx, genesis.digest(), Height::new(1), 100);
+            let coded_parent: TestCodedBlock = encode_block(parent.clone(), coding_config);
+            let parent_commitment = coded_parent.commitment();
+            assert!(marshal.verified(parent_round, coded_parent).await);
+
+            // Participant 1 equivocates at view 2. It proposes two different children of the
+            // parent, A and B, with the same context. Their commitments differ.
+            let round = Round::new(Epoch::zero(), View::new(2));
+            let ctx = CodingCtx {
+                round,
+                leader: participants[1].clone(),
+                parent: (View::new(1), parent_commitment),
+            };
+            let a = make_coding_block(ctx.clone(), parent.digest(), Height::new(2), 200);
+            let b = make_coding_block(ctx.clone(), parent.digest(), Height::new(2), 201);
+            let b_digest = b.digest();
+            let coded_a: TestCodedBlock = encode_block(a, coding_config);
+            let coded_b: TestCodedBlock = encode_block(b, coding_config);
+            let (a_commitment, b_commitment) = (coded_a.commitment(), coded_b.commitment());
+            assert_ne!(a_commitment, b_commitment);
+
+            // Wrap an application that records each verification it is asked to start and
+            // never resolves it, so a started verification stays observable.
+            let application: RecordingVerifyingApp<CodingB, S> = RecordingVerifyingApp::new();
+            let cfg = MarshaledConfig {
+                application: application.clone(),
+                marshal: marshal.clone(),
+                shards: shards.clone(),
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+
+            // The leader withholds the shards of A. Consensus asks to verify it.
+            let verify_a = marshaled.verify(ctx, a_commitment).await;
+            context.sleep(Duration::from_millis(10)).await;
+            assert!(application.observed().is_empty());
+
+            // B is reconstructed and notarized, so consensus asks to certify it.
+            assert!(marshal.verified(round, coded_b).await);
+            let certify_b = marshaled.certify(round, b_commitment).await;
+            context.sleep(Duration::from_millis(50)).await;
+            assert_eq!(
+                application.observed(),
+                vec![Verification::Started(b_digest)]
+            );
+
+            // A is reconstructed.
+            assert!(marshal.verified(round, coded_a).await);
+            context.sleep(Duration::from_millis(100)).await;
+            assert_eq!(
+                application.observed(),
+                vec![Verification::Started(b_digest)],
+                "the application must not verify a block that conflicts with the certified one"
+            );
+
+            // The test keeps both receivers until here, so the wrapper never sees consensus drop
+            // a request.
+            drop((verify_a, certify_b));
+        });
+    }
+
+    /// A leader that equivocates re-proposes the epoch boundary block to this validator while
+    /// the rest of the network notarizes block B of the same round. Certifying B claims the
+    /// round, so the re-proposal must stop waiting for the boundary block.
+    #[test_traced("WARN")]
+    fn test_certify_releases_conflicting_reproposal() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            // Create the validator set and start the simulated network.
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+                1024 * 1024,
+            )
+            .await;
+
+            // Start the marshal of this validator, participant 0.
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+            let setup = CodingHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                participants[0].clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+
+            // Wrap an application whose verification passes.
+            let application: MockVerifyingApp<CodingB, S> = MockVerifyingApp::new();
+            let cfg = MarshaledConfig {
+                application,
+                marshal: setup.mailbox,
+                shards: setup.extra,
+                scheme_provider: ConstantProvider::new(schemes[0].clone()),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+
+            // The epoch boundary block, which this validator does not hold.
+            let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);
+            let boundary_view = View::new(boundary_height.get());
+            let boundary_ctx = CodingCtx {
+                round: Round::new(Epoch::zero(), boundary_view),
+                leader: default_leader(),
+                parent: (View::zero(), genesis_commitment()),
+            };
+            let boundary = make_coding_block(
+                boundary_ctx,
+                Sha256::hash(&[b"parent"]),
+                boundary_height,
+                100,
+            );
+            let boundary_digest = boundary.digest();
+            let coded_boundary: TestCodedBlock = encode_block(boundary, coding_config);
+            let boundary_commitment = coded_boundary.commitment();
+
+            // The round after the boundary block's view, led by participant 1 with the boundary
+            // block as parent. B builds on the boundary block at the next height, and is the
+            // block the rest of the network notarizes in this round.
+            let round = Round::new(Epoch::zero(), boundary_view.next());
+            let ctx = CodingCtx {
+                round,
+                leader: participants[1].clone(),
+                parent: (boundary_view, boundary_commitment),
+            };
+            let b = make_coding_block(ctx.clone(), boundary_digest, boundary_height.next(), 200);
+            let coded_b: TestCodedBlock = encode_block(b, coding_config);
+            let b_commitment = coded_b.commitment();
+            assert_ne!(boundary_commitment, b_commitment);
+
+            // Consensus asks to verify the re-proposal, which waits for the boundary block.
+            let mut verify = marshaled.verify(ctx, boundary_commitment).await;
+            context.sleep(Duration::from_millis(10)).await;
+            assert_eq!(verify.try_recv(), Err(TryRecvError::Empty));
+
+            // B is notarized, so consensus asks to certify it.
+            let certify_b = marshaled.certify(round, b_commitment).await;
+            context.sleep(Duration::from_millis(10)).await;
+            assert_eq!(
+                verify.try_recv(),
+                Err(TryRecvError::Closed),
+                "the wait for a block that lost its round must end"
+            );
+            drop(certify_b);
         });
     }
 }
