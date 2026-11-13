@@ -100,15 +100,21 @@ macro_rules! impl_group {
             /// Returns the sum of the points times their scalars, in variable time.
             ///
             /// The scalars must be public, as Lagrange coefficients and batch-verification weights
-            /// are: the running time and memory accesses depend on them. A parallel strategy may
-            /// split the points into batches of at least 256, so fewer than 512 points always run
-            /// on the calling thread.
+            /// are: the running time and memory accesses depend on them. The strategy may split
+            /// the points into batches and run them on several threads.
             fn msm(
                 points: &[Self],
                 scalars: &[$crate::group::Scalar],
                 strategy: &impl ::commonware_parallel::Strategy,
             ) -> Self {
-                $crate::group::msm::batched(points, scalars, strategy)
+                $crate::group::kernel::Batch::dispatch_batches(
+                    $crate::group::msm::Msm {
+                        elements: points,
+                        scalars,
+                        method: None,
+                    },
+                    strategy,
+                )
             }
         }
 
@@ -128,9 +134,13 @@ macro_rules! impl_group {
 
             /// Returns the sum of the elements, as when aggregating keys or signatures.
             ///
-            /// Costs less per element than adding the elements one at a time with `+`.
-            pub fn sum(elements: &[Self]) -> Self {
-                $crate::group::kernel::Kernel::dispatch($crate::group::kernel::Sum(elements))
+            /// Costs less per element than adding the elements one at a time with `+`. The
+            /// strategy may split the elements into batches and run them on several threads.
+            pub fn sum(elements: &[Self], strategy: &impl ::commonware_parallel::Strategy) -> Self {
+                $crate::group::kernel::Batch::dispatch_batches(
+                    $crate::group::kernel::Sum(elements),
+                    strategy,
+                )
             }
 
             /// Multiplies each element by the scalar at the same index, in place, in time
@@ -138,12 +148,17 @@ macro_rules! impl_group {
             ///
             /// Elements beyond the scalars are unchanged, and scalars beyond the elements are
             /// ignored. Costs less per element than multiplying the elements one at a time with
-            /// `*`.
-            pub fn mul_each(elements: &mut [Self], scalars: &[$crate::group::Scalar]) {
-                $crate::group::kernel::Kernel::dispatch($crate::group::kernel::MultiplyEach {
-                    elements,
-                    scalars,
-                });
+            /// `*`. The strategy may split the elements into batches and run them on several
+            /// threads.
+            pub fn mul_each(
+                elements: &mut [Self],
+                scalars: &[$crate::group::Scalar],
+                strategy: &impl ::commonware_parallel::Strategy,
+            ) {
+                $crate::group::kernel::Batch::dispatch_batches(
+                    $crate::group::kernel::MultiplyEach { elements, scalars },
+                    strategy,
+                );
             }
         }
 
@@ -176,12 +191,16 @@ macro_rules! impl_group {
                     &MULTIPLES
                 }
 
-                fn sum(elements: &[Self]) -> Self {
-                    Self::sum(elements)
+                fn sum(elements: &[Self], strategy: &impl ::commonware_parallel::Strategy) -> Self {
+                    Self::sum(elements, strategy)
                 }
 
-                fn mul_each(elements: &mut [Self], scalars: &[Scalar]) {
-                    Self::mul_each(elements, scalars);
+                fn mul_each(
+                    elements: &mut [Self],
+                    scalars: &[Scalar],
+                    strategy: &impl ::commonware_parallel::Strategy,
+                ) {
+                    Self::mul_each(elements, scalars, strategy);
                 }
             }
         }
@@ -222,8 +241,8 @@ fn fmt_coordinates<const N: usize>(
 pub mod fuzz {
     use super::{
         Scalar,
-        kernel::{Add, Double, Group, Kernel, Multiply, MultiplyEach, Sum},
-        msm::{self, MSM_BATCH, Msm},
+        kernel::{Add, Batch, Double, Group, Kernel, Multiply, MultiplyEach, Sum},
+        msm::{self, Msm, PIPPENGER_CHUNK},
     };
     #[cfg(feature = "fuzz")]
     pub use super::{pairing::fuzz as pairing, scalar::fuzz as scalar};
@@ -238,7 +257,7 @@ pub mod fuzz {
     use arbitrary::{Arbitrary, Unstructured};
     use commonware_math::algebra::{CryptoGroup, test_suites};
     use commonware_parallel::{
-        Sequential,
+        Strategy,
         mocks::{Explorer, pooled},
     };
     use commonware_simd::Simd;
@@ -266,10 +285,20 @@ pub mod fuzz {
         fn multiples() -> &'static [Self];
 
         /// Returns the sum of the elements.
-        fn sum(elements: &[Self]) -> Self;
+        fn sum(elements: &[Self], strategy: &impl Strategy) -> Self;
 
         /// Multiplies each element by the scalar at the same index.
-        fn mul_each(elements: &mut [Self], scalars: &[Scalar]);
+        fn mul_each(elements: &mut [Self], scalars: &[Scalar], strategy: &impl Strategy);
+    }
+
+    /// Draws a strategy that runs each operation whole or in batches, on the calling thread or
+    /// on a pool of two workers.
+    // The strategy owns its pool, which stops with it: CI runs the plans under Intel SDE, where
+    // a pool that outlives its test can keep the process from exiting.
+    pub fn strategy(u: &mut Unstructured<'_>) -> arbitrary::Result<Explorer> {
+        const WORKERS: NonZeroUsize = NonZeroUsize::new(2).unwrap();
+        const TASKS: NonZeroUsize = NonZeroUsize::new(3).unwrap();
+        Ok(Explorer::seeded(&pooled(WORKERS, TASKS), u.arbitrary()?))
     }
 
     /// Returns the multiples of the generator by zero through [`MULTIPLES`], one addition at a
@@ -458,10 +487,12 @@ pub mod fuzz {
         /// logarithms do, for scalars and for integers of any length.
         Multiples,
         /// Checks a multi-scalar multiplication by each method against the discrete logarithms
-        /// of its elements, around the lane counts and the crossover between methods.
+        /// of its elements, around the lane counts and the crossover between methods, whole or
+        /// in batches.
         Msm,
-        /// Checks a multi-scalar multiplication split into batches by a parallel strategy.
-        Batches,
+        /// Checks a multi-scalar multiplication of more elements than Pippenger's method holds
+        /// the images of at once, whole or in batches.
+        Chunks,
         /// Checks the sum of a slice against the discrete logarithms of its elements.
         Sum,
         /// Checks multiplying a slice against one multiplication at a time.
@@ -524,32 +555,27 @@ pub mod fuzz {
                     };
                     let (elements, logarithms) = elements::<G>(u, count + extra_elements)?;
                     let scalars = scalars(u, count + extra_scalars)?;
+                    let strategy = strategy(u)?;
                     let actual = match method {
-                        None => G::msm(&elements, &scalars, &Sequential),
+                        None => G::msm(&elements, &scalars, &strategy),
                         method => Msm {
                             elements: &elements[..count],
                             scalars: &scalars[..count],
                             method,
                         }
-                        .dispatch(),
+                        .dispatch_batches(&strategy),
                     };
                     let expected = generator * &dot(&logarithms[..count], &scalars[..count]);
                     assert_eq!(actual, expected, "{method:?} for {count} elements");
                 }
-                Self::Batches => {
-                    const WORKERS: NonZeroUsize = NonZeroUsize::new(2).unwrap();
-                    const TASKS: NonZeroUsize = NonZeroUsize::new(3).unwrap();
-                    let strategy = pooled(WORKERS, TASKS);
-                    let strategy = match u.int_in_range(0u8..=1)? {
-                        0 => Explorer::parallel(&strategy),
-                        _ => Explorer::seeded(&strategy, u.arbitrary()?),
-                    };
-                    // Enough elements for two batches, and a remainder.
-                    let count = 2 * MSM_BATCH.get() + u.int_in_range(0..=5)?;
+                Self::Chunks => {
+                    // Two chunks and a remainder: the whole crosses a chunk, and so does each of
+                    // two batches.
+                    let count = 2 * PIPPENGER_CHUNK.get() + u.int_in_range(1..=5)?;
                     let (elements, logarithms) = elements::<G>(u, count)?;
                     let scalars = scalars(u, count)?;
                     assert_eq!(
-                        G::msm(&elements, &scalars, &strategy),
+                        G::msm(&elements, &scalars, &strategy(u)?),
                         generator * &dot(&logarithms, &scalars)
                     );
                 }
@@ -559,7 +585,7 @@ pub mod fuzz {
                     let logarithm = logarithms
                         .iter()
                         .fold(Scalar::ZERO, |sum, logarithm| sum + logarithm);
-                    assert_eq!(G::sum(&elements), generator * &logarithm);
+                    assert_eq!(G::sum(&elements, &strategy(u)?), generator * &logarithm);
                 }
                 Self::MulEach => {
                     // Elements beyond the scalars are unchanged, and scalars beyond the elements
@@ -569,7 +595,7 @@ pub mod fuzz {
                     let (elements, _) = elements::<G>(u, elements_count)?;
                     let scalars = scalars(u, scalars_count)?;
                     let mut products = elements.clone();
-                    G::mul_each(&mut products, &scalars);
+                    G::mul_each(&mut products, &scalars, &strategy(u)?);
                     for (i, (product, element)) in products.iter().zip(&elements).enumerate() {
                         let expected = scalars.get(i).map_or(*element, |scalar| *element * scalar);
                         assert_eq!(*product, expected, "element {i}");
@@ -668,12 +694,12 @@ pub mod fuzz {
         }
 
         #[test]
-        fn minifuzz_batches() {
+        fn minifuzz_chunks() {
             minifuzz::Builder::default()
                 .with_min_iterations(1)
                 .test(|u| {
-                    Plan::Batches.run::<G1>(u)?;
-                    Plan::Batches.run::<G2>(u)
+                    Plan::Chunks.run::<G1>(u)?;
+                    Plan::Chunks.run::<G2>(u)
                 });
         }
 

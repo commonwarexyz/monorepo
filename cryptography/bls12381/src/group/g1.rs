@@ -2,7 +2,8 @@
 
 use super::{
     Scalar,
-    kernel::{Group, MAX_COMPONENTS},
+    kernel::{Group, Kernel, MAX_COMPONENTS, MultiplyEach, Sum},
+    msm::Msm,
 };
 use crate::core::{
     curve::g1::{Coordinates, GENERATOR, IDENTITY, Point},
@@ -27,6 +28,8 @@ impl Group for G1 {
 
     const IDENTITY: Coordinates = IDENTITY;
 
+    const WORK: usize = 1;
+
     // Up to these counts, residues, which hold one element at a time, finish sooner than Unsat49:
     // a pass of Unsat49 costs the same however many of its lanes hold elements, and its sum ends
     // with additions across the lanes.
@@ -41,6 +44,22 @@ impl Group for G1 {
     fn components(scalar: &Scalar) -> [[u64; 2]; MAX_COMPONENTS] {
         let [a, b] = scalar.split();
         [a, b, [0; 2], [0; 2]]
+    }
+
+    // The three functions below have no type parameters, so the kernels compile once, in this
+    // crate, and not for every strategy and crate that reaches them through
+    // Batch::dispatch_batches.
+
+    fn dispatch_sum(kernel: Sum<'_, Self>) -> Self {
+        kernel.dispatch()
+    }
+
+    fn dispatch_multiply_each(kernel: MultiplyEach<'_, Self>) {
+        kernel.dispatch();
+    }
+
+    fn dispatch_msm(kernel: Msm<'_, Self>) -> Self {
+        kernel.dispatch()
     }
 
     fn coordinates(&self) -> &Coordinates {

@@ -21,7 +21,9 @@ Operations over slices cost less per element than the same operation repeated on
 
 - [`G1::sum`] and [`G2::sum`] add many elements, as when aggregating keys or signatures.
 - [`G1::mul_each`] and [`G2::mul_each`] multiply each element by its own scalar.
-- [`Space::msm`] returns the sum of the elements times their scalars, as in threshold recovery or batch verification. Its strategy decides whether it runs on the calling thread ([`Sequential`]) or splits the work into batches of at least 256 elements that run in parallel (`Rayon`, with the `std` feature of [commonware-parallel](https://docs.rs/commonware-parallel)).
+- [`Space::msm`] returns the sum of the elements times their scalars, as in threshold recovery or batch verification.
+
+Each takes a strategy of [commonware-parallel](https://docs.rs/commonware-parallel). [`Sequential`] runs the operation on the calling thread. `Rayon`, which needs the `std` feature of commonware-parallel, decides at each call whether to split the operation into batches that run on several threads.
 
 Three functions compute pairings:
 

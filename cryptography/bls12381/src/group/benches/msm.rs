@@ -1,8 +1,7 @@
-//! Multi-scalar multiplication on one thread.
+//! Multi-scalar multiplication.
 
-use super::utils::{Curve, scalars};
+use super::utils::{Curve, scalars, strategies};
 use commonware_cryptography_bls12381::{G1, G2};
-use commonware_parallel::Sequential;
 use criterion::{Criterion, Throughput, criterion_group};
 use std::hint::black_box;
 
@@ -12,13 +11,16 @@ const SIZES: [usize; 7] = [1, 2, 8, 32, 128, 512, 2048];
 fn bench<C: Curve>(c: &mut Criterion) {
     let mut group = c.benchmark_group(module_path!());
     let all_points = C::points(SIZES[SIZES.len() - 1], 6);
+    let strategies = strategies();
     for n in SIZES {
         let points = &all_points[..n];
         let scalars = scalars(n, 7);
         group.throughput(Throughput::Elements(n as u64));
-        group.bench_function(format!("curve={} n={n}", C::NAME), |bencher| {
-            bencher.iter(|| black_box(C::msm(black_box(points), black_box(&scalars), &Sequential)))
-        });
+        for (conc, strategy) in &strategies {
+            group.bench_function(format!("curve={} n={n} conc={conc}", C::NAME), |bencher| {
+                bencher.iter(|| black_box(C::msm(black_box(points), black_box(&scalars), strategy)))
+            });
+        }
     }
     group.finish();
 }

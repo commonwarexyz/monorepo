@@ -2,7 +2,8 @@
 
 use super::{
     Scalar,
-    kernel::{Group, MAX_COMPONENTS},
+    kernel::{Group, Kernel, MAX_COMPONENTS, MultiplyEach, Sum},
+    msm::Msm,
 };
 use crate::core::{
     curve::g2::{Coordinates, GENERATOR, IDENTITY, Point},
@@ -30,6 +31,10 @@ impl Group for G2 {
 
     const IDENTITY: Coordinates = IDENTITY;
 
+    // An addition of G2 multiplies in the quadratic extension, where each product takes three or
+    // four products in the base field.
+    const WORK: usize = 4;
+
     // Residues finish every count sooner than Unsat49: a product in the quadratic extension takes
     // fewer multiply instructions in residues than in the lanes of Unsat49.
     const SUM_BATCH: Option<usize> = None;
@@ -42,6 +47,22 @@ impl Group for G2 {
 
     fn components(scalar: &Scalar) -> [[u64; 2]; MAX_COMPONENTS] {
         scalar.split_quarters().map(|quarter| [quarter, 0])
+    }
+
+    // The three functions below have no type parameters, so the kernels compile once, in this
+    // crate, and not for every strategy and crate that reaches them through
+    // Batch::dispatch_batches.
+
+    fn dispatch_sum(kernel: Sum<'_, Self>) -> Self {
+        kernel.dispatch()
+    }
+
+    fn dispatch_multiply_each(kernel: MultiplyEach<'_, Self>) {
+        kernel.dispatch();
+    }
+
+    fn dispatch_msm(kernel: Msm<'_, Self>) -> Self {
+        kernel.dispatch()
     }
 
     fn coordinates(&self) -> &Coordinates {
