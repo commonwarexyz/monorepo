@@ -9,7 +9,8 @@
 //! block's epoch information before the application is asked.
 
 use super::{
-    COMMITTEE, Digest, Info, MockGroup, PublicKey, scheme::Scheme, stack::MAX_SUPPORTED_MODE,
+    COMMITTEE, Digest, Directory, Info, MockGroup, PublicKey, scheme::Scheme,
+    stack::MAX_SUPPORTED_MODE,
 };
 use crate::stateful::runner::unattributed;
 use commonware_codec::{
@@ -28,18 +29,17 @@ use commonware_cryptography::{
 };
 use commonware_glue::dkg::{ReshareBlock, reshare, types::Payload};
 use commonware_runtime::BufMut;
-use commonware_utils::sequence::Unit;
 use std::num::NonZeroU32;
 
 /// The reshare payload a block of the chain may carry.
-pub(super) type BlockPayload = Payload<MockGroup, PublicKey>;
+pub(super) type BlockPayload = Payload<MockGroup, PublicKey, Directory>;
 
 /// The consensus context embedded in every block.
 pub(super) type BlockContext = Context<Digest, PublicKey>;
 
 /// What the [`reshare::Application`] wrapper hands the application for each
 /// proposal: the payload it selected for the block.
-pub(super) type Input = reshare::Input<(), MockGroup, ed25519::PrivateKey>;
+pub(super) type Input = reshare::Input<(), MockGroup, ed25519::PrivateKey, Directory>;
 
 /// Codec configuration of a block: the largest participant set a payload may
 /// name and the newest sharing mode version it may use.
@@ -164,7 +164,7 @@ impl CertifiableBlock for Block {
 impl ReshareBlock for Block {
     type Variant = MockGroup;
     type PublicKey = PublicKey;
-    type Directory = Unit;
+    type Directory = Directory;
 
     fn payload(&self) -> Option<BlockPayload> {
         self.payload.clone()

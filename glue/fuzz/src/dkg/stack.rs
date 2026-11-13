@@ -1,7 +1,7 @@
 //! Construction of one bootstrap engine.
 
 use super::{
-    BOOTSTRAP_NAMESPACE, EPOCH_LENGTH, MockGroup, PublicKey, context::EngineContext,
+    BOOTSTRAP_NAMESPACE, COMMITTEE, EPOCH_LENGTH, MockGroup, PublicKey, context::EngineContext,
     invariants::Ending, store::Secrets,
 };
 use crate::stateful::{
@@ -98,6 +98,15 @@ pub(super) struct Config {
 
 /// The completion a bootstrap engine reports.
 pub(super) type Completion = bootstrap::Completion<MockGroup>;
+
+/// The largest message the bootstrap chain's network carries: the bound the
+/// bootstrap engine gives for the payloads it sends among the committee.
+pub(super) fn max_message_size() -> u32 {
+    commonware_p2p::max_message_size([bootstrap::max_payload_size::<MockGroup, Unit>(
+        COMMITTEE,
+        MAX_SUPPORTED_MODE,
+    )])
+}
 
 /// How the ceremony ended at the engine that reports `completion`.
 pub(super) fn ending(completion: Completion) -> Ending {

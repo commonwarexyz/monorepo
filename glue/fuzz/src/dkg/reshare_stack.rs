@@ -26,7 +26,7 @@
 //! storage do while they are constructed stays the engine's.
 
 use super::{
-    COMMITTEE, Digest, EPOCH_LENGTH, Info, PublicKey, RESHARE_NAMESPACE,
+    COMMITTEE, Digest, EPOCH_LENGTH, Info, MockGroup, PublicKey, RESHARE_NAMESPACE,
     app::{BLOCK_CFG, Block, BlockContext, Input},
     context::EngineContext,
     invariants::Records,
@@ -66,23 +66,24 @@ use commonware_cryptography::{
     ed25519,
 };
 use commonware_glue::dkg::{
-    ReshareBlock as _,
+    self, ReshareBlock as _,
     fence::Fence,
+    network::AddressableManager,
     orchestrator, probe, reshare,
     state_sync::{Config as StateSyncConfig, Plan as StateSyncPlan},
     types::Payload,
 };
 use commonware_p2p::{
     Receiver as ReceiverTrait, Sender as SenderTrait,
-    simulated::{Control, Manager, Oracle},
+    simulated::{Control, Oracle, SocketManager},
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     Handle, Spawner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::{archive::prunable, translator::TwoCap};
-use commonware_utils::{NZDuration, NZUsize, NonZeroDuration, sequence::Unit};
-use std::{sync::Arc, time::Duration};
+use commonware_utils::{NZDuration, NZUsize, NonZeroDuration};
+use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 
 /// Channel identifier of the probe, after the six channels of the chain that
 /// [`stack::register`] registers.
@@ -144,6 +145,8 @@ pub(super) struct Config<A, L> {
     /// How the engine enters the chain: from the height-zero block, or
     /// through the probe and state sync.
     pub(super) entry: Entry,
+    /// Messages the reshare actor's mailbox holds before it overflows.
+    pub(super) mailbox: NonZeroUsize,
 }
 
 /// The height-zero block every engine of a run starts from.
@@ -202,11 +205,31 @@ impl<R: Reporter<Activity = Update<Block>>> Reporter for Observer<R> {
 }
 
 /// The peer manager and the blocker of an engine on the simulated network.
-pub(super) type Peers = Manager<PublicKey, deterministic::Context>;
+pub(super) type Peers = AddressableManager<SocketManager<PublicKey, deterministic::Context>>;
+
+/// The peer manager of the network of `oracle`, as every engine is given it:
+/// through the adapter that resolves each peer an epoch tracks in the epoch's
+/// directory.
+pub(super) fn peers(oracle: &Oracle<PublicKey, deterministic::Context>) -> Peers {
+    AddressableManager::new(oracle.socket_manager())
+}
 pub(super) type Blocker = Control<PublicKey, deterministic::Context>;
 
 /// The marshal variant of the reshare chain.
 pub(super) type Variant = Standard<Block>;
+
+/// The largest message the reshare chain's network carries: the largest of
+/// the bounds the DKG module, its orchestrator, its probe, and marshal give
+/// for the payloads they send among a committee.
+pub(super) fn max_message_size() -> u32 {
+    let participants = COMMITTEE.get();
+    commonware_p2p::max_message_size([
+        orchestrator::max_payload_size::<Scheme, Digest>(participants),
+        marshal::max_payload_size::<Variant, Scheme>(participants, &BLOCK_CFG),
+        probe::max_payload_size::<Variant, Scheme>(participants, &BLOCK_CFG),
+        dkg::max_payload_size::<MockGroup, PublicKey>(COMMITTEE),
+    ])
+}
 
 /// The archives a marshal keeps its finalizations and its finalized blocks
 /// in.
@@ -316,7 +339,7 @@ fn probe_config(
         bootstrap: probe::Bootstrap {
             epoch: Epoch::zero(),
             participants: genesis.participants(),
-            directory: Unit,
+            directory: genesis.directory.clone(),
         },
         floor: joiner.and_then(Joiner::floor),
         verifier,
@@ -438,9 +461,10 @@ async fn run<A, L, S, R>(
         application,
         elector,
         entry,
+        mailbox,
     } = config;
     let identity = signer.public_key();
-    let manager = oracle.manager();
+    let manager = peers(&oracle);
     let blocker = oracle.control(identity.clone());
     let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     let epocher = FixedEpocher::new(EPOCH_LENGTH);
@@ -566,7 +590,7 @@ async fn run<A, L, S, R>(
             namespace: RESHARE_NAMESPACE,
             sharing_mode,
             reveal: Reveal::V1,
-            mailbox_size: MAILBOX_SIZE,
+            mailbox_size: mailbox,
             partition_prefix: format!("{partition}-reshare"),
             page_cache: page_cache.clone(),
             write_buffer: IO_BUFFER_SIZE,
@@ -653,12 +677,13 @@ mod tests {
     use super::*;
     use crate::{
         dkg::{
-            MockGroup, RESHARE_IDENTITIES,
-            app::App,
+            RESHARE_IDENTITIES,
+            app::{App, BlockPayload},
             fixtures::{identities, raised},
             invariants::{Reshare, Resharer, Step, check_placement},
             joiner::tests::{artifact, finalization},
             reshare_cluster::Elector,
+            schedule::directory,
             signers,
         },
         stateful::runner,
@@ -678,16 +703,16 @@ mod tests {
         Info {
             outcome: EpochOutcome::Success,
             epoch: Epoch::zero(),
+            directory: directory(&players),
             output,
             players: players.clone(),
             next_players: players,
-            directory: Unit,
         }
     }
 
     /// The blocks at `heights` above the height-zero block, each carrying
     /// the payload given with its height.
-    fn chain(heights: &[(u64, Option<Payload<MockGroup, PublicKey>>)]) -> Vec<Block> {
+    fn chain(heights: &[(u64, Option<BlockPayload>)]) -> Vec<Block> {
         let genesis = Block::genesis(identities()[0].clone(), info());
         let mut blocks = vec![genesis.clone()];
         for (height, payload) in heights {
@@ -762,6 +787,7 @@ mod tests {
                     application: App,
                     elector: Elector::default(),
                     entry: Entry::Genesis,
+                    mailbox: MAILBOX_SIZE,
                 };
                 let handle = spawn(
                     EngineContext::new(context.child("engine"), engine),
@@ -820,7 +846,7 @@ mod tests {
             let floor_of = |label, joiner: Option<&Joiner<EngineContext>>| {
                 probe_config(
                     engine(label),
-                    oracle.manager(),
+                    peers(&oracle),
                     oracle.control(identities[0].clone()),
                     verifier.clone(),
                     &genesis,

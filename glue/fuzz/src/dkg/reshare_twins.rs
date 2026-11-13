@@ -47,7 +47,7 @@ use super::{
 };
 use crate::stateful::{
     network::{TwinsScript, shared_router},
-    runner::{LINK, Panic, network_with},
+    runner::{LINK, Panic, network_sized},
 };
 use commonware_consensus::types::Epoch;
 use commonware_runtime::{Handle, Spawner as _, Supervisor as _, deterministic};
@@ -199,7 +199,14 @@ async fn run(
 ) -> Option<Observations> {
     let signers = signers(RESHARE_IDENTITIES);
     let participants: Arc<[PublicKey]> = public_keys(&signers);
-    let oracle = network_with(&context, &participants, LINK, TRACKED_PEER_SETS).await;
+    let oracle = network_sized(
+        &context,
+        &participants,
+        LINK,
+        TRACKED_PEER_SETS,
+        reshare_stack::max_message_size(),
+    )
+    .await;
 
     // Draw the twins script from the tape.
     let (compromised, script) = TwinsScript::select(
@@ -216,6 +223,7 @@ async fn run(
         sharing_mode: input.sharing_mode,
         outsider: input.outsider,
         rotations: input.rotations,
+        mailbox: input.mailbox,
     };
     let session = Session::deal(&mut context, signers, &controls);
 
@@ -245,6 +253,7 @@ async fn run(
         application: App,
         elector: elector.clone(),
         entry: Entry::Genesis,
+        mailbox: session.mailbox,
     };
 
     // Correct identities. Each is done once it has registered the scheme of
@@ -370,6 +379,7 @@ async fn run(
             application: faulty,
             elector: secondary.elector,
             entry: secondary.entry,
+            mailbox: secondary.mailbox,
         },
         votes_secondary,
         certificates_secondary,
@@ -415,6 +425,7 @@ mod tests {
         DkgMask, MAX_EPOCHS, Rotation, Side,
         fixtures::{self, PREFIX, ROTATE, STAY, contradicted, decode, tape},
         reshare_input::ROTATIONS,
+        reshare_restarts_input::ROOMY_MAILBOX,
     };
     use commonware_cryptography::bls12381::primitives::sharing::Mode;
 
@@ -449,6 +460,7 @@ mod tests {
             },
             outsider: seed % RESHARE_IDENTITIES as u8,
             rotations,
+            mailbox: ROOMY_MAILBOX,
             raw_bytes: tape(seed.into()),
         }
     }

@@ -230,6 +230,21 @@ invariants must hold whenever a ceremony completes.
   `glue/fuzz/src/stateful/invariants.rs`. That file holds the observation records the checks read
   and the checks themselves, for all six targets, the probe target included. Drivers record
   observations and call into it; they MUST NOT define a check of their own.
+- **R27. Network limit.** The simulated network of every target MUST refuse a message larger than
+  the limit the code under test computes for itself: in the bootstrap targets the bound
+  `bootstrap::max_payload_size` gives for the committee, and in every other target the largest of
+  the bounds the DKG module, its orchestrator, its probe, and marshal give through their
+  `max_payload_size`. A sender that hands the network a larger message panics, which I8 reports,
+  so a bound too small for a message the module sends is a finding.
+- **R28. Peer directory.** The bootstrap targets MUST run with the key-only directory and the
+  network's key-only peer manager. Every other target MUST carry an address for every peer of an
+  epoch in the epoch's `EpochInfo` and track peers through the DKG module's `AddressableManager`.
+  The first `EpochInfo` and the participants provider MUST supply a directory of exactly the
+  epoch's dealers, players, and next players.
+- **R29. Reshare mailbox.** In the reshare Twins, reshare restart, and state-sync targets the
+  input MUST choose the size of the reshare actor's mailbox: one, two, or four messages in half of
+  the runs, and room for a hundred in the others. A small mailbox overflows when marshal and the
+  application call the actor while it is busy, so that its overflow policy runs.
 
 ## 4. Properties
 

@@ -9,6 +9,7 @@ use super::{
     pacing::PacedCounts,
     public_keys,
     reshare_input::ROTATIONS,
+    schedule::directory,
     signers,
 };
 use crate::stateful::runner::Panic;
@@ -20,7 +21,7 @@ use commonware_cryptography::bls12381::{
 };
 use commonware_glue::dkg::types::EpochOutcome;
 use commonware_runtime::{Handle, Storage as _, deterministic};
-use commonware_utils::{N3f1, TestRng, ordered::Set, sequence::Unit, sync::Mutex};
+use commonware_utils::{N3f1, TestRng, ordered::Set, sync::Mutex};
 use std::{future::Future, sync::Arc, thread};
 
 /// What a half of the compromised identity says when it stops on the dealing
@@ -147,10 +148,10 @@ pub(super) fn described(seed: u64, epoch: Epoch) -> (Info, Vec<Share>) {
     let info = Info {
         outcome: EpochOutcome::Success,
         epoch,
+        directory: directory(&players),
         output,
         players: players.clone(),
         next_players: players,
-        directory: Unit,
     };
     (info, shares.values().to_vec())
 }

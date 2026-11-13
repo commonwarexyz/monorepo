@@ -41,8 +41,9 @@ use super::{
     network::harness,
     probe_input::SOURCES,
     public_keys,
-    reshare_stack::{Variant, archives, backfill_config, marshal_config},
+    reshare_stack::{Variant, archives, backfill_config, marshal_config, max_message_size, peers},
     runner::{self, Report},
+    schedule::directory_of,
     scheme::{Scheme, certificate_verifier},
     signers,
 };
@@ -50,7 +51,7 @@ use crate::stateful::{
     MAILBOX_SIZE, MAX_ADVANCE_STEPS, MAX_RAW_PAYLOAD, MAX_SOURCE_HEIGHT, PAGE_CACHE_SIZE,
     PAGE_SIZE, PROBE_EPOCH_LENGTH, PROBE_RETRY_TIMEOUT, PROBE_STEP, ProbeEvent,
     observe::{Acking, Observed, ObservedBlocker, Witness, certify, inject, prefix},
-    runner::network,
+    runner::{LINK, network_sized},
     stack::TEST_QUOTA,
 };
 use commonware_consensus::{
@@ -80,10 +81,9 @@ use commonware_runtime::{
     Clock as _, Handle, IoBuf, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_utils::{
-    N3f1, NZDuration,
+    N3f1, NZDuration, NZUsize,
     channel::oneshot::{self, error::TryRecvError},
     ordered::Set,
-    sequence::Unit,
 };
 use futures::future::select_all;
 use std::{collections::BTreeMap, fmt, time::Duration};
@@ -340,10 +340,10 @@ impl Chain {
                 Info {
                     outcome: EpochOutcome::Success,
                     epoch: Epoch::new(epoch),
+                    directory: directory_of(output.players(), committee, next),
                     output,
                     players: committee.clone(),
                     next_players: next.clone(),
-                    directory: Unit,
                 }
             })
             .collect();
@@ -543,7 +543,8 @@ impl Harness {
         let identities: Vec<PublicKey> = public_keys(&signers(COMMITTEE.get() + 1));
         let (dealers, outsider) = identities.split_at(SOURCES + 1);
         let outsider = outsider[0].clone();
-        let oracle = network(&context, &identities).await;
+        let oracle =
+            network_sized(&context, &identities, LINK, NZUsize!(1), max_message_size()).await;
 
         // The dealers deal and receive every epoch's shares. The identity
         // outside them is announced as a next player, so every probe tracks
@@ -621,7 +622,7 @@ impl Harness {
                 node.child("marshal_resolver"),
                 backfill_config(
                     identity,
-                    oracle.manager(),
+                    peers(&oracle),
                     control.clone(),
                     NZDuration!(FETCH_TIMEOUT),
                 ),
@@ -714,7 +715,7 @@ impl Harness {
                     probe::Bootstrap {
                         epoch: bootstrap,
                         participants: checkpoint.participants(),
-                        directory: Unit,
+                        directory: checkpoint.directory.clone(),
                     },
                     persisted.clone(),
                 ),
@@ -722,7 +723,7 @@ impl Harness {
                     probe::Bootstrap {
                         epoch: Epoch::zero(),
                         participants: history.infos[0].participants(),
-                        directory: Unit,
+                        directory: history.infos[0].directory.clone(),
                     },
                     None,
                 ),
@@ -730,7 +731,7 @@ impl Harness {
             let (actor, mailbox) =
                 probe::Actor::<_, _, Scheme, Variant, _, _>::new(probe::Config {
                     context: node.child("probe"),
-                    manager: oracle.manager(),
+                    manager: peers(&oracle),
                     bootstrap,
                     floor,
                     verifier: history.verifier.clone(),

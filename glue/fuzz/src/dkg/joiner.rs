@@ -48,7 +48,7 @@
 //! panic in it is reported as the harness's.
 
 use super::{
-    Digest, MockGroup,
+    Digest, Directory, MockGroup,
     app::Block,
     invariants::{Material, ProbeArtifact, Records, Startup, Step},
     scheme::Scheme,
@@ -76,7 +76,7 @@ use commonware_utils::{channel::oneshot::error::RecvError, fixed_bytes, sequence
 pub(super) type Floor = Finalization<Scheme, Digest>;
 
 /// What marshal and the DKG actors of a state-synced engine start from.
-pub(super) type Sync = StateSync<Scheme, Digest, MockGroup>;
+pub(super) type Sync = StateSync<Scheme, Digest, MockGroup, Directory>;
 
 /// The probe of a reshare engine, as its caller reaches it.
 pub(super) type Probe = probe::Mailbox<Scheme, Standard<Block>>;
@@ -380,7 +380,7 @@ impl<E: Context> Joiner<E> {
         let material = self.reported(Material {
             round: floor.round(),
             digest: floor.proposal.payload,
-            info: artifact.info.clone(),
+            info: Box::new(artifact.info.clone()),
             boundary: artifact.finalization.is_some(),
         });
         self.records.stepped(Step::Entered(material));

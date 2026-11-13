@@ -421,10 +421,22 @@ pub(crate) async fn network_with(
     link: Link,
     tracked_peer_sets: NonZeroUsize,
 ) -> Oracle<PublicKey, deterministic::Context> {
+    network_sized(context, participants, link, tracked_peer_sets, 1024 * 1024).await
+}
+
+/// Like [`network_with`], with the network refusing a message of more than
+/// `max_size` bytes: a sender that hands it a larger one panics.
+pub(crate) async fn network_sized(
+    context: &deterministic::Context,
+    participants: &[PublicKey],
+    link: Link,
+    tracked_peer_sets: NonZeroUsize,
+    max_size: u32,
+) -> Oracle<PublicKey, deterministic::Context> {
     let (network, oracle) = SimulatedNetwork::new_with_peers(
         context.child("network"),
         NetworkConfig {
-            max_size: 1024 * 1024,
+            max_size,
             max_peers_per_set: NZUsize!(participants.len()),
             disconnect_on_block: false,
             tracked_peer_sets,

@@ -44,7 +44,7 @@ use super::{
     stack,
     store::Secrets,
 };
-use crate::stateful::runner::network_with;
+use crate::stateful::runner::network_sized;
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::{bls12381::primitives::sharing::Mode, ed25519};
 use commonware_p2p::simulated::Oracle;
@@ -378,11 +378,12 @@ async fn run<S: Stack>(
     let program = Program::new(&input.environment, entropy, signers.len());
     let cluster = Cluster::new(
         environment::cluster(&context),
-        network_with(
+        network_sized(
             &context,
             &public_keys::<Vec<_>>(&signers),
             link.clone(),
             NZUsize!(1),
+            stack::max_message_size(),
         )
         .await,
         signers,

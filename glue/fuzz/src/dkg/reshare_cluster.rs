@@ -54,7 +54,7 @@ use super::{
     public_keys,
     reshare_restarts_input::SessionControls,
     reshare_stack::{self, Config},
-    schedule::Schedule,
+    schedule::{Schedule, directory_of},
     store::Secrets,
 };
 use commonware_consensus::{simplex::elector::RoundRobin, types::Epoch};
@@ -69,10 +69,10 @@ use commonware_cryptography::{
 use commonware_glue::dkg::types::EpochOutcome;
 use commonware_p2p::simulated::Oracle;
 use commonware_runtime::{Handle, deterministic};
-use commonware_utils::{N3f1, channel::mpsc, ordered::Map, sequence::Unit, sync::Mutex};
+use commonware_utils::{N3f1, channel::mpsc, ordered::Map, sync::Mutex};
 use futures::future::select_all;
 use rand_core::CryptoRng;
-use std::sync::Arc;
+use std::{num::NonZeroUsize, sync::Arc};
 
 /// Leader election of every epoch's Simplex engine: the committee in turn.
 pub(super) type Elector = RoundRobin<Sha256>;
@@ -93,6 +93,8 @@ pub(super) struct Session {
     pub(super) sharing_mode: Mode,
     /// The epoch after the last one the run is asked to complete.
     pub(super) last: Epoch,
+    /// Messages the mailbox of every engine's reshare actor holds.
+    pub(super) mailbox: NonZeroUsize,
     /// Each first-committee member's share of the first output.
     shares: Map<PublicKey, Share>,
 }
@@ -114,13 +116,15 @@ impl Session {
         let (output, shares) =
             deal::<MockGroup, _, N3f1>(rng, controls.sharing_mode, schedule.committee())
                 .expect("a trusted deal among the first committee must succeed");
+        let players = schedule.players(Epoch::zero());
+        let next_players = schedule.players(Epoch::new(1));
         let genesis = Info {
             outcome: EpochOutcome::Success,
             epoch: Epoch::zero(),
+            directory: directory_of(output.players(), &players, &next_players),
             output,
-            players: schedule.players(Epoch::zero()),
-            next_players: schedule.players(Epoch::new(1)),
-            directory: Unit,
+            players,
+            next_players,
         };
         Self {
             signers: signers.into(),
@@ -129,6 +133,7 @@ impl Session {
             schedule,
             sharing_mode: controls.sharing_mode,
             last: Epoch::new(u64::from(controls.epochs)),
+            mailbox: NonZeroUsize::new(usize::from(controls.mailbox)).unwrap_or(NonZeroUsize::MIN),
             shares,
         }
     }
@@ -175,6 +180,9 @@ pub struct ReshareRestartCounts {
     /// ceremony itself, so it was not down across the boundary, and it
     /// applies the epoch's final block a second time.
     pub repeated: usize,
+    /// How often the mailbox of a crashed engine's reshare actor had
+    /// overflowed when the engine was crashed.
+    pub overflows: usize,
 }
 
 /// One identity's engine across its restarts.
@@ -300,6 +308,7 @@ impl Cluster {
             application: App,
             elector: Elector::default(),
             entry: Entry::Genesis,
+            mailbox: self.session.mailbox,
         }
     }
 
@@ -402,8 +411,10 @@ impl Stack for Cluster {
         };
         node.crashed = Some((epoch, landing));
         node.down = true;
+        let overflows = environment::mailbox_overflows(&self.context, Some(index));
         let mut counts = self.counts.lock();
         counts.crashes += 1;
+        counts.overflows += overflows;
         match landing {
             Landing::Dealing => counts.dealing += 1,
             Landing::Inclusion => counts.inclusion += 1,
@@ -489,7 +500,10 @@ impl View {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dkg::{COMMITTEE, RESHARE_IDENTITIES, Rotation, reshare_input::ROTATIONS, signers};
+    use crate::dkg::{
+        COMMITTEE, RESHARE_IDENTITIES, Rotation, reshare_input::ROTATIONS,
+        reshare_restarts_input::ROOMY_MAILBOX, signers,
+    };
     use commonware_utils::TestRng;
 
     fn controls(epochs: u8, outsider: u8) -> SessionControls {
@@ -498,6 +512,7 @@ mod tests {
             sharing_mode: Mode::NonZeroCounter,
             outsider,
             rotations: [Rotation::Replace(1); ROTATIONS],
+            mailbox: ROOMY_MAILBOX,
         }
     }
 

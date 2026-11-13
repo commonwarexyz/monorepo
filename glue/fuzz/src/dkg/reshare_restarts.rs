@@ -43,10 +43,11 @@ use super::{
     invariants::{self, Instance, Reshare, ReshareCounts},
     pacing::{PacedCounts, Trace},
     reshare_cluster::{Cluster, ReshareRestartCounts, Session},
+    reshare_stack,
     runner::{self, Report},
     signers,
 };
-use crate::stateful::runner::network_with;
+use crate::stateful::runner::network_sized;
 use commonware_runtime::deterministic;
 use std::{fmt, time::Duration};
 
@@ -80,6 +81,8 @@ pub struct ReshareRestartsReport {
     pub after: Duration,
     /// The blocks the engine of that restart applied in that time.
     pub after_blocks: u64,
+    /// How often the mailbox of an engine's reshare actor overflowed.
+    pub overflows: usize,
     /// The simulated time the run took.
     pub elapsed: Duration,
 }
@@ -93,7 +96,7 @@ impl fmt::Display for ReshareRestartsReport {
              reconstructions={} continuities={} isolations={} carried={} kept={} blocks={} \
              crashes={} restarts={} dealing={} inclusion={} boundary={} finished={} resumed={} \
              across={} repeated={} {} followed={} expired={} after_ms={} after_blocks={} \
-             elapsed_ms={}",
+             overflows={} elapsed_ms={}",
             self.outcome,
             self.asked,
             self.counts.epochs,
@@ -126,6 +129,7 @@ impl fmt::Display for ReshareRestartsReport {
             self.expired,
             self.after.as_millis(),
             self.after_blocks,
+            self.overflows,
             self.elapsed.as_millis(),
         )
     }
@@ -186,6 +190,7 @@ fn execute<S: Stack>(
         expired: observed.expired,
         after: observed.after,
         after_blocks: observed.after_blocks,
+        overflows: observed.overflows,
         elapsed: observed.elapsed,
     };
     (report, observed.paced, observed.reshare)
@@ -211,6 +216,9 @@ struct Observations {
     expired: usize,
     after: Duration,
     after_blocks: u64,
+    /// How often the mailbox of an engine's reshare actor overflowed: in the
+    /// engines the schedule crashed, and in those running at the end.
+    overflows: usize,
     elapsed: Duration,
 }
 
@@ -224,7 +232,14 @@ async fn run<S: Stack>(
     let participants = session.participants.clone();
     let link = input.environment.links.link();
     let program = Program::new(&input.environment, entropy, participants.len());
-    let oracle = network_with(&context, &participants, link.clone(), TRACKED_PEER_SETS).await;
+    let oracle = network_sized(
+        &context,
+        &participants,
+        link.clone(),
+        TRACKED_PEER_SETS,
+        reshare_stack::max_message_size(),
+    )
+    .await;
 
     // The oracle reads what the engines report and hold, whatever a test
     // makes of the cluster.
@@ -254,6 +269,7 @@ async fn run<S: Stack>(
         expired: played.expired(),
         after: last.map_or(Duration::ZERO, |last| last.lasted),
         after_blocks: last.map_or(0, |last| last.blocks),
+        overflows: view.counts().overflows + environment::mailbox_overflows(&context, None),
         instances: played.instances,
         paced: played.paced,
         elapsed: played.elapsed,
@@ -273,7 +289,7 @@ mod tests {
         },
         pacing::{Change, Operation, Partition, Secret, Stage},
         reshare_input::ROTATIONS,
-        reshare_restarts_input::SessionControls,
+        reshare_restarts_input::{ROOMY_MAILBOX, SessionControls},
         reshare_stack,
         schedule::Schedule,
         scheme::Registration,
@@ -308,6 +324,7 @@ mod tests {
                 sharing_mode: Mode::NonZeroCounter,
                 outsider: OUTSIDER,
                 rotations,
+                mailbox: ROOMY_MAILBOX,
             },
             environment: EnvironmentControls {
                 restarts,
@@ -476,6 +493,28 @@ mod tests {
         let run = watched(input);
         assert_succeeded(&run);
         run
+    }
+
+    /// A reshare actor whose mailbox holds one message overflows when
+    /// marshal and the application call it while it is busy, as it is while
+    /// a write of its engine is held before a crash. Its run is judged like
+    /// one whose mailbox has room, which does not overflow.
+    #[test]
+    fn small_mailbox_overflows_and_holds_invariants() {
+        let small = |seed: u16| {
+            let mut input = input(2, ROTATE, 3, CLEAN, vec![], seed);
+            input.session.mailbox = 1;
+            input
+        };
+        let (overflowed, ()) = first(0..24, small, |run| {
+            (run.report.overflows > 0 && completed(run)).then_some(())
+        });
+        assert_succeeded(&overflowed);
+
+        let mut roomy = overflowed.input.clone();
+        roomy.session.mailbox = ROOMY_MAILBOX;
+        let roomy = succeeded(roomy);
+        assert_eq!(roomy.report.overflows, 0, "{}", roomy.report);
     }
 
     /// Lists, for each seed of a range, the schedule of the input over

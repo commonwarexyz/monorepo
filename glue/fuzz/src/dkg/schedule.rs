@@ -8,12 +8,42 @@
 //! the provider honors its contract: every node, and every call, returns the
 //! same set for the same epoch.
 
-use super::{PublicKey, reshare_input::Rotation};
+use super::{Directory, PublicKey, reshare_input::Rotation};
 use crate::stateful::runner::unattributed;
 use commonware_consensus::types::Epoch;
 use commonware_glue::dkg::ParticipantsProvider;
-use commonware_utils::{ordered::Set, sequence::Unit};
-use std::sync::Arc;
+use commonware_p2p::Address;
+use commonware_utils::ordered::Set;
+use std::{
+    net::{Ipv4Addr, SocketAddr},
+    sync::Arc,
+};
+
+/// The address `peer` is reached at. The simulated network dials by key, so
+/// the address only has to be the same wherever it is derived.
+fn address(peer: &PublicKey) -> Address {
+    let key: &[u8] = peer.as_ref();
+    let port = u16::from_be_bytes([key[0], key[1]]);
+    Address::Symmetric(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
+}
+
+/// The transport directory that holds exactly `peers`.
+pub(crate) fn directory<'a>(peers: impl IntoIterator<Item = &'a PublicKey>) -> Directory {
+    peers
+        .into_iter()
+        .map(|peer| (peer.clone(), address(peer)))
+        .collect()
+}
+
+/// The transport directory of an epoch whose dealers, players, and next
+/// players are the given sets: it holds exactly their union.
+pub(crate) fn directory_of(
+    dealers: &Set<PublicKey>,
+    players: &Set<PublicKey>,
+    next_players: &Set<PublicKey>,
+) -> Directory {
+    directory(dealers.iter().chain(players).chain(next_players))
+}
 
 /// The player set of every epoch's ceremony.
 #[derive(Clone, Debug)]
@@ -71,7 +101,7 @@ impl Schedule {
 
 impl ParticipantsProvider for Schedule {
     type PublicKey = PublicKey;
-    type Directory = Unit;
+    type Directory = Directory;
 
     async fn participants(&mut self, epoch: Epoch) -> Set<Self::PublicKey> {
         // The provider is called inside an engine's task and is the harness's
@@ -79,8 +109,9 @@ impl ParticipantsProvider for Schedule {
         unattributed(|| self.players(epoch))
     }
 
-    async fn directory(&mut self, _: Epoch, _: Set<Self::PublicKey>) -> Self::Directory {
-        Unit
+    async fn directory(&mut self, _: Epoch, peers: Set<Self::PublicKey>) -> Self::Directory {
+        // Like `participants`, this is the harness's code.
+        unattributed(|| directory(&peers))
     }
 }
 

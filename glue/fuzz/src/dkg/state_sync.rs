@@ -68,11 +68,12 @@ use super::{
     joiner::Entry,
     pacing::{PacedCounts, Trace},
     reshare_cluster::{Cluster, ReshareRestartCounts, Session},
+    reshare_stack,
     runner::{self, Report},
     signers,
     state_sync_input::Place,
 };
-use crate::stateful::runner::{LINK, network_with};
+use crate::stateful::runner::{LINK, network_sized};
 use commonware_consensus::types::{Epoch, Height};
 use commonware_macros::select;
 use commonware_runtime::{Handle, deterministic};
@@ -523,7 +524,14 @@ async fn run<S: Stack>(
         early: before_join,
     };
     let program = Program::joining(input.restarts, entropy, participants.len(), join);
-    let oracle = network_with(&context, &participants, LINK, TRACKED_PEER_SETS).await;
+    let oracle = network_sized(
+        &context,
+        &participants,
+        LINK,
+        TRACKED_PEER_SETS,
+        reshare_stack::max_message_size(),
+    )
+    .await;
 
     // The cluster creates every identity's secret store here. The oracle
     // reads what the engines report and hold, whatever a test makes of the
@@ -592,7 +600,7 @@ mod tests {
         joiner::Lapse,
         pacing::{Operation, Partition},
         reshare_input::ROTATIONS,
-        reshare_restarts_input::SessionControls,
+        reshare_restarts_input::{ROOMY_MAILBOX, SessionControls},
         reshare_stack,
         store::Secrets,
     };
@@ -623,6 +631,7 @@ mod tests {
                 sharing_mode: Mode::NonZeroCounter,
                 outsider: OUTSIDER,
                 rotations,
+                mailbox: ROOMY_MAILBOX,
             },
             joiner,
             join_height,

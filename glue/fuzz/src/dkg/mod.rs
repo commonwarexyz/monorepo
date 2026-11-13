@@ -146,7 +146,7 @@ mod twins;
 
 pub(crate) use crate::stateful::PublicKey;
 use commonware_cryptography::{Signer as _, ed25519, sha256};
-use commonware_glue::dkg::types::EpochInfo;
+use commonware_glue::dkg::{network::Addresses, types::EpochInfo};
 use commonware_utils::{NZU32, NZU64, NZUsize};
 pub use input::{
     Cut, CutScope, DkgBootstrapFuzzInput, DkgBootstrapRestartsFuzzInput, DkgMask,
@@ -179,8 +179,16 @@ pub use twins::{BootstrapReport, fuzz_dkg_bootstrap, run_dkg_bootstrap};
 /// Block digest type of the bootstrap chain.
 pub(crate) type Digest = sha256::Digest;
 
-/// The public description of an epoch over the mock group.
-pub(crate) type Info = EpochInfo<MockGroup, PublicKey>;
+/// The public description of the epoch of the bootstrap chain, whose peers
+/// are dialed by key alone and so have no transport directory.
+pub(crate) type BootstrapInfo = EpochInfo<MockGroup, PublicKey>;
+
+/// The transport directory of the reshare chain: an address for every peer
+/// of an epoch, carried in the epoch's description.
+pub(crate) type Directory = Addresses<PublicKey>;
+
+/// The public description of an epoch of the reshare chain.
+pub(crate) type Info = EpochInfo<MockGroup, PublicKey, Directory>;
 
 /// Namespace of the bootstrap ceremony's transcripts.
 pub(crate) const BOOTSTRAP_NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_FUZZ_DKG_BOOTSTRAP";

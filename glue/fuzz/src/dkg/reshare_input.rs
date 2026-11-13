@@ -7,6 +7,7 @@
 use super::{
     COMMITTEE, DkgMask, MAX_EPOCHS, RESHARE_IDENTITIES,
     input::{STREAM_BYTES, sharing_mode},
+    reshare_restarts_input::mailbox,
 };
 use crate::{
     input::stream,
@@ -76,6 +77,9 @@ pub struct DkgReshareFuzzInput {
     /// How the player set changes from one epoch's ceremony to the next.
     /// Later epochs keep the last set.
     pub rotations: [Rotation; ROTATIONS],
+    /// Messages the mailbox of every engine's reshare actor holds before it
+    /// overflows.
+    pub mailbox: u8,
     /// Byte tape seeding the deterministic runtime, the scenario sampler, the
     /// trusted deal, and the faulty application.
     pub raw_bytes: Vec<u8>,
@@ -92,6 +96,7 @@ impl fmt::Debug for DkgReshareFuzzInput {
             .field("sharing_mode", &self.sharing_mode)
             .field("outsider", &self.outsider)
             .field("rotations", &self.rotations)
+            .field("mailbox", &self.mailbox)
             .field("raw_bytes_len", &self.raw_bytes.len())
             .finish()
     }
@@ -110,6 +115,7 @@ impl Arbitrary<'_> for DkgReshareFuzzInput {
             sharing_mode: sharing_mode(u)?,
             outsider: u.int_in_range(0..=RESHARE_IDENTITIES as u8 - 1)?,
             rotations: u.arbitrary()?,
+            mailbox: mailbox(u)?,
             raw_bytes: tape(u)?,
         })
     }

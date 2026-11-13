@@ -173,6 +173,31 @@ fn read_height(metrics: &str, index: usize) -> Option<u64> {
     })
 }
 
+/// How often the mailbox of a reshare actor overflowed: the requests it was
+/// sent while it already held as many as it has room for. Read from the
+/// metrics the engines registered below `cluster`, for the running engine at
+/// `index`, or summed over every running engine. An engine's count ends with
+/// the engine, so a crash reads it before it aborts the engine.
+pub(super) fn mailbox_overflows(cluster: &deterministic::Context, index: Option<usize>) -> usize {
+    read_overflows(&cluster.encode(), index)
+}
+
+/// The overflows of the reshare actors' mailboxes in `metrics`, the encoded
+/// metrics of a run: of the engine at `index`, or of every engine.
+fn read_overflows(metrics: &str, index: Option<usize>) -> usize {
+    let counter = format!("{ENGINE_LABEL}_reshare_mailbox_backoff_total{{");
+    let engine = index.map(|index| format!("{INDEX_ATTRIBUTE}=\"{index}\""));
+    metrics
+        .lines()
+        .filter_map(|line| {
+            let (name, value) = line.rsplit_once(' ')?;
+            let named = name.contains(&counter)
+                && engine.as_ref().is_none_or(|engine| name.contains(engine));
+            named.then(|| value.parse::<usize>().ok()).flatten()
+        })
+        .sum()
+}
+
 /// Where in a run a crash found its engine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Landing {

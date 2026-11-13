@@ -39,11 +39,11 @@ use super::{
 };
 use crate::stateful::{
     network::TwinsScript,
-    runner::{Panic, network},
+    runner::{LINK, Panic, network_sized},
 };
 use commonware_consensus::types::Epoch;
 use commonware_runtime::{Handle, Spawner as _, Supervisor as _, deterministic};
-use commonware_utils::{channel::oneshot, ordered::Set, sync::Mutex};
+use commonware_utils::{NZUsize, channel::oneshot, ordered::Set, sync::Mutex};
 use std::{fmt, sync::Arc};
 
 /// Label the driver reports under.
@@ -168,7 +168,14 @@ async fn run(
     let signers = identities();
     let participants: Arc<[PublicKey]> = public_keys(&signers);
     let committee = Set::from_iter_dedup(participants.iter().cloned());
-    let oracle = network(&context, &participants).await;
+    let oracle = network_sized(
+        &context,
+        &participants,
+        LINK,
+        NZUsize!(1),
+        stack::max_message_size(),
+    )
+    .await;
 
     // Draw the twins script from the tape.
     let (compromised, script) = TwinsScript::select(

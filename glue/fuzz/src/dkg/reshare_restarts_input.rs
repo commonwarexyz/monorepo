@@ -35,6 +35,11 @@ pub struct SessionControls {
     /// How the player set changes from one epoch's ceremony to the next.
     /// Later epochs keep the last set.
     pub rotations: [Rotation; ROTATIONS],
+    /// Messages the mailbox of every engine's reshare actor holds before it
+    /// overflows. Marshal and the application call the actor while it is
+    /// busy, so a small mailbox overflows and the actor's overflow policy
+    /// decides what is kept.
+    pub mailbox: u8,
 }
 
 impl Arbitrary<'_> for SessionControls {
@@ -44,8 +49,23 @@ impl Arbitrary<'_> for SessionControls {
             sharing_mode: sharing_mode(u)?,
             outsider: u.int_in_range(0..=RESHARE_IDENTITIES as u8 - 1)?,
             rotations: u.arbitrary()?,
+            mailbox: mailbox(u)?,
         })
     }
+}
+
+/// The mailbox of a reshare actor that is not meant to overflow.
+pub(super) const ROOMY_MAILBOX: u8 = 100;
+
+/// Draw the size of the reshare actors' mailboxes: one, two, or four messages
+/// in half of the runs, and room for a hundred in the others.
+pub(super) fn mailbox(u: &mut Unstructured<'_>) -> arbitrary::Result<u8> {
+    Ok(match u.int_in_range(0..=7)? {
+        0 | 1 => 1,
+        2 => 2,
+        3 => 4,
+        _ => ROOMY_MAILBOX,
+    })
 }
 
 /// One run of the reshare restart target.

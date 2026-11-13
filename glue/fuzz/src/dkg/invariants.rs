@@ -14,7 +14,7 @@
 //! enforces, the engines involved, and the epoch.
 
 use super::{
-    Digest, EPOCH_LENGTH, Info, MockGroup, PublicKey,
+    BootstrapInfo, Digest, Directory, EPOCH_LENGTH, Info, MockGroup, PublicKey,
     schedule::Schedule,
     scheme::{Registration, Scheme},
 };
@@ -29,14 +29,13 @@ use commonware_cryptography::bls12381::primitives::{
     ops::{self, threshold},
 };
 use commonware_glue::dkg::{
+    network,
     probe::Artifact,
-    types::{EpochOutcome, Payload, SchemeInfo},
+    types::{EpochInfo, EpochOutcome, Payload, SchemeInfo},
 };
 use commonware_p2p::Recipients;
 use commonware_parallel::Sequential;
-use commonware_utils::{
-    Faults as _, N3f1, Participant, channel::mpsc, ordered::Set, sequence::Unit, sync::Mutex,
-};
+use commonware_utils::{Faults as _, N3f1, Participant, channel::mpsc, ordered::Set, sync::Mutex};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -51,7 +50,7 @@ const RECONSTRUCTION_MESSAGE: &[u8] = b"reconstruction";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Ending {
     /// The ceremony produced this output.
-    Success(Box<Info>),
+    Success(Box<BootstrapInfo>),
     /// The ceremony failed and produced no output.
     Failure,
 }
@@ -129,7 +128,11 @@ pub(crate) fn check_output_agreement(ceremony: &Ceremony) -> (Option<&Ending>, u
 /// run. It is the successful output of the ceremony's epoch, among exactly
 /// the committee, with no next players, and its sharing needs the committee's
 /// quorum of shares.
-pub(crate) fn check_bootstrap_output(ceremony: &Ceremony, info: &Info, committee: &[PublicKey]) {
+pub(crate) fn check_bootstrap_output(
+    ceremony: &Ceremony,
+    info: &BootstrapInfo,
+    committee: &[PublicKey],
+) {
     let epoch = ceremony.epoch;
     assert!(
         info.outcome == EpochOutcome::Success && info.epoch == epoch,
@@ -169,7 +172,10 @@ pub(crate) fn check_bootstrap_output(ceremony: &Ceremony, info: &Info, committee
 /// one.
 ///
 /// Returns the number of shares checked.
-pub(crate) fn check_share_validity(ceremony: &Ceremony, info: &Info) -> usize {
+pub(crate) fn check_share_validity<D: network::Directory<PublicKey>>(
+    ceremony: &Ceremony,
+    info: &EpochInfo<MockGroup, PublicKey, D>,
+) -> usize {
     let sharing = info.output.public();
     let mut checked = 0;
     for node in &ceremony.nodes {
@@ -222,7 +228,10 @@ fn subsets(n: usize, k: usize) -> Vec<Vec<usize>> {
 /// subset one smaller recovers one.
 ///
 /// Returns the number of subsets that reconstructed the key.
-pub(crate) fn check_reconstruction(ceremony: &Ceremony, info: &Info) -> usize {
+pub(crate) fn check_reconstruction<D: network::Directory<PublicKey>>(
+    ceremony: &Ceremony,
+    info: &EpochInfo<MockGroup, PublicKey, D>,
+) -> usize {
     let sharing = info.output.public();
     let required = sharing.required() as usize;
     let holders: Vec<(usize, &Share)> = ceremony
@@ -511,7 +520,11 @@ struct Recorded {
 impl Records {
     /// Record the kind of `payload`, which the finalized block at `height`
     /// carried when marshal delivered it to the engine.
-    pub(crate) fn placed(&self, height: Height, payload: Option<&Payload<MockGroup, PublicKey>>) {
+    pub(crate) fn placed(
+        &self,
+        height: Height,
+        payload: Option<&Payload<MockGroup, PublicKey, Directory>>,
+    ) {
         let carried = match payload {
             None => Carried::Nothing,
             Some(Payload::DealerLog(_)) => Carried::DealerLog,
@@ -1340,7 +1353,7 @@ pub(crate) fn check_reshare(
 pub(crate) type ProbeFinalization = Finalization<Scheme, Digest>;
 
 /// The artifact a discovering probe emits.
-pub(crate) type ProbeArtifact = Artifact<Scheme, Digest, MockGroup, Unit>;
+pub(crate) type ProbeArtifact = Artifact<Scheme, Digest, MockGroup, Directory>;
 
 /// Tags of the DKG probe's wire format. Every message starts with a byte
 /// below this, as the module documentation of [`commonware_glue::dkg::probe`]
@@ -2333,7 +2346,7 @@ pub(crate) struct Material {
     /// The block the floor finalizes.
     pub(crate) digest: Digest,
     /// The epoch description paired with the floor.
-    pub(crate) info: Info,
+    pub(crate) info: Box<Info>,
     /// Whether the probe's artifact carried the finalization of a boundary
     /// block, which it does for every epoch but the first.
     pub(crate) boundary: bool,
@@ -2595,7 +2608,7 @@ pub(crate) fn check_floor_provenance(sync: &StateSync) -> (usize, usize) {
         );
         for info in held {
             assert!(
-                *info == material.info,
+                *info == *material.info,
                 "I16 violated: engine {} paired its floor with a description of epoch {epoch} \
                  other than the one the nodes that started at genesis finalized: {:?} != {info:?}",
                 joiner.engine,
@@ -2706,8 +2719,8 @@ mod tests {
     use commonware_utils::{NZU32, TestRng, sequence::Unit};
 
     /// The public description of a successful bootstrap with `output`.
-    fn successful(output: Output<MockGroup, PublicKey>, players: Set<PublicKey>) -> Info {
-        Info {
+    fn successful(output: Output<MockGroup, PublicKey>, players: Set<PublicKey>) -> BootstrapInfo {
+        BootstrapInfo {
             outcome: EpochOutcome::Success,
             epoch: Epoch::zero(),
             output,
@@ -2719,7 +2732,7 @@ mod tests {
 
     /// A ceremony dealt by a trusted dealer under `seed`, as four correct
     /// engines would observe it had it succeeded.
-    fn dealt(seed: u64) -> (Ceremony, Info) {
+    fn dealt(seed: u64) -> (Ceremony, BootstrapInfo) {
         let identities = identities();
         let players = Set::from_iter_dedup(identities.iter().map(|signer| signer.public_key()));
         let (output, shares) =
@@ -3167,7 +3180,7 @@ mod reshare_tests {
     use super::*;
     use crate::dkg::{
         COMMITTEE, RESHARE_IDENTITIES, faulty::spare_log, fixtures::identities,
-        reshare_input::Rotation, signers,
+        reshare_input::Rotation, schedule::directory_of, signers,
     };
     use commonware_codec::{Copying, Encode as _, Read as _};
     use commonware_cryptography::{
@@ -3180,7 +3193,7 @@ mod reshare_tests {
         },
         ed25519,
     };
-    use commonware_utils::{FuzzRng, NZU64, TestRng, sequence::Unit};
+    use commonware_utils::{FuzzRng, NZU64, TestRng};
 
     type Shares = Vec<(PublicKey, Share)>;
 
@@ -3382,7 +3395,11 @@ mod reshare_tests {
             output: output.clone(),
             players: schedule.players(Epoch::zero()),
             next_players: schedule.players(Epoch::new(1)),
-            directory: Unit,
+            directory: directory_of(
+                output.players(),
+                &schedule.players(Epoch::zero()),
+                &schedule.players(Epoch::new(1)),
+            ),
         };
         let nodes = identities
             .iter()
@@ -3418,10 +3435,14 @@ mod reshare_tests {
         let info = Info {
             outcome: EpochOutcome::Success,
             epoch: Epoch::new(1),
+            directory: directory_of(
+                output.players(),
+                &genesis.next_players,
+                &schedule.players(Epoch::new(2)),
+            ),
             output,
             players: genesis.next_players.clone(),
             next_players: schedule.players(Epoch::new(2)),
-            directory: Unit,
         };
         let mut fixture = Fixture {
             reshare: Reshare {
@@ -4390,7 +4411,7 @@ mod state_sync_tests {
         Material {
             round: floor,
             digest: block(height),
-            info: info(floor.epoch().get()),
+            info: Box::new(info(floor.epoch().get())),
             boundary: floor.epoch() != Epoch::zero(),
         }
     }
@@ -4735,7 +4756,7 @@ mod state_sync_tests {
         let Step::Entered(material) = &mut sync.nodes[JOINER].steps[1] else {
             unreachable!("the second step is the entry");
         };
-        material.info = info(0);
+        *material.info = info(0);
         check_floor_provenance(&sync);
     }
 
