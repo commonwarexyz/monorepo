@@ -192,9 +192,8 @@ use super::{
 #[cfg(feature = "external")]
 use crate::Pacer;
 use crate::{
-    BlobLayout, BlobVersion, Clock, Error, Execution, Handle, Local as ThreadLocal,
-    METRICS_PREFIX, Name, SinkOf, Spawner as _, StreamOf, Supervisor as _, Thread, ThreadBuilder,
-    child_label,
+    BlobLayout, BlobVersion, Clock, Error, Execution, Handle, Local as ThreadLocal, METRICS_PREFIX,
+    Name, SinkOf, Spawner as _, StreamOf, Supervisor as _, Thread, ThreadBuilder, child_label,
     network::{
         iouring::{Config as NetworkConfig, Network},
         metered::Network as MeteredNetwork,
@@ -858,7 +857,8 @@ impl crate::Spawner for Context {
         T: Send + 'static,
     {
         // A resident always reports the thread execution, whatever this context's placement
-        let (_, metric) = spawn_metrics!(Label::task(self.name.clone(), Execution::Thread), @make self);
+        let (_, metric) =
+            spawn_metrics!(Label::task(self.name.clone(), Execution::Thread), @make self);
 
         // The task is supervised by this context, and its context is placed on the thread
         let parent = self.tree.clone();

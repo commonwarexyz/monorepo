@@ -97,7 +97,10 @@ impl Cpus {
 
     /// The number of stored ids.
     pub fn len(&self) -> usize {
-        self.words.iter().map(|word| word.count_ones() as usize).sum()
+        self.words
+            .iter()
+            .map(|word| word.count_ones() as usize)
+            .sum()
     }
 
     /// Whether no id was requested, so none is stored and none at or above 1024 was recorded.
@@ -108,9 +111,7 @@ impl Cpus {
     /// The smallest requested id that `base` does not contain, including a recorded id at or
     /// above 1024.
     fn first_outside(&self, base: &Self) -> Option<usize> {
-        self.iter()
-            .find(|&id| !base.contains(id))
-            .or(self.beyond)
+        self.iter().find(|&id| !base.contains(id)).or(self.beyond)
     }
 }
 

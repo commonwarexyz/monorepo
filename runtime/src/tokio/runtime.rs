@@ -42,10 +42,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::PathBuf,
     pin::pin,
-    sync::{
-        Arc, Weak,
-        atomic::AtomicU64,
-    },
+    sync::{Arc, Weak, atomic::AtomicU64},
     task::Poll,
     time::{Duration, SystemTime},
 };
@@ -622,7 +619,8 @@ impl crate::Spawner for Context {
         T: Send + 'static,
     {
         // A resident always reports the thread execution, whatever this context's placement
-        let (_, metric) = spawn_metrics!(Label::task(self.name.clone(), Execution::Thread), @make self);
+        let (_, metric) =
+            spawn_metrics!(Label::task(self.name.clone(), Execution::Thread), @make self);
 
         // The task is supervised by this context, and its context is placed on the thread
         let parent = Arc::clone(&self.tree);

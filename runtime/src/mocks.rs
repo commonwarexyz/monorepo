@@ -665,7 +665,9 @@ impl<E: Spawner> Spawner for RecordingContext<E> {
 
     fn thread(self) -> ThreadBuilder<Self> {
         let recordings = self.recordings;
-        self.inner.thread().map(move |inner| Self { inner, recordings })
+        self.inner
+            .thread()
+            .map(move |inner| Self { inner, recordings })
     }
 
     fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
@@ -685,8 +687,9 @@ impl<E: Spawner> Spawner for RecordingContext<E> {
         T: Send + 'static,
     {
         let recordings = self.recordings;
-        self.inner
-            .spawn_on(thread, move |local| f(local.map(|inner| Self { inner, recordings })))
+        self.inner.spawn_on(thread, move |local| {
+            f(local.map(|inner| Self { inner, recordings }))
+        })
     }
 
     async fn stop(self, value: i32, timeout: Option<std::time::Duration>) -> Result<(), Error> {
@@ -904,7 +907,9 @@ impl<E: Spawner> Spawner for DelayedSyncContext<E> {
 
     fn thread(self) -> ThreadBuilder<Self> {
         let pending = self.pending;
-        self.inner.thread().map(move |inner| Self { inner, pending })
+        self.inner
+            .thread()
+            .map(move |inner| Self { inner, pending })
     }
 
     fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
@@ -924,8 +929,9 @@ impl<E: Spawner> Spawner for DelayedSyncContext<E> {
         T: Send + 'static,
     {
         let pending = self.pending;
-        self.inner
-            .spawn_on(thread, move |local| f(local.map(|inner| Self { inner, pending })))
+        self.inner.spawn_on(thread, move |local| {
+            f(local.map(|inner| Self { inner, pending }))
+        })
     }
 
     async fn stop(self, value: i32, timeout: Option<std::time::Duration>) -> Result<(), Error> {
@@ -1572,8 +1578,9 @@ impl<E: Spawner> Spawner for MutationFaultContext<E> {
         T: Send + 'static,
     {
         let faults = self.faults;
-        self.inner
-            .spawn_on(thread, move |local| f(local.map(|inner| Self { inner, faults })))
+        self.inner.spawn_on(thread, move |local| {
+            f(local.map(|inner| Self { inner, faults }))
+        })
     }
 
     async fn stop(self, value: i32, timeout: Option<std::time::Duration>) -> Result<(), Error> {

@@ -855,8 +855,8 @@ mod tests {
     use crate::{merkle::mmr, translator::TwoCap};
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_runtime::{
-        Error as RuntimeError, Handle, Local, Name, Runner as _, Supervisor, Thread,
-        ThreadBuilder, deterministic, signal::Signal,
+        Error as RuntimeError, Handle, Local, Name, Runner as _, Supervisor, Thread, ThreadBuilder,
+        deterministic, signal::Signal,
     };
     use core::{future::ready, time::Duration};
     use futures::{Stream, stream};
@@ -948,8 +948,9 @@ mod tests {
             _read_options: ReadOptions,
         ) -> impl Future<
             Output = Result<
-                impl Stream<Item = Result<crate::journal::contiguous::Batch<TestOp>, crate::journal::Error>>
-                    + Send,
+                impl Stream<
+                    Item = Result<crate::journal::contiguous::Batch<TestOp>, crate::journal::Error>,
+                > + Send,
                 crate::journal::Error,
             >,
         > + Send {
@@ -1097,11 +1098,11 @@ mod tests {
         for fail_at in [1, 3, 4] {
             deterministic::Runner::default().start(|context| async move {
                 let log = three_chunk_log();
-                let mut index = crate::index::partitioned::unordered::Index::<
-                    TwoCap,
-                    Location,
-                    1,
-                >::new(context.child("index"), TwoCap);
+                let mut index =
+                    crate::index::partitioned::unordered::Index::<TwoCap, Location, 1>::new(
+                        context.child("index"),
+                        TwoCap,
+                    );
                 let launches = Arc::new(AtomicUsize::new(0));
                 let wrapper = FailLaunch {
                     inner: context.child("build"),
@@ -1140,11 +1141,10 @@ mod tests {
                 .await
                 .unwrap();
             let log = three_chunk_log();
-            let mut index =
-                crate::index::partitioned::unordered::Index::<TwoCap, Location, 1>::new(
-                    context.child("index"),
-                    TwoCap,
-                );
+            let mut index = crate::index::partitioned::unordered::Index::<TwoCap, Location, 1>::new(
+                context.child("index"),
+                TwoCap,
+            );
             let result = build_snapshot_parallel(
                 &mut index,
                 ended,
@@ -1170,11 +1170,10 @@ mod tests {
     fn test_parallel_build_three_chunk_log() {
         deterministic::Runner::default().start(|context| async move {
             let log = three_chunk_log();
-            let mut index =
-                crate::index::partitioned::unordered::Index::<TwoCap, Location, 1>::new(
-                    context.child("index"),
-                    TwoCap,
-                );
+            let mut index = crate::index::partitioned::unordered::Index::<TwoCap, Location, 1>::new(
+                context.child("index"),
+                TwoCap,
+            );
             let wrapper = FailLaunch {
                 inner: context.child("build"),
                 launches: Arc::new(AtomicUsize::new(0)),

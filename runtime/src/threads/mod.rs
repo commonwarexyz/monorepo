@@ -12,10 +12,10 @@ mod local;
 pub(crate) use admission::ThreadInner;
 pub use builder::{Cpus, Thread, ThreadBuilder, ThreadError};
 pub(crate) use builder::{ThreadRuntime, validate};
-pub use local::{Local, LocalHandle};
 pub(crate) use local::Owner;
+pub use local::{Local, LocalHandle};
 
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod close_tests;
+#[cfg(test)]
+mod tests;
