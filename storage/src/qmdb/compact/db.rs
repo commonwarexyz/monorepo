@@ -796,6 +796,7 @@ where
                 },
                 ancestors,
                 inactivity_floor,
+                scan_advance: 0,
             },
         }))
     }
