@@ -24,6 +24,8 @@ pub(crate) struct AffinityState {
 
 impl AffinityState {
     /// Record the calling thread's allowed CPUs as the base set.
+    // Const only where affinity is unavailable.
+    #[allow(clippy::missing_const_for_fn)]
     pub(crate) fn capture() -> Self {
         Self {
             base: base_set(),
@@ -38,6 +40,8 @@ impl AffinityState {
     }
 
     /// Arm the reset once a pinned thread applied its mask.
+    // Const only where affinity is unavailable.
+    #[allow(clippy::missing_const_for_fn)]
     fn arm(&self) {
         #[cfg(all(target_os = "linux", not(miri)))]
         self.armed.store(true, Ordering::SeqCst);
@@ -65,6 +69,8 @@ impl AffinityState {
 
     /// Write the base set if the reset is armed and the calling thread's mask is a strict
     /// subset of it. Keeps the inherited mask on failure.
+    // Const only where affinity is unavailable.
+    #[allow(clippy::missing_const_for_fn)]
     pub(crate) fn reset_if_narrowed(&self) {
         cfg_if::cfg_if! {
             if #[cfg(all(target_os = "linux", not(miri)))] {
