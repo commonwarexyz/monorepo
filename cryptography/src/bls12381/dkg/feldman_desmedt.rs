@@ -605,6 +605,9 @@ impl<V: Variant, P: Ord> Output<V, P> {
     /// Return the set of players whose shares may have been revealed.
     ///
     /// These are players whose shares can be reconstructed from the selected dealer reveals.
+    ///
+    /// In a reshare, an adversary that knows an honest player's previous share (for example, one
+    /// revealed in the previous round) may reconstruct shares that this set does not list.
     pub const fn revealed(&self) -> &Set<P> {
         &self.revealed
     }
