@@ -7,6 +7,7 @@ use super::{
     durability::{DispatchGate, Durable as _},
     floor::{Cutoff, Floor, Processed, State as FloorState, closed_epoch, retained_from},
     mailbox::{Mailbox, Message},
+    prefetch::Prefetches,
     staged::Staged,
     stream::Stream,
     subscriptions::{Finalized as FinalizedSubscriptions, Subscriptions},
@@ -52,7 +53,7 @@ use commonware_utils::{
 };
 use futures::{
     FutureExt as _, TryFutureExt as _,
-    future::{join, join_all},
+    future::{Either, join, join_all, pending, ready},
     try_join,
 };
 use rand_core::CryptoRng;
@@ -122,7 +123,8 @@ where
     epocher: ES,
     // Minimum number of views to retain temporary data after the application processes a block
     view_retention: ViewDelta,
-    // Maximum number of missing finalized heights fetched from peers at a time
+    // Bounds speculative body capacity, prefetch dispatches per turn, resolver messages per
+    // batch, and finalized heights requested per repair pass
     max_repair: NonZeroUsize,
     // Codec configuration for block type
     block_codec_config: <V::ApplicationBlock as Read>::Cfg,
@@ -139,6 +141,8 @@ where
     tip: Height,
     // Outstanding subscriptions for blocks
     block_subscriptions: Subscriptions<V>,
+    // Speculative demand from range leases, sharing one bound on active fetches and ready bodies
+    prefetch: Prefetches<V>,
     // Local waiters for finalized blocks by height, served independently of application
     // acknowledgements
     finalized_subscriptions: FinalizedSubscriptions<V>,
@@ -286,6 +290,7 @@ where
                 pending_acks: PendingAcks::new(config.max_pending_acks.get()),
                 tip: Height::zero(),
                 block_subscriptions: Subscriptions::new(),
+                prefetch: Prefetches::new(config.max_repair.get()),
                 finalized_subscriptions: FinalizedSubscriptions::new(),
                 certified: Certified::new(),
                 dispatch_gate: DispatchGate::default(),
@@ -468,10 +473,22 @@ where
                     "stream must be synced before the actor handles its next event"
                 );
 
-                // Remove any dropped subscribers. If all subscribers dropped, abort the waiter.
-                let released = self.block_subscriptions.retain_open();
+                // Remove callers, prefetch leases, and finalized waiters whose receivers closed,
+                // and cancel the requests that only closed callers or leases owned. Removing the
+                // last caller for a commitment also aborts its buffer waiter. Cleanup runs before
+                // marshal waits for its next event, so a receiver dropped during that wait is
+                // still registered while the event is handled.
+                let mut released = self.block_subscriptions.retain_open();
+                released.extend(self.prefetch.retain_open());
                 Self::cancel_subscription_requests(&mut resolver, released);
                 self.finalized_subscriptions.retain_open();
+
+                // Arm the prefetch branch only while queued demand has a free slot.
+                let prefetch_ready = if self.prefetch.ready() {
+                    Either::Left(ready(()))
+                } else {
+                    Either::Right(pending::<()>())
+                };
             },
             on_stopped => {
                 debug!("context shutdown, stopping marshal");
@@ -535,7 +552,7 @@ where
                     .instrument(span)
                     .await;
             },
-            // Handle resolver messages last (batched up to max_repair, sync once)
+            // Handle resolver messages before speculative prefetch (batched up to max_repair).
             Some(message) = resolver_rx.recv() else {
                 debug!("handler closed, shutting down");
                 return;
@@ -550,6 +567,10 @@ where
                         &mut application,
                     )
                     .await;
+            },
+            // Start speculative fetches only after every other ready event.
+            () = prefetch_ready => {
+                self.dispatch_prefetch(&buffer, &mut resolver).await;
             },
         }
     }
@@ -743,6 +764,7 @@ where
                     notarization.and(block)
                 });
                 ack.send_lossy(handle);
+                self.release_stored_prefetch(V::commitment(&block)).await;
             }
             Message::Certification { notarization, .. } => {
                 // Certification also authenticates the parent commitment
@@ -796,6 +818,7 @@ where
                             PooledSync::Observed
                         });
                     }
+                    self.release_stored_prefetch(commitment).await;
                 } else {
                     debug!(?round, "notarized block unavailable locally");
                 }
@@ -920,6 +943,24 @@ where
                     response.send_lossy(V::restore_across(stored, &self.strategy).await);
                 } else if height > self.floor.processed_height() {
                     self.finalized_subscriptions.insert(span, height, response);
+                }
+            }
+            Message::Prefetch {
+                commitments,
+                range,
+                lease,
+                ..
+            } => {
+                // Lease the selected commitments, then retire speculative demand for any that a
+                // fetching caller already owns, so the two never share a request.
+                self.prefetch
+                    .lease(commitments.clone(), range.clone(), lease);
+                if let Some(selected) = commitments.get(range) {
+                    for commitment in selected {
+                        if self.block_subscriptions.fetching(commitment) {
+                            self.prefetch.retire(*commitment);
+                        }
+                    }
                 }
             }
             Message::HintFinalized {
@@ -1106,6 +1147,10 @@ where
     }
 
     /// Cancels exact-body requests after their fetch owner releases them.
+    ///
+    /// Fetching callers and speculative demand never own the same commitment, because an acquire
+    /// takes over speculative demand and a prefetch lease skips commitments a caller is fetching.
+    /// Canceling one owner's request therefore never strands the other.
     fn cancel_subscription_requests(
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
         commitments: Vec<V::Commitment>,
@@ -1118,6 +1163,41 @@ where
             *retention != Annotation::Subscription
                 || !matches!(key, Key::Block(commitment) if commitments.contains(commitment))
         });
+    }
+
+    /// Starts speculative fetches for queued demand while capacity allows.
+    async fn dispatch_prefetch<Buf: Buffer<V>>(
+        &mut self,
+        buffer: &Buf,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
+    ) {
+        // Bound the dispatches of one turn, so queued demand cannot starve other events.
+        for _ in 0..self.max_repair.get() {
+            let Some(commitment) = self.prefetch.next() else {
+                break;
+            };
+            let digest = V::commitment_to_inner(commitment);
+
+            // A body already in storage releases its slot. Storage is checked by digest, because a
+            // digest identifies the commitment of every body consensus accepts (see
+            // `Variant::commitment_to_inner`). A range acquires each body by its exact commitment,
+            // so a body stored under another commitment forgoes only the speculative fetch. A body
+            // found only in the buffer keeps the slot reserved for its fetch, because the buffer
+            // may evict it. Any other body is requested from peers.
+            if self.cache.has_block(digest).await
+                || self
+                    .finalized_blocks
+                    .has(&digest)
+                    .await
+                    .expect("failed to check finalized block")
+            {
+                self.prefetch.retire(commitment);
+            } else if let Some(block) = buffer.find_by_commitment(commitment).await {
+                self.prefetch.complete(block);
+            } else {
+                resolver.fetch(Request::subscription(commitment));
+            }
+        }
     }
 
     /// Answers a local caller with the block for `commitment` or registers it until delivery.
@@ -1134,23 +1214,31 @@ where
         waiters: &mut AbortablePool<'_, Option<V::Block>>,
         buffer: &mut Buf,
     ) {
+        // A locally available block answers at once. A certified block's digest binds its parent
+        // commitment, so certification extends to the parent. The block also answers earlier
+        // callers and speculative demand, and any subscription request still outstanding for it
+        // is canceled.
         if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
-            // An ancestor may be certified through a descendant without its own local notification.
-            // Its digest binds the parent commitment, so extend certification evidence here.
             if self.certified.contains(block.height(), &commitment)
                 && let Some(parent) = block.height().previous()
             {
                 self.certified.insert(parent, V::parent_commitment(&block));
             }
-            if self.satisfy_demand(&block) {
+            let active = fetch && self.prefetch.retire(commitment);
+            if self.satisfy_demand(&block) || active {
                 Self::cancel_subscription_requests(resolver, vec![commitment]);
             }
             response.send_lossy(block);
             return;
         }
 
-        if fetch && !self.block_subscriptions.fetching(&commitment) {
-            resolver.fetch(Request::subscription(commitment));
+        // Only fetching callers own peer demand. A caller that waits without fetching
+        // leaves speculative demand and any existing request to their owners.
+        if fetch {
+            let active = self.prefetch.retire(commitment);
+            if !active && !self.block_subscriptions.fetching(&commitment) {
+                resolver.fetch(Request::subscription(commitment));
+            }
         }
         self.block_subscriptions
             .insert(span, commitment, fetch, response, waiters, buffer);
@@ -1252,17 +1340,45 @@ where
         let handle;
         (self.cache, handle) = self.cache.put_verified(round, digest, &block).await;
         ack.send_lossy(handle);
+        self.release_stored_prefetch(V::commitment(&block)).await;
         self
     }
 
+    /// Releases a completed speculative body only when storage can serve its full commitment.
+    async fn release_stored_prefetch(&mut self, commitment: V::Commitment) {
+        if self.prefetch.get_ready(&commitment).is_some()
+            && self
+                .find_block_in_storage_by_commitment(commitment)
+                .await
+                .is_some()
+        {
+            self.prefetch.retire(commitment);
+        }
+    }
+
+    /// Hands a validated block to its direct callers and speculative demand.
+    ///
+    /// Returns true when a resolver request for the block may still be outstanding, because a
+    /// fetching caller was waiting or speculative demand was still fetching it. Queued and
+    /// completed speculative demand own no request.
     fn satisfy_demand(&mut self, block: &V::Block) -> bool {
         let commitment = V::commitment(block);
         let fetching = self.block_subscriptions.fetching(&commitment);
         self.block_subscriptions.notify(block);
-        fetching
+
+        // A fetching caller owns the request, so speculative demand retires. Otherwise the
+        // body fills a slot only if speculative demand reserved one.
+        if fetching {
+            self.prefetch.retire(commitment);
+            return true;
+        }
+        self.prefetch.complete(block.clone())
     }
 
     /// Notifies subscribers of a validated block and applies any pending floor transition.
+    ///
+    /// Cancels the block's [`Annotation::Subscription`] requests when a fetching caller or an
+    /// active speculative fetch was waiting for it.
     ///
     /// Subscribers are notified before the block is persisted and may hold a block that marshal
     /// never durably stores. Subscriptions make no durability promise. Durable height-ordered
@@ -1351,6 +1467,9 @@ where
         )
         .expect("failed to store floor anchor");
         self = self.sync_finalized().await;
+
+        // The durable anchor retires its speculative demand and answers waiters at its height.
+        self.prefetch.retire(V::commitment(&block));
         self.finalized_subscriptions.notify(&block);
         self.advance_tip(round, height, digest, application);
 
@@ -1453,11 +1572,12 @@ where
                     self.certified.insert(parent, V::parent_commitment(&block));
                 }
 
+                // Send the verdict before the handoff. The handoff cancels the block's subscription
+                // request when a fetching caller or an active speculative fetch was waiting for it,
+                // and the resolver keeps the source feedback of a canceled delivery only if its
+                // verdict was already sent. A block that anchors the pending floor transition is
+                // consumed by that transition and is not stored as an ordinary delivery.
                 response.send_lossy(Outcome::Resolved(Resolution::Complete));
-
-                // This block may match the pending floor request. Whether it
-                // installs or is rejected as the floor anchor, do not also
-                // process it as an ordinary block delivery.
                 let anchored;
                 (self, anchored) = self
                     .ingest(block.clone(), buffer, application, resolver)
@@ -1497,6 +1617,7 @@ where
                         .cache
                         .put_certified(bounds.epoch(), height, digest, &block)
                         .await;
+                    self.prefetch.retire(commitment);
                 } else if let Some(notarization) = self
                     .cache
                     .get_notarization_for(digest)
@@ -1513,6 +1634,7 @@ where
                         handle.durable(round, "notarized").await;
                         PooledSync::Observed
                     });
+                    self.prefetch.retire(commitment);
                 }
             }
             Key::Finalized { height } => {
@@ -2014,10 +2136,13 @@ where
         )
         .unwrap_or_else(|e| panic!("failed to finalize: {e}"));
 
+        // An archived block answers the callers waiting for its commitment and the waiters at
+        // its height, and retires its speculative demand. Any request a fetching caller or an
+        // active speculative fetch still holds for it is canceled.
         let commitment = V::commitment(block);
         let fetching = self.block_subscriptions.fetching(&commitment);
         self.block_subscriptions.notify(block);
-        if fetching {
+        if self.prefetch.retire(commitment) || fetching {
             Self::cancel_subscription_requests(resolver, vec![commitment]);
         }
         self.finalized_subscriptions.notify(block);
@@ -2140,6 +2265,9 @@ where
         buffer: &Buf,
         commitment: V::Commitment,
     ) -> Option<V::Block> {
+        if let Some(block) = self.prefetch.get_ready(&commitment) {
+            return Some(block.clone());
+        }
         if let Some(block) = buffer.find_by_commitment(commitment).await {
             return Some(block);
         }
