@@ -427,9 +427,10 @@ stability_scope!(BETA {
         /// promptly. Blocking work belongs on `shared(true)`, and long CPU work on a
         /// [`Strategizer::strategy`]. Each runtime bounds a thread's turns:
         ///
-        /// - io_uring: one turn admits at most 64 queued spawns, in order, then polls at most 64
-        ///   ready tasks. There is no cooperative budget, so a task whose channels never return
-        ///   `Pending` can starve its thread. The thread's tasks share one io_uring ring and its
+        /// - io_uring: one turn admits at most 64 queued spawns, in order, then makes at most 64
+        ///   polls of ready tasks, polling a task again if it was woken meanwhile. There is no
+        ///   cooperative budget, so a task whose channels never return `Pending` can starve its
+        ///   thread. The thread's tasks share one io_uring ring and its
         ///   in-flight limit, so a receive can hold the slot that a dependent send needs.
         ///   Deadlines break such dependencies. A future first polled elsewhere keeps the
         ///   registrations of the worker that polled it after it moves onto a thread, so create

@@ -2551,7 +2551,7 @@ impl crate::Runner for Runner {
         // Task panics interrupt the root inside the pool failure check, so they
         // are observed only until the root completes, before its state is
         // destroyed.
-        let output = Worker::run(
+        let run = Worker::run(
             shared.clone(),
             Role::Pool(0),
             || {
@@ -2577,8 +2577,12 @@ impl crate::Runner for Runner {
                 }
             },
             Some(Box::pin(process.collect(Sleep::new))),
-        )
-        .and_then(|(mut worker, output)| {
+        );
+
+        // Stop observing ordinary task panics once the root is gone, so a later one is dropped
+        // where it is notified.
+        drop(tasks);
+        let output = run.and_then(|(mut worker, output)| {
             #[cfg(test)]
             tests::before_abort();
 

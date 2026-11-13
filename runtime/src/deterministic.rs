@@ -623,18 +623,25 @@ impl Executor {
                 let job = factory.lock().take();
                 match job {
                     Some(job) => {
-                        // On the first schedule, skip the factory of an aborted task or a
-                        // closing thread, or run it on this thread with a Local. Release the
-                        // table lock before taking the admission lock, which admissions take
-                        // first.
+                        // On the first schedule, run the factory on this thread with a Local.
+                        // A closing thread keeps it for its close drain, which drops it after
+                        // every resident future. The factory of a task aborted on an open
+                        // thread is dropped now.
                         let home = self
                             .threads
                             .lock()
                             .entries
                             .get(&thread)
                             .map(|entry| entry.thread.clone());
-                        let open = home.is_some_and(|home| home.inner().is_open());
-                        let owner = (open && !abort.is_aborted())
+                        let Some(home) = home else {
+                            self.dispose(job);
+                            return true;
+                        };
+                        if !home.inner().is_open() {
+                            *factory.lock() = Some(job);
+                            return false;
+                        }
+                        let owner = (!abort.is_aborted())
                             .then(|| self.owner(table, thread))
                             .flatten();
                         let Some(owner) = owner else {

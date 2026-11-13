@@ -437,20 +437,24 @@ impl ThreadRoot {
     }
 
     /// Admit `job` as a resident queued for its first poll, running its factory now, or drop
-    /// a factory whose task was aborted or whose thread is closing.
-    fn admit(&mut self, job: Job) {
+    /// a factory whose task was aborted. Returns `job` if the thread is closing, so the close
+    /// drops it after every resident future.
+    fn admit(&mut self, job: Job) -> Result<(), Job> {
+        if !self.inner.is_open() {
+            return Err(job);
+        }
         let Job { work, abort, count } = job;
         let future = match work {
             Work::Placed(future) => future as Resident,
             Work::Factory(factory) => {
-                if abort.is_aborted() || !self.inner.is_open() {
+                if abort.is_aborted() {
                     Panics::contain(move || drop(factory));
                     self.owner.reap();
-                    return;
+                    return Ok(());
                 }
                 match factory.run(&self.owner) {
                     Some(future) => future,
-                    None => return,
+                    None => return Ok(()),
                 }
             }
         };
@@ -470,6 +474,7 @@ impl ThreadRoot {
             })
         });
         self.wake.queue(id);
+        Ok(())
     }
 
     /// Poll the resident `id` once, unless it retired, then reinsert or retire it.
@@ -546,7 +551,11 @@ impl Future for ThreadRoot {
             return Poll::Ready(());
         }
         while let Some(job) = this.batch.pop_front() {
-            this.admit(job);
+            if let Err(job) = this.admit(job) {
+                this.batch.push_front(job);
+                this.close();
+                return Poll::Ready(());
+            }
         }
 
         // Poll ready residents, without holding any lock while they run, until the turn's budget

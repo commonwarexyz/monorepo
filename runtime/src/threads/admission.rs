@@ -35,9 +35,10 @@ use {crate::utils::abort::AbortHandle, std::collections::VecDeque};
 // its mutex.
 cfg_if::cfg_if! {
     if #[cfg(feature = "loom")] {
-        use loom::sync::{Mutex, MutexGuard};
+        use loom::sync::{Mutex, MutexGuard, atomic::AtomicBool};
     } else {
         use commonware_utils::sync::{Mutex, MutexGuard};
+        use std::sync::atomic::AtomicBool;
     }
 }
 
@@ -92,6 +93,9 @@ pub(crate) struct ThreadInner {
     cpus: Option<Cpus>,
     /// Admission state and ingress.
     admission: Mutex<Admission>,
+    /// Whether the admission state is open, written under the admission lock, so hosts and
+    /// pre-checks can read it without locking. The lock stays the authority for admission.
+    open: AtomicBool,
     /// The supervision node the thread occupies, used only by a root guard to abort it.
     node: Weak<Tree>,
     /// The thread's series of the residents gauge.
@@ -121,6 +125,7 @@ impl ThreadInner {
                 #[cfg(not(target_arch = "wasm32"))]
                 ingress: VecDeque::new(),
             }),
+            open: AtomicBool::new(true),
             node: Arc::downgrade(node),
             residents,
             backend,
@@ -176,13 +181,17 @@ impl ThreadInner {
     }
 
     /// The current admission state.
+    #[cfg(test)]
     pub(crate) fn state(&self) -> State {
         self.lock().state
     }
 
     /// Whether submissions are admitted.
+    ///
+    /// This reads a mirror of the state without the admission lock, so it is a hint that a
+    /// concurrent close can make stale at once. Admission itself checks under the lock.
     pub(crate) fn is_open(&self) -> bool {
-        self.state() == State::Open
+        self.open.load(Ordering::Acquire)
     }
 
     /// Move admission from open to closing, then wake the host if this call closed it.
@@ -194,6 +203,7 @@ impl ThreadInner {
             let open = admission.state == State::Open;
             if open {
                 admission.state = State::Closing;
+                self.open.store(false, Ordering::Release);
             }
             open
         };
@@ -205,6 +215,7 @@ impl ThreadInner {
     /// Mark the thread's close complete.
     pub(crate) fn finish_close(&self) {
         self.lock().state = State::Closed;
+        self.open.store(false, Ordering::Release);
     }
 
     /// Run `register` in the critical section that admits a submission, if the thread is open.
@@ -268,6 +279,7 @@ impl ThreadInner {
         let mut admission = self.lock();
         if admission.state == State::Open {
             admission.state = State::Closing;
+            self.open.store(false, Ordering::Release);
         }
         std::mem::take(&mut admission.ingress)
     }

@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub(crate) struct AffinityState {
     /// CPUs the thread that started the runner may run on, if known.
     base: Option<Cpus>,
-    /// Set once the runner creates its first pinned thread.
+    /// Set once a pinned thread of this runner applied its mask.
     #[cfg(all(target_os = "linux", not(miri)))]
     armed: AtomicBool,
 }

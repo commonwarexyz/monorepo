@@ -211,6 +211,7 @@ fn host(
         residents: RefCell::new(BTreeMap::new()),
         next: Cell::new(0),
         batch: RefCell::new(VecDeque::new()),
+        deferred: RefCell::new(Vec::new()),
     });
     let local_set = LocalSet::new();
     match started {
@@ -233,6 +234,10 @@ fn host(
         host.abort_residents();
         if let Err(panic) = catch_unwind(AssertUnwindSafe(move || drop(local_set))) {
             failures.push(panic);
+        }
+        let deferred = host.deferred.take();
+        for factory in deferred {
+            host.dispose(factory);
         }
         loop {
             let job = host.batch.borrow_mut().pop_front();
@@ -301,6 +306,9 @@ struct Host {
     next: Cell<u64>,
     /// Jobs detached from the ingress that have not been admitted.
     batch: RefCell<VecDeque<Job>>,
+    /// Factories of admitted residents that never ran because the thread closed, kept so the
+    /// close drops them after every resident future.
+    deferred: RefCell<Vec<Box<dyn FactoryJob>>>,
 }
 
 impl Host {
@@ -319,13 +327,23 @@ impl Host {
         }
     }
 
+    /// Keep the unrun `factory` of a resident for the close if the thread is closing, or drop it
+    /// now, after its task was aborted on an open thread.
+    fn discard(&self, factory: Box<dyn FactoryJob>) {
+        if self.inner.is_open() {
+            self.dispose(factory);
+            self.owner.reap();
+        } else {
+            self.deferred.borrow_mut().push(factory);
+        }
+    }
+
     /// Spawn `job` into the `LocalSet`, or drop a factory whose task was already aborted.
     fn admit(self: &Rc<Self>, job: Job, local_set: &LocalSet) {
         let Job { work, abort, count } = job;
         let state = match work {
             Work::Factory(factory) if abort.is_aborted() => {
-                self.dispose(factory);
-                self.owner.reap();
+                self.discard(factory);
                 return;
             }
             Work::Factory(factory) => State::Factory(factory),
@@ -383,8 +401,7 @@ impl Future for ResidentTask {
 
             // Cancellation can arrive after admission and before this first poll.
             if this.abort.is_aborted() || !this.host.inner.is_open() {
-                this.host.dispose(job);
-                this.host.owner.reap();
+                this.host.discard(job);
                 return Poll::Ready(());
             }
             match job.run(&this.host.owner) {
@@ -419,12 +436,10 @@ impl Drop for ResidentTask {
     fn drop(&mut self) {
         // Tokio drops a task's future inside its own panic boundary, so dispose of the factory
         // or future here, in one that reports.
-        if let Some(state) = self.state.take() {
-            let unrun = matches!(state, State::Factory(_));
-            self.host.dispose(state);
-            if unrun {
-                self.host.owner.reap();
-            }
+        match self.state.take() {
+            Some(State::Factory(factory)) => self.host.discard(factory),
+            Some(state) => self.host.dispose(state),
+            None => {}
         }
         self.host.residents.borrow_mut().remove(&self.id);
     }

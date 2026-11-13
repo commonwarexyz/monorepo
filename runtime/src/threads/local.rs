@@ -315,7 +315,13 @@ impl<T: 'static> Future for LocalHandle<T> {
 
 impl<T> Drop for LocalHandle<T> {
     fn drop(&mut self) {
+        // An output the handle never took is the runtime's to dispose of. A task still running
+        // keeps the slot and drops its output with itself.
         self.owner.remove_slot(self.id);
+        let output = self.slot.0.borrow_mut().take();
+        if let Some(output) = output {
+            self.owner.dispose(output);
+        }
     }
 }
 
@@ -516,11 +522,12 @@ impl<F, T> Shim<F, T> {
         Fut: Future<Output = T> + 'static,
         T: 'static,
     {
-        self.armed = false;
+        // A shim delivered elsewhere stays armed, so its home thread reaps the parked factory.
         let home = local.owner.home().inner();
         if home.runner() != self.runner || home.id() != self.thread {
             return ShimFuture::Missing;
         }
+        self.armed = false;
         let Some(parked) = local.owner.take_parked(self.id) else {
             return ShimFuture::Missing;
         };
@@ -574,9 +581,8 @@ impl<F, T> Drop for Shim<F, T> {
 /// task's slot.
 ///
 /// It keeps the completed future in its field, so the task wrapper drops it after the poll that
-/// completed it, and a destructor panic there is a disposal panic. Once the handle is dropped,
-/// the job holds the slot's last reference and so owns the output, which it disposes of in a
-/// boundary of its own if the future's destructor panics.
+/// completed it, and a destructor panic there is a disposal panic. If that destructor panics,
+/// the job disposes of the output, which can no longer be delivered, in a boundary of its own.
 struct LocalJob<Fut: Future> {
     /// The user's future, taken only by the job's drop.
     future: Option<Pin<Box<Fut>>>,
@@ -602,13 +608,12 @@ impl<Fut: Future> Drop for LocalJob<Fut> {
     fn drop(&mut self) {
         let future = self.future.take();
         if let Err(panic) = catch_unwind(AssertUnwindSafe(move || drop(future))) {
-            // An output the job owns would otherwise drop during this unwind, where a second
-            // panic aborts the process. Dispose of it first, then continue the unwind as a
+            // The unwind resolves the handle Closed, so the output can never be delivered.
+            // Dispose of it in its own boundary, since dropping it during this unwind could
+            // panic a second time and abort the process, then continue the unwind as a
             // disposal panic of the task.
-            if Rc::strong_count(&self.slot) == 1 {
-                let output = self.slot.0.borrow_mut().take();
-                self.owner.dispose(output);
-            }
+            let output = self.slot.0.borrow_mut().take();
+            self.owner.dispose(output);
             resume_unwind(panic);
         }
     }
