@@ -13,7 +13,7 @@ use crate::{
     telemetry::metrics::count_running_tasks,
     threads::{
         admission::{State, tests::set_before_enqueue},
-        tests::executions,
+        testing::{DropFlag, bounded, executions, flag, residents, settle},
     },
     tokio,
     utils::{extract_panic_message, supervision::tests::set_before_thread_abort},
@@ -24,13 +24,13 @@ use rstest::rstest;
 use std::{
     cell::Cell,
     future::{Future, Ready, poll_fn, ready},
-    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
+    panic::{AssertUnwindSafe, catch_unwind},
     pin::Pin,
     rc::Rc,
     sync::{
         Arc, Barrier,
         atomic::{AtomicBool, Ordering},
-        mpsc::{RecvTimeoutError, channel},
+        mpsc::channel,
     },
     task::{self, Poll},
     thread::JoinHandle,
@@ -69,11 +69,6 @@ macro_rules! on_backend {
     };
 }
 
-/// A new flag, initially false.
-fn flag() -> Arc<AtomicBool> {
-    Arc::new(AtomicBool::new(false))
-}
-
 /// A factory that records that it ran and returns a future that completes at once.
 fn recording<L>(ran: &Arc<AtomicBool>) -> impl FnOnce(L) -> Ready<()> + Send + 'static {
     let ran = ran.clone();
@@ -107,43 +102,6 @@ fn aborted_context<C: Spawner>(context: &C, stale: &Thread) -> C {
     let aborted = lineage.child("aborted");
     drop(lineage.on(stale).spawn(|_| async {}));
     aborted
-}
-
-/// Run `f` on a helper thread, failing if it does not finish in time (a deadlock).
-fn within<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
-    let (tx, rx) = channel();
-    let worker = std::thread::spawn(move || {
-        let _ = tx.send(f());
-    });
-    match rx.recv_timeout(Duration::from_secs(60)) {
-        Ok(value) => {
-            worker.join().expect("helper thread");
-            value
-        }
-        Err(RecvTimeoutError::Disconnected) => resume_unwind(worker.join().unwrap_err()),
-        Err(RecvTimeoutError::Timeout) => panic!("the test did not finish in time"),
-    }
-}
-
-/// Poll `done` until it holds, sleeping between checks.
-async fn settle(context: &impl Clock, mut done: impl FnMut() -> bool) {
-    for _ in 0..10_000 {
-        if done() {
-            return;
-        }
-        context.sleep(Duration::from_millis(1)).await;
-    }
-    panic!("condition did not settle");
-}
-
-/// The value of the `thread_residents` series of threads named `name`, if it exists.
-fn residents(metrics: &impl Metrics, name: &str) -> Option<i64> {
-    let label = format!("name=\"{name}\"");
-    metrics
-        .encode()
-        .lines()
-        .find(|line| line.starts_with("runtime_thread_residents{") && line.contains(&label))
-        .and_then(|line| line.rsplit(' ').next()?.parse().ok())
 }
 
 /// Assert the root barrier for a thread whose root handle already resolved. A `spawn_on` and a
@@ -546,7 +504,7 @@ where
 #[case::tokio(Backend::Tokio)]
 #[cfg_attr(target_os = "linux", case::iouring(Backend::Iouring))]
 fn test_thread_close_drops_residents_before_jobs(#[case] backend: Backend) {
-    let order = within(move || on_backend!(backend, false, close_drops_residents_before_jobs()));
+    let order = bounded(move || on_backend!(backend, false, close_drops_residents_before_jobs()));
     assert_eq!(order, ["resident", "job"]);
 }
 
@@ -611,7 +569,7 @@ fn test_thread_close_while_scheduling(#[case] backend: Backend) {
     let mut unrun = 0;
     for seed in 0..runs {
         let stale = stale_thread();
-        let order = within(move || match backend {
+        let order = bounded(move || match backend {
             Backend::Deterministic => close_while_scheduling(
                 deterministic::Runner::new(deterministic::Config::default().with_seed(seed)),
                 stale,
@@ -705,7 +663,7 @@ where
 #[case::tokio(Backend::Tokio)]
 #[cfg_attr(target_os = "linux", case::iouring(Backend::Iouring))]
 fn test_thread_close_reentrant_drop(#[case] backend: Backend) {
-    within(move || on_backend!(backend, false, close_reentrant_drop()));
+    bounded(move || on_backend!(backend, false, close_reentrant_drop()));
 }
 
 /// Aborting the handle of a rejected spawn and then awaiting it resolves `Closed`. This holds
@@ -1708,7 +1666,7 @@ where
 #[case::tokio(Backend::Tokio)]
 #[cfg_attr(target_os = "linux", case::iouring(Backend::Iouring))]
 fn test_thread_spawn_failure_rollback(#[case] backend: Backend) {
-    within(move || on_backend!(backend, false, spawn_failure_rollback()));
+    bounded(move || on_backend!(backend, false, spawn_failure_rollback()));
 }
 
 /// Spawn an OS thread that aborts `context`'s node, with its lineage, off every runtime
@@ -1828,7 +1786,7 @@ where
 #[cfg_attr(target_os = "linux", case::iouring(Backend::Iouring))]
 fn test_thread_root_barrier_external_abort(#[case] backend: Backend) {
     let stale = stale_thread();
-    within(move || on_backend!(backend, false, root_barrier_external_abort(stale)));
+    bounded(move || on_backend!(backend, false, root_barrier_external_abort(stale)));
 }
 
 /// Holds the first admission inside its critical section, optionally while another OS thread
@@ -1949,7 +1907,7 @@ fn test_thread_admission_race(
     #[values(Submission::Placed, Submission::SpawnOn)] submission: Submission,
 ) {
     let stale = stale_thread();
-    within(move || on_backend!(backend, false, admission_race(stale, submission)));
+    bounded(move || on_backend!(backend, false, admission_race(stale, submission)));
 }
 
 /// Submissions and thread creations race lineage aborts on deterministic, as in
@@ -2037,7 +1995,7 @@ fn deterministic_admission_race(stale: Thread) {
 #[test]
 fn test_thread_admission_race_deterministic() {
     let stale = stale_thread();
-    within(move || deterministic_admission_race(stale));
+    bounded(move || deterministic_admission_race(stale));
 }
 
 /// For one wrapper, `attach`, `spawn`, `spawn_on` and `spawn_local` all hand their closures
@@ -2163,15 +2121,6 @@ fn test_thread_wrapper_contexts() {
         assert!(faulty.faults.failed());
         wrapper_threads(faulty, |context| context.faults.failed(), stale).await;
     });
-}
-
-/// Sets its flag when dropped.
-struct DropFlag(Arc<AtomicBool>);
-
-impl Drop for DropFlag {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::SeqCst);
-    }
 }
 
 /// A `spawn_local` factory holding a capture that sets `dropped` when dropped. It sets `ran`

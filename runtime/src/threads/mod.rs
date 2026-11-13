@@ -18,4 +18,6 @@ pub use local::{Local, LocalHandle};
 #[cfg(test)]
 mod close_tests;
 #[cfg(test)]
+pub(crate) mod testing;
+#[cfg(test)]
 mod tests;
