@@ -1,12 +1,12 @@
 set positional-arguments := true
 
-tools_nightly_version := `sed -n 's/^channel = "\(.*\)"/\1/p' .github/rust-toolchain.toml`
+tools_nightly_version := `sed -n 's/^nightly = "\(.*\)"/\1/p' .github/toolchains.toml`
 env_nightly_version := env("NIGHTLY_VERSION", tools_nightly_version)
 use_rustup := if env("COMMONWARE_NO_RUSTUP", "") == "" { "true" } else { "false" }
 nightly_version := if use_rustup == "true" { if env_nightly_version != "" { "+" + env_nightly_version } else { "" } } else { "" }
-clippy_version := "1.100.0"
-rustfmt_version := "nightly-2026-11-12"
-dylint_version := `sed -n 's/^channel = "\(.*\)"/\1/p' .github/dylints/rust-toolchain`
+clippy_version := `sed -n 's/^clippy = "\(.*\)"/\1/p' .github/toolchains.toml`
+rustfmt_version := `sed -n 's/^rustfmt = "\(.*\)"/\1/p' .github/toolchains.toml`
+dylint_version := `sed -n 's/^channel = "\(.*\)"/\1/p' .github/toolchains.toml`
 rustfmt := env("RUSTFMT", "rustfmt")
 clippy_toolchain := if use_rustup == "true" { "+" + clippy_version } else { "" }
 rustfmt_toolchain := if use_rustup == "true" { if env("RUSTFMT", "") == "" { "+" + rustfmt_version } else { "" } } else { "" }

@@ -36,7 +36,7 @@ Before making a PR, to run all lints and tests, run:
 $ just pre-pr
 ```
 
-Lint recipes use the pinned rustup toolchains. Required nightly tools use [`.github/rust-toolchain.toml`](.github/rust-toolchain.toml), and Dylint uses [its own pin](.github/dylints/rust-toolchain). Set `NIGHTLY_VERSION` to override the tooling nightly, or to an empty value to use `cargo` from `PATH`.
+Lint recipes use the pinned rustup toolchains. Clippy, rustfmt, required nightly tools, and Dylint read their pins from [`.github/toolchains.toml`](.github/toolchains.toml). The Dylint `rust-toolchain` file is a symlink to this shared configuration so rustup discovers its compiler automatically. Set `NIGHTLY_VERSION` to override the tooling nightly, or to an empty value to use `cargo` from `PATH`.
 
 Without rustup (for example, Nix), set `COMMONWARE_NO_RUSTUP=1` to use tools from `PATH` without toolchain selectors or installs. `RUSTFMT` can select a standalone formatter. Match the documented pins when running checks for CI, including Dylint's compiler.
 
