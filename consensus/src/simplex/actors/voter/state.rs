@@ -1167,9 +1167,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// Missing ancestry is requested from the proposal's elected leader
     /// (see [`Self::resolve_ancestry`] for when an error justifies a fetch).
     ///
-    /// A proposal whose certification was requested is never verified (see
-    /// [`VerifyRequest::Withhold`]). Its ancestry is still resolved, since the
-    /// certificates fetched for it can advance the view.
+    /// A proposal whose certification was requested is not sent for
+    /// verification (see [`VerifyRequest::Withhold`]). Its ancestry is still
+    /// resolved, since the certificates fetched for it can advance the view.
     pub fn try_verify(&mut self) -> Verify<S, D> {
         // Bound the scan as in [`Self::try_propose`].
         // Ascending order gives the current view precedence over optimistic work.
