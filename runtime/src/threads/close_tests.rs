@@ -813,6 +813,8 @@ impl Drop for PollThenDrop {
 enum Wrapped {
     /// An ordinary spawn.
     Spawn,
+    /// A blocking spawn.
+    Blocking,
     /// A spawn placed on a thread.
     Placed,
     /// A `spawn_on` resident.
@@ -837,6 +839,7 @@ impl Wrapped {
     {
         match self {
             Self::Spawn => context.spawn(make),
+            Self::Blocking => context.shared(true).spawn(make),
             Self::Placed => context.on(thread).spawn(make),
             Self::SpawnOn => context.spawn_on(thread, move |local| make(local.into_inner())),
             Self::Root => context
@@ -898,8 +901,8 @@ enum Scenario {
     /// A placed spawn's factory capture panics when a closed thread rejects it before the
     /// factory runs.
     RejectedPlaced,
-    /// A task completes with an output holding its context, then its future panics when
-    /// dropped, before the output is delivered.
+    /// A task completes with an output that holds its context and panics when dropped, then
+    /// its future panics when dropped, before the output is delivered.
     ReadyOutput(Wrapped),
     /// A task's future panics in a poll, then panics again when dropped.
     PollThenDrop(Wrapped),
@@ -934,8 +937,12 @@ impl Scenario {
     /// panics escape the run.
     const fn escapes(self, backend: Backend) -> Option<&'static str> {
         match (self, backend) {
-            (Self::ReadyOutput(Wrapped::Spawn), Backend::Deterministic) => Some(PANIC),
-            (Self::PollThenDrop(Wrapped::Spawn), Backend::Deterministic) => Some(DROP_PANIC),
+            (Self::ReadyOutput(Wrapped::Spawn | Wrapped::Blocking), Backend::Deterministic) => {
+                Some(PANIC)
+            }
+            (Self::PollThenDrop(Wrapped::Spawn | Wrapped::Blocking), Backend::Deterministic) => {
+                Some(DROP_PANIC)
+            }
             _ => None,
         }
     }
@@ -1227,7 +1234,7 @@ where
             let output = flag();
             let held = output.clone();
             let handle = wrapped.spawn(context.child("ready"), thread, move |context| {
-                ready_then_panic(dropped, (context, DropFlag(held)))
+                ready_then_panic(dropped, (context, PanicOnDrop(held)))
             });
             assert!(matches!(handle.await, Err(Error::Closed)));
 
@@ -1314,10 +1321,12 @@ fn test_thread_panic_matrix(
         Scenario::RejectedAborted,
         Scenario::RejectedPlaced,
         Scenario::ReadyOutput(Wrapped::Spawn),
+        Scenario::ReadyOutput(Wrapped::Blocking),
         Scenario::ReadyOutput(Wrapped::Placed),
         Scenario::ReadyOutput(Wrapped::SpawnOn),
         Scenario::ReadyOutput(Wrapped::Root),
         Scenario::PollThenDrop(Wrapped::Spawn),
+        Scenario::PollThenDrop(Wrapped::Blocking),
         Scenario::PollThenDrop(Wrapped::Placed),
         Scenario::PollThenDrop(Wrapped::SpawnOn),
         Scenario::PollThenDrop(Wrapped::Root)
