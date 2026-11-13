@@ -1,31 +1,27 @@
 //! The variable-time multi-scalar multiplication, by Straus's or Pippenger's method, whichever
 //! costs less for the count of elements.
 //!
-//! [`batched`] implements `Space::msm` for both groups: it runs one [`Msm`] kernel per batch
-//! of the strategy and adds the results. [`Msm`] takes the method that [`Method::choose`]
-//! estimates cheapest for its count and lane width.
+//! [`Msm`] implements `Space::msm` for both groups as a [`Batch`]: a strategy runs one kernel
+//! per batch of elements, and a [`Sum`] adds their results. Each kernel takes the method that
+//! [`Method::choose`] estimates cheapest for its own count and lane width.
 //!
 //! The operations and memory accesses of both methods depend on the scalars, which must therefore
 //! be public.
 
 use super::{
     Scalar,
-    kernel::{Group, Kernel, identity, load_each, signed_digits, sum_lanes, windows},
+    kernel::{Batch, Group, Kernel, Sum, identity, load_each, signed_digits, sum_lanes, windows},
 };
 use crate::core::{
     curve::Points,
     field::{MAX_LANES, arithmetic::Field},
 };
 use alloc::{vec, vec::Vec};
-use commonware_math::algebra::Additive;
-use commonware_parallel::Strategy;
 use commonware_simd::Simd;
-use core::{num::NonZeroUsize, ops::RangeInclusive};
-
-/// Fewest elements of [`batched`] that a parallel strategy gives one kernel.
-// Every kernel pays for its own bucket sums and doublings, which cost about as much as adding a
-// few hundred elements.
-pub const MSM_BATCH: NonZeroUsize = NonZeroUsize::new(256).unwrap();
+use core::{
+    num::NonZeroUsize,
+    ops::{Range, RangeInclusive},
+};
 
 /// Window widths that [`Method::choose`] considers for Straus's method.
 const STRAUS_WIDTHS: RangeInclusive<u32> = 2..=8;
@@ -39,7 +35,7 @@ const PIPPENGER_WIDTHS: RangeInclusive<u32> = 2..=12;
 // Every group of windows reads the images of a chunk once, so the chunk bounds the memory of the
 // images whatever the count of elements, and its images stay cached from one group to the next.
 // Chunks of 64 through 4096 elements take the same time within one percent.
-const PIPPENGER_CHUNK: NonZeroUsize = NonZeroUsize::new(256).unwrap();
+pub const PIPPENGER_CHUNK: NonZeroUsize = NonZeroUsize::new(256).unwrap();
 
 /// Estimated cost of an addition of points, in units of [`Method::cost`].
 const ADD_COST: u64 = 10;
@@ -474,29 +470,30 @@ impl<G: Group> Kernel for Msm<'_, G> {
     }
 }
 
-/// Returns the sum of the points times their scalars, in variable time, through one [`Msm`] per
-/// batch of at least [`MSM_BATCH`] points that the strategy runs.
-pub fn batched<G: Group + Additive>(
-    points: &[G],
-    scalars: &[Scalar],
-    strategy: &impl Strategy,
-) -> G {
-    let count = points.len().min(scalars.len());
-    let (points, scalars) = (&points[..count], &scalars[..count]);
-    strategy.run_batches(count, MSM_BATCH, 1, |batches| {
-        batches
-            .map_collect_vec(
-                |ranges| ranges,
-                |range| {
-                    Msm {
-                        elements: &points[range.clone()],
-                        scalars: &scalars[range],
-                        method: None,
-                    }
-                    .dispatch()
-                },
-            )
-            .iter()
-            .fold(G::zero(), |sum, batch| sum + batch)
-    })
+impl<G: Group> Batch for Msm<'_, G> {
+    // Every element adds its images once per window, about 32 additions.
+    const WORK: usize = 32 * G::WORK;
+
+    fn len(&self) -> usize {
+        self.elements.len().min(self.scalars.len())
+    }
+
+    fn split(self, ranges: Vec<Range<usize>>) -> Vec<Self> {
+        ranges
+            .into_iter()
+            .map(|range| Self {
+                elements: &self.elements[range.clone()],
+                scalars: &self.scalars[range],
+                method: self.method,
+            })
+            .collect()
+    }
+
+    fn dispatch_one(self) -> G {
+        G::dispatch_msm(self)
+    }
+
+    fn join(outputs: &[G]) -> G {
+        G::dispatch_sum(Sum(outputs))
+    }
 }

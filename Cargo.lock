@@ -2032,6 +2032,7 @@ dependencies = [
  "arbitrary",
  "bytes",
  "commonware-allocator",
+ "commonware-bench",
  "commonware-codec",
  "commonware-conformance",
  "commonware-formatting",
