@@ -1,6 +1,6 @@
 //! Codec bounds and path limits shared by every Multimmit protocol object.
 
-use crate::multimmit::types::ChainId;
+use crate::multimmit::{faults::MultimmitFaults as _, types::ChainId};
 use commonware_utils::{Faults as _, N5f1};
 
 /// Bounds on the producer-chain paths one proposal or vote carries, immutable within an epoch.
