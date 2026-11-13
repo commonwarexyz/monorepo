@@ -97,7 +97,7 @@ mod tests {
                     self, BLOCKS_PER_EPOCH, CodingB, CodingCtx, CodingHarness, D, EmptyProvider, K,
                     LINK, NAMESPACE, NUM_VALIDATORS, QUORUM, S, TEST_QUOTA, TestHarness,
                     UNRELIABLE_LINK, V, default_leader, genesis_commitment, make_coding_block,
-                    setup_network_links, setup_network_with_participants,
+                    opened_cache_epochs, setup_network_links, setup_network_with_participants,
                 },
                 store::{Op, Recording},
                 verifying::{
@@ -128,7 +128,13 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_resolver::{Delivery, Fetch, Outcome, Resolution, Resolver, TargetedResolver};
     use commonware_runtime::{
-        Clock, Metrics, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
+        Clock, Metrics, Runner, Supervisor as _,
+        buffer::paged::CacheRef,
+        deterministic,
+        telemetry::metrics::{
+            MetricsExt as _,
+            histogram::{Buckets, Timed},
+        },
         utils::reschedule,
     };
     use commonware_storage::archive::immutable;
@@ -138,6 +144,7 @@ mod tests {
         sync::Mutex,
         vec::NonEmptyVec,
     };
+    use futures::StreamExt as _;
     use std::{sync::Arc, time::Duration};
 
     type TestCodingVariant = Coding<CodingB, ReedSolomon<Sha256>, Sha256, K>;
@@ -4690,6 +4697,131 @@ mod tests {
                 active(&resolver),
                 [],
                 "both requests must end once the round floor covers the withheld block's round"
+            );
+        });
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5717.
+    ///
+    /// A coding validator votes before it holds a block, so a notarized coded block can claim any
+    /// height. A walk that starts from one requests its parent under the height the child implies,
+    /// and the parent can claim a height in an epoch consensus has not reached. Marshal delivers
+    /// the parent to the walk without caching it or opening a cache for that epoch. Once a round
+    /// of that epoch is cached, the same response is cached too.
+    #[test_traced("WARN")]
+    fn pr_5717_regression() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (mailbox, resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("validator"),
+                "pr-5717",
+                ConstantProvider::new(schemes[0].clone()),
+                RecordingCodingBuffer::default(),
+            )
+            .await;
+
+            // Consensus is in epoch 0. The leader of views 1 and 2 proposes a block and its child
+            // at heights that map to epoch 64.
+            let block = |round: Round, parent: (u64, TestCommitment), height| -> TestCodedBlock {
+                encode_block(
+                    make_coding_block(
+                        CodingCtx {
+                            round,
+                            leader: participants[1].clone(),
+                            parent: (View::new(parent.0), parent.1),
+                        },
+                        parent.1.block(),
+                        Height::new(height),
+                        height,
+                    ),
+                    coding_config_for_participants(NUM_VALIDATORS as u16),
+                )
+            };
+            let height = BLOCKS_PER_EPOCH.get() * 64;
+            let genesis = genesis_coding_commitment(&genesis_block());
+            let parent_round = Round::new(Epoch::zero(), View::new(1));
+            let parent = block(parent_round, (0, genesis), height);
+            let round = Round::new(Epoch::zero(), View::new(2));
+            let child = block(round, (1, parent.commitment()), height + 1);
+
+            // The validator holds the child, as it does once the child's notarization is fetched,
+            // and an application starts a walk from it.
+            assert!(mailbox.verified(round, child.clone()).await);
+            let mut ancestry = mailbox
+                .ancestry(
+                    Arc::new(context.child("ancestry")),
+                    (core::DigestFallback::FetchByRound { round }, child.digest()),
+                    Timed::new(context.histogram(
+                        "ancestor_fetch_duration",
+                        "Histogram of time taken to fetch a block via the ancestry stream, in seconds",
+                        Buckets::LOCAL,
+                    )),
+                )
+                .await
+                .expect("the held child must start the stream");
+            assert_eq!(
+                ancestry.next().await.map(|block| block.digest()),
+                Some(child.digest())
+            );
+
+            // The walk requests the parent under the height the child implies.
+            let request = (
+                handler::Key::Block(parent.commitment()),
+                handler::Annotation::Untrusted {
+                    height: Height::new(height),
+                    round: Some(parent_round),
+                },
+            );
+            while resolver.fetches().is_empty() {
+                reschedule().await;
+            }
+            let fetch = resolver.fetches().remove(0);
+            assert_eq!((fetch.key, fetch.subscriber), request);
+
+            // A peer serves the parent, and the walk reads it.
+            assert!(resolver.deliver(fetch, parent.encode()).await);
+            assert_eq!(
+                ancestry.next().await.map(|block| block.digest()),
+                Some(parent.digest())
+            );
+
+            // Marshal answers a query only after it has finished with the delivery. It did not
+            // cache the parent, and epoch 0 is still the only epoch with a cache.
+            assert!(mailbox.get_block(&parent.digest()).await.is_none());
+            assert_eq!(opened_cache_epochs(&context, "validator_actor_cache"), [0]);
+
+            // Consensus then reaches epoch 64, and the validator stores a candidate of that epoch.
+            let reached = Round::new(Epoch::new(64), View::new(1));
+            let candidate = block(reached, (0, genesis), height + 2);
+            assert!(mailbox.verified(reached, candidate).await);
+
+            // The same request is served again, and the parent is cached under epoch 64.
+            let again = mailbox.subscribe_by_commitment(
+                parent.commitment(),
+                core::CommitmentFallback::FetchByCommitment {
+                    height: Height::new(height),
+                    round: Some(parent_round),
+                },
+            );
+            while resolver.fetches().len() < 2 {
+                reschedule().await;
+            }
+            let fetch = resolver.fetches().remove(1);
+            assert_eq!((fetch.key, fetch.subscriber), request);
+            assert!(resolver.deliver(fetch, parent.encode()).await);
+            assert_eq!(
+                again.await.map(|block| block.digest()),
+                Ok(parent.digest())
+            );
+            assert!(mailbox.get_block(&parent.digest()).await.is_some());
+            assert_eq!(
+                opened_cache_epochs(&context, "validator_actor_cache"),
+                [0, 64]
             );
         });
     }

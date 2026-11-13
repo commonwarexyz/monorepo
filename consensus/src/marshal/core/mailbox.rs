@@ -310,9 +310,10 @@ pub enum CommitmentFallback {
     /// the parent round in a block's consensus context, or the round of the consensus request the
     /// block is fetched for.
     ///
-    /// Neither bound is sent to peers, and neither is part of response validity. A fetched block
-    /// is delivered if its commitment matches. A matching block above `height` is delivered but
-    /// not cached.
+    /// Neither bound is sent to peers, and neither is part of response validity. A fetched block is
+    /// delivered if its commitment matches. A matching block above `height` is delivered but not
+    /// cached. So is a matching block whose own height lies in an epoch later than any the cache
+    /// has recorded.
     FetchByCommitment {
         height: Height,
         round: Option<Round>,

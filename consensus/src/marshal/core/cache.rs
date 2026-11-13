@@ -132,10 +132,10 @@ where
     block_codec_config: <V::ApplicationBlock as Read>::Cfg,
 
     /// Metadata store for recording which epochs may have data. The value is a tuple of the floor
-    /// and ceiling, the minimum and maximum epochs (inclusive) that may have data. A write above
-    /// the ceiling raises it without creating the epochs in between. A node whose first write
-    /// lands far from genesis (a floor finalization or consensus activity at the current epoch)
-    /// therefore has nothing stored for most of the range.
+    /// and ceiling, the minimum and maximum epochs (inclusive) that may have data. A write keyed by
+    /// a round in an epoch above the ceiling raises it without creating the epochs in between. A
+    /// node whose first write lands far from genesis (a floor finalization or consensus activity at
+    /// the current epoch) therefore has nothing stored for most of the range.
     metadata: Metadata<R, u8, (Epoch, Epoch)>,
 
     /// A map from epoch to its cache
@@ -416,6 +416,10 @@ where
     }
 
     /// Add a block to the height-indexed certified archive.
+    ///
+    /// A block whose epoch lies above the ceiling is not stored, so this write never raises the
+    /// ceiling. The epoch comes from the block's own height, and that height can be an unchecked
+    /// claim.
     pub(crate) async fn put_certified(
         mut self,
         epoch: Epoch,
@@ -423,6 +427,10 @@ where
         digest: <V::Block as Digestible>::Digest,
         block: &V::Block,
     ) -> Self {
+        let (_, ceiling) = self.get_metadata();
+        if epoch > ceiling {
+            return self;
+        }
         (self, _) = self
             .with_epoch(epoch, |mut cache| async move {
                 // A digest determines its height, so scoping the dedup to this height

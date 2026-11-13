@@ -95,8 +95,8 @@ mod tests {
                     self, B, BLOCKS_PER_EPOCH, Ctx, D, DeferredHarness, EmptyProvider,
                     InlineHarness, LINK, NAMESPACE, NUM_VALIDATORS, PAGE_CACHE_SIZE, PAGE_SIZE,
                     QUORUM, S, StandardHarness, TEST_QUOTA, TestHarness, UNRELIABLE_LINK, V,
-                    ValidatorHandle, default_leader, make_raw_block, setup_network_links,
-                    setup_network_with_participants,
+                    ValidatorHandle, default_leader, make_raw_block, opened_cache_epochs,
+                    setup_network_links, setup_network_with_participants,
                 },
                 store::{Op, Recording},
                 strategy::{Gate, GatedStrategy},
@@ -2081,32 +2081,6 @@ mod tests {
                 "cache should find block after loading persisted epochs"
             );
         });
-    }
-
-    /// Epochs whose cache archives are open under the metrics context `root`. Each open epoch's
-    /// finalizations archive registers an `items_tracked` gauge labeled with the epoch.
-    fn opened_cache_epochs(context: &deterministic::Context, root: &str) -> Vec<u64> {
-        let needle = format!("{root}_cache_finalizations_items_tracked{{");
-        let mut epochs: Vec<u64> = context
-            .encode()
-            .lines()
-            .filter(|line| line.starts_with(&needle))
-            .map(|line| {
-                let start = line
-                    .find("epoch=\"")
-                    .expect("gauge must have an epoch label")
-                    + "epoch=\"".len();
-                let end = start
-                    + line[start..]
-                        .find('"')
-                        .expect("epoch label must have a closing quote");
-                line[start..end]
-                    .parse()
-                    .expect("epoch label must be an integer")
-            })
-            .collect();
-        epochs.sort_unstable();
-        epochs
     }
 
     // A floor finalization cached at epoch 64 before its anchor block arrives
