@@ -163,7 +163,7 @@ where
     }
 }
 
-impl<B, C, H, P> Buffer<Coding<B, C, H, P>> for shards::Mailbox<B, C, H, P>
+impl<B, C, H, P> Buffer<Coding<B, C, H, P>> for shards::Mailbox<B, C, H>
 where
     B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>> + Codec,
     C: CodingScheme,

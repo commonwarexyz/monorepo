@@ -157,7 +157,7 @@ where
     /// Mailbox for communicating with the marshal engine.
     pub marshal: core::Mailbox<Z::Scheme, Coding<B, C, H, <Z::Scheme as Verifier>::PublicKey>>,
     /// Mailbox for communicating with the shards engine.
-    pub shards: shards::Mailbox<B, C, H, <Z::Scheme as Verifier>::PublicKey>,
+    pub shards: shards::Mailbox<B, C, H>,
     /// Provider for signing schemes scoped by epoch.
     pub scheme_provider: Z,
     /// Strategy for parallel operations.
@@ -186,7 +186,7 @@ where
     context: Arc<E>,
     application: A,
     marshal: core::Mailbox<Z::Scheme, Coding<B, C, H, <Z::Scheme as Verifier>::PublicKey>>,
-    shards: shards::Mailbox<B, C, H, <Z::Scheme as Verifier>::PublicKey>,
+    shards: shards::Mailbox<B, C, H>,
     scheme_provider: Z,
     epocher: ES,
     strategy: S,
@@ -513,11 +513,10 @@ where
         round: Round,
         payload: Commitment<B, C, H>,
     ) -> oneshot::Receiver<bool> {
-        // Certify may be reached without an earlier `verify`, so the shard
-        // engine may not know the leader yet. A notarized commitment is still
-        // enough to start reconstruction from the gossip shards and the local
-        // assigned shard already buffered for the commitment.
-        self.shards.notarized(payload, round);
+        // Certify may be reached without an earlier `verify`, in which case this
+        // is the shard engine's first report of the commitment. It starts
+        // reconstruction from the shards already buffered for the commitment.
+        self.shards.discovered(payload, round);
 
         // No in-progress task means we never verified this proposal locally.
         // We can use the block's embedded context to move to the next view. If a Byzantine
@@ -542,7 +541,6 @@ where
             .marshal
             .subscribe_by_commitment(payload, core::CommitmentFallback::FetchByRound { round });
         let marshaled = self.clone();
-        let shards = self.shards.clone();
         let (mut tx, rx) = oneshot::channel();
         let context = self.context.child("certify").with_attribute("round", round);
         context.spawn(move |_| {
@@ -594,13 +592,6 @@ where
                     return;
                 }
 
-                // Inform the shard engine of an externally proposed commitment.
-                shards.discovered(
-                    payload,
-                    embedded_context.leader.clone(),
-                    embedded_context.round,
-                );
-
                 // Use the block's embedded context for verification, passing the
                 // prefetched block to avoid fetching it again inside deferred_verify.
                 let verify_rx = marshaled.deferred_verify(
@@ -633,7 +624,7 @@ where
         // certification starts, a notarization exists and the same pending
         // verifier must be unblocked by round-bound recovery if local
         // reconstruction never completes.
-        self.shards.notarized(payload, round);
+        self.shards.discovered(payload, round);
         self.marshal.hint_notarized(round, payload);
 
         // A completed gate either carries an applicable local verdict or requests
@@ -919,7 +910,6 @@ where
             let shards = self.shards.clone();
             let epocher = self.epocher.clone();
             let round = consensus_context.round;
-            let leader = consensus_context.leader;
             let gates = self.gates.clone();
 
             // Register a certification gate task synchronously before spawning work so
@@ -978,7 +968,7 @@ where
                     // the shard engine reads the participant set from the round's epoch,
                     // so announcing an unvalidated round would classify this block's
                     // shards against the wrong epoch.
-                    shards.discovered(payload, leader, round);
+                    shards.discovered(payload, round);
 
                     // Valid re-proposal: notify the marshal and complete the
                     // certification gate task for `certify`.
@@ -999,12 +989,8 @@ where
         }
 
         // Inform the shard engine of an externally proposed commitment. The context
-        // digest validated above binds this round and leader to the commitment.
-        self.shards.discovered(
-            payload,
-            consensus_context.leader.clone(),
-            consensus_context.round,
-        );
+        // digest validated above binds this round to the commitment.
+        self.shards.discovered(payload, consensus_context.round);
 
         // Kick off deferred verification early to hide verification latency behind
         // shard validity checks and network latency for collecting votes.

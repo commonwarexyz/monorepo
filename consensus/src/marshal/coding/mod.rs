@@ -573,7 +573,7 @@ mod tests {
         context: deterministic::Context,
         participants: Vec<K>,
         provider: ConstantProvider<S, Epoch>,
-    ) -> shards::Mailbox<CodingB, ReedSolomon<Sha256>, Sha256, K> {
+    ) -> shards::Mailbox<CodingB, ReedSolomon<Sha256>, Sha256> {
         let me = participants[0].clone();
         let oracle = setup_network_with_participants(
             context.child("network"),
@@ -1880,11 +1880,7 @@ mod tests {
             );
             let coded_boundary = encode_block(boundary_block.clone(), coding_config);
             let boundary_commitment = coded_boundary.commitment();
-            shards.discovered(
-                boundary_commitment,
-                boundary_context.leader.clone(),
-                boundary_round,
-            );
+            shards.discovered(boundary_commitment, boundary_round);
             shards.proposed(boundary_round, coded_boundary.clone());
 
             context.sleep(Duration::from_millis(10)).await;
@@ -2196,11 +2192,7 @@ mod tests {
                         Sha256::hash(&[b"filler_context"]),
                         coding_config,
                     ));
-                    shards.discovered(
-                        commitment,
-                        participants[1].clone(),
-                        Round::new(Epoch::new(0), View::new(view)),
-                    );
+                    shards.discovered(commitment, Round::new(Epoch::new(0), View::new(view)));
                 }
             };
 
@@ -2227,7 +2219,7 @@ mod tests {
                     .verified(boundary_round, coded_boundary.clone())
                     .await
             );
-            shards.discovered(boundary_commitment, me.clone(), boundary_round);
+            shards.discovered(boundary_commitment, boundary_round);
             shards.proposed(boundary_round, coded_boundary.clone());
             assert!(shards.get(boundary_commitment).await.is_some());
 
@@ -2662,7 +2654,7 @@ mod tests {
             // Once the certification gate task's subscription reaches the shard engine, a
             // failed reconstruction of the payload closes it.
             marshal.get_processed().await;
-            shards.notarized(missing_payload, round);
+            shards.discovered(missing_payload, round);
             for (sender, shard) in senders.iter_mut().zip(&missing_shards[1..]) {
                 sender.send(Recipients::One(me.clone()), shard.encode(), true);
             }
@@ -2749,7 +2741,7 @@ mod tests {
             // Once the underlying buffer subscription reaches the shard engine, a failed
             // reconstruction of the commitment closes it.
             marshal.get_processed().await;
-            shards.notarized(missing_commitment, round);
+            shards.discovered(missing_commitment, round);
             for (sender, shard) in senders.iter_mut().zip(&missing_shards[1..]) {
                 sender.send(Recipients::One(me.clone()), shard.encode(), true);
             }
@@ -2805,7 +2797,7 @@ mod tests {
                 NUM_VALIDATORS as u16,
             );
             let missing_commitment = missing.commitment();
-            shards.discovered(missing_commitment, participants[1].clone(), missing_round);
+            shards.discovered(missing_commitment, missing_round);
 
             let subscription =
                 marshal.subscribe_by_commitment(missing_commitment, core::CommitmentFallback::Wait);
@@ -3342,8 +3334,8 @@ mod tests {
     /// validators and form a notarization with its own vote, leaving no peer
     /// able to serve a full-block fetch. A validator that never saw the
     /// proposal then holds only buffered sender-indexed gossip shards, and
-    /// draining them requires the reconstruction interest that `certify`
-    /// registers with the shard engine (`shards.notarized`).
+    /// draining them requires the report that `certify` sends the shard
+    /// engine (`shards.discovered`).
     #[test_traced("WARN")]
     fn test_certify_reconstructs_from_buffered_gossip_shards() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -3429,9 +3421,8 @@ mod tests {
             let coded_child: TestCodedBlock = encode_block(child.clone(), coding_config);
             let child_commitment = coded_child.commitment();
 
-            // Deliver each peer's sender-indexed gossip shard. Without leader
-            // discovery or reconstruction interest, the shard engine only
-            // buffers them.
+            // Deliver each peer's sender-indexed gossip shard. Until the
+            // commitment is discovered, the shard engine only buffers them.
             for (i, sender) in peer_senders.iter_mut().enumerate() {
                 let index = u16::try_from(i + 1).expect("peer index fits in u16");
                 let shard = coded_child.shard(index).expect("missing shard").encode();
@@ -3439,9 +3430,9 @@ mod tests {
             }
             context.sleep(Duration::from_millis(250)).await;
 
-            // Certify must register reconstruction interest with the shard
-            // engine, drain the buffered shards, and verify the reconstructed
-            // block through its embedded context.
+            // Certify must report the commitment to the shard engine, drain
+            // the buffered shards, and verify the reconstructed block through
+            // its embedded context.
             let certify_rx = marshaled.certify(child_round, child_commitment).await;
             select! {
                 result = certify_rx => {
@@ -3458,8 +3449,9 @@ mod tests {
     }
 
     /// A validator can hold its assigned shard from the leader and too few gossip shards when a
-    /// notarization arrives before the proposal could be verified. Certification names no
-    /// leader, yet the assigned shard counts toward reconstruction and is gossiped.
+    /// notarization arrives before the proposal could be verified. Certification reports the
+    /// commitment to the shard engine, and the buffered assigned shard counts toward
+    /// reconstruction and is gossiped exactly once.
     #[test_traced("WARN")]
     fn test_certify_reconstructs_with_buffered_assigned_shard() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -3567,9 +3559,8 @@ mod tests {
                 },
             }
 
-            // The assigned shard reaches the other participants as gossip exactly once.
-            // Certification names the leader after it holds the block, and that must not relay
-            // the shard again.
+            // The assigned shard reaches the other participants as gossip exactly once, also
+            // after certification holds the block.
             select! {
                 message = peer_receivers[2].recv() => {
                     let (from, shard) = message.expect("gossip must arrive");
