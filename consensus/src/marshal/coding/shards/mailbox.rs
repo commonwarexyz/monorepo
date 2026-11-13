@@ -222,13 +222,11 @@ where
     ///
     /// `round` MUST come from a trusted consensus observation, and its epoch
     /// MUST be validated for `commitment`. The engine classifies the
-    /// commitment's shards against that epoch's participant set, so an
-    /// unvalidated epoch can misclassify shards from honest peers. The
+    /// commitment's shards against that epoch's participant set. The
     /// commitment's coding config MUST already have been validated against that
     /// participant set, as proposal verification does and as a notarization
     /// implies. The engine checks and decodes with the config the commitment
-    /// claims, so under an unvalidated config a single shard could reconstruct
-    /// a block.
+    /// claims.
     pub fn discovered(&self, commitment: Commitment<B, C, H>, round: Round) {
         let _ = self
             .sender

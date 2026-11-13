@@ -897,7 +897,7 @@ where
     ///
     /// A cached record handles arrivals only on a participant whose assigned
     /// shard is unverified, so that a late assigned shard is verified and
-    /// relayed. Every other arrival for a cached record is ignored.
+    /// relayed. Any other cached record ignores every arrival.
     fn should_handle_network_shard(&self, commitment: Commitment<B, C, H>) -> bool {
         if let Some(record) = self.records.get(&commitment)
             && record.block().is_some()
@@ -1123,7 +1123,7 @@ where
             .records
             .get_mut(&commitment)
             .and_then(CommitmentRecord::reconstruction_mut)
-            .expect("buffered shards can only be ingested with reconstruction state");
+            .expect("a record must hold reconstruction state to ingest buffered shards");
 
         // Ingest buffered shards into the active reconstruction state.
         let mut progressed = false;
