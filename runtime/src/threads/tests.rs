@@ -705,7 +705,15 @@ where
         let (on, placed) = within(&context, unrelated).await.unwrap();
         assert!(matches!(on, Err(Error::Closed)));
         assert!(matches!(placed, Err(Error::Closed)));
-        assert!(dropped.load(Ordering::SeqCst));
+
+        // Nothing orders the local resident's drop before the other handles resolve, so wait
+        // for it.
+        within(&context, async {
+            while !dropped.load(Ordering::SeqCst) {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await;
     });
 }
 

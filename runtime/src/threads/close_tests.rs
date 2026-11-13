@@ -19,8 +19,10 @@ use commonware_utils::{channel::oneshot, sync::Mutex};
 use futures::{FutureExt as _, future::pending};
 use rstest::rstest;
 use std::{
+    cell::Cell,
     future::{Future, Ready, poll_fn, ready},
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
+    rc::Rc,
     sync::{
         Arc, Barrier,
         atomic::{AtomicBool, Ordering},
@@ -447,6 +449,181 @@ fn test_thread_close_with_queued_job(#[case] backend: Backend) {
     on_backend!(backend, false, close_with_queued_job());
 }
 
+/// The labels of dropped [Record]s, in drop order.
+type Order = Arc<Mutex<Vec<&'static str>>>;
+
+/// Records its label in an [Order] when dropped, unless disarmed first.
+struct Record {
+    /// The label to record.
+    label: &'static str,
+    /// Where to record it, unless disarmed.
+    order: Option<Order>,
+}
+
+impl Record {
+    /// A record of `label` into `order`.
+    fn new(label: &'static str, order: &Order) -> Self {
+        Self {
+            label,
+            order: Some(order.clone()),
+        }
+    }
+
+    /// Drop without recording.
+    fn disarm(mut self) {
+        self.order = None;
+    }
+}
+
+impl Drop for Record {
+    fn drop(&mut self) {
+        if let Some(order) = self.order.take() {
+            order.lock().push(self.label);
+        }
+    }
+}
+
+/// A close drops the thread's pending resident before its queued job, whose factory never
+/// runs, and leaves nothing queued. Returns the drop order.
+fn close_drops_residents_before_jobs<R: Runner>(runner: R) -> Vec<&'static str>
+where
+    R::Context: Spawner + Clock + Metrics,
+{
+    let order = Order::default();
+    let recorded = order.clone();
+    runner.start(|context| async move {
+        let (home, homed) = oneshot::channel();
+        let (queue, queued) = oneshot::channel::<()>();
+        let job = Record::new("job", &order);
+        let root = context
+            .child("order")
+            .thread()
+            .spawn(move |local| async move {
+                home.send(local.home().clone()).expect("home");
+                queued.await.expect("queue");
+
+                // Queue a job and return in the same poll, so the thread closes with it queued.
+                let home = local.home().clone();
+                vec![(*local).child("job").spawn_on(&home, move |_| {
+                    job.disarm();
+                    ready(())
+                })]
+            })
+            .expect("thread");
+        let thread = homed.await.expect("home");
+
+        // The resident is supervised outside the thread, so only the close can drop it.
+        let (started, start) = oneshot::channel();
+        let record = Record::new("resident", &order);
+        let resident = context
+            .child("resident")
+            .spawn_on(&thread, move |_| async move {
+                let _record = record;
+                started.send(()).expect("started");
+                pending::<()>().await;
+            });
+        start.await.expect("started");
+        queue.send(()).expect("queue");
+
+        let job = root.await.expect("root").pop().expect("job");
+        assert!(matches!(job.await, Err(Error::Closed)));
+        assert!(matches!(resident.await, Err(Error::Closed)));
+        assert_drained(&context, &thread).await;
+    });
+    recorded.lock().clone()
+}
+
+#[rstest]
+#[case::deterministic(Backend::Deterministic)]
+#[case::tokio(Backend::Tokio)]
+#[cfg_attr(target_os = "linux", case::iouring(Backend::Iouring))]
+fn test_thread_close_drops_residents_before_jobs(#[case] backend: Backend) {
+    let order = within(move || on_backend!(backend, false, close_drops_residents_before_jobs()));
+    assert_eq!(order, ["resident", "job"]);
+}
+
+/// Number of jobs scheduled after the one that closes the thread in [close_while_scheduling].
+const LATE_JOBS: usize = 20;
+
+/// A thread that starts closing while it schedules a burst of `spawn_on` jobs drops its pending
+/// resident before the factory of any job that never ran. The burst's first job closes the
+/// thread by aborting the lineage that created it. A resident of the thread submits the whole
+/// burst in one poll, so on native runners one host turn takes it. Returns the drop order, in
+/// which every late job that never ran records its factory's drop.
+fn close_while_scheduling<R: Runner>(runner: R, stale: Thread) -> Vec<&'static str>
+where
+    R::Context: Spawner + Clock + Metrics,
+{
+    let order = Order::default();
+    let recorded = order.clone();
+    runner.start(|context| async move {
+        let creator = context.child("creator");
+        let thread = creator.child("t").thread().build().expect("thread");
+
+        // The resident is supervised outside the creating lineage, so only the close drops it.
+        let record = Record::new("resident", &order);
+        let resident = context
+            .child("resident")
+            .spawn_on(&thread, move |local| async move {
+                let _record = record;
+                let home = local.home().clone();
+
+                // A placed spawn toward a thread of another runner is rejected and aborts the
+                // node of the context it consumed, with the thread below it.
+                drop((*local).child("closer").spawn_on(&home, move |_| {
+                    drop(creator.on(&stale).spawn(|_| async {}));
+                    ready(())
+                }));
+                for _ in 0..LATE_JOBS {
+                    let unrun = Record::new("factory", &order);
+                    drop((*local).child("late").spawn_on(&home, move |_| {
+                        unrun.disarm();
+                        ready(())
+                    }));
+                }
+                pending::<()>().await;
+            });
+        assert!(matches!(resident.await, Err(Error::Closed)));
+        assert_drained(&context, &thread).await;
+    });
+    recorded.lock().clone()
+}
+
+#[rstest]
+#[case::deterministic(Backend::Deterministic)]
+#[case::tokio(Backend::Tokio)]
+#[cfg_attr(target_os = "linux", case::iouring(Backend::Iouring))]
+fn test_thread_close_while_scheduling(#[case] backend: Backend) {
+    // Deterministic shuffles each ready pass, so the closer runs at a seeded place in the burst.
+    let runs = if backend == Backend::Deterministic {
+        8
+    } else {
+        1
+    };
+    let mut unrun = 0;
+    for seed in 0..runs {
+        let stale = stale_thread();
+        let order = within(move || match backend {
+            Backend::Deterministic => close_while_scheduling(
+                deterministic::Runner::new(deterministic::Config::default().with_seed(seed)),
+                stale,
+            ),
+            _ => on_backend!(backend, false, close_while_scheduling(stale)),
+        });
+        assert_eq!(
+            order.first(),
+            Some(&"resident"),
+            "an unrun factory was dropped before the pending resident: {order:?}"
+        );
+        assert_eq!(
+            order.iter().filter(|label| **label == "resident").count(),
+            1
+        );
+        unrun += order.len() - 1;
+    }
+    assert!(unrun > 0, "every late factory ran");
+}
+
 /// A capture that, when dropped, spawns onto its thread with a `spawn_on` and a placed spawn.
 struct Reenter<C: Spawner> {
     /// The context the spawns consume.
@@ -634,6 +811,12 @@ enum Scenario {
     /// A `spawn_local` future whose handle was dropped completes with an output that panics
     /// when dropped, then panics when dropped itself.
     DetachedLocalReady,
+    /// A `spawn_local` future whose handle is kept and awaited completes with an output that
+    /// panics when dropped, then panics when dropped itself.
+    RetainedLocalReady,
+    /// A completed `spawn_local` task's output panics when its handle is dropped without
+    /// taking it.
+    LocalOutputDisposal,
     /// A parked `spawn_local` factory's capture panics when its aborted task is skipped.
     ParkedCapture,
     /// A `spawn_on` factory's capture panics when a closed thread rejects it.
@@ -858,6 +1041,50 @@ where
             });
             root.expect("thread").await.expect("root");
         }
+        Scenario::RetainedLocalReady => {
+            // The handle resolves Closed, so the output is disposed of on the thread and never
+            // reaches the root.
+            let output = flag();
+            let root = context
+                .child("local")
+                .thread()
+                .spawn(move |local| async move {
+                    let (future_dropped, output_dropped) = (dropped.clone(), output.clone());
+                    let done = local
+                        .child("retained")
+                        .spawn_local(move |_| {
+                            ready_then_panic(future_dropped, PanicOnDrop(output_dropped))
+                        })
+                        .await;
+                    let closed = matches!(done, Err(Error::Closed));
+                    drop(done);
+                    settle(&*local, || {
+                        dropped.load(Ordering::SeqCst) && output.load(Ordering::SeqCst)
+                    })
+                    .await;
+                    closed
+                });
+            assert!(root.expect("thread").await.expect("root"));
+        }
+        Scenario::LocalOutputDisposal => {
+            let root = context
+                .child("local")
+                .thread()
+                .spawn(move |local| async move {
+                    let finished = Rc::new(Cell::new(false));
+                    let (done, guard) = (finished.clone(), dropped.clone());
+                    let handle = local.child("output").spawn_local(move |_| async move {
+                        done.set(true);
+                        PanicOnDrop(guard)
+                    });
+
+                    // The task stores its output in the poll that sets the flag.
+                    settle(&*local, || finished.get()).await;
+                    let contained = catch_unwind(AssertUnwindSafe(move || drop(handle))).is_ok();
+                    contained && dropped.load(Ordering::SeqCst)
+                });
+            assert!(root.expect("thread").await.expect("root"));
+        }
         Scenario::ParkedCapture => {
             let factory = ran.clone();
             let guard = dropped.clone();
@@ -969,6 +1196,8 @@ fn test_thread_panic_matrix(
         Scenario::SpawnOnReady,
         Scenario::SpawnLocalReady,
         Scenario::DetachedLocalReady,
+        Scenario::RetainedLocalReady,
+        Scenario::LocalOutputDisposal,
         Scenario::ParkedCapture,
         Scenario::RejectedClosed,
         Scenario::RejectedForeign,
@@ -1748,5 +1977,137 @@ fn test_thread_wrapper_contexts() {
         assert!(faulty.open("partition", b"refused").await.is_err());
         assert!(faulty.faults.failed());
         wrapper_threads(faulty, |context| context.faults.failed(), stale).await;
+    });
+}
+
+/// Sets its flag when dropped.
+struct DropFlag(Arc<AtomicBool>);
+
+impl Drop for DropFlag {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// A `spawn_local` factory holding a capture that sets `dropped` when dropped. It sets `ran`
+/// if it runs.
+fn parked<L>(
+    dropped: &Arc<AtomicBool>,
+    ran: &Arc<AtomicBool>,
+) -> impl FnOnce(L) -> Ready<()> + 'static {
+    let capture = DropFlag(dropped.clone());
+    let ran = ran.clone();
+    move |_| {
+        let _capture = capture;
+        ran.store(true, Ordering::SeqCst);
+        ready(())
+    }
+}
+
+/// What one side of [test_thread_misdelivered_spawn_local] saw.
+struct Misdelivered {
+    /// Whether the misdelivered `spawn_local` resolved `Closed`.
+    closed: bool,
+    /// Whether the side's factory was still parked, unrun and not dropped, once `check`
+    /// completed.
+    kept: bool,
+    /// Whether a later `spawn_local` dropped the misdelivered factory before returning.
+    reaped: bool,
+    /// Whether the later `spawn_local` completed.
+    later: bool,
+    /// Parked factories once the later `spawn_local` completed.
+    parked: usize,
+    /// Whether the misdelivered factory ran.
+    ran: bool,
+    /// Whether the side's thread stayed open.
+    open: bool,
+}
+
+/// Spawn a resident of `thread` that makes a `spawn_local` through a wrapper delivering its
+/// shim to `other`, an open thread of the same runner, and reports what it saw. Once the
+/// factory is parked, it signals `parked_tx` and awaits `check`.
+fn misdeliver<C: Spawner>(
+    context: C,
+    thread: &Thread,
+    other: Thread,
+    parked_tx: oneshot::Sender<()>,
+    check: impl Future<Output = ()> + Send + 'static,
+) -> Handle<Misdelivered> {
+    let (wrapper, recorded) = Recorder::new(context);
+    wrapper.spawn_on(thread, move |local| async move {
+        let (dropped, ran) = (flag(), flag());
+        recorded.redirect(other);
+        let handle = local
+            .child("misdelivered")
+            .spawn_local(parked(&dropped, &ran));
+        let _ = parked_tx.send(());
+        check.await;
+        let kept = local.owner().parked() == 1
+            && !dropped.load(Ordering::SeqCst)
+            && !ran.load(Ordering::SeqCst);
+        let closed = matches!(handle.await, Err(Error::Closed));
+
+        // The shim ran elsewhere and was dropped armed, so this thread's next reap point drops
+        // the parked factory.
+        let later = local.child("later").spawn_local(|_| ready(()));
+        let reaped = dropped.load(Ordering::SeqCst);
+        let later = later.await.is_ok();
+        Misdelivered {
+            closed,
+            kept,
+            reaped,
+            later,
+            parked: local.owner().parked(),
+            ran: ran.load(Ordering::SeqCst),
+            open: local.home().inner().is_open(),
+        }
+    })
+}
+
+/// A wrapper that delivers a `spawn_local` shim to another open thread of the same runner gets a
+/// handle that resolves `Closed`. The shim leaves the factory the other thread parked under the
+/// same id, and its home thread drops its own parked factory at its next reap point, a later
+/// `spawn_local`, while staying open.
+#[test]
+fn test_thread_misdelivered_spawn_local() {
+    deterministic::Runner::default().start(|context| async move {
+        let home = context.child("home").thread().build().expect("thread");
+        let other = context.child("other").thread().build().expect("thread");
+
+        // The other side parks its factory first and keeps it parked until the home side's
+        // shim ran on its thread.
+        let (parked_tx, parked_rx) = oneshot::channel();
+        let (check_tx, check_rx) = oneshot::channel::<()>();
+        let peer = misdeliver(
+            context.child("peer"),
+            &other,
+            home.clone(),
+            parked_tx,
+            async move { check_rx.await.expect("check") },
+        );
+        parked_rx.await.expect("parked");
+        let (unused, _) = oneshot::channel();
+        let mine = misdeliver(context.child("mine"), &home, other, unused, ready(()));
+        let mine = mine.await.expect("home side");
+        check_tx.send(()).expect("check");
+        let peer = peer.await.expect("other side");
+        assert!(
+            peer.kept,
+            "the home side's shim took the factory parked on the other thread"
+        );
+        for (side, seen) in [("home", &mine), ("other", &peer)] {
+            assert!(
+                seen.closed,
+                "{side}: the misdelivered spawn_local did not close"
+            );
+            assert!(
+                seen.reaped,
+                "{side}: the next reap point kept the parked factory"
+            );
+            assert!(seen.later, "{side}: the later spawn_local failed");
+            assert_eq!(seen.parked, 0, "{side}: a factory stayed parked");
+            assert!(!seen.ran, "{side}: the misdelivered factory ran");
+            assert!(seen.open, "{side}: the thread closed");
+        }
     });
 }

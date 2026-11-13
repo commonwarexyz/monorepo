@@ -87,6 +87,12 @@ impl IouringThread {
     pub(super) fn root_wakes(&self) -> usize {
         self.wake.root_wakes.load(Ordering::SeqCst)
     }
+
+    /// Number of host turns the thread has started.
+    #[cfg(test)]
+    pub(super) fn turns(&self) -> usize {
+        self.wake.turns.load(Ordering::SeqCst)
+    }
 }
 
 /// The ready list of a thread's residents and the wake of its root, shared with every
@@ -101,6 +107,9 @@ pub(super) struct WakeState {
     /// Root wakes sent.
     #[cfg(test)]
     root_wakes: std::sync::atomic::AtomicUsize,
+    /// Host turns started.
+    #[cfg(test)]
+    turns: std::sync::atomic::AtomicUsize,
 }
 
 /// The ready list and whether the thread closed it.
@@ -125,6 +134,8 @@ impl WakeState {
             root: Mutex::new(None),
             #[cfg(test)]
             root_wakes: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            turns: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -190,6 +201,8 @@ impl WakeState {
     /// Start a host turn. Record the root waker, then clear `notified`, so a wake from here on
     /// wakes the root again.
     pub(super) fn begin_turn(&self, waker: &Waker) {
+        #[cfg(test)]
+        self.turns.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         {
             let mut root = self.root();
             if !root.as_ref().is_some_and(|root| root.will_wake(waker)) {

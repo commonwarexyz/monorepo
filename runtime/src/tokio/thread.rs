@@ -974,18 +974,16 @@ pub(super) mod tests {
         .unwrap();
     }
 
-    /// A close drops the thread's pending residents before its queued jobs, on a normal close
-    /// and after a host failure. Afterwards the thread holds no job.
-    #[rstest]
-    fn test_thread_close_drops_residents_before_jobs(#[values(false, true)] host_failure: bool) {
+    /// After a host failure, a close still drops the thread's pending residents before its
+    /// queued jobs, and afterwards the thread holds no job.
+    #[test]
+    fn test_thread_host_failure_drops_residents_before_jobs() {
         let order = Arc::new(Mutex::new(Vec::new()));
         let thread = within({
             let order = order.clone();
             move || {
                 start(true, move |context| async move {
-                    if host_failure {
-                        inject_host_failure();
-                    }
+                    inject_host_failure();
                     let (home_tx, home_rx) = oneshot::channel();
                     let (queue_tx, queue_rx) = oneshot::channel::<()>();
                     let root = context

@@ -6266,41 +6266,32 @@ mod threads {
                 let measured = context
                     .child("waiter")
                     .spawn_on(&thread, move |local| async move {
-                        // Polled once per turn, so it counts turns.
-                        let turns = Rc::new(Cell::new(0usize));
-                        let ticker = local.child("ticker").spawn_local({
-                            let turns = turns.clone();
-                            move |_| {
-                                poll_fn(move |cx| {
-                                    turns.set(turns.get() + 1);
-                                    cx.waker().wake_by_ref();
-                                    Poll::<()>::Pending
-                                })
-                            }
-                        });
-                        // Wait until the ticker runs, so its own job is no
-                        // longer queued, and the producer filled the ingress.
-                        while turns.get() == 0 || local.home().inner().queued() < 200 {
+                        // Wait until the producer filled the ingress.
+                        while local.home().inner().queued() < 200 {
                             reschedule().await;
                         }
 
                         // The host takes no turn during this poll, so the
                         // ingress only grows between the two reads, and the
                         // child sits behind at least the first and at most the
-                        // second count less one.
+                        // second count less one. Turns are counted where the
+                        // host starts them, since a resident can be polled
+                        // several times in one turn.
                         let ahead = local.home().inner().queued();
-                        let (start, started_at) = (admitted.load(Ordering::SeqCst), turns.get());
+                        let start = admitted.load(Ordering::SeqCst);
+                        let started_at = backend(local.home()).turns();
                         let child = local.child("child").spawn_local({
                             let admitted = admitted.clone();
-                            let turns = turns.clone();
-                            move |_| {
-                                let at = (admitted.load(Ordering::SeqCst), turns.get());
+                            move |local| {
+                                let at = (
+                                    admitted.load(Ordering::SeqCst),
+                                    backend(local.home()).turns(),
+                                );
                                 async move { at }
                             }
                         });
                         let behind = local.home().inner().queued() - 1;
                         let (ran, ran_at) = child.await.unwrap();
-                        ticker.abort();
                         (ahead, behind, ran - start, ran_at - started_at)
                     });
                 let (ahead, behind, before_child, turns) = measured.await.unwrap();
