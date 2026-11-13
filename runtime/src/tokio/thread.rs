@@ -498,8 +498,7 @@ pub(super) mod tests {
         }
     }
 
-    // Tests of Tokio runtime threads (spec 8.4) and of their accounting after a failed
-    // OS-thread spawn (spec test 29).
+    // Tests of Tokio runtime threads and of their accounting after a failed OS-thread spawn.
 
     /// Run `body` on a helper thread, failing if it does not finish in time, so a test that
     /// breaks by deadlock fails instead of hanging.
@@ -770,7 +769,7 @@ pub(super) mod tests {
     /// Residents whose destructors panic are disposed of on the thread during teardown, polled
     /// or not, on a normal close and after a host failure. Each panic is reported through
     /// `Panicker::notify`, every handle resolves `Closed`, the residents gauge settles to zero,
-    /// and the runner fails with the panic only under `catch_panics(false)` (5.4).
+    /// and the runner fails with the panic only under `catch_panics(false)`.
     #[rstest]
     fn test_thread_teardown_disposal(
         #[values(Close::Normal, Close::HostFailure)] close: Close,
@@ -960,8 +959,8 @@ pub(super) mod tests {
         .unwrap();
     }
 
-    /// A close drops the thread's pending residents before its queued jobs (5.2 steps 3 and 4),
-    /// on a normal close and after a host failure. Afterwards the thread holds no job.
+    /// A close drops the thread's pending residents before its queued jobs, on a normal close
+    /// and after a host failure. Afterwards the thread holds no job.
     #[rstest]
     fn test_thread_close_drops_residents_before_jobs(#[values(false, true)] host_failure: bool) {
         let order = Arc::new(Mutex::new(Vec::new()));

@@ -572,7 +572,7 @@ pub(crate) mod tests {
     }
 
     /// A root guard closes admission itself, so once the root ends, submissions are rejected
-    /// even while a concurrent abort holds N's aborter without having run it (test 27).
+    /// even while a concurrent abort holds N's aborter without having run it.
     #[test]
     fn test_root_guard_closes_admission_before_node_aborter_runs() {
         let node = Tree::root();
@@ -604,8 +604,8 @@ pub(crate) mod tests {
 
     /// A placed wrapper pushed into a closing ingress comes back to the caller, who drops it
     /// after the admission lock is released. Its drop aborts the task's node and closes the
-    /// handle (5.1 rule 7 step 3, test 30). The wrapper's future takes the admission lock when
-    /// dropped, so a drop under the lock deadlocks.
+    /// handle. The wrapper's future takes the admission lock when dropped, so a drop under the
+    /// lock deadlocks.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn test_rejected_placed_wrapper_drops_outside_lock() {

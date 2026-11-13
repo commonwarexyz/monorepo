@@ -4040,7 +4040,7 @@ mod tests {
     }
 
     /// The same seed reproduces the same auditor state with threads, `spawn_on`,
-    /// `spawn_local`, placed spawns and closes (8.2 reproducibility).
+    /// `spawn_local`, placed spawns and closes, and another seed does not.
     #[test]
     fn test_thread_reproducibility() {
         assert_eq!(thread_program(1), thread_program(1));
@@ -4048,8 +4048,8 @@ mod tests {
     }
 
     /// A `Local` of thread A used by a task on thread B spawns a resident of A, so closing B
-    /// leaves it running and closing A aborts it (8.2 routing to the owner). The `Local` holds
-    /// a context of an unrelated lineage, so only a close can abort the resident.
+    /// leaves it running and closing A aborts it. The `Local` holds a context of an unrelated
+    /// lineage, so only a close can abort the resident.
     #[test]
     fn test_thread_routing_to_owner() {
         Runner::default().start(|context| async move {
@@ -4113,7 +4113,7 @@ mod tests {
 
     /// `spawn_local` through a `Local` whose thread closed earlier in the run resolves closed
     /// without running its factory, `home` still names the thread, and a capture that panics
-    /// when dropped is reported through the owner's panicker (8.2 late `spawn_local`).
+    /// when dropped is reported through the owner's panicker.
     #[test]
     fn test_thread_late_spawn_local() {
         let checked = Arc::new(AtomicBool::new(false));
@@ -4162,8 +4162,7 @@ mod tests {
         assert_eq!(extract_panic_message(&*panic), "late capture");
     }
 
-    /// A `spawn_on` from another OS thread runs its factory on the runner's thread (8.2
-    /// foreign-thread `spawn_on`).
+    /// A `spawn_on` from another OS thread runs its factory on the runner's thread.
     #[test]
     fn test_thread_foreign_spawn_on() {
         Runner::default().start(|context| async move {
@@ -4192,8 +4191,7 @@ mod tests {
     }
 
     /// Aborting a thread's lineage while the root awaits only a resident of that thread closes
-    /// it without a stall, and without skipping to a far sleeper's deadline (8.2 close on an
-    /// idle runtime).
+    /// it without a stall, and without skipping to a far sleeper's deadline.
     #[rstest::rstest]
     #[case::no_sleeper(false)]
     #[case::far_sleeper(true)]
@@ -4219,7 +4217,7 @@ mod tests {
     }
 
     /// Every exit path closes every virtual thread, and submissions from destructors that run
-    /// after the closed flag resolve closed without running a factory (8.2 every exit path).
+    /// after the closed flag resolve closed without running a factory.
     #[rstest::rstest]
     #[case::normal(Exit::Normal)]
     #[case::timeout(Exit::Timeout)]
@@ -4280,7 +4278,7 @@ mod tests {
 
     /// A root factory that queues `spawn_on` factories and then panics runs none of them,
     /// drops every capture, closes every thread, and its panic is the one `start` resumes, not
-    /// a capture's (8.2 root factory panic).
+    /// a capture's.
     #[test]
     fn test_thread_root_factory_panic() {
         let dropped = Arc::new(AtomicUsize::new(0));
@@ -4312,6 +4310,58 @@ mod tests {
         for thread in threads.lock().iter() {
             assert_eq!(thread.inner().state(), AdmissionState::Closed);
         }
+    }
+
+    /// A close drops every resident's future before any unrun `spawn_on` factory, even when the
+    /// factory belongs to an older resident.
+    #[test]
+    fn test_thread_close_drops_futures_before_factories() {
+        /// Records its name in the shared order when dropped.
+        struct Record(Arc<Mutex<Vec<&'static str>>>, &'static str);
+
+        impl Drop for Record {
+            fn drop(&mut self) {
+                self.0.lock().push(self.1);
+            }
+        }
+
+        let (context, executor, _panicked, _tree) = Context::new(Config::default());
+        let thread = context.child("t").thread().build().unwrap();
+        let id = thread.inner().id();
+        let order = Arc::new(Mutex::new(Vec::new()));
+
+        // The older resident keeps its factory unrun, and the newer one runs its factory and
+        // leaves its future pending.
+        let factory = Record(order.clone(), "factory");
+        let older = context.child("older").spawn_on(&thread, move |_| {
+            let _factory = factory;
+            ready(())
+        });
+        let future = Record(order.clone(), "future");
+        let newer = context
+            .child("newer")
+            .spawn_on(&thread, move |_| async move {
+                let _future = future;
+                pending::<()>().await
+            });
+        let (first, second) = {
+            let threads = executor.threads.lock();
+            let mut residents = threads.entries[&id].residents.keys().copied();
+            (residents.next().unwrap(), residents.next().unwrap())
+        };
+        assert!(first < second);
+        let table = RefCell::new(LocalTable::default());
+        let task = executor.tasks.get(second).unwrap();
+        let waker = futures::task::noop_waker();
+        let mut cx = task::Context::from_waker(&waker);
+        assert!(!executor.poll_resident(&table, &task, id, &mut cx));
+        assert!(order.lock().is_empty());
+
+        executor.close_thread(&table, id);
+        assert_eq!(*order.lock(), ["future", "factory"]);
+        assert!(matches!(older.now_or_never(), Some(Err(Error::Closed))));
+        assert!(matches!(newer.now_or_never(), Some(Err(Error::Closed))));
+        drop(context);
     }
 
     /// A pending thread close is ready work, so time does not skip to a sleeper and the runtime
@@ -4354,7 +4404,7 @@ mod tests {
 
     /// A resident whose destructor panics during the exit drain of a run that did not panic
     /// fails the run with that payload when panics are not caught, after cleanup and the
-    /// escaped-context assertion ran (8.2 exit-drain panic).
+    /// escaped-context assertion ran.
     #[rstest::rstest]
     #[case::reported(false, false)]
     #[case::caught(true, false)]
@@ -4406,7 +4456,7 @@ mod tests {
     }
 
     /// A CPU set outside `0..=63` survives recovery, and the recovered run gets a fresh
-    /// instance id, so a thread of the first run is foreign to it (8.2 recovery).
+    /// instance id, so a thread of the first run is foreign to it.
     #[test]
     fn test_thread_recovery() {
         let cfg = Config::default().with_cpus([100, 200]);

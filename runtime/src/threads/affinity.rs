@@ -163,7 +163,7 @@ pub(crate) mod tests {
     use super::{Cpus, current, write};
     use crate::{
         Error, Runner, Spawner, Supervisor as _, ThreadError, iouring, tokio,
-        utils::extract_panic_message,
+        utils::{extract_panic_message, thread::tests::fail_spawns},
     };
     use futures::future::ready;
     use rstest::rstest;
@@ -338,6 +338,63 @@ pub(crate) mod tests {
             }
         });
         assert_eq!(blocking, Some(narrow.clone()));
+        assert_eq!(unpinned, Some(narrow));
+    }
+
+    /// How a pinned thread fails before its mask applies.
+    #[derive(Clone, Copy, Debug)]
+    enum PinFailure {
+        /// The OS refuses the thread, so the finisher returns `ThreadError::Spawn`.
+        Spawn,
+        /// The thread starts, but its mask write fails.
+        Write,
+    }
+
+    /// A pinned thread that fails before its mask applies does not arm the reset. A later
+    /// unpinned thread created while the runner thread is narrowed keeps the narrowed mask it
+    /// inherits.
+    #[rstest]
+    #[case::tokio(tokio::Runner::new(tokio::Config::new().with_catch_panics(true)))]
+    #[case::iouring(iouring::Runner::new(iouring::Config::new().with_catch_panics(true)))]
+    fn test_affinity_failed_pin_does_not_arm_reset<R: Runner>(
+        #[case] runner: R,
+        #[values(PinFailure::Spawn, PinFailure::Write)] failure: PinFailure,
+    ) where
+        R::Context: Spawner,
+    {
+        let Some(base) = base() else {
+            return;
+        };
+        let pin = base.iter().next().unwrap();
+        let narrow = Cpus::from(pin);
+        let unpinned = runner.start(|context| {
+            let (narrow, base) = (narrow.clone(), base.clone());
+            async move {
+                match failure {
+                    PinFailure::Spawn => {
+                        // The failure is armed on this OS thread, which runs the finisher.
+                        fail_spawns(1);
+                        let built = context.child("pinned").thread().pin(pin).build();
+                        assert!(matches!(built, Err(ThreadError::Spawn(_))));
+                    }
+                    PinFailure::Write => {
+                        // Once a spawn toward the thread resolves, its startup failed.
+                        fail_writes(1);
+                        let thread = context.child("pinned").thread().pin(pin).build().unwrap();
+                        let probe = context.child("probe").spawn_on(&thread, |_| ready(()));
+                        assert!(matches!(probe.await, Err(Error::Closed)));
+                    }
+                }
+                let _narrowed = Narrowed::new(narrow, &base);
+                context
+                    .child("unpinned")
+                    .thread()
+                    .spawn(|_| ready(current()))
+                    .unwrap()
+                    .await
+                    .unwrap()
+            }
+        });
         assert_eq!(unpinned, Some(narrow));
     }
 

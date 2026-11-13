@@ -6101,8 +6101,8 @@ mod threads {
 
     /// Disposals in shared thread code are contained on io_uring, even with
     /// uncaught panics: a parked `spawn_local` factory dropped after its task
-    /// was aborted, a factory dropped at step 0 of `spawn_local` on a closed
-    /// thread, and an unconsumed `LocalHandle` output cleared at close.
+    /// was aborted, a factory that `spawn_local` drops before returning because
+    /// its thread closed, and an unconsumed `LocalHandle` output cleared at close.
     #[test]
     fn test_thread_shared_code_disposal_is_contained() {
         let aborted_drops = Arc::new(AtomicUsize::new(0));

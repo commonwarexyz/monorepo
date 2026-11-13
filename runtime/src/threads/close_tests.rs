@@ -83,6 +83,26 @@ fn stale_thread() -> Thread {
         .start(|context| async move { context.child("stale").thread().build().expect("thread") })
 }
 
+/// A thread whose root already returned. Its root handle resolved, so it admits nothing.
+async fn closed_thread<C: Spawner>(context: &C) -> Thread {
+    context
+        .child("closed")
+        .thread()
+        .spawn(|local| ready(local.home().clone()))
+        .expect("thread")
+        .await
+        .expect("root")
+}
+
+/// A context whose lineage was already aborted. A placed spawn toward a thread of another runner
+/// is rejected synchronously and aborts the node of the context it consumed.
+fn aborted_context<C: Spawner>(context: &C, stale: &Thread) -> C {
+    let lineage = context.child("lineage");
+    let aborted = lineage.child("aborted");
+    drop(lineage.on(stale).spawn(|_| async {}));
+    aborted
+}
+
 /// Run `f` on a helper thread, failing if it does not finish in time (a deadlock).
 fn within<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     let (tx, rx) = channel();
@@ -273,9 +293,9 @@ impl<E: Spawner> Spawner for Recorder<E> {
     }
 }
 
-/// Spec test 8: once a root's handle resolves, spawns toward its thread are closed at once and
-/// never run their factories, both after the root completes and after the root is dropped
-/// unrun (forced by redirecting it toward a thread of an earlier runner).
+/// Once a root's handle resolves, spawns toward its thread are closed at once and never run
+/// their factories, both after the root completes and after the root is dropped unrun (forced by
+/// redirecting it toward a thread of an earlier runner).
 fn root_exit_closes<R: Runner>(runner: R, stale: Thread)
 where
     R::Context: Spawner,
@@ -308,9 +328,9 @@ fn test_thread_root_exit_closes(#[case] backend: Backend) {
     on_backend!(backend, false, root_exit_closes(stale));
 }
 
-/// Spec test 18: a `spawn_on` or `spawn_local` aborted before the thread's next turn never
-/// runs its factory, aborts the consumed context's node (so a child wired from it is aborted),
-/// and leaves no parked `spawn_local` factory once the turn that skipped it ended.
+/// A `spawn_on` or `spawn_local` aborted before the thread's next turn never runs its factory,
+/// aborts the consumed context's node (so a child wired from it is aborted), and leaves no
+/// parked `spawn_local` factory once the turn that skipped it ended.
 fn skipped_factory_aborts_node<R: Runner>(runner: R)
 where
     R::Context: Spawner,
@@ -378,8 +398,8 @@ fn test_thread_skipped_factory_aborts_node(#[case] backend: Backend) {
     on_backend!(backend, false, skipped_factory_aborts_node());
 }
 
-/// Spec test 19: a thread that closes with a job queued drops the job unrun. Its handle
-/// resolves `Closed`, its consumed context's node closes and the residents gauge decrements.
+/// A thread that closes with a job queued drops the job unrun. Its handle resolves `Closed`, its
+/// consumed context's node closes and the residents gauge decrements.
 fn close_with_queued_job<R: Runner>(runner: R)
 where
     R::Context: Spawner + Clock + Metrics,
@@ -455,8 +475,8 @@ impl<C: Spawner> Drop for Reenter<C> {
     }
 }
 
-/// Spec test 20: a queued job's capture that spawns onto its own thread while the close drops it
-/// does not deadlock, and those spawns resolve `Closed`.
+/// A queued job's capture that spawns onto its own thread while the close drops it does not
+/// deadlock, and those spawns resolve `Closed`.
 fn close_reentrant_drop<R: Runner>(runner: R)
 where
     R::Context: Spawner + Clock,
@@ -503,6 +523,44 @@ fn test_thread_close_reentrant_drop(#[case] backend: Backend) {
     within(move || on_backend!(backend, false, close_reentrant_drop()));
 }
 
+/// Aborting the handle of a rejected spawn and then awaiting it resolves `Closed`. This holds
+/// for a placed spawn rejected before its factory runs, a `spawn_on` toward a closed thread or
+/// a thread of another runner, and either spawn from an aborted lineage.
+fn rejected_handle_abort<R: Runner>(runner: R, stale: Thread)
+where
+    R::Context: Spawner,
+{
+    runner.start(|context| async move {
+        let closed = closed_thread(&context).await;
+        let thread = context.child("open").thread().build().expect("thread");
+        let ran = flag();
+        let handles = [
+            context.child("placed").on(&closed).spawn(recording(&ran)),
+            context.child("placed").on(&stale).spawn(recording(&ran)),
+            context.child("on").spawn_on(&closed, recording(&ran)),
+            context.child("on").spawn_on(&stale, recording(&ran)),
+            aborted_context(&context, &stale)
+                .on(&thread)
+                .spawn(recording(&ran)),
+            aborted_context(&context, &stale).spawn_on(&thread, recording(&ran)),
+        ];
+        for handle in handles {
+            handle.abort();
+            assert!(matches!(handle.await, Err(Error::Closed)));
+        }
+        assert!(!ran.load(Ordering::SeqCst), "a rejected factory ran");
+    });
+}
+
+#[rstest]
+#[case::deterministic(Backend::Deterministic)]
+#[case::tokio(Backend::Tokio)]
+#[cfg_attr(target_os = "linux", case::iouring(Backend::Iouring))]
+fn test_thread_rejected_handle_abort(#[case] backend: Backend) {
+    let stale = stale_thread();
+    on_backend!(backend, false, rejected_handle_abort(stale));
+}
+
 /// Payload of every panic the panic tests raise.
 const PANIC: &str = "thread test panic";
 
@@ -516,13 +574,30 @@ impl Drop for PanicOnDrop {
     }
 }
 
-/// A future that completes at once and then panics when dropped, setting `dropped`.
-fn ready_then_panic(dropped: Arc<AtomicBool>) -> impl Future<Output = ()> + Send + 'static {
+/// A future that completes at once with `output`, then panics when dropped, setting `dropped`.
+fn ready_then_panic<T: Send + 'static>(
+    dropped: Arc<AtomicBool>,
+    output: T,
+) -> impl Future<Output = T> + Send + 'static {
     let guard = PanicOnDrop(dropped);
+    let mut output = Some(output);
     poll_fn(move |_| {
         let _guard = &guard;
-        Poll::Ready(())
+        Poll::Ready(output.take().expect("polled after completion"))
     })
+}
+
+/// A factory that records that it ran, holding `capture` until it is dropped.
+fn capturing<L>(
+    capture: PanicOnDrop,
+    ran: &Arc<AtomicBool>,
+) -> impl FnOnce(L) -> Ready<()> + Send + 'static {
+    let ran = ran.clone();
+    move |_| {
+        let _capture = capture;
+        ran.store(true, Ordering::SeqCst);
+        ready(())
+    }
 }
 
 /// A panic of the panic matrix.
@@ -556,13 +631,25 @@ enum Scenario {
     SpawnOnReady,
     /// A `spawn_local` future completes, then panics when dropped.
     SpawnLocalReady,
+    /// A `spawn_local` future whose handle was dropped completes with an output that panics
+    /// when dropped, then panics when dropped itself.
+    DetachedLocalReady,
     /// A parked `spawn_local` factory's capture panics when its aborted task is skipped.
     ParkedCapture,
+    /// A `spawn_on` factory's capture panics when a closed thread rejects it.
+    RejectedClosed,
+    /// A `spawn_on` factory's capture panics when a thread of another runner rejects it.
+    RejectedForeign,
+    /// A `spawn_on` factory's capture panics when an aborted lineage rejects it.
+    RejectedAborted,
+    /// A placed spawn's factory capture panics when a closed thread rejects it before the
+    /// factory runs.
+    RejectedPlaced,
 }
 
 impl Scenario {
     /// Whether the panic is reported through the runner's panicker. Disposal panics are
-    /// contained on io_uring (spec 5.4).
+    /// contained on io_uring.
     const fn reported(self, backend: Backend) -> bool {
         match self {
             Self::SpawnOnFactory
@@ -584,9 +671,9 @@ impl Scenario {
     }
 }
 
-/// Raise the panic of `scenario`, with `thread` a built thread that outlives it, and assert
-/// the outcome of the task that panicked (spec 5.4).
-async fn raise<C>(context: &C, thread: &Thread, scenario: Scenario)
+/// Raise the panic of `scenario`, with `thread` a built thread that outlives it and `stale` a
+/// thread of an earlier runner, and assert the outcome of the task that panicked.
+async fn raise<C>(context: &C, thread: &Thread, stale: &Thread, scenario: Scenario)
 where
     C: Spawner + Clock,
 {
@@ -729,14 +816,14 @@ where
             let handle = context
                 .child("root")
                 .thread()
-                .spawn(move |_| ready_then_panic(dropped))
+                .spawn(move |_| ready_then_panic(dropped, ()))
                 .expect("thread");
             assert!(matches!(handle.await, Err(Error::Closed)));
         }
         Scenario::SpawnOnReady => {
             let handle = context
                 .child("ready")
-                .spawn_on(thread, move |_| ready_then_panic(dropped));
+                .spawn_on(thread, move |_| ready_then_panic(dropped, ()));
             assert!(matches!(handle.await, Err(Error::Closed)));
         }
         Scenario::SpawnLocalReady => {
@@ -746,11 +833,30 @@ where
                 .spawn(move |local| async move {
                     let done = local
                         .child("ready")
-                        .spawn_local(move |_| ready_then_panic(dropped))
+                        .spawn_local(move |_| ready_then_panic(dropped, ()))
                         .await;
                     matches!(done, Err(Error::Closed))
                 });
             assert!(root.expect("thread").await.expect("root"));
+        }
+        Scenario::DetachedLocalReady => {
+            // The handle is dropped before the task runs, so the task owns its output when its
+            // future's destructor panics. Disposing of that output during the unwind would
+            // abort the process.
+            let output = flag();
+            let root = context.child("local").thread().spawn(move |local| {
+                let (future_dropped, output_dropped) = (dropped.clone(), output.clone());
+                drop(local.child("detached").spawn_local(move |_| {
+                    ready_then_panic(future_dropped, PanicOnDrop(output_dropped))
+                }));
+                async move {
+                    settle(&*local, || {
+                        dropped.load(Ordering::SeqCst) && output.load(Ordering::SeqCst)
+                    })
+                    .await;
+                }
+            });
+            root.expect("thread").await.expect("root");
         }
         Scenario::ParkedCapture => {
             let factory = ran.clone();
@@ -773,14 +879,49 @@ where
             settle(context, || dropped.load(Ordering::SeqCst)).await;
             assert!(!ran.load(Ordering::SeqCst), "the aborted factory ran");
         }
+        Scenario::RejectedClosed
+        | Scenario::RejectedForeign
+        | Scenario::RejectedAborted
+        | Scenario::RejectedPlaced => {
+            let closed = closed_thread(context).await;
+            let aborted = aborted_context(context, stale);
+            let capture = PanicOnDrop(dropped.clone());
+
+            // The rejection drops the factory, whose capture panics, before the call returns.
+            let rejected = catch_unwind(AssertUnwindSafe(|| match scenario {
+                Scenario::RejectedClosed => context
+                    .child("rejected")
+                    .spawn_on(&closed, capturing(capture, &ran)),
+                Scenario::RejectedForeign => context
+                    .child("rejected")
+                    .spawn_on(stale, capturing(capture, &ran)),
+                Scenario::RejectedAborted => aborted.spawn_on(thread, capturing(capture, &ran)),
+                _ => context
+                    .child("rejected")
+                    .on(&closed)
+                    .spawn(capturing(capture, &ran)),
+            }));
+            let handle = rejected.expect("a rejected spawn unwound into its caller");
+            assert!(
+                dropped.load(Ordering::SeqCst),
+                "the rejected factory was kept"
+            );
+            assert!(matches!(handle.await, Err(Error::Closed)));
+            assert!(!ran.load(Ordering::SeqCst), "the rejected factory ran");
+        }
     }
 }
 
-/// Spec test 17 for one runner: raise the panic of `scenario`, check that a resident of the
-/// same thread and a shared task survive it, and check how the run ends. A reported panic fails
-/// the run unless panics are caught. A contained one never does.
-fn panic_matrix<R: Runner>(runner: R, backend: Backend, scenario: Scenario, catch: bool)
-where
+/// Raise the panic of `scenario` on one runner, check that a resident of the same thread and a
+/// shared task survive it, and check how the run ends. A reported panic fails the run unless
+/// panics are caught. A contained one never does.
+fn panic_matrix<R: Runner>(
+    runner: R,
+    stale: Thread,
+    backend: Backend,
+    scenario: Scenario,
+    catch: bool,
+) where
     R::Context: Spawner + Clock,
 {
     let result = catch_unwind(AssertUnwindSafe(|| {
@@ -791,7 +932,7 @@ where
                 released.await.expect("released");
                 5
             });
-            raise(&context, &thread, scenario).await;
+            raise(&context, &thread, &stale, scenario).await;
             release.send(()).expect("release");
             assert!(matches!(survivor.await, Ok(5)));
             let after = context.child("after").spawn(|_| async { 7 });
@@ -827,17 +968,27 @@ fn test_thread_panic_matrix(
         Scenario::RootReady,
         Scenario::SpawnOnReady,
         Scenario::SpawnLocalReady,
-        Scenario::ParkedCapture
+        Scenario::DetachedLocalReady,
+        Scenario::ParkedCapture,
+        Scenario::RejectedClosed,
+        Scenario::RejectedForeign,
+        Scenario::RejectedAborted,
+        Scenario::RejectedPlaced
     )]
     scenario: Scenario,
     #[values(false, true)] catch: bool,
 ) {
-    on_backend!(backend, catch, panic_matrix(backend, scenario, catch));
+    let stale = stale_thread();
+    on_backend!(
+        backend,
+        catch,
+        panic_matrix(stale, backend, scenario, catch)
+    );
 }
 
-/// Spec test 28: the run's root returns while a resident is pending, and the resident's
-/// destructor panics during the shutdown close. Tokio and deterministic report it, so it fails
-/// the run unless panics are caught. io_uring contains it.
+/// The run's root returns while a resident is pending, and the resident's destructor panics
+/// during the shutdown close. Tokio and deterministic report it, so it fails the run unless
+/// panics are caught. io_uring contains it.
 fn late_disposal_panic<R: Runner>(runner: R, dropped: Arc<AtomicBool>)
 where
     R::Context: Spawner,
@@ -906,10 +1057,10 @@ impl<C: Spawner> Drop for BuildOnDrop<C> {
     }
 }
 
-/// Spec test 22: every finisher returns `Closed` from an aborted lineage and from a drop during
-/// the shutdown abort, an empty pin on an aborted lineage returns `EmptyCpus` (CPU validation
-/// comes first), and nothing is left behind. With `pin`, a pinned builder returned from the run
-/// returns `Closed` afterwards.
+/// Every finisher returns `Closed` from an aborted lineage and from a drop during the shutdown
+/// abort, an empty pin on an aborted lineage returns `EmptyCpus` (CPU validation comes first),
+/// and nothing is left behind. With `pin`, a pinned builder returned from the run returns
+/// `Closed` afterwards.
 fn builder_closed<R: Runner>(
     runner: R,
     stale: Thread,
@@ -1007,7 +1158,7 @@ const fn valid_cpu() -> Option<usize> {
     None
 }
 
-/// Spec test 24 for one runner with base set `base` (`None` if unknown).
+/// Check pin validation on one runner whose base set is `base` (`None` if unknown).
 fn pin_validation<R: Runner>(runner: R, base: Option<Cpus>)
 where
     R::Context: Spawner,
@@ -1117,9 +1268,9 @@ fn test_thread_pin_validation(#[case] backend: Backend) {
     }
 }
 
-/// Spec test 29 for one runner: with the OS refusing the thread, every finisher returns
-/// `Spawn` and rolls back. The residents series stays absent or 0, a child wired from the
-/// consumed context keeps running, a later thread from the same parent works, and the run ends.
+/// With the OS refusing the thread, every finisher returns `Spawn` and rolls back. The
+/// residents series stays absent or 0, a child wired from the consumed context keeps running, a
+/// later thread from the same parent works, and the run ends.
 fn spawn_failure_rollback<R: Runner>(runner: R)
 where
     R::Context: Spawner + Metrics,
@@ -1230,10 +1381,10 @@ impl Drop for AbortGate {
     }
 }
 
-/// Spec test 27 for one native runner: an abort of the thread's node from another OS thread
-/// takes the node's aborter and blocks before running it. The root then ends, by completing or
-/// by being dropped unrun, and once its handle resolves every spawn toward the thread is closed
-/// at once and never runs its factory.
+/// On one native runner, an abort of the thread's node from another OS thread takes the node's
+/// aborter and blocks before running it. The root then ends, by completing or by being dropped
+/// unrun, and once its handle resolves every spawn toward the thread is closed at once and never
+/// runs its factory.
 fn root_barrier_external_abort<R: Runner>(runner: R, stale: Thread)
 where
     R::Context: Spawner + Clock,
@@ -1377,9 +1528,9 @@ async fn assert_drained<C: Clock + Metrics>(context: &C, thread: &Thread) {
     settle(context, || residents(context, thread.name()) == Some(0)).await;
 }
 
-/// Spec test 35 for one native runner: a submission on a runtime thread holds its admission
-/// critical section while another OS thread aborts the thread's lineage. The submission either
-/// runs or resolves `Closed`, and the thread closes with nothing left queued.
+/// On one native runner, a submission on a runtime thread holds its admission critical section
+/// while another OS thread aborts the thread's lineage. The submission either runs or resolves
+/// `Closed`, and the thread closes with nothing left queued.
 fn admission_race<R: Runner>(runner: R, stale: Thread, submission: Submission)
 where
     R::Context: Spawner + Clock + Metrics,
@@ -1414,8 +1565,9 @@ fn test_thread_admission_race(
     within(move || on_backend!(backend, false, admission_race(stale, submission)));
 }
 
-/// Spec test 35 on deterministic. The loop keeps running on `reschedule()` while other OS
-/// threads submit, create threads and abort lineages.
+/// Submissions and thread creations race lineage aborts on deterministic, as in
+/// [admission_race]. The loop keeps running on `reschedule()` while other OS threads submit,
+/// create threads and abort lineages.
 fn deterministic_admission_race(stale: Thread) {
     deterministic::Runner::default().start(|context| async move {
         // A placed spawn submitted off the loop races an abort of the thread's lineage.
@@ -1501,9 +1653,10 @@ fn test_thread_admission_race_deterministic() {
     within(move || deterministic_admission_race(stale));
 }
 
-/// Spec test 31 for one wrapper: `attach`, `spawn`, `spawn_on` and `spawn_local` all hand
-/// their closures the wrapper type with its state (`holds` checks it), and the root barrier of
-/// spec test 8 holds through the wrapper, after completion and after a root dropped unrun.
+/// For one wrapper, `attach`, `spawn`, `spawn_on` and `spawn_local` all hand their closures
+/// the wrapper type with its state (`holds` checks it). The root barrier also holds through the
+/// wrapper, after completion and after a root dropped unrun, so once a root's handle resolves
+/// no spawn toward its thread runs.
 async fn wrapper_threads<W>(context: W, holds: fn(&W) -> bool, stale: Thread)
 where
     W: Spawner,

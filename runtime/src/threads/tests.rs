@@ -193,7 +193,7 @@ where
     });
 }
 
-// Placement follows 5.1. The last of on and shared wins, placement is inherited by child,
+// The last of on and shared decides where a spawn runs. Placement is inherited by child,
 // with_attribute and handed contexts while the blocking flag is not, and contexts a thread hands
 // out keep the creating context's label.
 #[rstest]
