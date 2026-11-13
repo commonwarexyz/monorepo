@@ -77,8 +77,8 @@ pub use marshaled::{Marshaled, MarshaledConfig};
 #[cfg(test)]
 mod tests {
     use crate::{
-        Automaton, Block, CertifiableAutomaton, CertifiableBlock, Handoff, Heightable, Relay,
-        Reporter,
+        Automaton, Block, CertifiableAutomaton, CertifiableBlock, Handoff, Heightable, History,
+        Relay, Reporter,
         marshal::{
             ancestry::{Ancestry, BlockProvider},
             coding::{
@@ -836,7 +836,11 @@ mod tests {
             };
             let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
-            let mut verify_rx = marshaled.verify(candidate_ctx, commitment).await;
+            let mut verify_rx = marshaled.verify(
+                candidate_ctx.clone(),
+                commitment,
+                History::anchored([candidate_ctx.parent.1]),
+            );
             context.sleep(Duration::from_millis(100)).await;
 
             assert!(
@@ -905,7 +909,9 @@ mod tests {
 
             // No shard reaches the member, so prompt acceptance shows that verification did not
             // wait for the member's assigned shard.
-            let verify_rx = marshaled.verify(candidate_ctx, commitment).await;
+            let commitments: Arc<[_]> = Arc::from([candidate_ctx.parent.1]);
+            let verify_rx =
+                marshaled.verify(candidate_ctx, commitment, History::anchored(commitments));
             select! {
                 result = verify_rx => {
                     assert!(
@@ -964,7 +970,11 @@ mod tests {
             let proposal = Proposal::new(round, View::zero(), commitment);
             let notarization = CodingHarness::make_notarization(proposal, &schemes, QUORUM);
             resolver.respond_to_next_fetch((notarization, candidate).encode());
-            let certify_rx = marshaled.certify(round, commitment).await;
+            let certify_rx = marshaled.certify(
+                round,
+                commitment,
+                History::anchored([genesis_coding_commitment(&genesis_block())]),
+            );
 
             let result = certify_rx.await.expect("certify result missing");
             assert!(result, "fetched notarized candidate should certify");
@@ -1030,12 +1040,20 @@ mod tests {
             let (candidate_ctx, candidate) = missing_candidate(me);
             let commitment = candidate.commitment();
             let round = candidate_ctx.round;
-            let _verify_rx = marshaled.verify(candidate_ctx, commitment).await;
+            let _verify_rx = marshaled.verify(
+                candidate_ctx.clone(),
+                commitment,
+                History::anchored([candidate_ctx.parent.1]),
+            );
 
             let proposal = Proposal::new(round, View::zero(), commitment);
             let notarization = CodingHarness::make_notarization(proposal, &schemes, QUORUM);
             resolver.respond_to_next_fetch((notarization, candidate).encode());
-            let certify_rx = marshaled.certify(round, commitment).await;
+            let certify_rx = marshaled.certify(
+                round,
+                commitment,
+                History::anchored([candidate_ctx.parent.1]),
+            );
 
             let result = certify_rx.await.expect("certify result missing");
             assert!(
@@ -1177,8 +1195,13 @@ mod tests {
             // The next lookup returns ownership while removing the buffer entry, modeling
             // shard engine eviction.
             buffer.insert_transient(candidate);
-            let _verify_rx = marshaled.verify(candidate_ctx, commitment).await;
-            let certify_rx = marshaled.certify(round, commitment).await;
+            let commitments: Arc<[_]> = Arc::from([candidate_ctx.parent.1]);
+            let _verify_rx = marshaled.verify(
+                candidate_ctx,
+                commitment,
+                History::anchored(commitments.clone()),
+            );
+            let certify_rx = marshaled.certify(round, commitment, History::anchored(commitments));
 
             // This request is ordered after the verification wait and the certification hint
             // in the marshal mailbox. Once it returns, the one-shot buffer hit and eviction have
@@ -1544,15 +1567,17 @@ mod tests {
             let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
             let shard_validity = marshaled
-                .verify(block_ctx, commitment)
-                .await
+                .verify(
+                    block_ctx.clone(),
+                    commitment,
+                    History::anchored([block_ctx.parent.1]),
+                )
                 .await
                 .expect("verify result missing");
             assert!(shard_validity, "shard validity should pass");
 
             let certify_result = marshaled
-                .certify(round, commitment)
-                .await
+                .certify(round, commitment, History::anchored([block_ctx.parent.1]))
                 .await
                 .expect("certify result missing");
             assert!(
@@ -1747,20 +1772,52 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             // Step 1: Verify block A at view 5
-            let _ = marshaled.verify(context_a, commitment_a).await.await;
+            let _ = marshaled
+                .verify(
+                    context_a.clone(),
+                    commitment_a,
+                    History::anchored([
+                        genesis_coding_commitment(&genesis_block()),
+                        context_a.parent.1,
+                    ]),
+                )
+                .await;
 
             // Step 2: Verify block B at view 10
-            let _ = marshaled.verify(context_b, commitment_b).await.await;
+            let _ = marshaled
+                .verify(
+                    context_b.clone(),
+                    commitment_b,
+                    History::anchored([
+                        genesis_coding_commitment(&genesis_block()),
+                        context_b.parent.1,
+                    ]),
+                )
+                .await;
 
             // Step 3: Certify block B at view 10 FIRST
-            let certify_b = marshaled.certify(round_b, commitment_b).await;
+            let certify_b = marshaled.certify(
+                round_b,
+                commitment_b,
+                History::anchored([
+                    genesis_coding_commitment(&genesis_block()),
+                    context_b.parent.1,
+                ]),
+            );
             assert!(
                 certify_b.await.unwrap(),
                 "Block B certification should succeed"
             );
 
             // Step 4: Certify block A at view 5 (should succeed)
-            let certify_a = marshaled.certify(round_a, commitment_a).await;
+            let certify_a = marshaled.certify(
+                round_a,
+                commitment_a,
+                History::anchored([
+                    genesis_coding_commitment(&genesis_block()),
+                    context_a.parent.1,
+                ]),
+            );
 
             // Use select with timeout to detect never-resolving receiver
             select! {
@@ -1905,8 +1962,11 @@ mod tests {
             // We must await the verify result to ensure the certification gate task is
             // registered before calling certify.
             let shard_validity = marshaled
-                .verify(reproposal_context.clone(), boundary_commitment)
-                .await
+                .verify(
+                    reproposal_context.clone(),
+                    boundary_commitment,
+                    History::suffix([boundary_commitment]),
+                )
                 .await;
             assert!(
                 shard_validity.unwrap(),
@@ -1928,8 +1988,11 @@ mod tests {
 
             // Use certify to get the actual deferred_verify result
             let certify_result = marshaled
-                .certify(reproposal_round, boundary_commitment)
-                .await
+                .certify(
+                    reproposal_round,
+                    boundary_commitment,
+                    History::suffix([boundary_commitment]),
+                )
                 .await;
             assert!(
                 certify_result.unwrap(),
@@ -1949,16 +2012,22 @@ mod tests {
                 parent: (reproposal_round.view(), boundary_commitment),
             };
             let repeated_verify = marshaled
-                .verify(repeated_reproposal_context, boundary_commitment)
-                .await
+                .verify(
+                    repeated_reproposal_context,
+                    boundary_commitment,
+                    History::suffix([boundary_commitment]),
+                )
                 .await;
             assert!(
                 repeated_verify.unwrap(),
                 "Repeated re-proposal should remain valid as the parent view advances"
             );
             let repeated_certify = marshaled
-                .certify(repeated_reproposal_round, boundary_commitment)
-                .await
+                .certify(
+                    repeated_reproposal_round,
+                    boundary_commitment,
+                    History::suffix([boundary_commitment]),
+                )
                 .await;
             assert!(
                 repeated_certify.unwrap(),
@@ -1981,8 +2050,11 @@ mod tests {
             // We must await the verify result to ensure the certification gate task is
             // registered before calling certify.
             let shard_validity = marshaled
-                .verify(invalid_reproposal_context, non_boundary_commitment)
-                .await
+                .verify(
+                    invalid_reproposal_context,
+                    non_boundary_commitment,
+                    History::suffix([non_boundary_commitment]),
+                )
                 .await;
             assert!(
                 !shard_validity.unwrap(),
@@ -1991,8 +2063,11 @@ mod tests {
 
             // Use certify to get the actual deferred_verify result
             let certify_result = marshaled
-                .certify(invalid_reproposal_round, non_boundary_commitment)
-                .await
+                .certify(
+                    invalid_reproposal_round,
+                    non_boundary_commitment,
+                    History::suffix([non_boundary_commitment]),
+                )
                 .await;
             assert!(
                 !certify_result.unwrap(),
@@ -2012,8 +2087,11 @@ mod tests {
             // We must await the verify result to ensure the certification gate task is
             // registered before calling certify.
             let shard_validity = marshaled
-                .verify(cross_epoch_reproposal_context.clone(), boundary_commitment)
-                .await
+                .verify(
+                    cross_epoch_reproposal_context.clone(),
+                    boundary_commitment,
+                    History::suffix([boundary_commitment]),
+                )
                 .await;
             assert!(
                 !shard_validity.unwrap(),
@@ -2022,8 +2100,11 @@ mod tests {
 
             // Use certify to get the actual deferred_verify result
             let certify_result = marshaled
-                .certify(cross_epoch_reproposal_round, boundary_commitment)
-                .await
+                .certify(
+                    cross_epoch_reproposal_round,
+                    boundary_commitment,
+                    History::suffix([boundary_commitment]),
+                )
                 .await;
             assert!(
                 !certify_result.unwrap(),
@@ -2116,7 +2197,13 @@ mod tests {
                 parent: (View::zero(), commitment),
             };
             let assigned = shards.subscribe_assigned_shard_verified(commitment);
-            let verdict = marshaled.verify(reproposal_context, commitment).await.await;
+            let verdict = marshaled
+                .verify(
+                    reproposal_context,
+                    commitment,
+                    History::suffix([commitment]),
+                )
+                .await;
             assert!(!verdict.expect("re-proposal verdict missing"));
 
             // The re-proposer delivers this node's assigned shard. Without reconstruction
@@ -2238,8 +2325,11 @@ mod tests {
                 parent: (View::new(boundary_height.get()), boundary_commitment),
             };
             let verdict = marshaled
-                .verify(reproposal_context, boundary_commitment)
-                .await
+                .verify(
+                    reproposal_context,
+                    boundary_commitment,
+                    History::suffix([boundary_commitment]),
+                )
                 .await;
             assert!(
                 verdict.expect("re-proposal verdict missing"),
@@ -2280,8 +2370,11 @@ mod tests {
             assert_eq!(block.commitment(), boundary_commitment);
 
             let certify = marshaled
-                .certify(reproposal_round, boundary_commitment)
-                .await
+                .certify(
+                    reproposal_round,
+                    boundary_commitment,
+                    History::suffix([boundary_commitment]),
+                )
                 .await;
             assert!(
                 certify.expect("certify result missing"),
@@ -2387,7 +2480,13 @@ mod tests {
                 leader: participants[1].clone(),
                 parent: (View::new(5), commitment),
             };
-            let verdict = marshaled.verify(reproposal_context, commitment).await.await;
+            let verdict = marshaled
+                .verify(
+                    reproposal_context.clone(),
+                    commitment,
+                    History::suffix([commitment]),
+                )
+                .await;
             assert!(
                 verdict.expect("re-proposal verdict missing"),
                 "re-proposal should verify after fetching the block by parent round"
@@ -2474,7 +2573,11 @@ mod tests {
                 parent: (View::new(1), parent_commitment),
             };
 
-            let verify_rx = marshaled.verify(context_b, commitment_a).await;
+            let verify_rx = marshaled.verify(
+                context_b.clone(),
+                commitment_a,
+                History::anchored([context_b.parent.1]),
+            );
             select! {
                 result = verify_rx => {
                     assert!(
@@ -2562,9 +2665,11 @@ mod tests {
             };
 
             // Start verify, then drop the receiver before the block is available.
-            let verify_rx = marshaled
-                .verify(reproposal_context, boundary_commitment)
-                .await;
+            let verify_rx = marshaled.verify(
+                reproposal_context,
+                boundary_commitment,
+                History::suffix([boundary_commitment]),
+            );
             drop(verify_rx);
             context.sleep(Duration::from_millis(10)).await;
 
@@ -2573,9 +2678,11 @@ mod tests {
 
             // Certify should not return the stale closed certification gate task; it
             // should recover through the embedded-context certification path.
-            let certify_rx = marshaled
-                .certify(reproposal_round, boundary_commitment)
-                .await;
+            let certify_rx = marshaled.certify(
+                reproposal_round,
+                boundary_commitment,
+                History::suffix([boundary_commitment]),
+            );
             select! {
                 result = certify_rx => {
                     assert!(
@@ -2650,7 +2757,11 @@ mod tests {
             };
 
             // Verify must not synthesize `false` when the block cannot be fetched.
-            let verify_rx = marshaled.verify(reproposal_context, missing_payload).await;
+            let verify_rx = marshaled.verify(
+                reproposal_context.clone(),
+                missing_payload,
+                History::anchored([reproposal_context.parent.1]),
+            );
 
             // Once the certification gate task's subscription reaches the shard engine, a
             // failed reconstruction of the payload closes it.
@@ -2675,7 +2786,11 @@ mod tests {
             // Certify should not surface the closed certification gate task as the final result.
             // With no block available, it remains pending on the recovery path until the
             // certifier's caller times out or data arrives.
-            let mut certify_rx = marshaled.certify(round, missing_payload).await;
+            let mut certify_rx = marshaled.certify(
+                round,
+                missing_payload,
+                History::anchored([reproposal_context.parent.1]),
+            );
             context.sleep(Duration::from_millis(100)).await;
             assert!(
                 matches!(
@@ -2962,14 +3077,19 @@ mod tests {
             };
 
             // Call verify to kick off deferred verification
-            let _shard_validity = marshaled
-                .verify(unsupported_context, block_commitment)
-                .await;
+            let _shard_validity = marshaled.verify(
+                unsupported_context.clone(),
+                block_commitment,
+                History::anchored([unsupported_context.parent.1]),
+            );
 
             // Use certify to get the actual deferred_verify result
             let certify_result = marshaled
-                .certify(unsupported_round, block_commitment)
-                .await
+                .certify(
+                    unsupported_round,
+                    block_commitment,
+                    History::anchored([unsupported_context.parent.1]),
+                )
                 .await;
 
             assert!(
@@ -3079,14 +3199,19 @@ mod tests {
             // 2. Fetch malicious_block (height 35) from marshal based on digest
             // 3. Validate height is contiguous (fail)
             // 4. Return false
-            let _shard_validity = marshaled
-                .verify(byzantine_context, malicious_commitment)
-                .await;
+            let _shard_validity = marshaled.verify(
+                byzantine_context.clone(),
+                malicious_commitment,
+                History::anchored([byzantine_context.parent.1]),
+            );
 
             // Use certify to get the actual deferred_verify result
             let certify_result = marshaled
-                .certify(byzantine_round, malicious_commitment)
-                .await
+                .certify(
+                    byzantine_round,
+                    malicious_commitment,
+                    History::anchored([byzantine_context.parent.1]),
+                )
                 .await;
 
             assert!(
@@ -3124,14 +3249,19 @@ mod tests {
             // 3. Validate height is contiguous
             // 4. Validate parent commitment matches (fail)
             // 5. Return false
-            let _shard_validity = marshaled
-                .verify(byzantine_context2, malicious_commitment2)
-                .await;
+            let _shard_validity = marshaled.verify(
+                byzantine_context2.clone(),
+                malicious_commitment2,
+                History::anchored([byzantine_context2.parent.1]),
+            );
 
             // Use certify to get the actual deferred_verify result
             let certify_result = marshaled
-                .certify(byzantine_round2, malicious_commitment2)
-                .await
+                .certify(
+                    byzantine_round2,
+                    malicious_commitment2,
+                    History::anchored([byzantine_context2.parent.1]),
+                )
                 .await;
 
             assert!(
@@ -3222,7 +3352,14 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             // Call certify directly without any prior verify (simulating crash recovery).
-            let certify_rx = marshaled.certify(child_round, child_commitment).await;
+            let certify_rx = marshaled.certify(
+                child_round,
+                child_commitment,
+                History::anchored([
+                    genesis_coding_commitment(&genesis_block()),
+                    parent_commitment,
+                ]),
+            );
             select! {
                 result = certify_rx => {
                     assert!(
@@ -3316,7 +3453,14 @@ mod tests {
 
             // No prior verify, so no gate exists and certify falls through to
             // the embedded-context path.
-            let certify_rx = marshaled.certify(child_round, child_commitment).await;
+            let certify_rx = marshaled.certify(
+                child_round,
+                child_commitment,
+                History::anchored([
+                    genesis_coding_commitment(&genesis_block()),
+                    parent_commitment,
+                ]),
+            );
             select! {
                 result = certify_rx => {
                     assert!(
@@ -3434,7 +3578,14 @@ mod tests {
             // Certify must report the commitment to the shard engine, drain
             // the buffered shards, and verify the reconstructed block through
             // its embedded context.
-            let certify_rx = marshaled.certify(child_round, child_commitment).await;
+            let certify_rx = marshaled.certify(
+                child_round,
+                child_commitment,
+                History::anchored([
+                    genesis_coding_commitment(&genesis_block()),
+                    parent_commitment,
+                ]),
+            );
             select! {
                 result = certify_rx => {
                     assert!(
@@ -3581,7 +3732,14 @@ mod tests {
 
             if asked == Asked::Verify {
                 // Verification is requested before the assigned shard arrives, and waits for it.
-                let mut verify_rx = marshaled.verify(child_ctx, child_commitment).await;
+                let mut verify_rx = marshaled.verify(
+                    child_ctx,
+                    child_commitment,
+                    History::anchored([
+                        genesis_coding_commitment(&genesis_block()),
+                        parent_commitment,
+                    ]),
+                );
                 context.sleep(Duration::from_millis(250)).await;
                 assert!(matches!(verify_rx.try_recv(), Err(TryRecvError::Empty)));
 
@@ -3602,7 +3760,7 @@ mod tests {
                 // A re-proposal of the block at view 3 is verified first. That verification
                 // fetches the block before it reports the commitment, and no peer answers the
                 // fetch. Otherwise no verification is requested.
-                let (round, mut pending) = match asked {
+                let (round, history, mut pending) = match asked {
                     Asked::CertifyDuringVerify => {
                         let round = Round::new(Epoch::zero(), View::new(3));
                         let ctx = CodingCtx {
@@ -3610,9 +3768,18 @@ mod tests {
                             leader: participants[1].clone(),
                             parent: (View::new(2), child_commitment),
                         };
-                        (round, Some(marshaled.verify(ctx, child_commitment).await))
+                        let history = History::suffix([child_commitment]);
+                        let verify_rx = marshaled.verify(ctx, child_commitment, history.clone());
+                        (round, history, Some(verify_rx))
                     }
-                    Asked::Verify | Asked::Certify => (child_round, None),
+                    Asked::Verify | Asked::Certify => (
+                        child_round,
+                        History::anchored([
+                            genesis_coding_commitment(&genesis_block()),
+                            parent_commitment,
+                        ]),
+                        None,
+                    ),
                 };
 
                 // The leader delivers this validator's assigned shard, and one peer gossips its
@@ -3626,7 +3793,7 @@ mod tests {
                 if let Some(verify_rx) = pending.as_mut() {
                     assert!(matches!(verify_rx.try_recv(), Err(TryRecvError::Empty)));
                 }
-                let certify_rx = marshaled.certify(round, child_commitment).await;
+                let certify_rx = marshaled.certify(round, child_commitment, history);
                 select! {
                     result = certify_rx => {
                         assert!(
@@ -3764,14 +3931,28 @@ mod tests {
 
             context.sleep(Duration::from_millis(10)).await;
 
-            let optimistic = marshaled.verify(verify_context, commitment).await;
+            let optimistic = marshaled.verify(
+                verify_context.clone(),
+                commitment,
+                History::anchored([
+                    genesis_coding_commitment(&genesis_block()),
+                    verify_context.parent.1,
+                ]),
+            );
             assert!(
                 optimistic.await.expect("verify result missing"),
                 "optimistic verify should pass pre-checks and schedule deferred verification"
             );
 
             // 4) Certify must observe the deferred application failure and return false.
-            let certify = marshaled.certify(round, commitment).await;
+            let certify = marshaled.certify(
+                round,
+                commitment,
+                History::anchored([
+                    genesis_coding_commitment(&genesis_block()),
+                    verify_context.parent.1,
+                ]),
+            );
             assert!(
                 !certify.await.expect("certify result missing"),
                 "certify should propagate deferred application verify failure"
@@ -3883,7 +4064,14 @@ mod tests {
                 leader: me.clone(),
                 parent: (View::new(1), certified_commitment),
             };
-            let verify_rx = marshaled.verify(equivocating_ctx, commitment).await;
+            let verify_rx = marshaled.verify(
+                equivocating_ctx.clone(),
+                commitment,
+                History::anchored([
+                    genesis_coding_commitment(&genesis_block()),
+                    certified_commitment,
+                ]),
+            );
             select! {
                 result = verify_rx => {
                     assert!(
@@ -3898,7 +4086,15 @@ mod tests {
 
             // The honest notarization for the same `(round, commitment)`
             // arrives. Certification recovers through the embedded context.
-            let certify_rx = marshaled.certify(round, commitment).await;
+            let certify_rx = marshaled.certify(
+                round,
+                commitment,
+                History::anchored([
+                    genesis_coding_commitment(&genesis_block()),
+                    certified_commitment,
+                    notarized_commitment,
+                ]),
+            );
             select! {
                 result = certify_rx => {
                     assert!(
@@ -4449,6 +4645,11 @@ mod tests {
                 parent_commitment = block.commitment();
                 chain.push(block);
             }
+            let selected: Arc<[TestCommitment]> =
+                std::iter::once(genesis_coding_commitment(&genesis_block()))
+                    .chain(chain[..3].iter().map(Committable::commitment))
+                    .collect::<Vec<_>>()
+                    .into();
             let candidate = &chain[3];
             let parent = &chain[2];
             assert_ne!(chain[1].digest(), certified_ancestor.digest());
@@ -4483,9 +4684,11 @@ mod tests {
                     strategy: Sequential,
                 },
             );
-            let _shard_verdict = marshaled
-                .verify(candidate.context(), candidate.commitment())
-                .await;
+            let _shard_verdict = marshaled.verify(
+                candidate.context(),
+                candidate.commitment(),
+                History::anchored(selected.clone()),
+            );
 
             // Neither the certified fork nor a cached untrusted child authenticates these fetches
             for (index, ancestor) in [&chain[1], &chain[0]].into_iter().enumerate() {
@@ -4534,8 +4737,11 @@ mod tests {
             }
             assert!(
                 marshaled
-                    .certify(candidate.context().round, candidate.commitment())
-                    .await
+                    .certify(
+                        candidate.context().round,
+                        candidate.commitment(),
+                        History::anchored(selected.clone())
+                    )
                     .await
                     .unwrap()
             );
@@ -5024,8 +5230,7 @@ mod tests {
                 parent: (View::zero(), genesis.commitment()),
             };
             let decision = marshaled
-                .prepare(ctx)
-                .await
+                .prepare(ctx, History::anchored([genesis.commitment()]))
                 .await
                 .expect("prepare decision missing");
             assert_eq!(decision, Handoff::Wait, "the default prepare declines");
@@ -5087,11 +5292,15 @@ mod tests {
             };
 
             // propose with a missing scheme returns a dropped sender
-            let rx = marshaled.propose(ctx.clone()).await;
+            let rx = marshaled.propose(ctx.clone(), History::anchored([ctx.parent.1]));
             assert!(rx.await.is_err());
 
             // verify with a missing scheme returns a dropped sender
-            let rx = marshaled.verify(ctx, genesis_commitment()).await;
+            let rx = marshaled.verify(
+                ctx.clone(),
+                genesis_commitment(),
+                History::anchored([ctx.parent.1]),
+            );
             assert!(rx.await.is_err());
         });
     }
@@ -5188,16 +5397,28 @@ mod tests {
 
             // Optimistic verify returns shard validity (true).
             let shard_validity = marshaled
-                .verify(child_ctx, child_commitment)
-                .await
+                .verify(
+                    child_ctx.clone(),
+                    child_commitment,
+                    History::anchored([
+                        genesis_coding_commitment(&genesis_block()),
+                        child_ctx.parent.1,
+                    ]),
+                )
                 .await
                 .expect("verify result missing");
             assert!(shard_validity, "shard validity should pass");
 
             // Certify is the safety gate before finalize voting.
             let certify_result = marshaled
-                .certify(child_round, child_commitment)
-                .await
+                .certify(
+                    child_round,
+                    child_commitment,
+                    History::anchored([
+                        genesis_coding_commitment(&genesis_block()),
+                        child_ctx.parent.1,
+                    ]),
+                )
                 .await
                 .expect("certify result missing");
             assert!(certify_result, "certify should succeed");
@@ -5312,8 +5533,10 @@ mod tests {
             // and returns the commitment. Durability is established by the
             // certify flush below.
             let commitment = marshaled
-                .propose(propose_context)
-                .await
+                .propose(
+                    propose_context.clone(),
+                    History::anchored([propose_context.parent.1]),
+                )
                 .await
                 .expect("propose should produce a commitment");
             assert_eq!(commitment, expected_commitment);
@@ -5322,8 +5545,11 @@ mod tests {
             // sync handle and establishes durability before the finalize vote.
             assert!(
                 marshaled
-                    .certify(propose_round, commitment)
-                    .await
+                    .certify(
+                        propose_round,
+                        commitment,
+                        History::anchored([propose_context.parent.1])
+                    )
                     .await
                     .expect("certify result missing"),
                 "certify must succeed for the leader's own proposal"
@@ -5432,8 +5658,10 @@ mod tests {
             let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
             let commitment = marshaled
-                .propose(propose_context)
-                .await
+                .propose(
+                    propose_context.clone(),
+                    History::anchored([propose_context.parent.1]),
+                )
                 .await
                 .expect("propose should produce a commitment");
             assert_eq!(commitment, expected_commitment);
@@ -5456,8 +5684,11 @@ mod tests {
             // certification resolves durably without a flush.
             assert!(
                 marshaled
-                    .certify(propose_round, commitment)
-                    .await
+                    .certify(
+                        propose_round,
+                        commitment,
+                        History::anchored([propose_context.parent.1])
+                    )
                     .await
                     .expect("certify result missing"),
                 "certify must succeed for the relayed proposal"
@@ -5525,8 +5756,7 @@ mod tests {
                 };
                 let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
                 let staged = marshaled
-                    .propose(ctx.clone())
-                    .await
+                    .propose(ctx.clone(), History::anchored([ctx.parent.1]))
                     .await
                     .expect("propose should produce a commitment");
                 assert_eq!(staged, commitment);
@@ -5555,8 +5785,11 @@ mod tests {
             assert!(matches!(feedback, Feedback::Ok));
             assert!(
                 replacement
-                    .certify(round, replacement_commitment)
-                    .await
+                    .certify(
+                        round,
+                        replacement_commitment,
+                        History::anchored([ctx.parent.1])
+                    )
                     .await
                     .expect("certify result missing"),
                 "lock-in handshake must resolve certification durably"
@@ -5625,9 +5858,9 @@ mod tests {
                 strategy: Sequential,
             };
             let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+            let commitments: Arc<[TestCommitment]> = Arc::from([ctx.parent.1]);
             let commitment = marshaled
-                .propose(ctx)
-                .await
+                .propose(ctx, History::anchored(commitments.clone()))
                 .await
                 .expect("propose should produce a commitment");
             assert_eq!(commitment, candidate.commitment());
@@ -5645,8 +5878,7 @@ mod tests {
             // Certification claims the candidate and persists it.
             assert!(
                 marshaled
-                    .certify(round, commitment)
-                    .await
+                    .certify(round, commitment, History::anchored(commitments))
                     .await
                     .expect("certify result missing"),
                 "certification must persist the claimed candidate"
@@ -5726,7 +5958,8 @@ mod tests {
             // The actor issues any peer fetch for a missing block before it registers the local
             // wait, so a registered wait shows the prepare's parent lookup has been handled. The
             // runner timeout is only a hang guard for this loop.
-            let decision = marshaled.prepare(ctx.clone()).await;
+            let commitments: Arc<[TestCommitment]> = Arc::from([parent_ctx.parent.1, ctx.parent.1]);
+            let decision = marshaled.prepare(ctx.clone(), History::anchored(commitments.clone()));
             while buffer.commitment_subscription_count() == 0 {
                 reschedule().await;
             }
@@ -5737,7 +5970,7 @@ mod tests {
 
             // An ordinary propose on the same parent fetches it by round. The runner timeout is
             // only a hang guard for this loop.
-            let proposal = marshaled.propose(ctx).await;
+            let proposal = marshaled.propose(ctx, History::anchored(commitments));
             while resolver.fetches().is_empty() {
                 reschedule().await;
             }
@@ -5834,8 +6067,10 @@ mod tests {
                 };
                 let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
                 let decision = marshaled
-                    .prepare(ctx)
-                    .await
+                    .prepare(
+                        ctx,
+                        History::anchored([genesis_parent_commitment, parent_commitment]),
+                    )
                     .await
                     .expect("prepare must return a decision");
                 let expected = if built {
@@ -5919,8 +6154,7 @@ mod tests {
             };
             let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
             let decision = marshaled
-                .prepare(ctx)
-                .await
+                .prepare(ctx, History::anchored([boundary_commitment]))
                 .await
                 .expect("prepare must return a decision");
             assert_eq!(decision, Handoff::Stage(child_commitment));
@@ -6045,8 +6279,7 @@ mod tests {
             let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
             let decision = marshaled
-                .prepare(ctx)
-                .await
+                .prepare(ctx, History::anchored([genesis_parent_commitment]))
                 .await
                 .expect("prepare must return a decision");
             assert_eq!(
@@ -6058,8 +6291,11 @@ mod tests {
             let _ = marshaled.broadcast(fresh_commitment, Plan::Propose { round });
             assert!(
                 marshaled
-                    .certify(round, fresh_commitment)
-                    .await
+                    .certify(
+                        round,
+                        fresh_commitment,
+                        History::anchored([genesis_parent_commitment])
+                    )
                     .await
                     .expect("certify result missing"),
                 "the fresh block must certify through the relay handshake"
@@ -6098,8 +6334,11 @@ mod tests {
             let mut certifier = Marshaled::new(context.child("certifier"), cfg);
             assert!(
                 certifier
-                    .certify(round, fresh_commitment)
-                    .await
+                    .certify(
+                        round,
+                        fresh_commitment,
+                        History::anchored([genesis_parent_commitment])
+                    )
                     .await
                     .expect("certify result missing"),
                 "the fresh block must certify from storage after a restart"
@@ -6189,8 +6428,7 @@ mod tests {
             let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
             let commitment = marshaled
-                .propose(ctx)
-                .await
+                .propose(ctx, History::suffix([boundary_commitment]))
                 .await
                 .expect("propose must return a commitment");
             assert_eq!(
@@ -6199,7 +6437,7 @@ mod tests {
             );
 
             let _ = marshaled.broadcast(commitment, Plan::Propose { round });
-            let certify_rx = marshaled.certify(round, commitment).await;
+            let certify_rx = marshaled.certify(round, commitment, History::suffix([commitment]));
             select! {
                 result = certify_rx => {
                     assert!(
@@ -6298,13 +6536,14 @@ mod tests {
             let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
             // The leader withholds the shards of A. Consensus asks to verify it.
-            let verify_a = marshaled.verify(ctx, a_commitment).await;
+            let history = History::anchored([genesis_parent_commitment, parent_commitment]);
+            let verify_a = marshaled.verify(ctx, a_commitment, history.clone());
             context.sleep(Duration::from_millis(10)).await;
             assert!(application.observed().is_empty());
 
             // B is reconstructed and notarized, so consensus asks to certify it.
             assert!(marshal.verified(round, coded_b).await);
-            let certify_b = marshaled.certify(round, b_commitment).await;
+            let certify_b = marshaled.certify(round, b_commitment, history);
             context.sleep(Duration::from_millis(50)).await;
             assert_eq!(
                 application.observed(),
@@ -6402,12 +6641,13 @@ mod tests {
             assert_ne!(boundary_commitment, b_commitment);
 
             // Consensus asks to verify the re-proposal, which waits for the boundary block.
-            let mut verify = marshaled.verify(ctx, boundary_commitment).await;
+            let history = History::suffix([boundary_commitment]);
+            let mut verify = marshaled.verify(ctx, boundary_commitment, history.clone());
             context.sleep(Duration::from_millis(10)).await;
             assert_eq!(verify.try_recv(), Err(TryRecvError::Empty));
 
             // B is notarized, so consensus asks to certify it.
-            let certify_b = marshaled.certify(round, b_commitment).await;
+            let certify_b = marshaled.certify(round, b_commitment, history);
             context.sleep(Duration::from_millis(10)).await;
             assert_eq!(
                 verify.try_recv(),

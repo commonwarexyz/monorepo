@@ -25,7 +25,7 @@ use crate::{
 };
 use commonware_actor::Feedback;
 use commonware_consensus::{
-    Application as _, CertifiableAutomaton as _, Reporter,
+    Application as _, CertifiableAutomaton as _, History, Reporter,
     marshal::{
         self,
         ancestry::{self, Ancestry},
@@ -1196,6 +1196,7 @@ async fn build_multi_chain(
 fn out_of_order_certifications_complete_on_qmdb() {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
         let (genesis, blocks) = build_chain(&context, 6).await;
+        let ancestor_commitments = blocks.iter().map(|block| block.parent).collect::<Vec<_>>();
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut signing_context = context.child("signing");
         let fixture = scheme_mocks::fixture(
@@ -1292,7 +1293,11 @@ fn out_of_order_certifications_complete_on_qmdb() {
         let mut certifications = Vec::with_capacity(blocks.len());
         for index in [5, 1, 4, 0, 3, 2] {
             let block = &blocks[index];
-            certifications.push(deferred.certify(block.context.round, block.digest()).await);
+            certifications.push(deferred.certify(
+                block.context.round,
+                block.digest(),
+                History::anchored(&ancestor_commitments[..=index]),
+            ));
         }
 
         for result in futures::future::join_all(certifications).await {
@@ -1314,6 +1319,7 @@ fn finalizations_and_certifications_complete_during_proposal_parent_lookup_on_qm
     // finalization or certification waiting for the proposal would never complete.
     deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
         let (genesis, blocks) = build_chain(&context, 6).await;
+        let ancestor_commitments = blocks.iter().map(|block| block.parent).collect::<Vec<_>>();
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut signing_context = context.child("signing");
         let fixture = scheme_mocks::fixture(
@@ -1460,7 +1466,11 @@ fn finalizations_and_certifications_complete_during_proposal_parent_lookup_on_qm
         let mut certifications = Vec::with_capacity(blocks.len());
         for index in [5, 1, 4, 0, 3, 2] {
             let block = &blocks[index];
-            certifications.push(deferred.certify(block.context.round, block.digest()).await);
+            certifications.push(deferred.certify(
+                block.context.round,
+                block.digest(),
+                History::anchored(&ancestor_commitments[..=index]),
+            ));
         }
         for result in futures::future::join_all(certifications).await {
             assert!(result.expect("certification result missing"));
@@ -1684,6 +1694,7 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
 fn overlapping_finalizations_complete_on_multi_qmdb() {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
         let (genesis, blocks) = build_multi_chain(&context, 6).await;
+        let ancestor_commitments = blocks.iter().map(|block| block.parent).collect::<Vec<_>>();
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut signing_context = context.child("signing");
         let fixture = scheme_mocks::fixture(
@@ -1797,8 +1808,12 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
 
         // Cache the batches that will be finalized so the held descendant
         // verification does not own their replay.
-        for block in &blocks[..3] {
-            let certification = deferred.certify(block.context.round, block.digest()).await;
+        for (index, block) in blocks[..3].iter().enumerate() {
+            let certification = deferred.certify(
+                block.context.round,
+                block.digest(),
+                History::anchored(&ancestor_commitments[..=index]),
+            );
             assert!(
                 certification
                     .await
@@ -1819,7 +1834,11 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             let block = &blocks[index];
             certifications.push((
                 index,
-                deferred.certify(block.context.round, block.digest()).await,
+                deferred.certify(
+                    block.context.round,
+                    block.digest(),
+                    History::anchored(&ancestor_commitments[..=index]),
+                ),
             ));
         }
 
@@ -1920,6 +1939,7 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
     // verification starts, so a verification waiting for it never starts.
     deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
         let (genesis, blocks) = build_multi_chain(&context, 6).await;
+        let ancestor_commitments = blocks.iter().map(|block| block.parent).collect::<Vec<_>>();
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut signing_context = context.child("signing");
         let fixture = scheme_mocks::fixture(
@@ -2034,8 +2054,12 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
 
         // Cache the batches that will be finalized so the held descendant
         // verifications do not own their replay.
-        for block in &blocks[..3] {
-            let certification = deferred.certify(block.context.round, block.digest()).await;
+        for (index, block) in blocks[..3].iter().enumerate() {
+            let certification = deferred.certify(
+                block.context.round,
+                block.digest(),
+                History::anchored(&ancestor_commitments[..=index]),
+            );
             assert!(
                 certification
                     .await
@@ -2082,7 +2106,11 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
             let block = &blocks[index];
             certifications.push((
                 index,
-                deferred.certify(block.context.round, block.digest()).await,
+                deferred.certify(
+                    block.context.round,
+                    block.digest(),
+                    History::anchored(&ancestor_commitments[..=index]),
+                ),
             ));
         }
         process_started
@@ -2155,6 +2183,7 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
 fn pruning_joins_verification_on_real_qmdbs() {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
         let (genesis, blocks) = build_multi_chain(&context, 5).await;
+        let ancestor_commitments = blocks.iter().map(|block| block.parent).collect::<Vec<_>>();
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut signing_context = context.child("signing");
         let fixture = scheme_mocks::fixture(
@@ -2274,8 +2303,12 @@ fn pruning_joins_verification_on_real_qmdbs() {
 
         // Keep the first four batches available so the verification of block 5 executes
         // only block 5.
-        for block in &blocks[..4] {
-            let certification = deferred.certify(block.context.round, block.digest()).await;
+        for (index, block) in blocks[..4].iter().enumerate() {
+            let certification = deferred.certify(
+                block.context.round,
+                block.digest(),
+                History::anchored(&ancestor_commitments[..=index]),
+            );
             assert!(
                 certification
                     .await
@@ -2313,7 +2346,11 @@ fn pruning_joins_verification_on_real_qmdbs() {
         );
 
         let block = &blocks[4];
-        let mut certification = deferred.certify(block.context.round, block.digest()).await;
+        let mut certification = deferred.certify(
+            block.context.round,
+            block.digest(),
+            History::anchored(&ancestor_commitments[..=4]),
+        );
         first_started
             .await
             .expect("verification should start before pruning");

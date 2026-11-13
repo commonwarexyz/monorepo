@@ -90,7 +90,7 @@
 
 use crate::{
     Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Handoff,
-    Heightable, Relay, Reporter,
+    Heightable, History, Relay, Reporter,
     marshal::{
         ancestry::Ancestry,
         application::{
@@ -342,6 +342,7 @@ where
         commitment: Commitment<B, C, H>,
         prefetched_block: Option<Arc<CodedBlock<B, C, H>>>,
         stage: Stage,
+        _history: History<Commitment<B, C, H>>,
     ) -> oneshot::Receiver<GateOutcome> {
         let marshal = self.marshal.clone();
         let mut application = self.application.clone();
@@ -517,6 +518,7 @@ where
         &self,
         round: Round,
         payload: Commitment<B, C, H>,
+        history: History<Commitment<B, C, H>>,
     ) -> oneshot::Receiver<bool> {
         // No in-progress task means we never verified this proposal locally.
         // We can use the block's embedded context to move to the next view. If a Byzantine
@@ -599,6 +601,7 @@ where
                     payload,
                     Some(block),
                     Stage::Certified,
+                    history,
                 );
                 gates::forward(tx, verify_rx, |result| match result {
                     GateOutcome::Ready(result) => Some(result),
@@ -619,6 +622,7 @@ where
         round: Round,
         payload: Commitment<B, C, H>,
         task: oneshot::Receiver<GateOutcome>,
+        history: History<Commitment<B, C, H>>,
     ) -> oneshot::Receiver<bool> {
         // `verify()` intentionally waits only for local candidate data. Once
         // certification starts, a notarization exists and the same pending
@@ -637,7 +641,7 @@ where
             .with_attribute("round", round);
         context.spawn(move |_| {
             gates::drive(tx, task, round, payload, move || {
-                marshaled.certify_from_embedded_context(round, payload)
+                marshaled.certify_from_embedded_context(round, payload, history)
             })
             .instrument(info_span!(
                 "marshal.coding.certify.existing",
@@ -662,6 +666,7 @@ where
     fn checks(
         &self,
         consensus_context: Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
+        _history: History<Commitment<B, C, H>>,
         parent_fallback: core::CommitmentFallback,
     ) -> impl Future<Output = CodingResolved<B, C, H, impl Ancestry<B>>> + Send + 'static {
         let scheme_provider = self.scheme_provider.clone();
@@ -775,11 +780,11 @@ where
     /// awaited only at certification so it overlaps consensus voting. The commitment does not
     /// imply durability on its own. [`CertifiableAutomaton::certify`] awaits the registered
     /// certification gate before the finalize vote.
-    #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.coding.propose", level = "info", skip_all, fields(round = %consensus_context.round))]
-    async fn propose(
+    fn propose(
         &mut self,
         consensus_context: Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
+        history: History<Self::Digest>,
     ) -> oneshot::Receiver<Self::Digest> {
         let strategy = self.strategy.clone();
         let erasure_encode_duration = self.erasure_encode_duration.clone();
@@ -787,6 +792,7 @@ where
         let (parent_view, parent_commitment) = consensus_context.parent;
         let checks = self.checks(
             consensus_context.clone(),
+            history,
             core::CommitmentFallback::FetchByRound {
                 round: Round::new(consensus_context.epoch(), parent_view),
             },
@@ -830,12 +836,12 @@ where
     /// Verification is spawned in a background task and returns a receiver that will contain
     /// the verification result. Additionally, this method kicks off deferred verification to
     /// start block verification early (hidden behind shard validity and network latency).
-    #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.coding.verify", level = "info", skip_all, fields(round = %consensus_context.round, commitment = %payload))]
-    async fn verify(
+    fn verify(
         &mut self,
         consensus_context: Context<Self::Digest, <Z::Scheme as Verifier>::PublicKey>,
         payload: Self::Digest,
+        history: History<Self::Digest>,
     ) -> oneshot::Receiver<bool> {
         // If there's no scheme for the current epoch, we cannot vote on the proposal.
         // Send back a receiver with a dropped sender.
@@ -1009,7 +1015,7 @@ where
         // drops the verify receiver without cancelling certification for it, so
         // deferred verification must survive that drop for certify to consume.
         let round = consensus_context.round;
-        let task = self.deferred_verify(consensus_context, payload, None, Stage::Verified);
+        let task = self.deferred_verify(consensus_context, payload, None, Stage::Verified, history);
         self.gates.insert(round, payload, task);
 
         match scheme.me().and_then(|m| m.signer()) {
@@ -1073,17 +1079,21 @@ where
     /// When the checks find the epoch boundary block, the marshal re-proposes it without the
     /// application and answers [`Handoff::Stage`]. A round without a scheme answers
     /// [`Handoff::Wait`].
-    #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.coding.prepare", level = "info", skip_all, fields(round = %consensus_context.round))]
-    async fn prepare(
+    fn prepare(
         &mut self,
         consensus_context: Context<Self::Digest, <Z::Scheme as Verifier>::PublicKey>,
+        history: History<Self::Digest>,
     ) -> oneshot::Receiver<Handoff<Self::Digest>> {
         let strategy = self.strategy.clone();
         let erasure_encode_duration = self.erasure_encode_duration.clone();
         let clock = self.context.clone();
         let (parent_view, parent_commitment) = consensus_context.parent;
-        let checks = self.checks(consensus_context.clone(), core::CommitmentFallback::Wait);
+        let checks = self.checks(
+            consensus_context.clone(),
+            history,
+            core::CommitmentFallback::Wait,
+        );
         let span = info_span!(
             "marshal.coding.prepare.task",
             round = %consensus_context.round
@@ -1113,9 +1123,13 @@ where
         )
     }
 
-    #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.coding.certify", level = "info", skip_all, fields(round = %round, commitment = %payload))]
-    async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
+    fn certify(
+        &mut self,
+        round: Round,
+        payload: Self::Digest,
+        history: History<Self::Digest>,
+    ) -> oneshot::Receiver<bool> {
         // Certify may be reached without an earlier `verify`, or while the `verify`
         // of a re-proposal still awaits its block. This can then be the first call
         // that asks the shard engine to gather the commitment, and such a call
@@ -1127,10 +1141,10 @@ where
             self.marshal.verified_deferred(round, block, ack)
         });
         if let Some(task) = task {
-            return self.certify_from_existing_task(round, payload, task);
+            return self.certify_from_existing_task(round, payload, task, history);
         }
 
-        self.certify_from_embedded_context(round, payload)
+        self.certify_from_embedded_context(round, payload, history)
     }
 }
 

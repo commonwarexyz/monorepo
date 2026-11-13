@@ -311,6 +311,8 @@ mod tests {
         held_verifications: Option<VerificationRequests>,
         /// Whether every mock application verification should fail.
         fail_verification: bool,
+        /// Observes the history of every proposal, prepare, and verification request.
+        history_observer: Option<mocks::application::HistoryObserver<Sha256Digest>>,
         certifier: mocks::application::Certifier<Sha256Digest>,
     }
 
@@ -335,6 +337,7 @@ mod tests {
                 verify_requests: None,
                 held_verifications: None,
                 fail_verification: false,
+                history_observer: None,
                 certifier: mocks::application::Certifier::Always,
             }
         }
@@ -398,6 +401,9 @@ mod tests {
         actor.set_drop_proposals(options.drop_proposals);
         actor.set_handoff(options.handoff);
         actor.set_fail_verification(options.fail_verification);
+        if let Some(observer) = options.history_observer {
+            actor.set_history_observer(observer);
+        }
         if let Some(propose_requests) = propose_requests {
             actor.set_propose_observer(Box::new(move |context| {
                 propose_requests.lock().push(context);
@@ -7160,6 +7166,432 @@ mod tests {
     fn test_missed_notarization_is_fetched() {
         // Request routing is scheme-independent; one scheme is enough.
         missed_notarization_is_fetched(ed25519::fixture);
+    }
+
+    /// A request on a notarized parent above a missing certificate carries only the parent's
+    /// commitment as a suffix, and the voter does not fetch the missing certificate for it.
+    fn application_history_holds_resident_suffix(local_index: usize, prepare: bool) {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            // Build a four-validator network.
+            let epoch = Epoch::new(333);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(
+                &mut context,
+                b"_COMMONWARE_CONSENSUS_TEST_APPLICATION_HISTORY",
+                4,
+            );
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+
+            // The parent at view 2 builds on a proposal at view 1 that never gets a certificate.
+            let missing = Proposal::new(
+                Round::new(epoch, View::new(1)),
+                View::zero(),
+                Sha256::hash(&[b"missing"]),
+            );
+            let parent = Proposal::new(
+                Round::new(epoch, View::new(2)),
+                missing.view(),
+                Sha256::hash(&[b"parent"]),
+            );
+
+            // The view 3 request must carry only the parent's commitment, as a suffix.
+            let observed = Arc::new(Mutex::new(false));
+            let observer = observed.clone();
+            let expected = [parent.payload];
+
+            // With a two-view term, view 3 starts a term and its leader requests the proposal
+            // through prepare. Certification never completes, so the parent stays uncertified.
+            let elector = RoundRobin::<Sha256>::default().with_term(
+                TermLength::new(NZU32!(if prepare { 2 } else { 5 })),
+                Duration::from_secs(30),
+                ViewDelta::new(2),
+            );
+            let (mut mailbox, mut batcher, mut resolver, relay, _) = setup_voter(
+                &context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                VoterOptions {
+                    local_index,
+                    leader_timeout: Duration::from_secs(20),
+                    handoff: Handoff::Vote(()),
+                    history_observer: Some(Box::new(move |round, history| {
+                        if round.view() == View::new(3) {
+                            assert_eq!(history.commitments().as_ref(), expected.as_slice());
+                            assert!(!history.is_anchored());
+                            *observer.lock() = true;
+                        }
+                    })),
+                    certifier: Certifier::Pending,
+                    ..VoterOptions::default()
+                },
+            )
+            .await;
+
+            // A quorum of peers notarizes the parent.
+            let peer_schemes = peers(&schemes, local_index);
+            let (_, parent_certificate) = build_notarization(&peer_schemes, &parent, quorum(4));
+            mailbox.recovered(Certificate::Notarization(parent_certificate));
+
+            // Validator 1 is not a view 3 leader, so it verifies the leader's proposal.
+            if local_index == 1 {
+                let contents = (Round::new(epoch, View::new(3)), parent.payload, 1u64).encode();
+                let candidate = Proposal::new(
+                    Round::new(epoch, View::new(3)),
+                    parent.view(),
+                    Sha256::hash(&[&contents]),
+                );
+                relay.broadcast(
+                    &participants[2],
+                    Recipients::All,
+                    (candidate.payload, contents),
+                );
+                mailbox.proposal(candidate);
+            }
+
+            // Matches a fetch of the missing certificate on behalf of the view 3 request.
+            let history_request = |message: MailboxMessage<_, _>| {
+                matches!(
+                    message,
+                    MailboxMessage::Resolve { proposal, view, .. }
+                        if proposal == View::new(3) && view == missing.view()
+                )
+            };
+
+            // Run until this node votes at view 3 after the observed request, and fail if that
+            // request fetches the missing certificate.
+            loop {
+                select! {
+                    message = resolver.recv() => {
+                        assert!(
+                            !history_request(message.unwrap()),
+                            "history must not request certificates"
+                        );
+                    },
+                    message = batcher.recv() => {
+                        if let batcher::Message::Constructed(Vote::Notarize(vote)) =
+                            message.unwrap()
+                            && vote.view() == View::new(3)
+                        {
+                            assert!(*observed.lock());
+                            assert_eq!(vote.proposal.parent, parent.view());
+                            break;
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(10)) =>
+                        panic!("a request missing an ancestor certificate must be answered"),
+                }
+            }
+
+            // Fetches still queued after the vote must not request the missing certificate for it.
+            while let Some(message) = resolver.recv().now_or_never().flatten() {
+                assert!(
+                    !history_request(message),
+                    "history must not request certificates"
+                );
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_propose_history_holds_resident_suffix() {
+        application_history_holds_resident_suffix(2, false);
+    }
+
+    #[test_traced]
+    fn test_prepare_history_holds_resident_suffix() {
+        application_history_holds_resident_suffix(3, true);
+    }
+
+    #[test_traced]
+    fn test_verify_history_holds_resident_suffix() {
+        application_history_holds_resident_suffix(1, false);
+    }
+
+    /// A request whose path is certificate-backed down to genesis is dispatched with an
+    /// anchored history, and a certification request carries the commitments below its
+    /// candidate.
+    #[test_traced]
+    fn test_application_history_anchored_on_complete_path() {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            // Build a four-validator network.
+            let epoch = Epoch::new(333);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(
+                &mut context,
+                b"_COMMONWARE_CONSENSUS_TEST_APPLICATION_HISTORY",
+                4,
+            );
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+
+            // A proposal at view 1 links the parent at view 2 to genesis.
+            let genesis = mocks::application::genesis::<Sha256>(epoch);
+            let first = Proposal::new(
+                Round::new(epoch, View::new(1)),
+                View::zero(),
+                Sha256::hash(&[b"first"]),
+            );
+            let parent = Proposal::new(
+                Round::new(epoch, View::new(2)),
+                first.view(),
+                Sha256::hash(&[b"parent"]),
+            );
+
+            // Verifying the view 3 candidate must see the whole path from genesis, and certifying
+            // the parent must see the path below it.
+            let verified = Arc::new(Mutex::new(false));
+            let certified = Arc::new(Mutex::new(false));
+            let (verify_observer, certify_observer) = (verified.clone(), certified.clone());
+            let complete = [genesis, first.payload, parent.payload];
+
+            // Start validator 1 to verify the view 3 proposal and certify its parent.
+            let elector = RoundRobin::<Sha256>::default().with_term(
+                TermLength::new(NZU32!(5)),
+                Duration::from_secs(30),
+                ViewDelta::new(2),
+            );
+            let (mut mailbox, mut batcher, _resolver, relay, _) = setup_voter(
+                &context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                VoterOptions {
+                    local_index: 1,
+                    leader_timeout: Duration::from_secs(20),
+                    history_observer: Some(Box::new(move |round, history| {
+                        if round.view() == View::new(3) {
+                            assert_eq!(history.commitments().as_ref(), complete.as_slice());
+                            assert!(history.is_anchored());
+                            *verify_observer.lock() = true;
+                        }
+                    })),
+                    certifier: Certifier::WithHistory(Box::new(move |round, _, history| {
+                        if round.view() == View::new(2) {
+                            assert_eq!(history.commitments().as_ref(), &complete[..2]);
+                            assert!(history.is_anchored());
+                            *certify_observer.lock() = true;
+                        }
+                        true
+                    })),
+                    ..VoterOptions::default()
+                },
+            )
+            .await;
+
+            // A quorum of peers notarizes both proposals.
+            let peer_schemes = peers(&schemes, 1);
+            for proposal in [&first, &parent] {
+                let (_, certificate) = build_notarization(&peer_schemes, proposal, quorum(4));
+                mailbox.recovered(Certificate::Notarization(certificate));
+            }
+
+            // The view 3 leader proposes on the parent.
+            let contents = (Round::new(epoch, View::new(3)), parent.payload, 1u64).encode();
+            let candidate = Proposal::new(
+                Round::new(epoch, View::new(3)),
+                parent.view(),
+                Sha256::hash(&[&contents]),
+            );
+            relay.broadcast(
+                &participants[2],
+                Recipients::All,
+                (candidate.payload, contents),
+            );
+            mailbox.proposal(candidate);
+
+            // Run until the parent certifies and this node votes at view 3 after the observed
+            // verification.
+            let mut voted = false;
+            while !(voted && *certified.lock()) {
+                select! {
+                    message = batcher.recv() => {
+                        if let batcher::Message::Constructed(Vote::Notarize(vote)) =
+                            message.unwrap()
+                            && vote.view() == View::new(3)
+                        {
+                            assert!(*verified.lock());
+                            voted = true;
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(10)) =>
+                        panic!("the candidate must be verified and its parent certified"),
+                }
+            }
+        });
+    }
+
+    /// A term-start candidate whose parent in an earlier term has no certificate here is
+    /// certified on an empty suffix, and the voter sends no untargeted request for the parent's
+    /// certificate.
+    fn certification_history_omits_uncertified_cross_term_parent(conflicting_local_parent: bool) {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            // Build a four-validator network.
+            let epoch = Epoch::new(333);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(
+                &mut context,
+                b"_COMMONWARE_CONSENSUS_TEST_CERTIFICATION_PARENT_HISTORY",
+                4,
+            );
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+
+            // The candidate at view 6 starts the second five-view term on a parent at view 1.
+            let genesis = mocks::application::genesis::<Sha256>(epoch);
+            let local_round = Round::new(epoch, View::new(1));
+            let parent = Proposal::new(local_round, View::zero(), Sha256::hash(&[b"parent"]));
+            let candidate = Proposal::new(
+                Round::new(epoch, View::new(6)),
+                parent.view(),
+                Sha256::hash(&[b"candidate"]),
+            );
+
+            // The candidate must be certified once on an empty suffix.
+            let observed = Arc::new(Mutex::new(0usize));
+            let call_observer = observed.clone();
+            let candidate_view = candidate.view();
+            let candidate_payload = candidate.payload;
+
+            // Start validator 1 with five-view terms.
+            let elector = RoundRobin::<Sha256>::default().with_term(
+                TermLength::new(NZU32!(5)),
+                Duration::from_secs(30),
+                ViewDelta::new(2),
+            );
+            let (mut mailbox, mut batcher, mut resolver, relay, _) = setup_voter(
+                &context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                VoterOptions {
+                    local_index: 1,
+                    leader_timeout: Duration::from_secs(20),
+                    certifier: Certifier::WithHistory(Box::new(move |round, payload, history| {
+                        if round.view() == candidate_view {
+                            assert_eq!(payload, candidate_payload);
+                            assert!(history.commitments().is_empty());
+                            assert!(!history.is_anchored());
+                            *call_observer.lock() += 1;
+                        }
+                        true
+                    })),
+                    ..VoterOptions::default()
+                },
+            )
+            .await;
+
+            // With a conflicting local parent, this node first votes for a different proposal at
+            // the parent's view.
+            if conflicting_local_parent {
+                let local_contents = (local_round, genesis, 0u64).encode();
+                let local =
+                    Proposal::new(local_round, View::zero(), Sha256::hash(&[&local_contents]));
+
+                // Epoch 333 plus one-based term 1 elects participant 2.
+                let leader = participants[2].clone();
+                relay.broadcast(&leader, Recipients::All, (local.payload, local_contents));
+                mailbox.proposal(local.clone());
+
+                // Wait for this node's vote on the conflicting proposal.
+                loop {
+                    select! {
+                        message = batcher.recv() => {
+                            if let batcher::Message::Constructed(Vote::Notarize(vote)) =
+                                message.unwrap()
+                                && vote.view() == local.view()
+                            {
+                                assert_eq!(vote.proposal, local);
+                                break;
+                            }
+                        },
+                        _message = resolver.recv() => {},
+                        _ = context.sleep(Duration::from_secs(10)) =>
+                            panic!("the local proposal must be verified and voted"),
+                    }
+                }
+            }
+
+            // The other validators nullify view 2 and notarize the candidate.
+            let quorum_schemes = [schemes[0].clone(), schemes[2].clone(), schemes[3].clone()];
+            let (_, skipped) =
+                build_nullification(&quorum_schemes, Round::new(epoch, View::new(2)), quorum(4));
+            let (_, candidate_certificate) =
+                build_notarization(&quorum_schemes, &candidate, quorum(4));
+            mailbox.recovered(Certificate::Nullification(skipped));
+            mailbox.recovered(Certificate::Notarization(candidate_certificate));
+
+            // Run until this node votes to finalize the certified candidate, and fail on an
+            // untargeted fetch of the parent's certificate.
+            loop {
+                select! {
+                    message = resolver.recv() => {
+                        match message.unwrap() {
+                            MailboxMessage::Resolve { view, target: None, .. }
+                                if view == parent.view() =>
+                                    panic!("history must not request the parent certificate"),
+                            MailboxMessage::Certified { notarization, success, .. }
+                                if notarization.view() == candidate.view() => {
+                                    assert!(success);
+                            }
+                            _ => {}
+                        }
+                    },
+                    message = batcher.recv() => {
+                        if let batcher::Message::Constructed(Vote::Finalize(vote)) =
+                            message.unwrap()
+                            && vote.view() == candidate.view()
+                        {
+                            assert_eq!(*observed.lock(), 1);
+                            break;
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(10)) =>
+                        panic!("the candidate must certify without its parent certificate"),
+                }
+            }
+
+            // Fetches still queued after the finalize vote must not request the parent's
+            // certificate untargeted.
+            while let Some(message) = resolver.recv().now_or_never().flatten() {
+                if let MailboxMessage::Resolve {
+                    view, target: None, ..
+                } = message
+                {
+                    assert_ne!(
+                        view,
+                        parent.view(),
+                        "history must not request the parent certificate"
+                    );
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_certification_history_omits_conflicting_cross_term_parent() {
+        certification_history_omits_uncertified_cross_term_parent(true);
+    }
+
+    #[test_traced]
+    fn test_certification_history_omits_missing_cross_term_parent() {
+        certification_history_omits_uncertified_cross_term_parent(false);
     }
 
     /// Tests that when proposal verification fails, the voter emits a nullify vote
