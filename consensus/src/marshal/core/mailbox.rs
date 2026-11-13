@@ -598,7 +598,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// fetched block does not match that relationship.
     ///
     /// Do not use this to wait for pending candidate proposal data.
-    pub(crate) fn ancestor_stream<I, C>(
+    pub fn ancestor_stream<I, C>(
         &self,
         clock: Arc<C>,
         initial: I,
