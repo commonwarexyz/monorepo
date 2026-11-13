@@ -606,8 +606,10 @@ impl<V: Variant, P: Ord> Output<V, P> {
     ///
     /// The set only reflects the dealings that the selected dealers revealed in this round, so it
     /// is not a complete list of exposed shares. A Byzantine player can reveal its own share
-    /// outside the protocol. An adversary that knew an honest player's share before a reshare may
-    /// use it with this round's reveals to rebuild new shares of honest players who are not listed.
+    /// outside the protocol. An adversary that knew an honest player's share before a reshare (from
+    /// a reveal or some other path) may use it with this round's reveals to rebuild new shares of
+    /// honest players who are not listed. See [Share Reveals](self#share-reveals) for why the
+    /// shared secret stays safe and what exposed shares can mean for applications.
     pub const fn revealed(&self) -> &Set<P> {
         &self.revealed
     }
