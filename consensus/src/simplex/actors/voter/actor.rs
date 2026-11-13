@@ -432,10 +432,11 @@ impl<
     }
 
     /// Attempt to propose a new block.
-    async fn try_propose(&mut self) -> PendingProposal<D, S::PublicKey> {
+    fn try_propose(&mut self) -> PendingProposal<D, S::PublicKey> {
         // Check if we are ready to propose
         let request = self.state.try_propose()?;
         let context = request.context().clone();
+        let history = self.state.parent_history(context.parent.0);
 
         // Request proposal from application
         let span = info_span!(
@@ -444,7 +445,7 @@ impl<
             epoch = context.round.epoch().traced(),
             view = context.view().traced()
         );
-        let state = async {
+        let state = span.in_scope(|| {
             debug!(
                 round = ?context.round,
                 handoff = request.is_handoff(),
@@ -453,21 +454,18 @@ impl<
             match &request {
                 ProposalRequest::Prepare(_) => {
                     self.record_handoff_event(HandoffEventKind::Requested);
-                    ProposalState::Preparing(self.automaton.prepare(context).await)
+                    ProposalState::Preparing(self.automaton.prepare(context, history))
                 }
                 ProposalRequest::Propose(_) => {
-                    ProposalState::Proposing(self.automaton.propose(context).await)
+                    ProposalState::Proposing(self.automaton.propose(context, history))
                 }
             }
-        }
-        .instrument(span.clone())
-        .await;
+        });
         Some(Request(request, span, state))
     }
 
     /// Attempt to verify a proposed block.
-    #[allow(clippy::async_yields_async)]
-    async fn try_verify(&mut self, resolver: &mut resolver::Mailbox<S, D>) -> PendingVerification {
+    fn try_verify(&mut self, resolver: &mut resolver::Mailbox<S, D>) -> PendingVerification {
         // Check if we are ready to verify
         let (context, proposal) = match self.state.try_verify() {
             Verify::Ready(context, proposal) => (context, proposal),
@@ -482,6 +480,7 @@ impl<
             }
             Verify::Wait => return None,
         };
+        let history = self.state.parent_history(context.parent.0);
 
         // Request verification
         let span = info_span!(
@@ -491,17 +490,15 @@ impl<
             view = context.view().traced()
         );
         let round = context.round;
-        let receiver = async {
+        let receiver = span.in_scope(|| {
             debug!(?proposal, "requested proposal verification");
-            self.automaton.verify(context, proposal.payload).await
-        }
-        .instrument(span.clone())
-        .await;
+            self.automaton.verify(context, proposal.payload, history)
+        });
         Some(Request(round, span, receiver))
     }
 
     /// Drops obsolete pending application requests and dispatches eligible new ones.
-    async fn reconcile_application_requests(
+    fn reconcile_application_requests(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
         pending_propose: &mut PendingProposal<D, S::PublicKey>,
@@ -576,10 +573,10 @@ impl<
         // State and Round prevent duplicate requests when both checkpoints
         // observe the same view.
         if pending_propose.is_none() {
-            *pending_propose = self.try_propose().await;
+            *pending_propose = self.try_propose();
         }
         if pending_verify.is_none() {
-            *pending_verify = self.try_verify(resolver).await;
+            *pending_verify = self.try_verify(resolver);
         }
     }
 
@@ -1234,8 +1231,7 @@ impl<
                     &mut resolver,
                     &mut pending_propose,
                     &mut pending_verify,
-                )
-                .await;
+                );
 
                 // Attempt to certify any views that we have notarizations for.
                 //
@@ -1249,6 +1245,7 @@ impl<
                     resolver.resolve(proposal, view, Kind::Notarization, None);
                 }
                 for proposal in candidates {
+                    let history = self.state.certification_history(proposal.view());
                     let round = proposal.round;
                     let view = round.view();
                     debug!(%view, "attempting certification");
@@ -1258,10 +1255,8 @@ impl<
                         epoch = round.epoch().traced(),
                         view = view.traced()
                     );
-                    #[allow(clippy::async_yields_async)]
-                    let receiver = async { self.automaton.certify(round, proposal.payload).await }
-                        .instrument(span.clone())
-                        .await;
+                    let receiver = span
+                        .in_scope(|| self.automaton.certify(round, proposal.payload, history));
                     let handle = certify_pool.push(async move { (round, span, receiver.await) });
                     self.state.set_certify_handle(view, handle);
                 }
@@ -1442,7 +1437,7 @@ impl<
                         &mut resolver,
                         &mut pending_propose,
                         &mut pending_verify,
-                    ).await;
+                    );
 
                     // Sync everything appended this iteration (during message
                     // processing and construction) in a single coalesced sync.

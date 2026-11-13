@@ -127,6 +127,9 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     use commonware_utils::channel::{fallible::OneshotExt, oneshot, ring};
     use std::future::Future;
 
+    mod history;
+    pub use history::History;
+
     pub mod marshal;
 
     mod reporter;
@@ -141,6 +144,11 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 
     /// Automaton is the interface responsible for driving the consensus forward by proposing new payloads
     /// and verifying payloads proposed by other participants.
+    ///
+    /// Each request synchronously dispatches work and returns a response receiver. Perform
+    /// application work behind the receiver. When the receiver closes, cancel work owned only
+    /// by that request. Work with an independent owner may continue. This contract also
+    /// applies to [`CertifiableAutomaton`] requests.
     pub trait Automaton: Clone + Send + 'static {
         /// Context is metadata provided by the consensus engine associated with a given payload.
         ///
@@ -168,13 +176,18 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// rather than rebuilding them from current local state. If consensus
         /// later abandons a dependency, it also abandons the proposal.
         ///
+        /// `history` is the [`History`] consensus holds on the selected parent branch at
+        /// dispatch. It can be empty. A nonempty history ends at the parent, and a payload that
+        /// re-proposes its parent appears as the parent's commitment.
+        ///
         /// Closing the response declines this request, which consensus may
         /// treat as final for the context. Keep the response pending when
         /// temporary unavailability should not abandon the context.
         fn propose(
             &mut self,
             context: Self::Context,
-        ) -> impl Future<Output = oneshot::Receiver<Self::Digest>> + Send;
+            history: History<Self::Digest>,
+        ) -> oneshot::Receiver<Self::Digest>;
 
         /// Verify the payload is valid.
         ///
@@ -199,11 +212,15 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ///
         /// The future-context requirement on [`Self::propose`] applies here
         /// too: the context's dependencies may not be resolvable locally yet.
+        ///
+        /// `history` is the selected parent branch as in [`Self::propose`], ending at
+        /// `payload`'s parent.
         fn verify(
             &mut self,
             context: Self::Context,
             payload: Self::Digest,
-        ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
+            history: History<Self::Digest>,
+        ) -> oneshot::Receiver<bool>;
     }
 
     /// An application's response to a handoff proposal request.
@@ -278,9 +295,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// then drops the request and can request a proposal on the replacement, unless it has
         /// voted to nullify this view or has left it.
         ///
-        /// Return the receiver promptly and do any work behind it. Parent certification does not
-        /// cancel this request, and while the response is pending, consensus requests no other
-        /// proposal for this view.
+        /// Parent certification does not cancel this request. While the response is pending,
+        /// consensus requests no other proposal for this view.
         ///
         /// Consensus drops the receiver when it abandons the context, so stop pending work when
         /// the receiver closes.
@@ -292,6 +308,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// certifying. The request then waits as if the application had returned
         /// [`Handoff::Wait`].
         ///
+        /// `history` is the selected parent branch as in [`Automaton::propose`].
+        ///
         /// # Request Contract
         ///
         /// Per view and per process, with at most `f` faulty validators, consensus calls this
@@ -302,14 +320,11 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         fn prepare(
             &mut self,
             _context: Self::Context,
-        ) -> impl Future<Output = oneshot::Receiver<Handoff<Self::Digest>>> + Send
-        {
-            #[allow(clippy::async_yields_async)]
-            async move {
-                let (sender, receiver) = oneshot::channel();
-                sender.send_lossy(Handoff::Wait);
-                receiver
-            }
+            _history: History<Self::Digest>,
+        ) -> oneshot::Receiver<Handoff<Self::Digest>> {
+            let (sender, receiver) = oneshot::channel();
+            sender.send_lossy(Handoff::Wait);
+            receiver
         }
 
         /// Determine whether a notarized payload is safe to commit.
@@ -324,6 +339,9 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// still outstanding, after consensus has dropped that request's receiver, or for a
         /// payload this participant was never asked to verify. Once certification is requested
         /// for a round, [`Automaton::verify`] is not requested for that round until a restart.
+        ///
+        /// `history` is the selected parent branch as in [`Automaton::propose`], ending at
+        /// `payload`'s parent.
         ///
         /// Like [`Automaton::verify`], payloads produced by [`Automaton::propose`] are certifiable-by-construction.
         /// Also like [`Automaton::verify`], certification is single-shot for the given
@@ -358,13 +376,11 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             &mut self,
             _round: Round,
             _payload: Self::Digest,
-        ) -> impl Future<Output = oneshot::Receiver<bool>> + Send {
-            #[allow(clippy::async_yields_async)]
-            async move {
-                let (sender, receiver) = oneshot::channel();
-                sender.send_lossy(true);
-                receiver
-            }
+            _history: History<Self::Digest>,
+        ) -> oneshot::Receiver<bool> {
+            let (sender, receiver) = oneshot::channel();
+            sender.send_lossy(true);
+            receiver
         }
     }
 

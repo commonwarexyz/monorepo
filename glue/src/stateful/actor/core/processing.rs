@@ -516,7 +516,7 @@ mod tests {
     use commonware_actor::mailbox as actor_mailbox;
     use commonware_consensus::{
         Application as _, Automaton as _, Block as _, CertifiableAutomaton as _,
-        CertifiableBlock as _, Handoff, Heightable as _, Reporter as _, Reporters,
+        CertifiableBlock as _, Handoff, Heightable as _, History, Reporter as _, Reporters,
         marshal::{
             Update,
             ancestry::{self, Ancestry, BoxedAncestry},
@@ -2812,7 +2812,8 @@ mod tests {
             );
             let genesis = TestBlock::new(0, 0);
             let winner = TestBlock::child(&genesis, 1);
-            let proposal = deferred.prepare(winner.context()).await;
+            let proposal =
+                deferred.prepare(winner.context(), History::anchored([genesis.digest()]));
             proposal_started.await.expect("proposal should start");
 
             // The finalization queues behind the held build. A later verification starts
@@ -3005,9 +3006,10 @@ mod tests {
 
             // The handoff build on the uncertified parent processes the parent and is then held,
             // and a finalization report queues behind it ahead of the parent's verification.
-            let mut handoff = deferred
-                .prepare(TestBlock::child(&parent, 3).context())
-                .await;
+            let mut handoff = deferred.prepare(
+                TestBlock::child(&parent, 3).context(),
+                History::anchored([genesis.digest(), outgoing.digest(), parent.digest()]),
+            );
             parent_started
                 .await
                 .expect("handoff build must process its parent");
@@ -3019,11 +3021,11 @@ mod tests {
             let _ = mailbox.report(Update::Block(digested(outgoing.clone()), acknowledgement));
 
             // The parent verifies and certifies from its processed state while the build is held.
-            let optimistic = deferred.verify(parent.context(), parent.digest()).await;
+            let parent_history = History::anchored([genesis.digest(), outgoing.digest()]);
+            let optimistic =
+                deferred.verify(parent.context(), parent.digest(), parent_history.clone());
             assert_eq!(optimistic.await, Ok(true));
-            let certify = deferred
-                .certify(parent.context().round, parent.digest())
-                .await;
+            let certify = deferred.certify(parent.context().round, parent.digest(), parent_history);
             assert_eq!(certify.await, Ok(true));
             assert!(poll!(&mut handoff).is_pending());
             assert!(poll!(&mut waiter).is_pending());
