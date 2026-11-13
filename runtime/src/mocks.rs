@@ -1,8 +1,8 @@
 //! Mock implementations of runtime primitives for testing.
 
 use crate::{
-    Blob, BlobVersion, BufMut, Clock, Error, Handle, IoBufs, IoBufsMut, Metrics, Name, ReadOptions,
-    Spawner, Supervisor, WriteOptions,
+    Blob, BlobVersion, BufMut, Clock, Error, Handle, IoBufs, IoBufsMut, Local, Metrics, Name,
+    ReadOptions, Spawner, Supervisor, Thread, ThreadBuilder, WriteOptions,
     signal::Signal,
     telemetry::metrics::{Metric, Registered},
 };
@@ -653,24 +653,53 @@ forward_context!(RecordingContext, recordings);
 
 #[cfg(any(test, feature = "test-utils"))]
 impl<E: Spawner> Spawner for RecordingContext<E> {
-    fn shared(mut self, blocking: bool) -> Self {
-        self.inner = self.inner.shared(blocking);
+    fn shared(mut self) -> Self {
+        self.inner = self.inner.shared();
         self
     }
 
-    fn dedicated(mut self) -> Self {
-        self.inner = self.inner.dedicated();
+    fn blocking(mut self) -> Self {
+        self.inner = self.inner.blocking();
         self
+    }
+
+    fn on(mut self, thread: &Thread) -> Self {
+        self.inner = self.inner.on(thread);
+        self
+    }
+
+    fn placed(mut self) -> Self {
+        self.inner = self.inner.placed();
+        self
+    }
+
+    fn thread(self) -> ThreadBuilder<Self> {
+        let recordings = self.recordings;
+        self.inner
+            .thread()
+            .map(move |inner| Self { inner, recordings })
     }
 
     fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
     where
-        F: FnOnce(Self) -> Fut + Send + 'static,
+        F: FnOnce(Self) -> Fut,
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
         let recordings = self.recordings;
         self.inner.spawn(move |inner| f(Self { inner, recordings }))
+    }
+
+    fn spawn_on<F, Fut, T>(self, thread: &Thread, f: F) -> Handle<T>
+    where
+        F: FnOnce(Local<Self>) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + 'static,
+        T: Send + 'static,
+    {
+        let recordings = self.recordings;
+        self.inner.spawn_on(thread, move |local| {
+            f(local.map(|inner| Self { inner, recordings }))
+        })
     }
 
     async fn stop(self, value: i32, timeout: Option<std::time::Duration>) -> Result<(), Error> {
@@ -876,24 +905,53 @@ pub struct DelayedSyncContext<E> {
 forward_context!(DelayedSyncContext, pending);
 
 impl<E: Spawner> Spawner for DelayedSyncContext<E> {
-    fn shared(mut self, blocking: bool) -> Self {
-        self.inner = self.inner.shared(blocking);
+    fn shared(mut self) -> Self {
+        self.inner = self.inner.shared();
         self
     }
 
-    fn dedicated(mut self) -> Self {
-        self.inner = self.inner.dedicated();
+    fn blocking(mut self) -> Self {
+        self.inner = self.inner.blocking();
         self
+    }
+
+    fn on(mut self, thread: &Thread) -> Self {
+        self.inner = self.inner.on(thread);
+        self
+    }
+
+    fn placed(mut self) -> Self {
+        self.inner = self.inner.placed();
+        self
+    }
+
+    fn thread(self) -> ThreadBuilder<Self> {
+        let pending = self.pending;
+        self.inner
+            .thread()
+            .map(move |inner| Self { inner, pending })
     }
 
     fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
     where
-        F: FnOnce(Self) -> Fut + Send + 'static,
+        F: FnOnce(Self) -> Fut,
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
         let pending = self.pending;
         self.inner.spawn(move |inner| f(Self { inner, pending }))
+    }
+
+    fn spawn_on<F, Fut, T>(self, thread: &Thread, f: F) -> Handle<T>
+    where
+        F: FnOnce(Local<Self>) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + 'static,
+        T: Send + 'static,
+    {
+        let pending = self.pending;
+        self.inner.spawn_on(thread, move |local| {
+            f(local.map(|inner| Self { inner, pending }))
+        })
     }
 
     async fn stop(self, value: i32, timeout: Option<std::time::Duration>) -> Result<(), Error> {
@@ -1508,24 +1566,51 @@ pub struct MutationFaultContext<E> {
 forward_context!(MutationFaultContext, faults);
 
 impl<E: Spawner> Spawner for MutationFaultContext<E> {
-    fn shared(mut self, blocking: bool) -> Self {
-        self.inner = self.inner.shared(blocking);
+    fn shared(mut self) -> Self {
+        self.inner = self.inner.shared();
         self
     }
 
-    fn dedicated(mut self) -> Self {
-        self.inner = self.inner.dedicated();
+    fn blocking(mut self) -> Self {
+        self.inner = self.inner.blocking();
         self
+    }
+
+    fn on(mut self, thread: &Thread) -> Self {
+        self.inner = self.inner.on(thread);
+        self
+    }
+
+    fn placed(mut self) -> Self {
+        self.inner = self.inner.placed();
+        self
+    }
+
+    fn thread(self) -> ThreadBuilder<Self> {
+        let faults = self.faults;
+        self.inner.thread().map(move |inner| Self { inner, faults })
     }
 
     fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
     where
-        F: FnOnce(Self) -> Fut + Send + 'static,
+        F: FnOnce(Self) -> Fut,
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
         let faults = self.faults;
         self.inner.spawn(move |inner| f(Self { inner, faults }))
+    }
+
+    fn spawn_on<F, Fut, T>(self, thread: &Thread, f: F) -> Handle<T>
+    where
+        F: FnOnce(Local<Self>) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + 'static,
+        T: Send + 'static,
+    {
+        let faults = self.faults;
+        self.inner.spawn_on(thread, move |local| {
+            f(local.map(|inner| Self { inner, faults }))
+        })
     }
 
     async fn stop(self, value: i32, timeout: Option<std::time::Duration>) -> Result<(), Error> {

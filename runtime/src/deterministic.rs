@@ -46,8 +46,8 @@ pub use crate::storage::faulty::{
     Config as FaultConfig, PartialWriteMode, ResizeConfig, WriteConfig,
 };
 use crate::{
-    BlobVersion, Clock, Error, Execution, Handle, IoBufs, ListenerOf, METRICS_PREFIX, Name,
-    Panicked, child_label,
+    BlobVersion, Clock, Cpus, Error, Execution, Handle, IoBufs, ListenerOf, Local, METRICS_PREFIX,
+    Name, Panicked, Thread, ThreadBuilder, ThreadError, child_label,
     network::{
         audited::Network as AuditedNetwork, deterministic::Network as DeterministicNetwork,
         metered::Network as MeteredNetwork,
@@ -64,10 +64,20 @@ use crate::{
     },
     telemetry::metrics::{
         Counter, CounterFamily, GaugeFamily, Metric, Register, Registered, Registry, add_attribute,
-        raw, task::Label, validate_label,
+        raw,
+        task::{Label, ThreadLabel},
+        validate_label,
+    },
+    threads::{
+        Owner, ThreadInner, ThreadRuntime,
+        admission::{
+            FactoryJob, Resident, ResidentCount, SpawnJob, ThreadBackend, Ticket, next_runner_id,
+        },
+        validate,
     },
     utils::{
-        FactoryGuard, Panicker,
+        Aborter, FactoryGuard, Panicker, Place, Placement,
+        abort::AbortHandle,
         signal::{Signal, Stopper},
         supervision::Tree,
     },
@@ -98,6 +108,7 @@ use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use pin_project::pin_project;
 use rand::{CryptoRng, Rng, SeedableRng, TryCryptoRng, TryRng, prelude::SliceRandom, rngs::StdRng};
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, BinaryHeap, HashMap},
     convert::Infallible,
     mem::{replace, take},
@@ -105,7 +116,11 @@ use std::{
     num::NonZeroUsize,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     pin::Pin,
-    sync::{Arc, Weak},
+    rc::Rc,
+    sync::{
+        Arc, Weak,
+        atomic::{AtomicUsize, Ordering},
+    },
     task::{self, Poll},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -117,6 +132,7 @@ struct Metrics {
     tasks_spawned: CounterFamily<Label>,
     tasks_running: GaugeFamily<Label>,
     task_polls: CounterFamily<Label>,
+    thread_residents: GaugeFamily<ThreadLabel>,
 }
 
 impl Metrics {
@@ -140,6 +156,11 @@ impl Metrics {
             task_polls: registry.register(
                 "task_polls",
                 "Total number of task polls",
+                raw::Family::default(),
+            ),
+            thread_residents: registry.register(
+                "thread_residents",
+                "Number of tasks queued or running on runtime threads",
                 raw::Family::default(),
             ),
         }
@@ -243,6 +264,11 @@ pub struct Config {
     /// Configuration for deterministic storage fault injection.
     /// Defaults to no faults being injected.
     storage_fault_cfg: FaultConfig,
+
+    /// CPUs that runtime threads may be pinned to, standing in for the CPUs of the thread that
+    /// starts a native runner. Pins are validated against this set and recorded, never applied.
+    /// Defaults to `0..=63`.
+    cpus: Cpus,
 }
 
 impl Config {
@@ -255,6 +281,7 @@ impl Config {
             timeout: None,
             catch_panics: false,
             storage_fault_cfg: FaultConfig::default(),
+            cpus: Cpus::from(0..=63),
         }
     }
 
@@ -306,6 +333,12 @@ impl Config {
         self
     }
 
+    /// See [Config]
+    pub fn with_cpus(mut self, cpus: impl Into<Cpus>) -> Self {
+        self.cpus = cpus.into();
+        self
+    }
+
     // Getters
     /// See [Config]
     pub const fn cycle(&self) -> Duration {
@@ -323,6 +356,10 @@ impl Config {
     pub const fn catch_panics(&self) -> bool {
         self.catch_panics
     }
+    /// See [Config]
+    pub const fn cpus(&self) -> &Cpus {
+        &self.cpus
+    }
 
     /// Assert that the configuration is valid.
     pub fn assert(&self) {
@@ -338,6 +375,11 @@ impl Config {
             self.start_time >= UNIX_EPOCH,
             "start time must be greater than or equal to unix epoch"
         );
+        assert!(
+            self.cpus.beyond().is_none(),
+            "cpus must be below 1024 (CPU_SETSIZE)"
+        );
+        assert!(!self.cpus.is_empty(), "cpus must not be empty");
     }
 }
 
@@ -361,6 +403,13 @@ pub struct Executor {
     shutdown: Mutex<Stopper>,
     panicker: Panicker,
     dns: Mutex<HashMap<String, Vec<IpAddr>>>,
+
+    /// Instance id of this run, which its runtime threads carry.
+    runner: u64,
+    /// CPUs that runtime threads may be pinned to.
+    cpus: Cpus,
+    /// Runtime threads of this run that have not finished closing.
+    threads: Mutex<Threads>,
 }
 
 impl Executor {
@@ -453,6 +502,398 @@ impl Executor {
             }
         }
     }
+
+    /// Drop `value` in its own panic boundary, reporting a panic through the panicker.
+    fn dispose<V>(&self, value: V) {
+        if let Err(panic) = catch_unwind(AssertUnwindSafe(move || drop(value))) {
+            self.panicker.notify(panic);
+        }
+    }
+
+    /// Whether `thread` is an open thread of this run, which still admits residents.
+    fn admits(&self, thread: &Thread) -> bool {
+        let inner = thread.inner();
+        inner.runner() == self.runner
+            && inner.backend::<VirtualThread>().is_some()
+            && inner.is_open()
+            && !self.threads.lock().closed
+    }
+
+    /// Register a resident of `thread` as a task, together with its entry in the thread's
+    /// resident registry, in the critical section that admits it. Returns `mode` if the thread
+    /// is closing, closed, or not a thread of this run, or the run is exiting.
+    fn register_resident(
+        &self,
+        thread: &Thread,
+        label: Label,
+        mode: Mode,
+        abort: AbortHandle,
+    ) -> Result<(), Mode> {
+        let inner = thread.inner();
+        if inner.runner() != self.runner || inner.backend::<VirtualThread>().is_none() {
+            return Err(mode);
+        }
+        let thread = inner.id();
+        let mut mode = Some(mode);
+        let task = inner
+            .admit(|| {
+                // The admission lock is the outer lock. The table and task locks below are
+                // leaves, and the loop never takes the admission lock while holding them.
+                let mut threads = self.threads.lock();
+                if threads.closed {
+                    return None;
+                }
+                let entry = threads.entries.get_mut(&thread)?;
+                let mode = mode.take().expect("mode registered once");
+                let task = self.tasks.register_resident(label, mode, thread);
+                entry.residents.insert(
+                    task,
+                    ResidentEntry {
+                        abort,
+                        _count: inner.count_resident(),
+                    },
+                );
+                Some(task)
+            })
+            .flatten();
+        let Some(task) = task else {
+            return Err(mode.take().expect("rejected mode is returned"));
+        };
+        self.auditor.event(b"thread_admit", |hasher| {
+            hasher.update(task.to_be_bytes());
+            hasher.update(thread.to_be_bytes());
+        });
+        Ok(())
+    }
+
+    /// Remove a finished resident from its thread's registry.
+    fn retire_resident(&self, thread: u64, task: u128) {
+        let resident = {
+            let mut threads = self.threads.lock();
+            threads
+                .entries
+                .get_mut(&thread)
+                .and_then(|entry| entry.residents.remove(&task))
+        };
+        drop(resident);
+    }
+
+    /// The owner state of `thread`, created on first use, unless the thread finished closing.
+    fn owner(&self, table: &RefCell<LocalTable>, thread: u64) -> Option<Rc<Owner>> {
+        if let Some(owner) = table.borrow().owners.get(&thread) {
+            return Some(owner.clone());
+        }
+        let home = self.threads.lock().entries.get(&thread)?.thread.clone();
+        let owner = Owner::new(home, self.panicker.clone(), true);
+        table.borrow_mut().owners.insert(thread, owner.clone());
+        Some(owner)
+    }
+
+    /// Poll a resident task once, with its factory, poll and disposal each in its own panic
+    /// boundary. Returns whether the task finished.
+    fn poll_resident(
+        &self,
+        table: &RefCell<LocalTable>,
+        task: &Task,
+        thread: u64,
+        cx: &mut task::Context<'_>,
+    ) -> bool {
+        let mut future = match &task.mode {
+            Mode::Root => unreachable!("the root is not a resident"),
+            Mode::Work(slot) => {
+                // Placed spawns poll their `Send` wrapper. Take it out so no lock is held
+                // while it runs.
+                let Some(mut future) = slot.lock().take() else {
+                    return true;
+                };
+                return match catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(cx))) {
+                    Ok(Poll::Pending) => {
+                        *slot.lock() = Some(future);
+                        false
+                    }
+                    Ok(Poll::Ready(())) => {
+                        self.dispose(future);
+                        true
+                    }
+                    Err(panic) => {
+                        self.panicker.notify(panic);
+                        self.dispose(future);
+                        true
+                    }
+                };
+            }
+            Mode::Spawn { factory, abort } => {
+                let job = factory.lock().take();
+                match job {
+                    Some(job) => {
+                        // On the first schedule, run the factory on this thread with a Local.
+                        // A closing thread keeps it for its close drain, which drops it after
+                        // every resident future. The factory of a task aborted on an open
+                        // thread is dropped now.
+                        let home = self
+                            .threads
+                            .lock()
+                            .entries
+                            .get(&thread)
+                            .map(|entry| entry.thread.clone());
+                        let Some(home) = home else {
+                            self.dispose(job);
+                            return true;
+                        };
+                        if !home.inner().is_open() {
+                            *factory.lock() = Some(job);
+                            return false;
+                        }
+                        let owner = (!abort.is_aborted())
+                            .then(|| self.owner(table, thread))
+                            .flatten();
+                        let Some(owner) = owner else {
+                            self.dispose(job);
+                            let owner = table.borrow().owners.get(&thread).cloned();
+                            if let Some(owner) = owner {
+                                owner.reap();
+                            }
+                            return true;
+                        };
+                        let Some(future) = job.run(&owner) else {
+                            return true;
+                        };
+                        future
+                    }
+                    None => {
+                        let future = table.borrow_mut().futures.remove(&task.id);
+                        let Some(future) = future else {
+                            return true;
+                        };
+                        future
+                    }
+                }
+            }
+        };
+        match catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(cx))) {
+            Ok(Poll::Pending) => {
+                table.borrow_mut().futures.insert(task.id, future);
+                false
+            }
+            Ok(Poll::Ready(())) => {
+                self.dispose(future);
+                true
+            }
+            Err(panic) => {
+                self.panicker.notify(panic);
+                self.dispose(future);
+                true
+            }
+        }
+    }
+
+    /// Close every thread on the closing list, in thread-id order, until the list stays empty.
+    fn drain_closing(&self, table: &RefCell<LocalTable>) {
+        loop {
+            let mut closing = self.tasks.take_closing();
+            if closing.is_empty() {
+                return;
+            }
+            closing.sort_unstable();
+            closing.dedup();
+            for thread in closing {
+                self.close_thread(table, thread);
+            }
+        }
+    }
+
+    /// Close the thread `id`. Abort every resident, then drop the resident futures in task-id
+    /// order, then the factories that never ran in task-id order, then the parked factories and
+    /// result slots, each in its own panic boundary. Finally mark the thread closed and release
+    /// its node and entry.
+    fn close_thread(&self, table: &RefCell<LocalTable>, id: u64) {
+        let Some(thread) = self
+            .threads
+            .lock()
+            .entries
+            .get(&id)
+            .map(|entry| entry.thread.clone())
+        else {
+            return;
+        };
+        self.auditor.event(b"thread_close", |hasher| {
+            hasher.update(id.to_be_bytes());
+        });
+        thread.inner().begin_close();
+
+        // Abort every resident before dropping any, so destructors observe their aborts.
+        let residents = self
+            .threads
+            .lock()
+            .entries
+            .get_mut(&id)
+            .map(|entry| take(&mut entry.residents))
+            .unwrap_or_default();
+        for resident in residents.values() {
+            resident.abort.abort();
+        }
+        let mut factories = Vec::new();
+        for &task in residents.keys() {
+            if let Some(task) = self.tasks.remove(task) {
+                match &task.mode {
+                    Mode::Root => {}
+                    Mode::Work(future) => {
+                        let future = future.lock().take();
+                        self.dispose(future);
+                    }
+                    Mode::Spawn { factory, .. } => {
+                        factories.extend(factory.lock().take());
+                    }
+                }
+            }
+            let future = table.borrow_mut().futures.remove(&task);
+            self.dispose(future);
+        }
+        for factory in factories {
+            self.dispose(factory);
+        }
+        drop(residents);
+
+        // Parked factories and result slots are dropped on the thread's owner.
+        let owner = table.borrow_mut().owners.remove(&id);
+        if let Some(owner) = owner {
+            owner.close();
+        }
+
+        thread.inner().finish_close();
+        let entry = self.threads.lock().entries.remove(&id);
+        drop(entry);
+    }
+}
+
+impl ThreadRuntime for Executor {
+    fn create_thread(
+        self: Arc<Self>,
+        node: Arc<Tree>,
+        name: &str,
+        cpus: Option<Cpus>,
+    ) -> Result<Thread, ThreadError> {
+        if let Some(cpus) = &cpus {
+            validate(cpus, Some(&self.cpus))?;
+        }
+        let residents = self
+            .metrics
+            .thread_residents
+            .get_or_create(&ThreadLabel::new(name.to_string()))
+            .clone();
+
+        // Insert the entry before registering, so a close that fires right after the
+        // registration finds it.
+        let thread = {
+            let mut threads = self.threads.lock();
+            if threads.closed {
+                return Err(ThreadError::Closed);
+            }
+            let id = threads.next;
+            threads.next += 1;
+            let inner = ThreadInner::new(
+                self.runner,
+                id,
+                name.to_string(),
+                cpus,
+                &node,
+                residents,
+                Box::new(VirtualThread {
+                    tasks: Arc::downgrade(&self.tasks),
+                    id,
+                }),
+            );
+            let thread = Thread::new(inner.clone());
+            threads.entries.insert(
+                id,
+                ThreadEntry {
+                    thread: thread.clone(),
+                    _node: node.clone(),
+                    residents: BTreeMap::new(),
+                },
+            );
+            if node
+                .try_register(Aborter::thread(Arc::downgrade(&inner)))
+                .is_err()
+            {
+                let entry = threads.entries.remove(&id);
+                drop(threads);
+                drop(entry);
+                return Err(ThreadError::Closed);
+            }
+            thread
+        };
+        self.auditor.event(b"thread_create", |hasher| {
+            hasher.update(thread.inner().id().to_be_bytes());
+            hasher.update(name.as_bytes());
+            for cpu in thread.cpus().into_iter().flat_map(Cpus::iter) {
+                hasher.update(cpu.to_be_bytes());
+            }
+        });
+        Ok(thread)
+    }
+
+    fn available(&self) -> Option<Cpus> {
+        if self.threads.lock().closed {
+            return None;
+        }
+        Some(self.cpus.clone())
+    }
+}
+
+/// Backend state of a virtual runtime thread: where to queue its close.
+struct VirtualThread {
+    /// The run's tasks, whose closing list the loop drains.
+    tasks: Weak<Tasks>,
+    /// The thread's id in its run.
+    id: u64,
+}
+
+impl ThreadBackend for VirtualThread {
+    fn wake(&self) {
+        if let Some(tasks) = self.tasks.upgrade() {
+            tasks.close(self.id);
+        }
+    }
+}
+
+/// The runtime threads of a run.
+#[derive(Default)]
+struct Threads {
+    /// Id of the next thread.
+    next: u64,
+    /// Set once the run starts exiting, refusing threads and resident spawns from then on.
+    closed: bool,
+    /// Threads that have not finished closing, by id.
+    entries: BTreeMap<u64, ThreadEntry>,
+}
+
+/// A runtime thread of a run, until its close completes.
+struct ThreadEntry {
+    /// The thread.
+    thread: Thread,
+    /// The node the thread occupies, held until its close completes.
+    _node: Arc<Tree>,
+    /// Its residents' abort handles, by task id.
+    residents: BTreeMap<u128, ResidentEntry>,
+}
+
+/// A resident task's entry in its thread's registry.
+struct ResidentEntry {
+    /// Aborts the resident when its thread closes.
+    abort: AbortHandle,
+    /// Counts the resident until it leaves the registry.
+    _count: ResidentCount,
+}
+
+/// Runner-owned state of virtual threads that is not `Send`, living only on the runner's
+/// thread.
+#[derive(Default)]
+struct LocalTable {
+    /// Futures of `spawn_on` tasks whose factory ran, by task id.
+    futures: BTreeMap<u128, Resident>,
+    /// Owner state of each thread that ran a factory, by thread id.
+    owners: BTreeMap<u64, Rc<Owner>>,
 }
 
 /// An artifact that can be used to recover the state of the runtime.
@@ -468,6 +909,7 @@ pub struct Checkpoint {
     storage_fault_cfg: FaultConfig,
     dns: Mutex<HashMap<String, Vec<IpAddr>>>,
     catch_panics: bool,
+    cpus: Cpus,
 }
 
 impl Checkpoint {
@@ -535,42 +977,57 @@ impl Runner {
         Fut: Future,
     {
         // Setup context and return strong reference to executor
-        let (context, executor, panicked) = match self.state {
+        let (context, executor, panicked, tree) = match self.state {
             State::Config(config) => Context::new(config),
             State::Checkpoint(checkpoint) => Context::recover(checkpoint),
         };
 
-        // Pin root task to the heap
+        // Pin the root task to the heap once the loop's cleanup boundary is in place
         let storage = context.storage.clone();
-        let root = Box::pin(panicked.interrupt(f(context)));
+        let panicked = &panicked;
+        let root = Box::new(move || {
+            Box::pin(panicked.interrupt(f(context))) as Pin<Box<dyn Future<Output = _> + '_>>
+        });
 
         // Drive the root to completion and snapshot the runtime
-        Self::run(executor, storage, root)
+        Self::run(executor, storage, tree, panicked, root)
     }
 
-    /// Drive the pinned root task to completion and return its output together with a
+    /// Build the root task, drive it to completion and return its output together with a
     /// [Checkpoint] from which a later [Runner] can resume.
     ///
     /// Each iteration checks the deadline, drains the ready tasks, shuffles them with the
-    /// seeded RNG, and polls them in that order, then advances time by one cycle (skipping
-    /// ahead to the next sleeper when nothing is ready). Once the root completes, or the
-    /// loop panics (a propagated task panic, a timeout, or a stall), every remaining task
-    /// and the root are dropped and the run asserts that no [Context] escaped, storage is
-    /// crashed (resolving unsynced writes per the fault configuration) and snapshotted into
-    /// the checkpoint, and any caught panic is resumed after that cleanup.
+    /// seeded RNG, and polls them in that order, then closes the runtime threads whose close
+    /// was requested and advances time by one cycle (skipping ahead to the next sleeper when
+    /// nothing is ready). Once the root completes, or the root factory or the loop panics (a
+    /// propagated task panic, a timeout, or a stall), the run refuses new threads, aborts the
+    /// supervision tree, closes every thread, drops every remaining task and the root, crashes
+    /// storage (resolving unsynced writes per the fault configuration) and snapshots it into
+    /// the checkpoint, and asserts that no [Context] escaped. A caught panic is resumed after
+    /// that cleanup, or else the first panic reported while cleaning up.
     // Share the loop and cleanup across root futures with the same output type.
     // Erase the root's type using its existing allocation without requiring Send or 'static.
-    fn run<TOutput>(
+    #[allow(clippy::type_complexity)]
+    fn run<'a, TOutput>(
         executor: Arc<Executor>,
         storage: Arc<Storage>,
-        mut root: Pin<Box<dyn Future<Output = TOutput> + '_>>,
+        tree: Arc<Tree>,
+        panicked: &Panicked,
+        build: Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = TOutput> + 'a>> + 'a>,
     ) -> (TOutput, Checkpoint) {
-        // Register the root task
-        Tasks::register_root(&executor.tasks);
+        // Futures of runtime threads' tasks that need not be Send, kept on this thread
+        let table = RefCell::new(LocalTable::default());
+        let mut root = None;
 
-        // Process tasks until root task completes or progress stalls.
-        // Wrap the loop in catch_unwind to ensure task cleanup runs even if the loop or a task panics.
+        // Process tasks until root task completes or progress stalls. Wrap the root factory
+        // and the loop in catch_unwind to ensure task cleanup runs even if either panics.
         let result = catch_unwind(AssertUnwindSafe(|| {
+            // Build the root before registering it, so tasks its factory spawns keep ids below
+            // the root's.
+            let root = root.insert(build());
+            Tasks::register_root(&executor.tasks);
+            executor.drain_closing(&table);
+
             loop {
                 // Ensure we have not exceeded our deadline
                 let current = *executor.time.lock();
@@ -619,8 +1076,8 @@ impl Runner {
                     let mut cx = task::Context::from_waker(&waker);
 
                     // Poll the task
-                    match &task.mode {
-                        Mode::Root => {
+                    match (&task.mode, task.thread) {
+                        (Mode::Root, _) => {
                             // Poll the root task
                             if let Poll::Ready(result) = root.as_mut().poll(&mut cx) {
                                 trace!(id, "root task is complete");
@@ -628,7 +1085,17 @@ impl Runner {
                                 break;
                             }
                         }
-                        Mode::Work(future) => {
+                        (_, Some(thread)) => {
+                            // Residents of runtime threads get a panic boundary around their
+                            // factory, poll and disposal.
+                            if executor.poll_resident(&table, &task, thread, &mut cx) {
+                                trace!(id, "resident is complete");
+                                executor.tasks.remove(id);
+                                executor.retire_resident(thread, id);
+                                continue;
+                            }
+                        }
+                        (Mode::Work(future), None) => {
                             // Only this loop polls or clears task futures during scheduling, and it
                             // removes a finished task from the registry before clearing its future.
                             // Any task the lookup above finds therefore still has its future.
@@ -645,6 +1112,9 @@ impl Runner {
                                 continue;
                             }
                         }
+                        (Mode::Spawn { .. }, None) => {
+                            unreachable!("spawn_on tasks are residents")
+                        }
                     }
 
                     // Try again later if task is still pending
@@ -656,6 +1126,9 @@ impl Runner {
                     break output;
                 }
 
+                // Close the threads whose close the pass requested before time moves.
+                executor.drain_closing(&table);
+
                 // Advance time and wake sleepers until the runtime can make progress
                 let current = executor.advance_time();
                 executor.wake_until_progress(current);
@@ -664,6 +1137,22 @@ impl Runner {
                 executor.metrics.iterations.inc();
             }
         }));
+
+        // Refuse new threads and resident spawns from here on, then abort the supervision tree.
+        // Aborting only sets flags, queues tasks and closing threads, and finishes gauges.
+        executor.threads.lock().closed = true;
+        tree.abort();
+
+        // Close every thread, with each disposal in its own panic boundary, while the tasks
+        // that may still reference its residents exist.
+        executor.drain_closing(&table);
+        let LocalTable { futures, owners } = table.into_inner();
+        for future in futures.into_values() {
+            executor.dispose(future);
+        }
+        for owner in owners.into_values() {
+            owner.close();
+        }
 
         // Clear remaining tasks from the executor.
         //
@@ -674,10 +1163,11 @@ impl Runner {
         executor.sleeping.lock().clear(); // included in tasks
         let tasks = executor.tasks.clear();
         for task in tasks {
-            let Mode::Work(future) = &task.mode else {
-                continue;
-            };
-            *future.lock() = None;
+            match &task.mode {
+                Mode::Root => {}
+                Mode::Work(future) => *future.lock() = None,
+                Mode::Spawn { factory, .. } => *factory.lock() = None,
+            }
         }
 
         // Drop the root task to release any Context references it may still hold.
@@ -707,6 +1197,12 @@ impl Runner {
             Err(payload) => resume_unwind(payload),
         };
 
+        // Without one, resume the first panic reported while cleaning up (with panics not
+        // caught), as a panic reported while the root ran would have been.
+        if let Some(panic) = panicked.try_take() {
+            resume_unwind(panic);
+        }
+
         // Extract the executor from the Arc
         let executor = Arc::into_inner(executor).expect("executor still has strong references");
 
@@ -721,6 +1217,7 @@ impl Runner {
             storage_fault_cfg,
             dns: executor.dns,
             catch_panics: executor.panicker.catch(),
+            cpus: executor.cpus,
         };
 
         (output, checkpoint)
@@ -749,8 +1246,19 @@ impl crate::Runner for Runner {
 /// The mode of a [Task].
 enum Mode {
     Root,
-    Work(Mutex<Option<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>>),
+    Work(Mutex<Option<WorkFuture>>),
+    /// A [crate::Spawner::spawn_on] task. The loop takes its factory when it first schedules
+    /// the task, and keeps the future the factory builds in the runner's local table.
+    Spawn {
+        /// The factory, until the loop takes it.
+        factory: Mutex<Option<Box<dyn FactoryJob>>>,
+        /// Aborts the task, so the loop can skip the factory of an aborted task.
+        abort: AbortHandle,
+    },
 }
+
+/// The future of a task that the executor may poll from any thread.
+type WorkFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
 /// A future being executed by the [Executor].
 struct Task {
@@ -758,6 +1266,9 @@ struct Task {
     label: Label,
 
     mode: Mode,
+
+    /// The runtime thread this task is a resident of, if any.
+    thread: Option<u64>,
 }
 
 /// A waker for a [Task].
@@ -787,6 +1298,11 @@ struct Tasks {
     ready: Mutex<Vec<u128>>,
     /// All running tasks.
     running: Mutex<BTreeMap<u128, Arc<Task>>>,
+    /// Runtime threads whose close was requested, which the loop counts as ready work.
+    closing: Mutex<Vec<u64>>,
+    /// Length of `closing`, written under its lock, so the loop can check for closes without
+    /// locking on every iteration.
+    closes: AtomicUsize,
 }
 
 impl Tasks {
@@ -796,6 +1312,8 @@ impl Tasks {
             counter: Mutex::new(0),
             ready: Mutex::new(Vec::new()),
             running: Mutex::new(BTreeMap::new()),
+            closing: Mutex::new(Vec::new()),
+            closes: AtomicUsize::new(0),
         }
     }
 
@@ -816,23 +1334,34 @@ impl Tasks {
             id,
             label: Label::root(),
             mode: Mode::Root,
+            thread: None,
         });
         arc_self.register(id, task);
     }
 
     /// Register a non-root task to be executed.
-    fn register_work(
-        arc_self: &Arc<Self>,
-        label: Label,
-        future: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
-    ) {
+    fn register_work(arc_self: &Arc<Self>, label: Label, future: WorkFuture) {
         let id = arc_self.increment();
         let task = Arc::new(Task {
             id,
             label,
             mode: Mode::Work(Mutex::new(Some(future))),
+            thread: None,
         });
         arc_self.register(id, task);
+    }
+
+    /// Register a resident of runtime thread `thread`, returning its task id.
+    fn register_resident(&self, label: Label, mode: Mode, thread: u64) -> u128 {
+        let id = self.increment();
+        let task = Arc::new(Task {
+            id,
+            label,
+            mode,
+            thread: Some(thread),
+        });
+        self.register(id, task);
+        id
     }
 
     /// Register a new task to be executed.
@@ -859,7 +1388,25 @@ impl Tasks {
 
     /// The number of ready tasks.
     fn ready(&self) -> usize {
-        self.ready.lock().len()
+        // A pending thread close is work the loop does before time moves.
+        self.ready.lock().len() + self.closes.load(Ordering::Acquire)
+    }
+
+    /// Request the close of runtime thread `thread`.
+    fn close(&self, thread: u64) {
+        let mut closing = self.closing.lock();
+        closing.push(thread);
+        self.closes.store(closing.len(), Ordering::Release);
+    }
+
+    /// Take the threads whose close was requested.
+    fn take_closing(&self) -> Vec<u64> {
+        if self.closes.load(Ordering::Acquire) == 0 {
+            return Vec::new();
+        }
+        let mut closing = self.closing.lock();
+        self.closes.store(0, Ordering::Release);
+        take(&mut *closing)
     }
 
     /// Lookup a task.
@@ -872,14 +1419,15 @@ impl Tasks {
     }
 
     /// Remove a task.
-    fn remove(&self, id: u128) {
-        self.running.lock().remove(&id);
+    fn remove(&self, id: u128) -> Option<Arc<Task>> {
+        self.running.lock().remove(&id)
     }
 
     /// Clear all tasks.
     fn clear(&self) -> Vec<Arc<Task>> {
         // Clear ready
         self.ready.lock().clear();
+        drop(self.take_closing());
 
         // Clear running tasks
         let running: BTreeMap<u128, Arc<Task>> = {
@@ -923,11 +1471,12 @@ pub struct Context {
     storage: Arc<Storage>,
     opens: Arc<Opens>,
     tree: Arc<Tree>,
-    execution: Execution,
+    /// Where this context's spawns run.
+    place: Place,
 }
 
 impl Context {
-    fn new(cfg: Config) -> (Self, Arc<Executor>, Panicked) {
+    fn new(cfg: Config) -> (Self, Arc<Executor>, Panicked, Arc<Tree>) {
         // Create a new registry
         let mut registry = Registry::new();
         let mut runtime_registry = registry.sub_registry(METRICS_PREFIX);
@@ -971,8 +1520,12 @@ impl Context {
             shutdown: Mutex::new(Stopper::default()),
             panicker,
             dns: Mutex::new(HashMap::new()),
+            runner: next_runner_id(),
+            cpus: cfg.cpus,
+            threads: Mutex::new(Threads::default()),
         });
 
+        let tree = Tree::root();
         (
             Self {
                 name: String::new(),
@@ -981,11 +1534,12 @@ impl Context {
                 network: Arc::new(network),
                 storage: Arc::new(storage),
                 opens: Arc::default(),
-                tree: Tree::root(),
-                execution: Execution::default(),
+                tree: tree.clone(),
+                place: Place::default(),
             },
             executor,
             panicked,
+            tree,
         )
     }
 
@@ -1001,7 +1555,7 @@ impl Context {
     /// It is only permitted to call this method after the runtime has finished (i.e. once `start` returns)
     /// and only permitted to do once (otherwise multiple recovered runtimes will share the same inner state).
     /// If either one of these conditions is violated, this method will panic.
-    fn recover(checkpoint: Checkpoint) -> (Self, Arc<Executor>, Panicked) {
+    fn recover(checkpoint: Checkpoint) -> (Self, Arc<Executor>, Panicked, Arc<Tree>) {
         // Rebuild metrics
         let mut registry = Registry::new();
         let mut runtime_registry = registry.sub_registry(METRICS_PREFIX);
@@ -1031,6 +1585,7 @@ impl Context {
             rng: checkpoint.rng,
             time: checkpoint.time,
             dns: checkpoint.dns,
+            cpus: checkpoint.cpus,
 
             // New state for the new runtime
             registry,
@@ -1039,7 +1594,10 @@ impl Context {
             sleeping: Mutex::new(BinaryHeap::new()),
             shutdown: Mutex::new(Stopper::default()),
             panicker,
+            runner: next_runner_id(),
+            threads: Mutex::new(Threads::default()),
         });
+        let tree = Tree::root();
         (
             Self {
                 name: String::new(),
@@ -1048,11 +1606,12 @@ impl Context {
                 network: Arc::new(network),
                 storage: Arc::new(storage),
                 opens: Arc::default(),
-                tree: Tree::root(),
-                execution: Execution::default(),
+                tree: tree.clone(),
+                place: Place::default(),
             },
             executor,
             panicked,
+            tree,
         )
     }
 
@@ -1064,6 +1623,17 @@ impl Context {
     /// Get a reference to [Metrics].
     fn metrics(&self) -> Arc<Metrics> {
         self.executor().metrics.clone()
+    }
+
+    /// Where the next spawn runs, as its task metric reports it.
+    const fn execution(&self) -> Execution {
+        self.place.execution()
+    }
+
+    /// The runtime thread this context's spawns run on, if any.
+    #[cfg(test)]
+    pub(crate) const fn placed_thread(&self) -> Option<&Thread> {
+        self.place.thread()
     }
 
     /// Get a reference to the [Auditor].
@@ -1123,19 +1693,45 @@ impl Context {
 }
 
 impl crate::Spawner for Context {
-    fn dedicated(mut self) -> Self {
-        self.execution = Execution::Dedicated;
+    fn shared(mut self) -> Self {
+        self.place.set(Placement::Shared);
         self
     }
 
-    fn shared(mut self, blocking: bool) -> Self {
-        self.execution = Execution::Shared(blocking);
+    fn blocking(mut self) -> Self {
+        self.place.set(Placement::Blocking);
         self
+    }
+
+    fn on(mut self, thread: &Thread) -> Self {
+        self.place.set(Placement::Thread(thread.clone()));
+        self
+    }
+
+    fn placed(mut self) -> Self {
+        self.place.place();
+        self
+    }
+
+    fn thread(self) -> ThreadBuilder<Self> {
+        // The context handed to the thread's work keeps this context's name and attributes at a
+        // fresh child of this context's node, on the shared executor.
+        let node = self.tree.clone();
+        let (tree, _) = Tree::child(&node);
+        let name = self.name.clone();
+        let host: Weak<Executor> = self.executor.clone();
+        let host: Weak<dyn ThreadRuntime> = host;
+        let context = Self {
+            tree: tree.clone(),
+            place: Place::default(),
+            ..self
+        };
+        ThreadBuilder::new(context, tree, node, name, host)
     }
 
     fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
     where
-        F: FnOnce(Self) -> Fut + Send + 'static,
+        F: FnOnce(Self) -> Fut,
         Fut: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
@@ -1144,16 +1740,49 @@ impl crate::Spawner for Context {
 
         // Track supervision before resetting configuration
         let parent = Arc::clone(&self.tree);
-        self.execution = Execution::default();
+        let thread = self.place.thread().cloned();
+        self.place = self.place.handoff();
         let (child, aborted) = Tree::child(&parent);
         if aborted {
+            // A factory toward a thread is dropped unrun like a resident's future
+            if thread.is_some() {
+                self.executor().dispose(f);
+            }
             return Handle::closed(metric);
         }
         self.tree = child;
 
+        // A spawn placed on a runtime thread runs its factory here and its future as a resident
+        let executor = self.executor();
+        if let Some(thread) = thread {
+            if !executor.admits(&thread) {
+                // Close the consumed context's node, so children wired from it are aborted too
+                parent.abort();
+                executor.dispose(f);
+                return Handle::closed(metric);
+            }
+            let guard = FactoryGuard::new(&parent, metric);
+            let future = f(self);
+            let (prepared, handle) = Handle::prepare(guard.disarm(), parent);
+            let abort = prepared.abort_handle();
+            let future: WorkFuture =
+                Box::pin(Handle::wrap(prepared, future, executor.panicker.clone()));
+
+            // A thread that closed after the check rejects the wrapper, whose drop aborts the
+            // node and closes the handle.
+            if let Err(mode) = executor.register_resident(
+                &thread,
+                label,
+                Mode::Work(Mutex::new(Some(future))),
+                abort,
+            ) {
+                executor.dispose(mode);
+            }
+            return handle;
+        }
+
         // Spawn the task (we don't care about Model)
         let guard = FactoryGuard::new(&parent, metric);
-        let executor = self.executor();
         let future = f(self);
         let (f, handle) = Handle::init(
             future,
@@ -1163,6 +1792,43 @@ impl crate::Spawner for Context {
         );
         Tasks::register_work(&executor.tasks, label, Box::pin(f));
 
+        handle
+    }
+
+    fn spawn_on<F, Fut, T>(mut self, thread: &Thread, f: F) -> Handle<T>
+    where
+        F: FnOnce(Local<Self>) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + 'static,
+        T: Send + 'static,
+    {
+        // A resident always reports the thread execution, whatever this context's placement
+        let (label, metric) =
+            spawn_metrics!(Label::task(self.name.clone(), Execution::Thread), @make self);
+
+        // The task is supervised by this context, and its context is unplaced on the thread
+        // A factory dropped unrun is disposed of like a resident's future
+        let parent = Arc::clone(&self.tree);
+        let (child, aborted) = Tree::child(&parent);
+        if aborted {
+            self.executor().dispose(f);
+            return Handle::closed(metric);
+        }
+        self.tree = child;
+        self.place = Place::unplaced(Placement::Thread(thread.clone()));
+
+        // The factory runs on the thread. A rejected job drops its factory, then its ticket,
+        // which aborts the node and closes the handle.
+        let executor = self.executor();
+        let (prepared, handle) = Handle::prepare(metric, parent);
+        let abort = prepared.abort_handle();
+        let factory: Box<dyn FactoryJob> = Box::new(SpawnJob::new(f, self, Ticket::new(prepared)));
+        let mode = Mode::Spawn {
+            factory: Mutex::new(Some(factory)),
+            abort: abort.clone(),
+        };
+        if let Err(mode) = executor.register_resident(thread, label, mode, abort) {
+            executor.dispose(mode);
+        }
         handle
     }
 
@@ -1249,7 +1915,7 @@ impl crate::Supervisor for Context {
             storage: self.storage.clone(),
             opens: self.opens.clone(),
             tree,
-            execution: Execution::default(),
+            place: self.place.clone(),
         }
     }
 
@@ -1605,6 +2271,7 @@ mod tests {
     use crate::{
         Blob, IoBuf, Metrics as _, ReadOptions, Resolver, Runner as _, Spawner as _, Storage,
         Strategizer, Supervisor as _, WriteOptions, deterministic, reschedule,
+        threads::admission::State as AdmissionState, utils::extract_panic_message,
     };
     use bytes::Bytes;
     use commonware_macros::test_traced;
@@ -1615,15 +2282,287 @@ mod tests {
     #[cfg(feature = "external")]
     use futures::StreamExt;
     #[cfg(not(feature = "external"))]
-    use futures::future::pending;
-    #[cfg(not(feature = "external"))]
     use futures::stream::StreamExt as _;
-    use futures::{FutureExt as _, stream::FuturesUnordered};
+    use futures::{FutureExt as _, future::pending, stream::FuturesUnordered};
     use std::{
         cell::Cell,
+        future::ready,
+        panic::{AssertUnwindSafe, catch_unwind},
         rc::Rc,
-        sync::atomic::{AtomicUsize, Ordering},
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     };
+
+    thread_local! {
+        /// A `Local` parked by a resident for another task on the runner's OS thread.
+        static PARKED: RefCell<Option<Local<Context>>> = const { RefCell::new(None) };
+    }
+
+    /// Sets a flag when dropped.
+    struct SetOnDrop(Arc<AtomicBool>);
+
+    impl Drop for SetOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Panics with its message when dropped.
+    struct PanicOnDrop(&'static str);
+
+    impl Drop for PanicOnDrop {
+        fn drop(&mut self) {
+            panic!("{}", self.0);
+        }
+    }
+
+    /// Counts its drop in the counter, then panics if the flag is set.
+    struct Capture(Arc<AtomicUsize>, bool);
+
+    impl Drop for Capture {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            if self.1 {
+                panic!("capture");
+            }
+        }
+    }
+
+    /// What the destructors of [Submitter]s observed.
+    #[derive(Default)]
+    struct ExitProbe {
+        /// Tasks holding a submitter that have started.
+        started: AtomicUsize,
+        /// Submitters dropped.
+        dropped: AtomicUsize,
+        /// Submissions that resolved closed before returning.
+        rejected: AtomicUsize,
+        /// Whether a factory of a submission ran.
+        ran: AtomicBool,
+    }
+
+    /// Attempts a `spawn_on`, a placed spawn and a thread creation toward its thread when
+    /// dropped, recording each outcome in its probe.
+    struct Submitter {
+        context: Context,
+        thread: Thread,
+        probe: Arc<ExitProbe>,
+    }
+
+    impl Drop for Submitter {
+        fn drop(&mut self) {
+            let probe = &self.probe;
+            probe.dropped.fetch_add(1, Ordering::SeqCst);
+            let ran = probe.clone();
+            let on = self.context.child("late").spawn_on(&self.thread, move |_| {
+                ran.ran.store(true, Ordering::SeqCst);
+                ready(())
+            });
+            let ran = probe.clone();
+            let placed = self.context.child("late").on(&self.thread).spawn(move |_| {
+                ran.ran.store(true, Ordering::SeqCst);
+                ready(())
+            });
+            let built = self.context.child("late").thread().build();
+            for closed in [
+                matches!(on.now_or_never(), Some(Err(Error::Closed))),
+                matches!(placed.now_or_never(), Some(Err(Error::Closed))),
+                matches!(built, Err(ThreadError::Closed)),
+            ] {
+                if closed {
+                    probe.rejected.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+    }
+
+    /// How a run ends.
+    #[derive(Clone, Copy, Debug)]
+    enum Exit {
+        /// The root returns.
+        Normal,
+        /// The run times out.
+        Timeout,
+        /// No task can make progress.
+        #[cfg(not(feature = "external"))]
+        Stall,
+        /// The root panics.
+        RootPanic,
+        /// A task panics with panics not caught.
+        TaskPanic,
+    }
+
+    /// Spawn a lineage task that builds a thread and stays pending, returning the thread and
+    /// the lineage's handle, whose abort closes the thread.
+    async fn lineage(context: &Context, label: &'static str) -> (Thread, Handle<()>) {
+        let (sender, receiver) = oneshot::channel();
+        let handle = context.child(label).spawn(move |context| async move {
+            let thread = context.child("thread").thread().build().unwrap();
+            sender.send(thread).ok().unwrap();
+            pending::<()>().await
+        });
+        (receiver.await.unwrap(), handle)
+    }
+
+    /// Create a built thread, a thread with a root and a local resident, an attached thread,
+    /// and a shared task, each task holding a [Submitter], and wait until every task started.
+    async fn populate(context: &Context, probe: &Arc<ExitProbe>, threads: &Mutex<Vec<Thread>>) {
+        let submitter = |context: Context, thread: &Thread| Submitter {
+            context,
+            thread: thread.clone(),
+            probe: probe.clone(),
+        };
+
+        // A resident of a built thread.
+        let built = context.child("built").thread().build().unwrap();
+        threads.lock().push(built.clone());
+        let held = submitter(context.child("submitter"), &built);
+        let started = probe.clone();
+        drop(
+            context
+                .child("resident")
+                .spawn_on(&built, move |_| async move {
+                    let _held = held;
+                    started.started.fetch_add(1, Ordering::SeqCst);
+                    pending::<()>().await
+                }),
+        );
+
+        // The root of a thread, and a local resident it spawns.
+        let (home_sender, home_receiver) = oneshot::channel();
+        let root_probe = probe.clone();
+        drop(
+            context
+                .child("rooted")
+                .thread()
+                .spawn(move |local| {
+                    let home = local.home().clone();
+                    home_sender.send(home.clone()).ok().unwrap();
+                    let submitter = |local: &Local<Context>| Submitter {
+                        context: local.child("submitter").into_inner(),
+                        thread: home.clone(),
+                        probe: root_probe.clone(),
+                    };
+                    let held = submitter(&local);
+                    let local_held = submitter(&local);
+                    let started = root_probe.clone();
+                    drop(local.child("local").spawn_local(move |_| async move {
+                        let _held = local_held;
+                        started.started.fetch_add(1, Ordering::SeqCst);
+                        pending::<()>().await
+                    }));
+                    let started = root_probe.clone();
+                    async move {
+                        let _held = held;
+                        started.started.fetch_add(1, Ordering::SeqCst);
+                        pending::<()>().await
+                    }
+                })
+                .unwrap(),
+        );
+        let home = home_receiver.await.unwrap();
+        threads.lock().push(home);
+
+        // A placed resident of an attached thread.
+        let attached = context.child("attached").thread().attach().unwrap();
+        let thread = attached.place.thread().cloned().unwrap();
+        threads.lock().push(thread.clone());
+        let held = submitter(context.child("submitter"), &thread);
+        let started = probe.clone();
+        drop(attached.child("placed").spawn(move |_| async move {
+            let _held = held;
+            started.started.fetch_add(1, Ordering::SeqCst);
+            pending::<()>().await
+        }));
+
+        // A task on the shared executor.
+        let held = submitter(context.child("submitter"), &built);
+        let started = probe.clone();
+        drop(context.child("shared").spawn(move |_| async move {
+            let _held = held;
+            started.started.fetch_add(1, Ordering::SeqCst);
+            pending::<()>().await
+        }));
+
+        while probe.started.load(Ordering::SeqCst) < 5 {
+            reschedule().await;
+        }
+    }
+
+    /// A seeded program with threads, `spawn_on`, `spawn_local`, placed spawns and closes,
+    /// returning the auditor state.
+    fn thread_program(seed: u64) -> String {
+        Runner::seeded(seed).start(|context| async move {
+            // A root spawning local residents that interleave.
+            let root = context
+                .child("rooted")
+                .thread()
+                .spawn(|local| async move {
+                    let handles: Vec<_> = (0..5u64)
+                        .map(|i| {
+                            local.child("leaf").spawn_local(move |local| async move {
+                                for _ in 0..i {
+                                    reschedule().await;
+                                }
+                                local.sleep(Duration::from_millis(i)).await;
+                                Rc::new(i)
+                            })
+                        })
+                        .collect();
+                    let mut total = 0;
+                    for handle in handles {
+                        total += *handle.await.unwrap();
+                    }
+                    total
+                })
+                .unwrap();
+
+            // Several threads of one lineage, with spawn_on and placed residents.
+            let (sender, receiver) = oneshot::channel();
+            let lineage = context.child("lineage").spawn(move |context| async move {
+                let threads: Vec<_> = (0..3)
+                    .map(|_| context.child("thread").thread().build().unwrap())
+                    .collect();
+                sender.send(threads).ok().unwrap();
+                pending::<()>().await
+            });
+            let threads = receiver.await.unwrap();
+            let mut handles = Vec::new();
+            for (i, thread) in threads.iter().enumerate() {
+                handles.push(context.child("on").spawn_on(thread, move |_| async move {
+                    for _ in 0..i {
+                        reschedule().await;
+                    }
+                    i
+                }));
+                handles.push(
+                    context
+                        .child("placed")
+                        .on(thread)
+                        .spawn(move |_| async move {
+                            reschedule().await;
+                            i
+                        }),
+                );
+            }
+            let mut total = 0;
+            for handle in handles {
+                total += handle.await.unwrap();
+            }
+            assert_eq!(total, 6);
+            assert_eq!(root.await.unwrap(), 10);
+
+            // Close every thread of the lineage at once, with residents still pending.
+            let probes: Vec<_> = threads
+                .iter()
+                .map(|thread| context.child("probe").spawn_on(thread, |_| pending::<()>()))
+                .collect();
+            lineage.abort();
+            for probe in probes {
+                assert!(matches!(probe.await, Err(Error::Closed)));
+            }
+            context.auditor().state()
+        })
+    }
 
     #[rstest::rstest]
     #[case::open_named(true, true)]
@@ -2575,6 +3514,22 @@ mod tests {
         deterministic::Runner::new(cfg);
     }
 
+    /// A set holding only an id at or above 1024 is also empty, so the range check must run
+    /// before the emptiness check to report it.
+    #[test]
+    #[should_panic(expected = "cpus must be below 1024 (CPU_SETSIZE)")]
+    fn test_bad_cpus_beyond() {
+        let cfg = Config::default().with_cpus(5000);
+        deterministic::Runner::new(cfg);
+    }
+
+    #[test]
+    #[should_panic(expected = "cpus must not be empty")]
+    fn test_bad_cpus_empty() {
+        let cfg = Config::default().with_cpus(Vec::<usize>::new());
+        deterministic::Runner::new(cfg);
+    }
+
     #[cfg(not(feature = "external"))]
     #[test]
     #[should_panic(expected = "runtime stalled")]
@@ -3123,5 +4078,454 @@ mod tests {
         let output = Runner::from(checkpoint).start(run);
         assert_eq!(output, value.as_str());
         assert_eq!(calls.get(), 2);
+    }
+
+    /// The same seed reproduces the same auditor state with threads, `spawn_on`,
+    /// `spawn_local`, placed spawns and closes, and another seed does not.
+    #[test]
+    fn test_thread_reproducibility() {
+        assert_eq!(thread_program(1), thread_program(1));
+        assert_ne!(thread_program(1), thread_program(2));
+    }
+
+    /// A `Local` of thread A used by a task on thread B spawns a resident of A, so closing B
+    /// leaves it running and closing A aborts it. The `Local` holds a context of an unrelated
+    /// lineage, so only a close can abort the resident.
+    #[test]
+    fn test_thread_routing_to_owner() {
+        Runner::default().start(|context| async move {
+            let (a, lineage_a) = lineage(&context, "a").await;
+            let (b, lineage_b) = lineage(&context, "b").await;
+
+            // A resident of A parks its Local.
+            context
+                .child("parker")
+                .spawn_on(&a, |local| {
+                    PARKED.with(|parked| *parked.borrow_mut() = Some(local));
+                    ready(())
+                })
+                .await
+                .unwrap();
+
+            // A resident of B spawns through it.
+            let free = context.child("free");
+            let home = Arc::new(AtomicBool::new(false));
+            let started = Arc::new(AtomicBool::new(false));
+            let dropped = Arc::new(AtomicBool::new(false));
+            context
+                .child("spawner")
+                .spawn_on(&b, {
+                    let (a, home, started, dropped) =
+                        (a.clone(), home.clone(), started.clone(), dropped.clone());
+                    move |_| {
+                        let mut routed = PARKED.with(|parked| parked.borrow_mut().take()).unwrap();
+                        *routed = free;
+                        drop(routed.spawn_local(move |local| {
+                            home.store(local.home() == &a, Ordering::SeqCst);
+                            async move {
+                                let _dropped = SetOnDrop(dropped);
+                                started.store(true, Ordering::SeqCst);
+                                pending::<()>().await
+                            }
+                        }));
+                        ready(())
+                    }
+                })
+                .await
+                .unwrap();
+            while !started.load(Ordering::SeqCst) {
+                reschedule().await;
+            }
+            assert!(home.load(Ordering::SeqCst));
+
+            // Closing B leaves the resident running.
+            let probe = context.child("probe").spawn_on(&b, |_| pending::<()>());
+            lineage_b.abort();
+            assert!(matches!(probe.await, Err(Error::Closed)));
+            assert!(!dropped.load(Ordering::SeqCst));
+
+            // Closing A aborts it.
+            let probe = context.child("probe").spawn_on(&a, |_| pending::<()>());
+            lineage_a.abort();
+            assert!(matches!(probe.await, Err(Error::Closed)));
+            assert!(dropped.load(Ordering::SeqCst));
+        });
+    }
+
+    /// `spawn_local` through a `Local` whose thread closed earlier in the run resolves closed
+    /// without running its factory, `home` still names the thread, and a capture that panics
+    /// when dropped is reported through the owner's panicker.
+    #[test]
+    fn test_thread_late_spawn_local() {
+        let checked = Arc::new(AtomicBool::new(false));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            Runner::default().start(|context| {
+                let checked = checked.clone();
+                async move {
+                    let (thread, lineage) = lineage(&context, "t").await;
+                    context
+                        .child("parker")
+                        .spawn_on(&thread, |local| {
+                            PARKED.with(|parked| *parked.borrow_mut() = Some(local));
+                            ready(())
+                        })
+                        .await
+                        .unwrap();
+                    let probe = context
+                        .child("probe")
+                        .spawn_on(&thread, |_| pending::<()>());
+                    lineage.abort();
+                    assert!(matches!(probe.await, Err(Error::Closed)));
+
+                    let local = PARKED.with(|parked| parked.borrow_mut().take()).unwrap();
+                    assert_eq!(local.home(), &thread);
+                    let ran = Rc::new(Cell::new(false));
+                    let capture = PanicOnDrop("late capture");
+                    let handle = local.spawn_local({
+                        let ran = ran.clone();
+                        move |_| {
+                            let _capture = capture;
+                            ran.set(true);
+                            ready(())
+                        }
+                    });
+                    assert!(!ran.get());
+                    assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
+                    checked.store(true, Ordering::SeqCst);
+
+                    // The reported panic fails the run at the root's next poll.
+                    reschedule().await;
+                }
+            })
+        }));
+        assert!(checked.load(Ordering::SeqCst));
+        let panic = result.expect_err("the dropped capture's panic was not reported");
+        assert_eq!(extract_panic_message(&*panic), "late capture");
+    }
+
+    /// A `spawn_on` from another OS thread runs its factory on the runner's thread.
+    #[test]
+    fn test_thread_foreign_spawn_on() {
+        Runner::default().start(|context| async move {
+            let thread = context.child("t").thread().build().unwrap();
+            let ran_on = Arc::new(Mutex::new(None));
+            let foreign = std::thread::spawn({
+                let context = context.child("foreign");
+                let (thread, ran_on) = (thread.clone(), ran_on.clone());
+                move || {
+                    let handle = context.spawn_on(&thread, move |_| {
+                        *ran_on.lock() = Some(std::thread::current().id());
+                        ready(7)
+                    });
+                    (std::thread::current().id(), handle)
+                }
+            });
+            while ran_on.lock().is_none() {
+                reschedule().await;
+            }
+            let (foreign, handle) = foreign.join().unwrap();
+            let runner = std::thread::current().id();
+            assert_ne!(foreign, runner);
+            assert_eq!(*ran_on.lock(), Some(runner));
+            assert_eq!(handle.await.unwrap(), 7);
+        });
+    }
+
+    /// Aborting a thread's lineage while the root awaits only a resident of that thread closes
+    /// it without a stall, and without skipping to a far sleeper's deadline.
+    #[rstest::rstest]
+    #[case::no_sleeper(false)]
+    #[case::far_sleeper(true)]
+    fn test_thread_close_on_idle_runtime(#[case] sleeper: bool) {
+        const FAR: Duration = Duration::from_secs(3600);
+        Runner::default().start(|context| async move {
+            if sleeper {
+                drop(
+                    context
+                        .child("sleeper")
+                        .spawn(|context| async move { context.sleep(FAR).await }),
+                );
+            }
+            let (thread, lineage) = lineage(&context, "t").await;
+            let resident = context
+                .child("resident")
+                .spawn_on(&thread, |_| pending::<()>());
+            let start = context.current();
+            lineage.abort();
+            assert!(matches!(resident.await, Err(Error::Closed)));
+            assert!(context.current() < start + FAR);
+        });
+    }
+
+    /// Every exit path closes every virtual thread, and submissions from destructors that run
+    /// after the closed flag resolve closed without running a factory.
+    #[rstest::rstest]
+    #[case::normal(Exit::Normal)]
+    #[case::timeout(Exit::Timeout)]
+    #[cfg_attr(not(feature = "external"), case::stall(Exit::Stall))]
+    #[case::root_panic(Exit::RootPanic)]
+    #[case::task_panic(Exit::TaskPanic)]
+    fn test_thread_exit_paths(#[case] exit: Exit) {
+        let probe = Arc::new(ExitProbe::default());
+        let threads = Arc::new(Mutex::new(Vec::new()));
+        let cfg = Config::default().with_timeout(Some(Duration::from_millis(100)));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            Runner::new(cfg).start(|context| {
+                let (probe, threads) = (probe.clone(), threads.clone());
+                async move {
+                    populate(&context, &probe, &threads).await;
+                    match exit {
+                        Exit::Normal => {}
+                        Exit::Timeout => loop {
+                            context.sleep(Duration::from_millis(10)).await;
+                        },
+                        #[cfg(not(feature = "external"))]
+                        Exit::Stall => pending::<()>().await,
+                        Exit::RootPanic => panic!("root panic"),
+                        Exit::TaskPanic => {
+                            drop(
+                                context
+                                    .child("panic")
+                                    .spawn(|_| async { panic!("task panic") }),
+                            );
+                            pending::<()>().await
+                        }
+                    }
+                }
+            })
+        }));
+        let expected = match exit {
+            Exit::Normal => None,
+            Exit::Timeout => Some("runtime timeout"),
+            #[cfg(not(feature = "external"))]
+            Exit::Stall => Some("runtime stalled"),
+            Exit::RootPanic => Some("root panic"),
+            Exit::TaskPanic => Some("task panic"),
+        };
+        assert_eq!(
+            result.err().map(|panic| extract_panic_message(&*panic)),
+            expected.map(String::from)
+        );
+
+        let threads = threads.lock();
+        assert_eq!(threads.len(), 3);
+        for thread in threads.iter() {
+            assert_eq!(thread.inner().state(), AdmissionState::Closed);
+        }
+        assert_eq!(probe.dropped.load(Ordering::SeqCst), 5);
+        assert_eq!(probe.rejected.load(Ordering::SeqCst), 15);
+        assert!(!probe.ran.load(Ordering::SeqCst));
+    }
+
+    /// A root factory that queues `spawn_on` factories and then panics runs none of them,
+    /// drops every capture, closes every thread, and its panic is the one `start` resumes, not
+    /// a capture's.
+    #[test]
+    fn test_thread_root_factory_panic() {
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let ran = Arc::new(AtomicBool::new(false));
+        let threads = Arc::new(Mutex::new(Vec::new()));
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            Runner::default().start(|context| -> std::future::Ready<()> {
+                for label in ["a", "b"] {
+                    let thread = context.child(label).thread().build().unwrap();
+                    threads.lock().push(thread.clone());
+                    for panics in [false, true, false] {
+                        let capture = Capture(dropped.clone(), panics);
+                        let ran = ran.clone();
+                        drop(context.child("job").spawn_on(&thread, move |_| {
+                            let _capture = capture;
+                            ran.store(true, Ordering::SeqCst);
+                            ready(())
+                        }));
+                    }
+                }
+                panic!("root factory");
+            })
+        }));
+        let panic = result.expect_err("the root factory's panic was not resumed");
+        assert_eq!(extract_panic_message(&*panic), "root factory");
+        assert!(!ran.load(Ordering::SeqCst));
+        assert_eq!(dropped.load(Ordering::SeqCst), 6);
+        for thread in threads.lock().iter() {
+            assert_eq!(thread.inner().state(), AdmissionState::Closed);
+        }
+    }
+
+    /// A close drops every resident's future before any unrun `spawn_on` factory, even when the
+    /// factory belongs to an older resident.
+    #[test]
+    fn test_thread_close_drops_futures_before_factories() {
+        /// Records its name in the shared order when dropped.
+        struct Record(Arc<Mutex<Vec<&'static str>>>, &'static str);
+
+        impl Drop for Record {
+            fn drop(&mut self) {
+                self.0.lock().push(self.1);
+            }
+        }
+
+        let (context, executor, _panicked, _tree) = Context::new(Config::default());
+        let thread = context.child("t").thread().build().unwrap();
+        let id = thread.inner().id();
+        let order = Arc::new(Mutex::new(Vec::new()));
+
+        // The older resident keeps its factory unrun, and the newer one runs its factory and
+        // leaves its future pending.
+        let factory = Record(order.clone(), "factory");
+        let older = context.child("older").spawn_on(&thread, move |_| {
+            let _factory = factory;
+            ready(())
+        });
+        let future = Record(order.clone(), "future");
+        let newer = context
+            .child("newer")
+            .spawn_on(&thread, move |_| async move {
+                let _future = future;
+                pending::<()>().await
+            });
+        let (first, second) = {
+            let threads = executor.threads.lock();
+            let mut residents = threads.entries[&id].residents.keys().copied();
+            (residents.next().unwrap(), residents.next().unwrap())
+        };
+        assert!(first < second);
+        let table = RefCell::new(LocalTable::default());
+        let task = executor.tasks.get(second).unwrap();
+        let waker = futures::task::noop_waker();
+        let mut cx = task::Context::from_waker(&waker);
+        assert!(!executor.poll_resident(&table, &task, id, &mut cx));
+        assert!(order.lock().is_empty());
+
+        executor.close_thread(&table, id);
+        assert_eq!(*order.lock(), ["future", "factory"]);
+        assert!(matches!(older.now_or_never(), Some(Err(Error::Closed))));
+        assert!(matches!(newer.now_or_never(), Some(Err(Error::Closed))));
+        drop(context);
+    }
+
+    /// A pending thread close is ready work, so time does not skip to a sleeper and the runtime
+    /// does not report a stall while a close is queued.
+    #[test]
+    fn test_thread_closing_list_counts_as_ready() {
+        let (context, executor, _panicked, _tree) = Context::new(Config::default());
+        let current = *executor.time.lock();
+        let deadline = current + Duration::from_secs(3600);
+        let backend = VirtualThread {
+            tasks: Arc::downgrade(&executor.tasks),
+            id: 3,
+        };
+
+        // With no sleeper, a queued close is progress.
+        backend.wake();
+        assert_ne!(executor.tasks.ready(), 0);
+        executor.wake_until_progress(current);
+        assert_eq!(executor.tasks.take_closing(), [3]);
+
+        // With a far sleeper, a queued close keeps time where it is.
+        executor.sleeping.lock().push(Alarm {
+            time: deadline,
+            waker: Arc::new(AtomicWaker::new()),
+        });
+        backend.wake();
+        assert_ne!(executor.tasks.ready(), 0);
+        assert_eq!(executor.skip_idle_time(current), current);
+        executor.wake_until_progress(current);
+        assert_eq!(*executor.time.lock(), current);
+
+        // Once the close is taken, the same runtime skips to the sleeper.
+        assert_eq!(executor.tasks.take_closing(), [3]);
+        assert_eq!(executor.tasks.ready(), 0);
+        if !cfg!(feature = "external") {
+            assert_eq!(executor.skip_idle_time(current), deadline);
+        }
+        drop(context);
+    }
+
+    /// A resident whose destructor panics during the exit drain of a run that did not panic
+    /// fails the run with that payload when panics are not caught, after cleanup and the
+    /// escaped-context assertion ran.
+    #[rstest::rstest]
+    #[case::reported(false, false)]
+    #[case::caught(true, false)]
+    #[case::escaped_context(false, true)]
+    fn test_thread_exit_drain_panic(#[case] catch: bool, #[case] escape: bool) {
+        let cleared = Arc::new(AtomicBool::new(false));
+        let escaped = Arc::new(Mutex::new(None));
+        let cfg = Config::default().with_catch_panics(catch);
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            Runner::new(cfg).start(|context| {
+                let (cleared, escaped) = (cleared.clone(), escaped.clone());
+                async move {
+                    let thread = context.child("t").thread().build().unwrap();
+                    let started = Arc::new(AtomicBool::new(false));
+                    drop(context.child("resident").spawn_on(&thread, {
+                        let started = started.clone();
+                        move |_| async move {
+                            let _panics = PanicOnDrop("drain");
+                            started.store(true, Ordering::SeqCst);
+                            pending::<()>().await
+                        }
+                    }));
+
+                    // A shared task the exit clears.
+                    drop(context.child("shared").spawn(move |_| async move {
+                        let _cleared = SetOnDrop(cleared);
+                        pending::<()>().await
+                    }));
+                    while !started.load(Ordering::SeqCst) {
+                        reschedule().await;
+                    }
+                    if escape {
+                        *escaped.lock() = Some(context.child("escaped"));
+                    }
+                }
+            })
+        }));
+        let expected = match (catch, escape) {
+            (_, true) => Some("executor still has weak references"),
+            (false, false) => Some("drain"),
+            (true, false) => None,
+        };
+        assert_eq!(
+            result.err().map(|panic| extract_panic_message(&*panic)),
+            expected.map(String::from)
+        );
+        assert!(cleared.load(Ordering::SeqCst));
+        drop(escaped.lock().take());
+    }
+
+    /// A CPU set outside `0..=63` survives recovery, and the recovered run gets a fresh
+    /// instance id, so a thread of the first run is foreign to it.
+    #[test]
+    fn test_thread_recovery() {
+        let cfg = Config::default().with_cpus([100, 200]);
+        let (first, checkpoint) = Runner::new(cfg).start_and_recover(|context| async move {
+            assert!(matches!(
+                context.child("low").thread().pin(5).build(),
+                Err(ThreadError::CpuUnavailable(5))
+            ));
+            context.child("high").thread().pin(200).build().unwrap()
+        });
+        assert_eq!(first.cpus(), Some(&Cpus::from(200)));
+
+        Runner::from(checkpoint).start(|context| async move {
+            assert!(matches!(
+                context.child("low").thread().pin(0).build(),
+                Err(ThreadError::CpuUnavailable(0))
+            ));
+            let second = context
+                .child("high")
+                .thread()
+                .pin([100, 200])
+                .build()
+                .unwrap();
+            assert_eq!(second.inner().id(), first.inner().id());
+            assert_ne!(second.inner().runner(), first.inner().runner());
+            assert_ne!(second, first);
+            let stale = context.child("stale").spawn_on(&first, |_| ready(()));
+            assert!(matches!(stale.await, Err(Error::Closed)));
+        });
     }
 }

@@ -64,7 +64,7 @@ impl Strategy for GatedStrategy {
         let (result_tx, result_rx) = oneshot::channel();
         self.context
             .child("job")
-            .shared(true)
+            .blocking()
             .spawn(move |_| async move {
                 if let Some(pending) = pending {
                     pending.started.send_lossy(());

@@ -335,7 +335,8 @@ where
         )
         .await;
 
-        let (mux, mut dealing_mux) = Muxer::new(self.context.child("mux"), sender, receiver);
+        let (mux, mut dealing_mux) =
+            Muxer::new(self.context.child("mux").placed(), sender, receiver);
         mux.start();
 
         // Plan resolution and the startup tip read one processed position. A

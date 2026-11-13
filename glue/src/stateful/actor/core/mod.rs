@@ -227,7 +227,7 @@ where
         let metrics = StatefulMetrics::new(self.context.as_present());
         let (sender, receiver) = oneshot::channel();
         let (syncer, syncer_mailbox) = syncer::Syncer::new(syncer::Config {
-            context: self.context.child("syncer"),
+            context: self.context.child("syncer").placed(),
             db_config: self.db_config,
             sync_config: self.sync_config,
             resolvers: self.resolvers.clone(),

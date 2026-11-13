@@ -142,6 +142,11 @@ impl Tree {
         }
     }
 
+    /// Records an [Aborter] on the node, or returns it unrun if the node is already aborted.
+    pub(crate) fn try_register(&self, aborter: Aborter) -> Result<(), Aborter> {
+        self.inner.lock().register(aborter)
+    }
+
     /// Aborts the task and all descendants rooted at this node.
     pub(crate) fn abort(self: &Arc<Self>) {
         // Walk the supervision tree iteratively so deep clone/spawn chains do
@@ -161,6 +166,10 @@ impl Tree {
             // Abort the task before descending so observers see the parent
             // transition before any surviving children are visited.
             if let Some(aborter) = task {
+                #[cfg(test)]
+                if aborter.is_thread() {
+                    tests::before_thread_abort();
+                }
                 aborter.abort();
             }
 
@@ -220,7 +229,7 @@ impl Drop for Tree {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{
         telemetry::metrics::raw::Gauge,
@@ -229,6 +238,27 @@ mod tests {
             abort::{AbortHandle, Abortable},
         },
     };
+
+    /// A callback run when a thread's aborter is taken from its node and before it runs.
+    type ThreadAbortHook = Arc<dyn Fn() + Send + Sync>;
+
+    /// The callback [`Tree::abort`] runs before each thread aborter. nextest runs every test
+    /// in its own process, so one slot serves the process.
+    static BEFORE_THREAD_ABORT: Mutex<Option<ThreadAbortHook>> = Mutex::new(None);
+
+    /// Install (or with `None`, remove) the callback run before each thread aborter.
+    pub(crate) fn set_before_thread_abort(hook: Option<ThreadAbortHook>) {
+        let previous = std::mem::replace(&mut *BEFORE_THREAD_ABORT.lock(), hook);
+        drop(previous);
+    }
+
+    /// Run the installed callback, outside the slot's lock.
+    pub(super) fn before_thread_abort() {
+        let hook = BEFORE_THREAD_ABORT.lock().clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
     use futures::future::pending;
 
     fn aborter() -> (Aborter, Abortable<futures::future::Pending<()>>) {

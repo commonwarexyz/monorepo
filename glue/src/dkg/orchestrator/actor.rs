@@ -517,14 +517,17 @@ where
         S: Sender<PublicKey = <P::Scheme as Verifier>::PublicKey>,
         R: Receiver<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
-        let (mux, vote, vote_backup) =
-            Muxer::builder(self.context.child("vote_mux"), vote_sender, vote_receiver)
-                .with_backup()
-                .build();
+        let (mux, vote, vote_backup) = Muxer::builder(
+            self.context.child("vote_mux").placed(),
+            vote_sender,
+            vote_receiver,
+        )
+        .with_backup()
+        .build();
         mux.start();
 
         let (mux, certificate, certificate_backup) = Muxer::builder(
-            self.context.child("certificate_mux"),
+            self.context.child("certificate_mux").placed(),
             certificate_sender,
             certificate_receiver,
         )
@@ -533,7 +536,7 @@ where
         mux.start();
 
         let (mux, resolver) = Muxer::new(
-            self.context.child("resolver_mux"),
+            self.context.child("resolver_mux").placed(),
             resolver_sender,
             resolver_receiver,
         );
@@ -701,6 +704,7 @@ where
         let context = self
             .context
             .child("consensus_engine")
+            .placed()
             .with_attribute("epoch", epoch);
         let engine = simplex::Engine::new(
             context,

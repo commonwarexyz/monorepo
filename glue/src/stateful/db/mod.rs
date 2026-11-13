@@ -1310,8 +1310,9 @@ macro_rules! impl_state_sync_set {
                             let finish_rx = db_channels.$idx.finish_rx;
                             let reached_tx = db_channels.$idx.reached_tx;
                             move |context| async move {
+                                // The database's own tasks run where its sync runs.
                                 let sync = $T::sync_db(
-                                    context,
+                                    context.placed(),
                                     config,
                                     source,
                                     target,

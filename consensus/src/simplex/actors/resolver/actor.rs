@@ -117,7 +117,7 @@ impl<
         let handler = Handler::new(handler_tx);
 
         let (resolver_engine, mut resolver) = p2p::Engine::new(
-            self.context.child("resolver"),
+            self.context.child("resolver").placed(),
             p2p::Config {
                 peer_provider: StaticProvider::new(self.epoch.get(), participants),
                 blocker: self.blocker.take().expect("blocker must be set"),
@@ -903,6 +903,55 @@ mod tests {
     #[test_async]
     async fn self_targeted_fetch_does_not_restrict_existing_backfill() {
         assert_targeted_fetch_does_not_restrict_existing_backfill(0);
+    }
+
+    #[test]
+    fn test_resolver_engine_thread_placement() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let thread = context.child("t").thread().build().unwrap();
+            let (actor, _mailbox) = TestActor::new(
+                context.child("actor").on(&thread),
+                Config {
+                    scheme: schemes[0].clone(),
+                    blocker: NoopBlocker,
+                    strategy: Sequential,
+                    epoch: EPOCH,
+                    mailbox_size: NZUsize!(8),
+                    fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                    fetch_retry_delay: Duration::from_millis(100),
+                    term_length: TermLength::ONE,
+                },
+            );
+            let (sender, receiver) = inert_channel(&participants);
+            let (voter_sender, _voter_receiver) = mailbox::new(context.child("voter"), NZUsize!(8));
+            let _actor = actor.start(voter::Mailbox::new(voter_sender), sender, receiver);
+            loop {
+                let metrics = context.encode();
+                let tasks: Vec<_> = metrics
+                    .lines()
+                    .filter(|line| {
+                        line.starts_with("runtime_tasks_spawned_total{")
+                            && line.contains("name=\"actor_resolver\"")
+                    })
+                    .collect();
+                if tasks.is_empty() {
+                    context.sleep(Duration::from_millis(1)).await;
+                    continue;
+                }
+                assert!(
+                    tasks
+                        .iter()
+                        .all(|line| line.contains("execution=\"Thread\"")),
+                    "{metrics}"
+                );
+                break;
+            }
+        });
     }
 
     /// Request expiry and retry backoff use their independently configured durations.

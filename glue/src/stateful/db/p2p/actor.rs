@@ -156,7 +156,7 @@ where
             actor_mailbox::new(self.context.child("handler"), receiver.capacity());
         let handler = handler::Handler::new(handler_tx);
         let (engine, mut resolver_mailbox) = p2p::Engine::new(
-            self.context.as_present().child("resolver"),
+            self.context.as_present().child("resolver").placed(),
             p2p::Config {
                 peer_provider: self.config.peer_provider.clone(),
                 blocker: self.config.blocker.clone(),

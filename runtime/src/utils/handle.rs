@@ -1,8 +1,9 @@
 use crate::{
     Error,
     telemetry::metrics::raw::Gauge,
+    threads::ThreadInner,
     utils::{
-        abort::{AbortHandle, Abortable, Aborted},
+        abort::{AbortHandle, AbortRegistration, Abortable, Aborted},
         extract_panic_message,
         supervision::Tree,
     },
@@ -11,17 +12,15 @@ use commonware_utils::{
     channel::oneshot,
     sync::{Exclusive, Mutex, Once},
 };
-use futures::{
-    future::{Either, poll_fn, select},
-    pin_mut,
-};
+use futures::{future::poll_fn, pin_mut};
 use std::{
     any::Any,
     cell::UnsafeCell,
     future::Future,
+    mem,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
-    pin::Pin,
-    sync::Arc,
+    pin::{Pin, pin},
+    sync::{Arc, Weak},
     task::{Context, Poll},
     vec::IntoIter,
 };
@@ -181,6 +180,66 @@ impl<F: Future> Future for FutureCell<F> {
     }
 }
 
+/// The parts of a task prepared before its future exists: its supervision node, its
+/// running-task metric, its result sink and its abort registration.
+///
+/// [`Handle::prepare`] registers the task's aborter on the node, and [`Handle::wrap`] consumes
+/// the parts. Parts dropped without being wrapped abort no node and finish no metric, so an
+/// owner that may drop them unwrapped calls [`Prepared::close`] or [`Prepared::exit`] instead.
+pub(crate) struct Prepared<T>
+where
+    T: Send + 'static,
+{
+    /// Supervision node the task's aborter is registered on.
+    tree: Arc<Tree>,
+    /// Running-task metric, finished once the task exits.
+    metric: MetricHandle,
+    /// Sink of the task's result.
+    sender: oneshot::Sender<Result<T, Error>>,
+    /// Registration consumed by the task's abortable wrapper.
+    registration: AbortRegistration,
+}
+
+impl<T> Prepared<T>
+where
+    T: Send + 'static,
+{
+    /// Returns a handle that aborts the task these parts belong to.
+    pub(crate) fn abort_handle(&self) -> AbortHandle {
+        self.registration.handle()
+    }
+
+    /// Closes the task without running it. Aborts its node, finishes its metric and drops its
+    /// sink, in that order, so its handle resolves [`Error::Closed`].
+    pub(crate) fn close(self) {
+        let Self {
+            tree,
+            metric,
+            sender,
+            registration,
+        } = self;
+        tree.abort();
+        metric.finish();
+        drop(sender);
+        drop(registration);
+    }
+
+    /// Publishes [`Error::Exited`] for a task whose factory panicked, then closes it like
+    /// [`Prepared::close`].
+    pub(crate) fn exit(self) {
+        let Self {
+            tree,
+            metric,
+            sender,
+            registration,
+        } = self;
+        let _ = sender.send(Err(Error::Exited));
+        tree.abort();
+        metric.finish();
+        drop(registration);
+    }
+}
+
 impl<T> Handle<T>
 where
     T: Send + 'static,
@@ -199,6 +258,17 @@ where
     where
         F: Future<Output = T> + Send + 'static,
     {
+        let (prepared, handle) = Self::prepare(metric, tree);
+        (Self::wrap(prepared, f, panicker), handle)
+    }
+
+    /// Prepares a task supervised by `tree` before its future exists, returning its parts and
+    /// its handle.
+    ///
+    /// The task's cancellation is registered on `tree` before this returns, so a closed `tree`
+    /// cancels the task before its future can be polled.
+    #[inline(always)]
+    pub(crate) fn prepare(metric: MetricHandle, tree: Arc<Tree>) -> (Prepared<T>, Self) {
         // Initialize channels to handle result/abort
         let (sender, receiver) = oneshot::channel();
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
@@ -206,27 +276,91 @@ where
         // Attach cancellation before the caller can publish the task.
         tree.register(Aborter::new(abort_handle.clone(), metric.clone()));
 
+        (
+            Prepared {
+                tree,
+                metric: metric.clone(),
+                sender,
+                registration: abort_registration,
+            },
+            Self {
+                state: HandleState::Task {
+                    receiver,
+                    abort_handle,
+                    metric,
+                },
+            },
+        )
+    }
+
+    /// Wraps `f` as the task `prepared` belongs to, without registering it again.
+    ///
+    /// The wrapper drops `f` before it publishes the result or drops the result sink.
+    #[inline(always)]
+    pub(crate) fn wrap<F>(
+        prepared: Prepared<T>,
+        f: F,
+        panicker: Panicker,
+    ) -> impl Future<Output = ()>
+    where
+        F: Future<Output = T>,
+    {
+        let Prepared {
+            tree,
+            metric,
+            sender,
+            registration: abort_registration,
+        } = prepared;
+
         // Install cleanup before the first poll so rejected tasks also close
         // supervision and finish their metrics when the future is dropped.
-        let guard = TaskGuard {
-            tree,
-            metric: metric.clone(),
-        };
+        let guard = TaskGuard { tree, metric };
 
         // Wrap the future with panic catching, abort support, and cleanup.
         //
         // Everything is done in a single async block (and the function is marked
         // #[inline(always)]) so that stack usage is `size_of(F) + constant` rather than
         // `N * size_of(F)` (which is what a combinator chain produces in debug builds).
-        let task = async move {
+        async move {
             // Cancellation can destroy the user future during this poll. Close
             // its supervision subtree even if that destruction unwinds.
             let _guard = guard;
 
             // Only this task's wakers poll this block, so the wrapper can skip re-registering
-            // an unchanged one. `f` is dropped at the end of this statement, before its result
-            // is sent.
-            let result = Abortable::task(FutureCell(UnsafeCell::new(f)), abort_registration).await;
+            // an unchanged one. The future sits in an `Option` so it can be dropped in place
+            // once it resolves, before its result is sent.
+            let mut task = pin!(Some(Abortable::task(
+                FutureCell(UnsafeCell::new(f)),
+                abort_registration
+            )));
+            let result = poll_fn(|cx| {
+                task.as_mut()
+                    .as_pin_mut()
+                    .expect("a task is not polled after it resolves")
+                    .poll(cx)
+            })
+            .await;
+
+            // Drop the future in its own boundary. A destructor panic of a resolved future is a
+            // disposal panic, which the caller of this poll handles. Before resuming it, publish
+            // a poll panic the future raised first, so that failure is not lost, and drop an
+            // output that can no longer be delivered.
+            if let Err(panic) = catch_unwind(AssertUnwindSafe(|| task.set(None))) {
+                match result {
+                    Ok(Ok(output)) => {
+                        if let Err(secondary) = catch_unwind(AssertUnwindSafe(move || drop(output)))
+                        {
+                            mem::forget(secondary);
+                        }
+                    }
+                    Ok(Err(poll_panic)) => {
+                        panicker.notify(poll_panic);
+                        let _ = sender.send(Err(Error::Exited));
+                    }
+                    Err(Aborted) => {}
+                }
+                resume_unwind(panic);
+            }
 
             // Handle result
             match result {
@@ -239,18 +373,7 @@ where
                 }
                 Err(Aborted) => {}
             }
-        };
-
-        (
-            task,
-            Self {
-                state: HandleState::Task {
-                    receiver,
-                    abort_handle,
-                    metric,
-                },
-            },
-        )
+        }
     }
 
     /// Returns a handle backed by a completion receiver.
@@ -344,7 +467,8 @@ where
         }
     }
 
-    /// Returns a handle that resolves to [`Error::Closed`] without spawning work.
+    /// Returns a handle that resolves to [`Error::Closed`] without spawning work. Aborting it does
+    /// not change that result.
     pub(crate) fn closed(metric: MetricHandle) -> Self {
         // Mark the task as finished immediately so gauges remain accurate.
         metric.finish();
@@ -352,8 +476,14 @@ where
         // Create a receiver that will yield `Err(Error::Closed)` when awaited.
         let (sender, receiver) = oneshot::channel();
         drop(sender);
-
-        Self::from_receiver(receiver)
+        let (abort_handle, _) = AbortHandle::new_pair();
+        Self {
+            state: HandleState::Task {
+                receiver,
+                abort_handle,
+                metric,
+            },
+        }
     }
 
     /// Abort the spawned task or stop waiting for a completion.
@@ -543,7 +673,9 @@ impl Panicker {
             catch,
             sender: Arc::new(Mutex::new(Some(sender))),
         };
-        let panicked = Panicked { receiver };
+        let panicked = Panicked {
+            receiver: Mutex::new(receiver),
+        };
         (panicker, panicked)
     }
 
@@ -564,9 +696,11 @@ impl Panicker {
             return;
         }
 
-        // If we've already sent a panic, ignore the new one
-        let mut sender = self.sender.lock();
-        let Some(sender) = sender.take() else {
+        // If we've already sent a panic, ignore the new one. Take the sender out and release the
+        // lock first, because a payload the closed receiver returns, or the ignored one, can run
+        // arbitrary destructors, which may notify again.
+        let sender = self.sender.lock().take();
+        let Some(sender) = sender else {
             return;
         };
 
@@ -577,66 +711,106 @@ impl Panicker {
 
 /// A handle that will be notified when a panic occurs.
 pub(crate) struct Panicked {
-    receiver: oneshot::Receiver<Panic>,
+    /// Receives the first panic notified. Locked only to poll or take from it, so several
+    /// observers can share the handle.
+    receiver: Mutex<oneshot::Receiver<Panic>>,
 }
 
 impl Panicked {
     /// Polls a task that should be interrupted by a panic.
-    pub(crate) async fn interrupt<Fut>(self, task: Fut) -> Fut::Output
+    pub(crate) async fn interrupt<Fut>(&self, task: Fut) -> Fut::Output
     where
         Fut: Future,
     {
-        // Wait for task to complete or panic
-        let panicked = self.receiver;
-        pin_mut!(panicked);
         pin_mut!(task);
-        match select(panicked, task).await {
-            Either::Left((panic, task)) => match panic {
-                // If there is a panic, resume the unwind
-                Ok(panic) => {
-                    resume_unwind(panic);
+
+        // Whether a panic can still arrive (the sender may be gone once it was taken)
+        let mut observing = true;
+        poll_fn(move |cx| {
+            // Wait for task to complete or panic, checking for a panic first
+            if observing {
+                let panicked = Pin::new(&mut *self.receiver.lock()).poll(cx);
+                match panicked {
+                    // If there is a panic, resume the unwind
+                    Poll::Ready(Ok(panic)) => resume_unwind(panic),
+                    // If there can never be a panic (oneshot is closed), wait for the task to
+                    // complete and return the output
+                    Poll::Ready(Err(_)) => observing = false,
+                    Poll::Pending => {}
                 }
-                // If there can never be a panic (oneshot is closed), wait for the task to complete
-                // and return the output
-                Err(_) => task.await,
-            },
-            Either::Right((output, mut panicked)) => {
-                // A panic sent while the task completed wins over its output
-                if let Ok(panic) = panicked.try_recv() {
-                    resume_unwind(panic);
-                }
-                output
             }
-        }
+            let output = std::task::ready!(task.as_mut().poll(cx));
+
+            // A panic sent while the task completed wins over its output
+            if observing {
+                let panic = self.receiver.lock().try_recv().ok();
+                if let Some(panic) = panic {
+                    resume_unwind(panic);
+                }
+            }
+            Poll::Ready(output)
+        })
+        .await
     }
 
     /// Take a panic sent and not yet observed.
-    #[cfg(target_os = "linux")]
     #[commonware_macros::stability(ALPHA)]
-    pub(crate) fn try_take(&mut self) -> Option<Panic> {
-        self.receiver.try_recv().ok()
+    pub(crate) fn try_take(&self) -> Option<Panic> {
+        self.receiver.lock().try_recv().ok()
     }
 }
 
-/// Couples an [`AbortHandle`] with its metric handle so aborted tasks clean up gauges.
-pub(crate) struct Aborter {
-    inner: AbortHandle,
-    metric: MetricHandle,
+/// What a supervision node aborts when its lineage ends.
+pub(crate) enum Aborter {
+    /// A spawned task: its [`AbortHandle`] and its metric handle, so aborted tasks clean up
+    /// gauges.
+    Task {
+        /// Aborts the task's wrapper.
+        inner: AbortHandle,
+        /// The task's running-task metric.
+        metric: MetricHandle,
+    },
+    /// A runtime thread occupying the node, held weakly so the node does not keep the
+    /// thread's state alive.
+    Thread(Weak<ThreadInner>),
 }
 
 impl Aborter {
     /// Creates a new [`Aborter`] for the provided abort handle and metric handle.
     pub(crate) const fn new(inner: AbortHandle, metric: MetricHandle) -> Self {
-        Self { inner, metric }
+        Self::Task { inner, metric }
     }
 
-    /// Aborts the task and records completion in the metric gauge.
-    pub(crate) fn abort(self) {
-        self.inner.abort();
+    /// Creates an [`Aborter`] that closes the runtime thread behind `thread`.
+    pub(crate) const fn thread(thread: Weak<ThreadInner>) -> Self {
+        Self::Thread(thread)
+    }
 
-        // We might never poll the future again after aborting it, so run the
-        // metric cleanup right away
-        self.metric.finish();
+    /// Whether this aborter closes a runtime thread.
+    #[cfg(test)]
+    pub(crate) const fn is_thread(&self) -> bool {
+        matches!(self, Self::Thread(_))
+    }
+
+    /// Aborts the task and records completion in the metric gauge, or starts closing the thread.
+    ///
+    /// Closing a thread only changes its admission state and wakes its host, so no user code
+    /// runs here.
+    pub(crate) fn abort(self) {
+        match self {
+            Self::Task { inner, metric } => {
+                inner.abort();
+
+                // We might never poll the future again after aborting it, so run the
+                // metric cleanup right away
+                metric.finish();
+            }
+            Self::Thread(thread) => {
+                if let Some(thread) = thread.upgrade() {
+                    thread.begin_close();
+                }
+            }
+        }
     }
 }
 
@@ -660,6 +834,15 @@ mod tests {
     };
 
     const METRIC_PREFIX: &str = "runtime_tasks_running{";
+
+    /// A panic payload whose destructor notifies its panicker again.
+    struct Renotify(Panicker);
+
+    impl Drop for Renotify {
+        fn drop(&mut self) {
+            self.0.notify(Box::new("nested"));
+        }
+    }
 
     fn running_tasks_for_label(metrics: &str, label: &str) -> Option<u64> {
         let label_fragment = format!("name=\"{label}\"");
@@ -1016,7 +1199,13 @@ mod tests {
             let pending = context
                 .child("pending")
                 .spawn(|_| future::pending::<Result<Option<AbortObservation>, AbortObservation>>());
-            let abort_handle = pending.aborter().unwrap().inner;
+            let Some(super::Aborter::Task {
+                inner: abort_handle,
+                ..
+            }) = pending.aborter()
+            else {
+                unreachable!("a spawned task has a task aborter");
+            };
             assert!(!abort_handle.is_aborted());
             let observed = Arc::new(Mutex::new(None));
             let resource = AbortObservation {
@@ -1077,7 +1266,7 @@ mod tests {
 
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let blocking_handle = context.child(LABEL).shared(true).spawn(|_| async move {
+            let blocking_handle = context.child(LABEL).blocking().spawn(|_| async move {
                 // Simulate some blocking work
                 42
             });
@@ -1144,6 +1333,28 @@ mod tests {
         }));
         let panic = result.expect_err("panic sent while completing was dropped");
         assert_eq!(extract_panic_message(&*panic), "late");
+    }
+
+    /// `notify` drops a payload it cannot deliver, or one it ignores, only after it releases
+    /// its lock, so a payload whose destructor notifies again does not deadlock. With
+    /// `catch` set, `notify` returns before it locks, so only `false` can fail here.
+    #[test]
+    fn notify_drops_payload_outside_lock() {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (panicker, panicked) = Panicker::new(false);
+            drop(panicked);
+
+            // The receiver is gone, so the send fails and hands the payload back to drop.
+            panicker.notify(Box::new(Renotify(panicker.clone())));
+
+            // The sender is gone, so the payload is ignored and dropped.
+            panicker.notify(Box::new(Renotify(panicker.clone())));
+            done_tx.send(()).unwrap();
+        });
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("notify deadlocked dropping a payload that notifies again");
     }
 
     /// A task whose supervisor closed before initialization is cancelled before its future can

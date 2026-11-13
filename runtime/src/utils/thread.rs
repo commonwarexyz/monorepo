@@ -1,6 +1,6 @@
-//! Helpers for resolving the configured thread stack size.
+//! Helpers for resolving the configured thread stack size and spawning runtime-owned threads.
 
-use std::{env, sync::OnceLock, thread};
+use std::{env, io, sync::OnceLock, thread};
 
 /// Cached configured thread stack size.
 static SYSTEM_THREAD_STACK_SIZE: OnceLock<usize> = OnceLock::new();
@@ -9,6 +9,9 @@ static SYSTEM_THREAD_STACK_SIZE: OnceLock<usize> = OnceLock::new();
 ///
 /// See <https://doc.rust-lang.org/std/thread/#stack-size>.
 const RUST_DEFAULT_THREAD_STACK_SIZE: usize = 2 * 1024 * 1024;
+
+/// Longest thread name Linux keeps, excluding the terminating NUL.
+const MAX_THREAD_NAME: usize = 15;
 
 /// Returns the value of the `RUST_MIN_STACK` environment variable, if set.
 fn rust_min_stack() -> Option<usize> {
@@ -95,14 +98,72 @@ fn system_thread_stack_size_impl() -> Option<usize> {
     Some(limit)
 }
 
-/// Spawns a thread with an explicit stack size.
-pub(crate) fn spawn<F, T>(stack_size: usize, f: F) -> thread::JoinHandle<T>
+/// Spawns a thread with an explicit stack size and an optional name, returning the OS error
+/// when the thread cannot be created. A refused thread drops `f` before this returns.
+pub(crate) fn try_spawn<F, T>(
+    stack_size: usize,
+    name: Option<&str>,
+    f: F,
+) -> io::Result<thread::JoinHandle<T>>
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
-    thread::Builder::new()
-        .stack_size(stack_size)
-        .spawn(f)
-        .expect("failed to spawn thread")
+    #[cfg(test)]
+    if tests::take_spawn_failure() {
+        drop(f);
+        return Err(io::Error::other("injected thread spawn failure"));
+    }
+
+    let mut builder = thread::Builder::new().stack_size(stack_size);
+    if let Some(name) = name {
+        builder = builder.name(name.to_owned());
+    }
+    builder.spawn(f)
+}
+
+/// Returns the name of a runtime thread created by a context labeled `label`: the label's last
+/// [MAX_THREAD_NAME] bytes, shortened to start at a character boundary, or `thread` when the
+/// label is empty.
+pub(crate) fn name(label: &str) -> &str {
+    if label.is_empty() {
+        return "thread";
+    }
+    let mut start = label.len().saturating_sub(MAX_THREAD_NAME);
+    while !label.is_char_boundary(start) {
+        start += 1;
+    }
+    &label[start..]
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// Number of upcoming [super::try_spawn] calls on this thread that fail.
+        static FAIL_SPAWNS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Make the next `count` calls to [super::try_spawn] on this thread fail.
+    pub(crate) fn fail_spawns(count: usize) {
+        FAIL_SPAWNS.set(count);
+    }
+
+    /// Consume one armed failure, if any.
+    pub(super) fn take_spawn_failure() -> bool {
+        let remaining = FAIL_SPAWNS.get();
+        if remaining == 0 {
+            return false;
+        }
+        FAIL_SPAWNS.set(remaining - 1);
+        true
+    }
+
+    #[test]
+    fn test_thread_name_keeps_label_suffix() {
+        assert_eq!(super::name(""), "thread");
+        assert_eq!(super::name("worker"), "worker");
+        assert_eq!(super::name("snapshot_decoder_x"), "pshot_decoder_x");
+    }
 }

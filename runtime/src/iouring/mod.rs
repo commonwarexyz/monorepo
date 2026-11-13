@@ -17,9 +17,24 @@
 //! nothing to run can steal half of another worker's queued tasks, rounded
 //! down, so a task queued alone behind a long poll waits for it.
 //!
-//! Dedicated and blocking tasks each receive a supervised thread and io_uring
-//! ring. Their ordinary descendants execute on the pool. Task factories run
-//! synchronously on the thread that calls [`crate::Spawner::spawn`].
+//! Blocking tasks each receive a supervised thread and io_uring ring, and their
+//! ordinary descendants execute on the pool. Task factories run synchronously
+//! on the thread that calls [`crate::Spawner::spawn`].
+//!
+//! # Runtime threads
+//!
+//! A runtime thread ([`crate::Spawner::thread`]) is a worker with a thread and
+//! io_uring ring of its own that polls only the tasks placed on it, its
+//! residents, outside the pool and its work stealing. Each turn admits at most
+//! 64 queued spawns, in order, then makes at most 64 resident polls, polling a
+//! resident again if it was woken during the turn. Residents
+//! share the thread's ring and its in-flight limit, and their I/O and sleeps
+//! register on that ring.
+//!
+//! There is no cooperative budget, so a resident whose channels never return
+//! `Pending` can starve the other residents of its thread. A future first
+//! polled on another worker keeps that worker's registrations after it moves
+//! onto a thread, so create thread-bound I/O inside the thread's tasks.
 //!
 //! Sockets, blobs, and pending I/O and sleep futures can move between workers.
 //! Registrations stay on their original worker without keeping it alive. If it
@@ -69,7 +84,7 @@
 //!
 //! Shutdown waits for all workers to finish runtime cleanup and failure publication,
 //! with no timeout. No pool worker closes its mailbox or io_uring ring until
-//! every pool task's future has been dropped, though dedicated and blocking
+//! every pool task's future has been dropped, though runtime threads and blocking
 //! tasks may still run and find a pool worker closed. Native thread-local
 //! destructors may run after the runner returns.
 //!

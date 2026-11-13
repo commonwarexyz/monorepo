@@ -77,6 +77,9 @@ stability_scope!(BETA {
 
     pub mod telemetry;
 
+    mod threads;
+    pub use threads::{Cpus, Local, LocalHandle, Thread, ThreadBuilder, ThreadError};
+
     /// Runtime-owned layout of a [`Blob`].
     ///
     /// This determines the container format, including its header and data offset, not the
@@ -355,31 +358,215 @@ stability_scope!(BETA {
     }
 
     /// Interface that any task scheduler must implement to spawn tasks.
+    ///
+    /// # Placement
+    ///
+    /// Every context carries a placement: the runtime's shared executor (the default), its
+    /// blocking pool, or a runtime [`Thread`] (see [`Spawner::thread`]). [`Spawner::shared`],
+    /// [`Spawner::blocking`] and [`Spawner::on`] set it, and the last of them wins.
+    /// [`Supervisor::child`] and [`Supervisor::with_attribute`] keep it.
+    ///
+    /// A spawn hands its task an unplaced context. The context remembers where its task runs, but
+    /// its spawns run on the shared executor until [`Spawner::placed`] places it where its task
+    /// runs. Placing a subsystem's context therefore places the tasks spawned from it and from
+    /// the contexts derived from it, including actors it wires before spawning, while what those
+    /// tasks spawn runs on the shared executor unless they ask with [`Spawner::placed`].
+    ///
+    /// Callers choose where a subsystem runs, with [`Spawner::shared`], [`Spawner::blocking`],
+    /// [`Spawner::on`] or [`ThreadBuilder::attach`]. Libraries choose what follows it:
+    ///
+    /// - A running task that wires a long-lived actor spawns it from `context.child(..).placed()`,
+    ///   so the actor runs where the task runs.
+    /// - Per-peer or per-request fan-out stays unplaced, so it runs on the shared executor
+    ///   instead of crowding one thread or the blocking pool.
+    /// - A component that keeps its construction context and spawns from it on demand stores it
+    ///   with [`Spawner::shared`]. A stored context never crosses a spawn, so it would otherwise
+    ///   carry its caller's placement into every on-demand spawn.
     pub trait Spawner: Supervisor {
-        /// Return a [`Spawner`] that schedules the next task onto the runtime's shared executor.
+        /// Place this context on the runtime's shared executor.
         ///
-        /// Set `blocking` to `true` when the task may hold the thread for a short, blocking operation.
-        /// Runtimes can use this hint to move the work to a blocking-friendly pool so asynchronous
-        /// tasks on a work-stealing executor are not starved. For long-lived, blocking work, use
-        /// [`Spawner::dedicated`] instead.
-        ///
-        /// The shared executor with `blocking == false` is the default spawn mode.
+        /// Contexts spawn there unless something placed them elsewhere, so this is needed only
+        /// to move a context off another placement, to store a context that spawns on demand
+        /// (see [Placement](Spawner#placement)), or to keep code that calls [`Spawner::placed`]
+        /// on a context derived from yours from running where your task runs.
         #[must_use]
-        fn shared(self, blocking: bool) -> Self;
+        fn shared(self) -> Self;
 
-        /// Return a [`Spawner`] that runs the next task on a dedicated thread when the runtime supports it.
+        /// Place this context on the runtime's blocking pool, for tasks that hold their thread
+        /// for a short, blocking operation.
         ///
-        /// Reserve this for long-lived or prioritized tasks that should not compete for resources in the
-        /// shared executor.
-        ///
-        /// This is not the default behavior. See [`Spawner::shared`] for more information.
+        /// Runtimes run these tasks where they cannot starve the asynchronous tasks of the shared
+        /// executor, such as a blocking-friendly pool. Every task spawned from the context, or
+        /// from a context derived from it, is such a task, because [`Supervisor::child`] keeps
+        /// the placement. Place the context you spawn from rather than one you derive many
+        /// children from. A long-lived task that should own a thread belongs on a runtime thread
+        /// (see [`Spawner::thread`]), and long CPU work on a [`Strategizer::strategy`].
         #[must_use]
-        fn dedicated(self) -> Self;
+        fn blocking(self) -> Self;
+
+        /// Place this context on `thread`.
+        ///
+        /// A spawn from a context placed on a thread runs its factory on the caller, as usual,
+        /// and its future on the thread. Tasks on a thread are cooperative. Every poll, factory
+        /// and destructor must return promptly (see [`Spawner::thread`]). A spawn toward a thread
+        /// that already closed, or belongs to another runner, resolves [`Error::Closed`] without
+        /// running its factory, and aborts the consumed context's node. If the thread closes before
+        /// the task finishes, its future is dropped and the handle resolves [`Error::Closed`] as
+        /// well.
+        ///
+        /// Placement creates no supervision edge. Aborting a context placed on a thread does not
+        /// close the thread, unless the thread was attached to it (see [`ThreadBuilder::attach`]).
+        /// Closing the thread aborts the tasks running on it, wherever they are supervised, and
+        /// supervision then aborts their descendants wherever those run.
+        ///
+        /// A component that stores this context, or one derived from it, and spawns from it on
+        /// demand runs every such spawn on the thread. Such a component should store its context
+        /// with [`Spawner::shared`] (see [Placement](Spawner#placement)).
+        #[must_use]
+        fn on(self, thread: &Thread) -> Self;
+
+        /// Place this context where its task runs.
+        ///
+        /// The context a spawn hands to its task remembers where that task runs: on a runtime
+        /// thread, on the blocking pool or on the shared executor. Until this is called, its
+        /// spawns run on the shared executor (see [Placement](Spawner#placement)). Contexts
+        /// derived from it with [`Supervisor::child`] and [`Supervisor::with_attribute`] remember
+        /// the same placement. On a context placed with [`Spawner::shared`],
+        /// [`Spawner::blocking`] or [`Spawner::on`], this does nothing.
+        ///
+        /// A context handed to a blocking task remembers the blocking pool, so its placed spawns
+        /// are blocking tasks as well.
+        ///
+        /// The placement belongs to the context, not to the code holding it. A context passed to
+        /// another task, or kept by a service, still resolves to the task it was handed to.
+        ///
+        /// # Examples
+        ///
+        /// A task on a thread wires a long-lived actor next to it, while its per-peer tasks run
+        /// on the shared executor:
+        ///
+        /// ```
+        /// use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
+        ///
+        /// deterministic::Runner::default().start(|context| async move {
+        ///     let core = context.child("core").thread().build().unwrap();
+        ///     let engine = context.child("engine").on(&core).spawn(|context| async move {
+        ///         // A long-lived actor runs on `core`, like the engine.
+        ///         let actor = context.child("actor").placed().spawn(|_| async { 1 });
+        ///
+        ///         // Per-peer tasks run on the shared executor.
+        ///         let peers: Vec<_> = (0..3)
+        ///             .map(|peer| context.child("peer").spawn(move |_| async move { peer }))
+        ///             .collect();
+        ///         let mut total = actor.await.unwrap();
+        ///         for peer in peers {
+        ///             total += peer.await.unwrap();
+        ///         }
+        ///         total
+        ///     });
+        ///     assert_eq!(engine.await.unwrap(), 4);
+        /// });
+        /// ```
+        #[must_use]
+        fn placed(self) -> Self;
+
+        /// Configure a new runtime thread.
+        ///
+        /// A runtime thread is an OS thread owned by the runtime that runs only the tasks placed
+        /// on it, its residents, cooperatively, for their whole lives. Tasks on one thread share
+        /// its core, its wakes and its data. It suits long-lived tasks that should own a thread.
+        ///
+        /// This consumes the context and ignores its placement. A thread created by
+        /// [`ThreadBuilder::build`] or [`ThreadBuilder::spawn`] occupies this context's
+        /// supervision node and lives as long as that node, until the context's lineage finishes
+        /// or is aborted, or the runtime shuts down. A thread created by [`ThreadBuilder::attach`]
+        /// closes when the task that consumes the attached context ends. Holding a [`Thread`] or
+        /// a [`Local`] never keeps a thread open. Closing a thread aborts the tasks running on
+        /// it, wherever they are supervised, and supervision then aborts their descendants
+        /// wherever those run.
+        ///
+        /// The returned [`ThreadBuilder`] can pin the thread to CPUs, then creates it with one of:
+        ///
+        /// - [`ThreadBuilder::build`]: a [`Thread`] handle for [`Spawner::on`] and
+        ///   [`Spawner::spawn_on`].
+        /// - [`ThreadBuilder::attach`]: a context placed on the thread, which closes when the task
+        ///   that consumes the context ends.
+        /// - [`ThreadBuilder::spawn`]: a root task that runs on the thread, which closes when the
+        ///   root task ends.
+        ///
+        /// # Cooperation and liveness
+        ///
+        /// Tasks on a thread are cooperative. Every poll, factory and destructor must return
+        /// promptly. Short blocking calls belong on [`Spawner::blocking`], and long CPU work on a
+        /// [`Strategizer::strategy`]. A strategy may run work inline on the calling task, as a
+        /// sequential strategy or a pool with one worker can, so it does not isolate the thread
+        /// from that work. Each runtime bounds a thread's turns:
+        ///
+        /// - io_uring: one turn admits at most 64 queued spawns, in order, then makes at most 64
+        ///   polls of ready tasks, polling a task again if it was woken meanwhile. There is no
+        ///   cooperative budget, so a task whose channels never return `Pending` can starve its
+        ///   thread. The thread's tasks share one io_uring ring and its
+        ///   in-flight limit, so a receive can hold the slot that a dependent send needs.
+        ///   Deadlines break such dependencies. A future first polled elsewhere keeps the
+        ///   registrations of the worker that polled it after it moves onto a thread, so create
+        ///   thread-bound I/O inside [`ThreadBuilder::spawn`] or [`Spawner::spawn_on`].
+        /// - tokio: a thread runs a `LocalSet` inside the owning runtime, which gives each task
+        ///   tokio's cooperative budget. One turn admits at most 64 queued spawns.
+        ///   `tokio::task::block_in_place` panics there. Do not hold the enter guard of another
+        ///   Tokio runtime across an await in a thread's tasks.
+        /// - deterministic: threads are virtual. Their tasks are ordinary seeded tasks with an
+        ///   identity, and pins are validated and recorded but never applied. All virtual threads
+        ///   share one OS thread, so thread-local storage can carry `!Send` values between them,
+        ///   which would not happen in production.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use commonware_runtime::{Runner, Spawner, Supervisor, ThreadError, deterministic};
+        /// use std::{cell::RefCell, rc::Rc};
+        ///
+        /// deterministic::Runner::default().start(|context| async move {
+        ///     // Run a root task on a thread of its own.
+        ///     let handle = context.child("worker").thread().spawn(|_| async { 42 })?;
+        ///     assert_eq!(handle.await.unwrap(), 42);
+        ///
+        ///     // Share one pinned thread across subsystems.
+        ///     let core = context.child("core").thread().pin(0).build()?;
+        ///     let a = context.child("a").on(&core);
+        ///     let b = context.child("b").on(&core);
+        ///     let (a, b) = (a.spawn(|_| async { 1 }), b.spawn(|_| async { 2 }));
+        ///     assert_eq!(a.await.unwrap() + b.await.unwrap(), 3);
+        ///
+        ///     // Keep !Send state on a thread, shared by its tasks.
+        ///     let handle = context.child("net").thread().spawn(|local| async move {
+        ///         let peers = Rc::new(RefCell::new(Vec::new()));
+        ///         let shared = peers.clone();
+        ///         local
+        ///             .child("conn")
+        ///             .spawn_local(move |_| async move { shared.borrow_mut().push(7) })
+        ///             .await
+        ///             .unwrap();
+        ///         let count = peers.borrow().len();
+        ///         count
+        ///     })?;
+        ///     assert_eq!(handle.await.unwrap(), 1);
+        ///     Ok::<(), ThreadError>(())
+        /// })
+        /// .unwrap();
+        /// ```
+        fn thread(self) -> ThreadBuilder<Self>
+        where
+            Self: Sized;
 
         /// Spawn a task with the current context.
         ///
         /// Unlike directly awaiting a future, the task starts running immediately even if the caller
-        /// never awaits the returned [`Handle`].
+        /// never awaits the returned [`Handle`]. The factory `f` runs on the caller before this
+        /// returns, unless the spawn is rejected and drops it unrun, so it may borrow or read
+        /// `!Send` state. The future it returns runs where the
+        /// context's spawns run (see [Placement](Spawner#placement)), so it must be `Send` and
+        /// `'static`. The context handed to the task remembers where the task runs, and is
+        /// unplaced.
         ///
         /// # Mandatory Supervision
         ///
@@ -402,19 +589,178 @@ stability_scope!(BETA {
         /// Task A finishes or aborts --> Task B and Task C are aborted
         /// ```
         ///
-        /// # Spawn Configuration
+        /// # Examples
         ///
-        /// [`Spawner::dedicated`] and [`Spawner::shared`] only affect the
-        /// handle they return. [`Supervisor::child`] and [`Spawner::spawn`]
-        /// both start child task contexts from a clean spawn configuration.
+        /// A task on a runtime thread can read its `!Send` state in a factory to build a `Send`
+        /// future:
         ///
-        /// Child tasks should assume they start from a clean configuration without needing to inspect how their
-        /// parent was configured.
+        /// ```
+        /// use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
+        /// use std::{cell::RefCell, rc::Rc};
+        ///
+        /// deterministic::Runner::default().start(|context| async move {
+        ///     let handle = context.child("worker").thread().spawn(|local| async move {
+        ///         let config = Rc::new(RefCell::new(5));
+        ///         let task = local.child("task").into_inner().spawn(|_| {
+        ///             let value = *config.borrow();
+        ///             async move { value + 1 }
+        ///         });
+        ///         task.await.unwrap()
+        ///     });
+        ///     assert_eq!(handle.unwrap().await.unwrap(), 6);
+        /// });
+        /// ```
+        ///
+        /// The future cannot hold the `Rc`:
+        ///
+        /// ```compile_fail
+        /// use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
+        /// use std::{cell::RefCell, rc::Rc};
+        ///
+        /// deterministic::Runner::default().start(|context| async move {
+        ///     let handle = context.child("worker").thread().spawn(|local| async move {
+        ///         let config = Rc::new(RefCell::new(5));
+        ///         let task = local.child("task").into_inner().spawn(move |_| async move {
+        ///             let value = *config.borrow();
+        ///             value + 1
+        ///         });
+        ///         task.await.unwrap()
+        ///     });
+        ///     assert_eq!(handle.unwrap().await.unwrap(), 6);
+        /// });
+        /// ```
         fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
         where
             Self: Sized,
-            F: FnOnce(Self) -> Fut + Send + 'static,
+            F: FnOnce(Self) -> Fut,
             Fut: Future<Output = T> + Send + 'static,
+            T: Send + 'static;
+
+        /// Send `f` to `thread`, build the task's future there and run it as a resident. The
+        /// future may be `!Send`.
+        ///
+        /// The task is supervised by this context, like [`Spawner::spawn`], and `f` receives a
+        /// [`Local`] on `thread`, whose context is unplaced like any context a spawn hands out.
+        /// `f` runs on the thread, in the thread's own runtime environment, never inside the
+        /// caller's poll. A spawn toward a thread that is closed or belongs to another runner
+        /// resolves [`Error::Closed`], drops `f` unrun and aborts the consumed context's node.
+        ///
+        /// A thread admits a bounded batch of spawns per turn, and its queue of spawns is
+        /// unbounded, like any spawn queue. A producer that submits faster than the thread admits
+        /// grows it, so backpressure is the caller's job.
+        ///
+        /// # Examples
+        ///
+        /// A `!Send` value can be built inside the task:
+        ///
+        /// ```
+        /// use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
+        /// use std::rc::Rc;
+        ///
+        /// deterministic::Runner::default().start(|context| async move {
+        ///     let thread = context.child("exec").thread().build().unwrap();
+        ///     let handle = context.child("execute").spawn_on(&thread, |_| async move {
+        ///         let state = Rc::new(5);
+        ///         *state + 1
+        ///     });
+        ///     assert_eq!(handle.await.unwrap(), 6);
+        /// });
+        /// ```
+        ///
+        /// But the factory is sent to the thread, so it cannot capture one:
+        ///
+        /// ```compile_fail
+        /// use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
+        ///
+        /// deterministic::Runner::default().start(|context| async move {
+        ///     let thread = context.child("exec").thread().build().unwrap();
+        ///     let state = std::rc::Rc::new(5);
+        ///     let handle = context.child("execute").spawn_on(&thread, move |_| async move {
+        ///         *state + 1
+        ///     });
+        ///     assert_eq!(handle.await.unwrap(), 6);
+        /// });
+        /// ```
+        ///
+        /// It can capture a `Send` value:
+        ///
+        /// ```
+        /// use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
+        ///
+        /// deterministic::Runner::default().start(|context| async move {
+        ///     let thread = context.child("exec").thread().build().unwrap();
+        ///     let state = std::sync::Arc::new(5);
+        ///     let handle = context.child("execute").spawn_on(&thread, move |_| async move {
+        ///         *state + 1
+        ///     });
+        ///     assert_eq!(handle.await.unwrap(), 6);
+        /// });
+        /// ```
+        ///
+        /// The same holds for the factory of a thread's root task:
+        ///
+        /// ```compile_fail
+        /// use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
+        ///
+        /// deterministic::Runner::default().start(|context| async move {
+        ///     let state = std::rc::Rc::new(5);
+        ///     let handle = context.child("exec").thread().spawn(move |_| async move {
+        ///         *state + 1
+        ///     });
+        ///     assert_eq!(handle.unwrap().await.unwrap(), 6);
+        /// });
+        /// ```
+        ///
+        /// With a `Send` value it compiles:
+        ///
+        /// ```
+        /// use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
+        ///
+        /// deterministic::Runner::default().start(|context| async move {
+        ///     let state = std::sync::Arc::new(5);
+        ///     let handle = context.child("exec").thread().spawn(move |_| async move {
+        ///         *state + 1
+        ///     });
+        ///     assert_eq!(handle.unwrap().await.unwrap(), 6);
+        /// });
+        /// ```
+        ///
+        /// An ordinary spawn from a context placed on a thread runs its factory on the caller and
+        /// sends the future it returns to the thread, so that future cannot hold one:
+        ///
+        /// ```compile_fail
+        /// use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
+        ///
+        /// deterministic::Runner::default().start(|context| async move {
+        ///     let thread = context.child("exec").thread().build().unwrap();
+        ///     let state = std::rc::Rc::new(5);
+        ///     let handle = context.child("execute").on(&thread).spawn(move |_| async move {
+        ///         *state + 1
+        ///     });
+        ///     assert_eq!(handle.await.unwrap(), 6);
+        /// });
+        /// ```
+        ///
+        /// Its factory can read one, and it compiles once the future holds only `Send` values:
+        ///
+        /// ```
+        /// use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
+        ///
+        /// deterministic::Runner::default().start(|context| async move {
+        ///     let thread = context.child("exec").thread().build().unwrap();
+        ///     let state = std::rc::Rc::new(5);
+        ///     let handle = context.child("execute").on(&thread).spawn(|_| {
+        ///         let value = *state;
+        ///         async move { value + 1 }
+        ///     });
+        ///     assert_eq!(handle.await.unwrap(), 6);
+        /// });
+        /// ```
+        fn spawn_on<F, Fut, T>(self, thread: &Thread, f: F) -> Handle<T>
+        where
+            Self: Sized,
+            F: FnOnce(Local<Self>) -> Fut + Send + 'static,
+            Fut: Future<Output = T> + 'static,
             T: Send + 'static;
 
         /// Signals the runtime to stop execution and waits for all outstanding tasks
@@ -1204,6 +1550,33 @@ mod tests {
     };
     use utils::reschedule;
 
+    /// Where a test spawns its task.
+    #[derive(Clone, Copy, Debug)]
+    enum Placement {
+        /// On the shared executor, as short blocking work or not.
+        Shared(bool),
+        /// As the root task of a new runtime thread.
+        Thread,
+    }
+
+    /// Spawn `f` from `context` as `placement` says.
+    fn spawn_placed<C, F, Fut, T>(context: C, placement: Placement, f: F) -> Handle<T>
+    where
+        C: Spawner,
+        F: FnOnce(C) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        match placement {
+            Placement::Shared(false) => context.shared().spawn(f),
+            Placement::Shared(true) => context.blocking().spawn(f),
+            Placement::Thread => context
+                .thread()
+                .spawn(move |local| f(local.into_inner()))
+                .expect("thread"),
+        }
+    }
+
     #[test]
     fn test_blob_version() {
         let version = BlobVersion::new(7);
@@ -1393,7 +1766,11 @@ mod tests {
                 // Register this task's waker before transferring the pending future.
                 // The destination must receive the eventual wakeup.
                 assert!(futures::poll!(&mut future).is_pending());
-                let moved = context.child("moved").dedicated().spawn(move |_| future);
+                let moved = context
+                    .child("moved")
+                    .thread()
+                    .spawn(move |_| future)
+                    .expect("thread");
 
                 // The source task's independent timeout detects a missing destination wakeup.
                 select! {
@@ -1458,22 +1835,13 @@ mod tests {
     #[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default()))]
     fn test_spawn_abort<R: Runner>(
         #[case] runner: R,
-        #[values(
-            Execution::Shared(false),
-            Execution::Shared(true),
-            Execution::Dedicated
-        )]
-        execution: Execution,
+        #[values(Placement::Shared(false), Placement::Shared(true), Placement::Thread)]
+        placement: Placement,
     ) where
         R::Context: Spawner,
     {
         runner.start(|context| async move {
-            let context = match execution {
-                Execution::Dedicated => context.dedicated(),
-                Execution::Shared(blocking) => context.shared(blocking),
-            };
-
-            let handle = context.spawn(|_| async move {
+            let handle = spawn_placed(context, placement, |_| async move {
                 loop {
                     reschedule().await;
                 }
@@ -2366,12 +2734,15 @@ mod tests {
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
     #[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default()))]
-    fn test_spawn_dedicated<R: Runner>(#[case] runner: R)
+    fn test_thread_spawn<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner,
     {
         runner.start(|context| async move {
-            let handle = context.dedicated().spawn(|_| async move { 42 });
+            let handle = context
+                .thread()
+                .spawn(|_| async move { 42 })
+                .expect("thread");
             assert!(matches!(handle.await, Ok(42)));
         });
     }
@@ -2738,17 +3109,12 @@ mod tests {
     #[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default()))]
     fn test_spawn_blocking<R: Runner>(
         #[case] runner: R,
-        #[values(Execution::Shared(true), Execution::Dedicated)] execution: Execution,
+        #[values(Placement::Shared(true), Placement::Thread)] placement: Placement,
     ) where
         R::Context: Spawner,
     {
         runner.start(|context| async move {
-            let context = match execution {
-                Execution::Dedicated => context.dedicated(),
-                Execution::Shared(blocking) => context.shared(blocking),
-            };
-
-            let handle = context.spawn(|_| async move { 42 });
+            let handle = spawn_placed(context, placement, |_| async move { 42 });
             let result = handle.await;
             assert!(matches!(result, Ok(42)));
         });
@@ -2761,16 +3127,12 @@ mod tests {
     #[should_panic(expected = "blocking task panicked")]
     fn test_spawn_blocking_panic<R: Runner>(
         #[case] runner: R,
-        #[values(Execution::Shared(true), Execution::Dedicated)] execution: Execution,
+        #[values(Placement::Shared(true), Placement::Thread)] placement: Placement,
     ) where
         R::Context: Spawner + Clock,
     {
         runner.start(|context| async move {
-            let spawner = match execution {
-                Execution::Dedicated => context.child("blocking").dedicated(),
-                Execution::Shared(blocking) => context.child("blocking").shared(blocking),
-            };
-            spawner.spawn(|_| async move {
+            spawn_placed(context.child("blocking"), placement, |_| async move {
                 panic!("blocking task panicked");
             });
 
@@ -2789,16 +3151,12 @@ mod tests {
     #[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::new(iouring::Config::default().with_catch_panics(true))))]
     fn test_spawn_blocking_panic_caught<R: Runner>(
         #[case] runner: R,
-        #[values(Execution::Shared(true), Execution::Dedicated)] execution: Execution,
+        #[values(Placement::Shared(true), Placement::Thread)] placement: Placement,
     ) where
         R::Context: Spawner + Clock,
     {
         let result: Result<(), Error> = runner.start(|context| async move {
-            let spawner = match execution {
-                Execution::Dedicated => context.child("blocking").dedicated(),
-                Execution::Shared(blocking) => context.child("blocking").shared(blocking),
-            };
-            let handle = spawner.spawn(|_| async move {
+            let handle = spawn_placed(context.child("blocking"), placement, |_| async move {
                 panic!("blocking task panicked");
             });
             handle.await
