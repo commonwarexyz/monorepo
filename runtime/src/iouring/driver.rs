@@ -24,10 +24,12 @@
 //!
 //! # Service and Parking
 //!
-//! Each service turn reaps completions, advances the timeout wheel, registers new
-//! deadlines, and stages queued work. Reaping first lets a terminal completion
+//! Each service turn reaps completions, expires due request deadlines, installs
+//! new ones, and stages queued work. Reaping first lets a terminal completion
 //! win a race with expiry. Partial progress after expiry cannot issue another SQE.
-//! Queued requests expire even while all operation slots are occupied.
+//! Queued requests expire even while all operation slots are occupied. Request
+//! deadlines live in a driver-local [`Deadlines`], unlinked as soon as their
+//! request completes or is cancelled.
 //!
 //! The ring uses SINGLE_ISSUER and DEFER_TASKRUN, requiring Linux 6.1 or newer.
 //! Unfinished requests need a GETEVENTS enter even when tasks keep the worker
@@ -47,10 +49,10 @@
 //! retire, keeping the driver in place throughout the drain.
 
 use super::{
-    registration::Observation,
+    deadlines::Deadlines,
+    operation::Observation,
     request::{Request, RequestOutput},
     runtime::{Deferred, RingConfig},
-    timeout::TimeoutWheel,
     waiter::{CompletionOutcome, Observer, UserData, WaiterId, Waiters},
     waker::{WAKE_USER_DATA, Waker},
 };
@@ -65,7 +67,7 @@ use io_uring::{
 };
 use std::{
     collections::VecDeque,
-    io,
+    io, mem,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll, Waker as TaskWaker},
@@ -98,12 +100,15 @@ struct State {
     acquiring: FuturesUnordered<BoxFuture<'static, (WaiterId, OwnedAsyncMutexGuard<()>)>>,
     /// Permit grants wake ring service even after the ordinary mailbox closes.
     acquisition_waker: TaskWaker,
-    /// New requests whose deadlines must be registered after advancing the wheel.
+    /// New requests whose deadlines must be installed by the next service turn.
     pending_deadlines: VecDeque<WaiterId>,
     /// Requests awaiting a cancellation SQE, skipped if their operation finishes first.
     pending_cancels: VecDeque<WaiterId>,
     /// Deadlines for queued and in-flight requests, independent of sleepers.
-    timeout_wheel: TimeoutWheel,
+    deadlines: Deadlines,
+    /// Slots whose deadlines the latest expiry pass detached, kept for the
+    /// allocation.
+    expired: Vec<u32>,
     /// Shared mailbox wake source retained through ring destruction.
     waker: Waker,
     /// Whether the multishot wake poll needs to be installed again.
@@ -130,16 +135,9 @@ impl Driver {
     /// Create a ring on its permanent owner thread after configuration validation.
     ///
     /// Uses the CQ sizing and overflow policy described by [`RingConfig::size`].
-    pub fn new(
-        cfg: &RingConfig,
-        max_timeout: Duration,
-        waker: Waker,
-        now: Instant,
-    ) -> io::Result<Self> {
+    /// Request deadlines are measured from `now`.
+    pub fn new(cfg: &RingConfig, waker: Waker, now: Instant) -> io::Result<Self> {
         assert!(cfg.size > 0 && cfg.size.is_power_of_two() && cfg.size <= 32_768);
-
-        TimeoutWheel::validate_layout(max_timeout, cfg.timeout_wheel_tick)
-            .expect("validated timeout wheel configuration");
 
         // Deferred task work runs during GETEVENTS, supplied by service or park.
         let ring = IoUring::builder()
@@ -158,7 +156,8 @@ impl Driver {
                 acquisition_waker: Arc::new(waker.clone()).into(),
                 pending_deadlines: VecDeque::with_capacity(size),
                 pending_cancels: VecDeque::with_capacity(size),
-                timeout_wheel: TimeoutWheel::new(max_timeout, cfg.timeout_wheel_tick, now),
+                deadlines: Deadlines::new(now),
+                expired: Vec::new(),
                 waker,
                 wake_rearm_needed: true,
             },
@@ -167,8 +166,8 @@ impl Driver {
 
     /// Accept an owned request without staging kernel work.
     ///
-    /// Cached time can reject expired requests immediately. Service validates
-    /// remaining deadlines after the wheel has advanced.
+    /// Cached time can reject expired requests immediately. Service installs
+    /// remaining deadlines against its own time.
     pub fn admit(
         &mut self,
         request: Request,
@@ -187,8 +186,8 @@ impl Driver {
                 return id;
             }
 
-            // A task poll may have taken long enough to leave the wheel behind.
-            // Service refreshes it before assigning this deadline a tick.
+            // A task poll may have taken long enough to make the cached time
+            // stale. Service checks the deadline again before installing it.
             self.state.pending_deadlines.push_back(id);
         }
 
@@ -236,13 +235,14 @@ impl Driver {
             || !self.state.pending_cancels.is_empty()
     }
 
-    /// Earliest active deadline registered on the operation wheel.
-    pub fn next_deadline(&self) -> Option<Instant> {
-        self.state.timeout_wheel.next_deadline()
+    /// Earliest firing time of an installed request deadline, or a time never
+    /// later than it.
+    pub const fn next_deadline(&self) -> Option<Instant> {
+        self.state.deadlines.next_deadline()
     }
 
     /// Consume a retained result or check whether its waker needs refreshing.
-    pub fn observe(&mut self, id: WaiterId, waker: &TaskWaker) -> Observation<RequestOutput> {
+    pub fn observe(&mut self, id: WaiterId, waker: &TaskWaker) -> Observation {
         self.state.waiters.observe(id, waker)
     }
 
@@ -287,8 +287,8 @@ impl Driver {
         defer_kernel_service: bool,
         deferred: &mut Deferred,
     ) -> io::Result<bool> {
-        // Finish posted work before expiring requests, then register deadlines
-        // against the refreshed wheel so an idle interval cannot shorten them.
+        // Finish posted work before expiring requests, then install new
+        // deadlines.
         self.state.reap(&mut self.ring, deferred);
         self.state.advance_timeouts(now, deferred);
         self.state.register_deadlines(now, deferred);
@@ -482,25 +482,38 @@ impl State {
 
     /// Store the terminal result and defer resource destruction and callbacks.
     fn complete(&mut self, id: WaiterId, result: Result<(), Error>, deferred: &mut Deferred) {
-        // Finish splits the request into its result and deferred resources.
-        // A previously cancelled request has already released its wheel tick.
-        if let Some(tick) = self.waiters.finish(id, result, deferred) {
-            self.timeout_wheel.remove(tick);
+        // A deadline still installed leaves with its request. Only a request
+        // with a timeout can have one, so others, such as storage requests,
+        // skip the wheel. One that cancellation or expiry already removed, or
+        // that was never installed, is not there to remove. A request leaves
+        // its slot only through here, so a slot never keeps the deadline of
+        // an earlier occupant.
+        if self.waiters.deadline(id).is_some() {
+            self.deadlines.remove(id.0.index);
         }
+
+        // Finish splits the request into its result and deferred resources.
+        self.waiters.finish(id, result, deferred);
     }
 
     /// Request cancellation once, finishing locally if no SQE is in flight.
     fn cancel(&mut self, id: WaiterId, deferred: &mut Deferred) {
-        // Cancellation clears the waiter's tick. Save it before the transition
-        // so the wheel loses its active count exactly once.
-        let tick = self.waiters.target_tick(id);
         if !self.waiters.cancel(id) {
             return;
         }
-        if let Some(tick) = tick {
-            self.timeout_wheel.remove(tick);
+
+        // An in-flight request completes only at its CQE, so remove its
+        // deadline now, before expiry could cancel it a second time.
+        if self.waiters.deadline(id).is_some() {
+            self.deadlines.remove(id.0.index);
         }
 
+        self.retire_cancelled(id, deferred);
+    }
+
+    /// Finish a request whose cancellation was just recorded, or queue its
+    /// cancellation SQE while its operation is in flight.
+    fn retire_cancelled(&mut self, id: WaiterId, deferred: &mut Deferred) {
         if self.waiters.is_in_flight(id) {
             self.pending_cancels.push_back(id);
         } else {
@@ -509,17 +522,31 @@ impl State {
         }
     }
 
-    /// Advance the wheel even when no active operation deadline remains.
+    /// Cancel the requests whose deadlines are due at `now`, at most one
+    /// expiry budget of them per turn.
     fn advance_timeouts(&mut self, now: Instant, deferred: &mut Deferred) {
-        let Some(expired) = self.timeout_wheel.advance(now) else {
-            return;
-        };
-        for id in expired {
-            self.cancel(id, deferred);
+        // Retiring a request needs the whole state, so the buffer leaves it
+        // for the pass.
+        let mut expired = mem::take(&mut self.expired);
+        self.deadlines.expire(now, &mut expired);
+
+        for slot in expired.drain(..) {
+            // Completion and cancellation remove a deadline, so the slot
+            // that expiry detached still holds the active request that
+            // installed it.
+            let id = self
+                .waiters
+                .id_at(slot)
+                .expect("expired deadline without a request");
+            assert!(self.waiters.cancel(id), "expired request already cancelled");
+            self.retire_cancelled(id, deferred);
         }
+
+        self.expired = expired;
     }
 
-    /// Register deadlines for new requests against this turn's refreshed wheel.
+    /// Install the deadlines of new requests, finishing those already due at
+    /// this turn's time.
     fn register_deadlines(&mut self, now: Instant, deferred: &mut Deferred) {
         while let Some(id) = self.pending_deadlines.pop_front() {
             // Cancellation may have retired the request before registration.
@@ -527,24 +554,15 @@ impl State {
                 continue;
             };
 
-            match self.timeout_wheel.checked_target_tick(deadline, now) {
-                Ok(Some(tick)) => {
-                    // Remember the same tick in the waiter so completion or
-                    // cancellation can remove its active count from the wheel.
-                    self.timeout_wheel.schedule(id, tick);
-                    self.waiters.set_deadline(id, tick);
-                }
-                // Time spent waiting for service can exhaust the deadline.
-                // Complete before staging, leaving the ready ID for lazy removal.
-                Ok(None) => self.complete(id, Err(Error::Timeout), deferred),
-                Err(message) => {
-                    // An unsupported deadline fails through the request result
-                    // path before the kernel can reference this request.
-                    let error =
-                        Error::Io(io::Error::new(io::ErrorKind::InvalidInput, message).into());
-                    self.complete(id, Err(error), deferred);
-                }
+            // Time spent waiting for service can exhaust the deadline.
+            // Complete before staging, leaving the ready ID for lazy removal.
+            if deadline <= now {
+                self.complete(id, Err(Error::Timeout), deferred);
+                continue;
             }
+
+            // Completion, cancellation or expiry later removes it exactly once.
+            self.deadlines.insert(id.0.index, deadline);
         }
     }
 
@@ -722,22 +740,25 @@ pub mod tests {
     use crate::{
         IoBuf, IoBufMut, IoBufs,
         iouring::{
+            deadlines::RESOLUTION,
             mailbox::Mailbox,
             request::{
                 Cache, DIRECT_ALIGN, IOVEC_BATCH_SIZE, ReadAtRequest, RecvRequest, RequestOutput,
                 SyncRequest, WriteAtRequest, WriteAtState,
             },
             waker::tests::wait_until_eventfd_armed,
+            wheel::BUDGET,
         },
         storage::{hold::Hold, iouring::Shared},
     };
-    use commonware_utils::channel::oneshot;
+    use commonware_utils::{TestRng, channel::oneshot};
+    use rand::RngExt as _;
     use std::{
         cell::Cell,
         fs::{self, OpenOptions},
         io::Write,
         os::{
-            fd::{AsRawFd, RawFd},
+            fd::{AsRawFd, OwnedFd, RawFd},
             unix::{fs::OpenOptionsExt as _, net::UnixStream},
         },
         panic::{AssertUnwindSafe, catch_unwind},
@@ -858,7 +879,8 @@ pub mod tests {
         tracked: Vec<(WaiterId, u64, TaskWaker)>,
         /// Collected results retained for assertions.
         completed: Vec<Completed>,
-        /// Initial wheel time, also used as the origin for simulated deadlines.
+        /// Driver creation time, the origin of request deadlines and of
+        /// simulated time.
         start: Instant,
     }
 
@@ -867,16 +889,7 @@ pub mod tests {
         fn new(size: u32) -> Self {
             let start = Instant::now();
             Self {
-                driver: Driver::new(
-                    &RingConfig {
-                        size,
-                        timeout_wheel_tick: Duration::from_millis(5),
-                    },
-                    Duration::from_secs(60),
-                    Waker::new().unwrap(),
-                    start,
-                )
-                .unwrap(),
+                driver: Driver::new(&RingConfig { size }, Waker::new().unwrap(), start).unwrap(),
                 deferred: Deferred::default(),
                 tracked: Vec::new(),
                 completed: Vec::new(),
@@ -898,16 +911,16 @@ pub mod tests {
         }
 
         /// Stage a request without submitting its SQE, for simulated completions.
-        fn stage(&mut self, request: Request, tick: Option<u64>, tag: u64) -> WaiterId {
+        fn stage(&mut self, request: Request, deadline: Option<Instant>, tag: u64) -> WaiterId {
             let waker = TaskWaker::from(Arc::new(Notify));
             let id = self
                 .driver
                 .state
                 .waiters
                 .insert(request, Observer::Local(Some(waker.clone())));
-            if let Some(tick) = tick {
-                self.driver.state.timeout_wheel.schedule(id, tick);
-                self.driver.state.waiters.set_deadline(id, tick);
+
+            if let Some(deadline) = deadline {
+                self.driver.state.deadlines.insert(id.0.index, deadline);
             }
 
             // Keep the fixture out of the ready queue and the kernel. Only
@@ -915,6 +928,11 @@ pub mod tests {
             self.driver.state.waiters.stage(id);
             self.tracked.push((id, tag, waker));
             id
+        }
+
+        /// The instant at which the driver expires a request due at `deadline`.
+        fn fires_at(&self, deadline: Instant) -> Instant {
+            self.driver.state.deadlines.fires_at(deadline)
         }
 
         /// Collect deferred outputs and consume local results in wake order.
@@ -1072,7 +1090,7 @@ pub mod tests {
     }
 
     /// Create an isolated open for tests that control durability completion.
-    fn make_file(name: &str) -> (PathBuf, Arc<Shared>) {
+    pub fn make_file(name: &str) -> (PathBuf, Arc<Shared>) {
         let directory =
             std::env::temp_dir().join(format!("commonware_driver_{name}_{}", std::process::id()));
         let hold = Hold::acquire(&directory).unwrap();
@@ -1212,11 +1230,12 @@ pub mod tests {
                 let id = harness.admit(recv(socket, 1, Some(deadline)), 2);
 
                 // Exercise expiry during initial registration and through the
-                // timeout wheel, while the active request prevents staging.
+                // installed deadline, while the active request prevents staging.
                 if register_first {
                     harness.service_at(now, false);
                 }
-                now = deadline;
+
+                now = harness.fires_at(deadline);
                 harness.service_at(now, false);
 
                 assert!(!harness.driver.state.waiters.is_pending(id));
@@ -1430,7 +1449,7 @@ pub mod tests {
     }
 
     #[test]
-    fn test_advance_timeouts_ignores_stale_entry_after_slot_reuse() {
+    fn test_slot_reuse_keeps_each_request_on_its_own_deadline() {
         let mut harness = Harness::new(1);
         let early = harness.start + Duration::from_millis(5);
         let late = harness.start + Duration::from_millis(15);
@@ -1443,10 +1462,11 @@ pub mod tests {
             .state
             .register_deadlines(harness.start, &mut harness.deferred);
 
-        // Keep another live deadline in the old bucket. Otherwise the wheel
-        // can skip it entirely, without passing its stale record to the driver.
+        // The orphan's deadline leaves at once, while a survivor keeps the
+        // early deadline live.
         harness.orphan(old);
         harness.completed.clear();
+        assert_eq!(harness.driver.state.deadlines.len(), 1);
         let (current, _current_peer) = UnixStream::pair().unwrap();
         let current = harness.admit(recv(current, 1, Some(late)), 2);
         assert_eq!(old.0.index, current.0.index);
@@ -1455,9 +1475,18 @@ pub mod tests {
             .driver
             .state
             .register_deadlines(harness.start, &mut harness.deferred);
+        assert!(harness.driver.state.deadlines.contains(current.0.index));
 
-        // The shared bucket expires, but its stale ID must not cancel the
-        // replacement or remove the replacement's later deadline.
+        // Every path that unlinks resolves the full identity first, so the
+        // stale one reaches neither the waiter nor the deadline.
+        harness.orphan(old);
+        harness.driver.state.cancel(old, &mut harness.deferred);
+        assert!(harness.driver.state.deadlines.contains(current.0.index));
+        assert!(harness.driver.state.waiters.is_pending(current));
+
+        // The early deadline expires, but must not cancel the replacement in
+        // the orphan's slot or remove the replacement's later deadline.
+        let (early, late) = (harness.fires_at(early), harness.fires_at(late));
         harness
             .driver
             .state
@@ -1491,45 +1520,45 @@ pub mod tests {
     }
 
     #[test]
-    fn test_deadline_registration_uses_refreshed_wheel() {
+    fn test_deadline_registration_after_a_long_idle_period() {
         let mut harness = Harness::new(1);
         let now = harness.start + Duration::from_secs(3600) + Duration::from_millis(1);
         let deadline = now + Duration::from_secs(60);
         let (left, _right) = UnixStream::pair().unwrap();
         let id = harness.admit(recv(left, 1, Some(deadline)), 0);
 
-        // The wheel is an hour behind, but the deadline fits its horizon when
-        // measured from this service turn. Refresh before validating it.
+        // The driver has not served for an hour. The deadline is checked
+        // against this service turn and installed exactly.
         harness.service_at(now, true);
 
         assert!(harness.completed.is_empty());
         let scheduled = harness.driver.next_deadline().unwrap();
         assert!(scheduled >= deadline);
-        assert!(scheduled < deadline + Duration::from_millis(5));
+        assert!(scheduled < deadline + Duration::from_nanos(RESOLUTION));
 
         harness.orphan(id);
         harness.drain();
     }
 
     #[test]
-    fn test_unsupported_deadline_is_rejected_without_submission() {
+    fn test_far_deadline_is_installed() {
         let mut harness = Harness::new(1);
         let (left, _right) = UnixStream::pair().unwrap();
 
-        // This future deadline exceeds the harness's 60-second horizon.
-        harness.admit(
-            recv(left, 1, Some(harness.start + Duration::from_secs(61))),
-            0,
-        );
+        // Deadlines have no horizon short of the 30 year timeout limit.
+        let deadline = harness.start + Duration::from_secs(30 * 365 * 24 * 60 * 60);
+        let id = harness.admit(recv(left, 1, Some(deadline)), 0);
         harness.service_at(harness.start, true);
 
-        assert!(matches!(
-            harness.completed[0].output,
-            RequestOutput::Recv(Err((_, Error::Io(_))))
-        ));
-        assert!(harness.driver.is_empty());
-        assert_eq!(harness.driver.ring.submission().len(), 1);
+        // The request is in flight, and its firing time bounds the next wait.
+        assert!(harness.completed.is_empty());
+        assert!(harness.driver.state.waiters.is_in_flight(id));
+        assert_eq!(
+            harness.driver.next_deadline(),
+            Some(harness.fires_at(deadline))
+        );
 
+        harness.orphan(id);
         harness.drain();
     }
 
@@ -1722,7 +1751,8 @@ pub mod tests {
     fn test_timeout_between_partial_completions() {
         let mut harness = Harness::new(1);
         let (left, _right) = UnixStream::pair().unwrap();
-        let id = harness.stage(recv(left, 8, None), Some(1), 0);
+        let deadline = harness.start + Duration::from_millis(5);
+        let id = harness.stage(recv(left, 8, None), Some(deadline), 0);
 
         // Partial progress leaves the request queued, with no SQE in flight.
         harness.simulated_completion(id, 4);
@@ -1730,10 +1760,11 @@ pub mod tests {
         assert_eq!(harness.driver.state.ready_queue.len(), 1);
 
         // Expiring between SQEs must finish locally, without an async cancel.
-        harness.driver.state.advance_timeouts(
-            harness.start + Duration::from_millis(5),
-            &mut harness.deferred,
-        );
+        let fires = harness.fires_at(deadline);
+        harness
+            .driver
+            .state
+            .advance_timeouts(fires, &mut harness.deferred);
         assert!(harness.driver.state.pending_cancels.is_empty());
         assert!(harness.driver.is_empty());
         harness.collect();
@@ -2061,35 +2092,46 @@ pub mod tests {
     #[test]
     fn test_orphan_in_flight_cancels_once_and_releases_deadline() {
         for expire_bucket in [false, true] {
+            // An in-flight receive with a deadline, and with `expire_bucket`
+            // a sibling that shares it.
             let mut harness = Harness::new(1);
             let deadline = harness.start + Duration::from_secs(10);
             let (left, _right) = UnixStream::pair().unwrap();
             let id = harness.admit(recv(left, 8, Some(deadline)), 0);
             let (survivor, _survivor_peer) = UnixStream::pair().unwrap();
-            if expire_bucket {
-                harness.admit(recv(survivor, 1, Some(deadline)), 1);
-            }
+            let sibling =
+                expire_bucket.then(|| harness.admit(recv(survivor, 1, Some(deadline)), 1));
             harness.service();
 
             assert!(harness.driver.state.waiters.is_in_flight(id));
 
-            // Repeated observer drops must not queue another cancel or remove the
-            // same deadline from the wheel twice.
+            // Repeated observer drops queue one cancellation and unlink the
+            // orphan's deadline once, leaving the sibling's installed.
             harness.orphan(id);
             harness.orphan(id);
 
-            if expire_bucket {
-                // A live sibling forces the orphan's stale wheel record through
-                // expiry before its cancellation or operation CQE arrives.
+            assert!(!harness.driver.state.deadlines.contains(id.0.index));
+            assert!(!harness.driver.state.deadlines.remove(id.0.index));
+
+            if let Some(sibling) = sibling {
+                assert!(harness.driver.state.deadlines.contains(sibling.0.index));
+
+                // A live sibling expires before the orphan's cancellation or
+                // operation CQE arrives, without reaching the orphan again.
+                let fires = harness.fires_at(deadline);
                 harness
                     .driver
                     .state
-                    .advance_timeouts(deadline, &mut harness.deferred);
+                    .advance_timeouts(fires, &mut harness.deferred);
+
                 assert!(harness.driver.state.waiters.is_in_flight(id));
             }
+
             assert_eq!(harness.driver.state.pending_cancels.len(), 1);
             assert!(harness.driver.next_deadline().is_none());
 
+            // The orphan retires without an observer, and the sibling times
+            // out.
             harness.collect();
             harness.drain();
 
@@ -2102,12 +2144,14 @@ pub mod tests {
                     .count(),
                 1
             );
+
             if expire_bucket {
                 let survivor = harness
                     .completed
                     .iter()
                     .find(|completed| matches!(completed.observer, TestObserver::Local(1)))
                     .unwrap();
+
                 assert!(matches!(
                     survivor.output,
                     RequestOutput::Recv(Err((_, Error::Timeout)))
@@ -2126,7 +2170,7 @@ pub mod tests {
         let (survivor, _peer) = UnixStream::pair().unwrap();
         harness.admit(recv(survivor, 1, Some(deadline)), 1);
 
-        // Retain the first result while another request keeps its bucket live.
+        // Retain the first result while another request keeps its deadline live.
         let limit = Instant::now() + Duration::from_secs(10);
         while harness.driver.state.waiters.is_pending(completed) {
             assert!(Instant::now() < limit, "receive stalled");
@@ -2136,10 +2180,14 @@ pub mod tests {
                 .unwrap();
             thread::yield_now();
         }
+
+        assert_eq!(harness.driver.state.deadlines.len(), 1);
+        let fires = harness.fires_at(deadline);
         harness
             .driver
             .state
-            .advance_timeouts(deadline, &mut harness.deferred);
+            .advance_timeouts(fires, &mut harness.deferred);
+
         assert!(harness.driver.next_deadline().is_none());
 
         harness.collect();
@@ -2669,11 +2717,7 @@ pub mod tests {
         let permit = file.durability.clone().try_lock_owned().unwrap();
         let mailbox = Arc::new(Mailbox::new().unwrap());
         let mut driver = Driver::new(
-            &RingConfig {
-                size: 2,
-                timeout_wheel_tick: Duration::from_millis(5),
-            },
-            Duration::from_secs(60),
+            &RingConfig { size: 2 },
             mailbox.waker.clone(),
             Instant::now(),
         )
@@ -2967,5 +3011,316 @@ pub mod tests {
         for result in results {
             assert_eq!(result.unwrap_err().raw_os_error(), Some(libc::EBADF));
         }
+    }
+
+    /// Whether `completed` is a local receive with tag `tag` that timed out.
+    fn timed_out(completed: &Completed, tag: u64) -> bool {
+        matches!(completed.observer, TestObserver::Local(id) if id == tag)
+            && matches!(
+                completed.output,
+                RequestOutput::Recv(Err((_, Error::Timeout)))
+            )
+    }
+
+    #[test]
+    fn test_completed_requests_leave_no_deadlines() {
+        // Six receives with installed deadlines, each with a byte waiting.
+        let mut harness = Harness::new(8);
+        let deadline = harness.start + Duration::from_secs(30);
+        let mut peers = Vec::new();
+
+        for tag in 0..6 {
+            let (socket, mut peer) = UnixStream::pair().unwrap();
+            peer.write_all(b"x").unwrap();
+            harness.admit(recv(socket, 1, Some(deadline)), tag);
+            peers.push(peer);
+        }
+
+        harness
+            .driver
+            .state
+            .register_deadlines(harness.start, &mut harness.deferred);
+
+        assert_eq!(harness.driver.state.deadlines.len(), 6);
+        assert!(harness.driver.next_deadline().is_some());
+
+        // Each completion unlinks its deadline at once.
+        harness.until(6);
+
+        assert_eq!(harness.driver.state.deadlines.len(), 0);
+        assert!(harness.driver.next_deadline().is_none());
+
+        harness.drain();
+    }
+
+    #[test]
+    fn test_expiry_cancels_and_reports_timeout() {
+        for in_flight in [false, true] {
+            // A receive that never completes, with its deadline installed
+            // while queued or in flight.
+            let mut harness = Harness::new(1);
+            let deadline = harness.start + Duration::from_secs(10);
+            let (socket, _peer) = UnixStream::pair().unwrap();
+            let id = harness.admit(recv(socket, 1, Some(deadline)), 0);
+
+            if in_flight {
+                harness.service_at(harness.start, false);
+                assert!(harness.driver.state.waiters.is_in_flight(id));
+            } else {
+                harness
+                    .driver
+                    .state
+                    .register_deadlines(harness.start, &mut harness.deferred);
+            }
+
+            assert!(harness.driver.state.deadlines.contains(id.0.index));
+
+            // Never early: one nanosecond before the rounded deadline.
+            let fires = harness.fires_at(deadline);
+            assert!(fires >= deadline && fires < deadline + Duration::from_nanos(RESOLUTION));
+
+            harness
+                .driver
+                .state
+                .advance_timeouts(fires - Duration::from_nanos(1), &mut harness.deferred);
+
+            assert!(harness.driver.state.deadlines.contains(id.0.index));
+            assert!(harness.driver.state.pending_cancels.is_empty());
+
+            // At its firing time, expiry unlinks the deadline and cancels the
+            // request.
+            harness
+                .driver
+                .state
+                .advance_timeouts(fires, &mut harness.deferred);
+
+            assert_eq!(harness.driver.state.deadlines.len(), 0);
+            assert!(harness.driver.next_deadline().is_none());
+
+            if in_flight {
+                // The owner's ring cancels the operation, which retires the
+                // request at its CQE.
+                assert_eq!(harness.driver.state.pending_cancels.len(), 1);
+                assert!(harness.driver.state.waiters.is_in_flight(id));
+                harness.until(1);
+            } else {
+                // A queued request finishes locally without an async cancel.
+                assert!(harness.driver.state.pending_cancels.is_empty());
+                assert!(harness.driver.is_empty());
+                harness.collect();
+            }
+
+            // Either way, the request reports a timeout.
+            assert_eq!(harness.completed.len(), 1);
+            assert!(timed_out(&harness.completed[0], 0));
+
+            harness.drain();
+        }
+    }
+
+    /// Check that every installed deadline belongs to the active request in
+    /// its slot.
+    fn assert_deadlines_belong_to_active_requests(harness: &Harness) {
+        let state = &harness.driver.state;
+        let mut installed = 0;
+
+        for index in 0..state.waiters.slots() {
+            if !state.deadlines.contains(index as u32) {
+                continue;
+            }
+
+            installed += 1;
+            let holder = state.waiters.active_at(index).unwrap();
+            assert!(state.waiters.deadline(holder).is_some());
+        }
+
+        assert_eq!(installed, state.deadlines.len());
+    }
+
+    #[test]
+    fn test_randomized_requests_keep_deadlines_on_active_occupants() {
+        let (mut timeouts, mut reuses, mut stale) = (0usize, 0usize, 0usize);
+
+        for seed in 0..16 {
+            // Random admissions, peer traffic, drops and cancellations of any
+            // identity ever issued, stale ones included, and services at
+            // later times, with the invariant checked after every step.
+            let mut rng = TestRng::new(seed);
+            let mut harness = Harness::new(4);
+            let mut issued: Vec<WaiterId> = Vec::new();
+            let mut peers: Vec<UnixStream> = Vec::new();
+            let mut elapsed = Duration::ZERO;
+
+            for step in 0..3_000u64 {
+                match rng.random_range(0..10) {
+                    // Admit a receive of one or two bytes without a deadline,
+                    // or with one that is due, near, or far.
+                    0..=3 => {
+                        if harness.driver.len() >= 12 {
+                            continue;
+                        }
+
+                        let now = harness.start + elapsed;
+
+                        let deadline = match rng.random_range(0..5) {
+                            0 => None,
+                            1 => Some(now - elapsed.min(Duration::from_millis(1))),
+                            2 | 3 => Some(now + Duration::from_micros(rng.random_range(1..20_000))),
+                            _ => Some(now + Duration::from_secs(60)),
+                        };
+
+                        let (socket, peer) = UnixStream::pair().unwrap();
+                        peer.set_nonblocking(true).unwrap();
+                        let len = rng.random_range(1..=2);
+                        let id = harness.admit(recv(socket, len, deadline), step);
+                        harness.collect();
+
+                        if id.0.generation > 0 {
+                            reuses += 1;
+                        }
+
+                        issued.push(id);
+                        peers.push(peer);
+                    }
+                    // Send a byte to a random socket, or close it.
+                    4 | 5 => {
+                        if peers.is_empty() {
+                            continue;
+                        }
+
+                        let pick = rng.random_range(0..peers.len());
+
+                        if rng.random_range(0..4) == 0 {
+                            peers.swap_remove(pick);
+                        } else {
+                            let _ = peers[pick].write(b"x");
+                        }
+                    }
+                    // Drop the observer of any identity ever issued.
+                    6 => {
+                        if issued.is_empty() {
+                            continue;
+                        }
+
+                        let id = issued[rng.random_range(0..issued.len())];
+
+                        if !harness.driver.state.waiters.is_pending(id) {
+                            stale += 1;
+                        }
+
+                        harness.orphan(id);
+                    }
+                    // Cancel any identity ever issued.
+                    7 => {
+                        if issued.is_empty() {
+                            continue;
+                        }
+
+                        let id = issued[rng.random_range(0..issued.len())];
+
+                        if !harness.driver.state.waiters.is_pending(id) {
+                            stale += 1;
+                        }
+
+                        harness.driver.state.cancel(id, &mut harness.deferred);
+                        harness.collect();
+                    }
+                    // Service at a later time.
+                    _ => {
+                        elapsed += Duration::from_micros(rng.random_range(0..5_000));
+                        harness.service_at(harness.start + elapsed, false);
+                    }
+                }
+
+                assert_deadlines_belong_to_active_requests(&harness);
+            }
+
+            // Draining completes every request and leaves no deadline.
+            harness.drain();
+
+            assert_deadlines_belong_to_active_requests(&harness);
+            assert_eq!(harness.driver.state.deadlines.len(), 0);
+
+            timeouts += harness
+                .completed
+                .iter()
+                .filter(|completed| {
+                    matches!(
+                        completed.output,
+                        RequestOutput::Recv(Err((_, Error::Timeout)))
+                    )
+                })
+                .count();
+        }
+
+        // The steps reached timeouts, reused slots and stale identities.
+        assert!(timeouts > 0 && reuses > 0 && stale > 0);
+    }
+
+    #[test]
+    fn test_budgeted_expiry_leaves_a_backlog_that_drains_before_parking() {
+        let mut harness = Harness::new(1);
+        let deadline = harness.start + Duration::from_secs(1);
+
+        // Queued receives on one shared socket never reach the kernel.
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        let fd: Arc<OwnedFd> = Arc::new(socket.into());
+        let count = u64::from(BUDGET) + 3;
+
+        for tag in 0..count {
+            let request = Request::Recv(RecvRequest {
+                fd: fd.clone(),
+                buf: IoBufMut::zeroed(1),
+                offset: 0,
+                len: 1,
+                exact: true,
+                deadline: Some(deadline + Duration::from_nanos(tag % 5)),
+            });
+
+            harness.admit(request, tag);
+        }
+
+        harness
+            .driver
+            .state
+            .register_deadlines(harness.start, &mut harness.deferred);
+
+        assert_eq!(harness.driver.state.deadlines.len(), count as usize);
+
+        // One pass expires one budget. While some remain due, the next
+        // deadline stays at or before now, so the drive loop serves again
+        // instead of parking.
+        let now = harness.fires_at(deadline + Duration::from_nanos(4));
+        harness
+            .driver
+            .state
+            .advance_timeouts(now, &mut harness.deferred);
+        harness.collect();
+
+        assert_eq!(harness.completed.len(), BUDGET as usize);
+        assert_eq!(harness.driver.state.deadlines.len(), 3);
+        assert!(harness.driver.next_deadline().unwrap() <= now);
+
+        // The next pass at the same time expires the rest, and each request
+        // reports a timeout.
+        harness
+            .driver
+            .state
+            .advance_timeouts(now, &mut harness.deferred);
+        harness.collect();
+
+        assert_eq!(harness.completed.len(), count as usize);
+        assert!(harness.driver.next_deadline().is_none());
+
+        for tag in 0..count {
+            assert!(
+                harness
+                    .completed
+                    .iter()
+                    .any(|completed| timed_out(completed, tag))
+            );
+        }
+
+        harness.drain();
     }
 }

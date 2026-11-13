@@ -4,14 +4,17 @@
 
 use super::{
     super::{
-        driver::tests::fail_after_completion,
+        driver::tests::{fail_after_completion, make_file},
         idle::tests::{WakePoint, on_wake_point},
         operation::Operation,
         queue::CAPACITY,
-        request::{RecvRequest, Request},
+        request::{RecvRequest, Request, SyncRequest},
+        sleep,
         task::{Task, tests::cancelled},
         tasks::tests::AFTER_INSERT,
+        waiter::Observer,
         waker::tests::state_bits,
+        wheel::BUDGET,
     },
     *,
 };
@@ -20,6 +23,7 @@ use crate::{
     Resolver as _, Runner as _, Sink as _, Storage as _, Stream as _, WriteOptions,
     utils::{extract_panic_message, reschedule},
 };
+use commonware_utils::sync::OwnedAsyncMutexGuard;
 use futures::{
     FutureExt,
     executor::block_on,
@@ -926,7 +930,11 @@ fn catch_up_callback_after_the_count_returns(catch_up: CatchUp) {
             move || {
                 let waker = waker(trigger);
                 let local = Local::current().unwrap();
-                local.borrow_mut().timers.insert_due(waker);
+                {
+                    let mut local = local.borrow_mut();
+                    let at = local.timers.insert_due(waker);
+                    local.timers_next = local.timers_next.min(at);
+                }
                 assert!(local.borrow().deferred.is_empty());
             }
         };
@@ -998,28 +1006,19 @@ fn test_config_validation_before_startup() {
     assert_eq!(defaults.global_queue_interval(), 31);
     defaults.validate();
 
-    let mut rounded = config().with_ring_config(RingConfig {
-        size: 3,
-        ..RingConfig::default()
-    });
+    let mut rounded = config().with_ring_config(RingConfig { size: 3 });
     rounded.validate();
     assert_eq!(rounded.ring_config.size, 4);
 
     // Rounding must not admit zero or exceed the configured ring-size limit.
     for size in [0, 32_769, u32::MAX] {
-        let mut invalid = config().with_ring_config(RingConfig {
-            size,
-            ..RingConfig::default()
-        });
+        let mut invalid = config().with_ring_config(RingConfig { size });
 
         assert!(catch_unwind(AssertUnwindSafe(|| invalid.validate())).is_err());
     }
 
     // Check both timeout settings at the unsupported ends of the range.
-    for timeout in [
-        Duration::ZERO,
-        TimeoutWheel::MAX_TIMEOUT + Duration::from_nanos(1),
-    ] {
+    for timeout in [Duration::ZERO, MAX_TIMEOUT + Duration::from_nanos(1)] {
         for mut invalid in [
             config().with_connect_timeout(timeout),
             config().with_read_write_timeout(timeout),
@@ -1028,12 +1027,8 @@ fn test_config_validation_before_startup() {
         }
     }
 
-    let invalid_layouts = [Duration::ZERO, Duration::from_nanos(1), Duration::MAX].map(|tick| {
-        config().with_ring_config(RingConfig {
-            timeout_wheel_tick: tick,
-            ..RingConfig::default()
-        })
-    });
+    let invalid_timeouts = [Duration::ZERO, MAX_TIMEOUT + Duration::from_nanos(1)]
+        .map(|timeout| config().with_read_write_timeout(timeout));
     let invalid_spinner = config().with_idle_spinner(SpinnerConfig {
         budget_us: 2,
         max_budget_us: 1,
@@ -1042,7 +1037,7 @@ fn test_config_validation_before_startup() {
     let invalid_workers = [0, MAX_WORKERS + 1].map(|workers| config().with_worker_threads(workers));
     let invalid_interval = config().with_global_queue_interval(0);
 
-    for invalid in invalid_layouts
+    for invalid in invalid_timeouts
         .into_iter()
         .chain([invalid_spinner, invalid_interval])
         .chain(invalid_workers)
@@ -1062,19 +1057,15 @@ fn test_config_validation_before_startup() {
         );
 
         // Invalid settings must fail before acquiring storage resources or
-        // invoking user code, including layouts whose slot arithmetic overflows.
+        // invoking user code.
         assert!(!called.load(Ordering::SeqCst));
         assert!(!directory.exists());
     }
 
-    // The maximum supported timeout remains valid with a representable wheel.
+    // The maximum supported timeout remains valid.
     let mut boundary = config()
-        .with_connect_timeout(TimeoutWheel::MAX_TIMEOUT)
-        .with_read_write_timeout(TimeoutWheel::MAX_TIMEOUT)
-        .with_ring_config(RingConfig {
-            timeout_wheel_tick: Duration::from_secs(3600),
-            ..RingConfig::default()
-        });
+        .with_connect_timeout(MAX_TIMEOUT)
+        .with_read_write_timeout(MAX_TIMEOUT);
     boundary.validate();
 }
 
@@ -2716,23 +2707,25 @@ fn test_spawn_refused_by_the_closed_task_set_is_disposed_on_its_caller() {
 /// Teardown drops every idle or queued future, spawned locally or from
 /// another thread, while the worker's timers are still registered.
 #[test]
-fn test_teardown_drops_every_future_before_clearing_timers() {
+fn test_teardown_drops_every_future_before_closing_timers() {
     /// Record whether the worker still holds timers when a future is dropped.
     struct TimerCheck {
         /// Futures dropped.
         drops: Arc<AtomicUsize>,
-        /// Futures dropped while the worker's timer table was still open.
+        /// Futures dropped while the worker's timers were still open.
         early: Arc<AtomicUsize>,
     }
 
     impl Drop for TimerCheck {
         fn drop(&mut self) {
             // The future's own sleep drops after this guard, so its timer is
-            // still registered unless teardown has already closed the table.
+            // still registered unless teardown has already closed its timers.
             let local = Local::current().expect("future dropped off its worker");
-            if local.borrow_mut().timers.next_deadline().is_some() {
+
+            if !local.borrow().timers.is_closed() {
                 self.early.fetch_add(1, Ordering::Relaxed);
             }
+
             self.drops.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -3265,6 +3258,177 @@ fn test_callback_generated_work_prevents_parking() {
     }
 }
 
+/// A callback in cleanup's drain can drop a sleep registered on another
+/// worker's open timers, which releases that sleep's waker into the same
+/// callback batch. Cleanup must run such a batch before waiting for retained
+/// I/O, which here is a sync waiting for a durability permit that only the
+/// last waker in a chain of such releases frees.
+#[test]
+fn test_cleanup_runs_released_wakers_before_waiting_for_retained_io() {
+    /// A waker that drops its sleep when destroyed.
+    struct DropSleep(
+        /// The sleep to drop, taken once by the destructor.
+        Mutex<Option<Sleep>>,
+    );
+
+    // This waker owns a destructor, which Waker::noop cannot model.
+    #[allow(clippy::manual_noop_waker)]
+    impl Wake for DropSleep {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    impl Drop for DropSleep {
+        fn drop(&mut self) {
+            drop(self.0.lock().take());
+        }
+    }
+
+    /// A waker that releases a durability permit when destroyed.
+    struct ReleasePermit {
+        /// The held durability permit, taken once by the destructor.
+        permit: Arc<Mutex<Option<OwnedAsyncMutexGuard<()>>>>,
+        /// Set when the destructor runs, before the permit is released.
+        released: Arc<AtomicBool>,
+    }
+
+    // This waker owns a destructor, which Waker::noop cannot model.
+    #[allow(clippy::manual_noop_waker)]
+    impl Wake for ReleasePermit {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    impl Drop for ReleasePermit {
+        fn drop(&mut self) {
+            self.released.store(true, Ordering::SeqCst);
+            drop(self.permit.lock().take());
+        }
+    }
+
+    // Hold the file's durability permit, so a sync on it waits until a waker
+    // or the watchdog releases it.
+    let (directory, file) = make_file("cleanup_released_wakers");
+    let permit = Arc::new(Mutex::new(Some(
+        file.durability.clone().try_lock_owned().unwrap(),
+    )));
+    let released = Arc::new(AtomicBool::new(false));
+    let waited = Runner::new(config().with_worker_threads(1)).start(|_| async {
+        // Two sleeps wait on worker zero's timers. Dropping the first releases
+        // a waker that drops the second, whose waker releases the permit.
+        let last = Waker::from(Arc::new(ReleasePermit {
+            permit: permit.clone(),
+            released: released.clone(),
+        }));
+
+        let mut second = Sleep::new(Duration::from_secs(60));
+        assert!(
+            Pin::new(&mut second)
+                .poll(&mut TaskContext::from_waker(&last))
+                .is_pending()
+        );
+
+        drop(last);
+        let middle = Waker::from(Arc::new(DropSleep(Mutex::new(Some(second)))));
+        let mut first = Sleep::new(Duration::from_secs(60));
+        assert!(
+            Pin::new(&mut first)
+                .poll(&mut TaskContext::from_waker(&middle))
+                .is_pending()
+        );
+
+        drop(middle);
+
+        // A dedicated worker retains a sync that waits for the permit, then
+        // cleans up with the first sleep's drop in its callback batch.
+        let shared = Local::current().unwrap().borrow().shared.clone();
+        let file = file.clone();
+        let permit = permit.clone();
+        let released = released.clone();
+        thread::spawn(move || {
+            let (mut worker, output) = Worker::run(
+                shared,
+                Role::Dedicated,
+                || async {
+                    let local = Local::current().unwrap();
+                    let mut local = local.borrow_mut();
+                    let Local {
+                        driver,
+                        now,
+                        deferred,
+                        ..
+                    } = &mut *local;
+                    driver.as_mut().unwrap().admit(
+                        Request::Sync(SyncRequest::new(file)),
+                        Observer::Orphaned,
+                        *now,
+                        deferred,
+                    );
+                },
+                None,
+            )
+            .unwrap();
+
+            assert!(output.is_some());
+
+            // Install the wake poll and consume startup signals, so the only
+            // wake left for a blocking wait is the permit's release.
+            worker.service(false);
+            let parked = worker
+                .local
+                .borrow_mut()
+                .driver
+                .as_mut()
+                .unwrap()
+                .park(worker.processed_seq, Some(Instant::now()));
+            parked.unwrap();
+            worker.service(false);
+
+            {
+                let local = worker.local.borrow();
+                let driver = local.driver.as_ref().unwrap();
+                assert!(!driver.is_empty());
+                assert!(!driver.has_pending_submissions());
+            }
+
+            worker
+                .local
+                .borrow_mut()
+                .deferred
+                .drops
+                .push(Waker::from(Arc::new(DropSleep(Mutex::new(Some(first))))));
+
+            // Without the release, cleanup would wait for the sync forever.
+            // Free the permit after a generous delay so a failure ends.
+            let watchdog = thread::spawn(move || {
+                let deadline = Instant::now() + TEST_TIMEOUT;
+
+                while !released.load(Ordering::SeqCst) {
+                    if Instant::now() >= deadline {
+                        drop(permit.lock().take());
+                        return false;
+                    }
+
+                    thread::sleep(Duration::from_millis(1));
+                }
+
+                true
+            });
+
+            worker.cleanup();
+
+            assert!(worker.take_panic().is_none());
+            watchdog.join().unwrap()
+        })
+        .join()
+        .unwrap()
+    });
+
+    // Remove the file, then check that a released waker, not the watchdog,
+    // freed the permit.
+    drop(file);
+    fs::remove_dir_all(directory).unwrap();
+    assert!(waited, "cleanup waited before running released wakers");
+}
+
 #[test]
 fn test_final_callbacks_finish_before_tls_removal() {
     /// Observe disposal of a successful root result when shutdown fails.
@@ -3725,10 +3889,7 @@ fn test_remote_task_panic_respects_policy() {
 fn test_shutdown_drains_queued_writes_on_every_ring() {
     let cfg = config()
         .with_worker_threads(2)
-        .with_ring_config(RingConfig {
-            size: 1,
-            ..Default::default()
-        });
+        .with_ring_config(RingConfig { size: 1 });
     Runner::new(cfg.clone()).start(|context| async move {
         for actor in 0_u8..4 {
             let write = {
@@ -3906,9 +4067,10 @@ fn test_wake_from_a_dedicated_worker_goes_to_the_pool() {
 }
 
 /// A task registers a receive and a sleep on worker zero, then a wake from
-/// another worker moves it there. Polled on that worker, both stay pending
-/// through a forward from worker zero. Worker zero holds the registrations, and
-/// the receive's result arrives through its forward.
+/// another worker moves it there. Polled on that worker, both stay pending,
+/// the receive through a forward from worker zero and the sleep in worker
+/// zero's timers. Worker zero holds the registrations, and the receive's
+/// result arrives through its forward.
 #[test]
 fn test_operation_and_sleep_follow_their_task_to_another_worker() {
     Runner::new(config().with_worker_threads(2)).start(|context| async move {
@@ -3934,10 +4096,11 @@ fn test_operation_and_sleep_follow_their_task_to_another_worker() {
             assert!(futures::poll!(&mut recv).is_pending());
             assert!(futures::poll!(&mut sleep).is_pending());
 
-            // The wake comes from the other worker, which polls this task and
-            // forwards both registrations from worker zero. The root writes to
-            // the peer only after these polls, since a receive that completes
-            // before its forward is polled may return its result immediately.
+            // The wake comes from the other worker, which polls this task,
+            // forwards the receive from worker zero and polls the sleep in
+            // worker zero's timers. The root writes to the peer only after
+            // these polls, since a receive that completes before its forward
+            // is polled may return its result immediately.
             moved.await.unwrap();
             let polled = thread::current().id();
             assert!(futures::poll!(&mut recv).is_pending());
@@ -4220,6 +4383,219 @@ fn test_busy_worker_checks_the_global_queue_every_interval() {
     }
 }
 
+/// A storm of sleeps due at once beside a task whose every poll outlasts the
+/// backlog slice. Each expiry pass fires one budget, about one group's worth,
+/// and each group completes its other sleeps early once woken. With a full
+/// batch between passes, every group after the first would wait for about
+/// [`BATCH_SIZE`] of the long polls. The slice holds the whole storm to a few.
+/// Once the storm has drained, a pass that reaches every due deadline clears
+/// the backlog, possibly after a few more sliced passes while a stale bucket
+/// bound stays early, and the long polls get full batches again.
+#[test]
+fn test_expiry_backlog_keeps_pace_with_long_polls() {
+    /// Groups of sleeps, each owned by one task.
+    const GROUPS: usize = 4;
+
+    /// Time from the storm's setup to its deadline, by which every group must
+    /// have registered, with ample room for a slow host.
+    const LEAD: Duration = Duration::from_millis(200);
+
+    /// Long polls measured after the storm, enough to span a full batch after
+    /// several batches cut short while the backlog lingers.
+    const MEASURED: usize = 4 * BATCH_SIZE;
+
+    Runner::new(config()).start(|context| async move {
+        // A task that requeues itself after polling for twice the slice. Once
+        // the storm has drained, it measures the longest run of its polls that
+        // share one service time, so no pass came between them.
+        let polls = Arc::new(AtomicUsize::new(0));
+        let drained = Arc::new(AtomicBool::new(false));
+        let spinner = context.child("spinner").spawn({
+            let polls = polls.clone();
+            let drained = drained.clone();
+            move |_| async move {
+                let (mut turn, mut run, mut longest, mut measured) = (None, 0, 0, 0);
+
+                while measured < MEASURED {
+                    let began = Instant::now();
+
+                    while began.elapsed() < 2 * BACKLOG_SLICE {
+                        std::hint::spin_loop();
+                    }
+
+                    polls.fetch_add(1, Ordering::Relaxed);
+
+                    if drained.load(Ordering::Relaxed) {
+                        let current = sleep::tests::turn();
+                        run = if current == turn { run + 1 } else { 1 };
+                        turn = current;
+                        longest = longest.max(run);
+                        measured += 1;
+                    }
+
+                    reschedule().await;
+                }
+
+                longest
+            }
+        });
+
+        // Each group registers two budgets of sleeps in one poll on the only
+        // worker, all at one deadline, then awaits them in order.
+        let deadline = SystemTime::now() + LEAD;
+        let groups: Vec<_> = (0..GROUPS)
+            .map(|_| {
+                let polls = polls.clone();
+                context.child("group").spawn(move |context| async move {
+                    // Register every sleep in one poll.
+                    let mut sleeps: Vec<_> = (0..2 * BUDGET)
+                        .map(|_| context.sleep_until(deadline))
+                        .collect();
+
+                    poll_fn(|cx| {
+                        for sleep in &mut sleeps {
+                            assert!(
+                                sleep.poll_unpin(cx).is_pending(),
+                                "the storm's deadline passed before its group registered"
+                            );
+                        }
+
+                        Poll::Ready(())
+                    })
+                    .await;
+
+                    // Report the long polls counted when the first sleep
+                    // completed and when the last one did.
+                    let mut first = None;
+
+                    for sleep in sleeps {
+                        sleep.await;
+                        first.get_or_insert(polls.load(Ordering::Relaxed));
+                    }
+
+                    (first.unwrap(), polls.load(Ordering::Relaxed))
+                })
+            })
+            .collect();
+
+        // The storm spans from the earliest first completion to the latest
+        // last one. Once it has drained, the spinner measures.
+        let (mut first, mut last) = (usize::MAX, 0);
+
+        for group in groups {
+            let (began, ended) = group.await.unwrap();
+            first = first.min(began);
+            last = last.max(ended);
+        }
+
+        drained.store(true, Ordering::Relaxed);
+        let longest = spinner.await.unwrap();
+
+        // Every pass after the first followed a slice, not a full batch.
+        assert!(
+            last - first < BATCH_SIZE,
+            "the storm spanned {} long polls",
+            last - first
+        );
+
+        // A pass soon after the storm cleared the backlog, so a full batch of
+        // long polls, and no more, ran between two later passes.
+        assert_eq!(
+            longest, BATCH_SIZE,
+            "longest run of long polls between passes in {MEASURED} after the storm"
+        );
+    });
+}
+
+/// A storm of request deadlines due at once beside a task whose every poll
+/// outlasts the backlog slice. Each expiry pass times out one budget of
+/// requests. With a full batch between passes, each further budget would wait
+/// for about [`BATCH_SIZE`] of the long polls. The slice holds the whole storm to
+/// a few.
+#[test]
+fn test_deadline_backlog_keeps_pace_with_long_polls() {
+    /// Requests in the storm, three budgets.
+    const REQUESTS: usize = 3 * BUDGET as usize;
+
+    /// Time from the storm's setup to its deadline, by which every request
+    /// must have registered, with ample room for a slow host.
+    const LEAD: Duration = Duration::from_millis(200);
+
+    // The ring holds one request in flight, the first, which has no deadline,
+    // so the storm's requests stay queued and time out without the kernel.
+    let cfg = config().with_ring_config(RingConfig { size: 1 });
+    Runner::new(cfg).start(|context| async move {
+        // A task that requeues itself after polling for twice the slice.
+        let polls = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let spinner = context.child("spinner").spawn({
+            let polls = polls.clone();
+            let stop = stop.clone();
+            move |_| async move {
+                while !stop.load(Ordering::Relaxed) {
+                    let began = Instant::now();
+
+                    while began.elapsed() < 2 * BACKLOG_SLICE {
+                        std::hint::spin_loop();
+                    }
+
+                    polls.fetch_add(1, Ordering::Relaxed);
+                    reschedule().await;
+                }
+            }
+        });
+
+        // Receives on a socket that never has data, registered in one poll
+        // on the only worker, all but the first at one deadline.
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        let fd: Arc<OwnedFd> = Arc::new(socket.into());
+        let receive = move |deadline| {
+            Operation::register(Request::Recv(RecvRequest {
+                fd: fd.clone(),
+                buf: IoBufMut::zeroed(1),
+                offset: 0,
+                len: 1,
+                exact: true,
+                deadline,
+            }))
+        };
+
+        let storm = context.child("storm").spawn({
+            let polls = polls.clone();
+            move |_| async move {
+                let _in_flight = receive(None);
+                let deadline = Instant::now() + LEAD;
+                let requests: Vec<_> = (0..REQUESTS).map(|_| receive(Some(deadline))).collect();
+
+                // Report the long polls counted when the first request timed
+                // out and when the last one did.
+                let mut first = None;
+
+                for request in requests {
+                    assert!(matches!(
+                        request.await,
+                        Ok(RequestOutput::Recv(Err((_, Error::Timeout))))
+                    ));
+                    first.get_or_insert(polls.load(Ordering::Relaxed));
+                }
+
+                (first.unwrap(), polls.load(Ordering::Relaxed))
+            }
+        });
+
+        let (first, last) = storm.await.unwrap();
+        stop.store(true, Ordering::Relaxed);
+        spinner.await.unwrap();
+
+        // Every pass after the first followed a slice, not a full batch.
+        assert!(
+            last - first < BATCH_SIZE,
+            "the storm spanned {} long polls",
+            last - first
+        );
+    });
+}
+
 /// A task that completes on a worker other than the one that spawned it
 /// leaves the task set there.
 #[test]
@@ -4255,9 +4631,10 @@ fn test_task_completing_away_from_its_spawner_retires() {
 }
 
 /// Shutdown while a task's poll runs on another worker. That poll can still
-/// forward a sleep registered on worker zero, whose mailbox stays open until
-/// every pool worker has finished polling. Teardown leaves the future to the
-/// poller. The poller drops it on its own thread once the poll returns.
+/// forward a receive registered on worker zero, whose mailbox stays open until
+/// every pool worker has finished polling, and poll a sleep registered there,
+/// whose timers stay open as long. Teardown leaves the future to the poller.
+/// The poller drops it on its own thread once the poll returns.
 #[test]
 fn test_shutdown_while_a_task_is_mid_poll_on_another_worker() {
     struct Dropped(Arc<Mutex<Option<ThreadId>>>);
@@ -4270,14 +4647,25 @@ fn test_shutdown_while_a_task_is_mid_poll_on_another_worker() {
 
     let dropped = Arc::new(Mutex::new(None));
     let polled = Arc::new(Mutex::new(None));
-    let forwarded = Arc::new(Mutex::new(None::<String>));
+    let forwarded = Arc::new(Mutex::new(None::<(String, String)>));
+    let (socket, peer) = UnixStream::pair().unwrap();
     Runner::new(config().with_worker_threads(2)).start(|context| {
         let dropped = dropped.clone();
         let polled = polled.clone();
         let forwarded = forwarded.clone();
         async move {
-            // Registered on worker zero by this first poll.
+            // Registered on worker zero by these first polls. The silent peer
+            // keeps the receive pending.
+            let mut receive = Operation::register(Request::Recv(RecvRequest {
+                fd: Arc::new(socket.into()),
+                buf: IoBufMut::with_capacity(1),
+                offset: 0,
+                len: 1,
+                exact: true,
+                deadline: None,
+            }));
             let mut sleep = Box::pin(context.sleep(Duration::from_secs(3600)));
+            assert!(futures::poll!(&mut receive).is_pending());
             assert!(futures::poll!(&mut sleep).is_pending());
 
             // Registered without a handle, so no abort can end the task. Only
@@ -4302,17 +4690,27 @@ fn test_shutdown_while_a_task_is_mid_poll_on_another_worker() {
                     }
 
                     // Give worker zero time to reach its drain, then poll the
-                    // sleep. The sleep forwards from worker zero.
+                    // receive, which forwards through worker zero's mailbox,
+                    // and the sleep, which locks worker zero's timers.
                     thread::sleep(Duration::from_millis(20));
                     let waker = futures::task::noop_waker();
-                    let poll = catch_unwind(AssertUnwindSafe(|| {
-                        sleep.as_mut().poll(&mut TaskContext::from_waker(&waker))
-                    }));
-                    *forwarded.lock() = Some(match poll {
+                    let mut cx = TaskContext::from_waker(&waker);
+
+                    let received = match Pin::new(&mut receive).poll(&mut cx) {
+                        Poll::Pending => "pending".into(),
+                        Poll::Ready(Ok(_)) => "ready".into(),
+                        Poll::Ready(Err(error)) => format!("{error:?}"),
+                    };
+
+                    let slept = catch_unwind(AssertUnwindSafe(|| sleep.as_mut().poll(&mut cx)));
+
+                    let slept = match slept {
                         Ok(Poll::Pending) => "pending".into(),
                         Ok(Poll::Ready(())) => "ready".into(),
                         Err(panic) => extract_panic_message(&*panic),
-                    });
+                    };
+
+                    *forwarded.lock() = Some((received, slept));
 
                     // Return pending only once teardown has cleared the task
                     // during this poll.
@@ -4334,28 +4732,44 @@ fn test_shutdown_while_a_task_is_mid_poll_on_another_worker() {
             assert_ne!(other, thread::current().id());
         }
     });
-    assert_eq!(forwarded.lock().as_deref(), Some("pending"));
+
+    assert_eq!(
+        *forwarded.lock(),
+        Some(("pending".into(), "pending".into()))
+    );
     let poller = polled.lock().expect("the task must have polled");
     assert_eq!(
         *dropped.lock(),
         Some(poller),
         "the future must drop on its poller"
     );
+
+    drop(peer);
 }
 
 /// Shutdown while worker zero holds a forward it took from its mailbox but has
 /// not applied. A batch of root wakes ahead of the forward completes the root
 /// first. The task that sent the forward is still mid-poll on another worker,
-/// so its sleep stays pending until every pool worker has finished polling.
+/// so its receive stays pending until every pool worker has finished polling.
 #[test]
 fn test_shutdown_retains_a_taken_forward_until_polling_ends() {
     let forwarded = Arc::new(Mutex::new(None::<String>));
+    let (socket, peer) = UnixStream::pair().unwrap();
     Runner::new(config().with_worker_threads(2)).start(|context| {
         let forwarded = forwarded.clone();
         async move {
-            // Registered on worker zero by this first poll.
-            let mut sleep = Box::pin(context.sleep(Duration::from_secs(3600)));
-            assert!(futures::poll!(&mut sleep).is_pending());
+            // Registered on worker zero by this first poll. The silent peer
+            // keeps it pending.
+            let mut receive = Operation::register(Request::Recv(RecvRequest {
+                fd: Arc::new(socket.into()),
+                buf: IoBufMut::with_capacity(1),
+                offset: 0,
+                len: 1,
+                exact: true,
+                deadline: None,
+            }));
+
+            assert!(futures::poll!(&mut receive).is_pending());
             let root = poll_fn(|cx| Poll::Ready(cx.waker().clone())).await;
 
             // Registered without a handle, so no abort can end the task. Only
@@ -4371,26 +4785,30 @@ fn test_shutdown_retains_a_taken_forward_until_polling_ends() {
                     let mut cx = TaskContext::from_waker(&waker);
 
                     // Queue a full batch of root wakes on worker zero, then
-                    // the sleep's forward behind them.
+                    // the receive's forward behind them.
                     for _ in 0..BATCH_SIZE {
                         root.wake_by_ref();
                     }
-                    assert!(sleep.as_mut().poll(&mut cx).is_pending());
+
+                    assert!(Pin::new(&mut receive).poll(&mut cx).is_pending());
                     queued.store(true, Ordering::Release);
 
                     // Teardown clears this task once worker zero has begun
-                    // its cleanup. Poll the sleep again while still mid-poll.
+                    // its cleanup. Poll the receive again while still
+                    // mid-poll.
                     let deadline = Instant::now() + TEST_TIMEOUT;
+
                     while !cancelled(this.get().unwrap()) {
                         assert!(Instant::now() < deadline, "teardown must clear the task");
                         std::hint::spin_loop();
                     }
-                    let poll = catch_unwind(AssertUnwindSafe(|| sleep.as_mut().poll(&mut cx)));
-                    *forwarded.lock() = Some(match poll {
-                        Ok(Poll::Pending) => "pending".into(),
-                        Ok(Poll::Ready(())) => "ready".into(),
-                        Err(panic) => extract_panic_message(&*panic),
+
+                    *forwarded.lock() = Some(match Pin::new(&mut receive).poll(&mut cx) {
+                        Poll::Pending => "pending".into(),
+                        Poll::Ready(Ok(_)) => "ready".into(),
+                        Poll::Ready(Err(error)) => format!("{error:?}"),
                     });
+
                     Poll::<()>::Pending
                 })
             };
@@ -4421,7 +4839,10 @@ fn test_shutdown_retains_a_taken_forward_until_polling_ends() {
             .await;
         }
     });
+
     assert_eq!(forwarded.lock().as_deref(), Some("pending"));
+
+    drop(peer);
 }
 
 /// Teardown clears two idle tasks whose destructors wake each other, so
@@ -5367,4 +5788,182 @@ fn test_direct_reads_outlive_their_origin_worker() {
 
     // The runner shut down before the handle was first polled, so it reports closure.
     assert!(matches!(block_on(unobserved), Err(Error::ReadFailed)));
+}
+
+/// A storm of sleeps due at once, each owned by a task of its own, beside a
+/// task that requeues itself, with short polls and with polls that outlast the
+/// backlog slice. An expiry pass fires no more sleeps than the run queue has
+/// room for, so the storm never overflows the queue, which would move its
+/// newest runnables, the requeued task among them, behind the storm in the
+/// global queue. The requeued task keeps its turn, so no more sleepers than
+/// the queue holds complete between two of its polls.
+#[test]
+fn test_expiry_storm_keeps_a_requeued_task_in_the_run_queue() {
+    /// Sleeping tasks, sixteen budgets' worth.
+    const SLEEPERS: usize = 16 * BUDGET as usize;
+
+    /// Time from the storm's setup to its deadline, by which every sleeper
+    /// must have registered, with ample room for a slow host.
+    const LEAD: Duration = Duration::from_millis(500);
+
+    for work in [Duration::ZERO, 2 * BACKLOG_SLICE] {
+        Runner::new(config()).start(move |context| async move {
+            // A task that requeues itself and records the most sleepers that
+            // completed between two of its polls.
+            let completed = Arc::new(AtomicUsize::new(0));
+            let stop = Arc::new(AtomicBool::new(false));
+            let spinner = context.child("spinner").spawn({
+                let completed = completed.clone();
+                let stop = stop.clone();
+                move |_| async move {
+                    let (mut seen, mut most) = (0, 0);
+
+                    while !stop.load(Ordering::Relaxed) {
+                        let now = completed.load(Ordering::Relaxed);
+                        most = most.max(now - seen);
+                        seen = now;
+                        let began = Instant::now();
+
+                        while began.elapsed() < work {
+                            std::hint::spin_loop();
+                        }
+
+                        reschedule().await;
+                    }
+
+                    most
+                }
+            });
+
+            // Every sleeper registers its sleep in its first poll.
+            let registered = Arc::new(AtomicUsize::new(0));
+            let deadline = SystemTime::now() + LEAD;
+            let sleepers: Vec<_> = (0..SLEEPERS)
+                .map(|_| {
+                    let completed = completed.clone();
+                    let registered = registered.clone();
+                    context.child("sleeper").spawn(move |context| async move {
+                        let mut sleep = pin!(context.sleep_until(deadline));
+                        let mut polled = false;
+                        poll_fn(|cx| {
+                            let result = sleep.as_mut().poll(cx);
+
+                            if !mem::replace(&mut polled, true) {
+                                registered.fetch_add(1, Ordering::Relaxed);
+                            }
+
+                            result
+                        })
+                        .await;
+
+                        completed.fetch_add(1, Ordering::Relaxed);
+                    })
+                })
+                .collect();
+
+            // Spawning the sleepers overflowed the run queue. Watch it from
+            // the moment every sleeper waits.
+            while registered.load(Ordering::Relaxed) < SLEEPERS {
+                reschedule().await;
+            }
+
+            assert!(
+                SystemTime::now() < deadline,
+                "the storm's setup outlasted its lead"
+            );
+
+            let overflowed = Arc::new(AtomicBool::new(false));
+            on_next_overflow(&context.shared.pool, {
+                let overflowed = overflowed.clone();
+                move || overflowed.store(true, Ordering::Relaxed)
+            });
+
+            for sleeper in sleepers {
+                sleeper.await.unwrap();
+            }
+
+            stop.store(true, Ordering::Relaxed);
+            let most = spinner.await.unwrap();
+
+            assert!(
+                most <= CAPACITY,
+                "the requeued task waited for {most} sleepers with polls of {work:?}"
+            );
+            assert!(
+                !overflowed.load(Ordering::Relaxed),
+                "the storm overflowed the run queue with polls of {work:?}"
+            );
+        });
+    }
+}
+
+/// A due sleep fires while the run queue stays full of tasks that requeue
+/// themselves, since every expiry pass fires at least one sleep.
+#[test]
+fn test_due_sleep_fires_beside_a_full_run_queue() {
+    Runner::new(config()).start(|context| async move {
+        // The sleep registers in the sleeper's first poll, before the run
+        // queue fills.
+        let stop = Arc::new(AtomicBool::new(false));
+        let registered = Arc::new(AtomicBool::new(false));
+        let sleeper = context.child("sleeper").spawn({
+            let stop = stop.clone();
+            let registered = registered.clone();
+            move |context| async move {
+                registered.store(true, Ordering::Relaxed);
+                context.sleep(Duration::from_millis(20)).await;
+                stop.store(true, Ordering::Relaxed);
+            }
+        });
+
+        while !registered.load(Ordering::Relaxed) {
+            reschedule().await;
+        }
+
+        // Tasks that requeue themselves fill the run queue exactly, so every
+        // service pass finds it without room.
+        let spinners: Vec<_> = (0..CAPACITY)
+            .map(|_| {
+                let stop = stop.clone();
+                context.child("spinner").spawn(move |_| async move {
+                    while !stop.load(Ordering::Relaxed) {
+                        reschedule().await;
+                    }
+                })
+            })
+            .collect();
+
+        // A watchdog stops the spinners if the sleep starves, so the test
+        // fails rather than hangs.
+        let starved = Arc::new(AtomicBool::new(false));
+        let watchdog = thread::spawn({
+            let stop = stop.clone();
+            let starved = starved.clone();
+            move || {
+                let began = Instant::now();
+
+                while !stop.load(Ordering::Relaxed) {
+                    if began.elapsed() > Duration::from_secs(5) {
+                        starved.store(true, Ordering::Relaxed);
+                        stop.store(true, Ordering::Relaxed);
+                    }
+
+                    thread::sleep(Duration::from_millis(1));
+                }
+            }
+        });
+
+        sleeper.await.unwrap();
+
+        for spinner in spinners {
+            spinner.await.unwrap();
+        }
+
+        watchdog.join().unwrap();
+
+        assert!(
+            !starved.load(Ordering::Relaxed),
+            "a full run queue starved a due sleep"
+        );
+    });
 }

@@ -59,10 +59,6 @@ pub struct Config {
     /// If the timeout expires, `Network::dial` returns [`Error::Timeout`].
     pub connect_timeout: Duration,
     /// Timeout budget applied to each top-level send/recv call.
-    ///
-    /// The owning runner validates its timeout wheel against this policy.
-    /// Moving a resource to a runner with a smaller horizon can reject an
-    /// operation whose deadline cannot be represented.
     pub read_write_timeout: Duration,
     /// Size of the read buffer for batching network reads.
     ///
@@ -630,10 +626,7 @@ mod tests {
     #[test]
     fn test_cancel_accept_before_service_preserves_next_connection() {
         iouring::Runner::new(
-            iouring::Config::default().with_ring_config(iouring::RingConfig {
-                size: 1,
-                ..Default::default()
-            }),
+            iouring::Config::default().with_ring_config(iouring::RingConfig { size: 1 }),
         )
         .start(|_| async {
             let network = Network::new(Config::default());
@@ -710,10 +703,7 @@ mod tests {
     #[test]
     fn test_stress_trait() {
         iouring::Runner::new(
-            iouring::Config::default().with_ring_config(iouring::RingConfig {
-                size: 256,
-                ..Default::default()
-            }),
+            iouring::Config::default().with_ring_config(iouring::RingConfig { size: 256 }),
         )
         .start(|context| async move {
             tests::stress_test_network_trait(context, || Network::new(Config::default())).await;
