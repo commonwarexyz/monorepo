@@ -62,8 +62,11 @@
 
 use crate::{
     Epochable,
-    multimmit::types::{
-        DaCertificate, DaQuorum, LeaderBlock, NoVote, TransactionBlockHeader, Vote, VoteBody,
+    multimmit::{
+        faults::MultimmitFaults as _,
+        types::{
+            DaCertificate, DaQuorum, LeaderBlock, NoVote, TransactionBlockHeader, Vote, VoteBody,
+        },
     },
     types::{Epoch, Height, Round},
 };

@@ -25,7 +25,7 @@
 //! checks ordinary signatures and recovered certificates but cannot check or recover shares.
 
 use super::{Available, Binding, DaFaults, DaSubject, Error, Generic, Marker, RoleDigest};
-use crate::multimmit::config::Parameters;
+use crate::multimmit::{config::Parameters, faults::MultimmitFaults as _};
 use bytes::BytesMut;
 use commonware_codec::{Read as _, Write as _};
 use commonware_cryptography::{
