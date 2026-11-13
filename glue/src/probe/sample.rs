@@ -118,7 +118,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_utils::{N3f1, faults::N5f1Nullification};
+    use commonware_utils::{N3f1, N5f1};
 
     fn assert_threshold<F: Faults>(committee_size: usize, threshold: usize) {
         let mut sample = Sample::new();
@@ -140,7 +140,7 @@ mod tests {
     fn thresholds_follow_fault_model() {
         for (size, n3f1, n5f1) in [(1, 1, 1), (4, 2, 1), (7, 3, 2), (11, 4, 3), (50, 17, 10)] {
             assert_threshold::<N3f1>(size, n3f1);
-            assert_threshold::<N5f1Nullification>(size, n5f1);
+            assert_threshold::<N5f1>(size, n5f1);
         }
     }
 
