@@ -304,7 +304,7 @@ mod tests {
 
             loop {
                 let metrics = context.encode();
-                if crate::authenticated::assert_thread_placement(
+                if crate::authenticated::placement::assert_thread_placement(
                     &metrics,
                     &["network0", "network1"],
                 ) {

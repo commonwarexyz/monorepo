@@ -225,7 +225,8 @@ where
         let ancestor_fetch_duration = Timed::new(ancestor_fetch_histogram);
 
         Self {
-            // Per-round tasks spawn on demand, so this context must not carry the caller's placement.
+            // Per-round tasks spawn on demand, so this context must not carry the caller's
+            // placement.
             context: Arc::new(context.shared()),
             application,
             marshal,

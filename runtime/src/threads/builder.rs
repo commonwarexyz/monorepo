@@ -435,8 +435,9 @@ impl<C: Spawner> ThreadBuilder<C> {
     /// [Spawner::spawn_on].
     ///
     /// The thread lives as long as the supervision node of the context consumed by
-    /// [Spawner::thread], so until that lineage ends or is aborted. Code that rebuilds a subsystem per epoch should use
-    /// [ThreadBuilder::attach], whose thread closes with the task that consumes its context.
+    /// [Spawner::thread], until that lineage ends or is aborted. Code that rebuilds a subsystem
+    /// per epoch should use [ThreadBuilder::attach], whose thread closes with the task that
+    /// consumes its context.
     ///
     /// # Errors
     ///

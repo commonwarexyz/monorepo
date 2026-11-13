@@ -233,7 +233,8 @@ where
         let ancestor_fetch_duration = Timed::new(ancestor_fetch_histogram);
 
         Self {
-            // Per-round tasks spawn on demand, so this context must not carry the caller's placement.
+            // Per-round tasks spawn on demand, so this context must not carry the caller's
+            // placement.
             context: Arc::new(context.shared()),
             application,
             marshal,
@@ -906,9 +907,81 @@ mod tests {
         sha256::Sha256,
     };
     use commonware_macros::{select, test_traced};
-    use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
+    use commonware_runtime::{Clock, Metrics, Runner, Spawner, Supervisor as _, deterministic};
     use commonware_utils::{NZUsize, channel::fallible::OneshotExt};
     use std::time::Duration;
+
+    #[test]
+    fn test_deferred_round_tasks_use_shared_executor() {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+                1024 * 1024,
+            )
+            .await;
+            let setup = StandardHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                participants[0].clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
+            let parent_round = Round::new(Epoch::zero(), View::new(1));
+            let parent_ctx = Ctx {
+                round: parent_round,
+                leader: default_leader(),
+                parent: (View::zero(), genesis.digest()),
+            };
+            let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
+            let parent_digest = parent.digest();
+            assert!(marshal.verified(parent_round, ready(parent)).await);
+            let round = Round::new(Epoch::zero(), View::new(2));
+            let ctx = Ctx {
+                round,
+                leader: participants[0].clone(),
+                parent: (View::new(1), parent_digest),
+            };
+            let block = B::new::<Sha256>(ctx.clone(), parent_digest, Height::new(2), 200);
+            let digest = block.digest();
+            let thread = context.child("t").thread().build().unwrap();
+            let mut deferred = Deferred::new(
+                context.child("deferred").on(&thread),
+                MockVerifyingApp::<B, S>::new().with_propose_result(block.clone()),
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+            );
+            assert_eq!(deferred.propose(ctx.clone()).await.await.unwrap(), digest);
+            assert!(marshal.verified(round, ready(block)).await);
+            assert!(deferred.verify(ctx, digest).await.await.unwrap());
+
+            let metrics = context.encode();
+            for task in ["deferred_propose", "deferred_optimistic_verify"] {
+                let name = format!("name=\"{task}\"");
+                let lines: Vec<_> = metrics
+                    .lines()
+                    .filter(|line| {
+                        line.starts_with("runtime_tasks_spawned_total{") && line.contains(&name)
+                    })
+                    .collect();
+                assert!(!lines.is_empty(), "missing {name}: {metrics}");
+                assert!(
+                    lines
+                        .iter()
+                        .all(|line| line.contains("execution=\"Shared\"")),
+                    "{name}: {metrics}"
+                );
+            }
+        });
+    }
 
     #[test_traced("INFO")]
     fn test_certify_lower_view_after_higher_view() {

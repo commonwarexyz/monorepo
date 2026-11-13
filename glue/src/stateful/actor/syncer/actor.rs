@@ -113,10 +113,8 @@ where
 
         let (tip_updates_tx, tip_updates_rx) = ring::channel(NZUsize!(1));
         let mut tip_updates_tx = Some(tip_updates_tx);
-        // State sync is a fixed set of tasks that lives as long as the sync, so it runs where
-        // the syncer runs.
         let mut task = OptionFuture::from(Some(Box::pin(A::Databases::sync(
-            self.context.child("state_sync").placed(),
+            self.context.child("state_sync"),
             self.db_config,
             self.resolvers,
             Anchor::from_block(&block),

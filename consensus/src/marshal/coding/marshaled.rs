@@ -247,6 +247,7 @@ where
     ES: Epocher,
 {
     /// Creates a new [`Marshaled`] wrapper.
+    ///
     /// Per-round tasks run on the shared executor regardless of the supplied context's placement.
     ///
     /// # Panics
@@ -298,7 +299,8 @@ where
         let erasure_encode_duration = Timed::new(erasure_histogram);
 
         Self {
-            // Per-round tasks spawn on demand, so this context must not carry the caller's placement.
+            // Per-round tasks spawn on demand, so this context must not carry the caller's
+            // placement.
             context: Arc::new(context.shared()),
             application,
             marshal,

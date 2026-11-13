@@ -1622,6 +1622,44 @@ mod tests {
     /// Default rate limit set high enough to not interfere with normal operation
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
+    #[test]
+    fn test_network_thread_placement() {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|context| async move {
+            let thread = context.child("t").thread().build().unwrap();
+            let cfg = Config {
+                max_size: MAX_MESSAGE_SIZE,
+                max_peers_per_set: NZUsize!(2),
+                disconnect_on_block: true,
+                tracked_peer_sets: NZUsize!(1),
+            };
+            let peers = [ed25519::PrivateKey::from_seed(1).public_key()];
+            let (network, _oracle) =
+                Network::new_with_peers(context.child("network").on(&thread), cfg, peers).await;
+            network.start();
+            let metrics = context.encode();
+            for (task, execution) in [
+                ("network", "Thread"),
+                ("network_peer_router", "Shared"),
+                ("network_peer_listener", "Shared"),
+            ] {
+                let name = format!("name=\"{task}\"");
+                let lines: Vec<_> = metrics
+                    .lines()
+                    .filter(|line| {
+                        line.starts_with("runtime_tasks_spawned_total{") && line.contains(&name)
+                    })
+                    .collect();
+                assert!(!lines.is_empty(), "missing {name}: {metrics}");
+                assert!(
+                    lines
+                        .iter()
+                        .all(|line| line.contains(&format!("execution=\"{execution}\""))),
+                    "{name}: {metrics}"
+                );
+            }
+        });
+    }
+
     async fn send_when_ready(
         context: &deterministic::Context,
         sender: &mut Sender<ed25519::PublicKey, deterministic::Context>,

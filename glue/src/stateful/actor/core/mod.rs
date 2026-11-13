@@ -226,8 +226,10 @@ where
         let (marshal, floor) = self.marshal;
         let metrics = StatefulMetrics::new(self.context.as_present());
         let (sender, receiver) = oneshot::channel();
+        // State sync is heavy and lasts only until the databases are synced, and the databases
+        // it opens keep its context, so the syncer and its tasks stay on the shared executor.
         let (syncer, syncer_mailbox) = syncer::Syncer::new(syncer::Config {
-            context: self.context.child("syncer").placed(),
+            context: self.context.child("syncer"),
             db_config: self.db_config,
             sync_config: self.sync_config,
             resolvers: self.resolvers.clone(),

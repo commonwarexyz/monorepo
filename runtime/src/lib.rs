@@ -563,10 +563,9 @@ stability_scope!(BETA {
         /// Unlike directly awaiting a future, the task starts running immediately even if the caller
         /// never awaits the returned [`Handle`]. The factory `f` runs on the caller before this
         /// returns, unless the spawn is rejected and drops it unrun, so it may borrow or read
-        /// `!Send` state. The future it returns runs where the
-        /// context's spawns run (see [Placement](Spawner#placement)), so it must be `Send` and
-        /// `'static`. The context handed to the task remembers where the task runs, and is
-        /// unplaced.
+        /// `!Send` state. The future it returns runs where the context's spawns run (see
+        /// [Placement](Spawner#placement)), so it must be `Send` and `'static`. The context handed
+        /// to the task remembers where the task runs, and is unplaced.
         ///
         /// # Mandatory Supervision
         ///
