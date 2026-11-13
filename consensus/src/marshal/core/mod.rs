@@ -56,7 +56,7 @@ mod staged;
 mod stream;
 
 mod mailbox;
-pub use mailbox::{CommitmentFallback, DigestFallback, Mailbox};
+pub use mailbox::Mailbox;
 
 mod subscriptions;
 mod variant;
