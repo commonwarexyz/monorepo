@@ -9,12 +9,15 @@
 //! into a kernel as canonical coordinates, so every kernel loads its inputs and stores its
 //! outputs.
 //!
-//! Operations over slices of elements ([`Sum`], [`MultiplyEach`], and
-//! [`Msm`](super::msm::Msm)) hold one element per lane, so they dispatch once for many elements
-//! and fill every lane; the single-element operations use one lane, so their cost is the latency
-//! of one lane's formulas.
+//! Operations over slices of elements ([`Sum`], [`MultiplyEach`], and [`Msm`]) hold one element
+//! per lane, so one kernel runs many elements and fills every lane; the single-element
+//! operations use one lane, so their cost is the latency of one lane's formulas.
+//!
+//! The operations over slices also implement [`Batch`], and the public operations run them
+//! through [`Batch::dispatch_batches`], which dispatches one kernel per batch that a strategy
+//! supplies.
 
-use super::Scalar;
+use super::{Scalar, msm::Msm};
 use crate::core::{
     curve::Points,
     field::{
@@ -23,8 +26,10 @@ use crate::core::{
         fp::{rns::Rns, unsat28::Unsat28, unsat49::Unsat49},
     },
 };
+use alloc::vec::Vec;
+use commonware_parallel::Strategy;
 use commonware_simd::{Operation, Simd, X86V4C};
-use core::fmt::Debug;
+use core::{fmt::Debug, mem, num::NonZeroUsize, ops::Range};
 
 /// Width in bits of the signed scalar windows of [`multiply`].
 const WINDOW_BITS: u32 = 5;
@@ -89,6 +94,83 @@ pub trait Kernel: Sized {
     }
 }
 
+/// Returns the number of lanes of the representation in which [`Kernel::dispatch`] runs a
+/// kernel that does not prefer wide lanes. No representation that [`Kernel::dispatch`] selects
+/// has fewer.
+pub fn lanes() -> usize {
+    /// Returns the number of lanes of the representation that it runs in.
+    struct Lanes;
+
+    impl Kernel for Lanes {
+        type Output = usize;
+
+        #[inline(always)]
+        fn run<S: Simd, F: Field<S>>(self, _: S) -> usize {
+            F::LANES
+        }
+    }
+
+    Lanes.dispatch()
+}
+
+/// An operation over a slice of items that splits into the same operation over parts of the
+/// items, whose results join into the result of the whole.
+pub trait Batch: Kernel<Output: Send> + Send {
+    /// Estimated work of one item, in additions of G1.
+    // A strategy keeps its measurements by call site and by the powers of two that the count
+    // and the work lie between. Every operation shares the call site of dispatch_batches, so
+    // the estimates are distinct powers of two, which keeps the measurements of two operations
+    // apart.
+    const WORK: usize;
+
+    /// Returns the number of items.
+    fn len(&self) -> usize;
+
+    /// Splits the operation into one operation per range of items.
+    ///
+    /// The ranges are consecutive and cover every item from the first.
+    fn split(self, ranges: Vec<Range<usize>>) -> Vec<Self>;
+
+    /// Runs the whole operation as one kernel on the best available backend.
+    fn dispatch_one(self) -> Self::Output;
+
+    /// Combines the results of the parts, in the order of their ranges.
+    fn join(outputs: &[Self::Output]) -> Self::Output;
+
+    /// Runs the operation as one kernel per batch of items that the strategy supplies.
+    ///
+    /// The strategy cuts batches of whole groups of [`lanes`] items. Each batch dispatches on
+    /// its own, so it runs in the representation that finishes its own items soonest.
+    fn dispatch_batches(self, strategy: &impl Strategy) -> Self::Output {
+        let len = self.len();
+        let lanes = lanes();
+        let groups = len.div_ceil(lanes);
+        // One group never splits.
+        if groups < 2 {
+            return self.dispatch_one();
+        }
+        let work = Self::WORK.saturating_mul(lanes);
+        strategy.run_batches(groups, NonZeroUsize::MIN, work, |batches| {
+            if batches.is_whole() {
+                return self.dispatch_one();
+            }
+            let outputs = batches.map_collect_vec(
+                |ranges| {
+                    let items = |group: usize| group.saturating_mul(lanes).min(len);
+                    self.split(
+                        ranges
+                            .into_iter()
+                            .map(|range| items(range.start)..items(range.end))
+                            .collect(),
+                    )
+                },
+                Self::dispatch_one,
+            );
+            Self::join(&outputs)
+        })
+    }
+}
+
 /// A group whose elements cross kernel boundaries as canonical projective coordinates.
 pub trait Group: Copy + Send + Sync {
     /// Canonical projective coordinates of one element.
@@ -99,6 +181,18 @@ pub trait Group: Copy + Send + Sync {
 
     /// The identity.
     const IDENTITY: Self::Coordinates;
+
+    /// Estimated work of an addition, in additions of G1.
+    const WORK: usize;
+
+    /// Runs a sum through [`Kernel::dispatch`].
+    fn dispatch_sum(kernel: Sum<'_, Self>) -> Self;
+
+    /// Runs the multiplications of a slice through [`Kernel::dispatch`].
+    fn dispatch_multiply_each(kernel: MultiplyEach<'_, Self>);
+
+    /// Runs a multi-scalar multiplication through [`Kernel::dispatch`].
+    fn dispatch_msm(kernel: Msm<'_, Self>) -> Self;
 
     /// Largest number of elements that [`Sum`] runs in residues, which finish them sooner than
     /// the 64-bit lanes, or `None` when residues finish every count sooner.
@@ -410,6 +504,29 @@ impl<G: Group> Kernel for Sum<'_, G> {
     }
 }
 
+impl<G: Group> Batch for Sum<'_, G> {
+    const WORK: usize = G::WORK;
+
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn split(self, ranges: Vec<Range<usize>>) -> Vec<Self> {
+        ranges
+            .into_iter()
+            .map(|range| Self(&self.0[range]))
+            .collect()
+    }
+
+    fn dispatch_one(self) -> G {
+        G::dispatch_sum(self)
+    }
+
+    fn join(outputs: &[G]) -> G {
+        G::dispatch_sum(Sum(outputs))
+    }
+}
+
 /// Multiplies each element by the scalar at the same index, one element per lane, in time
 /// independent of the scalars.
 pub struct MultiplyEach<'a, G> {
@@ -444,4 +561,35 @@ impl<G: Group> Kernel for MultiplyEach<'_, G> {
             }
         }
     }
+}
+
+impl<G: Group> Batch for MultiplyEach<'_, G> {
+    // A multiplication doubles once per bit of a component and adds once per window of every
+    // component.
+    const WORK: usize = 256 * G::WORK;
+
+    fn len(&self) -> usize {
+        self.elements.len().min(self.scalars.len())
+    }
+
+    fn split(self, ranges: Vec<Range<usize>>) -> Vec<Self> {
+        let mut rest = self.elements;
+        ranges
+            .into_iter()
+            .map(|range| {
+                let (elements, tail) = mem::take(&mut rest).split_at_mut(range.len());
+                rest = tail;
+                Self {
+                    elements,
+                    scalars: &self.scalars[range],
+                }
+            })
+            .collect()
+    }
+
+    fn dispatch_one(self) {
+        G::dispatch_multiply_each(self);
+    }
+
+    fn join(_: &[()]) {}
 }
