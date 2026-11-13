@@ -186,7 +186,8 @@ impl<R: Readable> Readable for Layered<'_, R> {
     }
 }
 
-impl<R: Readable> MerkleStorage<R::Family> for Layered<'_, R> {
+impl<R: Readable> MerkleStorage for Layered<'_, R> {
+    type Family = R::Family;
     type Digest = R::Digest;
 
     fn size(&self) -> Position<R::Family> {
@@ -1383,7 +1384,7 @@ where
     pub fn new_batch(&self) -> UnmerkleizedBatch<F, H, U, N, S> {
         UnmerkleizedBatch {
             inner: self.any.new_batch(),
-            grafted_parent: self.grafted_snapshot(),
+            grafted_parent: self.grafted_batch(),
             bitmap_parent: BitmapBatch::Base(Arc::clone(&self.any.bitmap)),
         }
     }
@@ -1393,7 +1394,7 @@ where
     /// Once the DB moves to another state, reads through it return [`Error::StaleRead`] and
     /// applying it returns [`Error::StaleBatch`].
     pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, U, N, S>> {
-        let grafted = self.grafted_snapshot();
+        let grafted = self.grafted_batch();
         Arc::new(MerkleizedBatch {
             inner: self.any.to_batch(),
             grafted,

@@ -15,8 +15,11 @@ use crate::{
         authenticated::{Backing as _, BackingRecovery as _},
         contiguous::variable,
     },
-    merkle::{Family, Location, MAX_PINNED_NODES, Proof, compact},
-    qmdb::{self, Error, sync::CompactTarget},
+    merkle::{self, Family, Location, MAX_PINNED_NODES, Proof, compact},
+    qmdb::{
+        self, Error,
+        sync::{CompactTarget, Request, Response, Source, source},
+    },
 };
 use bytes::Bytes;
 use commonware_codec::{Buf, EncodeSize, Read, Write};
@@ -116,7 +119,11 @@ where
 }
 
 /// A witness whose commit has been checked and whose root and commit proof are derived from it.
-pub(super) struct VerifiedWitness<F: Family, D: Digest, O: Operation<F>> {
+///
+/// As a [`Source`], it serves only requests for its own state: `size` equal to [`Self::size`] and
+/// `start` at the commit (`size - 1`). Other requests fail with the errors a pruned operation log
+/// reports ([`journal::Error::ItemPruned`] or [`merkle::Error::RangeOutOfBounds`]).
+pub struct VerifiedWitness<F: Family, D: Digest, O: Operation<F>> {
     pub(super) witness: Witness<F, D, O>,
     /// Inactivity floor declared by the commit.
     pub(super) inactivity_floor_loc: Location<F>,
@@ -129,8 +136,13 @@ pub(super) struct VerifiedWitness<F: Family, D: Digest, O: Operation<F>> {
 
 impl<F: Family, D: Digest, O: Operation<F>> VerifiedWitness<F, D, O> {
     /// The committed size, which also identifies the last commit's location.
-    pub(super) const fn size(&self) -> Location<F> {
+    pub const fn size(&self) -> Location<F> {
         self.witness.size
+    }
+
+    /// The committed root.
+    pub const fn root(&self) -> D {
+        self.root
     }
 
     /// The metadata carried by the commit.
@@ -139,11 +151,62 @@ impl<F: Family, D: Digest, O: Operation<F>> VerifiedWitness<F, D, O> {
     }
 
     /// The compact-sync target (root and size) this witness can serve.
-    pub(super) const fn target(&self) -> CompactTarget<F, D> {
+    pub const fn target(&self) -> CompactTarget<F, D> {
         CompactTarget {
             root: self.root,
             size: self.size(),
         }
+    }
+
+    /// Answer `request`, which the caller has checked ends at this witness's commit.
+    pub(super) fn respond(&self, request: &Request<F>) -> Response<F, O, D> {
+        let op = self.witness.commit.clone();
+        let proof = self.proof.clone();
+        match request {
+            Request::Operations { .. } => Response::Operations {
+                proof,
+                operations: vec![op],
+            },
+            Request::Boundary { .. } => Response::Boundary {
+                proof,
+                op,
+                pinned_nodes: self.witness.pinned_nodes.clone(),
+            },
+        }
+    }
+}
+
+impl<F: Family, D: Digest, O: Operation<F>> Source for VerifiedWitness<F, D, O> {
+    type Family = F;
+    type Digest = D;
+    type Op = O;
+    type Error = Error<F>;
+
+    #[tracing::instrument(
+        name = "qmdb.sync.serve",
+        level = "info",
+        skip_all,
+        fields(
+            size = *request.size(),
+            start = *request.start(),
+            max_ops = request.max_ops().get(),
+        ),
+    )]
+    async fn serve(&self, request: Request<F>) -> source::Result<Self> {
+        let size = self.size();
+        if request.size() > size || request.size() == 0 {
+            return Err(merkle::Error::RangeOutOfBounds(request.size()).into());
+        }
+        if request.size() < size {
+            return Err(journal::Error::ItemPruned(*request.size() - 1).into());
+        }
+        if request.start() >= request.size() {
+            return Err(merkle::Error::RangeOutOfBounds(request.start()).into());
+        }
+        if request.start() < request.size() - 1 {
+            return Err(journal::Error::ItemPruned(*request.start()).into());
+        }
+        Ok((self.respond(&request), None))
     }
 }
 

@@ -4,7 +4,7 @@ use crate::{
     index::immutable::Index,
     journal::{
         authenticated,
-        contiguous::{Contiguous, Mutable},
+        contiguous::{Contiguous, Mutable, Snapshottable},
     },
     merkle::{Family, Location, Proof},
     qmdb::{Error, chain, metrics::Metrics, operation::Key, sync::source, value::ValueEncoding},
@@ -23,11 +23,11 @@ use futures::{StreamExt, pin_mut};
 use std::{ops::Range, sync::Arc};
 use tracing::warn;
 
-/// Build the snapshot by replaying the log from `inactivity_floor_loc`, inserting the location of
+/// Build the index by replaying the log from `inactivity_floor_loc`, inserting the location of
 /// every retained [Operation::Set]. Assumes the log is not pruned beyond the inactivity floor.
 ///
 /// `init_buffer` sizes the replay read buffer (in bytes).
-pub(super) async fn build_snapshot<F, E, K, V, C, T>(
+pub(super) async fn build_index<F, E, K, V, C, T>(
     context: E,
     translator: T,
     inactivity_floor_loc: Location<F>,
@@ -46,7 +46,7 @@ where
     // replay neither counts them first nor grows the table as it goes. Commits are not indexed,
     // so a log of tiny batches can leave the table one doubling larger than its entries need.
     let end = log.bounds().end;
-    let mut snapshot = Index::new(
+    let mut index = Index::new(
         context,
         translator,
         *inactivity_floor_loc,
@@ -67,11 +67,11 @@ where
     while let Some(batch) = stream.next().await {
         for (loc, op) in batch? {
             if let Operation::Set(key, _) = op {
-                snapshot.insert(&key, loc);
+                index.insert(&key, loc);
             }
         }
     }
-    Ok(snapshot)
+    Ok(index)
 }
 
 /// An authenticated database that only supports adding new keyed values (no updates or
@@ -102,8 +102,8 @@ pub struct Db<
     pub(super) root: H::Digest,
 
     /// The location of the [Operation::Set] of every key set at or after the inactivity floor
-    /// the snapshot was built from, excluding pruned locations.
-    pub(super) snapshot: Index<T>,
+    /// the index was built from, excluding pruned locations.
+    pub(super) index: Index<T>,
 
     /// The inactivity floor declared by the last committed batch.
     /// Operations before this location are considered inactive by the application.
@@ -157,7 +157,7 @@ where
     where
         C: authenticated::Backing<E>,
     {
-        // Snapshot reconstruction replays from the selected commit's inactivity floor, so that
+        // Index reconstruction replays from the selected commit's inactivity floor, so that
         // floor must remain in the retained operation prefix.
         let mut journal = crate::qmdb::init_journal::<F, E, C, H, S>(
             context.child("journal"),
@@ -176,8 +176,8 @@ where
         }
 
         // Rebuild the in-memory state the last commit defines. Its inactivity floor is where
-        // the snapshot replay starts, so keys set before the floor are not loaded.
-        let (last_commit_loc, inactivity_floor_loc, snapshot) = {
+        // the index replay starts, so keys set before the floor are not loaded.
+        let (last_commit_loc, inactivity_floor_loc, index) = {
             let bounds = journal.journal.bounds();
             let last_commit_loc =
                 Location::new(bounds.end.checked_sub(1).expect("commit should exist"));
@@ -188,9 +188,9 @@ where
                 .inactivity_floor()
                 .expect("last operation should be a commit with floor");
 
-            // Replay the log from the inactivity floor to build the snapshot.
-            let snapshot = build_snapshot(
-                context.child("snapshot"),
+            // Replay the log from the inactivity floor to build the index.
+            let index = build_index(
+                context.child("index"),
                 cfg.translator,
                 inactivity_floor_loc,
                 &journal.journal,
@@ -198,7 +198,7 @@ where
             )
             .await?;
 
-            (last_commit_loc, inactivity_floor_loc, snapshot)
+            (last_commit_loc, inactivity_floor_loc, index)
         };
         let inactive_peaks = F::inactive_peaks(last_commit_loc + 1, inactivity_floor_loc);
         let root = journal.root(inactive_peaks)?;
@@ -207,7 +207,7 @@ where
         let db = Self {
             journal,
             root,
-            snapshot,
+            index,
             inactivity_floor_loc,
             metrics,
         };
@@ -264,7 +264,7 @@ where
         let _timer = self.metrics.get_timer();
         self.metrics.get_calls.inc();
         self.metrics.lookups_requested.inc();
-        for loc in self.snapshot.get(key) {
+        for loc in self.index.get(key) {
             let loc = Location::new(loc);
             if loc < floor {
                 continue;
@@ -307,7 +307,7 @@ where
         // candidate for it, including collisions. They are read in one batch below, each location
         // once, and resolved by comparing full keys.
         for (key_idx, key) in keys.iter().enumerate() {
-            for loc in self.snapshot.get(key.borrow()) {
+            for loc in self.index.get(key.borrow()) {
                 if loc < *floor {
                     continue;
                 }
@@ -426,17 +426,7 @@ where
         start_loc: Location<F>,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<F, H::Digest>, Vec<Operation<F, K, V>>), Error<F>> {
-        if historical_size > self.journal.size() {
-            return Err(crate::merkle::Error::RangeOutOfBounds(historical_size).into());
-        }
-
-        let inactive_peaks =
-            crate::qmdb::inactive_peaks_at::<F, _>(&self.journal, historical_size).await?;
-
-        Ok(self
-            .journal
-            .historical_proof(historical_size, start_loc, max_ops, inactive_peaks)
-            .await?)
+        crate::qmdb::historical_proof(&self.journal, historical_size, start_loc, max_ops).await
     }
 
     /// Generate and return:
@@ -485,7 +475,7 @@ where
             ));
         }
         (self.journal, _) = self.journal.prune(prune_loc).await?;
-        self.snapshot.prune(*self.bounds().start);
+        self.index.prune(*self.bounds().start);
         self.update_metrics();
         Ok(self)
     }
@@ -501,12 +491,13 @@ where
     }
 
     /// Return the pinned Merkle nodes at the given location.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::merkle::Error::RangeOutOfBounds`] if `loc` exceeds the operation count, and
+    /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned.
     pub async fn pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<H::Digest>, Error<F>> {
-        self.journal
-            .merkle
-            .pinned_nodes_at(loc)
-            .await
-            .map_err(Into::into)
+        self.journal.pinned_nodes_at(loc).await.map_err(Into::into)
     }
 
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
@@ -593,24 +584,22 @@ where
         self.validate_batch(&batch)?;
         let db_size = self.bounds().end;
 
-        // Journal writes and snapshot inserts are independent until batch publication.
-        let apply_snapshot = async {
+        // Journal writes and index inserts are independent until batch publication.
+        let apply_index = async {
             for (key, entry) in batch.diff.iter() {
-                self.snapshot.insert(key, *entry.loc);
+                self.index.insert(key, *entry.loc);
             }
             for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
                 if batch.bounds.ancestors[i].size <= db_size {
                     continue;
                 }
                 for (key, entry) in ancestor_diff.iter() {
-                    self.snapshot.insert(key, *entry.loc);
+                    self.index.insert(key, *entry.loc);
                 }
             }
         };
-        let (journal, ()) = futures::join!(
-            self.journal.apply_batch(&batch.journal_batch),
-            apply_snapshot
-        );
+        let (journal, ()) =
+            futures::join!(self.journal.apply_batch(&batch.journal_batch), apply_index);
         self.journal = journal?;
 
         // Update state.
@@ -643,5 +632,39 @@ where
 
     async fn serve(&self, request: crate::qmdb::sync::Request<F>) -> source::Result<Self> {
         self.journal.serve(request).await
+    }
+}
+
+impl<F, E, K, V, C, H, T, S> Db<F, E, K, V, C, H, T, S>
+where
+    F: Family,
+    E: Context,
+    K: Key,
+    V: ValueEncoding,
+    C: Mutable<Item = Operation<F, K, V>> + Snapshottable<Item = Operation<F, K, V>>,
+    C::Item: EncodeShared,
+    H: Hasher,
+    T: Translator,
+    S: Strategy,
+{
+    /// Capture an owned immutable snapshot of the database's operations log, with bounds
+    /// frozen at capture. The snapshot includes applied-but-uncommitted operations.
+    ///
+    /// Capture writes buffered data and keeps the log's blobs open while the snapshot is alive, as
+    /// [`Snapshottable::snapshot`] describes.
+    ///
+    /// Serving from the snapshot returns [`crate::merkle::Error::ElementPruned`] for a boundary
+    /// below the Merkle structure's pruning boundary, which a sync can leave above the log's
+    /// first retained operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the capture fails, which consumes the database.
+    pub async fn snapshot(
+        mut self,
+    ) -> Result<(Self, authenticated::Snapshot<F, E, C::Reader, H>), Error<F>> {
+        let log;
+        (self.journal, log) = self.journal.snapshot().await?;
+        Ok((self, log))
     }
 }

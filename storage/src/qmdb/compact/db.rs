@@ -1,7 +1,7 @@
 //! The compact db and its batches. See [`crate::qmdb::compact`].
 
 use super::{
-    Config, Operation, batch as compact_batch,
+    Config, Operation, Snapshot, batch as compact_batch,
     witness::{self, Rebuilt, StoredWitness, VerifiedWitness, Witness},
 };
 use crate::{
@@ -199,8 +199,8 @@ where
     /// Where the witnesses live.
     storage: Storage<E, F, H::Digest>,
 
-    /// The verified tip witness.
-    tip: VerifiedWitness<F, H::Digest, O>,
+    /// The verified tip witness, shared with snapshots.
+    tip: Arc<VerifiedWitness<F, H::Digest, O>>,
 
     /// Decodes the commits of retained witnesses below the tip when serving compact sync.
     codec_cfg: O::Cfg,
@@ -302,7 +302,7 @@ where
                 tip_state: TipState::Committed,
                 pending_sync: None,
             }),
-            tip,
+            tip: Arc::new(tip),
             codec_cfg,
         })
     }
@@ -343,23 +343,23 @@ where
                 context: context.child("witness"),
                 cfg: journal_cfg,
             })),
-            tip,
+            tip: Arc::new(tip),
             codec_cfg,
         })
     }
 
     /// Return the root of the db.
-    pub const fn root(&self) -> H::Digest {
+    pub fn root(&self) -> H::Digest {
         self.tip.root
     }
 
     /// Return the inactivity floor declared by the last applied batch.
-    pub const fn inactivity_floor(&self) -> Location<F> {
+    pub fn inactivity_floor(&self) -> Location<F> {
         self.tip.inactivity_floor_loc
     }
 
     /// Return the location of the next operation appended to this db.
-    pub const fn size(&self) -> Location<F> {
+    pub fn size(&self) -> Location<F> {
         self.tip.size()
     }
 
@@ -373,12 +373,12 @@ where
     /// This reflects the most recently applied batch. The target remains non-durable until a
     /// covering [`Self::commit`], [`Self::sync`], or [`Self::prune`] returns, or the handle
     /// returned by a covering [`Self::start_sync`] completes.
-    pub const fn target(&self) -> CompactTarget<F, H::Digest> {
+    pub fn target(&self) -> CompactTarget<F, H::Digest> {
         self.tip.target()
     }
 
     /// The [`Commitment`] for the database's current state.
-    pub(crate) const fn commitment(&self) -> Commitment<F, H::Digest> {
+    pub(crate) fn commitment(&self) -> Commitment<F, H::Digest> {
         Commitment {
             size: self.size(),
             root: self.root(),
@@ -437,7 +437,7 @@ where
 
         debug_assert_eq!(self.tip.size(), self.merkle.leaves());
         self.merkle.apply_batch(&batch.merkle_batch)?;
-        // Only a [`Self::to_batch`] snapshot has no operations, and it leaves the Merkle
+        // Only a [`Self::to_batch`] view has no operations, and it leaves the Merkle
         // unchanged. Any other batch ends with its commit.
         debug_assert_eq!(
             batch.operations.is_empty(),
@@ -455,7 +455,7 @@ where
         // Journal the import before the new witness so every applied state has its own entry.
         let mut open = self.storage.open(&self.tip.witness).await?;
         if let Some(tip) = tip {
-            self.tip = tip;
+            self.tip = Arc::new(tip);
             self.merkle.prune_to_frontier();
             open = open.append(&self.tip.witness).await?;
         }
@@ -564,6 +564,13 @@ where
         Ok(self)
     }
 
+    /// Capture an owned immutable [`Snapshot`] of the database's latest applied state, which may
+    /// not be durable yet. The snapshot holds only in-memory state, so unlike the standard
+    /// databases' snapshots it keeps no blobs open.
+    pub fn snapshot(&self) -> Snapshot<F, O, H::Digest> {
+        Arc::clone(&self.tip)
+    }
+
     /// Destroy all persisted state associated with this database.
     #[boxed]
     pub async fn destroy(self) -> Result<(), Error<F>> {
@@ -610,26 +617,10 @@ where
 
         // After the checks above, `start` is the request's last commit location. The witness's
         // pinned nodes are the pinned nodes for this request.
-        let retained;
-        let verified = if request.size() == self.tip.size() {
-            &self.tip
-        } else {
-            retained = self.retained(request.size()).await?;
-            &retained
-        };
-        let op = verified.witness.commit.clone();
-        let proof = verified.proof.clone();
-        Ok(match request {
-            Request::Operations { .. } => Response::Operations {
-                proof,
-                operations: vec![op],
-            },
-            Request::Boundary { .. } => Response::Boundary {
-                proof,
-                op,
-                pinned_nodes: verified.witness.pinned_nodes.clone(),
-            },
-        })
+        if request.size() == self.tip.size() {
+            return Ok(self.tip.respond(&request));
+        }
+        Ok(self.retained(request.size()).await?.respond(&request))
     }
 
     /// Load and rebuild the retained witness below the tip that commits exactly `size` leaves.
@@ -959,6 +950,7 @@ pub(crate) mod tests {
         metadata::{Config as MetadataConfig, Metadata},
         qmdb::{ProofExt as _, compact::witness},
     };
+    use commonware_codec::Encode as _;
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
@@ -1234,6 +1226,117 @@ pub(crate) mod tests {
                 .await,
                 Err(Error::Journal(crate::journal::Error::ItemPruned(_)))
             ));
+        });
+    }
+
+    /// The boundary request compact sync makes for the state committing `size` operations.
+    fn boundary_for<F: Family>(size: Location<F>) -> Request<F> {
+        Request::Boundary {
+            size,
+            start: size - 1,
+        }
+    }
+
+    /// A snapshot keeps serving its captured commit, byte-identical to the live serve at capture,
+    /// while the source advances past it, and refuses sizes it never captured.
+    pub(crate) fn test_compact_snapshot_frozen_at_capture<O: TestOperation>() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = open_db::<O>(context.child("db"), "compact-snapshot").await;
+            let (db, _) = apply_seed::<O>(db, 1).await;
+            let db = db.commit().await.unwrap();
+
+            let captured = db.target();
+            let (live, _) = db.serve(boundary_for(captured.size)).await.unwrap();
+
+            let snapshot = db.snapshot();
+            assert_eq!(snapshot.target(), captured);
+            assert_eq!(snapshot.root(), db.root());
+            let (served, _) = snapshot.serve(boundary_for(captured.size)).await.unwrap();
+            assert_eq!(served.encode(), live.encode());
+
+            // Advance the live database to a new durable commit.
+            let (db, _) = apply_seed::<O>(db, 2).await;
+            let db = db.commit().await.unwrap();
+            let advanced = db.target();
+            assert_ne!(advanced, captured);
+
+            // The snapshot still serves the captured commit and refuses the advanced size. The
+            // live database serves the captured commit from its retained witness.
+            let (served2, _) = snapshot.serve(boundary_for(captured.size)).await.unwrap();
+            assert_eq!(served2.encode(), served.encode());
+            assert!(matches!(
+                snapshot.serve(boundary_for(advanced.size)).await,
+                Err(Error::Merkle(merkle::Error::RangeOutOfBounds(_)))
+            ));
+            let (retained, _) = db.serve(boundary_for(captured.size)).await.unwrap();
+            assert_eq!(retained.encode(), served.encode());
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A snapshot captures the latest applied state, even before it is durable.
+    pub(crate) fn test_compact_snapshot_captures_applied_state<O: TestOperation>() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = open_db::<O>(context.child("db"), "compact-snapshot-applied").await;
+            let (db, _) = apply_seed::<O>(db, 1).await;
+            let db = db.commit().await.unwrap();
+            let committed = db.target();
+            let committed_snapshot = db.snapshot();
+
+            // Apply a batch without committing. A fresh snapshot tracks the applied state.
+            let (db, _) = apply_seed::<O>(db, 2).await;
+            assert!(db.size() > committed.size);
+            let snapshot = db.snapshot();
+            assert_eq!(snapshot.target(), db.target());
+            assert!(snapshot.serve(boundary_for(db.size())).await.is_ok());
+            assert!(matches!(
+                snapshot.serve(boundary_for(committed.size)).await,
+                Err(Error::Journal(crate::journal::Error::ItemPruned(_)))
+            ));
+
+            // The snapshot captured before the apply still serves the committed state.
+            assert_eq!(committed_snapshot.target(), committed);
+            assert!(
+                committed_snapshot
+                    .serve(boundary_for(committed.size))
+                    .await
+                    .is_ok()
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A snapshot captured while a compact-sync import is pending serves the imported tip.
+    pub(crate) fn test_compact_snapshot_import_pending_serves_tip<O: TestOperation>() {
+        deterministic::Runner::default().start(|context| async move {
+            // A source database with a retained commit below its tip.
+            let src = "compact-snapshot-import-src";
+            let below = commit_seed::<O>(context.child("below"), src, 1).await;
+            let import = Import::<O>::build(context.child("src"), src, 2).await;
+
+            // Import the source's tip into a fresh database, unjournaled.
+            let imported = import
+                .clone()
+                .into_db(context.child("import"), "compact-snapshot-import-dst");
+            let snapshot = imported.snapshot();
+            let (served, _) = snapshot
+                .serve(boundary_for(import.target.size))
+                .await
+                .unwrap();
+            let source = open_db::<O>(context.child("source"), src).await;
+            let (expected, _) = source
+                .serve(boundary_for(import.target.size))
+                .await
+                .unwrap();
+            assert_eq!(served.encode(), expected.encode());
+            assert!(matches!(
+                snapshot.serve(boundary_for(below.size)).await,
+                Err(Error::Journal(crate::journal::Error::ItemPruned(_)))
+            ));
+
+            source.destroy().await.unwrap();
         });
     }
 
@@ -1728,11 +1831,11 @@ pub(crate) mod tests {
             let db = open_db::<O>(context.child("db"), "compact-to-batch-live").await;
 
             let pre_apply_root = db.root();
-            let pre_snapshot = db.to_batch();
+            let pre_view = db.to_batch();
             assert_eq!(
-                pre_snapshot.root(),
+                pre_view.root(),
                 pre_apply_root,
-                "snapshot before any mutation should match the live root"
+                "view before any mutation should match the live root"
             );
 
             let batch = db
@@ -1751,9 +1854,9 @@ pub(crate) mod tests {
                 "applying a non-empty batch must change the live root"
             );
 
-            let snapshot = db.to_batch();
+            let view = db.to_batch();
             assert_eq!(
-                snapshot.root(),
+                view.root(),
                 live_root,
                 "to_batch().root() must match the live db.root() even before sync"
             );
@@ -1762,19 +1865,19 @@ pub(crate) mod tests {
         });
     }
 
-    /// Applying a snapshot journals nothing, however often it is applied, while a batch with no
+    /// Applying a [`Db::to_batch`] view journals nothing, however often it is applied, while a batch with no
     /// mutations still appends its commit and a witness.
-    pub(crate) fn test_compact_apply_snapshot_appends_no_witness<O: TestOperation>() {
+    pub(crate) fn test_compact_apply_view_appends_no_witness<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
-            let db = open_db::<O>(context.child("db"), "compact-apply-snapshot").await;
+            let db = open_db::<O>(context.child("db"), "compact-apply-view").await;
             let (db, _) = apply_seed::<O>(db, 1).await;
             let mut db = db.sync().await.unwrap();
             let target = db.target();
             let entries = witness_entries(&db);
 
             for _ in 0..2 {
-                let snapshot = db.to_batch();
-                db = db.apply_batch(snapshot).await.unwrap();
+                let view = db.to_batch();
+                db = db.apply_batch(view).await.unwrap();
                 assert_eq!(db.target(), target);
                 assert_eq!(witness_entries(&db), entries);
             }
@@ -1788,17 +1891,16 @@ pub(crate) mod tests {
         });
     }
 
-    /// Applying a snapshot of a pending import journals only the import.
-    pub(crate) fn test_compact_apply_snapshot_journals_import<O: TestOperation>() {
+    /// Applying a view of a pending import journals only the import.
+    pub(crate) fn test_compact_apply_view_journals_import<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
-            let dst = "compact-apply-snapshot-import-dst";
+            let dst = "compact-apply-view-import-dst";
             let import =
-                Import::<O>::build(context.child("src"), "compact-apply-snapshot-import-src", 2)
-                    .await;
+                Import::<O>::build(context.child("src"), "compact-apply-view-import-src", 2).await;
             commit_seed::<O>(context.child("seed"), dst, 1).await;
             let imported = import.clone().into_db(context.child("import"), dst);
-            let snapshot = imported.to_batch();
-            let db = imported.apply_batch(snapshot).await.unwrap();
+            let view = imported.to_batch();
+            let db = imported.apply_batch(view).await.unwrap();
             assert_eq!(db.target(), import.target);
             assert_eq!(witness_entries(&db), 1);
             drop(db.sync().await.unwrap());
@@ -4170,6 +4272,9 @@ pub(crate) mod tests {
             $crate::qmdb::compact::db::tests::compact_db_tests!(@each $operation;
                 test_serve_refuses_requests_outside_witness,
                 test_serve_retained_witnesses,
+                test_compact_snapshot_frozen_at_capture,
+                test_compact_snapshot_captures_applied_state,
+                test_compact_snapshot_import_pending_serves_tip,
                 test_compact_apply_overlaps_start_sync,
                 test_compact_start_sync_recovery,
                 test_compact_start_sync_failure_propagates,
@@ -4183,8 +4288,8 @@ pub(crate) mod tests {
                 test_compact_stale_batch_rejected,
                 test_compact_delayed_merkleize_after_ancestor_apply,
                 test_compact_to_batch_reflects_live_state,
-                test_compact_apply_snapshot_appends_no_witness,
-                test_compact_apply_snapshot_journals_import,
+                test_compact_apply_view_appends_no_witness,
+                test_compact_apply_view_journals_import,
                 test_compact_stale_batch_chained,
                 test_compact_stale_parent_after_child_applied,
                 test_compact_sequential_commit_parent_then_child,

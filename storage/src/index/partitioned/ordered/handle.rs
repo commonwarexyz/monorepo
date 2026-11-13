@@ -1,7 +1,7 @@
 //! Metric handles that an [`Index`](super::Index) updates as it changes.
 //!
 //! A full index counts on its registered metrics directly. The index inside a parallel
-//! snapshot-build worker counts on [`Batched`] handles that publish to the full index's metrics in
+//! index-build worker counts on [`Batched`] handles that publish to the full index's metrics in
 //! batches. Both implement these traits, so one implementation of the index serves either.
 
 use commonware_runtime::telemetry::metrics::{Batched, Counter, Gauge, GaugeValue, raw};

@@ -3,7 +3,7 @@ use crate::{
     Context,
     journal::{
         authenticated,
-        contiguous::{Contiguous, Mutable},
+        contiguous::{Contiguous, Mutable, Snapshottable},
     },
     merkle::{Family, Location, Proof},
     qmdb::{Error, chain, metrics::Metrics, sync::source, value::ValueEncoding},
@@ -105,7 +105,7 @@ where
     where
         C: authenticated::Backing<E>,
     {
-        // Keyless restores commit fields without replaying a keyed snapshot, so its logical floor
+        // Keyless restores commit fields without replaying a keyed index, so its logical floor
         // may precede the retained operation prefix.
         let mut journal = crate::qmdb::init_journal::<F, E, C, H, S>(
             context.child("journal"),
@@ -305,26 +305,17 @@ where
         start_loc: Location<F>,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<F, H::Digest>, Vec<Operation<F, V>>), Error<F>> {
-        if historical_size > self.journal.size() {
-            return Err(crate::merkle::Error::RangeOutOfBounds(historical_size).into());
-        }
-
-        let inactive_peaks =
-            crate::qmdb::inactive_peaks_at::<F, _>(&self.journal, historical_size).await?;
-
-        Ok(self
-            .journal
-            .historical_proof(historical_size, start_loc, max_ops, inactive_peaks)
-            .await?)
+        crate::qmdb::historical_proof(&self.journal, historical_size, start_loc, max_ops).await
     }
 
     /// Return the pinned Merkle nodes for a lower operation boundary of `loc`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::merkle::Error::RangeOutOfBounds`] if `loc` exceeds the operation count, and
+    /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned.
     pub async fn pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<H::Digest>, Error<F>> {
-        self.journal
-            .merkle
-            .pinned_nodes_at(loc)
-            .await
-            .map_err(Into::into)
+        self.journal.pinned_nodes_at(loc).await.map_err(Into::into)
     }
 
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root.
@@ -468,5 +459,37 @@ where
 
     async fn serve(&self, request: crate::qmdb::sync::Request<F>) -> source::Result<Self> {
         self.journal.serve(request).await
+    }
+}
+
+impl<F, E, V, C, H, S> Db<F, E, V, C, H, S>
+where
+    F: Family,
+    E: Context,
+    V: ValueEncoding,
+    C: Snapshottable<Item = Operation<F, V>>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, V>: EncodeShared,
+{
+    /// Capture an owned immutable snapshot of the database's operations log, with bounds
+    /// frozen at capture. The snapshot includes applied-but-uncommitted operations.
+    ///
+    /// Capture writes buffered data and keeps the log's blobs open while the snapshot is alive, as
+    /// [`Snapshottable::snapshot`] describes.
+    ///
+    /// Serving from the snapshot returns [`crate::merkle::Error::ElementPruned`] for a boundary
+    /// below the Merkle structure's pruning boundary, which a sync can leave above the log's
+    /// first retained operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the capture fails, which consumes the database.
+    pub async fn snapshot(
+        mut self,
+    ) -> Result<(Self, authenticated::Snapshot<F, E, C::Reader, H>), Error<F>> {
+        let log;
+        (self.journal, log) = self.journal.snapshot().await?;
+        Ok((self, log))
     }
 }

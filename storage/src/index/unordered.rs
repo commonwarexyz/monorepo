@@ -77,7 +77,7 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
 
     /// Create an empty index that shares this index's translator and metrics. It updates the
     /// metrics through detached handles and holds no registrations, so the metrics leave the
-    /// registry when this index is dropped. Parallel snapshot-build workers use it for their
+    /// registry when this index is dropped. Parallel index-build workers use it for their
     /// partition slots.
     #[commonware_macros::stability(ALPHA)]
     pub(crate) fn empty(&self) -> Self {
