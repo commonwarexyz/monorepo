@@ -133,7 +133,7 @@ enum WorkerFault {
     AfterRelease(Box<dyn FnOnce() + Send>),
 }
 
-/// Fault state shared between a test and its dedicated worker threads.
+/// Fault state shared between a test and its worker threads.
 struct WorkerFaultEntry {
     /// Worker registry identity without retaining the runtime's shared services.
     workers: Weak<Workers>,
@@ -321,19 +321,18 @@ fn run_startup_failure_case(case: &str) {
             Runner::new(config().with_worker_threads(2)).start(|_| async {});
         }
 
-        // A dedicated or blocking worker fails on its own thread while the
-        // root runs, which closes the task's handle.
+        // A runtime thread or blocking worker fails on its own thread while
+        // the root runs, which closes the task's handle.
         "dedicated" | "dedicated_caught" | "blocking" => {
             let catch = case == "dedicated_caught";
             Runner::new(config().with_catch_panics(catch)).start(|context| async move {
                 let _fault = inject_worker_fault(&context.shared.workers, WorkerFault::Startup);
                 let worker = context.child("failed");
-                let worker = if case == "blocking" {
-                    worker.shared(true)
+                let failed = if case == "blocking" {
+                    worker.shared(true).spawn(|_| async {})
                 } else {
-                    worker.dedicated()
+                    worker.thread().spawn(|_| async {}).expect("thread")
                 };
-                let failed = worker.spawn(|_| async {});
                 assert!(matches!(failed.await, Err(Error::Closed)));
 
                 // Keep the root active until it observes an uncaught failure.
@@ -367,12 +366,31 @@ fn config() -> Config {
         .with_idle_spinner(SpinnerConfig::disabled())
 }
 
-/// Select a placement while preserving the unmodified default as a separate case.
-fn placed(context: Context, mode: Option<Execution>) -> Context {
+/// Where a test spawns its task.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Mode {
+    /// With the context's own placement.
+    Default,
+    /// On the pool, or on a blocking worker.
+    Shared(bool),
+    /// As the root task of a new runtime thread.
+    Thread,
+}
+
+/// Spawn `f` from `context` as `mode` says.
+fn spawn_mode<F, Fut, T>(context: Context, mode: Mode, f: F) -> Handle<T>
+where
+    F: FnOnce(Context) -> Fut + Send + 'static,
+    Fut: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
     match mode {
-        None => context,
-        Some(Execution::Dedicated) => context.dedicated(),
-        Some(Execution::Shared(blocking)) => context.shared(blocking),
+        Mode::Default => context.spawn(f),
+        Mode::Shared(blocking) => context.shared(blocking).spawn(f),
+        Mode::Thread => context
+            .thread()
+            .spawn(move |local| f(local.into_inner()))
+            .expect("thread"),
     }
 }
 
@@ -1286,15 +1304,17 @@ fn test_root_destruction_can_spawn_work_before_shutdown() {
         }
     }
 
-    for dedicated in [false, true] {
+    for placed in [false, true] {
         let invoked = Arc::new(AtomicBool::new(false));
         let drops = Arc::new(AtomicUsize::new(0));
 
         Runner::new(config()).start(|context| {
+            // A thread's root factory runs on the thread, so the thread case
+            // spawns from a context placed on it, whose factory runs here.
             let context = context.child("root_drop");
             Root {
-                context: Some(if dedicated {
-                    context.dedicated()
+                context: Some(if placed {
+                    context.thread().attach().expect("thread")
                 } else {
                     context
                 }),
@@ -1336,63 +1356,66 @@ fn test_execution_modes_share_ordinary_descendants() {
     let ordinary = thread::current().id();
     Runner::new(config()).start(|context| async move {
         for mode in [
-            None,
-            Some(Execution::Shared(false)),
-            Some(Execution::Dedicated),
-            Some(Execution::Shared(true)),
+            Mode::Default,
+            Mode::Shared(false),
+            Mode::Thread,
+            Mode::Shared(true),
         ] {
-            let child = placed(context.child("mode"), mode);
-            let parent = child
-                .spawn(move |context| async move {
-                    let parent = thread::current().id();
+            let parent = spawn_mode(context.child("mode"), mode, move |context| async move {
+                let parent = thread::current().id();
 
-                    // Ordinary children run on the pool, here its only worker,
-                    // even when their parent owns a dedicated or blocking worker.
-                    for explicit in [false, true] {
-                        let child = context.child("ordinary_child");
-                        let child = if explicit { child.shared(false) } else { child };
+                // Ordinary children run on the pool, here its only worker, even
+                // when their parent owns a blocking worker. Children of a
+                // thread's task inherit the thread unless they ask for the pool.
+                for explicit in [false, true] {
+                    let child = context.child("ordinary_child");
+                    let child = if explicit { child.shared(false) } else { child };
+                    let expected = if !explicit && mode == Mode::Thread {
+                        parent
+                    } else {
+                        ordinary
+                    };
+                    assert_eq!(
+                        child
+                            .spawn(|_| async { thread::current().id() })
+                            .await
+                            .unwrap(),
+                        expected
+                    );
+                }
+
+                // Nested blocking tasks and threads each receive a separate worker.
+                for blocking in [false, true] {
+                    let mode = if blocking {
+                        Mode::Shared(true)
+                    } else {
+                        Mode::Thread
+                    };
+                    spawn_mode(context.child("nested"), mode, move |context| async move {
+                        assert_ne!(thread::current().id(), ordinary);
+                        assert_ne!(thread::current().id(), parent);
                         assert_eq!(
-                            child
+                            context
+                                .child("ordinary")
+                                .shared(false)
                                 .spawn(|_| async { thread::current().id() })
                                 .await
                                 .unwrap(),
                             ordinary
                         );
-                    }
+                    })
+                    .await
+                    .unwrap();
+                }
 
-                    // Nested dedicated tasks each receive a separate worker.
-                    for blocking in [false, true] {
-                        let nested = context.child("dedicated");
-                        let nested = if blocking {
-                            nested.shared(true)
-                        } else {
-                            nested.dedicated()
-                        };
-                        nested
-                            .spawn(move |context| async move {
-                                assert_ne!(thread::current().id(), ordinary);
-                                assert_ne!(thread::current().id(), parent);
-                                assert_eq!(
-                                    context
-                                        .child("ordinary")
-                                        .spawn(|_| async { thread::current().id() })
-                                        .await
-                                        .unwrap(),
-                                    ordinary
-                                );
-                            })
-                            .await
-                            .unwrap();
-                    }
-
-                    parent
-                })
-                .await
-                .unwrap();
+                parent
+            })
+            .await
+            .unwrap();
 
             assert_eq!(
                 parent == ordinary,
-                matches!(mode, None | Some(Execution::Shared(false)))
+                matches!(mode, Mode::Default | Mode::Shared(false))
             );
         }
     });
@@ -1400,19 +1423,27 @@ fn test_execution_modes_share_ordinary_descendants() {
 
 #[test]
 fn test_factories_execute_synchronously_on_the_caller() {
+    // An ordinary spawn on a runtime thread runs its factory on the caller too,
+    // so the thread mode here places the spawn on a thread with Spawner::on.
     let modes = [
-        None,
-        Some(Execution::Shared(false)),
-        Some(Execution::Dedicated),
-        Some(Execution::Shared(true)),
+        Mode::Default,
+        Mode::Shared(false),
+        Mode::Thread,
+        Mode::Shared(true),
     ];
 
     for catch in [false, true] {
         Runner::new(config().with_catch_panics(catch)).start(|context| async move {
+            let target = context.child("target").thread().build().unwrap();
             for parent_mode in modes {
-                placed(context.child("parent"), parent_mode)
-                    .spawn(move |context| async move {
+                let target = target.clone();
+                spawn_mode(context.child("parent"), parent_mode, move |context| async move {
                         let caller = thread::current().id();
+                        let place = |context: Context, mode| match mode {
+                            Mode::Default => context,
+                            Mode::Shared(blocking) => context.shared(blocking),
+                            Mode::Thread => context.on(&target),
+                        };
 
                         for mode in modes {
                             let invoked = Arc::new(AtomicBool::new(false));
@@ -1420,7 +1451,7 @@ fn test_factories_execute_synchronously_on_the_caller() {
 
                             // Construction must finish on the caller before spawn
                             // returns, independent of the future's placement.
-                            let handle = placed(context.child("factory"), mode).spawn(move |_| {
+                            let handle = place(context.child("factory"), mode).spawn(move |_| {
                                 assert_eq!(thread::current().id(), caller);
                                 invoked.store(true, Ordering::SeqCst);
                                 async {}
@@ -1432,7 +1463,7 @@ fn test_factories_execute_synchronously_on_the_caller() {
                             // Constructor panics also belong to the caller, which
                             // must remain usable after catching the failure.
                             let result = catch_unwind(AssertUnwindSafe(|| {
-                                placed(context.child("panic"), mode).spawn(|_| -> Ready<()> {
+                                place(context.child("panic"), mode).spawn(|_| -> Ready<()> {
                                     panic!("task constructor failed");
                                 })
                             }));
@@ -1460,25 +1491,29 @@ fn test_blocking_parents_can_wait_for_ordinary_descendants() {
     let ordinary = thread::current().id();
     Runner::new(config()).start(|context| async move {
         for blocking in [false, true] {
-            let parent = context.child("parent");
-            let parent = if blocking {
-                parent.shared(true)
+            let mode = if blocking {
+                Mode::Shared(true)
             } else {
-                parent.dedicated()
+                Mode::Thread
             };
-            parent
-                .spawn(move |context| async move {
+            spawn_mode(context.child("parent"), mode, move |context| async move {
                     assert_ne!(thread::current().id(), ordinary);
                     for explicit in [false, true] {
+                        // Children of a thread's task inherit the thread, so a
+                        // parent that blocks its thread sends them to the pool.
                         let (sender, receiver) = mpsc::channel();
                         let child = context.child("child");
-                        let child = if explicit { child.shared(false) } else { child };
+                        let child = if explicit || !blocking {
+                            child.shared(false)
+                        } else {
+                            child
+                        };
                         child.spawn(move |_| async move {
                             sender.send(thread::current().id()).unwrap();
                         });
 
                         // The root awaits this parent asynchronously, leaving the ordinary
-                        // worker available while this dedicated thread blocks.
+                        // worker available while this thread blocks.
                         assert_eq!(receiver.recv_timeout(TEST_TIMEOUT).unwrap(), ordinary);
                     }
                 })
@@ -1521,19 +1556,23 @@ fn test_aborted_context_skips_factories_for_every_placement() {
     Runner::new(config()).start(|context| async move {
         context.tree.abort();
 
-        for execution in [
-            Execution::Shared(false),
-            Execution::Dedicated,
-            Execution::Shared(true),
-        ] {
-            let mut rejected = context.child("rejected");
-            rejected.execution = execution;
-            let handle = rejected.spawn(|_| -> Ready<()> {
-                panic!("an aborted context must not invoke its factory");
-            });
+        for blocking in [false, true] {
+            let handle = context
+                .child("rejected")
+                .shared(blocking)
+                .spawn(|_| -> Ready<()> {
+                    panic!("an aborted context must not invoke its factory");
+                });
 
             assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
         }
+        let thread = context
+            .child("rejected")
+            .thread()
+            .spawn(|_| -> Ready<()> {
+                panic!("an aborted context must not invoke its factory");
+            });
+        assert!(matches!(thread, Err(crate::ThreadError::Closed)));
 
         assert_eq!(context.shared.workers.state.lock().active, 0);
     });
@@ -1565,20 +1604,25 @@ fn test_closed_task_set_skips_local_and_foreign_factories() {
 }
 
 #[test]
-fn test_closed_registry_skips_dedicated_factories() {
+fn test_closed_registry_skips_worker_factories() {
     Runner::new(config()).start(|context| async move {
         // Leave supervision open so rejection must come from worker registration.
         context.shared.workers.close();
 
-        for execution in [Execution::Dedicated, Execution::Shared(true)] {
-            let mut rejected = context.child("rejected");
-            rejected.execution = execution;
-            let handle = rejected.spawn(|_| -> Ready<()> {
+        let handle = context
+            .child("rejected")
+            .shared(true)
+            .spawn(|_| -> Ready<()> {
                 panic!("a closed registry must not invoke its factory");
             });
-
-            assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
-        }
+        assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
+        let thread = context
+            .child("rejected")
+            .thread()
+            .spawn(|_| -> Ready<()> {
+                panic!("a closed registry must not invoke its factory");
+            });
+        assert!(matches!(thread, Err(crate::ThreadError::Closed)));
 
         assert_eq!(context.shared.workers.state.lock().active, 0);
     });
@@ -1694,7 +1738,7 @@ fn test_shutdown_does_not_wait_for_an_unpublished_ordinary_factory() {
 }
 
 #[test]
-fn test_dedicated_reservation_covers_factory_construction_through_shutdown() {
+fn test_blocking_reservation_covers_factory_construction_through_shutdown() {
     /// Signal worker registration closure while ordinary tasks are destroyed.
     struct Closing(mpsc::Sender<()>);
 
@@ -1704,7 +1748,7 @@ fn test_dedicated_reservation_covers_factory_construction_through_shutdown() {
         }
     }
 
-    for execution in [Execution::Dedicated, Execution::Shared(true)] {
+    {
         let drops = Arc::new(AtomicUsize::new(0));
         let polled = Arc::new(AtomicBool::new(false));
         let payload = DropCount(drops.clone());
@@ -1727,8 +1771,7 @@ fn test_dedicated_reservation_covers_factory_construction_through_shutdown() {
 
                 let registry = context.shared.workers.clone();
                 let (entered, entering) = oneshot::channel();
-                let mut child = context.child("foreign");
-                child.execution = execution;
+                let child = context.child("foreign").shared(true);
                 let publisher = thread::spawn(move || {
                     child.spawn(move |_| {
                         entered.send(()).unwrap();
@@ -1769,15 +1812,10 @@ fn test_dedicated_reservation_covers_factory_construction_through_shutdown() {
 fn test_factory_panic_finishes_metrics_and_releases_reservation() {
     for catch in [false, true] {
         Runner::new(config().with_catch_panics(catch)).start(|context| async move {
-            for execution in [
-                Execution::Shared(false),
-                Execution::Dedicated,
-                Execution::Shared(true),
-            ] {
+            for blocking in [false, true] {
                 let registry = context.shared.workers.clone();
-                let mut child = context.child("panicking_factory");
-                child.execution = execution;
-                let label = Label::task(child.name.clone(), execution);
+                let child = context.child("panicking_factory").shared(blocking);
+                let label = Label::task(child.name.clone(), Execution::Shared(blocking));
                 let metrics = &context.shared.metrics;
                 let running = metrics.tasks_running.get_or_create(&label).clone();
                 let spawned = metrics.tasks_spawned.get_or_create(&label).clone();
@@ -1785,11 +1823,8 @@ fn test_factory_panic_finishes_metrics_and_releases_reservation() {
 
                 let result = catch_unwind(AssertUnwindSafe(|| {
                     child.spawn(move |_| -> Ready<()> {
-                        // Dedicated factories retain their reservation without holding its lock.
-                        let reserved = usize::from(matches!(
-                            execution,
-                            Execution::Dedicated | Execution::Shared(true)
-                        ));
+                        // Blocking factories retain their reservation without holding its lock.
+                        let reserved = usize::from(blocking);
                         assert_eq!(registry.state.lock().active, reserved);
                         assert_eq!(factory_running.get(), 1);
                         panic!("factory failed");
@@ -1850,26 +1885,25 @@ fn test_retained_descendant_context_is_closed_before_parent_result() {
 }
 
 #[test]
-fn test_dedicated_completion_cancels_local_and_remote_descendants() {
+fn test_worker_completion_cancels_local_and_remote_descendants() {
     for blocking in [false, true] {
         Runner::new(config()).start(|context| async move {
-            let parent = context.child("parent");
-            let parent = if blocking {
-                parent.shared(true)
+            let mode = if blocking {
+                Mode::Shared(true)
             } else {
-                parent.dedicated()
+                Mode::Thread
             };
-            let descendants = parent
-                .spawn(|context| async move {
-                    let local = context.child("local").spawn(|_| pending::<()>());
-                    let remote = context
-                        .child("remote")
-                        .dedicated()
-                        .spawn(|_| pending::<()>());
-                    [local, remote]
-                })
-                .await
-                .unwrap();
+            let descendants = spawn_mode(context.child("parent"), mode, |context| async move {
+                let local = context.child("local").spawn(|_| pending::<()>());
+                let remote = context
+                    .child("remote")
+                    .thread()
+                    .spawn(|_| pending::<()>())
+                    .expect("thread");
+                [local, remote]
+            })
+            .await
+            .unwrap();
 
             for descendant in descendants {
                 assert!(matches!(descendant.await, Err(Error::Closed)));
@@ -1891,10 +1925,7 @@ fn test_dedicated_completion_cancels_local_and_remote_descendants() {
 fn test_root_shutdown_cancels_descendants_across_workers() {
     let handles = Runner::new(config()).start(|context| async move {
         let (published, descendants) = oneshot::channel();
-        let parent = context
-            .child("parent")
-            .dedicated()
-            .spawn(|context| async move {
+        let parent = spawn_mode(context.child("parent"), Mode::Thread, |context| async move {
                 let local = context.child("local").spawn(|_| pending::<()>());
                 let remote = context
                     .child("remote")
@@ -1913,29 +1944,28 @@ fn test_root_shutdown_cancels_descendants_across_workers() {
 }
 
 #[test]
-fn test_completed_dedicated_worker_does_not_close_sibling_registry() {
+fn test_completed_thread_does_not_close_sibling_registry() {
     Runner::new(config()).start(|context| async move {
         context
             .child("first")
-            .dedicated()
+            .thread()
             .spawn(|_| async {})
+            .expect("thread")
             .await
             .unwrap();
 
-        // Spawning remains available to a later sibling and its own dedicated children.
-        let result = context
-            .child("second")
-            .dedicated()
-            .spawn(|context| async move {
-                context
-                    .child("nested")
-                    .dedicated()
-                    .spawn(|_| async { 11 })
-                    .await
-                    .unwrap()
-            })
-            .await
-            .unwrap();
+        // Spawning remains available to a later sibling and its own threads.
+        let result = spawn_mode(context.child("second"), Mode::Thread, |context| async move {
+            context
+                .child("nested")
+                .thread()
+                .spawn(|_| async { 11 })
+                .expect("thread")
+                .await
+                .unwrap()
+        })
+        .await
+        .unwrap();
 
         assert_eq!(result, 11);
     });
@@ -1981,7 +2011,7 @@ fn test_worker_closure_wakes_shared_observers_before_forwarding(#[case] timer: b
 
     for cancel in [false, true] {
         Runner::new(config()).start(|context| async move {
-            // Both registrations stay pending until their dedicated worker closes.
+            // Both registrations stay pending until their thread closes.
             let mut future = if timer {
                 let sleep = context.sleep(Duration::from_secs(60));
                 async move {
@@ -2020,10 +2050,11 @@ fn test_worker_closure_wakes_shared_observers_before_forwarding(#[case] timer: b
             let mut source = shared.clone();
             let task = context
                 .child("source")
-                .dedicated()
+                .thread()
                 .spawn(move |_| async move {
                     assert!(futures::poll!(&mut source).is_pending());
-                });
+                })
+                .expect("thread");
             ready.await.unwrap();
 
             // Register a second observer while Shared's poll lock is held. Count
@@ -2154,25 +2185,18 @@ fn test_launch_failure_destroys_reentrant_payload_after_unlocking_registry() {
 
 #[test]
 fn test_creation_failure_in_caught_task_leaves_runner_usable() {
-    for dedicated in [false, true] {
+    for mode in [Mode::Default, Mode::Thread] {
         Runner::new(config().with_catch_panics(true)).start(|context| async move {
-            let caller = context.child("launch_caller");
-            let caller = if dedicated {
-                caller.dedicated()
-            } else {
-                caller
-            };
-            let result = caller
-                .spawn(|context| async move {
-                    let _fault = inject_worker_fault(&context.shared.workers, WorkerFault::Launch);
-                    context
-                        .child("failed_launch")
-                        .dedicated()
-                        .spawn(|_| async {})
-                        .await
-                        .unwrap();
-                })
-                .await;
+            let result = spawn_mode(context.child("launch_caller"), mode, |context| async move {
+                let _fault = inject_worker_fault(&context.shared.workers, WorkerFault::Launch);
+                context
+                    .child("failed_launch")
+                    .shared(true)
+                    .spawn(|_| async {})
+                    .await
+                    .unwrap();
+            })
+            .await;
 
             assert!(matches!(result, Err(Error::Exited)));
             assert_eq!(
@@ -2195,12 +2219,11 @@ fn test_worker_startup_failure_uses_configured_panic_policy() {
                 Runner::new(config().with_catch_panics(catch)).start(|context| async move {
                     let _fault = inject_worker_fault(&context.shared.workers, WorkerFault::Startup);
                     let worker = context.child("failed_worker");
-                    let worker = if blocking {
-                        worker.shared(true)
+                    let failed = if blocking {
+                        worker.shared(true).spawn(|_| async {})
                     } else {
-                        worker.dedicated()
+                        worker.thread().spawn(|_| async {}).expect("thread")
                     };
-                    let failed = worker.spawn(|_| async {});
 
                     assert!(matches!(failed.await, Err(Error::Closed)));
                     if !catch {
@@ -2375,22 +2398,14 @@ fn test_service_error_preserves_completions_before_cleanup() {
 #[test]
 fn test_cancelled_task_disposal_is_contained() {
     for catch in [false, true] {
-        for execution in [
-            Execution::default(),
-            Execution::Dedicated,
-            Execution::Shared(true),
-        ] {
+        for mode in [Mode::Default, Mode::Thread, Mode::Shared(true)] {
             let drops = Arc::new(AtomicUsize::new(0));
             let task_drops = drops.clone();
 
             Runner::new(Config::default().with_catch_panics(catch)).start(|context| async move {
                 let child = context.child("cancelled");
-                let child = match execution {
-                    Execution::Dedicated => child.dedicated(),
-                    Execution::Shared(blocking) => child.shared(blocking),
-                };
                 let (started, ready) = oneshot::channel();
-                let handle = child.spawn(|context| async move {
+                let handle = spawn_mode(child, mode, |context| async move {
                     let _guard = PanickingDrop(task_drops);
                     assert!(started.send(context.child("retained")).is_ok());
                     pending::<()>().await;
@@ -2797,7 +2812,7 @@ fn test_teardown_drops_every_future_before_clearing_timers() {
 }
 
 #[test]
-fn test_shutdown_waits_for_dedicated_task_destruction() {
+fn test_shutdown_waits_for_thread_task_destruction() {
     /// Hold task disposal open until the test inspects the shutdown wait.
     struct HeldDestructor {
         /// Tell the test that destruction has begun.
@@ -2823,7 +2838,7 @@ fn test_shutdown_waits_for_dedicated_task_destruction() {
             let (started, starting) = oneshot::channel();
             context
                 .child("cancelled_worker")
-                .dedicated()
+                .thread()
                 .spawn(move |_| async move {
                     let _payload = HeldDestructor {
                         entered,
@@ -2831,7 +2846,8 @@ fn test_shutdown_waits_for_dedicated_task_destruction() {
                     };
                     started.send(()).unwrap();
                     pending::<()>().await;
-                });
+                })
+                .expect("thread");
             starting.await.unwrap();
         });
     });
@@ -2950,7 +2966,7 @@ fn test_worker_releases_storage_and_durable_io_before_tracking_ends() {
         );
         context
             .child("durable_worker")
-            .dedicated()
+            .thread()
             .spawn(move |context| async move {
                 let (blob, _) = context.open("partition", b"retained").await.unwrap();
 
@@ -2960,6 +2976,7 @@ fn test_worker_releases_storage_and_durable_io_before_tracking_ends() {
                 assert!(write.now_or_never().is_none());
                 drop(blob);
             })
+            .expect("thread")
             .await
             .unwrap();
         (shared, registry, fault)
@@ -3046,7 +3063,7 @@ fn test_ready_future_destructor_closes_handle_and_leaves_runner_usable() {
     }
 
     for catch in [false, true] {
-        for dedicated in [false, true] {
+        for mode in [Mode::Default, Mode::Thread] {
             let polls = Arc::new(AtomicUsize::new(0));
             let drops = Arc::new(AtomicUsize::new(0));
             let future = ReadyDrop {
@@ -3056,11 +3073,10 @@ fn test_ready_future_destructor_closes_handle_and_leaves_runner_usable() {
 
             Runner::new(config().with_catch_panics(catch)).start(|context| async move {
                 let child = context.child("ready_drop");
-                let child = if dedicated { child.dedicated() } else { child };
 
                 // Disposal escapes the shared wrapper's user-poll boundary
                 // before it publishes a result. Task disposal remains contained.
-                let result = child.spawn(move |_| future).await;
+                let result = spawn_mode(child, mode, move |_| future).await;
                 assert!(matches!(result, Err(Error::Closed)));
 
                 context.child("survivor").spawn(|_| async {}).await.unwrap();
@@ -3393,7 +3409,7 @@ fn test_finished_worker_tls_can_wait_for_live_root_work() {
 
         context
             .child("first_worker")
-            .dedicated()
+            .thread()
             .spawn(move |_| async move {
                 EXIT.with(|slot| {
                     *slot.borrow_mut() = Some(OnExit {
@@ -3404,6 +3420,7 @@ fn test_finished_worker_tls_can_wait_for_live_root_work() {
                     });
                 });
             })
+            .expect("thread")
             .await
             .unwrap();
 
@@ -3412,8 +3429,9 @@ fn test_finished_worker_tls_can_wait_for_live_root_work() {
         entered_rx.await.unwrap();
         let second = context
             .child("second_worker")
-            .dedicated()
-            .spawn(|_| async {});
+            .thread()
+            .spawn(|_| async {})
+            .expect("thread");
         release.send(()).unwrap();
         second.await.unwrap();
         done_rx.await.unwrap();
@@ -3872,11 +3890,11 @@ fn test_wake_from_another_runtime_stays_in_its_own_pool() {
     assert_ne!(before, sender);
 }
 
-/// An ordinary task woken from a dedicated worker runs on a pool worker, not on
-/// the dedicated thread, with one pool worker and with two. A dedicated worker
-/// serves no task set.
+/// An ordinary task woken from a runtime thread runs on a pool worker, not on
+/// the thread, with one pool worker and with two. A thread's worker serves no
+/// task set.
 #[test]
-fn test_wake_from_a_dedicated_worker_goes_to_the_pool() {
+fn test_wake_from_a_thread_goes_to_the_pool() {
     for workers in [1, 2] {
         Runner::new(config().with_worker_threads(workers)).start(|context| async move {
             let (wake, waiter) = oneshot::channel::<()>();
@@ -3888,18 +3906,19 @@ fn test_wake_from_a_dedicated_worker_goes_to_the_pool() {
             reschedule().await;
             let sender = context
                 .child("sender")
-                .dedicated()
+                .thread()
                 .spawn(|_| async move {
                     wake.send(()).unwrap();
                     thread::current().id()
                 })
+                .expect("thread")
                 .await
                 .unwrap();
             let (before, after) = task.await.unwrap();
             assert_ne!(before, sender);
             assert_ne!(
                 after, sender,
-                "an ordinary task must not poll on a dedicated worker"
+                "an ordinary task must not poll on a thread's worker"
             );
         });
     }
@@ -5230,7 +5249,7 @@ fn test_catch_up_callbacks_after_a_search_finds_work_run_with_no_search_count() 
 /// partly consumed replay handed to another task still yields every byte.
 #[rstest::rstest]
 fn test_paged_replay_survives_the_worker_that_issued_its_reads_closing(
-    #[values(false, true)] dedicated: bool,
+    #[values(false, true)] on_thread: bool,
     #[values(false, true)] landed: bool,
 ) {
     use crate::{
@@ -5254,14 +5273,12 @@ fn test_paged_replay_survives_the_worker_that_issued_its_reads_closing(
         let (sealed, sync) = writer.seal().await.unwrap();
         sync.await.unwrap();
 
-        let child = context.child("child");
-        let child = if dedicated {
-            child.dedicated()
+        let mode = if on_thread {
+            Mode::Thread
         } else {
-            child.shared(true)
+            Mode::Shared(true)
         };
-        let mut replay = child
-            .spawn(move |context| async move {
+        let mut replay = spawn_mode(context.child("child"), mode, move |context| async move {
                 let mut replay = sealed
                     .replay(NZUsize!(buffer), ReadOptions::default())
                     .unwrap();
@@ -5292,7 +5309,7 @@ fn test_paged_replay_survives_the_worker_that_issued_its_reads_closing(
     });
 }
 
-/// Direct reads registered on a dedicated worker complete when a plain thread observes them while
+/// Direct reads registered on a thread's worker complete when a plain thread observes them while
 /// that worker lives. A pending handle does not keep the worker alive, so a handle first observed
 /// after the worker finished its cleanup, or after the runner shut down, reports closure.
 #[test]
@@ -5318,7 +5335,7 @@ fn test_direct_reads_outlive_their_origin_worker() {
         let origin = blob.clone();
         let bufs = context
             .child("alive")
-            .dedicated()
+            .thread()
             .spawn(move |context| async move {
                 let handle = origin
                     .start_read_many(&RANGES, ReadOptions::DONT_CACHE)
@@ -5329,6 +5346,7 @@ fn test_direct_reads_outlive_their_origin_worker() {
                 }
                 observer.join().unwrap()
             })
+            .expect("thread")
             .await
             .unwrap();
         check(bufs.unwrap());
@@ -5337,12 +5355,13 @@ fn test_direct_reads_outlive_their_origin_worker() {
         let origin = blob.clone();
         let handle = context
             .child("exited")
-            .dedicated()
+            .thread()
             .spawn(move |_| async move {
                 origin
                     .start_read_many(&RANGES, ReadOptions::DONT_CACHE)
                     .await
             })
+            .expect("thread")
             .await
             .unwrap();
 

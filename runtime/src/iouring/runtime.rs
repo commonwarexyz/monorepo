@@ -179,8 +179,9 @@ use super::{
 #[cfg(feature = "external")]
 use crate::Pacer;
 use crate::{
-    BlobLayout, BlobVersion, Clock, Error, Execution, Handle, METRICS_PREFIX, Name, SinkOf,
-    Spawner as _, StreamOf, Supervisor as _, child_label,
+    BlobLayout, BlobVersion, Clock, Error, Execution, Handle, Local as ThreadLocal,
+    METRICS_PREFIX, Name, SinkOf, Spawner as _, StreamOf, Supervisor as _, Thread, ThreadBuilder,
+    child_label,
     network::{
         iouring::{Config as NetworkConfig, Network},
         metered::Network as MeteredNetwork,
@@ -194,7 +195,14 @@ use crate::{
     },
     telemetry::metrics::{
         CounterFamily, Gauge, GaugeFamily, Metric, Register, Registered, Registry, add_attribute,
-        raw, task::Label, validate_label,
+        raw,
+        task::{Label, ThreadLabel},
+        validate_label,
+    },
+    threads::{
+        ThreadRuntime,
+        admission::{Job, SpawnJob, Ticket, next_runner_id},
+        affinity::AffinityState,
     },
     utils::{self, FactoryGuard, MetricHandle, Panicker, signal::Stopper, supervision::Tree},
 };
@@ -222,10 +230,13 @@ use std::{
     pin::{Pin, pin},
     ptr,
     rc::Rc,
-    sync::{Arc, Weak},
+    sync::{Arc, Weak, atomic::AtomicU64},
     task::{Context as TaskContext, Poll, Waker},
     time::{Duration, Instant, SystemTime},
 };
+
+#[path = "thread.rs"]
+mod thread;
 
 /// Maximum task polls or mailbox messages processed before yielding to other work.
 const BATCH_SIZE: usize = 64;
@@ -580,6 +591,8 @@ struct TaskMetrics {
     tasks_spawned: CounterFamily<Label>,
     /// Number of tasks that have not completed or been aborted.
     tasks_running: GaugeFamily<Label>,
+    /// Number of tasks queued or running on each runtime thread.
+    thread_residents: GaugeFamily<ThreadLabel>,
 }
 
 impl TaskMetrics {
@@ -594,6 +607,11 @@ impl TaskMetrics {
             tasks_running: registry.register(
                 "tasks_running",
                 "Number of tasks currently running",
+                raw::Family::default(),
+            ),
+            thread_residents: registry.register(
+                "thread_residents",
+                "Number of tasks queued or running on runtime threads",
                 raw::Family::default(),
             ),
         }
@@ -685,7 +703,10 @@ pub struct Shared {
     shutdown: Mutex<Stopper>,
     /// User task panic policy and root notification.
     panicker: Panicker,
-    /// Synchronized creation and closure of dedicated workers.
+    /// Panic policy and runner notification for runtime threads, observed until every worker
+    /// has finished.
+    thread_panicker: Panicker,
+    /// Synchronized creation and closure of runtime thread and blocking workers.
     workers: Arc<Workers>,
     /// Every live ordinary task, retained so the pool workers' cleanup can
     /// drop its future.
@@ -694,6 +715,12 @@ pub struct Shared {
     storage: MeteredStorage<Storage>,
     /// Metered native socket adapter.
     network: MeteredNetwork<Network>,
+    /// Instance id of this runner, which its runtime threads carry.
+    runner: u64,
+    /// Id of the next runtime thread.
+    threads: AtomicU64,
+    /// The runner's base set and affinity reset.
+    affinity: AffinityState,
 }
 
 /// Task and runtime ownership transferred to a dedicated worker's thread.
@@ -709,6 +736,12 @@ struct Launch {
 }
 
 impl Shared {
+    /// Whether `thread` is a runtime thread of this runner.
+    fn targets(&self, thread: &Thread) -> bool {
+        let inner = thread.inner();
+        inner.runner() == self.runner && inner.backend::<thread::IouringThread>().is_some()
+    }
+
     /// Transfer a reserved worker's task and its cleanup responsibility to a new thread.
     fn launch(self: &Arc<Self>, task: BoxedTask, active: ActiveWorker) {
         let payload = Launch {
@@ -720,9 +753,10 @@ impl Shared {
         #[cfg(test)]
         let payload = tests::before_launch(payload);
 
-        utils::thread::spawn(self.cfg.thread_stack_size, move || {
+        utils::thread::try_spawn(self.cfg.thread_stack_size, None, move || {
             Worker::run_task(payload)
-        });
+        })
+        .expect("failed to spawn thread");
     }
 }
 
@@ -747,8 +781,10 @@ pub struct Context {
     shared: Arc<Shared>,
     /// This context's node in the mandatory supervision tree.
     tree: Arc<Tree>,
-    /// Placement requested for the next consumed spawn.
-    execution: Execution,
+    /// Whether the next spawn is short blocking work. Applies to one spawn only.
+    blocking: bool,
+    /// The runtime thread this context line runs on, or `None` for the pool.
+    placement: Option<Thread>,
 }
 
 impl Context {
@@ -756,17 +792,79 @@ impl Context {
     fn metrics(&self) -> &TaskMetrics {
         &self.shared.metrics
     }
+
+    /// Where the next spawn runs, as its task metric reports it.
+    const fn execution(&self) -> Execution {
+        if self.placement.is_some() {
+            Execution::Thread
+        } else {
+            Execution::Shared(self.blocking)
+        }
+    }
 }
 
 impl crate::Spawner for Context {
-    fn dedicated(mut self) -> Self {
-        self.execution = Execution::Dedicated;
+    fn shared(mut self, blocking: bool) -> Self {
+        self.placement = None;
+        self.blocking = blocking;
         self
     }
 
-    fn shared(mut self, blocking: bool) -> Self {
-        self.execution = Execution::Shared(blocking);
+    fn on(mut self, thread: &Thread) -> Self {
+        self.placement = Some(thread.clone());
+        self.blocking = false;
         self
+    }
+
+    fn thread(self) -> ThreadBuilder<Self> {
+        // The thread occupies this context's node. The context handed to its work keeps this
+        // context's name and attributes at a fresh child of that node, unplaced.
+        let node = self.tree.clone();
+        let (tree, _) = Tree::child(&node);
+        let name = self.name.clone();
+        let host: Weak<Shared> = Arc::downgrade(&self.shared);
+        let host: Weak<dyn ThreadRuntime> = host;
+        let context = Self {
+            tree,
+            blocking: false,
+            placement: None,
+            ..self
+        };
+        ThreadBuilder::new(context, node, name, host)
+    }
+
+    fn spawn_on<F, Fut, T>(mut self, thread: &Thread, f: F) -> Handle<T>
+    where
+        F: FnOnce(ThreadLocal<Self>) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + 'static,
+        T: Send + 'static,
+    {
+        // A resident always reports the thread execution, whatever this context's placement
+        let (_, metric) = spawn_metrics!(Label::task(self.name.clone(), Execution::Thread), @make self);
+
+        // The task is supervised by this context, and its context is placed on the thread
+        let parent = self.tree.clone();
+        let (child, aborted) = Tree::child(&parent);
+        if aborted {
+            return Handle::closed(metric);
+        }
+        self.tree = child;
+        self.blocking = false;
+        self.placement = Some(thread.clone());
+
+        // The factory runs on the thread. A rejected job drops its factory, then its ticket,
+        // outside the admission lock, which aborts the node and closes the handle.
+        let accepts = self.shared.targets(thread);
+        let (prepared, handle) = Handle::prepare(metric, parent);
+        let abort = prepared.abort_handle();
+        let job = Job::factory(
+            Box::new(SpawnJob::new(f, self, Ticket::new(prepared))),
+            abort,
+        );
+        if accepts && let Err(job) = thread.inner().submit(job) {
+            drop(job);
+        }
+        handle
     }
 
     fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
@@ -777,10 +875,7 @@ impl crate::Spawner for Context {
     {
         let (_, metric) = spawn_metrics!(self);
         let parent = self.tree.clone();
-        let execution = self.execution;
-
-        // Placement applies to this spawn. Children start with ordinary placement.
-        self.execution = Execution::default();
+        let blocking = mem::take(&mut self.blocking);
         let (child, aborted) = Tree::child(&parent);
         if aborted {
             return Handle::closed(metric);
@@ -789,10 +884,32 @@ impl crate::Spawner for Context {
         self.tree = child;
         let shared = self.shared.clone();
 
+        // A spawn placed on a runtime thread runs its factory here and its future on the
+        // thread, whose worker reservation covers all of its residents.
+        if let Some(thread) = self.placement.clone() {
+            if !shared.targets(&thread) || !thread.inner().is_open() {
+                // Close the consumed context's node, so children wired from it are aborted too
+                parent.abort();
+                return Handle::closed(metric);
+            }
+            let guard = FactoryGuard::new(&parent, metric);
+            let future = f(self);
+            let (prepared, handle) = Handle::prepare(guard.disarm(), parent);
+            let abort = prepared.abort_handle();
+            let wrapper = Handle::wrap(prepared, future, shared.thread_panicker.clone());
+
+            // A thread that closed after the check rejects the wrapper, whose drop aborts the
+            // node and closes the handle.
+            if let Err(job) = thread.inner().submit(Job::placed(Box::pin(wrapper), abort)) {
+                drop(job);
+            }
+            return handle;
+        }
+
         // Dedicated and blocking spawns reserve a dedicated worker before the
         // factory runs, so shutdown waits for them. Ordinary spawns only check
         // that the task set still accepts tasks.
-        let reservation = if matches!(execution, Execution::Dedicated | Execution::Shared(true)) {
+        let reservation = if blocking {
             let Some(reservation) = shared.workers.reserve() else {
                 return Handle::closed(metric);
             };
@@ -849,6 +966,12 @@ impl crate::Spawner for Context {
     }
 }
 
+impl From<ThreadLocal<Context>> for Context {
+    fn from(local: ThreadLocal<Context>) -> Self {
+        local.into_inner()
+    }
+}
+
 impl crate::Strategizer for Context {
     fn strategy(&self, parallelism: NonZeroUsize) -> Rayon {
         Rayon::new(
@@ -866,7 +989,8 @@ impl crate::Supervisor for Context {
             attributes: self.attributes.clone(),
             shared: self.shared.clone(),
             tree,
-            execution: Execution::default(),
+            blocking: false,
+            placement: self.placement.clone(),
         }
     }
 
@@ -1616,6 +1740,9 @@ impl Worker {
             task,
         } = payload;
 
+        // A blocking worker launched from a pinned thread inherits its mask.
+        shared.affinity.reset_if_narrowed();
+
         let result = catch_unwind(AssertUnwindSafe(|| {
             // Startup may reject the builder without invoking it. Its captured
             // root keeps the same disposal boundary as an executing spawned task.
@@ -2346,6 +2473,8 @@ impl crate::Runner for Runner {
             &mut runtime_registry,
         );
         let (panicker, tasks) = Panicker::new(self.cfg.catch_panics);
+        let (thread_panicker, thread_failures) = Panicker::new(self.cfg.catch_panics);
+        let affinity = AffinityState::capture();
 
         // Every pool worker's mailbox exists before any worker starts, so a
         // push can wake any of them from the first spawn on.
@@ -2367,6 +2496,10 @@ impl crate::Runner for Runner {
             tasks: Tasks::new(workers),
             storage,
             network,
+            runner: next_runner_id(),
+            threads: AtomicU64::new(0),
+            affinity,
+            thread_panicker,
         });
 
         let label = Label::root();
@@ -2395,13 +2528,14 @@ impl crate::Runner for Runner {
             Role::Pool(0),
             || {
                 threads.start(&shared, &pool_panicker);
-                let root = tasks.interrupt(f(Context {
+                let root = thread_failures.interrupt(tasks.interrupt(f(Context {
                     name: label.name().to_string(),
                     attributes: Vec::new(),
                     shared: context_shared,
                     tree: context_tree,
-                    execution: Execution::default(),
-                }));
+                    blocking: false,
+                    placement: None,
+                })));
                 let failures = &mut pool_failures;
                 async move {
                     let mut root = pin!(root);
@@ -2431,9 +2565,15 @@ impl crate::Runner for Runner {
                 worker.panics.retain(panic);
             }
 
-            // Dedicated worker cleanup may depend on resources released by pool
-            // task disposal or I/O retirement, so drain the pool first.
+            // Thread and blocking worker cleanup may depend on resources released by
+            // pool task disposal or I/O retirement, so drain the pool first. Threads
+            // publish their failures before releasing their reservations, so one
+            // published after the root finished is observed here. A failure already
+            // retained takes precedence.
             shared.workers.wait();
+            if let Some(panic) = thread_failures.try_take() {
+                worker.panics.retain(panic);
+            }
             worker.result(output)
         });
         metric.finish();

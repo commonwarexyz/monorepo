@@ -197,9 +197,17 @@ impl AbortHandle {
     }
 
     /// Returns whether [AbortHandle::abort] was called.
-    #[cfg(test)]
     pub(crate) fn is_aborted(&self) -> bool {
         self.shared.aborted.load(Ordering::Relaxed)
+    }
+}
+
+impl AbortRegistration {
+    /// Returns a handle that aborts the [Abortable] this registration will be consumed by.
+    pub(crate) fn handle(&self) -> AbortHandle {
+        AbortHandle {
+            shared: self.shared.clone(),
+        }
     }
 }
 

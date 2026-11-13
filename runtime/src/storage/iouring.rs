@@ -3660,16 +3660,17 @@ mod tests {
         check_indexed(&data, &LIFECYCLE_RANGES, bufs);
         assert!(blob.shared.direct_file().is_some());
 
-        // Constructed on a dedicated worker whose task ends before the stream is polled. The
+        // Constructed on a runtime thread whose task ends before the stream is polled. The
         // stream borrows the blob, so the blob is leaked to make the borrow static.
         let blob: &'static Blob = Box::leak(Box::new(blob));
         let bufs = iouring::Runner::default().start(|context| async move {
             let reads = context
                 .child("constructor")
-                .dedicated()
+                .thread()
                 .spawn(move |_| async move {
                     blob.read_many(&LIFECYCLE_RANGES, ReadOptions::DONT_CACHE)
                 })
+                .expect("thread")
                 .await
                 .unwrap();
             reads.try_collect().await.unwrap()
@@ -3733,17 +3734,18 @@ mod tests {
             let (blob, data) = lifecycle_blob(&storage, b"blob").await;
             storage.remove("partition", Some(b"blob")).await.unwrap();
 
-            // Four dedicated workers and this one read the same batch concurrently.
+            // Four runtime threads and this worker read the same batch concurrently.
             let blob = Arc::new(blob);
             let readers: Vec<_> = (0..4)
                 .map(|_| {
                     let blob = blob.clone();
                     context
                         .child("reader")
-                        .dedicated()
+                        .thread()
                         .spawn(move |_| async move {
                             collect_many(&*blob, &LIFECYCLE_RANGES, ReadOptions::DONT_CACHE).await
                         })
+                        .expect("thread")
                 })
                 .collect();
             let here = collect_many(&*blob, &LIFECYCLE_RANGES, ReadOptions::DONT_CACHE)
@@ -3816,13 +3818,17 @@ mod tests {
                 let (polled, polled_rx) = oneshot::channel();
                 let (release, released) = oneshot::channel::<()>();
                 let (sealed, offsets) = (sealed.clone(), offsets.clone());
-                let handle = context.child(name).dedicated().spawn(move |_| async move {
-                    let mut buf = vec![0u8; offsets.len() * item.get()];
-                    let mut read = pin!(sealed.read_many_into(&mut buf, &offsets, item));
-                    assert!(futures::poll!(read.as_mut()).is_pending());
-                    polled.send(()).unwrap();
-                    let _ = released.await;
-                });
+                let handle = context
+                    .child(name)
+                    .thread()
+                    .spawn(move |_| async move {
+                        let mut buf = vec![0u8; offsets.len() * item.get()];
+                        let mut read = pin!(sealed.read_many_into(&mut buf, &offsets, item));
+                        assert!(futures::poll!(read.as_mut()).is_pending());
+                        polled.send(()).unwrap();
+                        let _ = released.await;
+                    })
+                    .expect("thread");
                 (polled_rx, release, handle)
             };
 

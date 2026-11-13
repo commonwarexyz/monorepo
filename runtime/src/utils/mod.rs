@@ -20,27 +20,21 @@ mod handle;
 #[commonware_macros::stability(ALPHA)]
 pub(crate) use handle::Panicked;
 pub use handle::{AbortOnDrop, Handle};
-pub(crate) use handle::{Aborter, FactoryGuard, MetricHandle, Panicker};
+pub(crate) use handle::{Aborter, FactoryGuard, MetricHandle, Panicker, Prepared};
 
 mod cell;
 pub use cell::Cell as ContextCell;
 
 pub(crate) mod supervision;
 
-/// The execution mode of a task.
+/// Where a spawned task runs, as its task metric reports it.
 #[derive(Copy, Clone, Debug)]
-pub enum Execution {
-    /// Task runs on a dedicated thread.
-    Dedicated,
+pub(crate) enum Execution {
     /// Task runs on the shared executor. `true` marks short blocking work that should
     /// use the runtime's blocking-friendly pool.
     Shared(bool),
-}
-
-impl Default for Execution {
-    fn default() -> Self {
-        Self::Shared(false)
-    }
+    /// Task runs on a runtime thread.
+    Thread,
 }
 
 /// Yield control back to the runtime.

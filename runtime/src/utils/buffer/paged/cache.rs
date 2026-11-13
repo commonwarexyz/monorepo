@@ -1523,7 +1523,7 @@ mod tests {
         target_os = "linux",
         case::iouring(crate::iouring::Runner::default(), true)
     )]
-    fn test_page_fetch_migrates_between_dedicated_workers<R: crate::Runner>(
+    fn test_page_fetch_migrates_between_threads<R: crate::Runner>(
         #[case] runner: R,
         #[case] require_pending: bool,
     ) where
@@ -1556,7 +1556,7 @@ mod tests {
                 let (source_release_tx, source_release_rx) = oneshot::channel();
                 let first_cache = cache_ref.clone();
                 let first_blob = blob.clone();
-                let first = context.child("first").dedicated().spawn(move |_| async move {
+                let first = context.child("first").thread().spawn(move |_| async move {
                     let mut buf = vec![0; PAGE_SIZE.get() as usize];
                     let mut read = Box::pin(first_cache.read_after_miss(
                         &first_blob,
@@ -1577,6 +1577,7 @@ mod tests {
                     read.await.unwrap();
                     buf
                 });
+                let first = first.expect("thread");
                 source_polled_rx
                     .await
                     .expect("source cache poll never completed");
@@ -1587,7 +1588,7 @@ mod tests {
                 let second_blob = blob.clone();
                 let second = context
                     .child("second")
-                    .dedicated()
+                    .thread()
                     .spawn(move |_| async move {
                         let mut buf = vec![0; PAGE_SIZE.get() as usize];
                         second_cache
@@ -1595,7 +1596,8 @@ mod tests {
                             .await
                             .unwrap();
                         buf
-                    });
+                    })
+                    .expect("thread");
 
                 // Release the source only after the destination completes the shared fetch.
                 let second_buf = second.await.unwrap();

@@ -1,8 +1,8 @@
 #[cfg(feature = "external")]
 use crate::Pacer;
 use crate::{
-    BlobLayout, BlobVersion, Clock, Error, Execution, Handle, METRICS_PREFIX, Name, SinkOf,
-    StreamOf, child_label,
+    BlobLayout, BlobVersion, Clock, Error, Execution, Handle, Local, METRICS_PREFIX, Name, SinkOf,
+    StreamOf, Thread, ThreadBuilder, child_label,
     network::{
         metered::Network as MeteredNetwork,
         tokio::{Config as TokioNetworkConfig, Network as TokioNetwork},
@@ -16,7 +16,13 @@ use crate::{
     },
     telemetry::metrics::{
         CounterFamily, GaugeFamily, Metric, Register, Registered, Registry, add_attribute, raw,
-        task::Label, validate_label,
+        task::{Label, ThreadLabel},
+        validate_label,
+    },
+    threads::{
+        ThreadRuntime,
+        admission::{Job, SpawnJob, Ticket, next_runner_id},
+        affinity::AffinityState,
     },
     utils::{self, FactoryGuard, Panicker, signal::Stopper, supervision::Tree},
 };
@@ -36,7 +42,10 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::PathBuf,
     pin::pin,
-    sync::Arc,
+    sync::{
+        Arc, Weak,
+        atomic::AtomicU64,
+    },
     task::Poll,
     time::{Duration, SystemTime},
 };
@@ -45,10 +54,14 @@ use tokio::{
     sync::Notify,
 };
 
+#[path = "thread.rs"]
+mod thread;
+
 #[derive(Debug)]
 struct Metrics {
     tasks_spawned: CounterFamily<Label>,
     tasks_running: GaugeFamily<Label>,
+    thread_residents: GaugeFamily<ThreadLabel>,
 }
 
 impl Metrics {
@@ -62,6 +75,11 @@ impl Metrics {
             tasks_running: registry.register(
                 "tasks_running",
                 "Number of tasks currently running",
+                raw::Family::default(),
+            ),
+            thread_residents: registry.register(
+                "thread_residents",
+                "Number of tasks queued or running on runtime threads",
                 raw::Family::default(),
             ),
         }
@@ -314,6 +332,20 @@ pub struct Executor {
     shutdown: Mutex<Stopper>,
     panicker: Panicker,
     thread_stack_size: usize,
+    /// Instance id of this runner, which its runtime threads carry.
+    runner: u64,
+    /// Id of the next runtime thread.
+    threads: AtomicU64,
+    /// The runner's base set and affinity reset.
+    affinity: Arc<AffinityState>,
+}
+
+impl Executor {
+    /// Whether `thread` is a runtime thread of this runner.
+    fn targets(&self, thread: &Thread) -> bool {
+        let inner = thread.inner();
+        inner.runner() == self.runner && inner.backend::<thread::TokioThread>().is_some()
+    }
 }
 
 /// Closes task admission and tracks wrappers through user-future drop and descendant cleanup.
@@ -398,13 +430,19 @@ impl crate::Runner for Runner {
         let mut registry = Registry::new();
         let mut runtime_registry = registry.sub_registry(METRICS_PREFIX);
 
-        // Initialize runtime
+        // Initialize runtime. Record the CPUs this thread may run on before Tokio creates
+        // threads, and reset Tokio's threads to them once a runtime thread is pinned.
         let metrics = Arc::new(Metrics::init(&mut runtime_registry));
+        let affinity = Arc::new(AffinityState::capture());
         let mut builder = Builder::new_multi_thread();
         builder
             .worker_threads(self.cfg.worker_threads)
             .max_blocking_threads(self.cfg.max_blocking_threads)
             .thread_stack_size(self.cfg.thread_stack_size)
+            .on_thread_start({
+                let affinity = affinity.clone();
+                move || affinity.reset_if_narrowed()
+            })
             .enable_all();
         if let Some(global_queue_interval) = self.cfg.global_queue_interval {
             builder.global_queue_interval(global_queue_interval);
@@ -458,6 +496,9 @@ impl crate::Runner for Runner {
             shutdown: Mutex::new(Stopper::default()),
             panicker,
             thread_stack_size: self.cfg.thread_stack_size,
+            runner: next_runner_id(),
+            threads: AtomicU64::new(0),
+            affinity,
         });
 
         // Get metrics
@@ -474,7 +515,8 @@ impl crate::Runner for Runner {
             executor: executor.clone(),
             network,
             tree: Arc::clone(&tree),
-            execution: Execution::default(),
+            blocking: false,
+            placement: None,
         };
 
         // Keep observing task panics until every admitted task has drained. The boxed root
@@ -521,7 +563,10 @@ pub struct Context {
     storage: Storage,
     network: Network,
     tree: Arc<Tree>,
-    execution: Execution,
+    /// Whether the next spawn is short blocking work. Applies to one spawn only.
+    blocking: bool,
+    /// The runtime thread this context line runs on, or `None` for the shared executor.
+    placement: Option<Thread>,
 }
 
 impl Context {
@@ -529,17 +574,79 @@ impl Context {
     fn metrics(&self) -> &Metrics {
         &self.executor.metrics
     }
+
+    /// Where the next spawn runs, as its task metric reports it.
+    const fn execution(&self) -> Execution {
+        if self.placement.is_some() {
+            Execution::Thread
+        } else {
+            Execution::Shared(self.blocking)
+        }
+    }
 }
 
 impl crate::Spawner for Context {
-    fn dedicated(mut self) -> Self {
-        self.execution = Execution::Dedicated;
+    fn shared(mut self, blocking: bool) -> Self {
+        self.placement = None;
+        self.blocking = blocking;
         self
     }
 
-    fn shared(mut self, blocking: bool) -> Self {
-        self.execution = Execution::Shared(blocking);
+    fn on(mut self, thread: &Thread) -> Self {
+        self.placement = Some(thread.clone());
+        self.blocking = false;
         self
+    }
+
+    fn thread(self) -> ThreadBuilder<Self> {
+        // The thread occupies this context's node. The context handed to its work keeps this
+        // context's name and attributes at a fresh child of that node, unplaced.
+        let node = self.tree.clone();
+        let (tree, _) = Tree::child(&node);
+        let name = self.name.clone();
+        let host: Weak<Executor> = Arc::downgrade(&self.executor);
+        let host: Weak<dyn ThreadRuntime> = host;
+        let context = Self {
+            tree,
+            blocking: false,
+            placement: None,
+            ..self
+        };
+        ThreadBuilder::new(context, node, name, host)
+    }
+
+    fn spawn_on<F, Fut, T>(mut self, thread: &Thread, f: F) -> Handle<T>
+    where
+        F: FnOnce(Local<Self>) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + 'static,
+        T: Send + 'static,
+    {
+        // A resident always reports the thread execution, whatever this context's placement
+        let (_, metric) = spawn_metrics!(Label::task(self.name.clone(), Execution::Thread), @make self);
+
+        // The task is supervised by this context, and its context is placed on the thread
+        let parent = Arc::clone(&self.tree);
+        let (child, aborted) = Tree::child(&parent);
+        if aborted {
+            return Handle::closed(metric);
+        }
+        self.tree = child;
+        self.blocking = false;
+        self.placement = Some(thread.clone());
+
+        // The factory runs on the thread. A rejected job drops its factory, then its ticket,
+        // outside the admission lock, which aborts the node and closes the handle.
+        let accepts = self.executor.targets(thread);
+        let (prepared, handle) = Handle::prepare(metric, parent);
+        let abort = prepared.abort_handle();
+        let job = Job::factory(
+            Box::new(SpawnJob::new(f, self, Ticket::new(prepared))),
+            abort,
+        );
+        if accepts && let Err(job) = thread.inner().submit(job) {
+            drop(job);
+        }
+        handle
     }
 
     fn spawn<F, Fut, T>(mut self, f: F) -> Handle<T>
@@ -553,13 +660,35 @@ impl crate::Spawner for Context {
 
         // Track supervision before resetting configuration
         let parent = Arc::clone(&self.tree);
-        let past = self.execution;
-        self.execution = Execution::default();
+        let blocking = std::mem::take(&mut self.blocking);
         let (child, aborted) = Tree::child(&parent);
         if aborted {
             return Handle::closed(metric);
         }
         self.tree = child;
+
+        // A spawn placed on a runtime thread runs its factory here and its future on the thread,
+        // which holds the tracker guard for all of its residents.
+        if let Some(thread) = self.placement.clone() {
+            let executor = self.executor.clone();
+            if !executor.targets(&thread) || !thread.inner().is_open() {
+                // Close the consumed context's node, so children wired from it are aborted too
+                parent.abort();
+                return Handle::closed(metric);
+            }
+            let guard = FactoryGuard::new(&parent, metric);
+            let future = f(self);
+            let (prepared, handle) = Handle::prepare(guard.disarm(), parent);
+            let abort = prepared.abort_handle();
+            let wrapper = Handle::wrap(prepared, future, executor.panicker.clone());
+
+            // A thread that closed after the check rejects the wrapper, whose drop aborts the
+            // node and closes the handle.
+            if let Err(job) = thread.inner().submit(Job::placed(Box::pin(wrapper), abort)) {
+                drop(job);
+            }
+            return handle;
+        }
 
         // Spawn the task
         let executor = self.executor.clone();
@@ -593,15 +722,7 @@ impl crate::Spawner for Context {
             .await;
         };
 
-        if matches!(past, Execution::Dedicated) {
-            utils::thread::spawn(executor.thread_stack_size, {
-                // Ensure the task can access the tokio runtime
-                let handle = executor.runtime.clone();
-                move || {
-                    handle.block_on(f);
-                }
-            });
-        } else if matches!(past, Execution::Shared(true)) {
+        if blocking {
             executor.runtime.spawn_blocking({
                 // Ensure the task can access the tokio runtime
                 let handle = executor.runtime.clone();
@@ -641,6 +762,12 @@ impl crate::Spawner for Context {
     }
 }
 
+impl From<Local<Context>> for Context {
+    fn from(local: Local<Context>) -> Self {
+        local.into_inner()
+    }
+}
+
 #[stability(BETA)]
 impl crate::Strategizer for Context {
     fn strategy(&self, parallelism: NonZeroUsize) -> Rayon {
@@ -659,7 +786,8 @@ impl crate::Supervisor for Context {
             storage: self.storage.clone(),
             network: self.network.clone(),
             tree,
-            execution: Execution::default(),
+            blocking: false,
+            placement: self.placement.clone(),
         }
     }
 
@@ -875,10 +1003,35 @@ mod tests {
         Ready,
     }
 
-    fn placed(context: Context, execution: Execution) -> Context {
-        match execution {
-            Execution::Dedicated => context.dedicated(),
-            Execution::Shared(blocking) => context.shared(blocking),
+    /// Where a test spawns its task.
+    #[derive(Clone, Copy, Debug)]
+    enum Placement {
+        /// On the shared executor, as short blocking work or not.
+        Shared(bool),
+        /// As the root task of a new runtime thread.
+        Thread,
+    }
+
+    /// Every placement a test covers.
+    const PLACEMENTS: [Placement; 3] = [
+        Placement::Shared(false),
+        Placement::Shared(true),
+        Placement::Thread,
+    ];
+
+    /// Spawn `f` from `context` as `placement` says.
+    fn spawn_placed<F, Fut, T>(context: Context, placement: Placement, f: F) -> Handle<T>
+    where
+        F: FnOnce(Context) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        match placement {
+            Placement::Shared(blocking) => context.shared(blocking).spawn(f),
+            Placement::Thread => context
+                .thread()
+                .spawn(move |local| f(local.into_inner()))
+                .expect("thread"),
         }
     }
 
@@ -898,11 +1051,11 @@ mod tests {
 
     fn spawn_drop_gated_task(
         context: Context,
-        execution: Execution,
+        placement: Placement,
         drop_gate: TaskDropGate,
         ready: Option<oneshot::Sender<()>>,
     ) {
-        placed(context, execution).spawn(move |context| async move {
+        spawn_placed(context, placement, move |context| async move {
             let _context = context;
             let _drop_gate = drop_gate;
             if let Some(ready) = ready {
@@ -912,7 +1065,7 @@ mod tests {
         });
     }
 
-    fn assert_runner_drains_spawned_task(execution: Execution, root_exit: RootExit) {
+    fn assert_runner_drains_spawned_task(placement: Placement, root_exit: RootExit) {
         let cfg = Config::new();
         let storage_directory = cfg.storage_directory().clone();
         let (ready_tx, ready_rx) = oneshot::channel();
@@ -928,13 +1081,13 @@ mod tests {
                 match root_exit {
                     RootExit::ConstructorPanic => {
                         Runner::new(cfg).start(move |context| -> futures::future::Pending<()> {
-                            spawn_drop_gated_task(context, execution, drop_gate, None);
+                            spawn_drop_gated_task(context, placement, drop_gate, None);
                             panic!("root constructor panic after spawning child");
                         })
                     }
                     RootExit::Return | RootExit::FuturePanic => {
                         Runner::new(cfg).start(move |context| async move {
-                            spawn_drop_gated_task(context, execution, drop_gate, Some(ready_tx));
+                            spawn_drop_gated_task(context, placement, drop_gate, Some(ready_tx));
                             ready_rx.await.unwrap();
                             assert!(
                                 matches!(root_exit, RootExit::Return),
@@ -968,7 +1121,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(storage_directory);
         assert!(
             returned_before_cleanup.is_none(),
-            "Runner::start returned before {execution:?} task cleanup completed"
+            "Runner::start returned before {placement:?} task cleanup completed"
         );
         assert_eq!(panicked, !matches!(root_exit, RootExit::Return));
     }
@@ -1138,17 +1291,13 @@ mod tests {
 
     #[test]
     fn test_runner_waits_for_spawned_task_cancellation() {
-        for execution in [
-            Execution::Shared(false),
-            Execution::Shared(true),
-            Execution::Dedicated,
-        ] {
+        for placement in PLACEMENTS {
             for root_exit in [
                 RootExit::Return,
                 RootExit::FuturePanic,
                 RootExit::ConstructorPanic,
             ] {
-                assert_runner_drains_spawned_task(execution, root_exit);
+                assert_runner_drains_spawned_task(placement, root_exit);
             }
         }
     }
@@ -1175,12 +1324,13 @@ mod tests {
                 let (started_tx, started_rx) = oneshot::channel();
                 context
                     .child("late")
-                    .dedicated()
+                    .thread()
                     .spawn(move |_| async move {
                         started_tx.send(()).unwrap();
                         sentinel_dropped_rx.recv().unwrap();
                         panic!("drain panic");
-                    });
+                    })
+                    .expect("thread");
                 started_rx.await.unwrap();
             })
         }));
@@ -1194,26 +1344,22 @@ mod tests {
     #[rstest]
     fn test_disposal_panic_is_task_panic(
         #[values(Disposal::Output, Disposal::Cancel, Disposal::Ready)] disposal: Disposal,
-        #[values(
-            Execution::Shared(false),
-            Execution::Shared(true),
-            Execution::Dedicated
-        )]
-        execution: Execution,
+        #[values(Placement::Shared(false), Placement::Shared(true), Placement::Thread)]
+        placement: Placement,
         #[values(false, true)] catch: bool,
     ) {
         let cfg = Config::new().with_catch_panics(catch);
         let storage_directory = cfg.storage_directory().clone();
         let result = catch_unwind(AssertUnwindSafe(|| {
             Runner::new(cfg).start(|context| async move {
-                let child = placed(context.child("disposal"), execution);
+                let child = context.child("disposal");
                 match disposal {
                     Disposal::Output => {
                         // Drop the handle while the task runs so its output
                         // cannot be delivered.
                         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
                         let (release_tx, release_rx) = std::sync::mpsc::channel();
-                        let handle = child.spawn(move |_| async move {
+                        let handle = spawn_placed(child, placement, move |_| async move {
                             entered_tx.send(()).unwrap();
                             release_rx.recv().unwrap();
                             PanicOnDrop
@@ -1225,7 +1371,7 @@ mod tests {
                     Disposal::Cancel => {
                         // Abort the task once it holds a value that panics on drop.
                         let (ready_tx, ready_rx) = oneshot::channel();
-                        let handle = child.spawn(move |_| async move {
+                        let handle = spawn_placed(child, placement, move |_| async move {
                             let _guard = PanicOnDrop;
                             ready_tx.send(()).unwrap();
                             futures::future::pending::<()>().await;
@@ -1238,14 +1384,13 @@ mod tests {
                         // The completed future panics when destroyed, before
                         // its result is published.
                         let guard = PanicOnDrop;
-                        let result = child
-                            .spawn(move |_| {
-                                poll_fn(move |_| {
-                                    let _guard = &guard;
-                                    Poll::Ready(())
-                                })
+                        let result = spawn_placed(child, placement, move |_| {
+                            poll_fn(move |_| {
+                                let _guard = &guard;
+                                Poll::Ready(())
                             })
-                            .await;
+                        })
+                        .await;
                         assert!(matches!(result, Err(Error::Closed)));
                     }
                 }
@@ -1310,13 +1455,14 @@ mod tests {
             let (ready_tx, ready_rx) = oneshot::channel();
             let handle = context
                 .child("disposal")
-                .dedicated()
+                .thread()
                 .spawn(move |_| async move {
                     std::mem::forget(tracing::subscriber::set_default(subscriber));
                     let _guard = PanicOnDrop;
                     ready_tx.send(()).unwrap();
                     futures::future::pending::<()>().await;
-                });
+                })
+                .expect("thread");
             ready_rx.await.unwrap();
 
             // Aborting destroys the guard, whose panic is logged on the task's thread.
@@ -1359,17 +1505,18 @@ mod tests {
             }
         }
 
-        for execution in [
-            Execution::Shared(false),
-            Execution::Shared(true),
-            Execution::Dedicated,
-        ] {
+        for placement in PLACEMENTS {
             let cfg = Config::new();
             let storage_directory = cfg.storage_directory().clone();
             let invoked = Arc::new(AtomicBool::new(false));
             let (dropped_tx, dropped_rx) = std::sync::mpsc::channel();
             Runner::new(cfg).start(|context| Root {
-                context: Some(placed(context.child("root"), execution)),
+                // A thread's root factory runs on the thread, so the thread case spawns from a
+                // context placed on it, whose factory runs on the caller.
+                context: Some(match placement {
+                    Placement::Shared(blocking) => context.child("root").shared(blocking),
+                    Placement::Thread => context.child("root").thread().attach().expect("thread"),
+                }),
                 invoked: invoked.clone(),
                 dropped: dropped_tx,
             });
@@ -1378,11 +1525,11 @@ mod tests {
             // The root can still spawn during disposal, and shutdown drains its child.
             assert!(
                 invoked.load(Ordering::SeqCst),
-                "{execution:?} spawn from root destruction was rejected"
+                "{placement:?} spawn from root destruction was rejected"
             );
             assert!(
                 dropped_rx.try_recv().is_ok(),
-                "{execution:?} child spawned by root destruction outlived the runner"
+                "{placement:?} child spawned by root destruction outlived the runner"
             );
         }
     }
@@ -1406,13 +1553,14 @@ mod tests {
             Runner::new(cfg).start(move |context| async move {
                 let blocked = context
                     .child("blocked")
-                    .dedicated()
+                    .thread()
                     .spawn(move |_| async move {
                         started.send(()).unwrap();
                         release_rx.recv().unwrap();
                         exited.send(()).unwrap();
                         Ok::<_, Error>(None::<TaskDropGate>)
                     })
+                    .expect("thread")
                     .abort_on_drop();
                 let failed = Handle::ready(Ok(Err(Error::Closed))).abort_on_drop();
                 let mut guards = vec![failed, blocked];
