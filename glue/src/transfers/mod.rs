@@ -90,7 +90,10 @@
 //! struct Balance(u64);
 //!
 //! impl Account for Balance {
+//!     // The balance and the amounts a transfer debits and credits.
 //!     type Amount = u64;
+//!
+//!     // No effect exists, since the account keeps no state other than its balance.
 //!     type Effect = Infallible;
 //!
 //!     fn balance(&self) -> u64 {

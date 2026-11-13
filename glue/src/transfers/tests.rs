@@ -35,7 +35,10 @@ type Key = FixedBytes<8>;
 struct Balance(u64);
 
 impl Account for Balance {
+    /// The balance and the amounts a transfer debits and credits.
     type Amount = u64;
+
+    /// No effect exists, since the account keeps no state other than its balance.
     type Effect = Infallible;
 
     fn balance(&self) -> u64 {
@@ -1455,7 +1458,10 @@ enum Effect {
 }
 
 impl Account for Nonced {
+    /// The balance and the amounts a transfer debits and credits.
     type Amount = u64;
+
+    /// Each effect reads or changes the account's nonces or balance.
     type Effect = Effect;
 
     fn balance(&self) -> u64 {
@@ -2612,7 +2618,10 @@ fn an_effect_only_change_touches_its_key() {
 struct Wide(U256);
 
 impl Account for Wide {
+    /// The balance and the amounts a transfer debits and credits.
     type Amount = U256;
+
+    /// No effect exists, since the account keeps no state other than its balance.
     type Effect = Infallible;
 
     fn balance(&self) -> U256 {
