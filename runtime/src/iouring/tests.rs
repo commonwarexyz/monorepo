@@ -4,14 +4,16 @@
 
 use super::{
     super::{
-        driver::tests::fail_after_completion,
+        driver::tests::{fail_after_completion, make_file, on_service_while_acquiring},
         idle::tests::{WakePoint, on_wake_point},
-        operation::Operation,
+        operation::{Operation, start_sync},
+        park::{Unparker, tests::waiting},
         queue::CAPACITY,
-        request::{RecvRequest, Request},
+        request::{RecvRequest, Request, SyncRequest},
+        slab::Id,
         task::{Task, tests::cancelled},
         tasks::tests::AFTER_INSERT,
-        waker::tests::state_bits,
+        waiter::WaiterId,
     },
     *,
 };
@@ -390,6 +392,24 @@ pub fn before_park() {
     assert!(!FORBID_PARK.get(), "callback work reached the idle path");
 }
 
+thread_local! {
+    /// Whether this thread's worker offered, in its current turn, to defer
+    /// kernel service to its wait, and whether its service deferred it.
+    static KERNEL_SERVICE: Cell<(bool, bool)> = const { Cell::new((false, false)) };
+}
+
+/// Record whether the calling worker's current turn offered to defer kernel
+/// service to its wait, and whether its service deferred it.
+pub fn record_kernel_service(offered: bool, deferred: bool) {
+    KERNEL_SERVICE.set((offered, deferred));
+}
+
+/// Whether the calling worker's current turn offered to defer kernel service
+/// to its wait, and whether its service deferred it.
+fn kernel_service() -> (bool, bool) {
+    KERNEL_SERVICE.get()
+}
+
 /// A point in a pool worker's park sequence where a test hook runs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ParkPoint {
@@ -498,20 +518,19 @@ pub fn before_overflow(pool: &Pool) {
 /// Whether worker `index` of `pool` is published idle and waits for a wake,
 /// on its futex or in its io_uring wait.
 fn is_waiting(pool: &Pool, index: u32) -> bool {
-    // The two waiting bits of the wake state.
-    const WAITING: u32 = 0b11;
-    pool.idle().is_idle(index) && state_bits(&pool.mailbox(index).waker) & WAITING != 0
+    pool.idle().is_idle(index) && waiting(&pool.mailbox(index).unparker)
 }
 
 /// Block until every worker of `pool` waits for a wake, published idle with no
 /// wake's claim and no search count held, both before and after the scan of the
 /// waiting bits.
 ///
-/// A worker a wake claimed shows its waiting bit until it runs, and one seen
-/// waiting can resume before the scan ends, so the waiting bits alone do not
-/// show a quiet pool. A worker that parks again before the second look has
-/// polled what it took. Once nothing can wake a task or push into the pool,
-/// this establishes that every task's poll has returned, leaving each idle.
+/// A worker a wake claimed shows its waiting bit until the wake's notification
+/// clears it, and one seen waiting can resume before the scan ends, so the
+/// waiting bits alone do not show a quiet pool. A worker that parks again
+/// before the second look has polled what it took. Once nothing can wake a
+/// task or push into the pool, this establishes that every task's poll has
+/// returned, leaving each idle.
 fn wait_until_every_worker_waits(pool: &Pool) {
     let workers = pool.workers() as u32;
     let parked =
@@ -647,8 +666,8 @@ fn occupy_worker_one(context: &Context, in_ring: bool) -> (ThreadId, Option<Unix
     (other, Some(peer))
 }
 
-/// A spin outlasting the test's timeout, so only a push's wake signal can end
-/// it, as no message is published.
+/// A spin outlasting the test's timeout, so only a push's notification can end
+/// it, as no message is sent.
 fn endless_spinner() -> SpinnerConfig {
     SpinnerConfig {
         budget_us: 60_000_000,
@@ -988,6 +1007,141 @@ fn catch_up_callback_after_the_count_returns(catch_up: CatchUp) {
         }
         drop(peer);
     });
+}
+
+/// An identity no request has, so neither its cancellation nor its forward
+/// makes the worker that applies it ready.
+fn stale_waiter() -> WaiterId {
+    WaiterId(Id {
+        index: u32::MAX,
+        generation: 0,
+    })
+}
+
+/// What worker one did in the turn after a notification, read at the turn's
+/// [`ParkPoint::AfterMessages`].
+#[derive(Debug)]
+struct Turn {
+    /// Whether the turn offered to defer kernel service to its wait.
+    offered: bool,
+    /// Whether the turn's service deferred kernel service to its wait.
+    deferred: bool,
+    /// Whether the turn could not finish while another thread held worker
+    /// one's inbox lock, so it took or tried to take from the mailbox.
+    blocked: bool,
+    /// Whether the mailbox still reported mail when the turn finished.
+    mail: bool,
+}
+
+/// Hold worker `index`'s inbox lock on another thread until the returned
+/// sender signals the end of the turn being checked, or until [`RESCUE`]
+/// passes. The holder returns whether it gave up waiting, which means the
+/// turn needed the lock.
+fn hold_inbox(pool: &Arc<Pool>, index: u32) -> (mpsc::Sender<()>, thread::JoinHandle<bool>) {
+    let (held, ready) = mpsc::channel();
+    let (release, finished) = mpsc::channel();
+    let pool = pool.clone();
+    let holder = thread::spawn(move || {
+        let _inbox = pool.mailbox(index).lock_inbox();
+        held.send(()).unwrap();
+        finished.recv_timeout(RESCUE).is_err()
+    });
+    ready.recv().unwrap();
+    (release, holder)
+}
+
+/// Notify worker one, parked in its ring with a receive in flight, first
+/// with a pool claim and then with a message, each just before it waits, and
+/// report the turn that follows each notification. Another thread holds
+/// worker one's inbox lock through the turn after the claim.
+fn claim_then_mail() -> [Turn; 2] {
+    let (sender, turns) = mpsc::channel();
+    Runner::new(config().with_worker_threads(2)).start(|context| async move {
+        let pool = context.shared.pool.clone();
+        spin_until(|| is_waiting(&pool, 1), "worker one must start and park");
+
+        // Report the next turn of worker one. A holder of its inbox lock is
+        // released once the turn has finished, and reports whether it gave up
+        // waiting first.
+        let report = {
+            let pool = pool.clone();
+            move |sender: mpsc::Sender<Turn>,
+                  holder: Option<(mpsc::Sender<()>, thread::JoinHandle<bool>)>| {
+                let hooked = pool.clone();
+                on_next_park(&pool, 1, ParkPoint::AfterMessages, move || {
+                    let (offered, deferred) = kernel_service();
+                    let blocked = holder.is_some_and(|(release, holder)| {
+                        let _ = release.send(());
+                        holder.join().unwrap()
+                    });
+                    let turn = Turn {
+                        offered,
+                        deferred,
+                        blocked,
+                        mail: hooked.mailbox(1).has_mail(),
+                    };
+                    sender.send(turn).unwrap();
+                });
+            }
+        };
+
+        // Once the receive is in flight and worker one is about to wait, a
+        // push from another thread claims it. Worker zero spins in this root
+        // until both turns are reported, so the claim cannot select it.
+        let claimant = context.child("claimant");
+        on_next_park(&pool, 1, ParkPoint::BeforeWait, {
+            let pool = pool.clone();
+            let sender = sender.clone();
+            move || {
+                report(sender.clone(), Some(hold_inbox(&pool, 1)));
+                thread::spawn(move || drop(claimant.spawn(|_| async {})))
+                    .join()
+                    .unwrap();
+
+                // At the next wait, worker one's mailbox gets a message.
+                let hooked = pool.clone();
+                on_next_park(&pool, 1, ParkPoint::BeforeWait, move || {
+                    let mailbox = hooked.mailbox(1);
+                    report(sender, None);
+                    let stale = Message::Cancel(Cancel::Waiter(stale_waiter()));
+                    assert!(mailbox.send(stale).is_ok());
+                });
+            }
+        });
+        let (_, _peer) = occupy_worker_one(&context, true);
+        let deadline = Instant::now() + TEST_TIMEOUT;
+        let mut reported = Vec::new();
+        while reported.len() < 2 {
+            assert!(
+                Instant::now() < deadline,
+                "worker one must report two turns"
+            );
+            reported.extend(turns.try_recv());
+            std::hint::spin_loop();
+        }
+        reported.try_into().unwrap()
+    })
+}
+
+/// How long a test waits for progress that must not need a rescue, such as a
+/// sync after its permit is released or a turn that must finish without the
+/// inbox lock another thread holds, before it gives up. It is well before
+/// worker zero's ten second process metrics tick.
+const RESCUE: Duration = Duration::from_secs(5);
+
+/// Unpark the worker of `unparker` unless `progress` reports within
+/// [`RESCUE`], recording in `rescued` that it needed the notification.
+fn rescue_after(
+    progress: mpsc::Receiver<()>,
+    unparker: Unparker,
+    rescued: Arc<AtomicBool>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        if progress.recv_timeout(RESCUE).is_err() {
+            rescued.store(true, Ordering::Relaxed);
+            unparker.unpark();
+        }
+    })
 }
 
 #[test]
@@ -4044,9 +4198,9 @@ fn test_push_racing_a_park_reaches_the_worker() {
 }
 
 /// A push into the global queue ends a spinning worker's spin through its
-/// wake signal.
+/// notification.
 #[test]
-fn test_push_ends_a_spin_through_the_wake_signal() {
+fn test_push_ends_a_spin_through_its_notification() {
     let cfg = config()
         .with_worker_threads(2)
         .with_idle_spinner(endless_spinner());
@@ -4059,11 +4213,11 @@ fn test_push_ends_a_spin_through_the_wake_signal() {
     });
 }
 
-/// A worker whose spin ended on a push's wake signal consumes it, so once idle
-/// again it spins out and sleeps on its futex, and does not spin on the stale
-/// signal forever.
+/// A worker whose spin ended on a push's notification observes the sequence
+/// again on its next turn, so once idle it can finish spinning and sleep on
+/// its futex.
 #[test]
-fn test_spinning_worker_sleeps_after_a_signalled_spin() {
+fn test_spinning_worker_sleeps_after_a_notified_spin() {
     let spinner = SpinnerConfig {
         budget_us: 1_000,
         max_budget_us: 1_000,
@@ -4078,7 +4232,7 @@ fn test_spinning_worker_sleeps_after_a_signalled_spin() {
             assert_eq!(thread, other);
         }
         let deadline = Instant::now() + TEST_TIMEOUT;
-        while state_bits(&pool.mailbox(1).waker) & 1 == 0 {
+        while !waiting(&pool.mailbox(1).unparker) {
             assert!(Instant::now() < deadline, "worker one must sleep");
             std::hint::spin_loop();
         }
@@ -4422,6 +4576,180 @@ fn test_shutdown_retains_a_taken_forward_until_polling_ends() {
         }
     });
     assert_eq!(forwarded.lock().as_deref(), Some("pending"));
+}
+
+/// A worker applies at most [`BATCH_SIZE`] messages a turn and takes a batch
+/// only into an empty scratch. A batch that starts while the worker still
+/// applies an earlier one notifies before the observation of the turn that
+/// empties the scratch, so that turn sees no notification since. It must find
+/// the batch through the mail flag before it parks, on its futex or in its
+/// io_uring wait, since no later send to that mailbox notifies.
+#[test]
+fn test_batch_started_during_a_long_batch_is_taken_before_parking() {
+    for in_ring in [false, true] {
+        Runner::new(config().with_worker_threads(2)).start(|context| async move {
+            let pool = context.shared.pool.clone();
+            let (_, _peer) = occupy_worker_one(&context, in_ring);
+            let stale = stale_waiter();
+
+            // Hold worker one inside a poll while a batch one message longer
+            // than a turn's share queues in its mailbox.
+            let (release, held) = mpsc::channel::<()>();
+            let _ = spawn_elsewhere(&context, async move {
+                let _ = held.recv_timeout(TEST_TIMEOUT);
+            });
+            for _ in 0..=BATCH_SIZE {
+                assert!(
+                    pool.mailbox(1)
+                        .send(Message::Cancel(Cancel::Waiter(stale)))
+                        .is_ok()
+                );
+            }
+
+            // Once worker one has taken that batch and applied its share,
+            // start a second batch. Its notification precedes the observation
+            // of the turn that applies the last message of the first.
+            let (sender, mut receiver) = oneshot::channel();
+            on_next_park(&pool, 1, ParkPoint::AfterMessages, {
+                let pool = pool.clone();
+                move || {
+                    let mailbox = pool.mailbox(1);
+                    assert!(!mailbox.has_mail(), "the first batch must be taken");
+                    assert!(
+                        mailbox
+                            .send(Message::Forward(Forward::Waiter(stale, sender)))
+                            .is_ok()
+                    );
+                }
+            });
+            release.send(()).unwrap();
+
+            // Worker one parks again only once it has answered the forward.
+            spin_until(|| is_waiting(&pool, 1), "worker one must park again");
+            let answered = receiver.try_recv().is_ok();
+
+            // A worker that parked with the batch hears no later send to its
+            // mailbox, the pool's stop included, so notify it before failing.
+            pool.mailbox(1).unparker.unpark();
+            spin_until(
+                || !pool.mailbox(1).has_mail(),
+                "worker one must take the second batch once notified",
+            );
+            assert!(answered, "worker one parked with a batch in its mailbox");
+        });
+    }
+}
+
+/// A pool claim moves the word without mail, so the turn it causes finishes
+/// without the inbox lock that another thread holds through it and still
+/// offers to defer kernel service to its wait, which its service does with a
+/// receive in flight. The turn after a message takes the batch and services
+/// the kernel at once.
+#[test]
+fn test_claim_without_mail_takes_nothing_and_keeps_kernel_service_deferred() {
+    let [claim, mail] = claim_then_mail();
+
+    // The claim's turn takes nothing and keeps the deferral.
+    assert!(!claim.blocked, "a claim without mail took from the mailbox");
+    assert!(claim.offered, "a claim without mail stopped the deferral");
+    assert!(claim.deferred, "service ignored the offered deferral");
+
+    // The message's turn takes the batch and services the kernel.
+    assert!(!mail.mail, "the turn after a message left its batch");
+    assert!(!mail.offered, "mail did not stop the deferral");
+    assert!(!mail.deferred, "service deferred despite mail");
+}
+
+/// The drive loop observes the word before its service turn polls permit
+/// acquisitions, so a permit released from another thread after that poll
+/// moves the word after the observation. The worker then goes round and
+/// polls the grant instead of waiting with it unpolled.
+#[test]
+fn test_permit_released_after_drive_service_is_polled_before_waiting() {
+    let (directory, file) = make_file("drive_permit");
+    let permit = file.durability.clone().try_lock_owned().unwrap();
+    let rescued = Arc::new(AtomicBool::new(false));
+    Runner::new(config()).start({
+        let rescued = rescued.clone();
+        move |context| async move {
+            // At the end of the service turn that polls the sync's
+            // acquisition, release the permit from another thread.
+            let unparker = context.shared.pool.mailbox(0).unparker.clone();
+            let (synced, progress) = mpsc::channel();
+            let watchdog = Arc::new(Mutex::new(None));
+            on_service_while_acquiring({
+                let watchdog = watchdog.clone();
+                move || {
+                    thread::spawn(move || drop(permit)).join().unwrap();
+                    *watchdog.lock() = Some(rescue_after(progress, unparker, rescued));
+                }
+            });
+
+            // The sync finishes without the rescue.
+            let result = start_sync(SyncRequest::new(file)).await.unwrap();
+            assert!(result.is_ok());
+            let _ = synced.send(());
+            let watchdog = watchdog.lock().take();
+            watchdog
+                .expect("the sync must wait for its permit")
+                .join()
+                .unwrap();
+        }
+    });
+    assert!(
+        !rescued.load(Ordering::Relaxed),
+        "the worker waited with a granted permit unpolled"
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+/// The cleanup loop observes the word before its service turn polls permit
+/// acquisitions, so a permit released from another thread after that poll
+/// moves the word after the observation. Cleanup then polls the grant and
+/// finishes the sync instead of waiting in its ring with nothing in flight.
+#[test]
+fn test_permit_released_after_cleanup_service_is_polled_before_waiting() {
+    let (directory, file) = make_file("cleanup_permit");
+    let permit = file.durability.clone().try_lock_owned().unwrap();
+    let rescued = Arc::new(AtomicBool::new(false));
+    let (stopped, progress) = mpsc::channel();
+    let watchdog = Arc::new(Mutex::new(None));
+    Runner::new(config()).start(|context| {
+        let unparker = context.shared.pool.mailbox(0).unparker.clone();
+        let rescued = rescued.clone();
+        let watchdog = watchdog.clone();
+        async move {
+            // Leave a sync without an observer waiting for its permit, so
+            // cleanup must finish it.
+            drop(start_sync(SyncRequest::new(file)));
+
+            // The runner calls this after the drive loop ends and before
+            // cleanup starts, so the first service turn after it that polls
+            // the sync's acquisition is cleanup's. At the end of that turn,
+            // release the permit from another thread.
+            BEFORE_ABORT.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move || {
+                    on_service_while_acquiring(move || {
+                        thread::spawn(move || drop(permit)).join().unwrap();
+                        *watchdog.lock() = Some(rescue_after(progress, unparker, rescued));
+                    });
+                }));
+            });
+        }
+    });
+
+    // Cleanup finished the sync without the rescue.
+    let _ = stopped.send(());
+    let watchdog = watchdog.lock().take();
+    watchdog
+        .expect("cleanup must wait for the sync's permit")
+        .join()
+        .unwrap();
+    assert!(
+        !rescued.load(Ordering::Relaxed),
+        "cleanup waited with a granted permit unpolled"
+    );
+    fs::remove_dir_all(directory).unwrap();
 }
 
 /// Teardown clears two idle tasks whose destructors wake each other, so

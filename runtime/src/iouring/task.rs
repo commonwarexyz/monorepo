@@ -1244,7 +1244,7 @@ pub mod tests {
     /// A pool of one worker that never runs, so every wake takes the global
     /// queue path.
     pub fn pool() -> Arc<Pool> {
-        Arc::new(Pool::new(vec![Arc::new(Mailbox::new().unwrap())]))
+        Arc::new(Pool::new(1).0)
     }
 
     impl Ready {
@@ -2002,11 +2002,15 @@ pub mod tests {
 #[cfg(all(test, feature = "loom"))]
 mod loom_tests {
     use super::{
-        AfterPending, AfterPoll, Mailbox, Panics, Pool, REF_ONE, REFS, Ready, Runnable, State,
-        Task, Tasks,
+        AfterPending, AfterPoll, Panics, Pool, REF_ONE, REFS, Ready, Runnable, State, Task, Tasks,
+        tests::queue,
     };
     use crate::iouring::{
-        idle::{Park, Searcher},
+        idle::{
+            Park, Searcher,
+            tests::{WakePoint, on_wake_point},
+        },
+        park::Parker,
         queue::{CAPACITY, STEALABLE},
     };
     use loom::{
@@ -2016,6 +2020,7 @@ mod loom_tests {
         },
         thread,
     };
+    use rstest::rstest;
     use std::{
         future::{Future, poll_fn},
         task::{Poll, Waker},
@@ -2026,13 +2031,19 @@ mod loom_tests {
         (state.0.load(Ordering::Acquire) & REFS) / REF_ONE
     }
 
-    /// A pool of `workers` workers with no runner. Task headers hold a
-    /// standard `Weak` to it, and every wake takes the global queue path.
-    fn pool(workers: usize) -> std::sync::Arc<Pool> {
-        let mailboxes = (0..workers)
-            .map(|_| std::sync::Arc::new(Mailbox::new().unwrap()))
-            .collect();
-        std::sync::Arc::new(Pool::new(mailboxes))
+    /// A pool of `workers` workers with no runner, and the parker of each
+    /// worker's word. Task headers hold a standard `Weak` to the pool, and
+    /// every wake takes the global queue path.
+    fn pool(workers: usize) -> (std::sync::Arc<Pool>, Vec<Parker>) {
+        let (pool, parkers) = Pool::new(workers);
+        (std::sync::Arc::new(pool), parkers)
+    }
+
+    /// The parkers of a pool of `N` workers, in worker order.
+    fn parker_array<const N: usize>(parkers: Vec<Parker>) -> [Parker; N] {
+        parkers
+            .try_into()
+            .unwrap_or_else(|_| panic!("expected {N} parkers"))
     }
 
     /// Counts the drops of a future's captured state.
@@ -2109,23 +2120,29 @@ mod loom_tests {
     ) {
         if run(set, runnable) && completed.fetch_add(1, Ordering::AcqRel) + 1 == tasks {
             for worker in 0..pool.workers() as u32 {
-                pool.mailbox(worker).waker.wake();
+                pool.mailbox(worker).unparker.unpark();
             }
         }
     }
 
-    /// Run worker `index` of `pool` until `tasks` tasks complete. `ready` must
-    /// own that worker's run queue, and every runnable must belong to `set`.
+    /// Run worker `index` of `pool` until `tasks` tasks complete. `ready` and
+    /// `parker` must own that worker's run queue and word, and every runnable
+    /// must belong to `set`.
     ///
     /// The worker takes from its run queue, then from the global queue, and
     /// when both are empty searches and parks through the drive loop's
     /// `Searcher` methods. The model omits I/O, the root, and the global queue
-    /// interval. With `spin`, a worker that finds a wake signal latched
-    /// consumes it instead of blocking, as an idle spin that sees it does.
+    /// interval. A worker observes its word before it looks, and waits only
+    /// while no notification moved it since. With `spin`, a worker that sees
+    /// it moved runs again without arming, as an idle spin that sees it does.
+    /// The worker that completes the last task wakes every worker, so none
+    /// waits forever.
+    #[allow(clippy::too_many_arguments)]
     fn work(
         pool: &Pool,
         set: &Tasks,
         ready: &mut Ready,
+        parker: &Parker,
         index: u32,
         completed: &AtomicUsize,
         tasks: usize,
@@ -2140,6 +2157,7 @@ mod loom_tests {
                 ready.discard();
                 return;
             }
+            let seen = parker.observe();
             let next = ready.pop().or_else(|| pool.take(ready));
             if let Some(runnable) = next {
                 searcher.leave_search();
@@ -2155,14 +2173,74 @@ mod loom_tests {
                 searcher.finish_park();
                 continue;
             }
-            let waker = &pool.mailbox(index).waker;
-            if spin && waker.signalled() {
-                waker.consume_signal();
-            } else {
-                waker.park_idle(0, None);
+            if !spin || !parker.moved(seen) {
+                parker.park(seen, None);
             }
             searcher.finish_park();
         }
+    }
+
+    /// Poll every runnable in `ready` as [`run`] does, without searching or
+    /// parking, as a worker that only runs what its own run queue holds.
+    fn drain(set: &Tasks, ready: &mut Ready) {
+        while let Some(runnable) = ready.pop() {
+            run(set, runnable);
+        }
+    }
+
+    /// Run worker `index` of `pool` as [`work`] does, without spinning, until
+    /// `stop` is set, then run what its run queue still holds. `ready` and
+    /// `parker` must own that worker's run queue and word, and every runnable
+    /// must belong to `set`.
+    ///
+    /// A model whose worker zero blocks until its peers have run stolen tasks
+    /// ends its peer this way, through [`stop_peer`], once worker zero has
+    /// resumed. The peer then counts no completions, and no worker notifies
+    /// every other one, so loom explores the peer's turns against the handoff
+    /// under test and not against the bookkeeping that ends the model.
+    fn work_until(
+        pool: &Pool,
+        set: &Tasks,
+        ready: &mut Ready,
+        parker: &Parker,
+        index: u32,
+        stop: &AtomicBool,
+    ) {
+        // Dropping the searcher on return withdraws any live publication and
+        // returns any held count, as at the end of the drive loop.
+        let mut searcher = Searcher::new(pool, index);
+        loop {
+            if stop.load(Ordering::Acquire) {
+                searcher.leave_search();
+                drain(set, ready);
+                return;
+            }
+            let seen = parker.observe();
+            let next = ready.pop().or_else(|| pool.take(ready));
+            if let Some(runnable) = next {
+                searcher.leave_search();
+                run(set, runnable);
+                continue;
+            }
+
+            if searcher.search(ready) || searcher.publish_and_look(ready) {
+                searcher.leave_search();
+                continue;
+            }
+            if stop.load(Ordering::Acquire) {
+                searcher.finish_park();
+                continue;
+            }
+            parker.park(seen, None);
+            searcher.finish_park();
+        }
+    }
+
+    /// End worker `index` of `pool`, which runs [`work_until`] on `stop`. The
+    /// worker may be parked, so the flag is set before it is notified.
+    fn stop_peer(pool: &Pool, index: u32, stop: &AtomicBool) {
+        stop.store(true, Ordering::Release);
+        pool.mailbox(index).unparker.unpark();
     }
 
     /// A thread outside the pool wakes `tasks` idle tasks while `workers` pool
@@ -2174,7 +2252,7 @@ mod loom_tests {
         let mut builder = loom::model::Builder::new();
         builder.preemption_bound = bound;
         builder.check(move || {
-            let pool = pool(workers);
+            let (pool, mut parkers) = pool(workers);
             let set = Arc::new(Tasks::new(workers));
             let signal = Arc::new(AtomicBool::new(false));
             let drops = Arc::new(AtomicUsize::new(0));
@@ -2193,25 +2271,30 @@ mod loom_tests {
                 handles.push(task);
             }
 
+            let parker = parkers.remove(0);
             let pushing = thread::spawn(move || {
                 signal.store(true, Ordering::Release);
                 for waker in wakers {
                     waker.wake();
                 }
             });
-            let others: Vec<_> = (1..workers as u32)
-                .map(|index| {
+            let others: Vec<_> = parkers
+                .into_iter()
+                .zip(1..)
+                .map(|(parker, index)| {
                     let pool = pool.clone();
                     let set = set.clone();
                     let completed = completed.clone();
                     thread::spawn(move || {
                         let mut ready = pool.queue(index).owner();
-                        work(&pool, &set, &mut ready, index, &completed, tasks, spin);
+                        work(
+                            &pool, &set, &mut ready, &parker, index, &completed, tasks, spin,
+                        );
                     })
                 })
                 .collect();
             let mut ready = pool.queue(0).owner();
-            work(&pool, &set, &mut ready, 0, &completed, tasks, spin);
+            work(&pool, &set, &mut ready, &parker, 0, &completed, tasks, spin);
             pushing.join().unwrap();
             for other in others {
                 other.join().unwrap();
@@ -2288,12 +2371,44 @@ mod loom_tests {
         }
     }
 
+    /// A count of the tasks whose polls have run, which a blocked thread
+    /// waits on.
+    type RanCount = Arc<(Mutex<usize>, Condvar)>;
+
     /// Block until at least `count` tasks have raised `ran`.
-    fn wait_ran_count(ran: &Arc<(Mutex<usize>, Condvar)>, count: usize) {
+    fn wait_ran_count(ran: &RanCount, count: usize) {
         let mut raised = ran.0.lock().unwrap();
         while *raised < count {
             raised = ran.1.wait(raised).unwrap();
         }
+    }
+
+    /// Create `tasks` tasks retained by `set` that each complete on their
+    /// first poll, counting it in `ran`. Their runnables go into `ready`
+    /// through `Pool::enqueue`, as [`enqueue_raising`] queues its own.
+    /// `ready` must own a run queue of `pool`. Returns the tasks so the model
+    /// can check their references at the end.
+    fn enqueue_counting(
+        pool: &std::sync::Arc<Pool>,
+        set: &Tasks,
+        ready: &mut Ready,
+        ran: &RanCount,
+        tasks: usize,
+    ) -> Vec<Task> {
+        (0..tasks)
+            .map(|_| {
+                let ran = ran.clone();
+                let future = poll_fn(move |_| {
+                    *ran.0.lock().unwrap() += 1;
+                    ran.1.notify_all();
+                    Poll::Ready(())
+                });
+                let (task, runnable) = Task::new(future, set, std::sync::Arc::downgrade(pool));
+                assert!(set.insert(task.clone()).is_ok());
+                pool.enqueue(ready, runnable);
+                task
+            })
+            .collect()
     }
 
     /// A push from outside the pool racing a worker's park, waiting or
@@ -2307,11 +2422,11 @@ mod loom_tests {
 
     /// A push from outside the pool racing two workers' parks is never lost,
     /// whichever worker it wakes and whichever takes it.
-    #[test]
-    fn test_foreign_push_racing_two_parks_is_never_lost() {
-        for spin in [false, true] {
-            foreign_pushes(2, 1, spin, Some(3));
-        }
+    #[rstest]
+    #[case::waiting(false)]
+    #[case::spinning(true)]
+    fn test_foreign_push_racing_two_parks_is_never_lost(#[case] spin: bool) {
+        foreign_pushes(2, 1, spin, Some(3));
     }
 
     /// Successive pushes from outside the pool racing a worker's takes and park
@@ -2329,7 +2444,8 @@ mod loom_tests {
         let mut builder = loom::model::Builder::new();
         builder.preemption_bound = Some(3);
         builder.check(|| {
-            let pool = pool(2);
+            let (pool, parkers) = pool(2);
+            let [p0, p1] = parker_array(parkers);
             let set = Arc::new(Tasks::new(2));
             let completed = Arc::new(AtomicUsize::new(0));
             let ran: Ran = Arc::new((Mutex::new(false), Condvar::new()));
@@ -2340,7 +2456,9 @@ mod loom_tests {
                 let completed = completed.clone();
                 move || {
                     let mut ready = pool.queue(1).owner();
-                    work(&pool, &set, &mut ready, 1, &completed, STEALABLE, false);
+                    work(
+                        &pool, &set, &mut ready, &p1, 1, &completed, STEALABLE, false,
+                    );
                 }
             });
 
@@ -2349,7 +2467,9 @@ mod loom_tests {
             let mut ready = pool.queue(0).owner();
             let handles = enqueue_raising(&pool, &set, &mut ready, &ran, STEALABLE);
             wait_ran(&ran);
-            work(&pool, &set, &mut ready, 0, &completed, STEALABLE, false);
+            work(
+                &pool, &set, &mut ready, &p0, 0, &completed, STEALABLE, false,
+            );
             thief.join().unwrap();
             for task in handles {
                 assert_eq!(refs(&task.state), 1);
@@ -2358,13 +2478,72 @@ mod loom_tests {
     }
 
     /// Returning the last search count hands a suppressed kick to a parked
-    /// peer, even when the former searcher blocks in a long poll.
+    /// peer, even when the former searcher blocks in a long poll. A lost
+    /// handoff leaves worker zero blocked and its peer parked, which loom
+    /// reports as a deadlock.
     #[test]
     fn test_kick_left_to_a_searcher_is_handed_on() {
         let mut builder = loom::model::Builder::new();
         builder.preemption_bound = Some(2);
         builder.check(|| {
-            let pool = pool(3);
+            let (pool, parkers) = pool(3);
+            let [_p0, _p1, p2] = parker_array(parkers);
+            let set = Arc::new(Tasks::new(3));
+            let stop = Arc::new(AtomicBool::new(false));
+            let ran: Ran = Arc::new((Mutex::new(false), Condvar::new()));
+
+            // Worker one searches, then starts a long poll. It returns its
+            // count, runs whatever its search stole, and does nothing more, as
+            // a worker blocked in that poll.
+            let searching = thread::spawn({
+                let pool = pool.clone();
+                let set = set.clone();
+                move || {
+                    let mut ready = pool.queue(1).owner();
+                    let mut searcher = Searcher::new(&pool, 1);
+                    let _ = searcher.search(&mut ready);
+                    searcher.leave_search();
+                    drain(&set, &mut ready);
+                }
+            });
+            let parked = thread::spawn({
+                let pool = pool.clone();
+                let set = set.clone();
+                let stop = stop.clone();
+                move || {
+                    let mut ready = pool.queue(2).owner();
+                    work_until(&pool, &set, &mut ready, &p2, 2, &stop);
+                }
+            });
+
+            // Both pushes race the searches and the peer's publication.
+            let mut ready = pool.queue(0).owner();
+            let handles = enqueue_raising(&pool, &set, &mut ready, &ran, STEALABLE);
+            wait_ran(&ran);
+
+            // It then ends its peer and runs what is left.
+            searching.join().unwrap();
+            stop_peer(&pool, 2, &stop);
+            parked.join().unwrap();
+            drain(&set, &mut ready);
+            for task in handles {
+                assert_eq!(refs(&task.state), 1);
+            }
+        });
+    }
+
+    /// The hand-on model through quiescence, at one preemption. Worker one
+    /// blocks in its long poll until a task has run, worker zero resumes its
+    /// own worker loop after the handoff, and the workers run on until both
+    /// tasks complete, when the last completion wakes every worker. The model
+    /// above explores the handoff itself at two preemptions.
+    #[test]
+    fn test_kick_left_to_a_searcher_is_handed_on_through_quiescence() {
+        let mut builder = loom::model::Builder::new();
+        builder.preemption_bound = Some(1);
+        builder.check(|| {
+            let (pool, parkers) = pool(3);
+            let [p0, _p1, p2] = parker_array(parkers);
             let set = Arc::new(Tasks::new(3));
             let completed = Arc::new(AtomicUsize::new(0));
             let ran: Ran = Arc::new((Mutex::new(false), Condvar::new()));
@@ -2394,20 +2573,183 @@ mod loom_tests {
                 let completed = completed.clone();
                 move || {
                     let mut ready = pool.queue(2).owner();
-                    work(&pool, &set, &mut ready, 2, &completed, STEALABLE, false);
+                    work(
+                        &pool, &set, &mut ready, &p2, 2, &completed, STEALABLE, false,
+                    );
                 }
             });
 
+            // Worker zero queues both tasks, whose pushes race the searches
+            // and the peer's publication, then blocks as in a long poll until
+            // one of them has run.
             let mut ready = pool.queue(0).owner();
             let handles = enqueue_raising(&pool, &set, &mut ready, &ran, STEALABLE);
             wait_ran(&ran);
+
+            // It then resumes its own worker loop until both tasks complete.
             searching.join().unwrap();
-            work(&pool, &set, &mut ready, 0, &completed, STEALABLE, false);
+            work(
+                &pool, &set, &mut ready, &p0, 0, &completed, STEALABLE, false,
+            );
             parked.join().unwrap();
             for task in handles {
                 assert_eq!(refs(&task.state), 1);
             }
         });
+    }
+
+    /// A push that claims a parking worker after it took a count to search
+    /// ends its last look without a steal. The worker returns its kept count
+    /// before a blocking poll, and that last return hands a kick the counts
+    /// suppressed to a parked peer. The claim's notification may also arrive
+    /// only after the worker ran on, and dropping the searcher returns the
+    /// count as an unwind does. Worker zero holds two runnables queued
+    /// without a kick.
+    fn claim_after_search_cas(delayed: bool, dropping: bool) {
+        let backlog = STEALABLE;
+        // The backlog and the task the push brings.
+        let tasks = backlog + 1;
+
+        let mut builder = loom::model::Builder::new();
+        builder.preemption_bound = Some(2);
+        builder.check(move || {
+            let (pool, parkers) = pool(4);
+            let [p0, p1, _p2, p3] = parker_array(parkers);
+            let set = Arc::new(Tasks::new(4));
+            let completed = Arc::new(AtomicUsize::new(0));
+            let ran: Ran = Arc::new((Mutex::new(false), Condvar::new()));
+            let gate: Gate = Arc::new((Mutex::new(0), Condvar::new()));
+
+            // Worker three parks before any backlog exists.
+            let peer = thread::spawn({
+                let pool = pool.clone();
+                let set = set.clone();
+                let completed = completed.clone();
+                let gate = gate.clone();
+                move || {
+                    let mut ready = pool.queue(3).owner();
+                    {
+                        let mut searcher = Searcher::new(&pool, 3);
+                        let seen = p3.observe();
+                        assert_eq!(searcher.prepare_park(&ready), Park::Wait);
+                        reach(&gate, 1);
+                        p3.park(seen, None);
+                        searcher.finish_park();
+                        searcher.leave_search();
+                    }
+                    work(&pool, &set, &mut ready, &p3, 3, &completed, tasks, false);
+                }
+            });
+            await_stage(&gate, 1);
+
+            // Worker zero cannot drain this backlog until the blocking
+            // poll below returns. Worker two is unavailable, with no
+            // publication or count.
+            let mut r0 = pool.queue(0).owner();
+            for _ in 0..backlog {
+                let (task, runnable) =
+                    Task::new(raising(&ran), &set, std::sync::Arc::downgrade(&pool));
+                assert!(set.insert(task).is_ok());
+                queue(&mut r0, runnable);
+            }
+
+            // The pushed task blocks in its poll until a stolen task
+            // runs. With `delayed`, the push claims worker one and
+            // holds its notification until the worker ran on.
+            let wait = ran;
+            let (task, runnable) = Task::new(
+                poll_fn(move |_| {
+                    wait_ran(&wait);
+                    Poll::Ready(())
+                }),
+                &set,
+                std::sync::Arc::downgrade(&pool),
+            );
+            assert!(set.insert(task).is_ok());
+            let pushing = thread::spawn({
+                let pool = pool.clone();
+                let gate = gate.clone();
+                move || {
+                    await_stage(&gate, 2);
+                    if delayed {
+                        on_wake_point(WakePoint::AfterClaim, {
+                            let gate = gate.clone();
+                            move || {
+                                reach(&gate, 3);
+                                await_stage(&gate, 4);
+                            }
+                        });
+                    }
+                    assert!(pool.push(runnable).is_ok());
+                    if !delayed {
+                        reach(&gate, 3);
+                    }
+                }
+            });
+
+            // Once worker one takes its count, the push claims it, and
+            // a kick finds a count held and leaves worker three parked.
+            on_wake_point(WakePoint::BeforeParkSearch, {
+                let pool = pool.clone();
+                let gate = gate.clone();
+                move || {
+                    reach(&gate, 2);
+                    await_stage(&gate, 3);
+                    assert_eq!(pool.idle().search_count(), 2);
+                    pool.kick();
+                    assert!(pool.idle().is_idle(3));
+                }
+            });
+
+            // The claim ends worker one's last look before a steal,
+            // leaving it one count.
+            let mut r1 = pool.queue(1).owner();
+            let mut searcher = Searcher::new(&pool, 1);
+            let seen = p1.observe();
+            assert!(searcher.publish_and_look(&mut r1));
+            assert!(r1.is_empty(), "the claimed lap must not steal");
+            assert!(!pool.idle().is_idle(1));
+            assert!(pool.idle().is_idle(3));
+            assert_eq!(pool.idle().search_count(), 1);
+            assert_eq!(p1.moved(seen), !delayed);
+
+            // Return the count before polling, as the drive loop does,
+            // or through the destructor an unwind runs.
+            if dropping {
+                drop(searcher);
+            } else {
+                searcher.leave_search();
+            }
+            reach(&gate, 4);
+            pushing.join().unwrap();
+
+            // The blocking poll returns only once worker three, woken by
+            // that return, ran a stolen task. Worker three can also take
+            // the pushed task first and block in its poll instead, until
+            // worker zero drains the backlog.
+            if let Some(blocking) = pool.take(&mut r1) {
+                assert!(r1.is_empty());
+                complete(&pool, &set, blocking, &completed, tasks);
+            }
+            work(&pool, &set, &mut r0, &p0, 0, &completed, tasks, false);
+            peer.join().unwrap();
+            assert_eq!(completed.load(Ordering::Acquire), tasks);
+            assert_eq!(pool.idle().search_count(), 0);
+            assert!((0..4).all(|index| !pool.idle().is_idle(index)));
+        });
+    }
+
+    /// Each notification timing and count return runs in its own model.
+    #[rstest]
+    #[case::prompt_return(false, false)]
+    #[case::prompt_drop(false, true)]
+    #[case::delayed_return(true, false)]
+    #[case::delayed_drop(true, true)]
+    fn test_claim_after_search_cas_hands_on_before_a_blocking_poll(
+        #[case] delayed: bool,
+        #[case] dropping: bool,
+    ) {
+        claim_after_search_cas(delayed, dropping);
     }
 
     /// A parker that returns the last search count and runs because the
@@ -2421,7 +2763,8 @@ mod loom_tests {
         let mut builder = loom::model::Builder::new();
         builder.preemption_bound = Some(2);
         builder.check(|| {
-            let pool = pool(4);
+            let (pool, parkers) = pool(4);
+            let [_p0, p1, _p2, p3] = parker_array(parkers);
             let set = Arc::new(Tasks::new(4));
             let completed = Arc::new(AtomicUsize::new(0));
             let ran: Ran = Arc::new((Mutex::new(false), Condvar::new()));
@@ -2438,16 +2781,17 @@ mod loom_tests {
                     let mut ready = pool.queue(1).owner();
                     {
                         let mut searcher = Searcher::new(&pool, 1);
+                        let seen = p1.observe();
                         assert_eq!(searcher.prepare_park(&ready), Park::Wait);
                         reach(&gate, 1);
 
-                        pool.mailbox(1).waker.park_idle(0, None);
+                        p1.park(seen, None);
                         await_stage(&gate, 2);
                         searcher.finish_park();
                         searcher.leave_search();
                     }
 
-                    work(&pool, &set, &mut ready, 1, &completed, TASKS, false);
+                    work(&pool, &set, &mut ready, &p1, 1, &completed, TASKS, false);
                 }
             });
 
@@ -2470,7 +2814,6 @@ mod loom_tests {
             // Worker zero resumes with the claim's count, takes one runnable,
             // and returns the count. Worker two still holds one, so it is not
             // the last.
-            pool.mailbox(0).waker.consume_signal();
             zero.finish_park();
             let first_zero = pool.take(&mut r0).unwrap();
             zero.leave_search();
@@ -2490,7 +2833,7 @@ mod loom_tests {
             wait_ran(&ran);
             complete(&pool, &set, first_zero, &completed, TASKS);
             complete(&pool, &set, first_two, &completed, TASKS);
-            work(&pool, &set, &mut r3, 3, &completed, TASKS, false);
+            work(&pool, &set, &mut r3, &p3, 3, &completed, TASKS, false);
             peer.join().unwrap();
 
             assert_eq!(completed.load(Ordering::Acquire), TASKS);
@@ -2505,7 +2848,7 @@ mod loom_tests {
     #[test]
     fn test_exit_racing_a_claim_restores_the_idle_state() {
         loom::model(|| {
-            let pool = pool(2);
+            let (pool, _parkers) = pool(2);
             let set = Tasks::new(2);
             let drops = Arc::new(AtomicUsize::new(0));
             let (task, runnable) =
@@ -2527,22 +2870,90 @@ mod loom_tests {
     }
 
     /// A searcher's released claim reaches the last count return's fence
-    /// through its release of the count. Peers must run three of four queued
-    /// tasks before their owner resumes. Schedules where worker one steals two
+    /// through its release of the count. Peers must run two of three queued
+    /// tasks before their owner resumes. Schedules where worker one steals one
     /// and returns a nonfinal count require worker two to find the remaining
     /// backlog, rather than park after observing a stale claim. A lost handoff
-    /// leaves the owner blocked and loom reports a deadlock.
+    /// leaves the owner blocked and loom reports a deadlock. Claims round down.
+    /// Pushes and scans retain their concurrent queue publication.
     #[test]
     fn test_search_return_publishes_the_steal_to_the_last_return() {
         /// Backlog requiring more progress than one half-backlog steal.
-        const TASKS: usize = 2 * STEALABLE;
+        const TASKS: usize = STEALABLE + 1;
         let mut builder = loom::model::Builder::new();
         builder.preemption_bound = Some(2);
         builder.check(|| {
-            let pool = pool(3);
+            let (pool, parkers) = pool(3);
+            let [_p0, _p1, p2] = parker_array(parkers);
+            let set = Arc::new(Tasks::new(3));
+            let stop = Arc::new(AtomicBool::new(false));
+            let ran: RanCount = Arc::new((Mutex::new(0), Condvar::new()));
+            let gate: Gate = Arc::new((Mutex::new(0), Condvar::new()));
+
+            // An empty search takes a count, held across the pushes so their
+            // kicks are left to it. This worker then scans once more, runs
+            // whatever it stole, and leaves.
+            let thief = thread::spawn({
+                let pool = pool.clone();
+                let set = set.clone();
+                let gate = gate.clone();
+                move || {
+                    let mut ready = pool.queue(1).owner();
+                    let mut searcher = Searcher::new(&pool, 1);
+                    assert!(!searcher.search(&mut ready));
+                    reach(&gate, 1);
+                    await_stage(&gate, 2);
+                    let _ = searcher.search(&mut ready);
+                    searcher.leave_search();
+                    drain(&set, &mut ready);
+                }
+            });
+            let parked = thread::spawn({
+                let pool = pool.clone();
+                let set = set.clone();
+                let stop = stop.clone();
+                move || {
+                    let mut ready = pool.queue(2).owner();
+                    work_until(&pool, &set, &mut ready, &p2, 2, &stop);
+                }
+            });
+
+            // Worker zero queues the tasks while worker one holds its count,
+            // then blocks as in a long poll until two have run.
+            await_stage(&gate, 1);
+            let mut ready = pool.queue(0).owner();
+            let handles = enqueue_counting(&pool, &set, &mut ready, &ran, TASKS);
+            reach(&gate, 2);
+            wait_ran_count(&ran, TASKS - 1);
+
+            // It then ends its peer and runs what is left.
+            thief.join().unwrap();
+            stop_peer(&pool, 2, &stop);
+            parked.join().unwrap();
+            drain(&set, &mut ready);
+            for task in handles {
+                assert_eq!(refs(&task.state), 1);
+            }
+        });
+    }
+
+    /// The publication model through quiescence, at one preemption, with a
+    /// backlog of four, of which one steal can take two. Worker zero resumes
+    /// its own worker loop once three tasks have run, and the workers run on
+    /// until all four complete, when the last completion wakes every worker.
+    /// The model above explores the publication itself at two preemptions.
+    #[test]
+    fn test_search_return_publishes_the_steal_to_the_last_return_through_quiescence() {
+        /// Backlog whose half is a steal of two.
+        const TASKS: usize = 2 * STEALABLE;
+        let mut builder = loom::model::Builder::new();
+        builder.preemption_bound = Some(1);
+        builder.check(|| {
+            let (pool, parkers) = pool(3);
+            let [p0, _p1, p2] = parker_array(parkers);
             let set = Arc::new(Tasks::new(3));
             let completed = Arc::new(AtomicUsize::new(0));
-            let ran: Arc<(Mutex<usize>, Condvar)> = Arc::new((Mutex::new(0), Condvar::new()));
+            let ran: RanCount = Arc::new((Mutex::new(0), Condvar::new()));
             let gate: Gate = Arc::new((Mutex::new(0), Condvar::new()));
 
             // An empty search takes a count, held across the pushes so their
@@ -2572,34 +2983,21 @@ mod loom_tests {
                 let completed = completed.clone();
                 move || {
                     let mut ready = pool.queue(2).owner();
-                    work(&pool, &set, &mut ready, 2, &completed, TASKS, false);
+                    work(&pool, &set, &mut ready, &p2, 2, &completed, TASKS, false);
                 }
             });
 
             // Worker zero queues the tasks while worker one holds its count,
-            // then blocks as in a long poll until three have run, then runs
-            // what is left.
+            // then blocks as in a long poll until three have run.
             await_stage(&gate, 1);
             let mut ready = pool.queue(0).owner();
-            let handles: Vec<Task> = (0..TASKS)
-                .map(|_| {
-                    let ran = ran.clone();
-                    let future = poll_fn(move |_| {
-                        *ran.0.lock().unwrap() += 1;
-                        ran.1.notify_all();
-                        Poll::Ready(())
-                    });
-                    let (task, runnable) =
-                        Task::new(future, &set, std::sync::Arc::downgrade(&pool));
-                    assert!(set.insert(task.clone()).is_ok());
-                    pool.enqueue(&mut ready, runnable);
-                    task
-                })
-                .collect();
+            let handles = enqueue_counting(&pool, &set, &mut ready, &ran, TASKS);
             reach(&gate, 2);
             wait_ran_count(&ran, TASKS - 1);
+
+            // It then resumes its own worker loop until every task completes.
             thief.join().unwrap();
-            work(&pool, &set, &mut ready, 0, &completed, TASKS, false);
+            work(&pool, &set, &mut ready, &p0, 0, &completed, TASKS, false);
             parked.join().unwrap();
             for task in handles {
                 assert_eq!(refs(&task.state), 1);
@@ -2616,7 +3014,7 @@ mod loom_tests {
     fn test_foreign_wake_racing_the_poll_path_is_never_lost() {
         for by_value in [false, true] {
             loom::model(move || {
-                let pool = pool(1);
+                let (pool, _parkers) = pool(1);
                 let set = Tasks::new(1);
                 let signal = Arc::new(AtomicBool::new(false));
                 let drops = Arc::new(AtomicUsize::new(0));
@@ -2666,7 +3064,7 @@ mod loom_tests {
     #[test]
     fn test_teardown_racing_a_foreign_wake_disposes_of_the_task_once() {
         loom::model(|| {
-            let pool = pool(1);
+            let (pool, _parkers) = pool(1);
             let set = Tasks::new(1);
             let drops = Arc::new(AtomicUsize::new(0));
             let (task, runnable) =
@@ -2696,7 +3094,7 @@ mod loom_tests {
     #[test]
     fn test_registration_racing_teardown_disposes_of_the_task_once() {
         loom::model(|| {
-            let pool = pool(1);
+            let (pool, _parkers) = pool(1);
             let set = Arc::new(Tasks::new(1));
             let drops = Arc::new(AtomicUsize::new(0));
             let registering = thread::spawn({
@@ -2727,7 +3125,7 @@ mod loom_tests {
     #[test]
     fn test_teardown_racing_the_poll_path_drops_the_future_once() {
         loom::model(|| {
-            let pool = pool(1);
+            let (pool, _parkers) = pool(1);
             let set = Arc::new(Tasks::new(1));
             let drops = Arc::new(AtomicUsize::new(0));
             let guard = DropCount(drops.clone());
