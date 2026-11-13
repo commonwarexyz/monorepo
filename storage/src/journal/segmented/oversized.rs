@@ -2640,7 +2640,7 @@ mod tests {
             page_cache.clear();
             recordings.clear();
 
-            // The first call opens the index writer, which reads its tail page once. The lazy
+            // The first call opens the index writer, which probes its tail page once. The lazy
             // refill follows and must preserve the caller's policy.
             let (section, position, entry) = replay
                 .next()
@@ -2650,7 +2650,7 @@ mod tests {
             assert_eq!((section, position, entry.id), (1, 0, 1));
             let reads = recordings.snapshot().reads;
             let (opened, replayed) = reads.split_at(1);
-            assert_eq!(opened, [ReadOptions::default()]);
+            assert_eq!(opened, [ReadOptions::DONT_CACHE]);
             assert!(
                 !replayed.is_empty(),
                 "the replay must read the evicted page"
