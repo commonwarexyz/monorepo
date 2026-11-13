@@ -391,8 +391,10 @@ stability_scope!(BETA {
         /// A spawn from a placed context runs its factory on the caller, as usual, and its
         /// future on the thread. Tasks on a thread are cooperative. Every poll, factory and
         /// destructor must return promptly (see [`Spawner::thread`]). A spawn toward a thread
-        /// that is closed or belongs to another runner resolves [`Error::Closed`] without running
-        /// its factory, and aborts the consumed context's node.
+        /// that already closed, or belongs to another runner, resolves [`Error::Closed`] without
+        /// running its factory, and aborts the consumed context's node. If the thread closes after
+        /// the factory ran, the task's future is dropped unpolled and the handle resolves
+        /// [`Error::Closed`] as well.
         ///
         /// Placement creates no supervision edge. Aborting a context placed on a thread does not
         /// close the thread, and closing the thread aborts only the tasks running on it.
@@ -434,7 +436,8 @@ stability_scope!(BETA {
         ///   thread-bound I/O inside [`ThreadBuilder::spawn`] or [`Spawner::spawn_on`].
         /// - tokio: a thread runs a `LocalSet` inside the owning runtime, which gives each task
         ///   tokio's cooperative budget. One turn admits at most 64 queued spawns.
-        ///   `tokio::task::block_in_place` panics there.
+        ///   `tokio::task::block_in_place` panics there, and holding another runtime's enter
+        ///   guard across an await is unsupported.
         /// - deterministic: threads are virtual. Their tasks are ordinary seeded tasks with an
         ///   identity, and pins are validated and recorded but never applied. All virtual threads
         ///   share one OS thread, so thread-local storage can carry `!Send` values between them,
@@ -510,7 +513,7 @@ stability_scope!(BETA {
         ///
         /// # Spawn Configuration
         ///
-        /// The blocking flag set by [`Spawner::shared`] applies to the next spawn only:
+        /// The blocking flag set by [`Spawner::shared`] applies to the next spawn only, so
         /// [`Supervisor::child`] and the context handed to the spawned task start without it.
         /// The placement set by [`Spawner::on`] or [`Spawner::shared`] is inherited by both.
         fn spawn<F, Fut, T>(self, f: F) -> Handle<T>

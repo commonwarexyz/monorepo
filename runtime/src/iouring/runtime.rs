@@ -861,9 +861,11 @@ impl crate::Spawner for Context {
             spawn_metrics!(Label::task(self.name.clone(), Execution::Thread), @make self);
 
         // The task is supervised by this context, and its context is placed on the thread
+        // A factory dropped unrun is disposed of like a task's future, which io_uring contains
         let parent = self.tree.clone();
         let (child, aborted) = Tree::child(&parent);
         if aborted {
+            Panics::contain(move || drop(f));
             return Handle::closed(metric);
         }
         self.tree = child;
@@ -879,8 +881,10 @@ impl crate::Spawner for Context {
             Box::new(SpawnJob::new(f, self, Ticket::new(prepared))),
             abort,
         );
-        if accepts && let Err(job) = thread.inner().submit(job) {
-            drop(job);
+        if !accepts {
+            Panics::contain(move || drop(job));
+        } else if let Err(job) = thread.inner().submit(job) {
+            Panics::contain(move || drop(job));
         }
         handle
     }
@@ -896,6 +900,10 @@ impl crate::Spawner for Context {
         let blocking = mem::take(&mut self.blocking);
         let (child, aborted) = Tree::child(&parent);
         if aborted {
+            // A factory toward a thread is dropped unrun like a task's future
+            if self.placement.is_some() {
+                Panics::contain(move || drop(f));
+            }
             return Handle::closed(metric);
         }
 
@@ -908,6 +916,7 @@ impl crate::Spawner for Context {
             if !shared.targets(&thread) || !thread.inner().is_open() {
                 // Close the consumed context's node, so children wired from it are aborted too
                 parent.abort();
+                Panics::contain(move || drop(f));
                 return Handle::closed(metric);
             }
             let guard = FactoryGuard::new(&parent, metric);
@@ -919,7 +928,7 @@ impl crate::Spawner for Context {
             // A thread that closed after the check rejects the wrapper, whose drop aborts the
             // node and closes the handle.
             if let Err(job) = thread.inner().submit(Job::placed(Box::pin(wrapper), abort)) {
-                drop(job);
+                Panics::contain(move || drop(job));
             }
             return handle;
         }
@@ -2573,8 +2582,8 @@ impl crate::Runner for Runner {
             #[cfg(test)]
             tests::before_abort();
 
-            // The root is gone and the pool is closed. Abort ordinary,
-            // dedicated, and blocking tasks, then clean up this worker, which
+            // The root is gone and the pool is closed. Abort ordinary and
+            // blocking tasks and close runtime threads, then clean up this worker, which
             // stops the other pool workers and waits for them to drain the
             // task set.
             worker.panics.run(|| tree.abort());

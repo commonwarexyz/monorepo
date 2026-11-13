@@ -695,6 +695,8 @@ impl Executor {
     /// Close `thread`. Abort its residents, drop their futures and unrun factories in task-id
     /// order, then its parked factories and result slots, each in its own panic boundary. Then
     /// mark it closed and release its node and entry.
+    ///
+    /// Every resident future is dropped before any unrun factory, each group in task-id order.
     fn close_thread(&self, table: &RefCell<LocalTable>, id: u64) {
         let Some(thread) = self
             .threads
@@ -721,7 +723,8 @@ impl Executor {
         for resident in residents.values() {
             resident.abort.abort();
         }
-        for (task, resident) in residents {
+        let mut factories = Vec::new();
+        for &task in residents.keys() {
             if let Some(task) = self.tasks.remove(task) {
                 match &task.mode {
                     Mode::Root => {}
@@ -730,15 +733,17 @@ impl Executor {
                         self.dispose(future);
                     }
                     Mode::Spawn { factory, .. } => {
-                        let factory = factory.lock().take();
-                        self.dispose(factory);
+                        factories.extend(factory.lock().take());
                     }
                 }
             }
             let future = table.borrow_mut().futures.remove(&task);
             self.dispose(future);
-            drop(resident);
         }
+        for factory in factories {
+            self.dispose(factory);
+        }
+        drop(residents);
 
         // Parked factories and result slots are dropped on the thread's owner.
         let owner = table.borrow_mut().owners.remove(&id);
@@ -1706,6 +1711,10 @@ impl crate::Spawner for Context {
         self.blocking = false;
         let (child, aborted) = Tree::child(&parent);
         if aborted {
+            // A factory toward a thread is dropped unrun like a resident's future
+            if self.placement.is_some() {
+                self.executor().dispose(f);
+            }
             return Handle::closed(metric);
         }
         self.tree = child;
@@ -1716,6 +1725,7 @@ impl crate::Spawner for Context {
             if !executor.admits(&thread) {
                 // Close the consumed context's node, so children wired from it are aborted too
                 parent.abort();
+                executor.dispose(f);
                 return Handle::closed(metric);
             }
             let guard = FactoryGuard::new(&parent, metric);
@@ -1733,7 +1743,7 @@ impl crate::Spawner for Context {
                 Mode::Work(Mutex::new(Some(future))),
                 abort,
             ) {
-                drop(mode);
+                executor.dispose(mode);
             }
             return handle;
         }
@@ -1763,9 +1773,11 @@ impl crate::Spawner for Context {
             spawn_metrics!(Label::task(self.name.clone(), Execution::Thread), @make self);
 
         // The task is supervised by this context, and its context is placed on the thread
+        // A factory dropped unrun is disposed of like a resident's future
         let parent = Arc::clone(&self.tree);
         let (child, aborted) = Tree::child(&parent);
         if aborted {
+            self.executor().dispose(f);
             return Handle::closed(metric);
         }
         self.tree = child;
@@ -1783,7 +1795,7 @@ impl crate::Spawner for Context {
             abort: abort.clone(),
         };
         if let Err(mode) = executor.register_resident(thread, label, mode, abort) {
-            drop(mode);
+            executor.dispose(mode);
         }
         handle
     }
@@ -4302,9 +4314,8 @@ mod tests {
         }
     }
 
-    /// A pending thread close is ready work: time does not skip to a sleeper and the runtime
-    /// does not report a stall while a close is queued (8.2 closing list counts as ready
-    /// work).
+    /// A pending thread close is ready work, so time does not skip to a sleeper and the runtime
+    /// does not report a stall while a close is queued.
     #[test]
     fn test_thread_closing_list_counts_as_ready() {
         let (context, executor, _panicked, _tree) = Context::new(Config::default());

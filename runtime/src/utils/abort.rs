@@ -40,8 +40,10 @@
 //! This relies on the runtime polling the task's future only with wakers of that task, so the
 //! recorded addresses keep naming the task for as long as the registration stands. The
 //! deterministic runtime builds a new waker for every poll, so its tasks keep registering on
-//! every pending poll. Other wrappers ([Abortable::new], used by completion handles) may be
-//! polled by any task, and a waker's addresses name its task only while that waker lives:
+//! every pending poll. A resident of a runtime thread is polled only with its own waker, which
+//! is stable for its whole life on io_uring and Tokio. Other wrappers ([Abortable::new], used by
+//! completion handles) may be polled by any task, and a waker's addresses name its task only
+//! while that waker lives:
 //!
 //! ```text
 //!                                                  slot holds        an abort wakes
@@ -239,9 +241,11 @@ impl<F> Abortable<F, true> {
     /// Wraps the future of a runtime task so the handle paired with `registration` can abort
     /// it, without registering a waker that is already registered.
     ///
-    /// Only the task future that `Handle::init` builds may own the result. The runtime's
-    /// executors poll that future only with wakers of its task, and it passes their context
-    /// through, so whichever waker is registered wakes the task that a later poll's waker wakes.
+    /// Only the task future that `Handle::wrap` builds (directly, or through `Handle::init`)
+    /// may own the result. The runtime's executors poll that future only with wakers of its
+    /// task, and it passes their context through, so whichever waker is registered wakes the
+    /// task that a later poll's waker wakes. Runtime threads keep this, since each resident is
+    /// polled only with its own stable waker.
     pub(super) fn task(future: F, registration: AbortRegistration) -> Self {
         Self {
             future,

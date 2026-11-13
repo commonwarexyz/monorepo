@@ -6,36 +6,29 @@
 //! task runs, and the result slots of [LocalHandle]s.
 //!
 //! [Local::spawn_local] is built on [Spawner::spawn_on]. It parks the `!Send` factory with the
-//! owner under a fresh id and sends a `Send` shim carrying only that id to the thread. The shim
-//! takes the factory back when it runs. A shim dropped unrun pushes its id onto the owner's
-//! orphan list, and the thread drops the orphaned factory, so parked factories are always
-//! dropped on their thread.
+//! owner under a fresh id and sends a `Send` shim carrying only that id and the identity of
+//! its thread. The shim takes the factory back when it runs on that thread. A shim dropped
+//! unrun pushes its id onto the owner's orphan list, and the thread drops the orphaned factory,
+//! so parked factories are always dropped on their thread.
 
-use super::{Thread, admission::Resident};
+use super::Thread;
 use crate::{Error, Handle, Spawner, utils::Panicker};
 use commonware_utils::sync::Mutex;
 use std::{
     any::Any,
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::BTreeMap,
     fmt::Display,
     future::{Future, ready},
     marker::PhantomData,
     mem,
     ops::{Deref, DerefMut},
-    panic::{AssertUnwindSafe, catch_unwind},
+    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     pin::Pin,
     rc::{Rc, Weak},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::Arc,
     task::{Context, Poll, ready},
 };
-
-/// Source of parked factory ids, shared by every thread so a shim delivered to the wrong thread
-/// finds nothing there.
-static PARKED_IDS: AtomicU64 = AtomicU64::new(0);
 
 /// A context proven to be on its runtime thread.
 ///
@@ -210,7 +203,7 @@ impl<C: Spawner> Local<C> {
     {
         let Self { context, owner } = self;
         let home = owner.home().clone();
-        let id = PARKED_IDS.fetch_add(1, Ordering::Relaxed);
+        let id = owner.next_id();
         let slot = Rc::new(Slot(RefCell::new(None)));
         let parked = Parked {
             factory: f,
@@ -221,6 +214,8 @@ impl<C: Spawner> Local<C> {
             Ok(orphans) => {
                 let shim = Shim::<F, T> {
                     id,
+                    runner: home.inner().runner(),
+                    thread: home.inner().id(),
                     orphans,
                     armed: true,
                     parked: PhantomData,
@@ -336,6 +331,8 @@ pub(crate) struct Owner {
     panicker: Panicker,
     /// Whether disposal panics are reported through `panicker` (otherwise contained).
     report_disposals: bool,
+    /// Id of the next parked factory.
+    next: Cell<u64>,
     /// State the thread's close takes.
     state: RefCell<Option<OwnerState>>,
 }
@@ -358,6 +355,7 @@ impl Owner {
             home,
             panicker,
             report_disposals,
+            next: Cell::new(0),
             state: RefCell::new(Some(OwnerState {
                 parked: BTreeMap::new(),
                 orphans: Arc::new(Mutex::new(Vec::new())),
@@ -374,6 +372,13 @@ impl Owner {
     /// Reports panics of the thread's tasks.
     pub(crate) const fn panicker(&self) -> &Panicker {
         &self.panicker
+    }
+
+    /// A parked factory id this owner has not used.
+    fn next_id(&self) -> u64 {
+        let id = self.next.get();
+        self.next.set(id + 1);
+        id
     }
 
     /// Drop `value` in its own panic boundary, reporting a panic through the panicker or
@@ -421,7 +426,7 @@ impl Owner {
     }
 
     /// Drop the factories whose shims were dropped unrun, each in its own panic boundary. When
-    /// nothing was orphaned this is one length check.
+    /// nothing was orphaned this is one uncontended lock and a length check.
     pub(crate) fn reap(&self) {
         let orphans = {
             let state = self.state.borrow();
@@ -485,10 +490,14 @@ struct Parked<F, T> {
 }
 
 /// The `Send` factory [Local::spawn_local] sends to the thread, carrying only the id of the
-/// parked factory.
+/// parked factory and the identity of the thread it is parked on.
 struct Shim<F, T> {
-    /// Id of the parked factory.
+    /// Id of the parked factory in its owner.
     id: u64,
+    /// Runner instance of the thread the factory is parked on.
+    runner: u64,
+    /// Id of that thread in its runner.
+    thread: u64,
     /// Where the shim records its id if it is dropped unrun.
     orphans: Arc<Mutex<Vec<u64>>>,
     /// Whether the shim was dropped unrun.
@@ -499,27 +508,56 @@ struct Shim<F, T> {
 
 impl<F, T> Shim<F, T> {
     /// Take the parked factory back through `local`'s owner, run it, and return the task's
-    /// future. A missing factory gives a future that completes at once with an empty slot.
-    fn run<C, Fut>(mut self, local: Local<C>) -> Resident
+    /// future. A factory that is missing, for example because a wrapper delivered the shim to
+    /// another thread, gives a future that completes at once with an empty slot.
+    fn run<C, Fut>(mut self, local: Local<C>) -> ShimFuture<Fut>
     where
         F: FnOnce(Local<C>) -> Fut + 'static,
         Fut: Future<Output = T> + 'static,
         T: 'static,
     {
         self.armed = false;
+        let home = local.owner.home().inner();
+        if home.runner() != self.runner || home.id() != self.thread {
+            return ShimFuture::Missing;
+        }
         let Some(parked) = local.owner.take_parked(self.id) else {
-            return Box::pin(ready(()));
+            return ShimFuture::Missing;
         };
         match parked.downcast::<Parked<F, T>>() {
             Ok(parked) => {
                 let Parked { factory, slot } = *parked;
-                let future = Box::pin(factory(local));
-                Box::pin(LocalJob { future, slot })
+                let owner = local.owner.clone();
+                let future = Some(Box::pin(factory(local)));
+                ShimFuture::Job(LocalJob {
+                    future,
+                    slot,
+                    owner,
+                })
             }
             Err(other) => {
                 local.owner.dispose(other);
-                Box::pin(ready(()))
+                ShimFuture::Missing
             }
+        }
+    }
+}
+
+/// The future a [Shim] builds on its thread.
+enum ShimFuture<Fut: Future> {
+    /// The parked factory's task.
+    Job(LocalJob<Fut>),
+    /// The parked factory was not there, so the task completes at once with an empty slot.
+    Missing,
+}
+
+impl<Fut: Future> Future for ShimFuture<Fut> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        match self.get_mut() {
+            Self::Job(job) => Pin::new(job).poll(cx),
+            Self::Missing => Poll::Ready(()),
         }
     }
 }
@@ -536,12 +574,16 @@ impl<F, T> Drop for Shim<F, T> {
 /// task's slot.
 ///
 /// It keeps the completed future in its field, so the task wrapper drops it after the poll that
-/// completed it, and a destructor panic there is a disposal panic.
+/// completed it, and a destructor panic there is a disposal panic. Once the handle is dropped,
+/// the job holds the slot's last reference and so owns the output, which it disposes of in a
+/// boundary of its own if the future's destructor panics.
 struct LocalJob<Fut: Future> {
-    /// The user's future.
-    future: Pin<Box<Fut>>,
+    /// The user's future, taken only by the job's drop.
+    future: Option<Pin<Box<Fut>>>,
     /// Receives the output.
     slot: Rc<Slot<Fut::Output>>,
+    /// Disposes of an output the job owns.
+    owner: Rc<Owner>,
 }
 
 impl<Fut: Future> Future for LocalJob<Fut> {
@@ -549,9 +591,26 @@ impl<Fut: Future> Future for LocalJob<Fut> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let this = self.get_mut();
-        let output = ready!(this.future.as_mut().poll(cx));
+        let future = this.future.as_mut().expect("a local job keeps its future");
+        let output = ready!(future.as_mut().poll(cx));
         *this.slot.0.borrow_mut() = Some(output);
         Poll::Ready(())
+    }
+}
+
+impl<Fut: Future> Drop for LocalJob<Fut> {
+    fn drop(&mut self) {
+        let future = self.future.take();
+        if let Err(panic) = catch_unwind(AssertUnwindSafe(move || drop(future))) {
+            // An output the job owns would otherwise drop during this unwind, where a second
+            // panic aborts the process. Dispose of it first, then continue the unwind as a
+            // disposal panic of the task.
+            if Rc::strong_count(&self.slot) == 1 {
+                let output = self.slot.0.borrow_mut().take();
+                self.owner.dispose(output);
+            }
+            resume_unwind(panic);
+        }
     }
 }
 

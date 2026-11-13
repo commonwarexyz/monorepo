@@ -5,6 +5,7 @@ use crate::{Handle, Spawner, utils::supervision::Tree};
 use std::{
     fmt,
     future::Future,
+    hash::{Hash, Hasher},
     ops::{Range, RangeInclusive},
     pin::Pin,
     sync::{Arc, Weak},
@@ -268,6 +269,13 @@ impl PartialEq for Thread {
 }
 
 impl Eq for Thread {}
+
+impl Hash for Thread {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.inner.runner().hash(state);
+        self.inner.id().hash(state);
+    }
+}
 
 /// Creates runtime threads for a [ThreadBuilder].
 pub(crate) trait ThreadRuntime: Send + Sync {

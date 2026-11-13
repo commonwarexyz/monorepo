@@ -181,7 +181,7 @@ where
         let (thread, probe) = rx.await.unwrap();
         owner.abort();
         assert!(matches!(probe.await, Err(Error::Closed)));
-        let late = context.child("late").spawn_on(&thread, |_| async {});
+        let late = context.child("late").spawn_on(&thread, |_| pending::<()>());
         assert!(matches!(late.await, Err(Error::Closed)));
 
         // Pins validate.

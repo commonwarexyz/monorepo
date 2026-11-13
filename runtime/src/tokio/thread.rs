@@ -86,7 +86,6 @@ impl ThreadRuntime for Executor {
             .get_or_create(&ThreadLabel::new(name.to_string()))
             .clone();
         let id = self.threads.fetch_add(1, Ordering::Relaxed);
-        let pinned = cpus.is_some();
         let inner = ThreadInner::new(
             self.runner,
             id,
@@ -103,9 +102,6 @@ impl ThreadRuntime for Executor {
             .is_err()
         {
             return Err(ThreadError::Closed);
-        }
-        if pinned {
-            self.affinity.arm();
         }
 
         let body = Body {
@@ -178,6 +174,9 @@ impl Body {
             panicker.notify(failure);
         }
         inner.finish_close();
+        drop(panicker);
+        drop(affinity);
+        drop(runtime);
         drop(inner);
         drop(node);
         drop(tracker);

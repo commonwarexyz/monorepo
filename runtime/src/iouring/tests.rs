@@ -323,8 +323,8 @@ fn run_startup_failure_case(case: &str) {
 
         // A runtime thread or blocking worker fails on its own thread while
         // the root runs, which closes the task's handle.
-        "dedicated" | "dedicated_caught" | "blocking" => {
-            let catch = case == "dedicated_caught";
+        "thread" | "thread_caught" | "blocking" => {
+            let catch = case == "thread_caught";
             Runner::new(config().with_catch_panics(catch)).start(|context| async move {
                 let _fault = inject_worker_fault(&context.shared.workers, WorkerFault::Startup);
                 let worker = context.child("failed");
@@ -347,9 +347,9 @@ fn run_startup_failure_case(case: &str) {
     // Only caught task panics keep the runner running. Otherwise its failure
     // carries the startup error.
     match result {
-        Ok(()) => assert_eq!(case, "dedicated_caught"),
+        Ok(()) => assert_eq!(case, "thread_caught"),
         Err(panic) => {
-            assert_ne!(case, "dedicated_caught");
+            assert_ne!(case, "thread_caught");
             assert!(
                 extract_panic_message(&*panic)
                     .contains("injected native worker initialization failure")
@@ -1627,7 +1627,7 @@ fn test_closed_registry_skips_worker_factories() {
 }
 
 #[test]
-fn test_closed_runner_rejects_dedicated_payload_without_invoking_closure() {
+fn test_closed_runner_rejects_blocking_payload_without_invoking_closure() {
     let escaped = Runner::new(config()).start(|context| async { context });
     let drops = Arc::new(AtomicUsize::new(0));
     let payload = DropCount(drops.clone());
@@ -2329,8 +2329,8 @@ fn test_startup_failure_is_reported_once() {
     for case in [
         "worker_zero",
         "pool_worker",
-        "dedicated",
-        "dedicated_caught",
+        "thread",
+        "thread_caught",
         "blocking",
     ] {
         let output = Command::new(env::current_exe().unwrap())
@@ -5402,7 +5402,10 @@ fn test_direct_reads_outlive_their_origin_worker() {
 /// the wake path, close and startup failures, failure observation, disposal,
 /// fairness and accounting.
 mod threads {
-    use super::{super::thread::IouringThread, *};
+    use super::{
+        super::thread::{BATCH, IouringThread},
+        *,
+    };
     use crate::{ThreadError, utils::thread::tests::fail_spawns};
     use std::panic::resume_unwind;
 
@@ -5622,8 +5625,8 @@ mod threads {
                         assert_eq!(polls.get(), 1);
 
                         // The host is in this poll, so it takes no turn during the
-                        // storm. This turn cleared notified, so the first wake
-                        // wakes the root and the rest find it set.
+                        // storm. The first wake since the turn began wakes the root
+                        // at most once, and the rest find it notified.
                         let waker = slot.borrow().clone().unwrap();
                         let wakes = backend.root_wakes();
                         thread::spawn(move || {
@@ -5634,9 +5637,10 @@ mod threads {
                         .join()
                         .unwrap();
                         assert_eq!(backend.ready_len(), 1);
-                        assert_eq!(backend.root_wakes() - wakes, 1);
+                        assert!(backend.root_wakes() - wakes <= 1);
 
-                        // The next turn polls the target once, before this root.
+                        // The target is polled once, before this root, which queued
+                        // itself behind it.
                         reschedule().await;
                         assert_eq!(polls.get(), 2);
                         assert_eq!(backend.ready_len(), 0);
@@ -5690,8 +5694,16 @@ mod threads {
                             reuser
                         }
                     });
+                    // A self-waking root can take a whole turn's budget, so
+                    // reschedule across several turns.
                     let reuser = first.await.unwrap();
-                    for _ in 0..4 {
+                    for _ in 0..4 * BATCH {
+                        if polls.get() > 0 {
+                            break;
+                        }
+                        reschedule().await;
+                    }
+                    for _ in 0..4 * BATCH {
                         reschedule().await;
                     }
                     assert_eq!(polls.get(), 1);
@@ -5699,7 +5711,7 @@ mod threads {
                     // The retired resident's waker queues nothing.
                     stale.borrow().as_ref().unwrap().wake_by_ref();
                     assert_eq!(backend.ready_len(), 0);
-                    for _ in 0..4 {
+                    for _ in 0..4 * BATCH {
                         reschedule().await;
                     }
                     assert_eq!(polls.get(), 1);
@@ -5714,7 +5726,7 @@ mod threads {
     /// A wake during a resident's poll, from the resident itself or from
     /// another thread, schedules its next poll.
     #[test]
-    fn test_thread_wake_during_a_poll_schedules_the_next_turn() {
+    fn test_thread_wake_during_a_poll_polls_again() {
         within_timeout(|| {
             Runner::new(config()).start(|context| async move {
                 let thread = context.child("waking").thread().build().expect("thread");
@@ -6124,7 +6136,12 @@ mod threads {
                         });
                         aborted.abort();
                         assert_eq!(local.owner().parked(), 1);
-                        reschedule().await;
+                        for _ in 0..4 * BATCH {
+                            if local.owner().parked() == 0 {
+                                break;
+                            }
+                            reschedule().await;
+                        }
                         assert_eq!(local.owner().parked(), 0);
                         assert!(matches!(aborted.await, Err(Error::Closed)));
 

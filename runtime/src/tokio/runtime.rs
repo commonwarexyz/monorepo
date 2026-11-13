@@ -338,6 +338,13 @@ pub struct Executor {
 }
 
 impl Executor {
+    /// Drop `value` in its own panic boundary, reporting a panic like a task's disposal panic.
+    fn dispose<V>(&self, value: V) {
+        if let Err(panic) = catch_unwind(AssertUnwindSafe(move || drop(value))) {
+            self.panicker.notify(panic);
+        }
+    }
+
     /// Whether `thread` is a runtime thread of this runner.
     fn targets(&self, thread: &Thread) -> bool {
         let inner = thread.inner();
@@ -623,9 +630,11 @@ impl crate::Spawner for Context {
             spawn_metrics!(Label::task(self.name.clone(), Execution::Thread), @make self);
 
         // The task is supervised by this context, and its context is placed on the thread
+        // A factory dropped unrun is disposed of like a task's future
         let parent = Arc::clone(&self.tree);
         let (child, aborted) = Tree::child(&parent);
         if aborted {
+            self.executor.dispose(f);
             return Handle::closed(metric);
         }
         self.tree = child;
@@ -634,15 +643,18 @@ impl crate::Spawner for Context {
 
         // The factory runs on the thread. A rejected job drops its factory, then its ticket,
         // outside the admission lock, which aborts the node and closes the handle.
-        let accepts = self.executor.targets(thread);
+        let executor = self.executor.clone();
+        let accepts = executor.targets(thread);
         let (prepared, handle) = Handle::prepare(metric, parent);
         let abort = prepared.abort_handle();
         let job = Job::factory(
             Box::new(SpawnJob::new(f, self, Ticket::new(prepared))),
             abort,
         );
-        if accepts && let Err(job) = thread.inner().submit(job) {
-            drop(job);
+        if !accepts {
+            executor.dispose(job);
+        } else if let Err(job) = thread.inner().submit(job) {
+            executor.dispose(job);
         }
         handle
     }
@@ -661,6 +673,10 @@ impl crate::Spawner for Context {
         let blocking = std::mem::take(&mut self.blocking);
         let (child, aborted) = Tree::child(&parent);
         if aborted {
+            // A factory toward a thread is dropped unrun like a task's future
+            if self.placement.is_some() {
+                self.executor.dispose(f);
+            }
             return Handle::closed(metric);
         }
         self.tree = child;
@@ -672,6 +688,7 @@ impl crate::Spawner for Context {
             if !executor.targets(&thread) || !thread.inner().is_open() {
                 // Close the consumed context's node, so children wired from it are aborted too
                 parent.abort();
+                executor.dispose(f);
                 return Handle::closed(metric);
             }
             let guard = FactoryGuard::new(&parent, metric);
@@ -683,7 +700,7 @@ impl crate::Spawner for Context {
             // A thread that closed after the check rejects the wrapper, whose drop aborts the
             // node and closes the handle.
             if let Err(job) = thread.inner().submit(Job::placed(Box::pin(wrapper), abort)) {
-                drop(job);
+                executor.dispose(job);
             }
             return handle;
         }

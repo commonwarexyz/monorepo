@@ -1437,7 +1437,6 @@ fn deterministic_admission_race(stale: Thread) {
         assert_drained(&context, &thread).await;
         settle(&context, || count_running_tasks(&context, "sub") == 0).await;
 
-        eprintln!("PHASE contended");
         // The loop first schedules a resident of a thread while a submission off the loop
         // holds that thread's admission critical section.
         let thread = context.child("contended").thread().build().expect("thread");
@@ -1460,7 +1459,6 @@ fn deterministic_admission_race(stale: Thread) {
         assert!(matches!(first.await, Ok(2)));
         assert!(matches!(second.await, Ok(3)));
 
-        eprintln!("PHASE creation");
         // A thread creation off the loop races an abort of the node it occupies.
         for _ in 0..32 {
             let parent = context.child("creator");

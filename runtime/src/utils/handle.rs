@@ -435,7 +435,8 @@ where
         }
     }
 
-    /// Returns a handle that resolves to [`Error::Closed`] without spawning work.
+    /// Returns a task handle that resolves to [`Error::Closed`] without spawning work, also after
+    /// it is aborted, like the handle of a spawned task that was closed.
     pub(crate) fn closed(metric: MetricHandle) -> Self {
         // Mark the task as finished immediately so gauges remain accurate.
         metric.finish();
@@ -443,8 +444,14 @@ where
         // Create a receiver that will yield `Err(Error::Closed)` when awaited.
         let (sender, receiver) = oneshot::channel();
         drop(sender);
-
-        Self::from_receiver(receiver)
+        let (abort_handle, _) = AbortHandle::new_pair();
+        Self {
+            state: HandleState::Task {
+                receiver,
+                abort_handle,
+                metric,
+            },
+        }
     }
 
     /// Abort the spawned task or stop waiting for a completion.

@@ -6,9 +6,11 @@
 //! on the thread's worker, so their I/O and sleeps register on its ring.
 //!
 //! Each turn of the root admits at most [BATCH] queued jobs, in order, then polls at most [BATCH]
-//! ready residents, and wakes itself if work remains. Each resident owns one waker for its whole
-//! life, carrying a `queued` flag, so a burst of wakes queues it once. Waking the root is
-//! coalesced with one `notified` flag, so a burst sends at most one root wake.
+//! ready residents, and wakes itself if work remains. A resident woken during the turn goes to
+//! the back of the ready list and is polled again in the same turn while the budget lasts, as a
+//! pool task woken during its poll is. Each resident owns one waker for its whole life, carrying
+//! a `queued` flag, so a burst of wakes queues it once. Waking the root is coalesced with one
+//! `notified` flag, so a burst sends at most one root wake.
 //!
 //! ```text
 //! resident wake                        host turn
@@ -16,7 +18,7 @@
 //! queued: false -> true?               store the root waker, notified := false
 //!   push id onto the ready list        closing? close and return
 //!   notified: false -> true?           admit <= 64 jobs (each marked queued, pushed)
-//!     wake the root                    take <= 64 ready ids, then for each:
+//!     wake the root                    until 64 polls, take ready ids, then for each:
 //!                                        queued := false, poll, reinsert or retire
 //!                                      work left? wake the root
 //! ```
@@ -59,7 +61,7 @@ cfg_if::cfg_if! {
 }
 
 /// Maximum jobs admitted, and maximum residents polled, per turn.
-const BATCH: usize = 64;
+pub(super) const BATCH: usize = 64;
 
 /// Backend state of an io_uring runtime thread.
 pub(super) struct IouringThread {
@@ -103,8 +105,8 @@ pub(super) struct WakeState {
 
 /// The ready list and whether the thread closed it.
 struct Ready {
-    /// Ids of residents to poll.
-    ids: Vec<Id>,
+    /// Ids of residents to poll, oldest first.
+    ids: VecDeque<Id>,
     /// Set once the thread closes. Later wakes do nothing.
     closed: bool,
 }
@@ -116,7 +118,7 @@ impl WakeState {
     pub(super) fn new() -> Self {
         Self {
             ready: Mutex::new(Ready {
-                ids: Vec::new(),
+                ids: VecDeque::new(),
                 closed: false,
             }),
             notified: AtomicBool::new(false),
@@ -152,14 +154,21 @@ impl WakeState {
 
     /// Queue `id` for a poll, then wake the root, unless the thread closed.
     pub(super) fn push(&self, id: Id) {
-        {
-            let mut ready = self.lock();
-            if ready.closed {
-                return;
-            }
-            ready.ids.push(id);
+        if self.queue(id) {
+            self.notify();
         }
-        self.notify();
+    }
+
+    /// Queue `id` for a poll without waking the root, unless the thread closed. Returns
+    /// whether it was queued. The host queues admitted residents this way, since it takes the
+    /// list later in the same turn.
+    fn queue(&self, id: Id) -> bool {
+        let mut ready = self.lock();
+        if ready.closed {
+            return false;
+        }
+        ready.ids.push_back(id);
+        true
     }
 
     /// Wake the root, unless a wake since the host's last turn already did.
@@ -251,7 +260,6 @@ impl ThreadRuntime for Shared {
         let id = self
             .threads
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let pinned = cpus.is_some();
         let wake = Arc::new(WakeState::new());
         let inner = ThreadInner::new(
             self.runner,
@@ -267,9 +275,6 @@ impl ThreadRuntime for Shared {
             .is_err()
         {
             return Err(ThreadError::Closed);
-        }
-        if pinned {
-            self.affinity.arm();
         }
 
         let stack_size = self.cfg.thread_stack_size;
@@ -366,13 +371,16 @@ fn run_thread(shared: &Arc<Shared>, inner: &Arc<ThreadInner>) -> Vec<Panic> {
         }
         Ok((mut worker, output)) => {
             // Drive and callback failures are retained in the worker, which reports them here.
+            // The root closes the ingress, unless it was never built, so close it again.
             worker.cleanup();
+            dispose_unstarted(inner);
             worker.result(output).err().into_iter().collect()
         }
     }
 }
 
-/// Close admission and drop every queued job of a thread whose root never ran, each contained.
+/// Close admission and drop every job left in the ingress, each contained. The root does this
+/// when it closes, so this covers a root that was never built or never ran.
 fn dispose_unstarted(inner: &ThreadInner) {
     if let Some(backend) = inner.backend::<IouringThread>() {
         backend.wake.close();
@@ -461,7 +469,7 @@ impl ThreadRoot {
                 _count: count,
             })
         });
-        self.wake.push(id);
+        self.wake.queue(id);
     }
 
     /// Poll the resident `id` once, unless it retired, then reinsert or retire it.
@@ -541,11 +549,20 @@ impl Future for ThreadRoot {
             this.admit(job);
         }
 
-        // Poll a bounded batch of ready residents, without holding any lock while they run.
+        // Poll ready residents, without holding any lock while they run, until the turn's budget
+        // is spent. Residents woken meanwhile join the back of the list.
         let mut ready = mem::take(&mut this.ready);
-        let more = this.wake.take(BATCH, &mut ready);
-        for id in ready.drain(..) {
-            this.poll_resident(id);
+        let mut budget = BATCH;
+        let mut more = false;
+        while budget > 0 {
+            more = this.wake.take(budget, &mut ready);
+            if ready.is_empty() {
+                break;
+            }
+            budget -= ready.len();
+            for id in ready.drain(..) {
+                this.poll_resident(id);
+            }
         }
         this.ready = ready;
 

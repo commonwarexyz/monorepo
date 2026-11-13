@@ -37,21 +37,29 @@ impl AffinityState {
         self.base.as_ref()
     }
 
-    /// Arm the reset before a pinned thread starts.
-    pub(crate) fn arm(&self) {
+    /// Arm the reset once a pinned thread applied its mask.
+    fn arm(&self) {
         #[cfg(all(target_os = "linux", not(miri)))]
         self.armed.store(true, Ordering::SeqCst);
     }
 
-    /// Apply `pin` to the calling runtime-created thread if it is pinned. Otherwise reset an
-    /// inherited mask narrower than the base set once the reset is armed (best effort).
+    /// Apply `pin` to the calling runtime-created thread if it is pinned, and arm the reset once
+    /// it applied. Otherwise reset an inherited mask narrower than the base set once the reset is
+    /// armed (best effort).
+    ///
+    /// A pinned thread arms the reset before it runs any task, so every thread it creates is
+    /// created afterwards.
     pub(crate) fn enter(&self, pin: Option<&Cpus>) -> std::io::Result<()> {
         pin.map_or_else(
             || {
                 self.reset_if_narrowed();
                 Ok(())
             },
-            apply,
+            |cpus| {
+                apply(cpus)?;
+                self.arm();
+                Ok(())
+            },
         )
     }
 
