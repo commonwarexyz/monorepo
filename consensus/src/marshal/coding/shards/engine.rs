@@ -57,10 +57,10 @@
 //!         +--------------------+--------------------+
 //!         |                    |                    |
 //!         v                    v                    v
-//!    Accumulate checked shards until minimum_shards reached
+//!      Hold gossip shards until minimum_shards are available
 //!         |                    |                    |
 //!         v                    v                    v
-//!            Batch verify pending shards at quorum
+//!          Batch verify the held shards decoding needs
 //!         |                    |                    |
 //!         v                    v                    v
 //!    +-------------+      +-------------+      +-------------+
@@ -84,8 +84,8 @@
 //!    |   consensus          |                  |
 //!    | - assigned shard     |                  |
 //!    |   verified eagerly   |                  |
-//!    | - other shards       |                  |
-//!    |   buffered           |                  |
+//!    | - gossip shards      |                  |
+//!    |   held               |                  |
 //!    +----------------------+                  |
 //!      |            |                          |
 //!      | own        | checked + pending shards | too few
@@ -152,9 +152,11 @@
 //! Peers found violating these rules are blocked via the [`Blocker`] trait.
 //! The width rule is enforced on receipt of every shard. The other rules are
 //! applied while a commitment is actively tracked in reconstruction state.
-//! Buffered shards are verified only as reconstruction needs them. Once a block
-//! is cached, its record retains no shards, verifies only a late assigned shard,
-//! and ignores other sender-indexed shards.
+//! Held shards are verified only as reconstruction needs them.
+//!
+//! Once a block is cached, its record retains no shards. On a participant whose
+//! assigned shard is unverified, it still verifies that shard and blocks the
+//! sender of a shard at any other index. Otherwise it ignores every arrival.
 //!
 //! _Until consensus reports a commitment via [`Mailbox::discovered`], its shards
 //! wait in fixed-size per-peer queues. The report supplies the round, and with it
@@ -166,8 +168,8 @@
 //! local signals ([`Mailbox::proposed`] and [`Mailbox::discovered`]) create
 //! records. Once the window is full, records with the lowest rounds are evicted
 //! first, and a signal at or below the lowest retained round creates no record
-//! and leaves the commitment's shards in the per-peer queues. Eviction closes no
-//! subscription.
+//! and leaves the commitment's shards in the per-peer queues. Eviction closes
+//! no subscription.
 
 use super::{
     mailbox::{Mailbox, Message},
@@ -904,16 +906,13 @@ where
 
     /// Returns whether an incoming network shard should still be processed.
     ///
-    /// Shards for reconstructed commitments are normally ignored. The only
-    /// exception is a late shard for the assigned index, which we still accept
-    /// so we can notify readiness and gossip it to slower peers.
+    /// A cached record handles arrivals only on a participant whose assigned
+    /// shard is unverified, so that a late assigned shard is verified and
+    /// relayed. Every other arrival for a cached record is ignored.
     fn should_handle_network_shard(&self, commitment: Commitment<B, C, H>) -> bool {
         if let Some(record) = self.records.get(&commitment)
             && record.block().is_some()
         {
-            // A participant's assigned shard can arrive after its block is cached.
-            // Keep handling shards until it is verified. A non-participant has no
-            // assigned shard to wait for.
             return record
                 .reconstruction()
                 .is_some_and(|s| !s.is_assigned_shard_verified())
@@ -1077,7 +1076,7 @@ where
             round,
             ReconstructionState::new(participants_len),
         );
-        let buffered_progress = self.ingest_buffered_shards(commitment);
+        let buffered_progress = self.ingest_buffered_shards(commitment, scheme.as_ref());
         if buffered_progress {
             self.try_advance(sender, commitment);
         }
@@ -1106,17 +1105,13 @@ where
     }
 
     /// Ingest every shard buffered for a commitment into its new reconstruction state.
-    fn ingest_buffered_shards(&mut self, commitment: Commitment<B, C, H>) -> bool {
-        let round = self
-            .records
-            .get(&commitment)
-            .expect("buffered shards can only be ingested with a commitment record")
-            .round();
-        let Some(scheme) = self.scheme_provider.scheme(round.epoch()) else {
-            warn!(%commitment, "no scheme for epoch, dropping buffered shards");
-            return false;
-        };
-
+    ///
+    /// `scheme` belongs to the record's epoch and classifies the shards.
+    fn ingest_buffered_shards(
+        &mut self,
+        commitment: Commitment<B, C, H>,
+        scheme: &S::Scheme,
+    ) -> bool {
         let mut buffered = Vec::new();
         for (peer, queue) in self.peer_buffers.iter_mut() {
             let mut i = 0;
@@ -1139,13 +1134,8 @@ where
         // Ingest buffered shards into the active reconstruction state.
         let mut progressed = false;
         for (peer, shard) in buffered {
-            progressed |= state.on_network_shard(
-                peer,
-                shard,
-                scheme.as_ref(),
-                &mut self.blocker,
-                &self.strategy,
-            );
+            progressed |=
+                state.on_network_shard(peer, shard, scheme, &mut self.blocker, &self.strategy);
         }
         progressed
     }
@@ -3392,6 +3382,13 @@ mod tests {
         record_verifies_assigned_shard(true, true);
     }
 
+    /// A committee member without a signing key still verifies and gossips an assigned shard
+    /// that arrives after its record cached the block.
+    #[test_traced]
+    fn test_member_cached_record_verifies_late_assigned_shard() {
+        record_verifies_assigned_shard(true, false);
+    }
+
     fn record_verifies_assigned_shard(member: bool, early: bool) {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -3456,8 +3453,8 @@ mod tests {
             engine.handle_assigned_shard_verified_subscription(commitment, response);
 
             // Without a record, the proposer's delivery of the assigned shard enters the proposer's
-            // buffer. The discovery creates the record and drains it. Readiness
-            // resolves before the block is reconstructed.
+            // buffer. The discovery creates the record and drains it. Readiness resolves before the
+            // block is reconstructed.
             if early {
                 engine.handle_network_shard(&mut sender, proposer.clone(), assigned.clone());
                 assert_eq!(buffered(&engine, &proposer, commitment), 1);
@@ -5029,8 +5026,8 @@ mod tests {
                     "target should remain cached after a later discovery"
                 );
 
-                // The fixture buffers one shard per peer. One authenticated peer
-                // sends two distinct codec-valid shards to exercise the same eviction boundary.
+                // The fixture buffers one shard per peer. One authenticated peer sends two distinct
+                // codec-valid shards to exercise the same eviction boundary.
                 let pressure_blocks = [2u64, 3].map(|id| {
                     let inner = B::new(Sha256Digest::EMPTY, Height::new(id), id);
                     encode_block::<B, C, H>(inner, coding_config)
@@ -5814,10 +5811,27 @@ mod tests {
         );
     }
 
+    /// A tracked primary that is a participant of epoch 1 only buffers a shard at the receiver
+    /// before discovery. A discovery in an epoch 1 round classifies the shard against epoch 1's
+    /// participant set, and nobody is blocked.
     #[test_traced]
     fn test_cross_epoch_buffered_shard_not_blocked() {
+        buffered_shard_from_tracked_primary(Epoch::new(1));
+    }
+
+    /// A shard from a tracked primary outside epoch 0's participant set waits in its sender's
+    /// buffer. A discovery in an epoch 0 round creates the record, drains the shard, and blocks
+    /// its sender.
+    #[test_traced]
+    fn test_buffered_shard_from_outside_committee_blocks_sender_on_discovery() {
+        buffered_shard_from_tracked_primary(Epoch::zero());
+    }
+
+    /// The future peer, a participant of epoch 1 only, buffers a shard for a commitment that the
+    /// receiver then discovers in a round of `epoch`.
+    fn buffered_shard_from_tracked_primary(epoch: Epoch) {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(move |context| async move {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
                 simulated::Config {
@@ -5896,7 +5910,7 @@ mod tests {
             let (engine, mailbox) = ShardEngine::new(context.child("receiver"), config);
             engine.start((sender_handle, receiver_handle));
 
-            // Build a coded block using epoch 1's participant set.
+            // Both epochs have four participants, so one coding config serves either.
             let coding_config = coding_config_for_participants(epoch1_set.len() as u16);
             let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
             let coded_block = encode_block::<B, C, H>(inner.clone(), coding_config);
@@ -5922,17 +5936,20 @@ mod tests {
                 "no peers should be blocked while shard is buffered"
             );
 
-            // Discover the commitment in an epoch 1 round.
-            mailbox.discovered(commitment, Round::new(Epoch::new(1), View::new(1)));
+            // The discovery creates the record and ingests the buffered shard.
+            mailbox.discovered(commitment, Round::new(epoch, View::new(1)));
             context.sleep(DEFAULT_LINK.latency * 2).await;
 
-            // The future peer is a valid participant in epoch 1, so they must NOT
-            // be blocked after their buffered shard is ingested.
-            let blocked = oracle.blocked().await.unwrap();
-            assert!(
-                blocked.is_empty(),
-                "future-epoch participant should not be blocked: {blocked:?}"
-            );
+            // The future peer is a participant of epoch 1 and not of epoch 0.
+            if epoch == Epoch::new(1) {
+                let blocked = oracle.blocked().await.unwrap();
+                assert!(
+                    blocked.is_empty(),
+                    "future-epoch participant should not be blocked: {blocked:?}"
+                );
+            } else {
+                assert_blocked(&oracle, &receiver_pk, &future_peer_pk).await;
+            }
         });
     }
 
@@ -6000,10 +6017,9 @@ mod tests {
             )
             .expect("signer scheme must be created");
 
-            // `discovered` performs two scoped lookups (`handle_discovered` and
-            // `ingest_buffered_shards`). Assigned-shard validation is the third.
-            // Any additional lookup for epoch 0 churns to `None`.
-            let broadcaster_provider = ChurningProvider::new(broadcaster_scheme, 3);
+            // `discovered` performs one scoped lookup, and assigned-shard validation is the
+            // second. Any additional lookup for epoch 0 churns to `None`.
+            let broadcaster_provider = ChurningProvider::new(broadcaster_scheme, 2);
             let broadcaster_config: Config<_, _, _, _, _, _> = Config {
                 scheme_provider: broadcaster_provider,
                 blocker: broadcaster_control.clone(),
@@ -6876,9 +6892,8 @@ mod tests {
                     .expect("missing shard");
                 unrelated_shard.commitment = tracked_commitment;
 
-                // Leader sends this unrelated/invalid shard to receiver.
-                // The shard index is neither the leader's nor the receiver's,
-                // so the leader must be blocked.
+                // The leader sends this unrelated shard to the receiver. Its index is neither the
+                // leader's nor the receiver's, so the leader must be blocked.
                 peers[leader_idx].sender.send(
                     Recipients::One(receiver_pk),
                     unrelated_shard.encode(),
@@ -7771,10 +7786,10 @@ mod tests {
         });
     }
 
-    /// If the evicted node leaves the
-    /// [`commonware_p2p::PeerSetUpdate::latest`] primary set, it must still
-    /// reconstruct once the commitment is discovered, as long as enough buffered
-    /// shards came from peers that remain in `latest.primary`.
+    /// If the evicted node leaves the [`commonware_p2p::PeerSetUpdate::latest`]
+    /// primary set, it must still reconstruct once the commitment is
+    /// discovered, as long as enough buffered shards came from peers that
+    /// remain in `latest.primary`.
     ///
     /// This does not rely on a self-buffered shard or a leader-delivered shard:
     /// reconstruction should succeed from the remaining buffered peer shards
