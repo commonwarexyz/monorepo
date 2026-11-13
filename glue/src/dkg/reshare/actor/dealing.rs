@@ -97,12 +97,12 @@ where
                 MailboxMessage::ReleaseLog { .. } => {}
                 MailboxMessage::EpochInfo {
                     span,
-                    ancestry,
+                    blocks,
                     response,
                 } => {
                     let process =
                         info_span!(parent: &span, "dkg.reshare.actor.dealing.epoch_info");
-                    if requests.push(span, ancestry, response) {
+                    if requests.push(span, blocks, response) {
                         process.in_scope(|| {
                             debug!("holding final-block request until the epoch midpoint");
                         });

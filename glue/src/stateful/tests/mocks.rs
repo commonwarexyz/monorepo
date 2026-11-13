@@ -5,7 +5,10 @@ use crate::stateful::{
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Handoff, Heightable,
-    marshal::{ancestry::Ancestry, standard::Standard},
+    marshal::{
+        blocks::{Ancestry, Blocks},
+        standard::Standard,
+    },
     simplex::{mocks::scheme as scheme_mocks, types::Context as SimplexContext},
     types::{Epoch, Height, View},
 };
@@ -383,7 +386,7 @@ impl<E: Send + Sync> Application<E> for TestApp {
     async fn prepare(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        ancestry: Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
     ) -> Handoff<Proposed<Self, E>> {
@@ -399,7 +402,7 @@ impl<E: Send + Sync> Application<E> for TestApp {
     async fn propose(
         &mut self,
         _context: (E, Self::Context),
-        _ancestry: impl Ancestry<Self::Block>,
+        _ancestry: Ancestry<Self::Block>,
         _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
@@ -413,7 +416,8 @@ impl<E: Send + Sync> Application<E> for TestApp {
     async fn process(
         &mut self,
         _context: (E, Self::Context),
-        _ancestry: impl Ancestry<Self::Block>,
+        _block: Digested<Self::Block>,
+        _blocks: Blocks<Self::Block>,
         _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         finality: Finality,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
@@ -456,6 +460,11 @@ pub(crate) fn test_databases() -> TestDatabases {
 pub(crate) fn digested<B: Digestible>(block: B) -> Digested<B> {
     let digest = block.digest();
     Digested::precomputed(block, digest)
+}
+
+/// Pairs a shared test block with its digest without copying the body.
+pub(crate) fn digested_shared<B: Digestible>(block: &Arc<B>) -> Digested<B> {
+    Digested::precomputed(Arc::clone(block), block.digest())
 }
 
 pub(crate) fn anchor(height: u64, digest_byte: u8) -> crate::stateful::db::Anchor<Sha256Digest> {

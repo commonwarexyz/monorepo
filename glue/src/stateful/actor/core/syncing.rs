@@ -16,10 +16,7 @@ use crate::stateful::{
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
     CertifiableBlock, Epochable, Heightable, Viewable,
-    marshal::{
-        ancestry::BlockProvider,
-        core::{Mailbox as MarshalMailbox, Variant},
-    },
+    marshal::core::{Mailbox as MarshalMailbox, Variant},
 };
 use commonware_cryptography::{Digested, Digestible};
 use commonware_macros::{select, select_loop};
@@ -108,7 +105,6 @@ where
     A: Application<E>,
     V: Variant<ApplicationBlock = A::Block>,
     R: AttachableResolverSet<A::Databases>,
-    MarshalMailbox<A::SigningScheme, V>: BlockProvider<Block = A::Block>,
     T: Strategy,
 {
     pub async fn run(mut self) {
@@ -274,7 +270,12 @@ where
                 FinalizedHandoff::Apply(block, acknowledgement) => {
                     if !processor.redelivered(&block) {
                         let Applied { prune, .. } = processor
-                            .finalize(self.context.as_present(), &self.marshal, &block, false)
+                            .finalize(
+                                self.context.as_present(),
+                                |tip| self.marshal.finalized_blocks(tip),
+                                &block,
+                                false,
+                            )
                             .await;
                         pending_prune = prune.or(pending_prune);
                         completed_height = block.height();
@@ -414,7 +415,7 @@ mod tests {
     use commonware_consensus::{
         Application as _, CertifiableBlock as _, Heightable, Reporter as _,
         marshal::{
-            self, Update, ancestry,
+            self, Update,
             core::{Mailbox as MarshalMailbox, Processed},
         },
         simplex::{mocks::scheme as scheme_mocks, types::Activity},
@@ -433,7 +434,11 @@ mod tests {
     };
     use commonware_utils::{Acknowledgement, NZUsize, acknowledgement::Exact, channel::oneshot};
     use futures::poll;
-    use std::{collections::VecDeque, sync::atomic::Ordering, time::Duration};
+    use std::{
+        collections::VecDeque,
+        sync::{Arc, atomic::Ordering},
+        time::Duration,
+    };
 
     fn pending(block: TestBlock) -> PendingFinalization<Digested<TestBlock>> {
         let (acknowledgement, _waiter) = Exact::handle();
@@ -1165,12 +1170,13 @@ mod tests {
                     Feedback::Ok
                 ));
                 parent = block;
-                let proposal = TestBlock::new(height + 10, digest + 10);
+                let proposal_parent = Arc::new(TestBlock::new(height + 9, digest + 9));
+                let proposal = TestBlock::child(&proposal_parent, digest + 10);
                 assert!(
                     mailbox
                         .propose(
                             (context.child("queue_fence"), proposal.context()),
-                            ancestry::from_iter([]),
+                            fixtures::ancestry(&proposal_parent),
                             (),
                         )
                         .await
@@ -1253,12 +1259,13 @@ mod tests {
                     Feedback::Ok
                 ));
                 parent = block;
-                let proposal = TestBlock::new(height + 10, digest + 10);
+                let proposal_parent = Arc::new(TestBlock::new(height + 9, digest + 9));
+                let proposal = TestBlock::child(&proposal_parent, digest + 10);
                 assert!(
                     mailbox
                         .propose(
                             (queue_context.child("queue_fence"), proposal.context()),
-                            ancestry::from_iter([]),
+                            fixtures::ancestry(&proposal_parent),
                             (),
                         )
                         .await
