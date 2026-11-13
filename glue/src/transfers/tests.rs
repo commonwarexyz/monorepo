@@ -1,7 +1,7 @@
 use super::*;
 use crate::stateful::db::{DatabaseSet, Merkleized as StatefulMerkleized, Shared};
 use bytes::BufMut;
-use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, ReadExt as _, Write};
+use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, ReadExt as _, U256, Write};
 use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_parallel::{Sequential, mocks::explore};
 use commonware_runtime::{Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic};
@@ -24,6 +24,7 @@ use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, sequence::FixedBytes};
 use rand::RngExt as _;
 use std::{
     collections::{BTreeMap, BTreeSet},
+    convert::Infallible,
     future::Future,
 };
 
@@ -34,6 +35,10 @@ type Key = FixedBytes<8>;
 struct Balance(u64);
 
 impl Account for Balance {
+    /// The balance and the amounts a transfer debits and credits.
+    type Amount = u64;
+
+    /// No effect exists, since the account keeps no state other than its balance.
     type Effect = Infallible;
 
     fn balance(&self) -> u64 {
@@ -69,17 +74,17 @@ impl Read for Balance {
 
 /// A payment from one key to another.
 #[derive(Clone, Debug)]
-struct Payment {
+struct Payment<A: Account = Balance> {
     from: Key,
     to: Key,
-    amount: u64,
+    amount: A::Amount,
 }
 
-impl Transfer for Payment {
+impl<A: Account> Transfer for Payment<A> {
     type Key = Key;
-    type Account = Balance;
+    type Account = A;
 
-    fn changes(&self) -> impl Iterator<Item = (&Key, Change)> {
+    fn changes(&self) -> impl Iterator<Item = (&Self::Key, Change<Self::Account>)> {
         [
             (&self.from, Change::debit(self.amount)),
             (&self.to, Change::credit(self.amount)),
@@ -90,13 +95,13 @@ impl Transfer for Payment {
 
 /// A transfer with any number of changes, including repeated keys.
 #[derive(Clone, Debug)]
-struct Multi(Vec<(Key, Change)>);
+struct Multi(Vec<(Key, Change<Balance>)>);
 
 impl Transfer for Multi {
     type Key = Key;
     type Account = Balance;
 
-    fn changes(&self) -> impl Iterator<Item = (&Key, Change)> {
+    fn changes(&self) -> impl Iterator<Item = (&Self::Key, Change<Self::Account>)> {
         self.0.iter().map(|(key, change)| (key, *change))
     }
 }
@@ -126,21 +131,18 @@ fn sums<K: Array>(plan: &Plan<K, Balance>) -> BTreeMap<K, (u64, u64)> {
 /// One entry of the flat model, where a transfer lists a key once for each debit, credit, or
 /// effect.
 #[derive(Clone, Debug)]
-enum Flat<E> {
-    Debit(u64),
-    Credit(u64),
-    Effect(E),
+enum Flat<A: Account> {
+    Debit(A::Amount),
+    Credit(A::Amount),
+    Effect(A::Effect),
 }
 
-/// The effect type of the accounts `T` changes.
-type EffectOf<T> = <<T as Transfer>::Account as Account>::Effect;
-
 /// The flat entries of one transfer, in order.
-type FlatTransfer<E> = Vec<(Key, Flat<E>)>;
+type FlatTransfer<A> = Vec<(Key, Flat<A>)>;
 
 /// The flat entries of each transfer in order. Each change becomes its effect, then its debit, then
 /// its credit, leaving out zero amounts.
-fn flatten<T: Transfer<Key = Key>>(transfers: &[T]) -> Vec<FlatTransfer<EffectOf<T>>> {
+fn flatten<T: Transfer<Key = Key>>(transfers: &[T]) -> Vec<FlatTransfer<T::Account>> {
     transfers
         .iter()
         .map(|transfer| {
@@ -149,10 +151,10 @@ fn flatten<T: Transfer<Key = Key>>(transfers: &[T]) -> Vec<FlatTransfer<EffectOf
                 if let Some(effect) = change.effect {
                     entries.push((key.clone(), Flat::Effect(effect)));
                 }
-                if change.debit != 0 {
+                if change.debit != Amount::ZERO {
                     entries.push((key.clone(), Flat::Debit(change.debit)));
                 }
-                if change.credit != 0 {
+                if change.credit != Amount::ZERO {
                     entries.push((key.clone(), Flat::Credit(change.credit)));
                 }
             }
@@ -174,23 +176,23 @@ fn expected<T: Transfer<Key = Key>>(
 /// time.
 fn expected_flat<A: Account>(
     accounts: &BTreeMap<Key, A>,
-    transfers: &[FlatTransfer<A::Effect>],
+    transfers: &[FlatTransfer<A>],
 ) -> Result<BTreeMap<Key, A>, Rejection<Key>> {
-    // Sum each key's debits and credits, rejecting a sum past `u64::MAX`, and list its effects in
-    // transfer order.
-    let mut debits: BTreeMap<Key, u64> = BTreeMap::new();
-    let mut credits: BTreeMap<Key, u64> = BTreeMap::new();
+    // Sum each key's debits and credits, rejecting a sum past the largest amount, and list its
+    // effects in transfer order.
+    let mut debits: BTreeMap<Key, A::Amount> = BTreeMap::new();
+    let mut credits: BTreeMap<Key, A::Amount> = BTreeMap::new();
     let mut effects: BTreeMap<Key, Vec<_>> = BTreeMap::new();
     for (key, entry) in transfers.iter().flatten().cloned() {
         match entry {
             Flat::Debit(amount) => {
-                let sum = debits.entry(key.clone()).or_default();
+                let sum = debits.entry(key.clone()).or_insert(A::Amount::ZERO);
                 *sum = sum
                     .checked_add(amount)
                     .ok_or(Rejection::Insufficient(key.clone()))?;
             }
             Flat::Credit(amount) => {
-                let sum = credits.entry(key.clone()).or_default();
+                let sum = credits.entry(key.clone()).or_insert(A::Amount::ZERO);
                 *sum = sum
                     .checked_add(amount)
                     .ok_or(Rejection::Overflow(key.clone()))?;
@@ -216,10 +218,10 @@ fn expected_flat<A: Account>(
         }
         let remaining = start
             .balance()
-            .checked_sub(debits.get(key).copied().unwrap_or(0))
+            .checked_sub(debits.get(key).copied().unwrap_or(A::Amount::ZERO))
             .ok_or(Rejection::Insufficient(key.clone()))?;
         let balance = remaining
-            .checked_add(credits.get(key).copied().unwrap_or(0))
+            .checked_add(credits.get(key).copied().unwrap_or(A::Amount::ZERO))
             .ok_or(Rejection::Overflow(key.clone()))?;
         account.set_balance(balance);
         if account == start {
@@ -1456,6 +1458,10 @@ enum Effect {
 }
 
 impl Account for Nonced {
+    /// The balance and the amounts a transfer debits and credits.
+    type Amount = u64;
+
+    /// Each effect reads or changes the account's nonces or balance.
     type Effect = Effect;
 
     fn balance(&self) -> u64 {
@@ -1519,7 +1525,7 @@ impl Transfer for Signed {
     type Key = Key;
     type Account = Nonced;
 
-    fn changes(&self) -> impl Iterator<Item = (&Key, Change<Effect>)> {
+    fn changes(&self) -> impl Iterator<Item = (&Self::Key, Change<Self::Account>)> {
         // A self-transfer moves nothing, but its sender must hold the amount. The sender's change
         // comes last, so a selection that refuses its nonce must undo the transfer's other changes.
         let (moves, sender) = if self.from == self.to {
@@ -1549,13 +1555,13 @@ fn signed(from: u64, to: u64, amount: u64, nonce: u64) -> Signed {
 
 /// A transfer between nonced accounts with any number of changes, applied in the order listed.
 #[derive(Clone, Debug)]
-struct NoncedMulti(Vec<(Key, Change<Effect>)>);
+struct NoncedMulti(Vec<(Key, Change<Nonced>)>);
 
 impl Transfer for NoncedMulti {
     type Key = Key;
     type Account = Nonced;
 
-    fn changes(&self) -> impl Iterator<Item = (&Key, Change<Effect>)> {
+    fn changes(&self) -> impl Iterator<Item = (&Self::Key, Change<Self::Account>)> {
         self.0.iter().map(|(key, change)| (key, change.clone()))
     }
 }
@@ -2604,5 +2610,100 @@ fn an_effect_only_change_touches_its_key() {
     assert_eq!(
         plan.settle(&[None], &Sequential),
         Ok(vec![Slot::Put(Nonced::new(DEFAULT_BALANCE, 1, 0))])
+    );
+}
+
+/// An account that holds only a 256-bit balance.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Wide(U256);
+
+impl Account for Wide {
+    /// The balance and the amounts a transfer debits and credits.
+    type Amount = U256;
+
+    /// No effect exists, since the account keeps no state other than its balance.
+    type Effect = Infallible;
+
+    fn balance(&self) -> U256 {
+        self.0
+    }
+
+    fn set_balance(&mut self, balance: U256) {
+        self.0 = balance;
+    }
+
+    fn apply(&mut self, effect: Infallible) -> bool {
+        match effect {}
+    }
+}
+
+#[test]
+fn amounts_wider_than_a_u64_settle_and_select() {
+    // Key 1 holds more than any `u64`, and key 2 holds the largest amount.
+    let half = U256::from(1) << 199;
+    let whole = U256::from(1) << 200;
+    let accounts = BTreeMap::from([(key(1), Wide(whole)), (key(2), Wide(U256::MAX))]);
+    let pay = |from, to, amount| Payment::<Wide> {
+        from: key(from),
+        to: key(to),
+        amount,
+    };
+
+    // A batch is rejected when a key's debits pass its balance by one, or when a credit takes a
+    // balance past the largest amount.
+    let unaffordable = [pay(1, 3, whole), pay(1, 4, U256::ONE)];
+    assert_eq!(
+        explore(|strategy| settle_all(strategy, &accounts, &unaffordable)),
+        Err(Rejection::Insufficient(key(1)))
+    );
+    let overflowing = [pay(1, 2, U256::ONE)];
+    assert_eq!(
+        explore(|strategy| settle_all(strategy, &accounts, &overflowing)),
+        Err(Rejection::Overflow(key(2)))
+    );
+
+    // Debits or credits that sum past the largest amount are rejected when planned.
+    let debits = [pay(2, 3, U256::MAX), pay(2, 4, U256::ONE)];
+    assert_eq!(
+        explore(|strategy| Plan::new(&debits, strategy).err()),
+        Some(Rejection::Insufficient(key(2)))
+    );
+    let credits = [pay(2, 3, U256::MAX), pay(1, 3, U256::ONE)];
+    assert_eq!(
+        explore(|strategy| Plan::new(&credits, strategy).err()),
+        Some(Rejection::Overflow(key(3)))
+    );
+
+    let candidates = [
+        // Fits: key 1 holds twice the amount.
+        pay(1, 3, half),
+        // Dropped: key 1 has only half its balance left to spend.
+        pay(1, 4, whole),
+        // Dropped: the credit takes key 2 past the largest amount.
+        pay(1, 2, U256::ONE),
+        // Fits: key 2 spends the largest amount, and key 5 starts at zero.
+        pay(2, 5, U256::MAX),
+        // Dropped: key 5's credits would sum past the largest amount, so the debit already applied
+        // to key 1 is undone.
+        pay(1, 5, U256::ONE),
+        // Fits: key 1 spends the other half of its balance.
+        pay(1, 3, half),
+    ];
+    let (accepted, settled) = explore(|strategy| select_all(strategy, &accounts, &candidates, 2));
+    assert_eq!(accepted, [true, false, false, true, false, true]);
+
+    // Keys 1 and 2 are spent to zero and deleted, and keys 3 and 5 are created.
+    assert_eq!(
+        settled,
+        BTreeMap::from([(key(3), Wide(whole)), (key(5), Wide(U256::MAX))])
+    );
+
+    // The accepted candidates settle as a batch to the same accounts, and so does the sequential
+    // reference.
+    let body = body(&candidates, &accepted);
+    assert_eq!(expected(&accounts, &body), Ok(settled.clone()));
+    assert_eq!(
+        explore(|strategy| settle_all(strategy, &accounts, &body)),
+        Ok(settled)
     );
 }
