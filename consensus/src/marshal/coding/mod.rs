@@ -80,7 +80,7 @@ mod tests {
         Automaton, Block, CertifiableAutomaton, CertifiableBlock, Handoff, Heightable, Relay,
         Reporter,
         marshal::{
-            ancestry::{Ancestry, BlockProvider},
+            ancestry::BlockProvider,
             coding::{
                 Coding, Marshaled, MarshaledConfig, shards,
                 types::{
@@ -102,6 +102,7 @@ mod tests {
                 store::{Op, Recording},
                 verifying::{
                     GatedVerifyingApp, MockVerifyingApp, RecordingVerifyingApp, Verification,
+                    WalkingVerifyingApp,
                 },
             },
             resolver::handler,
@@ -137,7 +138,6 @@ mod tests {
         sync::Mutex,
         vec::NonEmptyVec,
     };
-    use futures::StreamExt;
     use std::{sync::Arc, time::Duration};
 
     type TestCodingVariant = Coding<CodingB, ReedSolomon<Sha256>, Sha256, K>;
@@ -232,42 +232,6 @@ mod tests {
 
         fn send(&self, round: Round, block: Arc<TestCodedBlock>, recipients: Recipients<K>) {
             self.sends.lock().push((round, block, recipients));
-        }
-    }
-
-    /// Records the ancestry consumed by verification, accepting only after reaching genesis.
-    #[derive(Clone, Default)]
-    struct WalkingVerifyingApp {
-        blocks: Arc<Mutex<Vec<D>>>,
-    }
-
-    impl crate::Application<deterministic::Context> for WalkingVerifyingApp {
-        type Block = CodingB;
-        type Context = CodingCtx;
-        type SigningScheme = S;
-        type Input = ();
-
-        async fn propose(
-            &mut self,
-            _context: (deterministic::Context, CodingCtx),
-            _ancestry: impl Ancestry<CodingB>,
-            _input: (),
-        ) -> Option<Digested<CodingB>> {
-            None
-        }
-
-        async fn verify(
-            &mut self,
-            _context: (deterministic::Context, CodingCtx),
-            mut ancestry: impl Ancestry<CodingB>,
-        ) -> bool {
-            while let Some(block) = ancestry.next().await {
-                self.blocks.lock().push(block.digest());
-                if block.height() == Height::zero() {
-                    return true;
-                }
-            }
-            false
         }
     }
 
@@ -800,7 +764,7 @@ mod tests {
             };
             let child = make_coding_block(child_ctx, parent.digest(), Height::new(2), 200);
             let child = Digested::precomputed(child.clone(), child.digest());
-            let subscription = marshal.subscribe_parent(&child);
+            let subscription = marshal.subscribe_parent(&child, None);
 
             context.sleep(Duration::from_millis(100)).await;
             assert_eq!(

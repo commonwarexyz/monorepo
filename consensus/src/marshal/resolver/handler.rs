@@ -207,10 +207,10 @@ pub enum Annotation {
     ///
     /// The height is read from the block above the requested one. Until that
     /// block has been checked against its own parent, the height is only its
-    /// claim. The round, when the requester knows one, is the round consensus
-    /// bound to the commitment. The request is retired once the processed
-    /// height reaches the height or the processed round floor covers the
-    /// round.
+    /// claim. The round, when the requester knows one, is a consensus round
+    /// that ends the requester's need for the block. The request is retired
+    /// once the processed height reaches the height or the processed round
+    /// floor covers the round.
     ///
     /// Commitment material is recomputed unless another subscriber supplies
     /// certification evidence.
@@ -313,9 +313,10 @@ impl<D: Digest> Request<D> {
 
     /// Fetch a block by commitment without certification evidence.
     ///
-    /// `round`, when the requester knows one, is the round consensus bound to
-    /// `commitment`. The request is retired once the processed height reaches
-    /// `height` or the processed round floor covers `round`.
+    /// `round`, when the requester knows one, is a consensus round that ends
+    /// the requester's need for the block. The request is retired once the
+    /// processed height reaches `height` or the processed round floor covers
+    /// `round`.
     ///
     /// Commitment material is recomputed unless another subscriber supplies
     /// certification evidence.
