@@ -7,7 +7,7 @@ use super::{
 };
 use crate::core::{
     curve::g1::{Coordinates, GENERATOR, IDENTITY, Point},
-    field::{MAX_LANES, arithmetic::Field, fp},
+    field::{arithmetic::Field, fp},
 };
 use commonware_simd::Simd;
 use core::ops::Neg;
@@ -32,9 +32,11 @@ impl Group for G1 {
 
     // Up to these counts, residues, which hold one element at a time, finish sooner than Unsat49:
     // a pass of Unsat49 costs the same however many of its lanes hold elements, and its sum ends
-    // with additions across the lanes.
-    const SUM_BATCH: Option<usize> = Some(MAX_LANES);
-    const MULTIPLY_BATCH: Option<usize> = Some(8);
+    // with additions across the lanes. A pass of Unsat49 multiplies up to eight elements in the
+    // time residues take to multiply four. The additions across the lanes cost more than the
+    // lanes save on sums of up to 128 elements.
+    const SUM_BATCH: Option<usize> = Some(128);
+    const MULTIPLY_BATCH: Option<usize> = Some(4);
 
     // Scalars split into two halves of 128 bits: k = a + b x^2 for the eigenvalue -x^2 of the
     // endomorphism.
