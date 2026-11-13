@@ -220,11 +220,17 @@ where
         &self,
         block: &Digested<Self::Block>,
     ) -> impl Future<Output = Option<Digested<Self::Block>>> + Send + 'static {
+        // A coded block can be voted for before it is held, so its height may not have been
+        // checked against this parent. Its commitment binds its consensus context, and voters
+        // compare that context with their own. The round it names for the parent therefore
+        // bounds the request even when the height does not.
         let receiver = block.height().previous().map(|parent_height| {
+            let context = block.context();
             self.subscribe_by_commitment(
-                block.context().parent.1,
+                context.parent.1,
                 CommitmentFallback::FetchByCommitment {
                     height: parent_height,
+                    round: Some(Round::new(context.round.epoch(), context.parent.0)),
                 },
             )
         });

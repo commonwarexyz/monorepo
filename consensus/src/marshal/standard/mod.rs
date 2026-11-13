@@ -2925,6 +2925,7 @@ mod tests {
                 missing_digest,
                 CommitmentFallback::FetchByCommitment {
                     height: Height::new(2),
+                    round: None,
                 },
             );
             let mut wait = mailbox.subscribe_by_digest(missing_digest, DigestFallback::Wait);
@@ -4787,7 +4788,7 @@ mod tests {
                             && !matches!(
                                 fetch.subscriber,
                                 handler::Annotation::Certified { height }
-                                | handler::Annotation::Untrusted { height }
+                                | handler::Annotation::Untrusted { height, .. }
                                     if height == Height::new(2)
                             )
                     }),
@@ -7360,6 +7361,7 @@ mod tests {
                 Sha256::hash(&[b"below-floor-after-stale-ack"]),
                 CommitmentFallback::FetchByCommitment {
                     height: Height::new(2),
+                    round: None,
                 },
             );
             let _ = mailbox.get_block(Height::new(5)).await;
@@ -7445,6 +7447,7 @@ mod tests {
                 Sha256::hash(&[b"below-local-floor-after-stale-ack"]),
                 CommitmentFallback::FetchByCommitment {
                     height: Height::new(2),
+                    round: None,
                 },
             );
             let _ = mailbox.get_block(Height::new(5)).await;

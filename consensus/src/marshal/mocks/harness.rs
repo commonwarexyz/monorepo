@@ -4193,6 +4193,7 @@ pub fn commitment_fetch_height_hint_mismatch_wakes_subscriber<H: TestHarness>() 
             commitment,
             CommitmentFallback::FetchByCommitment {
                 height: expected_height,
+                round: None,
             },
         );
 
@@ -4239,6 +4240,7 @@ pub fn commitment_fetch_height_hint_mismatch_wakes_subscriber<H: TestHarness>() 
             commitment,
             CommitmentFallback::FetchByCommitment {
                 height: expected_height,
+                round: None,
             },
         );
         let received = select! {

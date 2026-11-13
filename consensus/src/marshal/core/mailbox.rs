@@ -295,19 +295,27 @@ pub enum CommitmentFallback {
     /// The returned block is heightable once decoded, but that is too late for
     /// the in-flight resolver key or retention bound.
     FetchByRound { round: Round },
-    /// Request the exact commitment from peers and prune the request at
-    /// `height`.
+    /// Request the exact commitment from peers and prune the request once the processed height
+    /// reaches `height` or, like [`Self::FetchByRound`], the processed round floor covers `round`.
     ///
-    /// Use this only when no parent round is available. The caller must have a locally validated
-    /// resolver retention bound. Examples include repairing a finalized gap or walking an
-    /// accepted ancestry stream. Do not use it for a candidate's immediate parent when the
-    /// consensus context supplies the parent round.
+    /// Use this when the caller reads the block's height from the block above it. Examples
+    /// include repairing a finalized gap or walking a block's ancestry. Peers serve the block
+    /// from wherever they store it, so the request also resolves after they prune its round's
+    /// notarization. Do not use it for a candidate's immediate parent when the consensus context
+    /// supplies the parent round.
     ///
-    /// The height is not sent to peers. It is a local hint for request retention.
-    /// It is not part of response validity. A fetched block is delivered if its
-    /// commitment matches. A matching block above this bound is delivered but
+    /// At least one bound must be locally validated. A height read from a block counts only once
+    /// that block has been checked against its own parent. Otherwise supply the `round` that
+    /// consensus bound to the commitment, such as the parent round in a block's consensus
+    /// context.
+    ///
+    /// Neither bound is sent to peers, and neither is part of response validity. A fetched block
+    /// is delivered if its commitment matches. A matching block above `height` is delivered but
     /// not cached.
-    FetchByCommitment { height: Height },
+    FetchByCommitment {
+        height: Height,
+        round: Option<Round>,
+    },
 }
 
 impl<S: Scheme, V: Variant> Message<S, V> {
@@ -1440,6 +1448,7 @@ mod tests {
             3,
             CommitmentFallback::FetchByCommitment {
                 height: Height::new(3),
+                round: Some(round(3)),
             },
         );
 
@@ -1466,9 +1475,12 @@ mod tests {
         assert!(matches!(
             &drained[2],
             TestMessage::SubscribeByCommitment {
-                fallback: CommitmentFallback::FetchByCommitment { height },
+                fallback: CommitmentFallback::FetchByCommitment {
+                    height,
+                    round: found
+                },
                 ..
-            } if *height == Height::new(3)
+            } if *height == Height::new(3) && *found == Some(round(3))
         ));
     }
 
