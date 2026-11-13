@@ -1972,8 +1972,19 @@ mod tests {
         }
 
         async fn build_child(&self, parent: &Block, view: View) -> (Block, TestMerkleized) {
-            let context = consensus_context(parent.digest(), view);
             let height = Height::new(parent.height().get() + 1);
+            self.build_at(parent, height, view).await
+        }
+
+        /// Builds a block that names `parent` and declares `height`, with commitments that
+        /// match the state it produces on `parent`. An unverified block can declare any height.
+        async fn build_at(
+            &self,
+            parent: &Block,
+            height: Height,
+            view: View,
+        ) -> (Block, TestMerkleized) {
+            let context = consensus_context(parent.digest(), view);
             let batches = self
                 .processor
                 .fork_batches(&parent.digest())
@@ -3223,6 +3234,39 @@ mod tests {
         });
     }
 
+    /// The applied state sits at the branch anchor's height, so no block at that height can be
+    /// recovered on it. A target that names the anchor as its parent and declares the anchor's
+    /// own height is rejected without being processed.
+    #[test]
+    fn execution_rebuild_pending_rejects_target_at_branch_anchor_height() {
+        deterministic::Runner::default().start(|context| async move {
+            // Finalize block1.
+            let mut harness = Harness::new(context.child("harness")).await;
+            let genesis = Block::genesis();
+            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+            assert!(harness.finalize(block1.clone()).await);
+
+            // The target is valid on block1's state but declares block1's height.
+            let (target, _) = harness
+                .build_at(&block1, block1.height(), View::new(2))
+                .await;
+            let provider = ScriptedSource::default();
+
+            // Recovery rejects the target without acquiring or processing a block.
+            let result = harness
+                .processor
+                .rebuild_pending(
+                    harness.context_cell.as_present(),
+                    provider.source(&target),
+                    digested(target.clone()),
+                )
+                .await;
+            assert_eq!(result, Err(PrepareBatchesError::Invalid));
+            assert_eq!(provider.fetches(), 0);
+            assert!(!harness.processor.pending_contains(&target.digest()));
+        });
+    }
+
     #[test]
     fn execution_rebuild_pending_rejects_sync_target_mismatch_before_caching() {
         deterministic::Runner::default().start(|context| async move {
@@ -3310,6 +3354,41 @@ mod tests {
         });
     }
 
+    /// A cached block has one height. A target that names a cached block as its parent without
+    /// sitting directly above it is rejected before any block is acquired or processed.
+    #[test]
+    fn execution_rebuild_pending_rejects_height_gap_to_cached_ancestor() {
+        deterministic::Runner::default().start(|context| async move {
+            // Finalize block1 and cache block2.
+            let mut harness = Harness::new(context.child("harness")).await;
+            let genesis = Block::genesis();
+            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+            assert!(harness.finalize(block1.clone()).await);
+            let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
+
+            // The gap block names block2 and declares a height two above it. The source selects
+            // the gap block's parent directly below it, as a history that assigns heights by
+            // position does.
+            let (gap_block, _) = harness
+                .build_at(&block2, Height::new(4), View::new(3))
+                .await;
+            let provider = ScriptedSource::default();
+
+            // The search finds block2 cached at another height than the one selected for it.
+            let result = harness
+                .processor
+                .rebuild_pending(
+                    harness.context_cell.as_present(),
+                    provider.source(&gap_block),
+                    digested(gap_block.clone()),
+                )
+                .await;
+            assert_eq!(result, Err(PrepareBatchesError::Invalid));
+            assert_eq!(provider.fetches(), 0);
+            assert!(!harness.processor.pending_contains(&gap_block.digest()));
+        });
+    }
+
     #[test]
     fn execution_rebuild_pending_rejects_wrong_parent_digest() {
         deterministic::Runner::default().start(|context| async move {
@@ -3339,6 +3418,52 @@ mod tests {
             assert_eq!(result, Err(PrepareBatchesError::Invalid));
             assert_eq!(provider.fetches(), 1);
             assert!(!harness.processor.pending_contains(&block3.digest()));
+        });
+    }
+
+    /// An unverified ancestor can name any parent. The first missing ancestor must extend the
+    /// branch anchor. One that names a cached block is rejected once acquired, before it is
+    /// processed.
+    #[test]
+    fn execution_rebuild_pending_rejects_ancestor_off_branch_anchor() {
+        deterministic::Runner::default().start(|context| async move {
+            // Finalize block1 and cache one child of it.
+            let mut harness = Harness::new(context.child("harness")).await;
+            let genesis = Block::genesis();
+            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+            assert!(harness.finalize(block1.clone()).await);
+            let cached = harness.stage_pending_child(&block1, View::new(2)).await;
+
+            // The ancestor declares the first height above the branch anchor and names the
+            // cached block, on whose state it is valid. The target extends the ancestor.
+            let (ancestor, _) = harness
+                .build_at(&cached, Height::new(2), View::new(3))
+                .await;
+            let target = Block {
+                context: consensus_context(ancestor.digest(), View::new(4)),
+                parent: ancestor.digest(),
+                height: Height::new(3),
+                ..ancestor.clone()
+            };
+
+            // The source serves the ancestor and selects no digest at the anchor's height, so
+            // the range cannot check the ancestor's parent.
+            let provider = ScriptedSource::default();
+            provider.push([Some(ancestor.clone())]);
+
+            // Recovery starts above the branch anchor and stops at the acquired ancestor.
+            let result = harness
+                .processor
+                .rebuild_pending(
+                    harness.context_cell.as_present(),
+                    provider.source(&target),
+                    digested(target.clone()),
+                )
+                .await;
+            assert_eq!(result, Err(PrepareBatchesError::Invalid));
+            assert_eq!(provider.fetches(), 1);
+            assert!(!harness.processor.pending_contains(&ancestor.digest()));
+            assert!(!harness.processor.pending_contains(&target.digest()));
         });
     }
 

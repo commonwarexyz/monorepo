@@ -263,6 +263,12 @@ impl TestBlock {
             commonware_consensus::types::Round::new(self.context.round.epoch(), View::new(view));
         self
     }
+
+    /// Declares `height` in place of the height above the block's parent.
+    pub(crate) fn with_height(mut self, height: u64) -> Self {
+        self.height = Height::new(height);
+        self
+    }
 }
 
 impl Write for TestBlock {

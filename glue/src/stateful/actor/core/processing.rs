@@ -2710,6 +2710,57 @@ mod tests {
         });
     }
 
+    /// A parent can name one block while its selected history holds another below it. Recovery
+    /// starts from the selected block's cached state. The parent does not extend that state, so
+    /// the child is rejected before either block is processed.
+    #[test]
+    fn unlinked_parent_rejects_child() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            // Two blocks extend genesis in distinct views, and the parent extends the second.
+            let genesis = TestBlock::new(0, 0);
+            let selected = TestBlock::child(&genesis, 1);
+            let named = TestBlock::child(&genesis, 2).with_view(2);
+            let parent = TestBlock::child(&named, 3).with_view(3);
+            let child = TestBlock::child(&parent, 4).with_view(4);
+            let app = ReplayGatedApp::new(parent.height(), []);
+            let process_calls = app.process_calls.clone();
+            let (mut mailbox, _, guards, actor) =
+                spawn_replay_gated_processing(&context, "unlinked-parent", &genesis, app).await;
+
+            // Both blocks above genesis are cached through their own verifications.
+            for (label, block) in [("verify_selected", &selected), ("verify_named", &named)] {
+                assert!(
+                    verify_with(
+                        &mut mailbox,
+                        (context.child(label), block.context()),
+                        [digested(block.clone()), digested(genesis.clone())]
+                    )
+                    .await
+                );
+            }
+            assert_eq!(process_calls.at(selected.height()), 2);
+
+            // The child's history selects one cached block below the parent, and the parent
+            // names the other.
+            assert!(
+                !verify_with(
+                    &mut mailbox,
+                    (context.child("verify_child"), child.context()),
+                    [
+                        digested(child.clone()),
+                        digested(parent.clone()),
+                        digested(selected)
+                    ]
+                )
+                .await
+            );
+            assert_eq!(process_calls.at(parent.height()), 0);
+            assert_eq!(process_calls.at(child.height()), 0);
+            actor.abort();
+            drop(guards);
+        });
+    }
+
     #[test]
     fn conflicting_processed_block_is_rejected() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
@@ -6662,6 +6713,90 @@ mod tests {
             );
 
             drop(verify);
+            harness.stop().await;
+        });
+    }
+
+    /// A walk below a suffix follows the parent links that its bodies name, and a range checks
+    /// each body against those links only. When the lowest missing block names a cached block
+    /// in place of the applied state that recovery starts from, the verification is rejected
+    /// before that block is processed.
+    #[test]
+    fn suffix_history_off_the_applied_state_is_rejected() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            // The ancestor declares the first height above genesis and names the cached block
+            // at that height. Marshal stores the ancestor and the parent that extends it.
+            let genesis = TestBlock::new(0, 0);
+            let cached = TestBlock::child(&genesis, 1);
+            let ancestor = TestBlock::child(&cached, 2).with_height(1);
+            let parent = TestBlock::child(&ancestor, 3).with_view(3);
+            let block = TestBlock::child(&parent, 4).with_view(4);
+            let app = ReplayGatedApp::new(Height::zero(), []);
+            let stored = [&ancestor, &parent];
+            let harness = HeldRead::with_app(&context, "off-state-recovery", app, &stored).await;
+
+            // The cached block is processed through its own verification.
+            let history = History::anchored([genesis.digest()]);
+            assert!(
+                harness
+                    .verification(context.child("verify_cached"), &cached, &genesis, history)
+                    .await
+            );
+
+            // Recovery starts above genesis and reads the ancestor through the walk. The walk
+            // takes the cached block's digest as the one selected below the ancestor.
+            let history = History::suffix([parent.digest()]);
+            assert!(
+                !harness
+                    .verification(context.child("verify"), &block, &parent, history)
+                    .await
+            );
+
+            // Only the cached block was processed.
+            assert_eq!(harness.process_calls.at(cached.height()), 1);
+            assert_eq!(harness.process_calls.at(parent.height()), 0);
+            assert_eq!(harness.process_calls.at(block.height()), 0);
+            harness.stop().await;
+        });
+    }
+
+    /// A walk below a suffix reads each body at the height its position gives it. A body that
+    /// declares another height makes the selected history invalid, so a verification whose
+    /// search for a cached ancestor reaches that body is rejected.
+    #[test]
+    fn off_height_history_rejects_the_cached_state_search() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            // The parent declares a height two above the block it names. Marshal stores both.
+            let genesis = TestBlock::new(0, 0);
+            let first = TestBlock::child(&genesis, 1);
+            let named = TestBlock::child(&genesis, 2).with_view(2);
+            let parent = TestBlock::child(&named, 3).with_view(3).with_height(3);
+            let block = TestBlock::child(&parent, 4);
+            let app = ReplayGatedApp::new(Height::zero(), []);
+            let stored = [&named, &parent];
+            let harness = HeldRead::with_app(&context, "off-height-search", app, &stored).await;
+
+            // One cached state makes recovery search the branch for the nearest cached ancestor.
+            let history = History::anchored([genesis.digest()]);
+            assert!(
+                harness
+                    .verification(context.child("verify_first"), &first, &genesis, history)
+                    .await
+            );
+
+            // The search needs the digest two heights below the parent. The walk toward it
+            // reads the named block one height below the parent, where it does not sit.
+            let history = History::suffix([parent.digest()]);
+            assert!(
+                !harness
+                    .verification(context.child("verify"), &block, &parent, history)
+                    .await
+            );
+
+            // Only the cached block was processed.
+            assert_eq!(harness.process_calls.at(first.height()), 1);
+            assert_eq!(harness.process_calls.at(parent.height()), 0);
+            assert_eq!(harness.process_calls.at(block.height()), 0);
             harness.stop().await;
         });
     }
