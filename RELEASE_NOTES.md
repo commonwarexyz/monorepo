@@ -1,5 +1,113 @@
 # Release Notes
 
+## v2026.10.1
+
+### Marshal
+
+The coding marshal's `shards::Mailbox` drops its public-key type parameter, so
+name it `Mailbox<B, C, H>`, including in `MarshaledConfig::shards` ([#5681]).
+`Mailbox::gather(commitment, round)` replaces `discovered` and `notarized`, and
+`proposed` is renamed `disperse` ([#5681]). When certification is the first to
+report a commitment to the shard engine, the shard the leader sent this
+validator can now be checked, counted toward rebuilding the block, and relayed
+without learning the leader ([#5681]). v2026.10.0 held that shard until `verify`
+or the recovered block named the leader ([#5681]). The engine also no longer
+needs the leader to block the sender of a shard whose index is neither the
+sender's nor its own ([#5681]). A node outside the participant set no longer
+receives a successful `subscribe_assigned_shard_verified` notification, so do
+not wait on it there ([#5681]). v2026.10.0 could send this notification after
+verifying the known leader's own shard ([#5681]). Vote, certificate, and shard
+encodings are unchanged ([#5681]).
+
+`Deferred` and coding `Marshaled` stop verifying a block once certification is
+requested for a different block of its round ([#5682]). That cancels a
+verification that is running or still waiting for its block or parent, which
+v2026.10.0 let proceed after certification of the other block had begun
+([#5682]). The `Application::verify` docs now state that several calls can be
+outstanding for one round when its leader equivocates, and that an
+implementation must give each its own verdict without cancelling or replacing
+an earlier one ([#5682]).
+
+When the `view_retention` window extends before the epoch of the previously
+witnessed finalization round, marshal now counts each missing view as one block
+height below that epoch and keeps the epoch containing the lowest such height
+whole ([#5646]). In v2026.10.0, marshal kept one whole earlier epoch for each
+missing view, leaving up to `view_retention` earlier epochs open, each with its
+own archives and metric series ([#5646]). Where the `epocher` cannot place
+those heights, each earlier epoch still counts for one view ([#5646]). The first
+prune after upgrading destroys the caches of earlier epochs that the window no
+longer covers ([#5646]).
+
+### Simplex
+
+Once Simplex has requested `certify` for a view, it does not request `verify`
+for that view until a restart ([#5681]). v2026.10.0 could still request it once
+the proposal became verifiable, which could run the application's verification
+twice through marshal's `Deferred` ([#5681]). A validator whose `certify`
+request comes first therefore no longer casts a late notarize vote for that
+view or nullifies it early on a `false` verification verdict, and it can still
+vote to finalize if certification succeeds before the view is nullified
+([#5681]). The voter also drops the receiver of a pending `verify` when a
+certificate for a conflicting proposal of the same view arrives, where
+v2026.10.0 kept that request until it completed or the view ended and discarded
+any stale verdict ([#5681]).
+
+The `Automaton::verify` docs now state that consensus may drop its receiver
+before a verdict arrives ([#5681]). The `CertifiableAutomaton::certify` docs
+clarify that a round can carry conflicting payloads, so state must be keyed by
+`(round, payload)` and not by either alone, and that certification can be
+requested for a payload this participant was never asked to verify ([#5681]).
+
+### Resolver
+
+The p2p resolver now tries pending requests in queue order when their
+deadlines match, with fresh requests still ahead of retries ([#5698]).
+v2026.10.0 broke such ties by key order, so marshal requests for blocks by
+commitment queued at the same instant behind a rate-limited peer could be
+tried in digest order ([#5698]).
+
+### Crash Recovery
+
+Opening a paged blob for writing, as journals and the stores built on them do
+at startup, now clears a checksum slot that a torn write left on its partial
+last page ([#5660]). A torn shrink or append could leave part of a checksum in
+that slot, and a second torn write to the page after a restart could complete
+it, revalidating bytes that the shrink or the earlier recovery had discarded
+([#5660]). `paged::Recovery::open` durably zeroes such a slot before opening
+completes, including on pages written by earlier releases, and the page format
+is unchanged ([#5660]).
+
+### Memory and Metrics
+
+Commonware's `futures` and `futures-util` dependencies now require at least
+0.3.34, including in downstream builds ([#5583]). Version 0.3.32 has a
+`FuturesUnordered::into_iter` leak that can retain task allocations when
+`glue::stateful` verification resumes after a finalization or prune ([#5583]).
+
+The resolver's `peer_performance` gauge drops a peer's series when the peer
+leaves the tracked set ([#5528]). The DKG reshare actor drops the `latest_share`
+series of peers outside an epoch's dealers and the `latest_ack` series of peers
+outside its players when it prepares that epoch, and a peer that keeps its role
+keeps its value ([#5528]).
+
+### Cryptography
+
+The `lthash` docs replace the estimate of at least 200 bits of security with a
+published collision attack on its 1024 16-bit state elements, which puts
+collision resistance far below 128 bits ([#5590]). The attack needs colliding
+sets of at least 2^72 elements combined, so it does not apply while an adversary
+cannot get that many elements of its choosing into the sets being compared
+([#5590]). The hash function is unchanged ([#5590]).
+
+[#5528]: https://github.com/commonwarexyz/monorepo/pull/5528
+[#5583]: https://github.com/commonwarexyz/monorepo/pull/5583
+[#5590]: https://github.com/commonwarexyz/monorepo/pull/5590
+[#5646]: https://github.com/commonwarexyz/monorepo/pull/5646
+[#5660]: https://github.com/commonwarexyz/monorepo/pull/5660
+[#5681]: https://github.com/commonwarexyz/monorepo/pull/5681
+[#5682]: https://github.com/commonwarexyz/monorepo/pull/5682
+[#5698]: https://github.com/commonwarexyz/monorepo/pull/5698
+
 ## v2026.10.0
 
 <details>
