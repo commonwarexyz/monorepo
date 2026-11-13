@@ -49,7 +49,8 @@
 //! ```
 
 use crate::{
-    merkle::{Family, Location, full::Config as MerkleConfig},
+    journal::authenticated::Config as MerkleConfig,
+    merkle::{Family, Location},
     qmdb::{single_operation_root, value::ValueEncoding},
 };
 use commonware_codec::EncodeShared;

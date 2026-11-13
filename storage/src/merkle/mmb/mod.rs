@@ -243,10 +243,6 @@ impl merkle::Family for Family {
             .expect("height excessively large");
         half.checked_mul(3).expect("height excessively large") - 1
     }
-}
-
-impl Graftable for Family {
-    type PendingChunk<D: Digest> = Option<D>;
 
     fn leftmost_leaf(pos: Position, height: u32) -> Location {
         if height == 0 {
@@ -283,6 +279,10 @@ impl Graftable for Family {
         let birth_pos = Self::location_to_position(birth_leaf);
         birth_pos.checked_add(1).expect("position overflow")
     }
+}
+
+impl Graftable for Family {
+    type PendingChunk<D: Digest> = Option<D>;
 
     fn chunk_peaks(
         size: Position,

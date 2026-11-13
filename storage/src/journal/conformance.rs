@@ -44,15 +44,13 @@ fn fill_variable_item<const COMPRESSED: bool>(
     }
 }
 
-fn authenticated_merkle_config(prefix: &str) -> crate::merkle::full::Config<Sequential> {
-    crate::merkle::full::Config {
-        journal_partition: format!("{prefix}-merkle-journal"),
-        metadata_partition: format!("{prefix}-merkle-metadata"),
-        items_per_blob: NZU64!(11),
-        write_buffer: WRITE_BUFFER,
+fn authenticated_merkle_config(prefix: &str) -> authenticated::Config<Sequential> {
+    authenticated::Config {
+        partition: format!("{prefix}-merkle-metadata"),
         replay_buffer: REPLAY_BUFFER,
+        replay_concurrency: NZUsize!(2),
         strategy: Sequential,
-        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+        resident_height: Default::default(),
     }
 }
 

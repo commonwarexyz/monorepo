@@ -49,9 +49,10 @@ use tracing::{error, warn};
 /// Ops-tree roots at the grafting height for the graftable bitmap chunks not wholly below the
 /// inactivity floor.
 ///
-/// Merkleization re-grafts a dirty chunk from its retained root, since the ops tree may have
-/// flushed that node from memory. Roots are stored densely from chunk `start`. The ops tree only
-/// appends, so a retained root never changes.
+/// Merkleization re-grafts a dirty chunk from its retained root without reading the ops tree,
+/// which holds that node in memory only if its resident height is at most the grafting height.
+/// Roots are stored densely from chunk `start`. The ops tree only appends, so a retained root
+/// never changes.
 pub(super) struct GraftRoots<D> {
     start: usize,
     roots: VecDeque<D>,
@@ -109,7 +110,7 @@ impl<D: Copy> GraftRoots<D> {
         self.roots.extend(chunks.map(|chunk| {
             ops_tree
                 .get_node(graft_root_position::<F, N>(chunk))
-                .expect("newly graftable root must be in the in-memory ops tree")
+                .expect("newly graftable root must be available")
         }));
     }
 
@@ -239,7 +240,7 @@ pub struct Db<
     /// otherwise, so a snapshot never observes later mutations.
     pub(super) grafted_tree: Arc<Mem<F, H::Digest>>,
 
-    /// Ops-tree roots at the grafting height, kept in memory across journal flushes.
+    /// Ops-tree roots at the grafting height, held whatever the ops tree's resident height.
     pub(super) graft_roots: GraftRoots<H::Digest>,
 
     /// Persists:
@@ -332,8 +333,7 @@ where
 
     /// Return the retained operation range `[start, end)`.
     ///
-    /// Proof generation also requires the necessary Merkle nodes to be retained. Proofs against
-    /// [`Self::root`] also require the operations' bitmap chunks to be retained.
+    /// Proofs against [`Self::root`] also require the operations' bitmap chunks to be retained.
     pub fn bounds(&self) -> std::ops::Range<Location<F>> {
         self.any.bounds()
     }
@@ -356,7 +356,7 @@ where
         grafting::Storage::<F, H, _, _>::new(
             &self.grafted_tree,
             grafting::height::<N>(),
-            &self.any.log.merkle,
+            &self.any.log,
         )
     }
 
@@ -765,10 +765,10 @@ where
         self.any = self.any.apply_batch(Arc::clone(&batch.inner)).await?;
 
         // Retain the roots of chunks that became graftable in the operations just applied, then
-        // release the roots of chunks wholly below the new inactivity floor. The any layer applies
-        // without flushing, so its in-memory ops tree still holds every newly graftable root.
+        // release the roots of chunks wholly below the new inactivity floor. The batch retains
+        // these nodes independently of the ops tree's resident height.
         self.graft_roots
-            .extend_to::<F, N>(*batch.grafted.leaves() as usize, self.any.log.merkle.mem());
+            .extend_to::<F, N>(*batch.grafted.leaves() as usize, &batch.inner.journal_batch);
         self.graft_roots
             .release_below_floor::<N>(self.any.inactivity_floor_loc);
         Arc::make_mut(&mut self.grafted_tree).apply_batch(&batch.grafted)?;
@@ -1085,7 +1085,7 @@ pub(super) async fn compute_grafted_root<
 ///
 /// Callers must pass only **graftable** chunks (those whose h=G ancestor has already been born in
 /// the ops tree). Each graftable chunk has exactly one covering ops node at height G, looked up via
-/// [`merkle::Graftable::subtree_root_position`]. Chunk indices must be strictly increasing.
+/// [`merkle::Family::subtree_root_position`]. Chunk indices must be strictly increasing.
 pub(super) async fn read_graft_inputs<F: merkle::Graftable, D: Digest, const N: usize>(
     ops_tree: &impl MerkleStorage<F, Digest = D>,
     chunks: impl IntoIterator<Item = (usize, [u8; N])>,
@@ -1259,18 +1259,23 @@ mod tests {
                 tests::{fixed_config, variable_config},
                 unordered::{fixed, variable},
             },
+            floor::Hold,
         },
-        translator::OneCap,
+        translator::{OneCap, TwoCap},
     };
-    use commonware_codec::FixedSize;
+    use bytes::BufMut;
+    use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, ReadExt, Write};
     use commonware_cryptography::{Sha256, sha256};
     use commonware_macros::test_traced;
+    use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         Error as RuntimeError, Runner as _, Storage as _, Supervisor as _, deterministic,
         mocks::{MutationFaultContext, MutationFaults},
     };
-    use commonware_utils::{NZU64, bitmap::Prunable as PrunableBitMap};
+    use commonware_utils::{Array, NZU64, Span, bitmap::Prunable as PrunableBitMap};
+    use core::{fmt, ops::Deref};
+    use rand::CryptoRng;
     use std::future::Future;
 
     const N: usize = sha256::Digest::SIZE;
@@ -1743,7 +1748,12 @@ mod tests {
                 let pos = graft_root_position::<F, 32>(chunk);
                 assert_eq!(
                     db.graft_roots.get(chunk),
-                    db.any.log.merkle.get_node(pos).await.unwrap()
+                    db.any
+                        .log
+                        .merkle
+                        .get_node(&db.any.log.journal, &db.any.log.hasher, pos)
+                        .await
+                        .unwrap()
                 );
             }
         }
@@ -2124,6 +2134,207 @@ mod tests {
         });
     }
 
+    /// A 16-byte digest. Bitmap chunks must be a multiple of the digest size, so this digest
+    /// admits 16-byte chunks. Their graft height of 7 lies below the maximum resident height of 8.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+    struct D16([u8; 16]);
+    impl fmt::Display for D16 {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "{:02x?}", self.0)
+        }
+    }
+    impl AsRef<[u8]> for D16 {
+        fn as_ref(&self) -> &[u8] {
+            &self.0
+        }
+    }
+    impl Deref for D16 {
+        type Target = [u8];
+        fn deref(&self) -> &[u8] {
+            &self.0
+        }
+    }
+    impl Write for D16 {
+        fn write(&self, buf: &mut impl BufMut) {
+            self.0.write(buf);
+        }
+    }
+    impl Read for D16 {
+        type Cfg = ();
+        fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+            Ok(Self(<[u8; 16]>::read(buf)?))
+        }
+    }
+    impl FixedSize for D16 {
+        const SIZE: usize = 16;
+    }
+    impl Span for D16 {}
+    impl Array for D16 {}
+    impl commonware_cryptography::Digest for D16 {
+        const EMPTY: Self = Self([0; 16]);
+    }
+    impl Random for D16 {
+        fn random(mut rng: impl CryptoRng) -> Self {
+            let mut out = [0; 16];
+            rng.fill_bytes(&mut out);
+            Self(out)
+        }
+    }
+
+    /// SHA-256 truncated to a `D16` digest.
+    #[derive(Default)]
+    struct Sha256128(Sha256);
+    fn truncate(digest: sha256::Digest) -> D16 {
+        D16(digest.0[..16].try_into().unwrap())
+    }
+    impl Hasher for Sha256128 {
+        type Digest = D16;
+        fn hash(parts: &[&[u8]]) -> D16 {
+            truncate(Sha256::hash(parts))
+        }
+        fn hash_pair(left: &[&[u8]], right: &[&[u8]], _: &impl Strategy) -> (D16, D16) {
+            (Self::hash(left), Self::hash(right))
+        }
+        fn update(&mut self, bytes: &[u8]) -> &mut Self {
+            self.0.update(bytes);
+            self
+        }
+        fn finalize(self) -> (Self, D16) {
+            let (reset, digest) = self.0.finalize();
+            (Self(reset), truncate(digest))
+        }
+    }
+
+    /// Apply `writes` keys under the given ops-tree `resident_height` and return the root. With
+    /// `descendant`, the applied batch is a child whose parent holds the writes and is dropped
+    /// first. The applied and reopened roots must match the merkleized root.
+    async fn run<F: crate::merkle::Graftable>(
+        context: deterministic::Context,
+        resident_height: u32,
+        writes: u16,
+        descendant: bool,
+    ) -> D16 {
+        type TestDb<F> = fixed::Db<
+            F,
+            deterministic::Context,
+            sha256::Digest,
+            sha256::Digest,
+            Sha256128,
+            TwoCap,
+            16,
+            Sequential,
+        >;
+
+        // Open a database whose ops tree caches nodes at or above `resident_height`. At height 8
+        // the resident cache excludes the height-7 graft roots.
+        let mut cfg = fixed_config::<TwoCap>("graft-height");
+        cfg.merkle.resident_height =
+            crate::journal::authenticated::ResidentHeight::new(resident_height).unwrap();
+        let db = TestDb::<F>::init(context.child("initial"), cfg.clone(), None)
+            .await
+            .unwrap();
+
+        // Write enough keys that applying the batch completes bitmap chunks and must record their
+        // graft roots.
+        let mut batch = db.new_batch();
+        for i in 0..writes {
+            let key = Sha256::hash(&[&i.to_be_bytes()]);
+            batch = batch.write(key, Some(key));
+        }
+        let parent = batch.merkleize_with(&db, &mut Hold).await.unwrap();
+
+        // A child applied after its parent is dropped must still supply the graft roots for
+        // chunks the parent completed.
+        let batch = if descendant {
+            let child = parent
+                .new_batch::<Sha256128>()
+                .write(Sha256::hash(&[b"child"]), Some(Sha256::hash(&[b"value"])))
+                .merkleize_with(&db, &mut Hold)
+                .await
+                .unwrap();
+            drop(parent);
+            child
+        } else {
+            parent
+        };
+
+        // The applied root matches the merkleized root, and each numbered key is readable.
+        db.validate_batch(&batch).unwrap();
+        let expected = batch.root();
+        let db = db.apply_batch(batch).await.unwrap();
+        assert_eq!(db.root(), expected);
+        for i in 0..writes {
+            let key = Sha256::hash(&[&i.to_be_bytes()]);
+            assert_eq!(db.get(&key).await.unwrap(), Some(key));
+        }
+
+        // A committed database reopens with the same root.
+        let db = db.commit().await.unwrap();
+        drop(db);
+        let db = TestDb::<F>::init(context.child("reopen"), cfg, None)
+            .await
+            .unwrap();
+        assert_eq!(db.root(), expected);
+        db.destroy().await.unwrap();
+        expected
+    }
+
+    #[test]
+    fn test_graft_roots_below_resident_height_mmr() {
+        deterministic::Runner::default().start(|context| async move {
+            // Resident height 7 caches the height-7 graft roots and height 8 excludes them. Both
+            // must produce the same root.
+            let expected = run::<mmr::Family>(context.child("control"), 7, 254, false).await;
+            assert_eq!(
+                run::<mmr::Family>(context.child("candidate"), 8, 254, false).await,
+                expected
+            );
+        });
+    }
+
+    #[test]
+    fn test_graft_roots_below_resident_height_mmb() {
+        deterministic::Runner::default().start(|context| async move {
+            // Resident height 7 caches the height-7 graft roots and height 8 excludes them. Both
+            // must produce the same root.
+            let expected =
+                run::<crate::merkle::mmb::Family>(context.child("control"), 7, 381, false).await;
+            assert_eq!(
+                run::<crate::merkle::mmb::Family>(context.child("candidate"), 8, 381, false).await,
+                expected
+            );
+        });
+    }
+
+    #[test]
+    fn test_graft_roots_with_dropped_ancestor_mmr() {
+        deterministic::Runner::default().start(|context| async move {
+            // Resident height 8 excludes the height-7 graft roots from the resident cache, so a
+            // child applied after its parent is dropped must carry them. Both heights must produce
+            // the same root.
+            let expected = run::<mmr::Family>(context.child("control"), 7, 254, true).await;
+            assert_eq!(
+                run::<mmr::Family>(context.child("candidate"), 8, 254, true).await,
+                expected
+            );
+        });
+    }
+
+    #[test]
+    fn test_graft_roots_with_dropped_ancestor_mmb() {
+        deterministic::Runner::default().start(|context| async move {
+            // Resident height 8 excludes the height-7 graft roots from the resident cache, so a
+            // child applied after its parent is dropped must carry them. Both heights must produce
+            // the same root.
+            let expected =
+                run::<crate::merkle::mmb::Family>(context.child("control"), 7, 381, true).await;
+            assert_eq!(
+                run::<crate::merkle::mmb::Family>(context.child("candidate"), 8, 381, true).await,
+                expected
+            );
+        });
+    }
+
     /// The context a database under an interrupted destroy runs on. It can stop the destroy
     /// before any mutation.
     type FaultedContext = MutationFaultContext<deterministic::Context>;
@@ -2153,8 +2364,8 @@ mod tests {
     type FixedDbConfig = Config<OneCap, FConfig, Sequential>;
     type VariableDbConfig = Config<OneCap, VConfig<((), ())>, Sequential>;
 
-    /// Partitions of the operations log, then of the Merkle structure. Destroy removes them in
-    /// that order before the grafted metadata.
+    /// Partitions of the operations log, then of the frontier. Destroy removes them in that order
+    /// before the grafted metadata.
     type Stages = [Vec<String>; 2];
 
     /// Where an interrupted destroy stopped, in the order destroy reaches each outcome.
@@ -2165,11 +2376,11 @@ mod tests {
         Unchanged,
         /// Destroy stopped while removing the log, and the database reopens new.
         InLog,
-        /// Destroy stopped after removing the log, while removing the Merkle structure, and the
-        /// database reopens new.
-        InMerkle,
-        /// Destroy stopped after removing the log and the Merkle structure, while removing the
-        /// grafted metadata, and the database reopens new.
+        /// Destroy stopped after removing the log, while removing the frontier, and the database
+        /// reopens new.
+        InFrontier,
+        /// Destroy stopped after removing the log and the frontier, while removing the grafted
+        /// metadata, and the database reopens new.
         InGraftedMetadata,
         /// Destroy completed.
         Completed,
@@ -2213,7 +2424,7 @@ mod tests {
                 let fresh = (db.bounds(), db.root());
 
                 // Commit twice and prune to the sync boundary, so the grafted metadata records
-                // pruned chunks above a pruned log and Merkle structure.
+                // pruned chunks above a pruned log and frontier.
                 let db = populate_fixed_db::<F, _>(db, 0, 384).await;
                 let db = populate_fixed_db::<F, _>(db, 0, 384).await;
                 let boundary = db.sync_boundary();
@@ -2259,7 +2470,7 @@ mod tests {
                         panic!("{scenario}: must not reopen at its last commit without its log")
                     }
                     (false, 0) => Interrupted::InLog,
-                    (false, 1) => Interrupted::InMerkle,
+                    (false, 1) => Interrupted::InFrontier,
                     (false, _) => Interrupted::InGraftedMetadata,
                 };
                 assert!(
@@ -2301,7 +2512,7 @@ mod tests {
         for outcome in [
             Interrupted::Unchanged,
             Interrupted::InLog,
-            Interrupted::InMerkle,
+            Interrupted::InFrontier,
             Interrupted::InGraftedMetadata,
             Interrupted::Completed,
         ] {
@@ -2311,28 +2522,21 @@ mod tests {
             );
         }
 
-        // Destroy stages the log's clear, then removes every partition of the log and of the
-        // Merkle structure and the partition of the grafted metadata, so it can stop at least
-        // once before each.
+        // Destroy stages the log's clear, then removes every partition of the log, the frontier
+        // and the grafted metadata, so it can stop at least once before each.
         let partitions: u64 = stages.iter().map(|stage| stage.len() as u64).sum();
         assert!(interrupted >= partitions + 2, "{interrupted}");
     }
 
-    /// Partitions of the Merkle structure configured by `cfg`.
+    /// Partitions of the frontier configured by `cfg`.
     fn merkle_partitions(cfg: &MerkleConfig<Sequential>) -> Vec<String> {
-        let journal = &cfg.journal_partition;
-        vec![
-            cfg.metadata_partition.clone(),
-            format!("{journal}-blobs"),
-            format!("{journal}-metadata"),
-        ]
+        vec![cfg.partition.clone()]
     }
 
-    /// A configuration of a database over a fixed log, and the partitions of its log and Merkle
-    /// structure. Its journals keep few blobs once pruned, so destroy has few places to stop.
+    /// A configuration of a database over a fixed log, and the partitions of its log and
+    /// frontier. Its log keeps few blobs once pruned, so destroy has few places to stop.
     fn fixed_destroy_config() -> (FixedDbConfig, Stages) {
         let mut cfg = fixed_config::<OneCap>("interrupted-destroy");
-        cfg.merkle.items_per_blob = NZU64!(512);
         cfg.log.items_per_blob = NZU64!(512);
         let log = &cfg.log.partition;
         let stages = [
@@ -2343,11 +2547,9 @@ mod tests {
     }
 
     /// A configuration of a database over a variable log, and the partitions of its log and
-    /// Merkle structure. Its journals keep few blobs once pruned, so destroy has few places to
-    /// stop.
+    /// frontier. Its log keeps few blobs once pruned, so destroy has few places to stop.
     fn variable_destroy_config() -> (VariableDbConfig, Stages) {
         let mut cfg = variable_config::<OneCap>("interrupted-destroy");
-        cfg.merkle.items_per_blob = NZU64!(512);
         cfg.log.items_per_section = NZU64!(512);
         let log = &cfg.log.partition;
         let stages = [

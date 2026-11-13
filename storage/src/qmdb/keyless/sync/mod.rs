@@ -1,10 +1,7 @@
 use crate::{
     Context,
     journal::{authenticated, contiguous::Mutable},
-    merkle::{
-        Family, Location,
-        full::{self, Merkle},
-    },
+    merkle::{Family, Location},
     qmdb::{
         self,
         keyless::{Db, Operation, operation::OperationCodec},
@@ -38,19 +35,19 @@ where
 
     /// Returns a [Db] initialized from data collected in the sync process.
     ///
-    /// # Behavior
-    ///
-    /// This method handles different initialization scenarios based on existing data:
-    /// - If the Merkle journal is empty or the last item is before the range start, it creates
-    ///   a fresh Merkle structure from the provided `pinned_nodes`
-    /// - If the Merkle journal has data but is incomplete (has length < range end), missing
-    ///   operations from the log are applied to bring it up to the target state
-    /// - If the Merkle journal has data beyond the range end, initialization truncates it to the
-    ///   sync target
+    /// The range start becomes the pruning boundary, with `pinned_nodes` as its pinned digests,
+    /// and the Merkle digests are rebuilt by replaying the log from there.
     ///
     /// # Returns
     ///
     /// A [Db] populated with the state from the given range.
+    async fn mark_sync_incomplete(
+        context: Self::Context,
+        config: &Self::Config,
+    ) -> Result<(), qmdb::Error<F>> {
+        Ok(authenticated::mark_sync_incomplete::<F, _, H, S>(context, &config.merkle).await?)
+    }
+
     async fn from_sync_result(
         context: Self::Context,
         config: Self::Config,
@@ -61,20 +58,13 @@ where
     ) -> Result<Self, qmdb::Error<F>> {
         let hasher = qmdb::hasher::<H>();
 
-        let merkle = Merkle::<F, _, _, S>::init_sync(
-            context.child("merkle"),
-            full::SyncConfig {
-                config: config.merkle.clone(),
-                range: range.clone(),
-                pinned_nodes,
-            },
-        )
-        .await?;
-
         let journal = authenticated::Journal::<F, _, _, _, S>::from_components(
-            merkle,
+            context.child("merkle"),
+            &config.merkle,
             log,
             hasher,
+            range.start(),
+            pinned_nodes.unwrap_or_default(),
             apply_batch_size,
         )
         .await?;
@@ -99,7 +89,8 @@ where
         db.sync().await
     }
 
-    async fn persist_sync_result(self) -> Result<Self, qmdb::Error<F>> {
+    async fn persist_sync_result(mut self) -> Result<Self, qmdb::Error<F>> {
+        self.journal = self.journal.persist_boundary().await?;
         Ok(self)
     }
 
@@ -107,7 +98,7 @@ where
         context: Self::Context,
         config: &Self::Config,
     ) -> Result<(), qmdb::Error<F>> {
-        sync::discard_local_state::<F, _, H, S>(context, config.merkle.clone()).await
+        Ok(authenticated::discard_frontier::<F, _, H, S>(context, &config.merkle).await?)
     }
 
     async fn local_pinned_nodes(
@@ -122,18 +113,8 @@ where
             return Ok(None);
         }
 
-        // The inactivity floor is carried by the last commit operation rather than being
-        // the target range's start.
-        let inactivity_floor =
-            qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end()).await?;
-
-        sync::local_pinned_nodes::<F, _, H, S>(
-            context,
-            config.merkle.clone(),
-            target,
-            inactivity_floor,
-        )
-        .await
+        sync::local_pinned_nodes::<F, _, H, S>(context, config.merkle.clone(), target, journal)
+            .await
     }
 
     fn ops_root(&self) -> Self::Digest {

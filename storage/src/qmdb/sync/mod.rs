@@ -30,9 +30,7 @@ pub use metrics::Metrics;
 
 mod database;
 pub use database::Database;
-pub(crate) use database::{
-    Config as DatabaseConfig, discard_local_state, journal_covers_range, local_pinned_nodes,
-};
+pub(crate) use database::{Config as DatabaseConfig, journal_covers_range, local_pinned_nodes};
 
 pub mod source;
 pub use source::{Feedback, Request, Response, ResponseOf, Source, max_response_size};
@@ -56,6 +54,9 @@ where
 }
 
 /// Create or open a database and sync it to the target in `config`.
+///
+/// A sync that fails or is interrupted after appending operations leaves a database whose `init`
+/// returns [`crate::qmdb::Error::IncompleteSync`] until a sync completes.
 #[boxed]
 pub async fn sync<DB, S>(
     config: Config<DB, S>,

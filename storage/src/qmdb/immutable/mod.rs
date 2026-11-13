@@ -77,7 +77,8 @@
 //! ```
 
 use crate::{
-    merkle::{Family, Location, full::Config as MerkleConfig},
+    journal::authenticated::Config as MerkleConfig,
+    merkle::{Family, Location},
     qmdb::{operation::Key, single_operation_root, value::ValueEncoding},
     translator::Translator,
 };
@@ -1198,7 +1199,7 @@ pub(super) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn run_recovery_from_failed_merkle_sync<F: Family, V, C>(
+    pub(crate) async fn run_recovery_from_unsynced_commit<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,

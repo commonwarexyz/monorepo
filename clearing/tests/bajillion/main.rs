@@ -31,8 +31,7 @@ use commonware_cryptography::{
 use commonware_parallel::Sequential;
 use commonware_runtime::{Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
-    journal::contiguous::fixed::Config as JournalConfig,
-    merkle::full::Config as MerkleConfig,
+    journal::{authenticated::Config as MerkleConfig, contiguous::fixed::Config as JournalConfig},
     qmdb::{current::unordered::fixed, keyless},
     translator::EightCap,
 };
@@ -257,13 +256,11 @@ fn config_for<O: commonware_cryptography::PublicKey>(
 ) -> Config<O, EightCap, Sequential> {
     let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(8));
     let merkle = |name: String| MerkleConfig {
-        journal_partition: format!("{name}-merkle-journal"),
-        metadata_partition: format!("{name}-merkle-metadata"),
-        items_per_blob: NZU64!(16),
-        write_buffer: NZUsize!(1024),
+        partition: format!("{name}-merkle-metadata"),
         replay_buffer: NZUsize!(1024),
+        replay_concurrency: NZUsize!(2),
         strategy: Sequential,
-        page_cache: page_cache.clone(),
+        resident_height: Default::default(),
     };
     let log = |name: String| JournalConfig {
         partition: format!("{name}-log"),

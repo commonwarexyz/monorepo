@@ -3,13 +3,17 @@ use crate::stateful::db::{DatabaseSet, Merkleized as StatefulMerkleized, Shared}
 use bytes::BufMut;
 use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, ReadExt as _, U256, Write};
 use commonware_cryptography::{Sha256, sha256::Digest};
+use commonware_macros::boxed;
 use commonware_parallel::{Sequential, mocks::explore};
 use commonware_runtime::{Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
-    journal::contiguous::{
-        fixed::Config as FixedJournalConfig, variable::Config as VariableJournalConfig,
+    journal::{
+        authenticated::Config as MerkleConfig,
+        contiguous::{
+            fixed::Config as FixedJournalConfig, variable::Config as VariableJournalConfig,
+        },
     },
-    merkle::{full::Config as MerkleConfig, mmr},
+    merkle::mmr,
     qmdb::{
         any::{
             self,
@@ -746,13 +750,11 @@ fn any_config(suffix: &str) -> any::Config<TwoCap, FixedJournalConfig, Sequentia
     let page_cache = CacheRef::new(NZU16!(101), NZUsize!(11));
     any::Config {
         merkle: MerkleConfig {
-            journal_partition: format!("transfers-journal-{suffix}"),
-            metadata_partition: format!("transfers-metadata-{suffix}"),
-            items_per_blob: NZU64!(11),
-            write_buffer: NZUsize!(1024),
+            partition: format!("transfers-metadata-{suffix}"),
+            resident_height: Default::default(),
             replay_buffer: NZUsize!(1024),
+            replay_concurrency: NZUsize!(2),
             strategy: Sequential,
-            page_cache: page_cache.clone(),
         },
         log: FixedJournalConfig {
             partition: format!("transfers-log-{suffix}"),
@@ -2118,6 +2120,7 @@ impl_stateful_db!(AnyUnordered: Balance, NoncedCurrent: Nonced);
 ///
 /// The candidates arrive in four rounds: `first`, a replay of `first` that touches only known
 /// keys, an empty round, and `last`.
+#[boxed]
 async fn stateful_select_matches_execute<D, S, T>(
     dbs: [D; 3],
     setup: &[S],

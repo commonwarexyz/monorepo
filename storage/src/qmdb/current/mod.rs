@@ -53,11 +53,11 @@
 //!   authenticated structure (see below).
 //!
 //! - **Graft roots**: The ops-tree root at the grafting height of each graftable bitmap chunk not
-//!   wholly below the inactivity floor, held in memory by chunk index. They survive journal
-//!   flushes, so merkleization recomputes a dirty chunk's grafted leaf without reading the ops
-//!   tree from storage. Startup and state sync rebuild them with the grafted tree, and a root is
-//!   released once the inactivity floor passes its chunk. With 32-byte chunks and 32-byte digests,
-//!   that is 32 bytes per 256 operations.
+//!   wholly below the inactivity floor, held in memory by chunk index whatever the ops tree's
+//!   resident height, so merkleization recomputes a dirty chunk's grafted leaf without reading the
+//!   ops tree from storage. Startup and state sync rebuild them with the grafted tree, and a root
+//!   is released once the inactivity floor passes its chunk. With 32-byte chunks and 32-byte
+//!   digests, that is 32 bytes per 256 operations.
 //!
 //! - **Bitmap metadata** (`Metadata`): Persists the pruning boundary and "pinned" digests needed to
 //!   restore the grafted tree after pruning old bitmap chunks.
@@ -328,8 +328,8 @@
 use crate::{
     Context,
     index::{Factory as IndexFactory, Ordered as OrderedIndex},
-    journal::authenticated,
-    merkle::{self, Location, full::Config as MerkleConfig},
+    journal::{authenticated, authenticated::Config as MerkleConfig},
+    merkle::{self, Location},
     qmdb::{
         any::{
             self, Config as AnyConfig,
@@ -541,7 +541,7 @@ where
     let (grafted_tree, graft_roots, ops_root_witness) = db::rebuild_grafted_tree::<F, H, S, N>(
         any.bitmap.as_ref(),
         &pinned_nodes,
-        &any.log.merkle,
+        &any.log,
         any.inactivity_floor_loc,
         &strategy,
     )
@@ -676,9 +676,8 @@ pub mod tests {
                     let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
                     for depth in [0u8, 1u8, 2u8] {
-                        // Hold every unapplied ancestor until the child is merkleized.
-                        // Speculative batch Merkle lookups walk weak parent links for in-memory
-                        // ancestor nodes.
+                        // Hold every unapplied ancestor until the child is merkleized, which
+                        // captures their operations and Merkle records.
                         let mut stack = Vec::new();
                         match depth {
                             0 => {}
@@ -878,13 +877,11 @@ pub mod tests {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
             merkle: MerkleConfig {
-                journal_partition: format!("{partition_prefix}-journal-partition"),
-                metadata_partition: format!("{partition_prefix}-metadata-partition"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
+                partition: format!("{partition_prefix}-metadata-partition"),
                 replay_buffer: NZUsize!(1024),
+                replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                resident_height: crate::journal::authenticated::low_resident_height(),
             },
             log: FConfig {
                 partition: format!("{partition_prefix}-partition-prefix"),
@@ -917,13 +914,11 @@ pub mod tests {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
             merkle: MerkleConfig {
-                journal_partition: format!("{partition_prefix}-journal-partition"),
-                metadata_partition: format!("{partition_prefix}-metadata-partition"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
+                partition: format!("{partition_prefix}-metadata-partition"),
                 replay_buffer: NZUsize!(1024),
+                replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                resident_height: crate::journal::authenticated::low_resident_height(),
             },
             log: VConfig {
                 partition: format!("{partition_prefix}-partition-prefix"),
@@ -2034,7 +2029,7 @@ pub mod tests {
                 <mmb::Family as merkle::Family>::location_to_position(end)
             );
 
-            let ops_pos = <mmb::Family as merkle::Graftable>::subtree_root_position(
+            let ops_pos = <mmb::Family as merkle::Family>::subtree_root_position(
                 Location::new(0),
                 grafting_height,
             );
@@ -2084,13 +2079,11 @@ pub mod tests {
             let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = Config {
                 merkle: MerkleConfig {
-                    journal_partition: "forged-exclusion-journal".to_string(),
-                    metadata_partition: "forged-exclusion-metadata".to_string(),
-                    items_per_blob: NZU64!(11),
-                    write_buffer: NZUsize!(1024),
+                    partition: "forged-exclusion-metadata".to_string(),
                     replay_buffer: NZUsize!(1024),
+                    replay_concurrency: NZUsize!(2),
                     strategy: Sequential,
-                    page_cache: page_cache.clone(),
+                    resident_height: Default::default(),
                 },
                 log: VConfig {
                     partition: "forged-exclusion-log".to_string(),
@@ -3103,7 +3096,7 @@ pub mod tests {
             let youngest = pruned_chunks - 1;
             let pair_chunk = youngest & !1;
             let pair_start = pair_chunk << gh;
-            let pair_pos = <mmb::Family as merkle::Graftable>::subtree_root_position(
+            let pair_pos = <mmb::Family as merkle::Family>::subtree_root_position(
                 merkle::Location::<mmb::Family>::new(pair_start),
                 gh + 1,
             );
@@ -3979,6 +3972,75 @@ pub mod tests {
                 ),
                 "unexpected bounded initialization error: {err:?}"
             );
+        });
+    }
+
+    /// Pruning an MMB database to an earlier generation's sync boundary leaves it and each later
+    /// generation initializable at its size with its recorded root and sync boundary.
+    #[test_traced("INFO")]
+    fn test_current_mmb_prune_keeps_retained_checkpoints_initializable() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Write the same keys in six synced generations and record each one's checkpoint.
+            let partition = "current-mmb-prune-retained-checkpoints";
+            let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                context.child("storage"),
+                variable_config::<OneCap>(partition),
+                None,
+            )
+            .await
+            .unwrap();
+            let mut history = Vec::new();
+            for generation in 0..6u64 {
+                let mut batch = db.new_batch();
+                for i in 0..384 {
+                    batch = batch.write(key(i), Some(val(generation * 1_000 + i)));
+                }
+                let merkleized = batch.merkleize(&db).await.unwrap();
+                db = db.apply_batch(merkleized).await.unwrap();
+                db = db.sync().await.unwrap();
+                history.push((
+                    db.bounds().end,
+                    db.inactivity_floor(),
+                    db.sync_boundary(),
+                    db.root(),
+                ));
+            }
+
+            // Prune to the first sync boundary of at least one bitmap chunk that lags its floor's
+            // chunk. Only MMB's delayed merges cause that lag, and this prune moves the bitmap.
+            let oldest = history
+                .iter()
+                .position(|(_, floor, boundary, _)| {
+                    **boundary >= CHUNK_BITS && **boundary < **floor / CHUNK_BITS * CHUNK_BITS
+                })
+                .expect("some generation's sync boundary must lag its floor's chunk");
+            assert!(
+                oldest + 1 < history.len(),
+                "a generation must follow the pruned one"
+            );
+            let prune_loc = history[oldest].2;
+            let db = db.prune(prune_loc).await.unwrap();
+            assert_eq!(db.pruned_bits(), *prune_loc);
+            let db = db.sync().await.unwrap();
+            drop(db);
+
+            // Reopen each retained generation bounded at its size, newest first.
+            let labels = ["gen0", "gen1", "gen2", "gen3", "gen4", "gen5"];
+            for index in (oldest..history.len()).rev() {
+                let (size, _, boundary, root) = history[index];
+                let db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                    context.child(labels[index]),
+                    variable_config::<OneCap>(partition),
+                    Some(size),
+                )
+                .await
+                .unwrap();
+                assert_eq!(db.bounds().end, size);
+                assert_eq!(db.root(), root);
+                assert_eq!(db.sync_boundary(), boundary);
+                assert_eq!(db.pruned_bits(), *prune_loc);
+            }
         });
     }
 

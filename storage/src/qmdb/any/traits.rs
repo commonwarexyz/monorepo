@@ -115,8 +115,6 @@ pub trait DbAny: BatchableDb<Key: Key, Value: CodecShared + Clone> + Send + Sync
     fn root(&self) -> Self::Digest;
 
     /// Return the retained operation range `[start, end)`.
-    ///
-    /// Proof generation also requires the necessary Merkle nodes to be retained.
     fn bounds(&self) -> Range<Location<Self::Family>>;
 
     /// Get the metadata associated with the last commit.

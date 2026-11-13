@@ -121,8 +121,8 @@
 use crate::{
     Context,
     index::{Factory as IndexFactory, Ordered as OrderedIndex},
-    journal::authenticated,
-    merkle::{Family, Location, full::Config as MerkleConfig},
+    journal::{authenticated, authenticated::Config as MerkleConfig},
+    merkle::{Family, Location},
     qmdb::{
         Error as QmdbError,
         any::operation::{
@@ -306,6 +306,57 @@ where
         return Err(QmdbError::HistoricalFloorPruned(Location::new(size)));
     }
 
+    // Build the snapshot while the journal rebuilds its digests.
+    if let Some(floor) = floor {
+        let index = I::new(context.child("index"), cfg.translator);
+        let snapshot_context = context.child("snapshot");
+        let metrics = Metrics::new(context);
+        let (concurrency, buffer, cache) = (cfg.init_concurrency, cfg.init_buffer, cfg.init_cache);
+
+        // A partitioned index built on decode tasks hashes the journal's operations as it decodes
+        // them, so the log is read once. Any other index builds while the journal replays the log
+        // on tasks of its own.
+        let (log, (index, active_keys, activity)) = match index.hashing_plan(concurrency, cache) {
+            Some(plan) => {
+                pending
+                    .finish_hashing(|journal, leaves| async move {
+                        let mut index = index;
+                        let (active_keys, activity) = index
+                            .build_snapshot_hashing(
+                                snapshot_context,
+                                floor,
+                                &journal,
+                                plan,
+                                buffer,
+                                leaves,
+                            )
+                            .await?;
+                        Ok::<_, QmdbError<F>>((index, active_keys, activity))
+                    })
+                    .await?
+            }
+            None => {
+                pending
+                    .finish_with(|journal| async move {
+                        let mut index = index;
+                        let (active_keys, activity) = index
+                            .build_snapshot(
+                                snapshot_context,
+                                floor,
+                                &journal,
+                                concurrency,
+                                buffer,
+                                cache,
+                            )
+                            .await?;
+                        Ok::<_, QmdbError<F>>((index, active_keys, activity))
+                    })
+                    .await?
+            }
+        };
+        return db::Db::from_snapshot(log, index, floor, active_keys, &activity, bitmap, metrics);
+    }
+
     // Publish the selected journal prefix only after its in-memory state is reconstructible.
     let mut log = pending.finish().await?;
 
@@ -357,7 +408,7 @@ pub(crate) mod test {
         NZU16, NZU64, NZUsize, Widen,
         bitmap::{Prunable, Readable as _},
     };
-    use core::{fmt::Debug, future::Future, pin::Pin};
+    use core::{fmt::Debug, future::Future, ops::RangeInclusive, pin::Pin};
     use std::{
         collections::{BTreeMap, BTreeSet, HashMap},
         num::{NonZeroU16, NonZeroUsize},
@@ -405,13 +456,11 @@ pub(crate) mod test {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
             merkle: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
-                metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
+                partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
+                replay_concurrency: NZUsize!(2),
                 strategy,
-                page_cache: page_cache.clone(),
+                resident_height: crate::journal::authenticated::low_resident_height(),
             },
             log: FConfig {
                 partition: format!("log-journal-{suffix}"),
@@ -456,13 +505,11 @@ pub(crate) mod test {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
             merkle: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
-                metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
+                partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
+                replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                resident_height: crate::journal::authenticated::low_resident_height(),
             },
             log: VConfig {
                 partition: format!("log-journal-{suffix}"),
@@ -5818,14 +5865,15 @@ pub(crate) mod test {
             // Decide every eighth update, or write every odd one of the first sixteen updates and
             // decide the eight even ones, which spends every entry before the writes. Every
             // decision follows the same batched reads. Without writes, those reads hold exactly
-            // the eight decided updates.
-            let (stride, batch, deltas): (_, _, &[u64]) = if in_batch {
+            // the eight decided updates. With writes, the read of the written keys may already
+            // cache the decided updates, leaving the policy nothing to read.
+            let (stride, batch, deltas): (_, _, &[RangeInclusive<u64>]) = if in_batch {
                 let batch = (1..16).step_by(2).fold(db.new_batch(), |batch, i| {
                     batch.write(keys[i], Some(make_value(i as u64 + 100)))
                 });
-                (2, batch, &[0, 2])
+                (2, batch, &[0..=0, 1..=2])
             } else {
-                (8, db.new_batch(), &[0, 1, 8])
+                (8, db.new_batch(), &[0..=0, 1..=1, 8..=8])
             };
             let sample = || -> Vec<_> {
                 names[..deltas.len()]
@@ -5833,7 +5881,7 @@ pub(crate) mod test {
                     .map(|name| counter(&context, name))
                     .collect()
             };
-            let after: Vec<_> = sample().iter().zip(deltas).map(|(n, d)| n + d).collect();
+            let before = sample();
             let mut probes = Vec::new();
             let mut policy = Script::new(8, u64::MAX, |_: &Digest| {
                 probes.push(sample());
@@ -5850,8 +5898,11 @@ pub(crate) mod test {
                 .map(|(loc, key, _)| (*loc, *key))
                 .collect();
             assert_eq!(decided, expected, "in_batch={in_batch}");
+            let after = sample();
             assert_eq!(probes, vec![after.clone(); 8], "in_batch={in_batch}");
-            assert_eq!(sample(), after, "in_batch={in_batch}");
+            for ((after, before), delta) in after.iter().zip(&before).zip(deltas) {
+                assert!(delta.contains(&(after - before)), "in_batch={in_batch}");
+            }
 
             // Start the next case from an empty database.
             db.destroy().await.unwrap();
@@ -6082,6 +6133,60 @@ pub(crate) mod test {
             context.sleep(Duration::from_millis(10)).await;
             let metrics = context.encode();
             assert_eq!(running_build_tasks(&metrics), 0, "{metrics}");
+        });
+    }
+
+    /// A snapshot build that hashes the journal's operations runs the journal's replay concurrency
+    /// of decode tasks when that exceeds its share of `init_concurrency`.
+    #[test_traced("INFO")]
+    fn test_hashing_build_decoders_follow_replay_concurrency() {
+        /// The runtime's running-task gauge for snapshot decoders.
+        fn running_decoders(metrics: &str) -> u64 {
+            metrics
+                .lines()
+                .filter(|line| {
+                    line.starts_with("runtime_tasks_running{") && line.contains("snapshot_decoder")
+                })
+                .filter_map(|line| line.rsplit_once(' ')?.1.trim().parse::<u64>().ok())
+                .sum()
+        }
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.child("db");
+
+            // A budget of four gives the index two decoders.
+            let cfg = || {
+                let mut cfg =
+                    fixed_db_config_full::<OneCap, _, _>("decoders", Sequential, NZUsize!(4));
+                cfg.merkle.replay_concurrency = NZUsize!(6);
+                cfg
+            };
+            let db: UnorderedFixedP1 = UnorderedFixedP1::init(ctx.child("storage"), cfg(), None)
+                .await
+                .unwrap();
+            let mut batch = db.new_batch();
+            for i in 0..2_000u64 {
+                batch = batch.write(key(i), Some(key(i)));
+            }
+            let merkleized = batch.merkleize(&db).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
+            let db = db.commit().await.unwrap();
+            let db = db.sync().await.unwrap();
+            drop(db);
+
+            let init = UnorderedFixedP1::init(ctx.child("storage"), cfg(), None);
+            pin_mut!(init);
+            let mut most = 0;
+            let db = loop {
+                if let std::task::Poll::Ready(db) = poll!(&mut init) {
+                    break db.unwrap();
+                }
+                most = most.max(running_decoders(&context.encode()));
+                context.sleep(Duration::from_millis(1)).await;
+            };
+            assert_eq!(most, 6);
+            db.destroy().await.unwrap();
         });
     }
 

@@ -52,7 +52,8 @@
 //!
 //! `commit()` makes applied state durable. `start_sync()` is its pipelined form, which also
 //! tries to advance the recovery watermark to bound startup recovery. `sync()` makes applied state
-//! durable and guarantees no recovery is needed on startup after a crash.
+//! durable and advances the operation journal's recovery watermark. Full databases rebuild their
+//! Merkle digests from retained operations at every startup.
 //!
 //! # Initialization bounds
 //!
@@ -194,7 +195,7 @@ where
 /// Select a QMDB commit before validating variant-specific reconstruction state.
 pub(crate) async fn prepare_initialization<F, E, C, H, S>(
     context: E,
-    merkle: crate::merkle::full::Config<S>,
+    merkle: crate::journal::authenticated::Config<S>,
     journal: C::Config,
     max_size: Option<Location<F>>,
 ) -> Result<crate::journal::authenticated::Recovery<F, E, C, H, S>, Error<F>>
@@ -215,27 +216,6 @@ where
         ROOT_BAGGING,
     )
     .await?)
-}
-
-/// Publish a standard QMDB journal after validating the retained commit.
-#[commonware_macros::boxed]
-pub(crate) async fn init_journal<F, E, C, H, S>(
-    context: E,
-    merkle: crate::merkle::full::Config<S>,
-    journal: C::Config,
-    max_size: Option<Location<F>>,
-    replay_from_floor: bool,
-) -> Result<crate::journal::authenticated::Journal<F, E, C, H, S>, Error<F>>
-where
-    F: Family,
-    E: crate::Context,
-    C: crate::journal::authenticated::Backing<E, Item: Floored<F> + commonware_codec::EncodeShared>,
-    H: Hasher,
-    S: commonware_parallel::Strategy,
-{
-    let pending = prepare_initialization(context, merkle, journal, max_size).await?;
-    validate_initialization(&pending, replay_from_floor).await?;
-    Ok(pending.finish().await?)
 }
 
 /// Merkle peak bagging policy used by QMDB operation roots.
@@ -325,6 +305,11 @@ pub enum Error<F: Family> {
     /// A QMDB initialization bound cannot exclude its initial commit.
     #[error("initialization bound must allow at least one operation")]
     InvalidInitializationBound,
+
+    /// A state sync appended operations to the database and did not finish. The database opens
+    /// once a sync completes.
+    #[error("incomplete state sync")]
+    IncompleteSync,
 
     /// Database state failed a consistency check. The payload names the check.
     #[error("data corrupted: {0}")]
@@ -432,6 +417,7 @@ impl<F: Family> From<crate::journal::authenticated::Error<F>> for Error<F> {
         match e {
             crate::journal::authenticated::Error::Journal(j) => Self::Journal(j),
             crate::journal::authenticated::Error::Merkle(m) => Self::Merkle(m),
+            crate::journal::authenticated::Error::IncompleteSync => Self::IncompleteSync,
         }
     }
 }

@@ -1149,8 +1149,10 @@ mod tests {
         ContextCell, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::{
-        journal::contiguous::fixed::Config as FixedLogConfig,
-        mmr::{self, Location, full::Config as MmrJournalConfig},
+        journal::{
+            authenticated::Config as MerkleConfig, contiguous::fixed::Config as FixedLogConfig,
+        },
+        mmr::{self, Location},
         qmdb::{any, sync::Target},
         translator::TwoCap,
     };
@@ -1891,14 +1893,12 @@ mod tests {
     fn qmdb_config(prefix: &str) -> QmdbConfig {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         QmdbConfig {
-            merkle: MmrJournalConfig {
-                journal_partition: format!("{prefix}_mmr_journal"),
-                metadata_partition: format!("{prefix}_mmr_metadata"),
-                items_per_blob: NZU64!(11),
-                write_buffer: IO_BUFFER_SIZE,
+            merkle: MerkleConfig {
+                partition: format!("{prefix}_mmr_metadata"),
                 replay_buffer: IO_BUFFER_SIZE,
+                replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                resident_height: Default::default(),
             },
             log: FixedLogConfig {
                 partition: format!("{prefix}_log_journal"),

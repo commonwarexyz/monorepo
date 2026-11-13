@@ -17,8 +17,8 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
     index::{Unordered, unordered::Index},
-    journal::contiguous::fixed::Config as JournalConfig,
-    merkle::{Location, full::Config as MerkleConfig, mmb, mmr},
+    journal::{authenticated::Config as MerkleConfig, contiguous::fixed::Config as JournalConfig},
+    merkle::{Location, mmb, mmr},
     qmdb::{current::unordered::fixed, keyless},
     translator::{EightCap, Translator},
 };
@@ -211,13 +211,11 @@ pub(crate) fn queue(epoch: Epoch, deposits: &[(u64, u64)], forced: &[(u64, u64)]
 fn journals(name: &str) -> (MerkleConfig<Sequential>, JournalConfig) {
     let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(8));
     let merkle = MerkleConfig {
-        journal_partition: format!("{name}-merkle-journal"),
-        metadata_partition: format!("{name}-merkle-metadata"),
-        items_per_blob: NZU64!(7),
-        write_buffer: NZUsize!(1024),
+        partition: format!("{name}-merkle-metadata"),
         replay_buffer: NZUsize!(1024),
+        replay_concurrency: NZUsize!(2),
         strategy: Sequential,
-        page_cache: page_cache.clone(),
+        resident_height: Default::default(),
     };
     let log = JournalConfig {
         partition: format!("{name}-log"),

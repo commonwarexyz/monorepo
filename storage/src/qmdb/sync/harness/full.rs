@@ -15,7 +15,6 @@ use crate::{
 };
 use commonware_cryptography::sha256;
 use commonware_macros::boxed;
-use commonware_parallel::Sequential;
 use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
 use commonware_utils::{
     NZU16, NZU64, NZUsize, channel::ring, non_empty_range, probability, sync::AsyncRwLock,
@@ -80,9 +79,6 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
     fn try_destroy(
         db: Self::Db,
     ) -> impl Future<Output = Result<(), qmdb::Error<Self::Family>>> + Send;
-    /// Returns the configuration of the Merkle structure persisted by the database that `config`
-    /// names.
-    fn merkle_config(config: &ConfigOf<Self>) -> merkle::full::Config<Sequential>;
     /// Makes every applied operation of `db` durable.
     fn db_sync(db: Self::Db) -> impl Future<Output = Self::Db> + Send;
 
@@ -1047,7 +1043,7 @@ pub(crate) async fn interrupt_destroy<H: SyncTestHarness>(
     context.storage_fault_config().write().remove_rate = None;
     assert!(result.is_err(), "destroy must stop at its first removal");
 
-    // The log reopens empty at zero beside the whole Merkle structure of the destroyed database.
+    // The log reopens empty at zero.
     let log = <JournalOf<H> as sync::Journal<H::Family>>::new(
         context.child("emptied_log"),
         sync::DatabaseConfig::journal_config(config),
@@ -1056,16 +1052,6 @@ pub(crate) async fn interrupt_destroy<H: SyncTestHarness>(
     .await
     .unwrap();
     assert_eq!(log.size(), Location::new(0));
-    drop(log);
-    let hasher = qmdb::hasher::<<DbOf<H> as sync::Database>::Hasher>();
-    let merkle = merkle::full::Merkle::<H::Family, _, sha256::Digest, Sequential>::init(
-        context.child("stale_merkle"),
-        &hasher,
-        H::merkle_config(config),
-    )
-    .await
-    .unwrap();
-    assert_eq!(merkle.leaves(), end);
 }
 
 /// Client storage that an interrupted destroy left behind, beside a target whose operations that

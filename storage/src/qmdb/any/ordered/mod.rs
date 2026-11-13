@@ -1970,11 +1970,15 @@ mod test {
         } = db;
         let authenticated::Journal {
             merkle,
+            frontier,
+            boundary_recorded,
             journal,
             hasher,
         } = log;
         let log = authenticated::Journal {
             merkle,
+            frontier,
+            boundary_recorded,
             journal: Controlled {
                 inner: journal,
                 mode,

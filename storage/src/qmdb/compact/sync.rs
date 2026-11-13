@@ -30,6 +30,14 @@ where
     type Context = E;
     type Hasher = H;
 
+    /// The synced log is held in memory, so an interrupted sync leaves nothing behind.
+    async fn mark_sync_incomplete(
+        _context: Self::Context,
+        _config: &Self::Config,
+    ) -> Result<(), Error<F>> {
+        Ok(())
+    }
+
     /// Build a compact db from the synced log, which must hold exactly the commit operation at
     /// the start of `range`.
     async fn from_sync_result(
