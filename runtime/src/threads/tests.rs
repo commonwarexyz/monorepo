@@ -57,7 +57,7 @@ async fn within<F: Future>(context: &impl Clock, future: F) -> F::Output {
 }
 
 /// The execution labels of the tasks spawned under `name`, from the runner's task metrics.
-fn executions(metrics: &impl Metrics, name: &str) -> Vec<String> {
+pub(super) fn executions(metrics: &impl Metrics, name: &str) -> Vec<String> {
     let needle = format!("name=\"{name}\"");
     metrics
         .encode()
@@ -193,9 +193,10 @@ where
     });
 }
 
-// The last of on and shared decides where a spawn runs. Placement is inherited by child,
-// with_attribute and handed contexts while the blocking flag is not, and contexts a thread hands
-// out keep the creating context's label.
+// The last of shared, blocking and on decides where a spawn runs, and child and with_attribute keep
+// it. A spawn hands its task a parked context, which spawns on the shared executor until placed
+// unparks it to where the task runs, and placed does nothing on a context placed explicitly.
+// Contexts a thread hands out keep the creating context's label.
 #[rstest]
 #[case::deterministic(deterministic::Runner::default(), false)]
 #[case::tokio(tokio::Runner::default(), true)]
@@ -214,85 +215,228 @@ where
             .unwrap();
         let check = |ran, expect| assert_ran(&context, ran, expect, home, native);
 
-        // The last of on and shared wins.
+        // The last of shared, blocking and on wins.
         check(
             ran_on(context.child("on").on(&thread)).await,
             Expect::Thread,
         );
         check(
-            ran_on(context.child("on_shared").on(&thread).shared(false)).await,
+            ran_on(context.child("on_shared").on(&thread).shared()).await,
             Expect::Shared,
         );
         check(
-            ran_on(context.child("on_blocking").on(&thread).shared(true)).await,
+            ran_on(context.child("on_blocking").on(&thread).blocking()).await,
             Expect::Blocking,
         );
         check(
-            ran_on(context.child("blocking_on").shared(true).on(&thread)).await,
-            Expect::Thread,
-        );
-
-        // Placement is inherited by child and with_attribute.
-        check(
-            ran_on(context.child("placed").on(&thread).child("child")).await,
+            ran_on(context.child("blocking_on").blocking().on(&thread)).await,
             Expect::Thread,
         );
         check(
-            ran_on(context.child("attr").on(&thread).with_attribute("k", 1)).await,
-            Expect::Thread,
+            ran_on(context.child("blocking_shared").blocking().shared()).await,
+            Expect::Shared,
+        );
+        check(
+            ran_on(context.child("shared_blocking").shared().blocking()).await,
+            Expect::Blocking,
         );
 
-        // The blocking flag survives with_attribute but not child.
+        // child and with_attribute keep the placement, the blocking pool included.
+        check(
+            ran_on(context.child("on_child").on(&thread).child("child")).await,
+            Expect::Thread,
+        );
+        check(
+            ran_on(context.child("on_attr").on(&thread).with_attribute("k", 1)).await,
+            Expect::Thread,
+        );
+        check(
+            ran_on(context.child("blocking_child").blocking().child("child")).await,
+            Expect::Blocking,
+        );
         check(
             ran_on(
                 context
                     .child("blocking_attr")
-                    .shared(true)
+                    .blocking()
                     .with_attribute("k", 1),
             )
             .await,
             Expect::Blocking,
         );
+
+        // placed does nothing on a context that no spawn handed out, or that was placed
+        // explicitly.
         check(
-            ran_on(context.child("blocking_parent").shared(true).child("child")).await,
+            ran_on(context.child("fresh_placed").placed()).await,
             Expect::Shared,
         );
+        check(
+            ran_on(context.child("on_placed").on(&thread).placed()).await,
+            Expect::Thread,
+        );
+        check(
+            ran_on(context.child("shared_placed").on(&thread).shared().placed()).await,
+            Expect::Shared,
+        );
+        check(
+            ran_on(context.child("blocking_placed").blocking().placed()).await,
+            Expect::Blocking,
+        );
 
-        // The context handed to a spawned task inherits the placement, not the blocking flag.
+        // A task placed on the thread receives a parked context. Its spawns, and those of the
+        // contexts derived from it, run on the shared executor until placed unparks them, and an
+        // explicit placement replaces what they remember.
         let handed = context
             .child("handed")
             .on(&thread)
-            .spawn(ran_on)
-            .await
-            .unwrap();
-        check(handed, Expect::Thread);
-        let (_, name) = context
-            .child("handed_blocking")
-            .shared(true)
-            .spawn(ran_on)
-            .await
-            .unwrap();
-        let mut labels = executions(&context, &name);
-        labels.sort();
-        assert_eq!(labels, ["Shared", "SharedBlocking"]);
+            .spawn(|context| async move {
+                let plain = ran_on(context.child("plain")).await;
+                let derived = ran_on(context.child("derived").with_attribute("k", 1)).await;
+                let placed = ran_on(context.child("placed").placed()).await;
+                let derived_placed = ran_on(
+                    context
+                        .child("derived_placed")
+                        .with_attribute("k", 1)
+                        .placed(),
+                )
+                .await;
+                let blocking = ran_on(context.child("blocking").blocking().placed()).await;
+                let shared = ran_on(context.child("shared").shared().placed()).await;
 
-        // A Local's context is placed, both through into_inner and through a deref child.
-        let (inner, deref) = context
-            .child("local")
-            .spawn_on(&thread, |local| async move {
-                let deref = ran_on((*local).child("deref")).await;
-                let inner = ran_on(local.into_inner()).await;
-                (inner, deref)
+                // A task spawned through placed receives a parked context as well.
+                let nested = context
+                    .child("nested")
+                    .placed()
+                    .spawn(|context| async move {
+                        let plain = ran_on(context.child("plain")).await;
+                        let placed = ran_on(context.child("placed").placed()).await;
+                        (plain, placed)
+                    })
+                    .await
+                    .unwrap();
+
+                // The placement belongs to the context, not to the task that holds it.
+                let saved = context.child("saved");
+                let saved = context
+                    .child("elsewhere")
+                    .spawn(move |_| async move { ran_on(saved.placed()).await })
+                    .await
+                    .unwrap();
+                [
+                    (plain, Expect::Shared),
+                    (derived, Expect::Shared),
+                    (placed, Expect::Thread),
+                    (derived_placed, Expect::Thread),
+                    (blocking, Expect::Blocking),
+                    (shared, Expect::Shared),
+                    (nested.0, Expect::Shared),
+                    (nested.1, Expect::Thread),
+                    (saved, Expect::Thread),
+                ]
             })
             .await
             .unwrap();
-        check(inner, Expect::Thread);
-        check(deref, Expect::Thread);
+        for (ran, expect) in handed {
+            check(ran, expect);
+        }
 
-        // Contexts handed out by attach and by the builder's spawn keep the creating label.
+        // A task on the shared executor or the blocking pool receives a context parked there.
+        for blocking in [false, true] {
+            let line = context.child(if blocking {
+                "blocking_task"
+            } else {
+                "shared_task"
+            });
+            let line = if blocking { line.blocking() } else { line };
+            let (plain, placed) = line
+                .spawn(|context| async move {
+                    let plain = ran_on(context.child("plain")).await;
+                    let placed = ran_on(context.child("placed").placed()).await;
+                    (plain, placed)
+                })
+                .await
+                .unwrap();
+            check(plain, Expect::Shared);
+            check(
+                placed,
+                if blocking {
+                    Expect::Blocking
+                } else {
+                    Expect::Shared
+                },
+            );
+        }
+
+        // A Local's context is parked on its thread, through into_inner and through a deref
+        // child, for a spawn_on task, a root and a spawn_local task alike.
+        let (inner, deref, placed) = context
+            .child("local")
+            .spawn_on(&thread, |local| async move {
+                let deref = ran_on((*local).child("deref")).await;
+                let placed = ran_on(local.child("placed").into_inner().placed()).await;
+                let inner = ran_on(local.child("inner").into_inner()).await;
+                (inner, deref, placed)
+            })
+            .await
+            .unwrap();
+        check(inner, Expect::Shared);
+        check(deref, Expect::Shared);
+        check(placed, Expect::Thread);
+        let (inner, placed, root) = context
+            .child("root")
+            .thread()
+            .spawn(|local| async move {
+                let root = os();
+                let placed = ran_on(local.child("placed").into_inner().placed()).await;
+                let inner = ran_on(local.child("inner").into_inner()).await;
+                (inner, placed, root)
+            })
+            .unwrap()
+            .await
+            .unwrap();
+        assert_ran(&context, inner, Expect::Shared, root, native);
+        assert_ran(&context, placed, Expect::Thread, root, native);
+        let (inner, placed) = context
+            .child("spawn_local")
+            .spawn_on(&thread, |local| async move {
+                local
+                    .child("task")
+                    .spawn_local(|local| async move {
+                        let placed = ran_on(local.child("placed").into_inner().placed()).await;
+                        let inner = ran_on(local.child("inner").into_inner()).await;
+                        (inner, placed)
+                    })
+                    .await
+                    .unwrap()
+            })
+            .await
+            .unwrap();
+        check(inner, Expect::Shared);
+        check(placed, Expect::Thread);
+
+        // An attached context is placed on its thread, and a task spawned from it can spawn there
+        // again through placed. Contexts handed out by attach and by the builder's spawn keep the
+        // creating label.
         let attached = context.child("attached").thread().attach().unwrap();
         assert_eq!(attached.name().label, "attached");
-        let (_, name) = ran_on(attached).await;
+        let attached_home = attached
+            .child("home")
+            .spawn(|_| async { os() })
+            .await
+            .unwrap();
+        let (plain, placed) = attached
+            .child("task")
+            .spawn(|context| async move {
+                let plain = ran_on(context.child("plain")).await;
+                let placed = ran_on(context.child("placed").placed()).await;
+                (plain, placed)
+            })
+            .await
+            .unwrap();
+        assert_ran(&context, plain, Expect::Shared, attached_home, native);
+        assert_ran(&context, placed, Expect::Thread, attached_home, native);
+        let (_, name) = ran_on(attached.placed()).await;
         assert_eq!(executions(&context, &name), ["Thread"]);
         let (label, home) = context
             .child("spawned")
@@ -424,7 +568,7 @@ where
         let moved = context
             .child("moved")
             .on(&closing)
-            .shared(false)
+            .shared()
             .spawn(move |_| async move { wait.await.unwrap() });
         let lineage = context.child("resident");
         let (go_kept, wait) = oneshot::channel::<u32>();
@@ -539,10 +683,7 @@ where
         // New placed spawns are rejected without running their factory, and the rejection
         // aborts a child wired from the consumed context.
         let placed = context.child("placed").on(&thread);
-        let wired = placed
-            .child("wired")
-            .shared(false)
-            .spawn(|_| pending::<()>());
+        let wired = placed.child("wired").shared().spawn(|_| pending::<()>());
         let ran = Arc::new(AtomicBool::new(false));
         let handle = placed.spawn({
             let ran = ran.clone();
@@ -1237,10 +1378,7 @@ fn wrong_runtime<R: Runner>(
             let ran = Arc::new(AtomicBool::new(false));
 
             let placed = context.child("placed").on(&thread);
-            let wired = placed
-                .child("wired")
-                .shared(false)
-                .spawn(|_| pending::<()>());
+            let wired = placed.child("wired").shared().spawn(|_| pending::<()>());
             let handle = placed.spawn({
                 let ran = ran.clone();
                 move |_| {
@@ -1316,7 +1454,7 @@ where
         assert_eq!(executions(&context, "placed"), ["Thread"]);
         context
             .child("blocking")
-            .shared(true)
+            .blocking()
             .spawn_on(&thread, |_| async {})
             .await
             .unwrap();
@@ -1459,7 +1597,7 @@ fn test_thread_local_context_swap<R: Runner + Send + 'static>(
 
                 // A shared context.
                 let mut swapped = local.child("shared");
-                *swapped = (*local).child("plain").shared(false);
+                *swapped = (*local).child("plain").shared();
                 let (ran, same) = swapped
                     .spawn_local(|local| async move { (os(), local.home().name().to_string()) })
                     .await
@@ -1536,10 +1674,7 @@ where
         }
 
         let placed = context.child("panics").on(&thread);
-        let wired = placed
-            .child("wired")
-            .shared(false)
-            .spawn(|_| pending::<()>());
+        let wired = placed.child("wired").shared().spawn(|_| pending::<()>());
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             placed.spawn(|_| -> std::future::Ready<()> { panic!("placed factory") })
         }));

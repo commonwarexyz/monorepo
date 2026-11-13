@@ -11,7 +11,10 @@ use crate::{
     reschedule,
     signal::Signal,
     telemetry::metrics::count_running_tasks,
-    threads::admission::{State, tests::set_before_enqueue},
+    threads::{
+        admission::{State, tests::set_before_enqueue},
+        tests::executions,
+    },
     tokio,
     utils::{extract_panic_message, supervision::tests::set_before_thread_abort},
 };
@@ -239,13 +242,23 @@ impl<E: Supervisor> Supervisor for Recorder<E> {
 }
 
 impl<E: Spawner> Spawner for Recorder<E> {
-    fn shared(mut self, blocking: bool) -> Self {
-        self.inner = self.inner.shared(blocking);
+    fn shared(mut self) -> Self {
+        self.inner = self.inner.shared();
+        self
+    }
+
+    fn blocking(mut self) -> Self {
+        self.inner = self.inner.blocking();
         self
     }
 
     fn on(mut self, thread: &Thread) -> Self {
         self.inner = self.inner.on(thread);
+        self
+    }
+
+    fn placed(mut self) -> Self {
+        self.inner = self.inner.placed();
         self
     }
 
@@ -349,16 +362,13 @@ where
 
                 // Everything below happens in this poll, before the host can take a turn.
                 let consumed = (*local).child("on");
-                let wired_on = consumed
-                    .child("wired")
-                    .shared(false)
-                    .spawn(|_| pending::<()>());
+                let wired_on = consumed.child("wired").shared().spawn(|_| pending::<()>());
                 let on = consumed.spawn_on(&home, recording(&factory));
                 on.abort();
                 let consumed = local.child("local");
                 let wired_local = (*consumed)
                     .child("wired")
-                    .shared(false)
+                    .shared()
                     .spawn(|_| pending::<()>());
                 let ran = factory.clone();
                 let spawned = consumed.spawn_local(move |_| {
@@ -413,10 +423,7 @@ where
 
         // The job's context is not below the root, so only the dropped job can close its node.
         let consumed = context.child("job");
-        let wired = consumed
-            .child("wired")
-            .shared(false)
-            .spawn(|_| pending::<()>());
+        let wired = consumed.child("wired").shared().spawn(|_| pending::<()>());
         let root = context
             .child("queued")
             .thread()
@@ -839,7 +846,7 @@ impl Wrapped {
     {
         match self {
             Self::Spawn => context.spawn(make),
-            Self::Blocking => context.shared(true).spawn(make),
+            Self::Blocking => context.blocking().spawn(make),
             Self::Placed => context.on(thread).spawn(make),
             Self::SpawnOn => context.spawn_on(thread, move |local| make(local.into_inner())),
             Self::Root => context
@@ -1637,13 +1644,10 @@ where
         let parent = context.child("parent");
         let consumed = parent.child("t");
         let (release, released) = oneshot::channel::<()>();
-        let wired = consumed
-            .child("wired")
-            .shared(false)
-            .spawn(move |_| async move {
-                released.await.expect("released");
-                9
-            });
+        let wired = consumed.child("wired").shared().spawn(move |_| async move {
+            released.await.expect("released");
+            9
+        });
 
         // The failure is armed on this OS thread, which runs the finisher synchronously.
         fail_spawns(1);
@@ -2015,7 +2019,7 @@ fn test_thread_admission_race_deterministic() {
 /// no spawn toward its thread runs.
 async fn wrapper_threads<W>(context: W, holds: fn(&W) -> bool, stale: Thread)
 where
-    W: Spawner,
+    W: Spawner + Metrics,
 {
     assert!(holds(&context));
 
@@ -2025,6 +2029,32 @@ where
         .child("task")
         .spawn(move |task: W| async move { holds(&task) });
     assert!(matches!(task.await, Ok(true)));
+
+    // The placement methods keep the wrapper's state and reach the inner context.
+    let (held, names) = attached
+        .child("placement")
+        .spawn(move |task: W| async move {
+            let lines = [
+                task.child("placed").placed(),
+                task.child("blocking").blocking(),
+                task.child("shared").placed().shared(),
+            ];
+            let held = lines.iter().all(holds);
+            let mut names = Vec::new();
+            for line in lines {
+                names.push(line.name().label);
+                line.spawn(|_| async {}).await.expect("spawn");
+            }
+            (held, names)
+        })
+        .await
+        .expect("placement");
+    assert!(held, "a placement method lost the wrapper's state");
+    let labels: Vec<_> = names
+        .iter()
+        .map(|name| executions(&context, name))
+        .collect();
+    assert_eq!(labels, [["Thread"], ["SharedBlocking"], ["Shared"]]);
 
     let root = context
         .child("root")

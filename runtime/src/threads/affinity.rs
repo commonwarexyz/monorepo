@@ -286,7 +286,7 @@ pub(crate) mod tests {
                     let blocking = local
                         .child("blocking")
                         .into_inner()
-                        .shared(true)
+                        .blocking()
                         .spawn(|_| async { current() })
                         .await
                         .unwrap();
@@ -327,7 +327,7 @@ pub(crate) mod tests {
                 let _narrowed = Narrowed::new(narrow, &base);
                 let blocking = context
                     .child("blocking")
-                    .shared(true)
+                    .blocking()
                     .spawn(|_| async { current() });
                 let unpinned = context
                     .child("unpinned")

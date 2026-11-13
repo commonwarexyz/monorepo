@@ -216,7 +216,10 @@ use crate::{
         admission::{Job, SpawnJob, Ticket, next_runner_id},
         affinity::AffinityState,
     },
-    utils::{self, FactoryGuard, MetricHandle, Panicker, signal::Stopper, supervision::Tree},
+    utils::{
+        self, FactoryGuard, MetricHandle, Panicker, Place, Placement, signal::Stopper,
+        supervision::Tree,
+    },
 };
 use commonware_macros::select;
 use commonware_parallel::{Rayon, rayon::ThreadPoolBuilder};
@@ -802,10 +805,8 @@ pub struct Context {
     shared: Arc<Shared>,
     /// This context's node in the mandatory supervision tree.
     tree: Arc<Tree>,
-    /// Whether the next spawn is short blocking work. Applies to one spawn only.
-    blocking: bool,
-    /// The runtime thread this context line runs on, or `None` for the pool.
-    placement: Option<Thread>,
+    /// Where this context line's spawns run.
+    place: Place,
 }
 
 impl Context {
@@ -816,24 +817,28 @@ impl Context {
 
     /// Where the next spawn runs, as its task metric reports it.
     const fn execution(&self) -> Execution {
-        if self.placement.is_some() {
-            Execution::Thread
-        } else {
-            Execution::Shared(self.blocking)
-        }
+        self.place.execution()
     }
 }
 
 impl crate::Spawner for Context {
-    fn shared(mut self, blocking: bool) -> Self {
-        self.placement = None;
-        self.blocking = blocking;
+    fn shared(mut self) -> Self {
+        self.place.set(Placement::Shared);
+        self
+    }
+
+    fn blocking(mut self) -> Self {
+        self.place.set(Placement::Blocking);
         self
     }
 
     fn on(mut self, thread: &Thread) -> Self {
-        self.placement = Some(thread.clone());
-        self.blocking = false;
+        self.place.set(Placement::Thread(thread.clone()));
+        self
+    }
+
+    fn placed(mut self) -> Self {
+        self.place.unpark();
         self
     }
 
@@ -847,8 +852,7 @@ impl crate::Spawner for Context {
         let host: Weak<dyn ThreadRuntime> = host;
         let context = Self {
             tree,
-            blocking: false,
-            placement: None,
+            place: Place::default(),
             ..self
         };
         ThreadBuilder::new(context, node, name, host)
@@ -873,8 +877,7 @@ impl crate::Spawner for Context {
             return Handle::closed(metric);
         }
         self.tree = child;
-        self.blocking = false;
-        self.placement = Some(thread.clone());
+        self.place = Place::parked(Placement::Thread(thread.clone()));
 
         // The factory runs on the thread. A rejected job drops its factory, then its ticket,
         // outside the admission lock, which aborts the node and closes the handle.
@@ -901,11 +904,13 @@ impl crate::Spawner for Context {
     {
         let (_, metric) = spawn_metrics!(self);
         let parent = self.tree.clone();
-        let blocking = mem::take(&mut self.blocking);
+        let blocking = self.place.blocking();
+        let thread = self.place.thread().cloned();
+        self.place = self.place.handoff();
         let (child, aborted) = Tree::child(&parent);
         if aborted {
             // A factory toward a thread is dropped unrun like a task's future
-            if self.placement.is_some() {
+            if thread.is_some() {
                 Panics::contain(move || drop(f));
             }
             return Handle::closed(metric);
@@ -916,7 +921,7 @@ impl crate::Spawner for Context {
 
         // A spawn placed on a runtime thread runs its factory here and its future on the
         // thread, whose worker reservation covers all of its residents.
-        if let Some(thread) = self.placement.clone() {
+        if let Some(thread) = thread {
             if !shared.targets(&thread) || !thread.inner().is_open() {
                 // Close the consumed context's node, so children wired from it are aborted too
                 parent.abort();
@@ -1020,8 +1025,7 @@ impl crate::Supervisor for Context {
             attributes: self.attributes.clone(),
             shared: self.shared.clone(),
             tree,
-            blocking: false,
-            placement: self.placement.clone(),
+            place: self.place.clone(),
         }
     }
 
@@ -1117,7 +1121,7 @@ impl crate::Resolver for Context {
     async fn resolve(&self, host: &str) -> Result<Vec<IpAddr>, Error> {
         let host = host.to_owned();
         self.child("resolver")
-            .shared(true)
+            .blocking()
             .spawn(move |_| async move {
                 (host.as_str(), 0)
                     .to_socket_addrs()
@@ -2565,8 +2569,7 @@ impl crate::Runner for Runner {
                     attributes: Vec::new(),
                     shared: context_shared,
                     tree: context_tree,
-                    blocking: false,
-                    placement: None,
+                    place: Place::default(),
                 });
 
                 // The root owns the ordinary task panic receiver, so a panic published after

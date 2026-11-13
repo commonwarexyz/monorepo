@@ -653,13 +653,23 @@ forward_context!(RecordingContext, recordings);
 
 #[cfg(any(test, feature = "test-utils"))]
 impl<E: Spawner> Spawner for RecordingContext<E> {
-    fn shared(mut self, blocking: bool) -> Self {
-        self.inner = self.inner.shared(blocking);
+    fn shared(mut self) -> Self {
+        self.inner = self.inner.shared();
+        self
+    }
+
+    fn blocking(mut self) -> Self {
+        self.inner = self.inner.blocking();
         self
     }
 
     fn on(mut self, thread: &Thread) -> Self {
         self.inner = self.inner.on(thread);
+        self
+    }
+
+    fn placed(mut self) -> Self {
+        self.inner = self.inner.placed();
         self
     }
 
@@ -895,13 +905,23 @@ pub struct DelayedSyncContext<E> {
 forward_context!(DelayedSyncContext, pending);
 
 impl<E: Spawner> Spawner for DelayedSyncContext<E> {
-    fn shared(mut self, blocking: bool) -> Self {
-        self.inner = self.inner.shared(blocking);
+    fn shared(mut self) -> Self {
+        self.inner = self.inner.shared();
+        self
+    }
+
+    fn blocking(mut self) -> Self {
+        self.inner = self.inner.blocking();
         self
     }
 
     fn on(mut self, thread: &Thread) -> Self {
         self.inner = self.inner.on(thread);
+        self
+    }
+
+    fn placed(mut self) -> Self {
+        self.inner = self.inner.placed();
         self
     }
 
@@ -1546,13 +1566,23 @@ pub struct MutationFaultContext<E> {
 forward_context!(MutationFaultContext, faults);
 
 impl<E: Spawner> Spawner for MutationFaultContext<E> {
-    fn shared(mut self, blocking: bool) -> Self {
-        self.inner = self.inner.shared(blocking);
+    fn shared(mut self) -> Self {
+        self.inner = self.inner.shared();
+        self
+    }
+
+    fn blocking(mut self) -> Self {
+        self.inner = self.inner.blocking();
         self
     }
 
     fn on(mut self, thread: &Thread) -> Self {
         self.inner = self.inner.on(thread);
+        self
+    }
+
+    fn placed(mut self) -> Self {
+        self.inner = self.inner.placed();
         self
     }
 

@@ -1127,7 +1127,7 @@ where
         let handle =
             self.context
                 .child("verification")
-                .shared(true)
+                .blocking()
                 .spawn(move |context| async move {
                     let ceremony = task.run(context);
                     VerifiedLogs {

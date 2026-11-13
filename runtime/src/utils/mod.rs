@@ -1,5 +1,6 @@
 //! Utility functions for interacting with any runtime.
 
+use crate::Thread;
 use commonware_utils::sync::{Condvar, Mutex};
 use futures::task::ArcWake;
 use std::{
@@ -35,6 +36,84 @@ pub(crate) enum Execution {
     Shared(bool),
     /// Task runs on a runtime thread.
     Thread,
+}
+
+/// Where a context line's spawns run.
+#[derive(Clone, Debug, Default)]
+pub(crate) enum Placement {
+    /// The runtime's shared executor.
+    #[default]
+    Shared,
+    /// The runtime's blocking pool, which gives each task a thread of its own.
+    Blocking,
+    /// A runtime thread.
+    Thread(Thread),
+}
+
+/// The placement a context carries.
+///
+/// A spawn hands its task a parked context. It remembers where the task runs, but its spawns
+/// run on the shared executor until [`crate::Spawner::placed`] unparks it or an explicit
+/// placement replaces what it remembers.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Place {
+    /// The explicit placement, or where the context's task runs while parked.
+    placement: Placement,
+    /// Whether spawns run on the shared executor instead of at `placement`.
+    parked: bool,
+}
+
+impl Place {
+    /// The context handed to a task that runs at `placement`.
+    pub(crate) const fn parked(placement: Placement) -> Self {
+        Self {
+            placement,
+            parked: true,
+        }
+    }
+
+    /// Place the context explicitly, replacing what it remembers.
+    pub(crate) fn set(&mut self, placement: Placement) {
+        self.placement = placement;
+        self.parked = false;
+    }
+
+    /// Spawn at the remembered placement: where the context's task runs if it is parked.
+    pub(crate) const fn unpark(&mut self) {
+        self.parked = false;
+    }
+
+    /// The runtime thread the next spawn runs on, if any.
+    pub(crate) const fn thread(&self) -> Option<&Thread> {
+        match (&self.placement, self.parked) {
+            (Placement::Thread(thread), false) => Some(thread),
+            _ => None,
+        }
+    }
+
+    /// Whether the next spawn runs on the blocking pool.
+    pub(crate) const fn blocking(&self) -> bool {
+        matches!((&self.placement, self.parked), (Placement::Blocking, false))
+    }
+
+    /// Where the next spawn runs, as its task metric reports it.
+    pub(crate) const fn execution(&self) -> Execution {
+        if self.thread().is_some() {
+            Execution::Thread
+        } else {
+            Execution::Shared(self.blocking())
+        }
+    }
+
+    /// The context handed to a task spawned from this one: parked where the task runs.
+    pub(crate) fn handoff(&self) -> Self {
+        let placement = if self.parked {
+            Placement::Shared
+        } else {
+            self.placement.clone()
+        };
+        Self::parked(placement)
+    }
 }
 
 /// Yield control back to the runtime.

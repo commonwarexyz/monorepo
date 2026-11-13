@@ -76,7 +76,7 @@ use crate::{
         validate,
     },
     utils::{
-        Aborter, FactoryGuard, Panicker,
+        Aborter, FactoryGuard, Panicker, Place, Placement,
         abort::AbortHandle,
         signal::{Signal, Stopper},
         supervision::Tree,
@@ -1464,10 +1464,8 @@ pub struct Context {
     storage: Arc<Storage>,
     opens: Arc<Opens>,
     tree: Arc<Tree>,
-    /// Whether the next spawn is short blocking work. Applies to one spawn only.
-    blocking: bool,
-    /// The runtime thread this context line runs on, or `None` for the shared executor.
-    placement: Option<Thread>,
+    /// Where this context line's spawns run.
+    place: Place,
 }
 
 impl Context {
@@ -1530,8 +1528,7 @@ impl Context {
                 storage: Arc::new(storage),
                 opens: Arc::default(),
                 tree: tree.clone(),
-                blocking: false,
-                placement: None,
+                place: Place::default(),
             },
             executor,
             panicked,
@@ -1603,8 +1600,7 @@ impl Context {
                 storage: Arc::new(storage),
                 opens: Arc::default(),
                 tree: tree.clone(),
-                blocking: false,
-                placement: None,
+                place: Place::default(),
             },
             executor,
             panicked,
@@ -1624,11 +1620,7 @@ impl Context {
 
     /// Where the next spawn runs, as its task metric reports it.
     const fn execution(&self) -> Execution {
-        if self.placement.is_some() {
-            Execution::Thread
-        } else {
-            Execution::Shared(self.blocking)
-        }
+        self.place.execution()
     }
 
     /// Get a reference to the [Auditor].
@@ -1688,15 +1680,23 @@ impl Context {
 }
 
 impl crate::Spawner for Context {
-    fn shared(mut self, blocking: bool) -> Self {
-        self.placement = None;
-        self.blocking = blocking;
+    fn shared(mut self) -> Self {
+        self.place.set(Placement::Shared);
+        self
+    }
+
+    fn blocking(mut self) -> Self {
+        self.place.set(Placement::Blocking);
         self
     }
 
     fn on(mut self, thread: &Thread) -> Self {
-        self.placement = Some(thread.clone());
-        self.blocking = false;
+        self.place.set(Placement::Thread(thread.clone()));
+        self
+    }
+
+    fn placed(mut self) -> Self {
+        self.place.unpark();
         self
     }
 
@@ -1710,8 +1710,7 @@ impl crate::Spawner for Context {
         let host: Weak<dyn ThreadRuntime> = host;
         let context = Self {
             tree,
-            blocking: false,
-            placement: None,
+            place: Place::default(),
             ..self
         };
         ThreadBuilder::new(context, node, name, host)
@@ -1728,11 +1727,12 @@ impl crate::Spawner for Context {
 
         // Track supervision before resetting configuration
         let parent = Arc::clone(&self.tree);
-        self.blocking = false;
+        let thread = self.place.thread().cloned();
+        self.place = self.place.handoff();
         let (child, aborted) = Tree::child(&parent);
         if aborted {
             // A factory toward a thread is dropped unrun like a resident's future
-            if self.placement.is_some() {
+            if thread.is_some() {
                 self.executor().dispose(f);
             }
             return Handle::closed(metric);
@@ -1741,7 +1741,7 @@ impl crate::Spawner for Context {
 
         // A spawn placed on a runtime thread runs its factory here and its future as a resident
         let executor = self.executor();
-        if let Some(thread) = self.placement.clone() {
+        if let Some(thread) = thread {
             if !executor.admits(&thread) {
                 // Close the consumed context's node, so children wired from it are aborted too
                 parent.abort();
@@ -1801,8 +1801,7 @@ impl crate::Spawner for Context {
             return Handle::closed(metric);
         }
         self.tree = child;
-        self.blocking = false;
-        self.placement = Some(thread.clone());
+        self.place = Place::parked(Placement::Thread(thread.clone()));
 
         // The factory runs on the thread. A rejected job drops its factory, then its ticket,
         // which aborts the node and closes the handle.
@@ -1909,8 +1908,7 @@ impl crate::Supervisor for Context {
             storage: self.storage.clone(),
             opens: self.opens.clone(),
             tree,
-            blocking: false,
-            placement: self.placement.clone(),
+            place: self.place.clone(),
         }
     }
 
@@ -2459,7 +2457,7 @@ mod tests {
 
         // A placed resident of an attached thread.
         let attached = context.child("attached").thread().attach().unwrap();
-        let thread = attached.placement.clone().unwrap();
+        let thread = attached.place.thread().cloned().unwrap();
         threads.lock().push(thread.clone());
         let held = submitter(context.child("submitter"), &thread);
         let started = probe.clone();

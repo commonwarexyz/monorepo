@@ -1266,7 +1266,7 @@ mod tests {
 
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let blocking_handle = context.child(LABEL).shared(true).spawn(|_| async move {
+            let blocking_handle = context.child(LABEL).blocking().spawn(|_| async move {
                 // Simulate some blocking work
                 42
             });

@@ -392,8 +392,9 @@ impl<C: Spawner> ThreadBuilder<C> {
     }
 
     /// Create the thread and return a context placed on it, at a fresh child of the thread's
-    /// node. Everything spawned from the context runs on the thread unless it moves off with
-    /// [Spawner::shared].
+    /// node. Spawns from the context, and from the contexts derived from it, run on the thread.
+    /// The tasks they start receive parked contexts, which spawn on the thread again through
+    /// [Spawner::placed].
     ///
     /// Such a thread hosts only `Send` work. Nothing returns its [Thread], so
     /// [Spawner::spawn_on] cannot target it. It lives as long as its creating lineage, so code

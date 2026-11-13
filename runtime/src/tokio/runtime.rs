@@ -24,7 +24,7 @@ use crate::{
         admission::{Job, SpawnJob, Ticket, next_runner_id},
         affinity::AffinityState,
     },
-    utils::{self, FactoryGuard, Panicker, signal::Stopper, supervision::Tree},
+    utils::{self, FactoryGuard, Panicker, Place, Placement, signal::Stopper, supervision::Tree},
 };
 use commonware_macros::{select, stability};
 #[stability(BETA)]
@@ -153,9 +153,10 @@ pub struct Config {
     /// Tokio sets the default value to 512 to avoid hanging on lower-level
     /// operations that require blocking (like `fs` and writing to `Stdout`).
     ///
-    /// Tasks spawned with [`crate::Spawner::shared`] in blocking mode share this pool with the
-    /// blocking work behind storage operations and name resolution. A blocking task that waits
-    /// on them holds a thread they need, so enough such tasks exhaust the pool and deadlock.
+    /// Tasks spawned from a context placed with [`crate::Spawner::blocking`] share this pool
+    /// with the blocking work behind storage operations and name resolution. A blocking task
+    /// that waits on them holds a thread they need, so enough such tasks exhaust the pool and
+    /// deadlock.
     max_blocking_threads: usize,
 
     /// Stack size to use for runtime-owned threads.
@@ -519,8 +520,7 @@ impl crate::Runner for Runner {
             executor: executor.clone(),
             network,
             tree: Arc::clone(&tree),
-            blocking: false,
-            placement: None,
+            place: Place::default(),
         };
 
         // Keep observing task panics until every admitted task has drained. The boxed root
@@ -567,10 +567,8 @@ pub struct Context {
     storage: Storage,
     network: Network,
     tree: Arc<Tree>,
-    /// Whether the next spawn is short blocking work. Applies to one spawn only.
-    blocking: bool,
-    /// The runtime thread this context line runs on, or `None` for the shared executor.
-    placement: Option<Thread>,
+    /// Where this context line's spawns run.
+    place: Place,
 }
 
 impl Context {
@@ -581,24 +579,28 @@ impl Context {
 
     /// Where the next spawn runs, as its task metric reports it.
     const fn execution(&self) -> Execution {
-        if self.placement.is_some() {
-            Execution::Thread
-        } else {
-            Execution::Shared(self.blocking)
-        }
+        self.place.execution()
     }
 }
 
 impl crate::Spawner for Context {
-    fn shared(mut self, blocking: bool) -> Self {
-        self.placement = None;
-        self.blocking = blocking;
+    fn shared(mut self) -> Self {
+        self.place.set(Placement::Shared);
+        self
+    }
+
+    fn blocking(mut self) -> Self {
+        self.place.set(Placement::Blocking);
         self
     }
 
     fn on(mut self, thread: &Thread) -> Self {
-        self.placement = Some(thread.clone());
-        self.blocking = false;
+        self.place.set(Placement::Thread(thread.clone()));
+        self
+    }
+
+    fn placed(mut self) -> Self {
+        self.place.unpark();
         self
     }
 
@@ -612,8 +614,7 @@ impl crate::Spawner for Context {
         let host: Weak<dyn ThreadRuntime> = host;
         let context = Self {
             tree,
-            blocking: false,
-            placement: None,
+            place: Place::default(),
             ..self
         };
         ThreadBuilder::new(context, node, name, host)
@@ -638,8 +639,7 @@ impl crate::Spawner for Context {
             return Handle::closed(metric);
         }
         self.tree = child;
-        self.blocking = false;
-        self.placement = Some(thread.clone());
+        self.place = Place::parked(Placement::Thread(thread.clone()));
 
         // The factory runs on the thread. A rejected job drops its factory, then its ticket,
         // outside the admission lock, which aborts the node and closes the handle.
@@ -670,11 +670,13 @@ impl crate::Spawner for Context {
 
         // Track supervision before resetting configuration
         let parent = Arc::clone(&self.tree);
-        let blocking = std::mem::take(&mut self.blocking);
+        let blocking = self.place.blocking();
+        let thread = self.place.thread().cloned();
+        self.place = self.place.handoff();
         let (child, aborted) = Tree::child(&parent);
         if aborted {
             // A factory toward a thread is dropped unrun like a task's future
-            if self.placement.is_some() {
+            if thread.is_some() {
                 self.executor.dispose(f);
             }
             return Handle::closed(metric);
@@ -683,7 +685,7 @@ impl crate::Spawner for Context {
 
         // A spawn placed on a runtime thread runs its factory here and its future on the thread,
         // which holds the tracker guard for all of its residents.
-        if let Some(thread) = self.placement.clone() {
+        if let Some(thread) = thread {
             let executor = self.executor.clone();
             if !executor.targets(&thread) || !thread.inner().is_open() {
                 // Close the consumed context's node, so children wired from it are aborted too
@@ -801,8 +803,7 @@ impl crate::Supervisor for Context {
             storage: self.storage.clone(),
             network: self.network.clone(),
             tree,
-            blocking: false,
-            placement: self.placement.clone(),
+            place: self.place.clone(),
         }
     }
 
@@ -1042,7 +1043,8 @@ mod tests {
         T: Send + 'static,
     {
         match placement {
-            Placement::Shared(blocking) => context.shared(blocking).spawn(f),
+            Placement::Shared(false) => context.shared().spawn(f),
+            Placement::Shared(true) => context.blocking().spawn(f),
             Placement::Thread => context
                 .thread()
                 .spawn(move |local| f(local.into_inner()))
@@ -1529,7 +1531,8 @@ mod tests {
                 // A thread's root factory runs on the thread, so the thread case spawns from a
                 // context placed on it, whose factory runs on the caller.
                 context: Some(match placement {
-                    Placement::Shared(blocking) => context.child("root").shared(blocking),
+                    Placement::Shared(false) => context.child("root").shared(),
+                    Placement::Shared(true) => context.child("root").blocking(),
                     Placement::Thread => context.child("root").thread().attach().expect("thread"),
                 }),
                 invoked: invoked.clone(),

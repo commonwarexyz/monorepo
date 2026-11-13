@@ -1004,13 +1004,23 @@ mod tests {
     }
 
     impl Spawner for FailLaunch {
-        fn shared(self, blocking: bool) -> Self {
-            let inner = self.inner.shared(blocking);
+        fn shared(self) -> Self {
+            let inner = self.inner.shared();
+            Self { inner, ..self }
+        }
+
+        fn blocking(self) -> Self {
+            let inner = self.inner.blocking();
             Self { inner, ..self }
         }
 
         fn on(self, thread: &Thread) -> Self {
             let inner = self.inner.on(thread);
+            Self { inner, ..self }
+        }
+
+        fn placed(self) -> Self {
+            let inner = self.inner.placed();
             Self { inner, ..self }
         }
 

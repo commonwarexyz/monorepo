@@ -129,7 +129,7 @@ use std::{
 /// });
 /// ```
 pub struct Local<C> {
-    /// The context, placed on the thread unless the holder replaced it.
+    /// The context, parked on the thread unless the holder replaced it.
     context: C,
     /// The owner state of the thread this value lives on.
     owner: Rc<Owner>,
@@ -189,9 +189,10 @@ impl<C: Spawner> Local<C> {
     /// Spawn a resident on this thread. Nothing needs to be `Send`.
     ///
     /// The task always runs on [Local::home], is supervised by the context this value holds,
-    /// and receives a [Local] placed on the thread. `f` runs on this thread after this call
-    /// returns and before the task's first poll, so it may borrow state the caller holds
-    /// borrowed now. The returned [LocalHandle] cannot leave the thread either.
+    /// and receives a [Local] on the thread, whose context is parked like any context a spawn
+    /// hands out. `f` runs on this thread after this call returns and before the task's first
+    /// poll, so it may borrow state the caller holds borrowed now. The returned [LocalHandle]
+    /// cannot leave the thread either.
     ///
     /// If the thread already closed, or the held context belongs to another runner, the
     /// handle resolves [Error::Closed] and `f` is dropped unrun before this returns.
@@ -247,8 +248,9 @@ impl<C: Spawner> Local<C> {
         self.owner.home()
     }
 
-    /// Return the plain context, giving up the proof. It is placed on this thread unless the
-    /// holder replaced it.
+    /// Return the plain context, giving up the proof. Unless the holder replaced it, it is
+    /// parked on this thread, so its spawns run on the shared executor until
+    /// [crate::Spawner::placed] unparks it.
     pub fn into_inner(self) -> C {
         self.context
     }
