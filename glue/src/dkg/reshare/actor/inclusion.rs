@@ -13,12 +13,12 @@ use crate::dkg::{
 use commonware_actor::mailbox::Sender as ActorSender;
 use commonware_consensus::{
     Block as _, Heightable as _,
-    marshal::{ancestry::BoxedAncestry, core::Variant as MarshalVariant},
+    marshal::{blocks::Blocks, core::Variant as MarshalVariant},
     simplex::scheme::Scheme as SimplexScheme,
     types::{Epoch, EpochPhase, Epocher, FixedEpocher, Height},
 };
 use commonware_cryptography::{
-    BatchVerifier, Digested, Digestible as _, PublicKey, Signer,
+    BatchVerifier, Digestible as _, PublicKey, Signer,
     bls12381::{
         dkg::feldman_desmedt::{
             DealerLog, FinalizeError as DkgFinalizeError, Info, Logs, Output, observe,
@@ -39,7 +39,7 @@ use commonware_utils::{
     futures::OptionFuture,
     ordered::Set,
 };
-use futures::{FutureExt, Stream, StreamExt, future::BoxFuture};
+use futures::{FutureExt, StreamExt, future::BoxFuture};
 use rand_core::CryptoRng;
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -61,7 +61,7 @@ type ArtifactScanTask<'a, V, P> = OptionFuture<BoxFuture<'a, Option<PendingLogs<
 /// Shared log view used by verification and artifact assembly.
 type LogView<V, P> = Arc<PendingLogs<V, P>>;
 
-/// A queued epoch-info request whose ancestry has not been read.
+/// A queued epoch-info request whose range has not been read.
 struct ArtifactRequest<B, V, C>
 where
     B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
@@ -69,11 +69,11 @@ where
     C: Signer,
 {
     span: Span,
-    ancestry: BoxedAncestry<B>,
+    blocks: Blocks<B>,
     response: oneshot::Sender<EpochInfoResponse<V, C, B::Directory>>,
 }
 
-/// The active ancestry scan and its request, kept so a finalized block can
+/// The active range scan and its request, kept so a finalized block can
 /// restart the scan.
 struct ArtifactScan<'a, B, V, C>
 where
@@ -105,7 +105,7 @@ where
     V: BlsVariant,
     C: Signer,
 {
-    /// Starts scanning a clone of `request`'s ancestry.
+    /// Starts scanning a clone of `request`'s selected range.
     ///
     /// Panics if a scan is active.
     fn start(
@@ -119,7 +119,7 @@ where
             parent: &request.span,
             "dkg.reshare.actor.inclusion.epoch_info"
         );
-        let task = pending_logs(scan, request.ancestry.clone(), shutdown)
+        let task = pending_logs(scan, request.blocks.clone(), shutdown)
             .instrument(process)
             .boxed();
         self.request = Some(request);
@@ -169,8 +169,8 @@ where
 
 /// Queued epoch-info requests in arrival order.
 ///
-/// Ancestries stay unread until selected, so waiting requests do not each hold
-/// a dealer-log map while the verifier is busy.
+/// Ranges stay unread until selected, so waiting requests do not each hold a
+/// dealer-log map while the verifier is busy.
 pub(super) struct ArtifactRequests<B, V, C>
 where
     B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
@@ -199,12 +199,12 @@ where
     V: BlsVariant,
     C: Signer,
 {
-    /// Retains a request without consuming its ancestry stream. Returns `false`
+    /// Retains a request without acquiring block bodies. Returns `false`
     /// and drops the request when its requester has already cancelled it.
     pub(super) fn push(
         &mut self,
         span: Span,
-        ancestry: BoxedAncestry<B>,
+        blocks: Blocks<B>,
         response: oneshot::Sender<EpochInfoResponse<V, C, B::Directory>>,
     ) -> bool {
         if response.is_closed() {
@@ -212,7 +212,7 @@ where
         }
         self.inner.push_back(ArtifactRequest {
             span,
-            ancestry,
+            blocks,
             response,
         });
         true
@@ -472,14 +472,14 @@ fn validate_future_participants<P: PublicKey>(participants: &Set<P>, max_partici
     );
 }
 
-/// Returns the valid dealer logs in `ancestry` above the finalized tip, keeping
-/// each dealer's earliest.
+/// Returns the valid dealer logs in the selected range above the finalized
+/// tip, keeping each dealer's earliest.
 ///
-/// Returns `None` if the runtime stops, or if `ancestry` ends early or does not
-/// extend the finalized tip.
+/// Returns `None` if the runtime stops, if acquiring the range fails, or if the
+/// selected branch does not extend the finalized tip.
 async fn pending_logs<B, V, P>(
     scan: PendingLogScan<'_, V, P, B::Digest>,
-    mut ancestry: impl Stream<Item = Digested<B>> + Send + Unpin,
+    blocks: Blocks<B>,
     mut shutdown: signal::Signal,
 ) -> Option<PendingLogs<V, P>>
 where
@@ -497,88 +497,68 @@ where
         .finalized_tip
         .filter(|tip| tip.height >= midpoint)
         .map_or(midpoint, |tip| tip.height.next());
+
+    // Finalization can select a different branch after the request was
+    // admitted. A finalized tip directly below the pending range anchors it, so
+    // a resident digest at the tip's height must match, even when nothing is
+    // pending.
     let anchor = scan
         .finalized_tip
-        .filter(|tip| tip.height.next() == first_pending)
-        .map(|tip| tip.digest);
-    let Some(mut cursor_height) = scan.final_height.previous() else {
-        return Some(PendingLogs::new());
-    };
-
-    // Verification ancestry starts at the final block and proposal ancestry at
-    // its parent. Reading it in this scan, which runs alongside the mailbox,
-    // keeps a slow parent fetch from stalling the actor.
-    let first = select! {
-        _ = &mut shutdown => return None,
-        block = ancestry.next() => block,
-    };
-    let Some(first) = first else {
-        warn!(
-            epoch = ?scan.epoch,
-            ?cursor_height,
-            "epoch info ancestry ended before yielding a boundary block"
-        );
-        return None;
-    };
-    let block = if first.height() == scan.final_height {
-        let parent = select! {
-            _ = &mut shutdown => return None,
-            block = ancestry.next() => block,
-        };
-        let Some(parent) = parent else {
-            warn!(
-                epoch = ?scan.epoch,
-                ?cursor_height,
-                "epoch info ancestry ended before yielding the boundary parent"
-            );
-            return None;
-        };
-        parent
-    } else {
-        first
-    };
-
-    let mut attachment = block.digest();
-    let mut blocks = Vec::new();
-    if first_pending <= cursor_height {
-        attachment = block.parent();
-        blocks.push(block);
-        while cursor_height > first_pending {
-            cursor_height = cursor_height
-                .previous()
-                .expect("pending dealer-log ancestry must remain above genesis");
-            let block = select! {
-                _ = &mut shutdown => return None,
-                block = ancestry.next() => block,
-            };
-            let Some(block) = block else {
-                warn!(
-                    epoch = ?scan.epoch,
-                    ?cursor_height,
-                    "epoch info ancestry ended before covering pending dealer logs"
-                );
-                return None;
-            };
-            attachment = block.parent();
-            blocks.push(block);
-        }
-    }
-
-    // Ancestry guarantees parent links between the blocks it yields, but not
-    // that they extend the finalized chain.
-    if anchor.is_some_and(|digest| digest != attachment) {
-        warn!(
-            epoch = ?scan.epoch,
-            "epoch info ancestry is detached from finalized prefix"
-        );
+        .filter(|tip| tip.height.next() == first_pending);
+    if let Some(tip) = anchor
+        && blocks
+            .digest(tip.height)
+            .is_some_and(|digest| digest != tip.digest)
+    {
+        warn!(epoch = ?scan.epoch, "epoch info branch is detached from finalized prefix");
         return None;
     }
 
-    // Authenticate logs in chain order so each dealer's earliest valid log wins,
-    // matching the journal's first-log rule.
+    // A final block at genesis has no pending heights.
     let mut logs = BTreeMap::new();
-    for block in blocks.into_iter().rev() {
+    let Some(last_pending) = scan.final_height.previous() else {
+        return Some(logs);
+    };
+
+    // With no pending block, the branch must still end at the anchor. A
+    // resident digest settles that without I/O, and otherwise the anchor's body
+    // is read.
+    if first_pending > last_pending {
+        let tip = anchor?;
+        if blocks.digest(tip.height) == Some(tip.digest) {
+            return Some(logs);
+        }
+        let mut range = blocks.range(tip.height..=tip.height);
+        let block = select! {
+            _ = &mut shutdown => return None,
+            block = range.next() => block?.ok()?,
+        };
+        return (block.digest() == tip.digest).then_some(logs);
+    }
+
+    // Read the pending heights in ascending order. The first must extend the
+    // anchor.
+    let mut range = blocks.range(first_pending..=last_pending);
+    loop {
+        let block = select! {
+            _ = &mut shutdown => return None,
+            block = range.next() => block,
+        };
+        let Some(block) = block else {
+            break;
+        };
+        let block = match block {
+            Ok(block) => block,
+            Err(error) => {
+                warn!(epoch = ?scan.epoch, ?error, "epoch info inclusion range unavailable");
+                return None;
+            }
+        };
         let height = block.height();
+        if height == first_pending && anchor.is_some_and(|tip| tip.digest != block.parent()) {
+            warn!(epoch = ?scan.epoch, "epoch info branch is detached from finalized prefix");
+            return None;
+        }
         let Some(Payload::DealerLog(log)) = block.inner().payload() else {
             continue;
         };
@@ -586,6 +566,8 @@ where
             warn!(epoch = ?scan.epoch, ?height, "ignoring invalid pending dealer log");
             continue;
         };
+
+        // Ascending range order matches durable storage's first-valid-log rule.
         logs.entry(dealer).or_insert(log);
     }
     Some(logs)
@@ -694,10 +676,10 @@ where
                 }
                 Message::EpochInfo {
                     span,
-                    ancestry,
+                    blocks,
                     response,
                 } => {
-                    work.requests.push(span, ancestry, response);
+                    work.requests.push(span, blocks, response);
                     advance = Some(std::future::ready(())).into();
                 }
                 Message::Finalized {
@@ -1039,7 +1021,7 @@ where
                 return;
             };
 
-            // Finalized logs take precedence. Pending ancestry fills only dealer
+            // Finalized logs take precedence. Pending blocks fill only dealer
             // slots the journal has not claimed.
             let mut logs = store.logs(epoch);
             for (dealer, log) in pending {
@@ -1449,12 +1431,12 @@ mod tests {
             store::AckOutcome,
         },
         state_sync::Plan as StateSyncPlan,
-        tests::mocks::{self, MemorySecretStore, TestBlock, TestBlsVariant, child},
+        tests::mocks::{self, MemorySecretStore, TestBlock, TestBlsVariant, child, ready},
     };
     use commonware_actor::Feedback;
-    use commonware_consensus::{Reporter, marshal};
+    use commonware_consensus::{Heightable, Reporter, marshal};
     use commonware_cryptography::{
-        Signer,
+        Digested, Signer,
         bls12381::{
             dkg::feldman_desmedt::{
                 Dealer as CryptoDealer, DealerPrivMsg, DealerPubMsg, Player as CryptoPlayer,
@@ -1478,15 +1460,8 @@ mod tests {
         Acknowledgement, N3f1, NZU32, NZU64, NZUsize, TestRng, acknowledgement::Exact,
         channel::oneshot, ordered::Set, sequence::Unit, sync::Mutex, test_rng,
     };
-    use futures::{FutureExt, stream};
-    use std::{
-        collections::BTreeMap,
-        num::NonZeroU64,
-        pin::Pin,
-        sync::Arc,
-        task::{Context, Poll},
-        time::Duration,
-    };
+    use futures::FutureExt;
+    use std::{collections::BTreeMap, num::NonZeroU64, sync::Arc, time::Duration};
 
     const TEST_NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_RESHARE_INCLUSION_TEST";
 
@@ -1509,71 +1484,44 @@ mod tests {
         public_key: PublicKey,
     }
 
-    #[derive(Clone)]
-    struct StalledAncestry;
-
-    impl futures::Stream for StalledAncestry {
-        type Item = Digested<TestBlock>;
-
-        fn poll_next(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            Poll::Pending
-        }
+    /// Returns a branch through height 8 whose acquisitions never complete.
+    fn stalled_blocks() -> Blocks<TestBlock> {
+        Blocks::new(
+            Height::new(8),
+            NZUsize!(8),
+            |_| None,
+            |_| futures::future::pending(),
+        )
     }
 
-    impl marshal::ancestry::Ancestry<TestBlock> for StalledAncestry {
-        fn peek(&self) -> Option<&Digested<TestBlock>> {
-            None
-        }
-    }
-
-    /// Hides its head while a gate delays stream materialization.
-    #[derive(Clone)]
-    struct GatedAncestry {
-        blocks: VecDeque<Digested<TestBlock>>,
-        gate: futures::future::Shared<oneshot::Receiver<()>>,
-        started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
-        released: bool,
-    }
-
-    impl GatedAncestry {
-        fn new(
-            blocks: impl IntoIterator<Item = Digested<TestBlock>>,
-            gate: oneshot::Receiver<()>,
-        ) -> (Self, oneshot::Receiver<()>) {
-            let (started, observed) = oneshot::channel();
-            (
-                Self {
-                    blocks: blocks.into_iter().collect(),
-                    gate: gate.shared(),
-                    started: Arc::new(Mutex::new(Some(started))),
-                    released: false,
-                },
-                observed,
-            )
-        }
-    }
-
-    impl futures::Stream for GatedAncestry {
-        type Item = Digested<TestBlock>;
-
-        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            if let Some(started) = self.started.lock().take() {
-                let _ = started.send(());
-            }
-            if !self.released {
-                if self.gate.poll_unpin(cx).is_pending() {
-                    return Poll::Pending;
+    /// Returns a branch over `blocks` with no resident digests whose acquisitions wait for
+    /// `gate`, and a receiver that fires when the first acquisition starts.
+    fn gated_blocks(
+        blocks: impl IntoIterator<Item = Digested<TestBlock>>,
+        gate: oneshot::Receiver<()>,
+    ) -> (Blocks<TestBlock>, oneshot::Receiver<()>) {
+        let source = mocks::blocks(blocks);
+        let gate = gate.shared();
+        let (started, observed) = oneshot::channel();
+        let started = Arc::new(Mutex::new(Some(started)));
+        let source = Blocks::new(
+            source.tip(),
+            NZUsize!(8),
+            |_| None,
+            move |height| {
+                let source = source.clone();
+                let gate = gate.clone();
+                let started = started.clone();
+                async move {
+                    if let Some(started) = started.lock().take() {
+                        let _ = started.send(());
+                    }
+                    gate.await.ok()?;
+                    source.range(height..=height).next().await?.ok()
                 }
-                self.released = true;
-            }
-            Poll::Ready(self.blocks.pop_front())
-        }
-    }
-
-    impl marshal::ancestry::Ancestry<TestBlock> for GatedAncestry {
-        fn peek(&self) -> Option<&Digested<TestBlock>> {
-            self.released.then(|| self.blocks.front()).flatten()
-        }
+            },
+        );
+        (source, observed)
     }
 
     struct DropNotifier(Option<oneshot::Sender<()>>);
@@ -1607,15 +1555,9 @@ mod tests {
         .expect("valid info")
     }
 
-    fn ready(block: TestBlock) -> Digested<TestBlock> {
-        let digest = block.digest();
-        Digested::precomputed(block, digest)
-    }
-
-    fn empty_ancestry() -> BoxedAncestry<TestBlock> {
-        BoxedAncestry::new(marshal::ancestry::from_iter(
-            Vec::<Digested<TestBlock>>::new(),
-        ))
+    /// Returns a branch with no blocks and a tip at height zero.
+    fn empty_blocks() -> Blocks<TestBlock> {
+        mocks::blocks([])
     }
 
     fn scan(
@@ -1668,7 +1610,7 @@ mod tests {
         )
         .await;
 
-        // Complete self-dealing so ancestry fixtures can carry a fully
+        // Complete self-dealing so branch fixtures can carry a fully
         // authenticated log without depending on the actor's dealing phase.
         let seed = store.seed_or_random(Epoch::zero(), test_rng()).await;
         let mut dealer = store
@@ -1871,8 +1813,8 @@ mod tests {
     ///
     /// A final-block request made while the actor is still applying the dealing window is
     /// answered once the actor has applied every block before the midpoint. Dealer logs from
-    /// the midpoint on are read from the request's ancestry, so a verifier that fell behind
-    /// still receives the epoch info from its original request.
+    /// the midpoint on are read from the request's selected range, so a verifier that fell
+    /// behind still receives the epoch info from its original request.
     #[test]
     fn pr_5263_regression() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
@@ -1896,10 +1838,7 @@ mod tests {
             // Verification of the final block asks for epoch info before dealing has applied
             // any block.
             let mut requester = mailbox.clone();
-            let mut request = Box::pin(requester.epoch_info(marshal::ancestry::from_iter([
-                blocks[3].clone(),
-                blocks[2].clone(),
-            ])));
+            let mut request = Box::pin(requester.epoch_info(mocks::blocks([blocks[2].clone()])));
             assert!(request.as_mut().now_or_never().is_none());
 
             // Dealing applies every block before the midpoint without answering the request.
@@ -2333,7 +2272,7 @@ mod tests {
     }
 
     #[test]
-    fn unanchored_or_delayed_ancestry_does_not_block_finalization() {
+    fn unanchored_or_delayed_range_does_not_block_finalization() {
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
             let InclusionHarness {
@@ -2401,10 +2340,8 @@ mod tests {
             // Admit the detached boundary request before the actor starts. It
             // must wait until finalized reporting establishes an exact anchor.
             let mut detached_mailbox = mailbox.clone();
-            let detached = detached_mailbox.epoch_info(marshal::ancestry::from_iter([
-                detached_four,
-                detached_midpoint,
-            ]));
+            let detached =
+                detached_mailbox.epoch_info(mocks::blocks([detached_four, detached_midpoint]));
             futures::pin_mut!(detached);
             assert!(detached.as_mut().now_or_never().is_none());
 
@@ -2415,18 +2352,17 @@ mod tests {
                 (result, store)
             });
 
-            // A verification candidate without its parent is truncated before
-            // the actor can reconstruct the boundary view.
+            // A source holding only the verification candidate cannot supply
+            // its parent, so the actor cannot reconstruct the boundary view.
             let mut malformed_mailbox = mailbox.clone();
-            let malformed =
-                malformed_mailbox.epoch_info(marshal::ancestry::from_iter([final_block.clone()]));
+            let malformed = malformed_mailbox.epoch_info(mocks::blocks([final_block.clone()]));
             futures::pin_mut!(malformed);
             assert!(malformed.as_mut().now_or_never().is_none());
 
             context.sleep(Duration::from_millis(1)).await;
             assert!(
                 detached.as_mut().now_or_never().is_none(),
-                "unanchored ancestry completed before the canonical prefix arrived"
+                "unanchored range must wait for the canonical prefix"
             );
 
             // Finalizing the canonical midpoint establishes the conflicting
@@ -2448,12 +2384,12 @@ mod tests {
             // The actor owns the request while its selected scan waits for the
             // parent, so finalized reporting must remain independent.
             let (release, gate) = oneshot::channel();
-            let (ancestry, ancestry_started) = GatedAncestry::new([canonical_four.clone()], gate);
+            let (blocks, range_started) = gated_blocks([canonical_four.clone()], gate);
             let mut canonical_mailbox = mailbox.clone();
-            let canonical = canonical_mailbox.epoch_info(ancestry);
+            let canonical = canonical_mailbox.epoch_info(blocks);
             futures::pin_mut!(canonical);
             assert!(canonical.as_mut().now_or_never().is_none());
-            ancestry_started
+            range_started
                 .await
                 .expect("request should await the delayed parent");
 
@@ -2467,30 +2403,30 @@ mod tests {
                 .expect("canonical parent should be acknowledged");
             assert!(canonical.as_mut().now_or_never().is_none());
 
-            // Once the ancestry yields the canonical parent, the actor can
+            // Once the range yields the canonical parent, the actor can
             // answer from the finalized state without walking any farther.
-            release.send(()).expect("ancestry should still be waiting");
+            release.send(()).expect("range must still be waiting");
             let response = select! {
                 response = canonical.as_mut() => response,
                 _ = context.sleep(Duration::from_secs(1)) => {
-                    panic!("delayed ancestry did not resume");
+                    panic!("delayed range must resume");
                 },
             };
             assert!(matches!(response, EpochInfoResponse::Available(None)));
 
-            // Finalization cannot classify an ancestry that has not yielded its
+            // Finalization cannot classify a range that has not yielded its
             // parent. Leave that verification pending instead of blocking the
             // reporter or manufacturing a stable verdict.
             let (terminal_release, terminal_gate) = oneshot::channel();
-            let (terminal_ancestry, terminal_started) =
-                GatedAncestry::new([canonical_four.clone()], terminal_gate);
+            let (terminal_blocks, terminal_started) =
+                gated_blocks([canonical_four.clone()], terminal_gate);
             let mut terminal_mailbox = mailbox.clone();
-            let terminal = terminal_mailbox.epoch_info(terminal_ancestry);
+            let terminal = terminal_mailbox.epoch_info(terminal_blocks);
             futures::pin_mut!(terminal);
             assert!(terminal.as_mut().now_or_never().is_none());
             terminal_started
                 .await
-                .expect("terminal ancestry scan should start");
+                .expect("terminal range scan must start");
 
             let (final_ack, final_waiter) = Exact::handle();
             assert_eq!(
@@ -2610,10 +2546,7 @@ mod tests {
             // view at its first stream poll.
             let mut prime_mailbox = mailbox.clone();
             let primed = prime_mailbox
-                .epoch_info(marshal::ancestry::from_iter([
-                    losing_six.clone(),
-                    losing_five.clone(),
-                ]))
+                .epoch_info(mocks::blocks([losing_six.clone(), losing_five.clone()]))
                 .await;
             assert!(matches!(
                 primed,
@@ -2621,10 +2554,9 @@ mod tests {
             ));
 
             let (release, gate) = oneshot::channel();
-            let (tail, scan_started) = GatedAncestry::new([losing_five], gate);
-            let ancestry = marshal::ancestry::with_prefix([losing_six], tail);
+            let (blocks, scan_started) = gated_blocks([losing_five, losing_six], gate);
             let mut raced_mailbox = mailbox.clone();
-            let raced = raced_mailbox.epoch_info(ancestry);
+            let raced = raced_mailbox.epoch_info(blocks);
             futures::pin_mut!(raced);
             assert!(raced.as_mut().now_or_never().is_none());
             scan_started.await.expect("scan should start");
@@ -2680,14 +2612,14 @@ mod tests {
     }
 
     #[test]
-    fn artifact_scan_cancels_stalled_ancestry_when_response_closes() {
+    fn artifact_scan_cancels_stalled_range_when_response_closes() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let info = info();
             let (response, receiver) = oneshot::channel::<TestResponse>();
             let request = ArtifactRequest {
                 span: Span::none(),
-                ancestry: BoxedAncestry::new(StalledAncestry),
+                blocks: stalled_blocks(),
                 response,
             };
             let mut artifact_scan = ArtifactScan::default();
@@ -2702,11 +2634,11 @@ mod tests {
     }
 
     #[test]
-    fn pending_logs_cancels_stalled_ancestry_when_runtime_stops() {
+    fn pending_logs_cancels_stalled_range_when_runtime_stops() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let info = info();
-            let pending = pending_logs(scan(&info), StalledAncestry, context.stopped());
+            let pending = pending_logs(scan(&info), stalled_blocks(), context.stopped());
             futures::pin_mut!(pending);
             assert!(pending.as_mut().now_or_never().is_none());
 
@@ -2721,7 +2653,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_logs_rejects_ancestry_truncated_before_inclusion_start() {
+    fn pending_logs_rejects_range_truncated_before_inclusion_start() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let info = info();
@@ -2744,7 +2676,7 @@ mod tests {
                 Height::new(6),
                 6,
             );
-            let ancestry = Box::pin(stream::iter([ready(block_six), ready(block_five)]));
+            let blocks = mocks::blocks([mocks::ready(block_six), mocks::ready(block_five)]);
             let scan = PendingLogScan {
                 epoch: Epoch::zero(),
                 info: &info,
@@ -2754,7 +2686,7 @@ mod tests {
             };
 
             assert!(
-                pending_logs(scan, ancestry, context.stopped())
+                pending_logs(scan, blocks, context.stopped())
                     .await
                     .is_none()
             );
@@ -2785,9 +2717,7 @@ mod tests {
                 Height::new(6),
                 6,
             );
-            let ancestry = Box::pin(
-                stream::iter([ready(block_six), ready(block_five)]).chain(stream::pending()),
-            );
+            let blocks = mocks::blocks([mocks::ready(block_six), mocks::ready(block_five)]);
             let scan = PendingLogScan {
                 epoch: Epoch::zero(),
                 info: &info,
@@ -2800,16 +2730,112 @@ mod tests {
             };
 
             assert!(
-                pending_logs(scan, ancestry, context.stopped())
+                pending_logs(scan, blocks, context.stopped())
                     .now_or_never()
                     .is_some_and(|logs| logs.is_some_and(|logs| logs.is_empty()))
             );
         });
     }
 
-    /// When the final block's parent is the finalized tip, the scan accepts ancestry that
-    /// starts at that parent (proposal) or at the final block itself (verification), and
-    /// rejects a parent that conflicts with the tip.
+    /// Inclusion reads only its selected range and keeps the earliest valid dealer log.
+    #[test]
+    fn pending_logs_selects_only_inclusion_range_and_first_valid_log() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // One dealer signs an invalid log, then two valid logs.
+            let info = info();
+            let signer = signers()[0].clone();
+            let public_key = signer.public_key();
+            let log = |info, seed| {
+                let (dealer, _, _) =
+                    CryptoDealer::start::<N3f1>(TestRng::new(seed), info, signer.clone(), None)
+                        .expect("dealer must start");
+                dealer.finalize::<N3f1>()
+            };
+            let wrong_info = Info::new::<N3f1>(
+                TEST_NAMESPACE,
+                1,
+                None,
+                SharingMode::NonZeroCounter,
+                Reveal::V1,
+                players(),
+                players(),
+            )
+            .expect("info must be valid");
+            let invalid = log(wrong_info, 10);
+            assert!(invalid.clone().check(&info).is_none());
+            let first = log(info.clone(), 11);
+            let expected = first.clone().check(&info).expect("log must be valid").1;
+            let later = log(info.clone(), 12);
+            assert!(later.clone().check(&info).expect("log must be valid").1 != expected);
+
+            // Heights 4 through 6 carry the three logs above a finalized tip at height 3.
+            let genesis = mocks::genesis_block(public_key.clone());
+            let anchor = TestBlock::new::<Sha256>(
+                genesis.context().clone(),
+                genesis.digest(),
+                Height::new(3),
+                3,
+            );
+            let mut parent = Arc::new(anchor.clone());
+            let mut chain = vec![parent.clone()];
+            for (offset, log) in [invalid, first, later].into_iter().enumerate() {
+                let block = TestBlock::new::<Sha256>(
+                    genesis.context().clone(),
+                    parent.digest(),
+                    Height::new(4 + offset as u64),
+                    offset as u64,
+                )
+                .with_payload::<Sha256, TestBlsVariant, PublicKey>(
+                    NZU32!(16),
+                    Payload::DealerLog(log),
+                );
+                parent = Arc::new(block);
+                chain.push(parent.clone());
+            }
+
+            // The branch records every height it acquires.
+            let source = mocks::blocks(chain.into_iter().map(mocks::ready));
+            let metadata = source.clone();
+            let acquired = Arc::new(Mutex::new(Vec::new()));
+            let observed = acquired.clone();
+            let blocks = Blocks::new(
+                source.tip(),
+                NZUsize!(8),
+                move |height| metadata.digest(height),
+                move |height| {
+                    observed.lock().push(height);
+                    let source = source.clone();
+                    async move { source.range(height..=height).next().await?.ok() }
+                },
+            );
+
+            // The scan acquires only heights 4 through 6 and keeps the first valid log.
+            let scan = PendingLogScan {
+                epoch: Epoch::zero(),
+                info: &info,
+                epocher: FixedEpocher::new(NZU64!(8)),
+                finalized_tip: Some(FinalizedTip {
+                    height: anchor.height(),
+                    digest: anchor.digest(),
+                }),
+                final_height: Height::new(7),
+            };
+            let logs = pending_logs(scan, blocks, context.stopped())
+                .await
+                .expect("range must yield logs");
+            assert_eq!(logs.len(), 1);
+            assert!(logs.get(&public_key) == Some(&expected));
+            assert_eq!(
+                *acquired.lock(),
+                [Height::new(4), Height::new(5), Height::new(6)]
+            );
+        });
+    }
+
+    /// When the final block's parent is the finalized tip, the scan accepts a branch that ends
+    /// at that parent and rejects a parent that conflicts with the tip, whether the parent's
+    /// digest is resident or read from its body.
     #[test]
     fn pending_logs_authenticates_a_fully_finalized_parent() {
         let executor = deterministic::Runner::default();
@@ -2821,12 +2847,6 @@ mod tests {
                 genesis.digest(),
                 Height::new(6),
                 6,
-            ));
-            let candidate = ready(TestBlock::new::<Sha256>(
-                genesis.context().clone(),
-                canonical.digest(),
-                Height::new(7),
-                7,
             ));
             let detached = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
@@ -2846,39 +2866,32 @@ mod tests {
                 finalized_tip: Some(tip),
                 final_height: Height::new(7),
             };
+            let fetched = [(canonical.clone(), true), (detached.clone(), false)];
 
-            // A proposal's ancestry starts at the finalized parent.
+            // A branch that ends at the finalized parent holds no pending log.
             assert!(
-                pending_logs(
-                    scan(),
-                    Box::pin(stream::iter([canonical.clone()])),
-                    context.stopped()
-                )
-                .await
-                .is_some_and(|logs| logs.is_empty())
-            );
-
-            // A verification's ancestry starts at the final block, before its parent.
-            assert!(
-                pending_logs(
-                    scan(),
-                    Box::pin(stream::iter([candidate, canonical])),
-                    context.stopped()
-                )
-                .await
-                .is_some_and(|logs| logs.is_empty())
+                pending_logs(scan(), mocks::blocks([canonical]), context.stopped())
+                    .await
+                    .is_some_and(|logs| logs.is_empty())
             );
 
             // A parent that conflicts with the finalized tip is rejected.
             assert!(
-                pending_logs(
-                    scan(),
-                    Box::pin(stream::iter([detached])),
-                    context.stopped()
-                )
-                .await
-                .is_none()
+                pending_logs(scan(), mocks::blocks([detached]), context.stopped())
+                    .await
+                    .is_none()
             );
+
+            // With no resident digest, the scan reads the parent's body and accepts the branch
+            // only when that body is the finalized tip.
+            for (block, accepted) in fetched {
+                let (release, gate) = oneshot::channel();
+                let (source, started) = gated_blocks([block], gate);
+                release.send(()).expect("gate must be open");
+                let logs = pending_logs(scan(), source, context.stopped()).await;
+                started.await.expect("scan must read the parent's body");
+                assert_eq!(logs.is_some(), accepted);
+            }
         });
     }
 
@@ -2913,7 +2926,7 @@ mod tests {
                 Height::new(6),
                 7,
             );
-            let ancestry = Box::pin(stream::iter([ready(block_six), ready(block_five)]));
+            let blocks = mocks::blocks([mocks::ready(block_six), mocks::ready(block_five)]);
             let scan = PendingLogScan {
                 epoch: Epoch::zero(),
                 info: &info,
@@ -2926,7 +2939,7 @@ mod tests {
             };
 
             assert!(
-                pending_logs(scan, ancestry, context.stopped())
+                pending_logs(scan, blocks, context.stopped())
                     .await
                     .is_none()
             );
@@ -2980,7 +2993,7 @@ mod tests {
     fn canceled_request_is_not_selected() {
         let (response_tx, response_rx) = oneshot::channel();
         let mut requests = TestRequests::default();
-        requests.push(Span::none(), empty_ancestry(), response_tx);
+        requests.push(Span::none(), empty_blocks(), response_tx);
         drop(response_rx);
 
         assert!(requests.pop().is_none());
@@ -2991,8 +3004,8 @@ mod tests {
         let (earlier_tx, earlier_rx) = oneshot::channel();
         let (later_tx, later_rx) = oneshot::channel();
         let mut requests = TestRequests::default();
-        requests.push(Span::none(), empty_ancestry(), earlier_tx);
-        requests.push(Span::none(), empty_ancestry(), later_tx);
+        requests.push(Span::none(), empty_blocks(), earlier_tx);
+        requests.push(Span::none(), empty_blocks(), later_tx);
 
         requests
             .pop()

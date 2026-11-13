@@ -111,6 +111,53 @@ pub(crate) type TestManager = SimManager<TestPublicKey, deterministic::Context>;
 pub(crate) type TestMailbox = orchestrator::Mailbox<TestBlock>;
 pub(crate) type TestMarshalMailbox = MarshalMailbox<TestScheme, TestMarshalVariant>;
 
+/// Pairs a test block with its digest.
+pub(crate) fn ready(block: impl Into<Arc<TestBlock>>) -> Digested<TestBlock> {
+    let block = block.into();
+    let digest = block.digest();
+    Digested::precomputed(block, digest)
+}
+
+/// Returns a branch ending at the highest of `blocks`, with each block's digest and its parent's
+/// resident. Each acquisition decodes a fresh body, so the branch retains none.
+pub(crate) fn blocks(
+    blocks: impl IntoIterator<Item = Digested<TestBlock>>,
+) -> marshal::blocks::Blocks<TestBlock> {
+    let mut digests = BTreeMap::new();
+    let mut encoded = BTreeMap::new();
+    for block in blocks {
+        if let Some(height) = block.height().previous() {
+            digests.insert(height, block.parent());
+        }
+        digests.insert(block.height(), block.digest());
+        encoded.insert(block.height(), block.encode());
+    }
+    let tip = encoded
+        .last_key_value()
+        .map_or(Height::zero(), |(height, _)| *height);
+    let encoded = Arc::new(encoded);
+    marshal::blocks::Blocks::new(
+        tip,
+        NZUsize!(8),
+        move |height| digests.get(&height).copied(),
+        move |height| {
+            let encoded = encoded.get(&height).cloned();
+            async move {
+                let block = TestBlock::decode_cfg(encoded?, &()).expect("test block must decode");
+                Some(ready(block))
+            }
+        },
+    )
+}
+
+/// Pairs `parent` with a branch that ends at it and holds no other block.
+pub(crate) fn ancestry(parent: Digested<TestBlock>) -> marshal::blocks::Ancestry<TestBlock> {
+    marshal::blocks::Ancestry {
+        blocks: blocks([parent.clone()]),
+        parent,
+    }
+}
+
 #[derive(Clone, Copy, Debug, thiserror::Error)]
 #[error("peer set unavailable")]
 pub(crate) struct TrackFailed;

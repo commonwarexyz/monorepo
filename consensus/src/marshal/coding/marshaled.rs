@@ -92,7 +92,6 @@ use crate::{
     Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Handoff,
     Heightable, History, Relay, Reporter,
     marshal::{
-        ancestry::Ancestry,
         application::{
             build::{self, Resolved},
             gates::{self, GateOutcome, Gates},
@@ -102,6 +101,7 @@ use crate::{
                 is_valid_reproposal_at_verify,
             },
         },
+        blocks::Ancestry,
         coding::{
             Coding, shards,
             types::{CodedBlock, coding_config_for_participants, hash_context},
@@ -142,8 +142,8 @@ use tracing::{Instrument as _, debug, info_span, warn};
 
 /// The outcome of the coding proposal checks. A build carries the coding configuration of the
 /// epoch's participants to the sealing step.
-type CodingResolved<B, C, H, A> =
-    Resolved<Commitment<B, C, H>, Arc<CodedBlock<B, C, H>>, A, CodingConfig>;
+type CodingResolved<B, C, H> =
+    Resolved<Commitment<B, C, H>, Arc<CodedBlock<B, C, H>>, B, CodingConfig>;
 
 /// Configuration for initializing [`Marshaled`].
 #[allow(clippy::type_complexity)]
@@ -200,7 +200,6 @@ where
     build_duration: Timed,
     verify_duration: Timed,
     proposal_parent_fetch_duration: Timed,
-    ancestor_fetch_duration: Timed,
     erasure_encode_duration: Timed,
 }
 
@@ -228,7 +227,6 @@ where
             build_duration: self.build_duration.clone(),
             verify_duration: self.verify_duration.clone(),
             proposal_parent_fetch_duration: self.proposal_parent_fetch_duration.clone(),
-            ancestor_fetch_duration: self.ancestor_fetch_duration.clone(),
             erasure_encode_duration: self.erasure_encode_duration.clone(),
         }
     }
@@ -287,13 +285,6 @@ where
         );
         let proposal_parent_fetch_duration = Timed::new(parent_fetch_histogram);
 
-        let ancestor_fetch_histogram = context.histogram(
-            "ancestor_fetch_duration",
-            "Histogram of time taken to fetch a block via the ancestry stream, in seconds",
-            Buckets::LOCAL,
-        );
-        let ancestor_fetch_duration = Timed::new(ancestor_fetch_histogram);
-
         let erasure_histogram = context.histogram(
             "erasure_encode_duration",
             "Histogram of time taken to erasure encode a built block on the strategy, in seconds",
@@ -314,7 +305,6 @@ where
             build_duration,
             verify_duration,
             proposal_parent_fetch_duration,
-            ancestor_fetch_duration,
             erasure_encode_duration,
         }
     }
@@ -342,13 +332,12 @@ where
         commitment: Commitment<B, C, H>,
         prefetched_block: Option<Arc<CodedBlock<B, C, H>>>,
         stage: Stage,
-        _history: History<Commitment<B, C, H>>,
+        history: History<Commitment<B, C, H>>,
     ) -> oneshot::Receiver<GateOutcome> {
         let marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
         let verify_duration = self.verify_duration.clone();
-        let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
 
         // A proposal alone does not show that its block is available, so verification waits for
         // local reconstruction and certification acquires the notarized block from peers. Own
@@ -448,18 +437,19 @@ where
                         return Some(false);
                     }
 
-                    let ancestry_stream = marshal.ancestor_stream(
-                        Arc::new(runtime_context.child("ancestor_stream")),
-                        [block.inner_digested(), parent.inner_digested()],
-                        ancestor_fetch_duration,
-                    );
+                    let blocks =
+                        marshal.blocks_with_parent(parent.height(), parent_commitment, history);
                     let validity_request = application
                         .verify(
                             (
                                 runtime_context.child("app_verify"),
                                 consensus_context.clone(),
                             ),
-                            ancestry_stream,
+                            block.inner_digested(),
+                            Ancestry {
+                                parent: parent.inner_digested(),
+                                blocks,
+                            },
                         )
                         .instrument(info_span!(
                             "marshal.coding.application.verify",
@@ -638,15 +628,14 @@ where
     fn checks(
         &self,
         consensus_context: Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
-        _history: History<Commitment<B, C, H>>,
+        history: History<Commitment<B, C, H>>,
         fetch_parent: bool,
-    ) -> impl Future<Output = CodingResolved<B, C, H, impl Ancestry<B>>> + Send + 'static {
+    ) -> impl Future<Output = CodingResolved<B, C, H>> + Send + 'static {
         let scheme_provider = self.scheme_provider.clone();
         let context = self.context.clone();
         let marshal = self.marshal.clone();
         let epocher = self.epocher.clone();
         let proposal_parent_fetch_duration = self.proposal_parent_fetch_duration.clone();
-        let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
         let build_duration = self.build_duration.clone();
         async move {
             let Some(scheme) = scheme_provider.scheme(consensus_context.epoch()) else {
@@ -706,13 +695,12 @@ where
                 return Resolved::Reuse(parent.commitment(), parent);
             }
 
-            let ancestor_stream = marshal.ancestor_stream(
-                context.clone(),
-                [parent.inner_digested()],
-                ancestor_fetch_duration,
-            );
+            let blocks = marshal.blocks_with_parent(parent.height(), parent_commitment, history);
             Resolved::Build(
-                ancestor_stream,
+                Ancestry {
+                    parent: parent.inner_digested(),
+                    blocks,
+                },
                 build_duration.timer(&*context),
                 coding_config,
             )

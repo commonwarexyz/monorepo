@@ -78,11 +78,11 @@ mod tests {
         History, Relay, Reporter, Viewable,
         marshal::{
             Identifier, Update,
-            ancestry::{Ancestry, BlockProvider},
             application::{
                 gates::{GateOutcome, Gates},
                 relay,
             },
+            blocks::Ancestry,
             config::{Config, Start},
             core::{Actor, Cutoff, Mailbox, Processed, cache, durability::Durable as _},
             mocks::{
@@ -162,12 +162,6 @@ mod tests {
         },
         time::Duration,
     };
-
-    #[test]
-    fn mailbox_provides_application_blocks() {
-        fn assert_provider<P: BlockProvider<Block = B>>() {}
-        assert_provider::<Mailbox<S, Standard<B>>>();
-    }
 
     /// Locally built blocks keep their identity through persistence and replay restores it once.
     #[test_traced("WARN")]
@@ -275,10 +269,15 @@ mod tests {
                     digests.push(digest);
                 }
 
-                let mut cursor = marshal.get_block(&parent).await.unwrap();
-                for expected in (0..3).rev() {
-                    cursor = marshal.subscribe_parent(&cursor).await.unwrap();
-                    assert_eq!(cursor.height(), Height::new(expected));
+                let blocks = marshal.blocks_with_parent(
+                    Height::new(3),
+                    parent,
+                    History::anchored(digests.clone()),
+                );
+                let mut range = blocks.range(Height::new(1)..=Height::new(3));
+                for expected in 1..=3 {
+                    let block = range.next().await.unwrap().unwrap();
+                    assert_eq!(block.height(), Height::new(expected));
                 }
                 assert_eq!(counter.count(), 3, "{kind:?} ancestry hashing");
                 assert_eq!(setup.application.pending_ack_heights().len(), 3);
@@ -374,38 +373,6 @@ mod tests {
                 .ok()?;
             Some(Scoped::scheme(Arc::clone(scheme)))
         }
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_block_provider_parent_fetches_by_commitment() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let buffer = RecordingBuffer::default();
-            let (mailbox, buffer, _resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
-                "standard-provider-parent-commitment",
-                ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
-                Some(buffer),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
-            )
-            .await;
-            let buffer = buffer.expect("buffer was provided");
-
-            let parent = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
-            let child = make_raw_block(parent.digest(), Height::new(2), 200);
-            let subscription = mailbox.subscribe_parent(&ready(child.clone()));
-
-            context.sleep(Duration::from_millis(100)).await;
-            assert_eq!(
-                buffer.commitment_subscription_count(),
-                1,
-                "parent walkback should use the standard parent commitment"
-            );
-            drop(subscription);
-        });
     }
 
     fn assert_finalize_deterministic<H: TestHarness>(
@@ -2905,10 +2872,8 @@ mod tests {
             // application progress advances the floor.
             let missing = make_raw_block(Sha256::hash(&[b"missing-parent"]), Height::new(2), 999);
             let missing_digest = missing.digest();
-            let child = make_raw_block(missing_digest, Height::new(3), 1_000);
             let mut first = mailbox.acquire(missing_digest);
             let mut second = mailbox.acquire(missing_digest);
-            let mut parent = Box::pin(mailbox.subscribe_parent(&ready(child.clone())));
 
             // The anchor subscription resolves when the block arrives.
             let anchor_wait = mailbox.acquire(anchor.digest());
@@ -2938,32 +2903,17 @@ mod tests {
             // Parent availability determines subscription lifetime.
             assert!(matches!(first.try_recv(), Err(TryRecvError::Empty)));
             assert!(matches!(second.try_recv(), Err(TryRecvError::Empty)));
-            select! {
-                result = &mut parent => {
-                    panic!("parent subscription resolved at processed floor: {result:?}");
-                },
-                _ = context.sleep(Duration::from_millis(100)) => {},
-            };
 
             // A new caller joins acquisition even after progress passed its height.
             let mut late_first = mailbox.acquire(missing_digest);
-            let mut late_parent = Box::pin(mailbox.subscribe_parent(&ready(child.clone())));
             let _ = mailbox.get_processed().await;
             assert!(matches!(late_first.try_recv(), Err(TryRecvError::Empty)));
-            select! {
-                result = &mut late_parent => {
-                    panic!("late parent subscription resolved before availability: {result:?}");
-                },
-                _ = context.sleep(Duration::from_millis(100)) => {},
-            };
 
             // Later local availability satisfies every registered caller.
             let _ = buffer.broadcast(Recipients::All, ready(missing.clone()));
             assert_eq!(first.await.unwrap().digest(), missing_digest);
             assert_eq!(second.await.unwrap().digest(), missing_digest);
-            assert_eq!(parent.await.unwrap().digest(), missing_digest);
             assert_eq!(late_first.await.unwrap().digest(), missing_digest);
-            assert_eq!(late_parent.await.unwrap().digest(), missing_digest);
         })
     }
 
@@ -12386,7 +12336,7 @@ mod tests {
         async fn prepare(
             &mut self,
             context: (Runtime, Ctx),
-            ancestry: impl Ancestry<B>,
+            ancestry: Ancestry<B>,
             input: (),
         ) -> Handoff<Digested<B>> {
             self.prepares.fetch_add(1, Ordering::SeqCst);
@@ -12398,7 +12348,7 @@ mod tests {
         async fn propose(
             &mut self,
             (_, context): (Runtime, Ctx),
-            _: impl Ancestry<B>,
+            _: Ancestry<B>,
             _: (),
         ) -> Option<Digested<B>> {
             self.build_started
@@ -12412,7 +12362,7 @@ mod tests {
             Some(ready(self.block.clone()))
         }
 
-        async fn verify(&mut self, _: (Runtime, Ctx), _: impl Ancestry<B>) -> bool {
+        async fn verify(&mut self, _: (Runtime, Ctx), _: Digested<B>, _: Ancestry<B>) -> bool {
             let started = self.verify_started.lock().take();
             if let Some(started) = started {
                 let release = self.verify_release.lock().take().unwrap();
