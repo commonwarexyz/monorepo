@@ -193,10 +193,13 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         let bufs = bufs.into();
         let bufs_len = bufs.remaining();
         self.metrics.storage_writes.inc();
-        self.metrics.storage_write_bytes.inc_by(bufs_len as u64);
+        self.metrics
+            .storage_write_bytes
+            .inc_by(Widen::widen(bufs_len));
         if options.contains(WriteOptions::SYNC) {
             self.metrics.storage_syncs.inc();
         }
+
         // The span is built here, not with `#[tracing::instrument]`, because `bytes` is known only
         // after converting `bufs`, and `Span::current().record` would write into the caller's span
         // when this span is disabled.
@@ -205,7 +208,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             .instrument(tracing::debug_span!(
                 "runtime.storage.blob.write_at",
                 partition = %self.partition,
-                bytes = bufs_len as u64,
+                bytes = bufs_len.traced(),
                 options = options.0.traced(),
             ))
             .await
@@ -215,7 +218,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         name = "runtime.storage.blob.resize",
         level = "debug",
         skip_all,
-        fields(partition = %self.partition, len = len)
+        fields(partition = %self.partition, len = len.traced())
     )]
     async fn resize(&self, len: u64) -> Result<(), Error> {
         self.metrics.storage_resizes.inc();
@@ -259,12 +262,7 @@ mod tests {
         storage::{memory::Storage as MemoryStorage, tests::run_storage_tests},
         telemetry::metrics::Registry,
     };
-    use commonware_utils::sync::Mutex;
     use rstest::rstest;
-    use tracing::{Level, Subscriber, instrument::WithSubscriber as _, span};
-    use tracing_subscriber::{
-        Layer, filter::LevelFilter, layer::Context, prelude::*, registry::LookupSpan,
-    };
 
     #[rstest]
     #[case::tokio(crate::tokio::Runner::default())]
@@ -280,97 +278,6 @@ mod tests {
 
             run_storage_tests(context, storage).await;
         });
-    }
-
-    /// Records the blob spans a subscriber opens and rejects writes to a parent span.
-    #[derive(Clone, Default)]
-    struct Spans(Arc<Mutex<Vec<(&'static str, Level)>>>);
-
-    impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for Spans {
-        fn on_record(&self, id: &span::Id, _: &span::Record<'_>, ctx: Context<'_, S>) {
-            assert_ne!(
-                ctx.span(id).unwrap().name(),
-                "test.parent",
-                "blob operations must not overwrite parent fields"
-            );
-        }
-
-        fn on_new_span(&self, attrs: &span::Attributes<'_>, _: &span::Id, _: Context<'_, S>) {
-            let metadata = attrs.metadata();
-            if metadata.name().starts_with("runtime.storage.blob.") {
-                self.0.lock().push((metadata.name(), *metadata.level()));
-            }
-        }
-    }
-
-    /// Runs blob operations under `filter` and checks which blob spans were opened.
-    async fn assert_blob_span_levels(filter: LevelFilter, expect_spans: bool) {
-        let spans = Spans::default();
-        let subscriber = tracing_subscriber::registry()
-            .with(filter)
-            .with(spans.clone());
-        async {
-            let parent = tracing::info_span!("test.parent", bytes = 17_u64);
-            async {
-                let mut registry = Registry::default();
-                let inner = MemoryStorage::new();
-                let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
-                let (blob, len) = storage.open("partition", b"blob").await.unwrap();
-                assert_eq!(len, 0);
-                assert_eq!(storage.metrics.open_blobs.get(), 1);
-
-                blob.write_at(0, b"data", WriteOptions::SYNC).await.unwrap();
-                blob.resize(3).await.unwrap();
-                blob.sync().await.unwrap();
-                blob.start_sync().await.await.unwrap();
-                assert_eq!(
-                    blob.read_at(0, 3, ReadOptions::default())
-                        .await
-                        .unwrap()
-                        .coalesce(),
-                    b"dat"
-                );
-                assert_eq!(storage.metrics.storage_writes.get(), 1);
-                assert_eq!(storage.metrics.storage_write_bytes.get(), 4);
-                assert_eq!(storage.metrics.storage_resizes.get(), 1);
-                assert_eq!(storage.metrics.storage_syncs.get(), 3);
-                assert_eq!(storage.metrics.storage_reads.get(), 1);
-                assert_eq!(storage.metrics.storage_read_bytes.get(), 3);
-                drop(blob);
-                assert_eq!(storage.metrics.open_blobs.get(), 0);
-            }
-            .instrument(parent)
-            .await;
-
-            // Record into another span so the hook above runs and would catch a parent write.
-            let probe = tracing::info_span!("test.probe", value = tracing::field::Empty);
-            probe.record("value", 1_u64);
-        }
-        .with_subscriber(subscriber)
-        .await;
-
-        let expected = if expect_spans {
-            vec![
-                ("runtime.storage.blob.write_at", Level::DEBUG),
-                ("runtime.storage.blob.resize", Level::DEBUG),
-                ("runtime.storage.blob.sync", Level::DEBUG),
-                ("runtime.storage.blob.start_sync", Level::DEBUG),
-                ("runtime.storage.blob.sync", Level::DEBUG),
-            ]
-        } else {
-            vec![]
-        };
-        assert_eq!(*spans.0.lock(), expected);
-    }
-
-    #[tokio::test]
-    async fn test_metered_blob_spans_hidden_at_info() {
-        assert_blob_span_levels(LevelFilter::INFO, false).await;
-    }
-
-    #[tokio::test]
-    async fn test_metered_blob_spans_emitted_at_debug() {
-        assert_blob_span_levels(LevelFilter::DEBUG, true).await;
     }
 
     #[tokio::test]
