@@ -817,8 +817,9 @@ stability_scope!(BETA {
         /// the [Removal] is polled, and dropping it does not cancel them.
         ///
         /// Names in a batch must be distinct. A repeated name fails the batch with
-        /// [Error::BlobMissing] at its second removal. An empty batch removes nothing but still
-        /// takes its turn and completes with `after`'s result, so it acts as a barrier.
+        /// [Error::BlobMissing] at its second removal. An empty batch names no partition and
+        /// removes nothing. It completes with `after`'s result, so it acts as a barrier for that
+        /// lineage.
         ///
         /// # Ordering
         ///

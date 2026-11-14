@@ -1024,36 +1024,51 @@ mod tests {
         strategy
     }
 
-    /// A removal batch still queued behind another when the root returns completes before
-    /// shutdown, so the next run finds its blobs gone.
+    /// Removal batches still queued behind others in several partitions when the root returns
+    /// complete before shutdown, so the next run finds their blobs gone.
     #[test]
     fn test_shutdown_completes_queued_removals() {
         let cfg = Config::new();
         let storage_directory = cfg.storage_directory().clone();
-        let names: Vec<_> = (0..64u64).map(|name| name.to_be_bytes().to_vec()).collect();
-        let encoded = Runner::new(cfg).start(|context| async move {
-            for name in &names {
-                drop(context.open("drain", name).await.unwrap());
-            }
-            let batch = |names: &[Vec<u8>]| {
-                names
-                    .iter()
-                    .map(|name| ("drain".to_string(), name.clone()))
-                    .collect()
-            };
 
-            // The second batch queues behind the first, which is still removing when the root
-            // returns.
-            let (first, second) = names.split_at(names.len() - 1);
-            drop(context.start_remove_many(batch(first), None).await);
-            drop(context.start_remove_many(batch(second), None).await);
+        // Partitions of different sizes finish at different times.
+        let partitions = [
+            ("drain_large", 64u64),
+            ("drain_medium", 16),
+            ("drain_small", 2),
+        ];
+        let names =
+            |blobs: u64| -> Vec<_> { (0..blobs).map(|name| name.to_be_bytes().to_vec()).collect() };
+        let encoded = Runner::new(cfg).start(|context| async move {
+            for (partition, blobs) in partitions {
+                for name in &names(blobs) {
+                    drop(context.open(partition, name).await.unwrap());
+                }
+            }
+            for (partition, blobs) in partitions {
+                let batch = |names: &[Vec<u8>]| {
+                    names
+                        .iter()
+                        .map(|name| (partition.to_string(), name.clone()))
+                        .collect()
+                };
+
+                // The second batch queues behind the first, which is still removing when the
+                // root returns.
+                let names = names(blobs);
+                let (first, second) = names.split_at(names.len() - 1);
+                drop(context.start_remove_many(batch(first), None).await);
+                drop(context.start_remove_many(batch(second), None).await);
+            }
             context.encode()
         });
-        assert!(encoded.contains("removals_submitted_total 2"), "{encoded}");
+        assert!(encoded.contains("removals_submitted_total 6"), "{encoded}");
 
         let cfg = Config::new().with_storage_directory(storage_directory.clone());
         Runner::new(cfg).start(|context| async move {
-            assert!(context.scan("drain").await.unwrap().is_empty());
+            for (partition, _) in partitions {
+                assert!(context.scan(partition).await.unwrap().is_empty());
+            }
         });
         std::fs::remove_dir_all(storage_directory).unwrap();
     }
