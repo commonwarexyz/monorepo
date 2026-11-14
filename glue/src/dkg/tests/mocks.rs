@@ -834,6 +834,10 @@ pub(crate) fn simplex_config() -> orchestrator::SimplexConfig<TestElector> {
 ///
 /// Dealings are keyed by the encoded dealer key so the store works with any
 /// [`PublicKey`](CryptoPublicKey). Pruned epochs are recorded for assertions.
+///
+/// Storing a second dealing for the same dealer and epoch panics. The panic
+/// checks that the reshare store stores at most one private dealing per dealer
+/// and epoch.
 #[derive(Clone, Default)]
 pub(crate) struct MemorySecretStore {
     inner: Arc<Mutex<MemorySecretStoreInner>>,
@@ -846,6 +850,7 @@ struct MemorySecretStoreInner {
     dealings: BTreeMap<(Epoch, Vec<u8>), DealerPrivMsg>,
     prunes: Vec<Epoch>,
     stall: bool,
+    park_dealings: bool,
 }
 
 impl MemorySecretStore {
@@ -869,6 +874,12 @@ impl MemorySecretStore {
     /// never return.
     pub(crate) fn stall(&self) {
         self.inner.lock().stall = true;
+    }
+
+    /// Sets whether [`SecretStore::put_dealing`] stops before it stores its
+    /// dealing and never returns.
+    pub(crate) fn park_dealings(&self, park: bool) {
+        self.inner.lock().park_dealings = park;
     }
 }
 
@@ -902,10 +913,19 @@ impl SecretStore for MemorySecretStore {
         dealer: P,
         private: DealerPrivMsg,
     ) {
-        self.inner
+        let park = self.inner.lock().park_dealings;
+        if park {
+            std::future::pending::<()>().await;
+        }
+        let replaced = self
+            .inner
             .lock()
             .dealings
             .insert((epoch, dealer.encode().to_vec()), private);
+        assert!(
+            replaced.is_none(),
+            "private dealing must be stored at most once per dealer and epoch"
+        );
     }
 
     async fn get_dealing<P: CryptoPublicKey>(
