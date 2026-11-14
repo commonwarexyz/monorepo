@@ -4,7 +4,6 @@ use commonware_math::algebra::Random as _;
 use commonware_storage::merkle::{self, Bagging::ForwardFold, Family, mem::Mem};
 use commonware_utils::{TestRng, test_rng};
 use criterion::{BatchSize, Criterion, criterion_group};
-use futures::executor::block_on;
 
 type StandardHasher<H> = merkle::hasher::Standard<H>;
 
@@ -26,7 +25,7 @@ fn make_elements(n: usize, sampler: &mut TestRng) -> Vec<sha256::Digest> {
 fn make_mem<F: Family>(elements: &[sha256::Digest]) -> Mem<F, sha256::Digest> {
     let h = StandardHasher::<Sha256>::new(ForwardFold);
     let mut mem = Mem::<F, _>::new();
-    block_on(async {
+    {
         let batch = {
             let mut batch = mem.new_batch();
             for digest in elements {
@@ -35,7 +34,7 @@ fn make_mem<F: Family>(elements: &[sha256::Digest]) -> Mem<F, sha256::Digest> {
             batch.merkleize(&mem, &h)
         };
         mem.apply_batch(&batch).unwrap();
-    });
+    }
     mem
 }
 
@@ -56,13 +55,11 @@ fn bench_append_additional_family<F: Family>(c: &mut Criterion, family: &str) {
                         || setup::<F>(n, a),
                         |(mem, additional)| {
                             let h = StandardHasher::<Sha256>::new(ForwardFold);
-                            block_on(async {
-                                let mut batch = mem.new_batch();
-                                for digest in &additional {
-                                    batch = batch.add(&h, digest);
-                                }
-                                batch.merkleize(&mem, &h);
-                            });
+                            let mut batch = mem.new_batch();
+                            for digest in &additional {
+                                batch = batch.add(&h, digest);
+                            }
+                            batch.merkleize(&mem, &h);
                         },
                         BatchSize::LargeInput,
                     )
