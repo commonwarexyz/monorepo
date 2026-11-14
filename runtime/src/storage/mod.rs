@@ -242,8 +242,8 @@ pub(crate) mod tests {
     }
 
     /// Test that batched removals run in submission order and are visible to later scans, that a
-    /// failure stops only its own batch, and that a batch runs only after the batch it follows
-    /// succeeded.
+    /// failure stops only its own batch, that a batch runs only after the batch it follows
+    /// succeeded, and that a batch can name several partitions.
     async fn test_remove_many<S>(storage: &S)
     where
         S: Storage,
@@ -293,10 +293,14 @@ pub(crate) mod tests {
                 None,
             )
             .await;
+        let barrier = storage
+            .start_remove_many(Vec::new(), Some(failed.clone()))
+            .await;
         let following = storage
             .start_remove_many(vec![removal("remove_many_fail", b"c")], Some(failed))
             .await;
         assert!(matches!(following.await, Err(Error::BlobMissing(_, _))));
+        assert!(matches!(barrier.await, Err(Error::BlobMissing(_, _))));
         let mut survivors = storage.scan("remove_many_fail").await.unwrap();
         survivors.sort();
         assert_eq!(survivors, vec![b"b".to_vec(), b"c".to_vec()]);
@@ -316,6 +320,30 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert!(storage.scan("remove_many_fail").await.unwrap().is_empty());
+
+        // A batch naming several partitions removes from each of them, and a later scan of any
+        // of them observes it.
+        for partition in ["remove_many_left", "remove_many_right"] {
+            for name in [b"a", b"b"] {
+                drop(storage.open(partition, name).await.unwrap());
+            }
+        }
+        let batch = storage
+            .start_remove_many(
+                vec![
+                    removal("remove_many_left", b"a"),
+                    removal("remove_many_right", b"a"),
+                    removal("remove_many_left", b"b"),
+                ],
+                None,
+            )
+            .await;
+        assert_eq!(
+            storage.scan("remove_many_right").await.unwrap(),
+            vec![b"b".to_vec()]
+        );
+        assert!(storage.scan("remove_many_left").await.unwrap().is_empty());
+        batch.await.unwrap();
     }
 
     /// Test opening a blob, writing to it, and reading back the data.

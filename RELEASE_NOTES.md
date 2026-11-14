@@ -58,14 +58,11 @@ storage is deleted. A journal that deletes inline returns
 `Removal::ready(Ok(()))`. `journal::Error` is not `non_exhaustive`, so
 the new `Removal` variant also breaks exhaustive matches.
 
-The tokio storage orders directory operations across all partitions, which is
-stronger than the per-partition order the trait promises. While a batch runs,
-every other partition's open, scan, and remove waits for its unlinks and
-directory syncs. With two blobs released per prune, an open on another partition
-issued right after the prune completed in 18 to 20 ms for 64 MiB blobs and 26 to
-34 ms for 256 MiB blobs across two measurements, compared with about 10 ms and
-17 ms that the prune call itself took before. Per-partition ordering in the
-tokio storage is planned as a follow-up.
+The tokio storage orders directory operations within each partition, the order
+the trait promises, and runs different partitions concurrently. A batch takes
+its place in every partition it names when it is submitted and keeps those
+places until its last removal is durable. An open, scan, or remove queues only
+behind batches that name its partition and waits for each of them as a whole.
 
 [#5395]: https://github.com/commonwarexyz/monorepo/pull/5395
 [#5478]: https://github.com/commonwarexyz/monorepo/pull/5478
