@@ -56,6 +56,8 @@ mod staged;
 mod stream;
 
 mod mailbox;
+#[cfg(test)]
+pub(crate) use mailbox::Message;
 pub use mailbox::{CommitmentFallback, DigestFallback, Mailbox};
 
 mod subscriptions;

@@ -13,7 +13,7 @@ use crate::{
             types::{CodedBlock, coding_config_for_participants, hash_context},
         },
         config::{Config, Start},
-        core::{Actor, CommitmentFallback, DigestFallback, Mailbox, Processed},
+        core::{Actor, CommitmentFallback, DigestFallback, Mailbox, Message, Processed, Variant},
         mocks::{
             application::Application,
             block::{Block, encode_block, ready},
@@ -28,6 +28,7 @@ use crate::{
     types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta, coding::Commitment},
 };
 use bytes::BufMut;
+use commonware_actor::mailbox;
 use commonware_broadcast::buffered;
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, Write};
 use commonware_coding::ReedSolomon;
@@ -55,7 +56,9 @@ use commonware_storage::{
     translator::EightCap,
 };
 use commonware_utils::{
-    NZDuration, NZU16, NZU32, NZU64, NZUsize, TestRng, non_empty, probability, test_rng,
+    NZDuration, NZU16, NZU32, NZU64, NZUsize, TestRng,
+    channel::{fallible::OneshotExt as _, oneshot},
+    non_empty, probability, test_rng,
     vec::NonEmptyVec,
 };
 use futures::StreamExt;
@@ -191,6 +194,76 @@ impl Provider for EmptyProvider {
 /// Default leader key for tests.
 pub fn default_leader() -> K {
     PrivateKey::from_seed(0).public_key()
+}
+
+/// The receiving end of a marshal mailbox, held by a test in place of the actor.
+pub(crate) type HeldMarshal<V> = mailbox::Receiver<Message<S, V>>;
+
+/// Returns a marshal mailbox that no actor serves and the receiver that holds its messages.
+///
+/// A request sent through the mailbox stays unanswered until the test answers it.
+pub(crate) fn held_marshal<V: Variant>(
+    context: deterministic::Context,
+) -> (Mailbox<S, V>, HeldMarshal<V>) {
+    let (sender, receiver) = mailbox::new(context, NZUsize!(16));
+    (Mailbox::new(sender, NZUsize!(1)), receiver)
+}
+
+/// Receives the next message, which must hand a proposal to marshal at its lock-in broadcast,
+/// and returns the proposal's round and block.
+pub(crate) async fn take_proposed<V: Variant>(held: &mut HeldMarshal<V>) -> (Round, V::Block) {
+    match held.recv().await {
+        Some(Message::Proposed { round, block, .. }) => (round, block),
+        Some(message) => panic!("expected a proposed block, received {}", message.name()),
+        None => panic!("marshal mailbox closed"),
+    }
+}
+
+/// Receives the next message, which must request `parent` by its commitment with a fetch by
+/// `round`, and answers it with `parent`.
+pub(crate) async fn answer_parent_request<V: Variant>(
+    held: &mut HeldMarshal<V>,
+    round: Round,
+    parent: &V::Block,
+) {
+    match held.recv().await {
+        Some(Message::SubscribeByCommitment {
+            commitment,
+            fallback,
+            response,
+            ..
+        }) => {
+            assert_eq!(commitment, V::commitment(parent));
+            assert_eq!(fallback, CommitmentFallback::FetchByRound { round });
+            response.send_lossy(parent.clone());
+        }
+        Some(message) => panic!("expected a parent request, received {}", message.name()),
+        None => panic!("marshal mailbox closed"),
+    }
+}
+
+/// Awaits a proposal's digest, which must arrive while marshal answers no request.
+pub async fn proposed_without_marshal<D>(
+    context: &deterministic::Context,
+    digest: oneshot::Receiver<D>,
+) -> D {
+    select! {
+        digest = digest => digest.expect("the proposal must build"),
+        _ = context.sleep(Duration::from_secs(1)) => {
+            panic!("the proposal waited on marshal");
+        },
+    }
+}
+
+/// Why a wrapper does not hold a block this node built.
+#[derive(Clone, Copy, Debug)]
+pub enum Unheld {
+    /// A restart replaced the wrapper that built the block.
+    Restarted,
+    /// Consensus finalized the block's round.
+    Finalized,
+    /// The wrapper staged a later proposal.
+    Replaced,
 }
 
 /// Create a raw test block with a derived context.
