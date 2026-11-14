@@ -72,7 +72,7 @@ use futures::{
 };
 use order::{Order, Slot, Target};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
     time::{Duration, SystemTime},
 };
@@ -129,7 +129,10 @@ pub(super) type Proven<S, D> = (LqcProof<S, D>, Arc<SweepFact<D>>);
 pub(super) type End<D> = (CertificateId<D>, D, Vec<Height>);
 
 /// Callers waiting on exact blocks.
-type Waiters<D, T> = HashMap<BlockRef<D>, Vec<oneshot::Sender<Result<T, Error>>>>;
+///
+/// The map is ordered, so callers wake in the same order in every run and a deterministic
+/// simulation replays exactly.
+type Waiters<D, T> = BTreeMap<BlockRef<D>, Vec<oneshot::Sender<Result<T, Error>>>>;
 
 /// A completed job.
 pub(super) enum Event<E: Context, H: Hasher, S: Scheme, B: Body<H>> {
@@ -272,8 +275,8 @@ where
     /// Blocks looked up in the broadcast buffer.
     buffering: HashSet<BlockRef<H::Digest>>,
     /// Broadcast-buffer subscriptions, each cancelled by dropping its sender: when its last
-    /// subscriber leaves or the block is held.
-    subscribing: HashMap<BlockRef<H::Digest>, oneshot::Sender<()>>,
+    /// subscriber leaves or the block is held. Ordered like [`Waiters`].
+    subscribing: BTreeMap<BlockRef<H::Digest>, oneshot::Sender<()>>,
 
     /// Peer requests being answered.
     serving: usize,
@@ -379,12 +382,12 @@ where
             delivered: state.ack.emitted.clone(),
             acked: state.ack,
             outstanding: 0,
-            custody: HashMap::new(),
-            subscribers: HashMap::new(),
-            waiting: HashMap::new(),
+            custody: BTreeMap::new(),
+            subscribers: BTreeMap::new(),
+            waiting: BTreeMap::new(),
             fetching: HashSet::new(),
             buffering: HashSet::new(),
-            subscribing: HashMap::new(),
+            subscribing: BTreeMap::new(),
             serving: 0,
             parked: Vec::new(),
             asked: requests::Requests::new(deliver::MAX_DEFERRED),
