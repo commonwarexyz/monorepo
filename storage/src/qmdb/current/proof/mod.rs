@@ -1061,7 +1061,6 @@ mod tests {
             ops_leaves_for_root,
             Location::new(0),
         )
-        .await
         .unwrap()
         .root::<Sha256>(&ops_root);
 
@@ -1153,7 +1152,6 @@ mod tests {
             ops_leaves_for_root,
             Location::new(0),
         )
-        .await
         .unwrap()
         .root::<Sha256>(&ops_root);
         let proof = RangeProof::new::<Sha256, _, N>(
@@ -1250,7 +1248,6 @@ mod tests {
             ops_leaves_for_root,
             Location::new(0),
         )
-        .await
         .unwrap()
         .root::<Sha256>(&ops_root);
 
@@ -1341,7 +1338,6 @@ mod tests {
             ops_leaves_for_root,
             Location::new(0),
         )
-        .await
         .unwrap()
         .root::<Sha256>(&ops_root);
 
@@ -1430,7 +1426,6 @@ mod tests {
             ops_leaves,
             Location::new(0),
         )
-        .await
         .unwrap()
         .root::<Sha256>(&ops_root);
 
@@ -1805,7 +1800,6 @@ mod tests {
             ops_leaves_for_root,
             Location::new(0),
         )
-        .await
         .unwrap()
         .root::<Sha256>(&ops_root);
         let proof = RangeProof::new::<Sha256, _, N>(
@@ -1936,7 +1930,6 @@ mod tests {
                 ops_leaves_for_root,
                 Location::new(0),
             )
-            .await
             .unwrap();
             let canonical_root = witness.root::<Sha256>(&ops_root);
             assert!(
@@ -2072,7 +2065,6 @@ mod tests {
             Location::<F>::new(pre_state_leaves),
             Location::new(0),
         )
-        .await
         .unwrap()
         .root::<Sha256>(&ops_root_pre);
 
@@ -2115,7 +2107,6 @@ mod tests {
             Location::<F>::new(post_state_leaves),
             Location::new(0),
         )
-        .await
         .unwrap()
         .root::<Sha256>(&ops_root_post);
 
@@ -2193,7 +2184,6 @@ mod tests {
             ops_leaves_for_root,
             inactivity_floor,
         )
-        .await
         .unwrap()
         .root::<Sha256>(&ops_root);
 
@@ -2560,7 +2550,6 @@ mod tests {
                     Location::new(leaves),
                     floor,
                 )
-                .await
                 .unwrap()
                 .root::<Sha256>(&ops_root);
                 for location in core::iter::once(None)

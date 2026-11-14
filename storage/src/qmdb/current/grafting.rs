@@ -421,13 +421,13 @@ impl<F: Graftable, H: Hasher> HasherTrait<F> for Verifier<'_, F, H> {
 /// standard proof generation to work transparently over the combined structure.
 ///
 /// Both the ops structure and the grafted structure use the same [Family] `F`. The combined storage
-/// presents as `StorageTrait<F>` so that callers generic over `F` can use it transparently.
+/// supports asynchronous storage reads and synchronous reads from memory when the ops tree does.
 pub(super) struct Storage<
     'a,
     F: Graftable,
     H: Hasher,
     G: Readable<Family = F, Digest = H::Digest>,
-    S: StorageTrait<F, Digest = H::Digest>,
+    S,
 > {
     grafted_tree: &'a G,
     grafting_height: u32,
@@ -435,13 +435,8 @@ pub(super) struct Storage<
     grafted_hasher: GraftedHasher<F, merkle::hasher::Standard<H>>,
 }
 
-impl<
-    'a,
-    F: Graftable,
-    H: Hasher,
-    G: Readable<Family = F, Digest = H::Digest>,
-    S: StorageTrait<F, Digest = H::Digest>,
-> Storage<'a, F, H, G, S>
+impl<'a, F: Graftable, H: Hasher, G: Readable<Family = F, Digest = H::Digest>, S>
+    Storage<'a, F, H, G, S>
 {
     /// Creates a new [Storage] instance.
     pub(super) const fn new(grafted_tree: &'a G, grafting_height: u32, ops_tree: &'a S) -> Self {
@@ -485,6 +480,29 @@ impl<
             self.grafted_hasher
                 .node_digest(pos, &left_digest, &right_digest),
         )
+    }
+}
+
+impl<
+    F: Graftable,
+    H: Hasher,
+    G: Readable<Family = F, Digest = H::Digest>,
+    S: Readable<Family = F, Digest = H::Digest>,
+> Readable for Storage<'_, F, H, G, S>
+{
+    type Family = F;
+    type Digest = H::Digest;
+
+    fn size(&self) -> Position<F> {
+        self.ops_tree.size()
+    }
+
+    fn get_node(&self, pos: Position<F>) -> Option<H::Digest> {
+        if F::pos_to_height(pos) < self.grafting_height {
+            return self.ops_tree.get_node(pos);
+        }
+        let grafted_pos = ops_to_grafted_pos::<F>(pos, self.grafting_height);
+        self.reconstruct_grafted_node(grafted_pos)
     }
 }
 
@@ -995,7 +1013,7 @@ mod tests {
             {
                 let combined =
                     Storage::<mmr::Family, Sha256, _, _>::new(&grafted, GRAFTING_HEIGHT, &ops_mmr);
-                assert_eq!(combined.size(), ops_mmr.size());
+                assert_eq!(Readable::size(&combined), ops_mmr.size());
 
                 // Compute the grafted root by iterating ops peaks.
                 let grafted_root = {
@@ -1007,7 +1025,7 @@ mod tests {
                             let gp = ops_to_grafted_pos(peak_pos, GRAFTING_HEIGHT);
                             peaks.push(grafted.get_node(gp).unwrap());
                         } else {
-                            peaks.push(combined.get_node(peak_pos).await.unwrap().unwrap());
+                            peaks.push(Readable::get_node(&combined, peak_pos).unwrap());
                         }
                     }
                     hasher
@@ -1156,7 +1174,7 @@ mod tests {
 
             let combined =
                 Storage::<mmr::Family, Sha256, _, _>::new(&grafted, GRAFTING_HEIGHT, &ops_mmr);
-            assert_eq!(combined.size(), ops_mmr.size());
+            assert_eq!(Readable::size(&combined), ops_mmr.size());
 
             // Compute the grafted root.
             let grafted_root = {
@@ -1168,7 +1186,7 @@ mod tests {
                         let gp = ops_to_grafted_pos(peak_pos, GRAFTING_HEIGHT);
                         peaks.push(grafted.get_node(gp).unwrap());
                     } else {
-                        peaks.push(combined.get_node(peak_pos).await.unwrap().unwrap());
+                        peaks.push(Readable::get_node(&combined, peak_pos).unwrap());
                     }
                 }
                 hasher
@@ -1205,15 +1223,22 @@ mod tests {
     }
 
     /// The combined storage's `get_nodes` must agree with `get_node` on every available
-    /// position and name the lowest position `get_node` reports as absent.
-    async fn assert_get_nodes_matches_get_node(
-        combined: &impl StorageTrait<mmr::Family, Digest = sha256::Digest>,
-    ) {
-        let all: Vec<Position> = (0..*combined.size()).map(Position::new).collect();
+    /// position and name the lowest position `get_node` reports as absent. With memory-backed
+    /// inputs, synchronous reads must agree with asynchronous reads too.
+    async fn assert_get_nodes_matches_get_node<S>(combined: &S)
+    where
+        S: StorageTrait<mmr::Family, Digest = sha256::Digest>
+            + Readable<Family = mmr::Family, Digest = sha256::Digest>,
+    {
+        let size = StorageTrait::size(combined);
+        assert_eq!(Readable::size(combined), size);
+        let all: Vec<Position> = (0..*size).map(Position::new).collect();
         let mut available = Vec::new();
         let mut first_absent = None;
         for &pos in &all {
-            match combined.get_node(pos).await.unwrap() {
+            let node = StorageTrait::get_node(combined, pos).await.unwrap();
+            assert_eq!(Readable::get_node(combined, pos), node, "position {pos}");
+            match node {
                 Some(node) => available.push((pos, node)),
                 None => {
                     if first_absent.is_none() {
@@ -1239,7 +1264,10 @@ mod tests {
         let sparse: Vec<_> = positions.iter().copied().step_by(3).collect();
         let batched = combined.get_nodes(&sparse).await.unwrap();
         for (slot, &pos) in sparse.iter().enumerate() {
-            let single = combined.get_node(pos).await.unwrap().unwrap();
+            let single = StorageTrait::get_node(combined, pos)
+                .await
+                .unwrap()
+                .unwrap();
             assert_eq!(batched[slot], single, "position {pos}");
         }
         assert!(combined.get_nodes(&[]).await.unwrap().is_empty());
