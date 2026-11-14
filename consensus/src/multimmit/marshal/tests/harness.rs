@@ -1,7 +1,7 @@
 //! Deterministic harness: marshals over a simulated network, fed by a scripted consensus.
 
 use crate::{
-    Epochable as _, Reporter,
+    Epochable as _, Reporter, Viewable as _,
     multimmit::{
         algebra::FinalTips,
         config::Parameters,
@@ -450,6 +450,22 @@ impl Script {
         let mut reporter = mailbox.clone();
         assert_eq!(
             reporter.report(certified.proven(self.codec(), Vec::new())),
+            Feedback::Ok
+        );
+    }
+
+    /// Reports that consensus accepted view `view`'s history record (zero-based).
+    pub(super) fn accept(&self, mailbox: &TestMailbox, view: usize) {
+        let certified = &self.views[view];
+        let leader = certified.lqc.leader();
+        let mut reporter = mailbox.clone();
+        assert_eq!(
+            reporter.report(Activity::HistoryAccepted {
+                view: leader.view(),
+                leader: leader.digest::<Sha256>(),
+                commitment: certified.history.commitment::<Sha256>(),
+                record: Arc::clone(&certified.history),
+            }),
             Feedback::Ok
         );
     }
