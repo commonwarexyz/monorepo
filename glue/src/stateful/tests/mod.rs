@@ -243,12 +243,14 @@ fn state_sync_random_crashes(
     run_state_sync_random_crashes(
         SingleDbEngine::new(NUM_VALIDATORS)
             .with_elector(elector.clone())
-            .with_state_sync(),
+            .with_state_sync()
+            .with_restart_retention(),
     );
     run_state_sync_random_crashes(
         MultiDbEngine::new(NUM_VALIDATORS)
             .with_elector(elector)
-            .with_state_sync(),
+            .with_state_sync()
+            .with_restart_retention(),
     );
 }
 
@@ -798,6 +800,7 @@ where
         .exit_condition(ProcessedHeightAtLeast::new(150))
         .property(LateJoinerStateSyncHandoff)
         .property(BlockAgreementAtHeight::new(150))
+        .timeout(Duration::from_secs(60))
         .run()
         .unwrap();
 }
