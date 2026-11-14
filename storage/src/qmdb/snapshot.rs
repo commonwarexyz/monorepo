@@ -581,6 +581,7 @@ where
             .child("snapshot_worker")
             .with_attribute("worker", w)
             .dedicated()
+            .inline_io()
             .spawn(move |_| {
                 build_snapshot_worker::<F, C, I::Range>(
                     log,
@@ -635,6 +636,7 @@ where
             let handle = context
                 .child("snapshot_decoder")
                 .dedicated()
+                .inline_io()
                 .spawn(move |_| async move {
                     let tx = &tx;
                     route_snapshot::<F, C, _>(
