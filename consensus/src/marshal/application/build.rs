@@ -9,10 +9,14 @@
 
 use crate::{
     Application, Handoff,
-    marshal::{ancestry::Ancestry, application::gates::Gates},
+    marshal::{
+        ancestry::Ancestry,
+        application::gates::Gates,
+        core::{CommitmentFallback, Mailbox, Variant},
+    },
     simplex::types::Context,
 };
-use commonware_cryptography::{Digest, Digested, PublicKey};
+use commonware_cryptography::{Digest, Digested, PublicKey, certificate::Scheme};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Spawner, telemetry::metrics::histogram::Timer};
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
@@ -30,6 +34,31 @@ pub(crate) enum Resolved<D, S, A, M = ()> {
     /// configuration, or unit for standard blocks) is passed to the sealing callback with
     /// the built block.
     Build(A, Timer, M),
+}
+
+/// Returns the block `commitment` identifies, for a proposal to build on.
+///
+/// The block staged in `gates` at the highest round is returned without a request to marshal,
+/// so a proposal that extends this node's previous one does not wait for the marshal actor.
+/// Any other block is requested from marshal under `fallback`. Returns `None` when marshal
+/// can no longer deliver the block.
+pub(crate) async fn parent<S, V>(
+    gates: &Gates<V::Commitment, V::Block>,
+    marshal: &Mailbox<S, V>,
+    commitment: V::Commitment,
+    fallback: CommitmentFallback,
+) -> Option<V::Block>
+where
+    S: Scheme,
+    V: Variant,
+{
+    if let Some(parent) = gates.latest(commitment) {
+        return Some(parent);
+    }
+    marshal
+        .subscribe_by_commitment(commitment, fallback)
+        .await
+        .ok()
 }
 
 /// Answers a prepare request for `consensus_context` from a task spawned from `context` and

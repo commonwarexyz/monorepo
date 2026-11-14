@@ -46,6 +46,11 @@ struct Inner<D: Digest, B> {
     /// for its round afterwards, for example by a build that completes late. A block staged at
     /// or below this cutoff is marked sent, so such a block cannot go out twice.
     decided: Option<Round>,
+    /// The block staged at the highest round, with that round and the block's digest.
+    ///
+    /// It stays here after the lock-in broadcast or certification takes its staged entry, so
+    /// the proposal that builds on it finds it without asking marshal.
+    latest: Option<(Round, D, B)>,
 }
 
 /// A shared, thread-safe registry of in-flight certification gate tasks and
@@ -66,6 +71,10 @@ struct Inner<D: Digest, B> {
 /// broadcast via [`crate::Relay::broadcast`] (or certification demands
 /// durability first), keeping marshal's mailbox free of any propose-time
 /// handshake.
+///
+/// The block staged at the highest round is also kept after its entry is taken. A proposer
+/// that builds on its own previous proposal reads the parent from [`latest`](Self::latest)
+/// while marshal is still storing it.
 ///
 /// [`claim`](Self::claim) drops a gate when certification claims its round for another
 /// block, and [`retain_after`](Self::retain_after) drops it once consensus finalizes its
@@ -90,6 +99,7 @@ impl<D: Digest, B: Clone> Gates<D, B> {
                 proposals: BTreeMap::new(),
                 sent: BTreeSet::new(),
                 decided: None,
+                latest: None,
             })),
         }
     }
@@ -140,6 +150,16 @@ impl<D: Digest, B: Clone> Gates<D, B> {
         inner.sent.insert((round, digest)).then_some(block)
     }
 
+    /// Returns the block staged at the highest round if `digest` identifies it.
+    ///
+    /// The digest binds the block's contents, so this is the block marshal would deliver for
+    /// the same digest.
+    pub(crate) fn latest(&self, digest: D) -> Option<B> {
+        let inner = self.inner.lock();
+        let (_, latest, block) = inner.latest.as_ref()?;
+        (*latest == digest).then(|| block.clone())
+    }
+
     /// Removes and returns the certification gate task for `(round, digest)`, if present, and
     /// hands the staged proposal it waits on to `persist` without broadcasting it.
     ///
@@ -186,8 +206,8 @@ impl<D: Digest, B: Clone> Gates<D, B> {
         gate
     }
 
-    /// Discards all entries and sent marks whose round is at or before `finalized_round` and
-    /// raises the decided cutoff to it.
+    /// Discards all entries, sent marks, and the latest staged block whose round is at or
+    /// before `finalized_round` and raises the decided cutoff to it.
     ///
     /// A discarded staged proposal drops its ack, which abandons the propose
     /// durability handshake for that (already decided) round.
@@ -201,6 +221,9 @@ impl<D: Digest, B: Clone> Gates<D, B> {
             .proposals
             .retain(|(round, _), _| *round > finalized_round);
         inner.sent.retain(|(round, _)| *round > finalized_round);
+        inner
+            .latest
+            .take_if(|(round, _, _)| *round <= finalized_round);
     }
 
     /// Stages `block` for its relay broadcast and completes the propose
@@ -210,7 +233,9 @@ impl<D: Digest, B: Clone> Gates<D, B> {
     /// consensus through `publish`, then awaits the durable-sync handle so
     /// [`certify`](crate::CertifiableAutomaton::certify) can require durability
     /// before the finalize vote. Both registrations happen before `digest` is
-    /// published so the relay broadcast and `certify` always find them.
+    /// published so the relay broadcast and `certify` always find them. The block
+    /// also becomes the [`latest`](Self::latest) one unless a block of a higher round
+    /// is already staged.
     ///
     /// The handle arrives once marshal persists the staged block, which happens
     /// when consensus locks it in with a propose broadcast, or at certification
@@ -240,6 +265,17 @@ impl<D: Digest, B: Clone> Gates<D, B> {
             if inner.decided.is_some_and(|decided| round <= decided) {
                 inner.sent.insert((round, digest));
             }
+
+            // A build that completes late stages a lower round and must not displace the
+            // block the next proposal builds on.
+            if inner
+                .latest
+                .as_ref()
+                .is_none_or(|(latest, _, _)| *latest <= round)
+            {
+                inner.latest = Some((round, digest, block.clone()));
+            }
+
             inner
                 .proposals
                 .insert((round, digest), Staged { block, ack });
@@ -947,5 +983,53 @@ mod tests {
             );
             assert!(gate.await.is_err(), "gate must be abandoned, not resolved");
         });
+    }
+
+    /// The latest staged block is read by its digest after the lock-in broadcast takes its
+    /// staged entry, and finalizing its round releases it.
+    #[test]
+    fn test_latest_outlives_staged_entry_until_finalized() {
+        // Stage a block at round 2. Nothing persists it, so its handshake stays pending.
+        let gates = TestGates::new();
+        let digest = Sha256::hash(&[b"block"]);
+        let mut stage = Box::pin(gates.stage(round(2), digest, 7, |_| {}, "test"));
+        assert!((&mut stage).now_or_never().is_none());
+
+        // The lock-in broadcast takes the staged entry. The block is still read by its digest,
+        // and no other digest returns it.
+        assert!(gates.take_staged(round(2), digest).is_some());
+        assert_eq!(gates.latest(digest), Some(7));
+        assert_eq!(gates.latest(Sha256::hash(&[b"other"])), None);
+
+        // Finalizing an earlier round keeps the block. Finalizing its own round releases it.
+        gates.retain_after(round(1));
+        assert_eq!(gates.latest(digest), Some(7));
+        gates.retain_after(round(2));
+        assert_eq!(gates.latest(digest), None);
+    }
+
+    /// A staged block becomes the latest unless a block of a higher round is already staged.
+    #[rstest]
+    // A build that completes late stages a lower round.
+    #[case::lower_round(2, false)]
+    // A replacement candidate is staged for the same round.
+    #[case::same_round(3, true)]
+    // The next proposal is staged for a higher round.
+    #[case::higher_round(4, true)]
+    fn test_latest_is_block_of_highest_round(#[case] view: u64, #[case] replaces: bool) {
+        // Stage a block at round 3.
+        let gates = TestGates::new();
+        let current = Sha256::hash(&[b"current"]);
+        let mut stage = Box::pin(gates.stage(round(3), current, 7, |_| {}, "test"));
+        assert!((&mut stage).now_or_never().is_none());
+
+        // Stage a second block at the case's round.
+        let other = Sha256::hash(&[b"other"]);
+        let mut restage = Box::pin(gates.stage(round(view), other, 8, |_| {}, "test"));
+        assert!((&mut restage).now_or_never().is_none());
+
+        // Exactly one of the two blocks is the latest.
+        assert_eq!(gates.latest(other), replaces.then_some(8));
+        assert_eq!(gates.latest(current), (!replaces).then_some(7));
     }
 }
