@@ -395,8 +395,11 @@ where
         ))
         .exit_condition(ProcessedHeightAtLeast::new(50))
         .property(BlockAgreementAtHeight::new(50))
+        .timeout(Duration::from_secs(60))
         .run()
-        .unwrap();
+        .unwrap()
+        .into_iter()
+        .for_each(|result| assert_eq!(result.crashes, 1));
 }
 
 /// Run long enough to cross the prune maintenance interval many times and
@@ -461,11 +464,11 @@ where
     LateJoinerStateSyncHandoff: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
 {
-    let participants = engine.participants();
+    // The late joiner is not running during the fault window, and a restart would start it
+    // before its delay round.
+    let active = engine.participants().into_iter().skip(1);
     state_sync_plan(engine)
-        .crash(Crash::Schedule(default_storage_fault_schedule(
-            state_sync_restart_order(&participants),
-        )))
+        .crash(Crash::Schedule(default_storage_fault_schedule(active)))
         .timeout(Duration::from_secs(90))
         .run()
         .unwrap();
@@ -485,16 +488,6 @@ where
         .exit_condition(ProcessedHeightAtLeast::new(150))
         .property(LateJoinerStateSyncHandoff)
         .property(BlockAgreementAtHeight::new(150))
-}
-
-fn state_sync_restart_order<P: PublicKey>(participants: &[P]) -> Vec<P> {
-    let Some((late_joiner, active)) = participants.split_first() else {
-        return Vec::new();
-    };
-
-    let mut restart_order = active.to_vec();
-    restart_order.push(late_joiner.clone());
-    restart_order
 }
 
 fn state_sync_partitioned_restart_schedule<P>(participants: &[P], late_joiner: P) -> Schedule<P>
@@ -567,6 +560,7 @@ where
         })
         .exit_condition(ProcessedHeightAtLeast::new(50))
         .property(BlockAgreementAtHeight::new(50))
+        .timeout(Duration::from_secs(60))
         .run()
         .unwrap();
 }

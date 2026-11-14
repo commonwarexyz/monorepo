@@ -594,6 +594,9 @@ impl<D: EngineDefinition> Plan<D> {
             Err("simulation stopped before completion".into());
         const EXIT_POLL: Duration = Duration::from_millis(25);
 
+        // Branches are polled in order. Delayed restarts, scheduled crashes and restarts, and
+        // random crash ticks come before monitor updates, so a steady stream of updates cannot
+        // starve them.
         select_loop! {
             ctx,
             on_stopped => {
@@ -603,6 +606,40 @@ impl<D: EngineDefinition> Plan<D> {
                 let was_delayed = delayed.contains(&pk);
                 team.restart(&ctx, &oracle, pk, monitor_tx.clone(), was_delayed)
                     .await;
+            },
+            Some(cmd) = schedule_rx.recv() else break => match cmd {
+                ScheduleCmd::Crash(pk) => {
+                    if team.crash(&pk) {
+                        crashes += 1;
+                    }
+                }
+                ScheduleCmd::Restart(pk) => {
+                    let was_delayed = delayed.contains(&pk);
+                    team.restart(&ctx, &oracle, pk, monitor_tx.clone(), was_delayed)
+                        .await;
+                }
+            },
+            _ = crash_rx.recv() => {
+                let Some((_, downtime, count)) = self.random_crash() else {
+                    continue;
+                };
+                let active = team.active_keys();
+                let crash_count = count.min(active.len());
+                let to_crash: Vec<D::PublicKey> =
+                    active.sample(&mut ctx, crash_count).cloned().collect();
+                for pk in to_crash {
+                    if !team.crash(&pk) {
+                        continue;
+                    }
+                    crashes += 1;
+                    let restart_tx = restart_tx.clone();
+                    ctx.child("restart_delay").spawn(move |ctx| async move {
+                        if downtime > Duration::ZERO {
+                            ctx.sleep(downtime).await;
+                        }
+                        let _ = restart_tx.send(pk).await;
+                    });
+                }
             },
             Some(update) = monitor_rx.recv() else {
                 result = Err("monitor channel closed".into());
@@ -693,40 +730,6 @@ impl<D: EngineDefinition> Plan<D> {
                     )
                     .await;
                 break;
-            },
-            Some(cmd) = schedule_rx.recv() else break => match cmd {
-                ScheduleCmd::Crash(pk) => {
-                    if team.crash(&pk) {
-                        crashes += 1;
-                    }
-                }
-                ScheduleCmd::Restart(pk) => {
-                    let was_delayed = delayed.contains(&pk);
-                    team.restart(&ctx, &oracle, pk, monitor_tx.clone(), was_delayed)
-                        .await;
-                }
-            },
-            _ = crash_rx.recv() => {
-                let Some((_, downtime, count)) = self.random_crash() else {
-                    continue;
-                };
-                let active = team.active_keys();
-                let crash_count = count.min(active.len());
-                let to_crash: Vec<D::PublicKey> =
-                    active.sample(&mut ctx, crash_count).cloned().collect();
-                for pk in to_crash {
-                    if !team.crash(&pk) {
-                        continue;
-                    }
-                    crashes += 1;
-                    let restart_tx = restart_tx.clone();
-                    ctx.child("restart_delay").spawn(move |ctx| async move {
-                        if downtime > Duration::ZERO {
-                            ctx.sleep(downtime).await;
-                        }
-                        let _ = restart_tx.send(pk).await;
-                    });
-                }
             },
         }
 
@@ -1372,6 +1375,55 @@ mod tests {
             result.crashes, 1,
             "second crash before restart should be a no-op and not counted"
         );
+    }
+
+    /// Runs one validator against `crash` while its reports outpace the plan's checks, and
+    /// returns the number of crashes the plan applied.
+    fn crashes_while_reports_outpace_checks(
+        crash: impl FnOnce(ed25519::PublicKey) -> Crash<ed25519::PublicKey> + Send + 'static,
+    ) -> u64 {
+        deterministic::Runner::timed(Duration::from_secs(2)).start(|context| async move {
+            // Emit reports every millisecond while each check takes five, so reports stay
+            // queued behind the check in progress.
+            let mut engine = FinalizingEngine::new(1, Duration::ZERO, u64::MAX);
+            engine.period = Duration::from_millis(1);
+            let crash = crash(engine.participants[0].clone());
+            let property = SlowCheck {
+                context: Arc::new(context.child("check")),
+                calls: Arc::new(AtomicUsize::new(0)),
+            };
+            PlanBuilder::new(engine)
+                .required_finalizations(20)
+                .finalization_property(property)
+                .crash(crash)
+                .build()
+                .run_inner(context)
+                .await
+                .expect("simulation must complete")
+                .crashes
+        })
+    }
+
+    #[test]
+    fn scheduled_crash_applies_while_reports_outpace_checks() {
+        let crashes = crashes_while_reports_outpace_checks(|pk| {
+            Crash::Schedule(
+                Schedule::new()
+                    .at(Duration::from_millis(10), Action::Crash(pk.clone()))
+                    .at(Duration::from_millis(20), Action::Restart(pk)),
+            )
+        });
+        assert_eq!(crashes, 1, "scheduled crash must apply before completion");
+    }
+
+    #[test]
+    fn random_crash_applies_while_reports_outpace_checks() {
+        let crashes = crashes_while_reports_outpace_checks(|_| Crash::Random {
+            frequency: Duration::from_millis(30),
+            downtime: Duration::from_millis(5),
+            count: 1,
+        });
+        assert!(crashes > 0, "random crash must apply before completion");
     }
 
     #[test]
