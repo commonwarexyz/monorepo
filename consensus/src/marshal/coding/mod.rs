@@ -96,8 +96,9 @@ mod tests {
                 harness::{
                     self, BLOCKS_PER_EPOCH, CodingB, CodingCtx, CodingHarness, D, EmptyProvider, K,
                     LINK, NAMESPACE, NUM_VALIDATORS, QUORUM, S, TEST_QUOTA, TestHarness,
-                    UNRELIABLE_LINK, V, default_leader, genesis_commitment, make_coding_block,
-                    setup_network_links, setup_network_with_participants,
+                    UNRELIABLE_LINK, Unheld, V, answer_parent_request, default_leader,
+                    genesis_commitment, held_marshal, make_coding_block, proposed_without_marshal,
+                    setup_network_links, setup_network_with_participants, take_proposed,
                 },
                 store::{Op, Recording},
                 verifying::{
@@ -138,6 +139,7 @@ mod tests {
         vec::NonEmptyVec,
     };
     use futures::StreamExt;
+    use rstest::rstest;
     use std::{sync::Arc, time::Duration};
 
     type TestCodingVariant = Coding<CodingB, ReedSolomon<Sha256>, Sha256, K>;
@@ -6415,6 +6417,365 @@ mod tests {
                 "the wait for a block that lost its round must end"
             );
             drop(certify_b);
+        });
+    }
+
+    /// The [`Marshaled`] wrapper the held-marshal proposal tests run.
+    type HeldMarshaled = Marshaled<
+        deterministic::Context,
+        MockVerifyingApp<CodingB, S>,
+        CodingB,
+        ReedSolomon<Sha256>,
+        Sha256,
+        harness::P,
+        Sequential,
+        FixedEpocher,
+    >;
+
+    /// Builds a child of `parent` under the consensus context of a proposal request.
+    fn build_child(context: CodingCtx, parent: &CodingB) -> CodingB {
+        let height = parent.height().next();
+        make_coding_block(context, parent.digest(), height, height.get())
+    }
+
+    /// Returns a [`Marshaled`] wrapper over `marshal` whose application builds a child of each
+    /// parent. No engine serves its shard mailbox, which a proposal does not use.
+    fn child_proposer(
+        context: deterministic::Context,
+        marshal: core::Mailbox<S, TestCodingVariant>,
+        scheme: S,
+    ) -> HeldMarshaled {
+        let (sender, _) = mailbox::new(context.child("shards"), NZUsize!(1));
+        Marshaled::new(
+            context,
+            MarshaledConfig {
+                application: MockVerifyingApp::new().with_build(build_child),
+                marshal,
+                shards: shards::Mailbox::new(sender),
+                scheme_provider: ConstantProvider::new(scheme),
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            },
+        )
+    }
+
+    /// A proposal that builds on this wrapper's previous proposal sends marshal no request, so
+    /// it completes while marshal has not handled the parent.
+    #[test_traced("WARN")]
+    fn test_coding_propose_on_own_proposal_skips_marshal() {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            // Create the validator set, whose size fixes the coding configuration.
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+
+            // No actor serves the marshal mailbox, so a request stays unanswered unless the
+            // test answers it.
+            let (marshal, mut held) = held_marshal::<TestCodingVariant>(context.child("marshal"));
+            let mut marshaled =
+                child_proposer(context.child("marshaled"), marshal, schemes[0].clone());
+
+            // Propose view 1 on a block this node did not build. The wrapper requests that
+            // block from marshal, and the test answers.
+            let genesis: Arc<TestCodedBlock> =
+                Arc::new(encode_block(genesis_block(), coding_config));
+            let first_round = Round::new(Epoch::zero(), View::new(1));
+            let first = marshaled
+                .propose(CodingCtx {
+                    round: first_round,
+                    leader: default_leader(),
+                    parent: (View::zero(), genesis.commitment()),
+                })
+                .await;
+            answer_parent_request(&mut held, Round::zero(), &genesis).await;
+            let first = first.await.expect("the first proposal must build");
+
+            // Consensus locks the first proposal in, which queues its block for marshal.
+            assert!(
+                marshaled
+                    .broadcast(first, Plan::Propose { round: first_round })
+                    .accepted()
+            );
+
+            // Propose view 2 on the first proposal. Its block is still queued, and the
+            // proposal builds on it.
+            let second_round = Round::new(Epoch::zero(), View::new(2));
+            let second = marshaled
+                .propose(CodingCtx {
+                    round: second_round,
+                    leader: default_leader(),
+                    parent: (View::new(1), first),
+                })
+                .await;
+            let second = proposed_without_marshal(&context, second).await;
+
+            // The mailbox holds the first block and nothing else, so the second proposal sent
+            // no request.
+            let (round, parent) = take_proposed(&mut held).await;
+            assert_eq!((round, parent.commitment()), (first_round, first));
+            assert!(held.try_recv().is_err());
+
+            // The second block extends the first.
+            assert!(
+                marshaled
+                    .broadcast(
+                        second,
+                        Plan::Propose {
+                            round: second_round
+                        }
+                    )
+                    .accepted()
+            );
+            let (_, block) = take_proposed(&mut held).await;
+            assert_eq!(
+                (block.commitment(), block.parent(), block.height()),
+                (second, parent.digest(), Height::new(2))
+            );
+        });
+    }
+
+    /// A proposal requests its parent from marshal when the wrapper does not hold the block,
+    /// even though this node built it.
+    #[rstest]
+    #[case::restarted(Unheld::Restarted)]
+    #[case::finalized(Unheld::Finalized)]
+    #[case::replaced(Unheld::Replaced)]
+    #[test_traced("WARN")]
+    fn test_coding_propose_requests_unheld_parent(#[case] unheld: Unheld) {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            // Create the validator set, whose size fixes the coding configuration and whose
+            // schemes sign the finalization one case reports.
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+
+            // No actor serves the marshal mailbox, so a request stays unanswered unless the
+            // test answers it.
+            let (marshal, mut held) = held_marshal::<TestCodingVariant>(context.child("marshal"));
+            let mut marshaled = child_proposer(
+                context.child("marshaled"),
+                marshal.clone(),
+                schemes[0].clone(),
+            );
+
+            // Build view 1, lock it in, and take its block from the mailbox.
+            let genesis: Arc<TestCodedBlock> =
+                Arc::new(encode_block(genesis_block(), coding_config));
+            let first_round = Round::new(Epoch::zero(), View::new(1));
+            let first = marshaled
+                .propose(CodingCtx {
+                    round: first_round,
+                    leader: default_leader(),
+                    parent: (View::zero(), genesis.commitment()),
+                })
+                .await;
+            answer_parent_request(&mut held, Round::zero(), &genesis).await;
+            let first = first.await.expect("the first proposal must build");
+            assert!(
+                marshaled
+                    .broadcast(first, Plan::Propose { round: first_round })
+                    .accepted()
+            );
+            let (_, first_block) = take_proposed(&mut held).await;
+
+            // Make the wrapper lose the block.
+            match unheld {
+                Unheld::Restarted => {
+                    marshaled =
+                        child_proposer(context.child("restarted"), marshal, schemes[0].clone());
+                }
+                Unheld::Finalized => {
+                    let finalization = CodingHarness::make_finalization(
+                        Proposal::new(first_round, View::zero(), first),
+                        &schemes,
+                        QUORUM,
+                    );
+                    assert!(
+                        marshaled
+                            .report(Activity::Finalization(finalization))
+                            .accepted()
+                    );
+                    assert!(matches!(
+                        held.recv().await,
+                        Some(core::Message::Finalization { .. })
+                    ));
+                }
+                Unheld::Replaced => {
+                    let round = Round::new(Epoch::zero(), View::new(2));
+                    let second = marshaled
+                        .propose(CodingCtx {
+                            round,
+                            leader: default_leader(),
+                            parent: (View::new(1), first),
+                        })
+                        .await;
+                    let second = proposed_without_marshal(&context, second).await;
+                    assert!(
+                        marshaled
+                            .broadcast(second, Plan::Propose { round })
+                            .accepted()
+                    );
+                    take_proposed(&mut held).await;
+                }
+            }
+
+            // Propose view 3 on the first block. The wrapper requests it from marshal by the
+            // block's round and builds once the test answers.
+            let round = Round::new(Epoch::zero(), View::new(3));
+            let commitment = marshaled
+                .propose(CodingCtx {
+                    round,
+                    leader: default_leader(),
+                    parent: (View::new(1), first),
+                })
+                .await;
+            answer_parent_request(&mut held, first_round, &first_block).await;
+            let commitment = commitment.await.expect("the proposal must build");
+
+            // The built block extends the first block.
+            assert!(
+                marshaled
+                    .broadcast(commitment, Plan::Propose { round })
+                    .accepted()
+            );
+            let (_, block) = take_proposed(&mut held).await;
+            assert_eq!(
+                (block.parent(), block.height()),
+                (first_block.digest(), Height::new(2))
+            );
+        });
+    }
+
+    /// At an epoch boundary the proposer re-proposes the boundary block it built without a
+    /// request to marshal. Once that block is finalized, the first proposal of the next epoch
+    /// requests it from marshal.
+    #[test_traced("WARN")]
+    fn test_coding_propose_on_own_boundary_block() {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            // Create the validator set, whose size fixes the coding configuration and whose
+            // schemes sign the boundary block's finalization.
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+
+            // No actor serves the marshal mailbox, so a request stays unanswered unless the
+            // test answers it.
+            let (marshal, mut held) = held_marshal::<TestCodingVariant>(context.child("marshal"));
+            let mut marshaled =
+                child_proposer(context.child("marshaled"), marshal, schemes[0].clone());
+
+            // Build the last block of epoch 0 on a block this node did not build, lock it in,
+            // and take it from the mailbox.
+            let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);
+            let boundary_view = View::new(boundary_height.get());
+            let boundary_round = Round::new(Epoch::zero(), boundary_view);
+            let parent_height = boundary_height.previous().unwrap();
+            let parent_view = View::new(parent_height.get());
+            let parent: Arc<TestCodedBlock> = Arc::new(encode_block(
+                make_coding_block(
+                    CodingCtx {
+                        round: Round::new(Epoch::zero(), parent_view),
+                        leader: default_leader(),
+                        parent: (View::zero(), genesis_commitment()),
+                    },
+                    Sha256::hash(&[b"ancestor"]),
+                    parent_height,
+                    0,
+                ),
+                coding_config,
+            ));
+            let boundary = marshaled
+                .propose(CodingCtx {
+                    round: boundary_round,
+                    leader: default_leader(),
+                    parent: (parent_view, parent.commitment()),
+                })
+                .await;
+            answer_parent_request(&mut held, Round::new(Epoch::zero(), parent_view), &parent).await;
+            let boundary = boundary.await.expect("the boundary proposal must build");
+            assert!(
+                marshaled
+                    .broadcast(
+                        boundary,
+                        Plan::Propose {
+                            round: boundary_round
+                        }
+                    )
+                    .accepted()
+            );
+            let (_, boundary_block) = take_proposed(&mut held).await;
+            assert_eq!(boundary_block.height(), boundary_height);
+
+            // The next view names the boundary block as its parent. The wrapper re-proposes
+            // the block and sends marshal no request.
+            let reproposal_round = Round::new(Epoch::zero(), boundary_view.next());
+            let reproposal = marshaled
+                .propose(CodingCtx {
+                    round: reproposal_round,
+                    leader: default_leader(),
+                    parent: (boundary_view, boundary),
+                })
+                .await;
+            assert_eq!(
+                proposed_without_marshal(&context, reproposal).await,
+                boundary
+            );
+            assert!(held.try_recv().is_err());
+
+            // Lock the re-proposal in and finalize it, which ends epoch 0.
+            assert!(
+                marshaled
+                    .broadcast(
+                        boundary,
+                        Plan::Propose {
+                            round: reproposal_round
+                        }
+                    )
+                    .accepted()
+            );
+            take_proposed(&mut held).await;
+            let finalization = CodingHarness::make_finalization(
+                Proposal::new(reproposal_round, boundary_view, boundary),
+                &schemes,
+                QUORUM,
+            );
+            assert!(
+                marshaled
+                    .report(Activity::Finalization(finalization))
+                    .accepted()
+            );
+            assert!(matches!(
+                held.recv().await,
+                Some(core::Message::Finalization { .. })
+            ));
+
+            // The first proposal of epoch 1 names the boundary block as its parent at view
+            // zero. The wrapper requests the block from marshal and builds on it.
+            let round = Round::new(Epoch::new(1), View::new(1));
+            let commitment = marshaled
+                .propose(CodingCtx {
+                    round,
+                    leader: default_leader(),
+                    parent: (View::zero(), boundary),
+                })
+                .await;
+            answer_parent_request(
+                &mut held,
+                Round::new(Epoch::new(1), View::zero()),
+                &boundary_block,
+            )
+            .await;
+            let commitment = commitment.await.expect("the proposal must build");
+            assert!(
+                marshaled
+                    .broadcast(commitment, Plan::Propose { round })
+                    .accepted()
+            );
+            let (_, block) = take_proposed(&mut held).await;
+            assert_eq!(
+                (block.parent(), block.height()),
+                (boundary_block.digest(), boundary_height.next())
+            );
         });
     }
 }

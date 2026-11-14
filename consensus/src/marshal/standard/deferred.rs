@@ -492,6 +492,7 @@ where
     {
         let context = self.context.clone();
         let marshal = self.marshal.clone();
+        let gates = self.gates.clone();
         let epocher = self.epocher.clone();
         let proposal_parent_fetch_duration = self.proposal_parent_fetch_duration.clone();
         let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
@@ -506,14 +507,17 @@ where
             // may still be uncertified, so this must stay round-bound until the
             // block is returned.
             let (parent_view, parent_commitment) = consensus_context.parent;
-            let parent_request = marshal.subscribe_by_commitment(
+            let parent_timer = proposal_parent_fetch_duration.timer(&*context);
+            let Some(parent) = build::parent(
+                &gates,
+                &marshal,
                 parent_commitment,
                 CommitmentFallback::FetchByRound {
                     round: Round::new(consensus_context.epoch(), parent_view),
                 },
-            );
-            let parent_timer = proposal_parent_fetch_duration.timer(&*context);
-            let Ok(parent) = parent_request.await else {
+            )
+            .await
+            else {
                 debug!(
                     ?parent_commitment,
                     reason = "failed to fetch parent block",
@@ -866,11 +870,11 @@ where
 
 /// The wrapper is the consensus engine's reporter, as it is its automaton and relay: it forwards
 /// every activity to marshal and first releases the state it keeps per round (certification
-/// gates, staged proposals, and sent marks). A finalization releases its round and the rounds
-/// below it. Any activity of a later epoch releases every earlier epoch, whose engine has been
-/// retired, which covers finalized progress that marshal imported while no engine reported it.
-/// The voter reports from the same task that requests the lock-in broadcast and certification,
-/// so pruning is ordered with both.
+/// gates, staged proposals, sent marks, and the latest staged block). A finalization releases
+/// its round and the rounds below it. Any activity of a later epoch releases every earlier
+/// epoch, whose engine has been retired, which covers finalized progress that marshal imported
+/// while no engine reported it. The voter reports from the same task that requests the lock-in
+/// broadcast and certification, so pruning is ordered with both.
 impl<E, S, A, B, ES> Reporter for Deferred<E, S, A, B, ES>
 where
     E: Send + Sync + 'static,
