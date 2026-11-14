@@ -49,7 +49,7 @@ use commonware_consensus::{
         elector::RoundRobin,
         types::{Context, Finalization},
     },
-    types::{Epoch, Epocher as _, FixedEpocher, Height, Round, View, ViewDelta},
+    types::{Epoch, Epocher as _, FixedEpocher, Height, Round, TermLength, View, ViewDelta},
 };
 use commonware_cryptography::{
     Digest as _, Digested, Digestible, Hasher, Sha256, Signer as _,
@@ -671,6 +671,7 @@ pub(super) struct ReshareEngine {
     processed: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
     marshals: Arc<Mutex<BTreeMap<ed25519::PublicKey, Marshal>>>,
     failures: Arc<HashSet<u64>>,
+    elector: RoundRobin,
 }
 
 pub(super) struct ValidatorEngine {
@@ -783,11 +784,18 @@ impl ReshareEngine {
             processed: Arc::new(Mutex::new(BTreeMap::new())),
             marshals: Arc::new(Mutex::new(BTreeMap::new())),
             failures: Arc::new(HashSet::new()),
+            elector: RoundRobin::default(),
         }
     }
 
     pub(super) fn with_failures(mut self, failures: impl IntoIterator<Item = u64>) -> Self {
         self.failures = Arc::new(failures.into_iter().collect());
+        self
+    }
+
+    /// Sets the leader election. The default rotates the leader every view.
+    pub(super) fn with_elector(mut self, elector: RoundRobin) -> Self {
+        self.elector = elector;
         self
     }
 
@@ -1297,7 +1305,7 @@ impl EngineDefinition for ReshareEngine {
                 application: deferred,
                 strategy: Sequential,
                 simplex: orchestrator::SimplexConfig {
-                    elector: RoundRobin::<Sha256>::default(),
+                    elector: self.elector.clone(),
                     mailbox_size: NZUsize!(3),
                     replay_buffer: IO_BUFFER_SIZE,
                     write_buffer: IO_BUFFER_SIZE,
@@ -1611,4 +1619,22 @@ pub(super) fn height_round(height: Height) -> Round {
         .containing(height)
         .expect("test height should be supported");
     Round::new(info.epoch(), View::new(info.relative().get()))
+}
+
+/// Stable leaders with optimistic validation.
+///
+/// A dealer's log can only be carried by a block that dealer proposes, and in this harness's
+/// epochs only by the 15 blocks from the midpoint up to but not including the final block. A
+/// ceremony needs logs from a quorum of dealers. With no skipped views, those 15 blocks span 8
+/// consecutive terms of two views. Round-robin election gives those terms to 8 consecutive
+/// leaders, and the largest committee these tests use has 7 dealers, so every dealer gets a term.
+///
+/// Two optimistic views let validators vote on a term's second view before its first is
+/// certified. The stall timeout exceeds the engine's leader and certification timeouts.
+pub(super) fn stable_leaders() -> RoundRobin {
+    RoundRobin::default().with_term(
+        TermLength::new(NZU32!(2)),
+        Duration::from_secs(5),
+        ViewDelta::new(2),
+    )
 }

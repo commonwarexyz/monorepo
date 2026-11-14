@@ -302,6 +302,7 @@ pub(crate) struct SingleDbEngine {
     enable_state_sync: bool,
     sync_config: SyncEngineConfig,
     retained_marshal_blocks: usize,
+    elector: RoundRobin,
 }
 
 impl SingleDbEngine {
@@ -323,6 +324,7 @@ impl SingleDbEngine {
                 max_outstanding_requests: NZUsize!(8),
             },
             retained_marshal_blocks: 10,
+            elector: RoundRobin::default(),
         }
     }
 
@@ -339,6 +341,19 @@ impl SingleDbEngine {
             max_outstanding_requests: NZUsize!(1),
         };
         self.retained_marshal_blocks = SLOW_SYNC_MARSHAL_RETENTION;
+        self
+    }
+
+    /// Retains enough marshal blocks for a validator restarted without state sync to fetch those
+    /// it missed while down.
+    pub(crate) fn with_restart_retention(mut self) -> Self {
+        self.retained_marshal_blocks = RESTART_MARSHAL_RETENTION;
+        self
+    }
+
+    /// Sets the leader election. The default rotates the leader every view.
+    pub(crate) fn with_elector(mut self, elector: RoundRobin) -> Self {
+        self.elector = elector;
         self
     }
 }
@@ -614,7 +629,7 @@ impl EngineDefinition for SingleDbEngine {
         // Simplex engine
         let simplex_config = simplex::Config {
             scheme,
-            elector: RoundRobin::<Sha256>::default(),
+            elector: self.elector.clone(),
             blocker: oracle.control(public_key.clone()),
             automaton: deferred.clone(),
             relay: deferred.clone(),
