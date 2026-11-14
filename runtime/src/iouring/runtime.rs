@@ -822,6 +822,12 @@ impl Context {
     const fn execution(&self) -> Execution {
         self.place.execution()
     }
+
+    /// The runtime thread this context's spawns run on, if any.
+    #[cfg(test)]
+    pub(crate) const fn placed_thread(&self) -> Option<&Thread> {
+        self.place.thread()
+    }
 }
 
 impl crate::Spawner for Context {

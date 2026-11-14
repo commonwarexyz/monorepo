@@ -939,7 +939,11 @@ mod tests {
                     context.sleep(Duration::from_millis(1)).await;
                     continue;
                 }
-                crate::marshal::mocks::assert_execution(&metrics, "actor_resolver", "Thread");
+                crate::marshal::mocks::harness::assert_execution(
+                    &metrics,
+                    "actor_resolver",
+                    "Thread",
+                );
                 break;
             }
         });

@@ -1630,6 +1630,12 @@ impl Context {
         self.place.execution()
     }
 
+    /// The runtime thread this context's spawns run on, if any.
+    #[cfg(test)]
+    pub(crate) const fn placed_thread(&self) -> Option<&Thread> {
+        self.place.thread()
+    }
+
     /// Get a reference to the [Auditor].
     pub fn auditor(&self) -> Arc<Auditor> {
         self.executor().auditor.clone()

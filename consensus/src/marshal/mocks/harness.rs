@@ -81,6 +81,23 @@ pub type V = MinPk;
 pub type S = bls12381_threshold_vrf::Scheme<K, V>;
 pub type P = ConstantProvider<S, Epoch>;
 
+/// Assert that `metrics` has spawns of `task` and that each ran with the given `execution`.
+#[cfg(test)]
+pub(crate) fn assert_execution(metrics: &str, task: &str, execution: &str) {
+    let name = format!("name=\"{task}\"");
+    let mut lines = metrics
+        .lines()
+        .filter(|line| line.starts_with("runtime_tasks_spawned_total{") && line.contains(&name))
+        .peekable();
+    assert!(lines.peek().is_some(), "missing {name}: {metrics}");
+    assert!(
+        lines.all(|line| line.contains(&format!("execution=\"{execution}\""))),
+        "{name} must use {execution}: {metrics}"
+    );
+}
+
+/// Start one standard marshal validator with a verified parent, returning its mailbox and the
+/// context and block of a child proposal.
 #[cfg(test)]
 pub(crate) async fn placement_setup(
     context: &mut deterministic::Context,

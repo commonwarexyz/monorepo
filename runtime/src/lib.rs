@@ -472,7 +472,8 @@ stability_scope!(BETA {
         /// [`ThreadBuilder::attach`] or [`ThreadBuilder::spawn`], which decide how long it lives
         /// (see [`ThreadBuilder`]). Holding a [`Thread`] or a [`Local`] never keeps a thread
         /// open. Closing a thread aborts the tasks running on it, wherever they are supervised,
-        /// and supervision then aborts their descendants wherever those run.
+        /// and their handles resolve [`Error::Closed`]. Supervision then aborts their
+        /// descendants wherever those run.
         ///
         /// # Cooperation and liveness
         ///
@@ -481,6 +482,8 @@ stability_scope!(BETA {
         /// [`Strategizer::strategy`]. A strategy may run work inline on the calling task, as a
         /// sequential strategy or a pool with one worker can, so it does not isolate the thread
         /// from that work.
+        ///
+        /// Each runtime adds its own limits:
         ///
         /// - io_uring: there is no cooperative budget, so a task whose channels never return
         ///   `Pending` can starve its thread. The thread's tasks share one io_uring ring and its
@@ -594,9 +597,9 @@ stability_scope!(BETA {
         /// belongs to another runner resolves [`Error::Closed`], drops `f` unrun and aborts the
         /// consumed context's node.
         ///
-        /// A thread admits a bounded batch of spawns per turn, and its queue of spawns is
-        /// unbounded, like any spawn queue. A producer that submits faster than the thread admits
-        /// grows it, so backpressure is the caller's job.
+        /// A thread admits a bounded batch of queued spawns per turn, in the order they were
+        /// submitted, and its queue of spawns is unbounded, like any spawn queue. A producer that
+        /// submits faster than the thread admits grows it, so backpressure is the caller's job.
         ///
         /// # Examples
         ///

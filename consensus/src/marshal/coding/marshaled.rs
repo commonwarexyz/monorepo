@@ -1290,7 +1290,7 @@ mod tests {
             let _verification = marshaled.verify(consensus_context, commitment).await;
             let metrics = context.encode();
             for task in ["propose", "deferred_verify", "shard_validity_wait"] {
-                crate::marshal::mocks::assert_execution(
+                crate::marshal::mocks::harness::assert_execution(
                     &metrics,
                     &format!("marshaled_{task}"),
                     "Shared",

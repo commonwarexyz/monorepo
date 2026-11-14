@@ -43,15 +43,20 @@ async fn ran_on<C: Spawner>(context: C) -> (ThreadId, String) {
     (context.spawn(|_| async { os() }).await.unwrap(), name)
 }
 
+/// Where the two spawns of [spawns] ran, with their labels.
+type Spawns = [(ThreadId, String); 2];
+
 /// Where spawns from children of `context` run, unplaced and after `placed`.
-async fn spawns<C: Spawner>(context: &C) -> [(ThreadId, String); 2] {
+async fn spawns<C: Spawner>(context: &C) -> Spawns {
     let plain = ran_on(context.child("plain")).await;
     [plain, ran_on(context.child("placed").placed()).await]
 }
 
-/// The OS thread a `Local`'s task runs on, and the [spawns] of its context.
-async fn local_spawns<C: Spawner>(local: Local<C>) -> (ThreadId, [(ThreadId, String); 2]) {
-    (os(), spawns(&*local).await)
+/// The OS thread a `Local`'s task runs on, and the [spawns] of its context, through the
+/// `Local` and after `into_inner`.
+async fn local_spawns<C: Spawner>(local: Local<C>) -> (ThreadId, [Spawns; 2]) {
+    let deref = spawns(&*local).await;
+    (os(), [deref, spawns(&local.into_inner()).await])
 }
 
 /// Assert that the task spawned under a label, which ran on an OS thread, has the execution
@@ -72,7 +77,7 @@ fn assert_ran<R: TestRunner>(
 /// `placed` says, relative to `thread`.
 fn assert_spawns<R: TestRunner>(
     metrics: &R::Context,
-    [plain, ran]: [(ThreadId, String); 2],
+    [plain, ran]: Spawns,
     placed: &str,
     thread: ThreadId,
 ) {
@@ -99,6 +104,21 @@ fn probe(report: oneshot::Sender<ThreadId>) -> Probe {
     on_drop(Box::new(move || {
         let _ = report.send(os());
     }))
+}
+
+/// Assert that `thread` runs a spawn from `context` and is still open afterwards, failing with
+/// `message` otherwise. Once the spawn ran, a completing poll of an earlier resident is over.
+async fn assert_open<C: Spawner>(context: &C, thread: &Thread, message: &str) {
+    let ran = context.child("open").spawn_on(thread, |_| async {}).await;
+    assert!(ran.is_ok() && thread.inner().is_open(), "{message}");
+}
+
+/// Wait until `thread` finished closing, then assert that a spawn from `context` toward it
+/// resolves Closed.
+async fn assert_closes<C: Spawner + Clock>(context: &C, thread: &Thread) {
+    settle(context, || thread.inner().state() == State::Closed).await;
+    let late = context.child("late").spawn_on(thread, |_| async {});
+    assert!(closed(late).await, "a closed thread admitted a spawn");
 }
 
 thread_local! {
@@ -202,6 +222,7 @@ fn test_thread_placement_matrix<R: TestRunner>(#[case] runner: R) {
         // Each placement, and child and with_attribute after one.
         let on = |label| context.child(label).on(&thread);
         let blocking = context.child("blocking_attr").blocking();
+        let blocking_child = context.child("blocking_child").blocking().child("child");
         let lines = [
             (on("on"), "Thread"),
             (on("on_shared").shared(), "Shared"),
@@ -209,6 +230,7 @@ fn test_thread_placement_matrix<R: TestRunner>(#[case] runner: R) {
             (on("on_child").child("child"), "Thread"),
             (on("on_attr").with_attribute("k", 1), "Thread"),
             (blocking.with_attribute("k", 1), "SharedBlocking"),
+            (blocking_child, "SharedBlocking"),
             (context.child("fresh_placed").placed(), "Shared"),
         ];
         for (line, expect) in lines {
@@ -256,8 +278,9 @@ fn test_thread_placement_matrix<R: TestRunner>(#[case] runner: R) {
         }
 
         // A Local's context is unplaced on its thread, for a spawn_on task, a spawn_local task
-        // and a root alike. A root and its spawn_local task share an OS thread of their own, and
-        // the root's context and thread keep the creating label.
+        // and a root alike, and so is the context into_inner returns. A root and its spawn_local
+        // task share an OS thread of their own, and the root's context and thread keep the
+        // creating label.
         let resident = context.child("local").spawn_on(&thread, local_spawns);
         let task = context.child("spawn_local");
         let task = task.spawn_on(&thread, |local| async move {
@@ -281,7 +304,9 @@ fn test_thread_placement_matrix<R: TestRunner>(#[case] runner: R) {
         ];
         for ((here, ran), thread) in residents {
             assert!(!R::NATIVE || here == thread, "a resident left its thread");
-            check_spawns(ran, "Thread", thread);
+            for ran in ran {
+                check_spawns(ran, "Thread", thread);
+            }
         }
 
         // An attached context is placed on its thread and keeps the creating label, and a task
@@ -400,7 +425,8 @@ fn test_thread_supervision<R: TestRunner>(#[case] runner: R) {
             }
             let late = context.child("late").on(&closing);
             let wired = late.child("wired").shared().spawn(|_| pending::<()>());
-            assert!(closed(late.spawn(recording(&ran))).await);
+            let late = closed(late.spawn(recording(&ran))).await;
+            assert!(late, "a placed spawn toward the closed thread was admitted");
             assert!(closed(wired).await, "a rejected spawn left its node open");
             assert!(!is_set(&ran), "a rejected factory ran");
             let still = context.child("still").spawn_on(&thread, |_| async { 7 });
@@ -412,7 +438,9 @@ fn test_thread_supervision<R: TestRunner>(#[case] runner: R) {
 // An attached context keeps its thread while its lineage lives, also when it is used only
 // through child and then dropped, or when an actor derived from it with child ends first. The
 // thread closes once the task that consumes the context ends, so a task that attaches a thread
-// per epoch, whose consumers complete or are aborted, leaves no OS thread behind.
+// per epoch, whose consumers complete or are aborted, leaves no thread open and no OS thread
+// behind. The checks reach each thread from contexts outside the attached lineage, which its
+// end does not abort.
 #[rstest]
 #[case::deterministic(deterministic::Runner::default())]
 #[case::tokio(tokio::Runner::default())]
@@ -424,41 +452,41 @@ fn test_thread_attach<R: TestRunner>(#[case] runner: R) {
             let (tx, rx) = oneshot::channel();
             let lineage = context.child("lineage").spawn(move |context| async move {
                 let attached = context.child("t").thread().attach().unwrap();
+                let thread = R::placed_on(&attached);
                 let probe = attached.child("probe").spawn(|_| pending::<()>());
-                tx.send(probe).ok().unwrap();
                 drop(attached);
+                tx.send((thread, probe)).ok().unwrap();
                 pending::<()>().await;
             });
-            let mut probe = rx.await.unwrap();
+            let (thread, mut probe) = rx.await.unwrap();
             context.sleep(Duration::from_millis(10)).await;
             let open = (&mut probe).now_or_never().is_none();
             assert!(open, "dropping the attached context closed its thread");
+            assert_open(&context, &thread, "dropping the context closed its thread").await;
             lineage.abort();
-            assert!(closed(probe).await);
+            assert!(closed(probe).await, "the aborted lineage kept its probe");
+            assert_closes(&context, &thread).await;
 
             // An actor derived with child ends first, then the consuming task runs.
             let attached = context.child("subsystem").thread().attach().unwrap();
+            let thread = R::placed_on(&attached);
             attached.child("actor").spawn(|_| async {}).await.unwrap();
-            let saved = attached.child("saved");
+            assert_open(&context, &thread, "the thread closed with an actor").await;
             let (release, released) = oneshot::channel::<()>();
             let main = attached.spawn(|_| released);
-            let open = saved.child("open").spawn(|_| async { 1 });
-            assert_eq!(open.await.unwrap(), 1, "the thread closed with an actor");
+            assert_open(&context, &thread, "the thread closed before its consumer").await;
             release.send(()).unwrap();
             main.await.unwrap().unwrap();
-
-            // A resident of the same thread runs after the consumer's completing poll, which
-            // aborts its node, or is aborted with it.
-            let _ = saved.child("barrier").spawn(|_| async {}).await;
-            let late = closed(saved.child("late").spawn(|_| async {})).await;
-            assert!(late, "a spawn from the consumed context was admitted late");
+            assert_closes(&context, &thread).await;
 
             // Sixteen epochs, whose engines complete or are aborted in turn.
             let orchestrator = context.child("orchestrator").spawn(|context| async move {
                 let baseline = os_threads();
+                let mut threads = Vec::new();
                 for epoch in 0..16 {
                     let engine = context.child("engine").with_attribute("epoch", epoch);
                     let engine = engine.thread().attach().unwrap();
+                    threads.push(R::placed_on(&engine));
                     let aborted = epoch % 2 == 0;
                     let main = engine.spawn(move |context| async move {
                         // A long-lived actor runs next to the engine until the engine ends.
@@ -470,7 +498,10 @@ fn test_thread_attach<R: TestRunner>(#[case] runner: R) {
                     if aborted {
                         main.abort();
                     }
-                    assert_eq!(closed(main).await, aborted);
+                    assert_eq!(closed(main).await, aborted, "epoch {epoch} ended wrongly");
+                }
+                for thread in &threads {
+                    assert_closes(&context, thread).await;
                 }
 
                 // The OS threads of native runners exit once their close completes. The count

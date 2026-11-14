@@ -784,7 +784,7 @@ mod tests {
                 "inline_inline_verify",
                 "inline_inline_certify",
             ] {
-                crate::marshal::mocks::assert_execution(&metrics, task, "Shared");
+                crate::marshal::mocks::harness::assert_execution(&metrics, task, "Shared");
             }
         });
     }

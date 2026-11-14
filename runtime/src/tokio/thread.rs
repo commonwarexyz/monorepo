@@ -434,7 +434,8 @@ impl Drop for ResidentTask {
 pub(super) mod tests {
     use super::super::{Config, Context, Runner};
     use crate::{
-        Error, Runner as _, Spawner as _, Supervisor as _, threads::testing::bounded,
+        Error, Runner as _, Spawner as _, Supervisor as _,
+        threads::testing::{bounded, capturing, closed, flag, is_set, on_drop},
         utils::extract_panic_message,
     };
     use commonware_utils::{
@@ -468,6 +469,11 @@ pub(super) mod tests {
     /// Make the next control future that finds its thread closing panic.
     pub(crate) fn inject_host_failure() {
         HOST_FAILURE.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether an injected host failure has not fired yet.
+    pub(crate) fn host_failure_pending() -> bool {
+        HOST_FAILURE.load(Ordering::SeqCst)
     }
 
     /// Install (or with `None`, remove) the callback run after every admission.
@@ -579,7 +585,10 @@ pub(super) mod tests {
 
     /// A `spawn_local` job aborted after the control future moved it into the `LocalSet` and
     /// before its first poll never runs its factory. Its capture drops and its parked factory
-    /// is reaped in the same turn, with the thread still open.
+    /// is reaped in the same turn, with the thread still open. A `spawn_on` factory admitted as
+    /// its thread starts closing, before its first poll, never runs either. The close disposes
+    /// of it on the thread and reports the panic of its capture, which fails the runner only
+    /// under `catch_panics(false)`.
     #[test]
     fn test_thread_cancel_after_admission() {
         thread_local! {
@@ -644,6 +653,49 @@ pub(super) mod tests {
             })
         })
         .unwrap();
+
+        for catch in [false, true] {
+            let (home, dropped) = (Arc::new(Mutex::new(None)), Arc::new(Mutex::new(None)));
+            let result = bounded({
+                let (home, dropped) = (home.clone(), dropped.clone());
+                move || {
+                    start(catch, move |context| async move {
+                        let creator = context.child("deferred");
+                        let node = creator.tree.clone();
+                        let thread = creator.thread().build().unwrap();
+                        let observe = context.child("home");
+                        let observe =
+                            observe.spawn_on(&thread, |_| ready(std::thread::current().id()));
+                        *home.lock() = Some(observe.await.unwrap());
+
+                        // Close the thread right after the control future admits the factory.
+                        set_after_admit(Some(Arc::new(move || node.abort())));
+                        let capture = on_drop(move || {
+                            *dropped.lock() = Some(std::thread::current().id());
+                            panic!("deferred capture");
+                        });
+                        let ran = flag();
+                        let victim = context.child("victim");
+                        let victim = victim.spawn_on(&thread, capturing(capture, &ran));
+                        let victim = closed(victim).await;
+                        assert!(victim, "the deferred factory's task stayed open");
+                        assert!(!is_set(&ran), "the deferred factory ran");
+                    })
+                }
+            });
+            set_after_admit(None);
+            let dropped = *dropped.lock();
+            let home = *home.lock();
+            assert!(dropped.is_some(), "the deferred capture was not dropped");
+            assert_eq!(dropped, home, "the capture was dropped off its thread");
+            match result {
+                Ok(()) => assert!(catch, "the disposal panic did not fail the runner"),
+                Err(panic) => {
+                    assert!(!catch, "a caught disposal panic failed the runner");
+                    assert_eq!(extract_panic_message(&*panic), "deferred capture");
+                }
+            }
+        }
     }
 
     /// A host failure raised when the thread starts closing, after the runner's root returned,

@@ -931,7 +931,7 @@ mod tests {
 
             let metrics = context.encode();
             for task in ["deferred_propose", "deferred_optimistic_verify"] {
-                crate::marshal::mocks::assert_execution(&metrics, task, "Shared");
+                crate::marshal::mocks::harness::assert_execution(&metrics, task, "Shared");
             }
         });
     }

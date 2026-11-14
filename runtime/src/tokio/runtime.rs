@@ -54,7 +54,7 @@ use tokio::{
 #[path = "thread.rs"]
 mod thread;
 #[cfg(test)]
-pub(crate) use thread::tests::inject_host_failure;
+pub(crate) use thread::tests::{host_failure_pending, inject_host_failure};
 
 #[derive(Debug)]
 struct Metrics {
@@ -586,6 +586,12 @@ impl Context {
     /// Where the next spawn runs, as its task metric reports it.
     const fn execution(&self) -> Execution {
         self.place.execution()
+    }
+
+    /// The runtime thread this context's spawns run on, if any.
+    #[cfg(test)]
+    pub(crate) const fn placed_thread(&self) -> Option<&Thread> {
+        self.place.thread()
     }
 }
 

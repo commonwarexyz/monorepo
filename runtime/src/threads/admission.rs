@@ -413,9 +413,10 @@ pub(crate) mod tests {
     };
     #[cfg(not(target_arch = "wasm32"))]
     use {
-        super::Job,
+        super::{Job, spawn_job},
         crate::{
             Error, Handle,
+            threads::testing::{capturing, flag, on_drop},
             utils::{MetricHandle, Panicker},
         },
         futures::FutureExt as _,
@@ -563,6 +564,37 @@ pub(crate) mod tests {
         done_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("dropping a rejected wrapper deadlocked on the admission lock");
+    }
+
+    /// A `spawn_on` job dropped unrun drops its factory's captures, then its context, then the
+    /// task's prepared parts. So a root guard in the factory closes admission while the root's
+    /// handle is pending and its node open, and the handle resolves Closed afterwards.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_unrun_spawn_job_drop_order() {
+        let node = Tree::root();
+        let (wired, _) = Tree::child(&node);
+        let metric = MetricHandle::new(Gauge::default());
+        let (prepared, handle) = Handle::<()>::prepare(metric, node);
+        let handle = Arc::new(Mutex::new(handle));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+
+        // Records its label, whether the handle is pending and whether the wired node is open.
+        let witness = |label: &'static str| {
+            let (handle, seen, wired) = (handle.clone(), seen.clone(), wired.clone());
+            on_drop(move || {
+                let pending = (&mut *handle.lock()).now_or_never().is_none();
+                seen.lock().push((label, pending, !Tree::child(&wired).1));
+            })
+        };
+        let factory = capturing(witness("factory"), &flag());
+        drop(spawn_job(factory, witness("context"), prepared));
+
+        let expected = [("factory", true, true), ("context", true, true)];
+        assert_eq!(*seen.lock(), expected, "wrong drop order");
+        let result = (&mut *handle.lock()).now_or_never();
+        assert!(matches!(result, Some(Err(Error::Closed))));
+        assert!(Tree::child(&wired).1, "the wired context was not aborted");
     }
 }
 

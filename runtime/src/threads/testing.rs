@@ -2,7 +2,7 @@
 
 #[cfg(target_os = "linux")]
 use crate::iouring;
-use crate::{Clock, Error, Metrics, Runner, Spawner, deterministic, tokio};
+use crate::{Clock, Error, Metrics, Runner, Spawner, Thread, deterministic, tokio};
 use commonware_utils::channel::oneshot;
 use std::{
     future::{Future, Ready, pending, ready},
@@ -26,6 +26,9 @@ pub(crate) trait TestRunner:
 
     /// A runner that catches panics if `catch`.
     fn catching(catch: bool) -> Self;
+
+    /// The thread `context` is placed on.
+    fn placed_on(context: &Self::Context) -> Thread;
 }
 
 impl TestRunner for deterministic::Runner {
@@ -34,11 +37,19 @@ impl TestRunner for deterministic::Runner {
     fn catching(catch: bool) -> Self {
         Self::new(deterministic::Config::default().with_catch_panics(catch))
     }
+
+    fn placed_on(context: &Self::Context) -> Thread {
+        context.placed_thread().cloned().unwrap()
+    }
 }
 
 impl TestRunner for tokio::Runner {
     fn catching(catch: bool) -> Self {
         Self::new(tokio::Config::default().with_catch_panics(catch))
+    }
+
+    fn placed_on(context: &Self::Context) -> Thread {
+        context.placed_thread().cloned().unwrap()
     }
 }
 
@@ -48,6 +59,10 @@ impl TestRunner for iouring::Runner {
 
     fn catching(catch: bool) -> Self {
         Self::new(iouring::Config::default().with_catch_panics(catch))
+    }
+
+    fn placed_on(context: &Self::Context) -> Thread {
+        context.placed_thread().cloned().unwrap()
     }
 }
 

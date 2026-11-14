@@ -306,6 +306,12 @@ fn test_thread_close_order<R: TestRunner>(#[case] runner: R, #[case] host_failur
             drained(&context, &thread).await;
         })
     });
+    if host_failure {
+        assert!(
+            !tokio::host_failure_pending(),
+            "the host failure did not fire"
+        );
+    }
     assert_eq!(*recorded.lock(), ["resident", "job"], "wrong drop order");
 }
 
@@ -368,7 +374,8 @@ fn test_thread_close_while_scheduling<R: TestRunner>(#[case] runners: Vec<R>) {
         let futures = futures.count();
         let ordered = order[futures..].iter().all(|label| *label == "factory");
         assert!(ordered, "a future was dropped after a factory: {order:?}");
-        assert!(order[..futures].contains(&"resident"));
+        let resident = order[..futures].contains(&"resident");
+        assert!(resident, "the resident was not among the dropped futures");
         unrun += order.len() - futures;
         mixed |= order[..futures].contains(&"young") && futures < order.len();
     }

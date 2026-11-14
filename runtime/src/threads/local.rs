@@ -65,6 +65,19 @@ use std::{
 /// });
 /// ```
 ///
+/// The context [Local::into_inner] returns can:
+///
+/// ```
+/// use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
+///
+/// deterministic::Runner::default().start(|context| async move {
+///     context.child("t").thread().spawn(|local| async move {
+///         let context = local.into_inner();
+///         std::thread::spawn(move || drop(context)).join().unwrap();
+///     }).unwrap().await.unwrap();
+/// });
+/// ```
+///
 /// A [Local] cannot move into an ordinary spawn:
 ///
 /// ```compile_fail
