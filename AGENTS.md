@@ -65,3 +65,13 @@ Read the relevant guide only when the task needs it:
 - [Conformance tests](conformance/TESTING.md)
 
 The root [README](README.md) lists primitives, examples, stability-level definitions, and product documentation.
+
+## Security Policy
+
+This project maintains a security policy in [SECURITY.md](./SECURITY.md).
+All AI coding agents MUST read and follow SECURITY.md before making changes or performing a secure code review.
+It contains:
+
+- Vulnerability reporting procedures
+- Threat model
+- Automatic security code review
