@@ -1008,12 +1008,19 @@ mod tests {
     /// even when the actor takes the fetch before it polls the verdict.
     #[test]
     fn issue_5720_regression() {
+        // When no other subscriber keeps the key in flight, the repeat starts a second
+        // source fetch and is delivered the new response, whether the consumer accepts,
+        // ignores, or drops the first delivery.
         for outcome in [
             Some(Outcome::Resolved(Resolution::Complete)),
             Some(Outcome::Ignored),
             None,
         ] {
             Runner::default().start(move |context| async move {
+                // The source holds an old and a new response. The actor is never
+                // started, so the test calls its handlers in the order under test. The
+                // first fetch is served the old response, and its delivery to
+                // subscriber 10 awaits a verdict.
                 let fetcher = MockFetcher::default();
                 fetcher.push(1, Some(Bytes::from_static(b"old")));
                 fetcher.push(1, Some(Bytes::from_static(b"new")));
@@ -1065,6 +1072,8 @@ mod tests {
         // When a later subscriber keeps the key in flight, the repeat joins it and
         // both are served from the accepted response.
         Runner::default().start(|context| async move {
+            // The source holds one response. The first fetch is served that response,
+            // and its delivery to subscriber 10 awaits a verdict.
             let fetcher = MockFetcher::default();
             fetcher.push(1, Some(Bytes::from_static(b"value")));
             let consumer = MockConsumer::default();
@@ -1086,6 +1095,10 @@ mod tests {
             let completed = actor.fetches.next_completed().await.unwrap();
             actor.handle_fetched(completed.key, completed.value);
             let first = consumer.pop().unwrap();
+
+            // Subscriber 11 joins while the delivery to 10 is judged. The consumer then
+            // accepts that delivery and fetches for 10 again before the actor polls the
+            // verdict.
             actor.add_fetch(fetch(11));
             first
                 .response
@@ -1093,6 +1106,9 @@ mod tests {
                 .unwrap();
             actor.add_fetch(fetch(10));
 
+            // The accepted response is redelivered to 11 and then to the repeat for 10,
+            // each after the previous verdict is applied, and the source is not asked
+            // again.
             for subscriber in [11, 10] {
                 while let Some(completed) = actor.deliveries.next_completion().now_or_never() {
                     if let Ok(completed) = completed {

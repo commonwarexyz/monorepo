@@ -592,6 +592,8 @@ mod tests {
     #[test]
     fn issue_5720_regression() {
         deterministic::Runner::default().start(|context| async move {
+            // Build an engine that is never started, so the test calls its handlers in
+            // the order under test.
             let (consumer, mut delivered) = MockConsumer::<MockKey, Bytes>::new();
             let (mut engine, _mailbox) = Engine::new(
                 context,
