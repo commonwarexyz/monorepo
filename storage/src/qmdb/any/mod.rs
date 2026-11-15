@@ -1896,7 +1896,7 @@ pub(crate) mod test {
         make_value: impl Fn(u64) -> Digest,
     ) where
         F: Family,
-        C: Mutable<Item = Operation<F, U>>,
+        C: authenticated::Backing<Context, Item = Operation<F, U>>,
         I: UnorderedIndex<Value = GenericLocation<F>>,
         U: Update<Key = Digest, Value = Digest>,
         S: Strategy,

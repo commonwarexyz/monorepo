@@ -2687,6 +2687,10 @@ impl<E: Context, V: CodecShared> authenticated::Backing<E> for Journal<E, V> {
         Recovery::<E, V>::span(context, cfg).await
     }
 
+    fn retained_start(&self) -> u64 {
+        self.0.offsets.retained_start()
+    }
+
     async fn clear(context: E, cfg: Self::Config, size: u64) -> Result<Self::Recovery, Error> {
         let offsets_partition = cfg.offsets_partition();
         let offsets_context = context.child("offsets");

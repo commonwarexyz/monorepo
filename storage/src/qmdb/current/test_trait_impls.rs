@@ -8,7 +8,10 @@ use super::{
 use crate::{
     Context,
     index::{Ordered as OrderedIndex, Unordered as UnorderedIndex},
-    journal::contiguous::{Contiguous, Mutable},
+    journal::{
+        authenticated::Backing,
+        contiguous::{Contiguous, Mutable},
+    },
     merkle::{Graftable, Location},
     qmdb::{
         Error,
@@ -178,7 +181,7 @@ impl<F, E, C, I, H, U, const N: usize, S> DbAny for Db<F, E, C, I, H, U, N, S>
 where
     F: Graftable,
     E: Context,
-    C: Mutable<Item = Operation<F, U>>,
+    C: Backing<E, Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
     U: Update,

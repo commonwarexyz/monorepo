@@ -732,7 +732,10 @@ where
     /// The journal's retained start, which may be less than `prune_loc`. After state sync, the
     /// Merkle pruning boundary can remain above the returned start.
     #[boxed]
-    pub async fn prune(self, prune_loc: Location<F>) -> Result<(Self, Location<F>), Error<F>> {
+    pub async fn prune(self, prune_loc: Location<F>) -> Result<(Self, Location<F>), Error<F>>
+    where
+        C: Backing<E>,
+    {
         let (journal, boundary, _) = self.prune_inner(prune_loc).await?;
         Ok((journal, boundary))
     }
@@ -740,7 +743,10 @@ where
     async fn prune_inner(
         mut self,
         prune_loc: Location<F>,
-    ) -> Result<(Self, Location<F>, bool), Error<F>> {
+    ) -> Result<(Self, Location<F>, bool), Error<F>>
+    where
+        C: Backing<E>,
+    {
         if self.merkle.size() == 0 {
             // DB is empty, nothing to prune.
             let boundary = Location::new(self.journal.bounds().start);
@@ -761,14 +767,25 @@ where
         (self.journal, journal_pruned) = self.journal.prune(*prune_loc).await?;
         let bounds = self.journal.bounds();
         let boundary = Location::new(bounds.start);
-        let merkle_boundary = self.merkle.bounds().start;
 
-        if boundary > merkle_boundary {
-            debug!(size = ?bounds.end, ?prune_loc, boundary = ?bounds.start, "pruned inactive ops");
-            self.merkle = self.merkle.prune(boundary).await?;
+        // A reopen starts the journal at its retained start, so the Merkle structure durably
+        // prunes only to the retained start.
+        let retained_start = self.retained_start();
+        let mut nodes_pruned = false;
+        if retained_start > self.merkle.bounds().start {
+            debug!(size = ?bounds.end, ?prune_loc, ?boundary, ?retained_start, "pruned inactive ops");
+            (self.merkle, nodes_pruned) = self.merkle.prune(retained_start).await?;
         }
 
-        Ok((self, boundary, journal_pruned || boundary > merkle_boundary))
+        Ok((self, boundary, journal_pruned || nodes_pruned))
+    }
+
+    /// The operation journal's [Backing::retained_start], as a location.
+    pub(crate) fn retained_start(&self) -> Location<F>
+    where
+        C: Backing<E>,
+    {
+        Location::new(self.journal.retained_start())
     }
 
     /// Destroy the authenticated journal, removing all data from disk.
@@ -1025,7 +1042,7 @@ impl<F, E, C, H, S> Mutable for Journal<F, E, C, H, S>
 where
     F: Family,
     E: Context,
-    C: Mutable<Item: EncodeShared>,
+    C: Backing<E, Item: EncodeShared>,
     H: Hasher,
     S: Strategy,
 {
@@ -1192,6 +1209,12 @@ pub trait Backing<E: Context>: Mutable {
         context: E,
         cfg: &Self::Config,
     ) -> impl Future<Output = Result<Range<u64>, JournalError>> + Send;
+
+    /// The oldest position the journal retains, at most the start of [Contiguous::bounds].
+    ///
+    /// Implementations must advance it only by removing whole blobs, and a reopened journal's
+    /// [Contiguous::bounds] must start there.
+    fn retained_start(&self) -> u64;
 }
 
 /// Whether `span` contains `position` or is empty exactly at it.
@@ -2787,6 +2810,51 @@ mod tests {
     fn test_mutable_prune_updates_merkle_boundary_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(test_mutable_prune_updates_merkle_boundary_inner::<mmb::Family>);
+    }
+
+    /// A prune that raises a lagging Merkle boundary to the retained start reports a removal when
+    /// it removes only node blobs.
+    async fn test_mutable_prune_reports_node_blob_removal_inner<F: Family + PartialEq>(
+        context: Context,
+    ) {
+        let suffix = "node_prune";
+        let mut journal = create_journal_with_ops::<F>(context.child("ops"), suffix, 100).await;
+        (journal, _) = journal
+            .append(&TestOp::<F>::Commit(None, Location::<F>::new(50)))
+            .await
+            .unwrap();
+        journal = journal.sync().await.unwrap();
+
+        // Prune the operation journal to 50 without pruning the Merkle structure, as a crash
+        // between the two prunes would. A reopen starts the journal at 49 and leaves the Merkle
+        // boundary at 0.
+        (journal.journal, _) = Mutable::prune(journal.journal, 50).await.unwrap();
+        drop(journal.sync().await.unwrap());
+        let journal = create_empty_journal::<F>(context.child("reopen"), suffix).await;
+        assert_eq!(journal.bounds().start, 49);
+        assert_eq!(journal.merkle.bounds().start, Location::<F>::new(0));
+
+        // Pruning to the retained start removes no operation blob, but it prunes the Merkle
+        // structure to 49 and removes node blobs.
+        let (journal, pruned) = <TestJournal<F> as Mutable>::prune(journal, 49)
+            .await
+            .unwrap();
+        assert!(pruned);
+        assert_eq!(journal.bounds().start, 49);
+        assert_eq!(journal.merkle.bounds().start, Location::<F>::new(49));
+        journal.destroy().await.unwrap();
+    }
+
+    #[test_traced("INFO")]
+    fn test_mutable_prune_reports_node_blob_removal_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_mutable_prune_reports_node_blob_removal_inner::<mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_mutable_prune_reports_node_blob_removal_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_mutable_prune_reports_node_blob_removal_inner::<mmb::Family>);
     }
 
     /// Verify that pruning doesn't change the operation count.
@@ -4741,7 +4809,7 @@ mod tests {
                     (journal, _) = journal.append(&op).await.unwrap();
                 }
                 journal = journal.sync().await.unwrap();
-                journal.merkle = journal.merkle.prune(Location::new(8)).await.unwrap();
+                (journal.merkle, _) = journal.merkle.prune(Location::new(8)).await.unwrap();
                 journal = journal.sync().await.unwrap();
                 let bounds = journal.bounds();
                 let merkle_bounds = journal.merkle.bounds();

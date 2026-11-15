@@ -1463,6 +1463,11 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         self.bounds.start
     }
 
+    /// Return the first position of the oldest retained blob, at most the pruning boundary.
+    pub(super) const fn retained_start(&self) -> u64 {
+        self.bounds.start
+    }
+
     /// See [Journal::prune].
     pub(crate) async fn prune(
         mut self: Box<Self>,
@@ -2189,6 +2194,10 @@ impl<E: Context, A: CodecFixedShared> authenticated::Backing<E> for Journal<E, A
             Some(target) => Ok(target..target),
             None => Recovery::<E, A>::span(&context, cfg, &checkpoint).await,
         }
+    }
+
+    fn retained_start(&self) -> u64 {
+        self.0.retained_start()
     }
 
     type Config = Config;
