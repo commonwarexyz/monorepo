@@ -1,5 +1,5 @@
 use crate::{
-    BlobVersion, Buf, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
+    BlobVersion, Buf, Error, Handle, IoBufs, IoBufsMut, ReadOptions, Removal, WriteOptions,
     telemetry::{
         metrics::{Counter, Gauge, Register, raw},
         traces::TracedExt as _,
@@ -17,6 +17,17 @@ pub struct Metrics {
     pub storage_write_bytes: Counter,
     pub storage_syncs: Counter,
     pub storage_resizes: Counter,
+    /// Removal batches submitted through this storage's [crate::Storage::start_remove_many]. A
+    /// context that runs a batch through its own [crate::Storage::remove], as the deterministic
+    /// runtime does, counts no batches here.
+    ///
+    /// A batch is counted as finished once its result is observed, at submission or at the next
+    /// poll of its completion. A pending batch whose completion is never polled again stays
+    /// counted as pending.
+    pub removals_submitted: Counter,
+    pub removals_completed: Counter,
+    pub removals_failed: Counter,
+    pub removals_pending: Gauge,
 }
 
 impl Metrics {
@@ -58,7 +69,35 @@ impl Metrics {
                 "Total number of storage resizes",
                 raw::Counter::default(),
             ),
+            removals_submitted: registry.register(
+                "removals_submitted",
+                "Total number of removal batches submitted",
+                raw::Counter::default(),
+            ),
+            removals_completed: registry.register(
+                "removals_completed",
+                "Total number of removal batches that removed every blob",
+                raw::Counter::default(),
+            ),
+            removals_failed: registry.register(
+                "removals_failed",
+                "Total number of removal batches that failed",
+                raw::Counter::default(),
+            ),
+            removals_pending: registry.register(
+                "removals_pending",
+                "Number of removal batches submitted but not finished",
+                raw::Gauge::default(),
+            ),
         }
+    }
+
+    /// Count a finished removal batch.
+    fn finish_removals(&self, result: &Result<(), Error>) {
+        match result {
+            Ok(()) => self.removals_completed.inc(),
+            Err(_) => self.removals_failed.inc(),
+        };
     }
 }
 
@@ -108,6 +147,29 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
         self.inner.remove(partition, name).await
+    }
+
+    async fn start_remove_many(
+        &self,
+        removals: Vec<(String, Vec<u8>)>,
+        after: Option<Removal>,
+    ) -> Removal {
+        let removal = self.inner.start_remove_many(removals, after).await;
+        self.metrics.removals_submitted.inc();
+        if let Some(result) = removal.peek() {
+            self.metrics.finish_removals(result);
+            return removal;
+        }
+
+        // A batch still running is counted as finished once its completion is next polled.
+        self.metrics.removals_pending.inc();
+        let metrics = self.metrics.clone();
+        Removal::submitted(Handle::from_future(async move {
+            let result = removal.await;
+            metrics.removals_pending.dec();
+            metrics.finish_removals(&result);
+            result
+        }))
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
@@ -258,7 +320,7 @@ mod tests {
     use super::*;
     use crate::{
         Blob, IoBufMut, Runner, Spawner, Storage as _,
-        mocks::RecordingContext,
+        mocks::{DeferredRemoveContext, RecordingContext},
         storage::{memory::Storage as MemoryStorage, tests::run_storage_tests},
         telemetry::metrics::Registry,
     };
@@ -307,6 +369,39 @@ mod tests {
         );
         assert_eq!(storage.metrics.storage_reads.get(), 2);
         assert_eq!(storage.metrics.storage_read_bytes.get(), 8);
+    }
+
+    /// Test that batches still pending at submission count as pending, then as completed or
+    /// failed once their completion is polled, once per batch however many clones observe it.
+    #[tokio::test]
+    async fn test_pending_removals_settle_once() {
+        let mut registry = Registry::default();
+        let memory = MemoryStorage::new();
+        let (inner, removes) = DeferredRemoveContext::new(memory.clone());
+        let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
+        drop(storage.open("partition", b"blob").await.unwrap());
+        let removal = |name: &[u8]| vec![("partition".to_string(), name.to_vec())];
+
+        // Both batches are parked, so neither has finished.
+        let succeeding = storage.start_remove_many(removal(b"blob"), None).await;
+        let failing = storage.start_remove_many(removal(b"missing"), None).await;
+        let metrics = &storage.metrics;
+        assert_eq!(metrics.removals_submitted.get(), 2);
+        assert_eq!(metrics.removals_pending.get(), 2);
+        assert_eq!(metrics.removals_completed.get(), 0);
+        assert_eq!(metrics.removals_failed.get(), 0);
+
+        // Releasing and observing each batch through several clones settles it once.
+        removes.release(&memory).await;
+        for _ in 0..2 {
+            succeeding.clone().await.unwrap();
+            assert!(failing.clone().await.is_err());
+        }
+        assert!(succeeding.peek().is_some_and(Result::is_ok));
+        assert_eq!(metrics.removals_submitted.get(), 2);
+        assert_eq!(metrics.removals_pending.get(), 0);
+        assert_eq!(metrics.removals_completed.get(), 1);
+        assert_eq!(metrics.removals_failed.get(), 1);
     }
 
     /// Test that a failed open does not count an open blob.

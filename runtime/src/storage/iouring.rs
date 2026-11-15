@@ -121,6 +121,9 @@ pub struct Config {
 /// Filesystem storage with one logical open per blob. Each request executes on the worker
 /// that registers it.
 ///
+/// Namespace operations (open, scan, and removal) run synchronously on the calling worker, so
+/// [crate::Storage::start_remove_many] removes its whole batch before it returns.
+///
 /// Errors from a durability barrier during content sync, or from the filesystem write of a
 /// [crate::WriteOptions::SYNC] request, remain errors on later opens through this instance until
 /// the blob is removed or recreated. Creation failures are retained only when the header is

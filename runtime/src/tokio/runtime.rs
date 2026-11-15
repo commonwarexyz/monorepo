@@ -1,8 +1,8 @@
 #[cfg(feature = "external")]
 use crate::Pacer;
 use crate::{
-    BlobLayout, BlobVersion, Clock, Error, Execution, Handle, METRICS_PREFIX, Name, SinkOf,
-    StreamOf, child_label,
+    BlobLayout, BlobVersion, Clock, Error, Execution, Handle, METRICS_PREFIX, Name, Removal,
+    SinkOf, StreamOf, child_label,
     network::{
         metered::Network as MeteredNetwork,
         tokio::{Config as TokioNetworkConfig, Network as TokioNetwork},
@@ -806,6 +806,24 @@ impl crate::Storage for Context {
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
         self.storage.remove(partition, name).await
+    }
+
+    async fn start_remove_many(
+        &self,
+        removals: Vec<(String, Vec<u8>)>,
+        after: Option<Removal>,
+    ) -> Removal {
+        let removal = self.storage.start_remove_many(removals, after).await;
+
+        // Poll a running batch to completion so its result is recorded and its metrics settle
+        // even if no one awaits it.
+        if removal.peek().is_none() {
+            let driver = removal.clone();
+            self.executor.runtime.spawn(async move {
+                let _ = driver.await;
+            });
+        }
+        removal
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
