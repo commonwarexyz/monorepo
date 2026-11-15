@@ -9,8 +9,11 @@ enum Op {
     Put(u8, u16),
     GetOrInsert(u8, u16),
     GetOrInsertMut(u8, u16),
+    GetOrInsertMutWithPriorKey(u8, u16),
     GetMut(u8, u16),
     Remove(u8),
+    RemoveReturningSlot(u8),
+    RemoveAt(u8),
     Retain(u8),
     Clear,
 }
@@ -20,15 +23,18 @@ impl Op {
         let key = key % keys;
         let value = u16::from_le_bytes([low, high]);
         // Keep clears rare so most sequences can build up cache state.
-        match tag % 65 {
+        match tag % 89 {
             0..=7 => Self::Get(key),
             8..=15 => Self::Peek(key),
             16..=23 => Self::Put(key, value),
             24..=31 => Self::GetOrInsert(key, value),
             32..=39 => Self::GetOrInsertMut(key, value),
-            40..=47 => Self::GetMut(key, value),
-            48..=55 => Self::Remove(key),
-            56..=63 => Self::Retain(key),
+            40..=47 => Self::GetOrInsertMutWithPriorKey(key, value),
+            48..=55 => Self::GetMut(key, value),
+            56..=63 => Self::Remove(key),
+            64..=71 => Self::RemoveReturningSlot(key),
+            72..=79 => Self::RemoveAt(key),
+            80..=87 => Self::Retain(key),
             _ => Self::Clear,
         }
     }
@@ -99,6 +105,26 @@ fn exercise_cache(capacity: usize, keys: u8, prefill: bool, ops: Vec<Op>) {
                 model.insert(key, value);
                 assert_eq!(cache.peek(&key).copied(), Some(value));
             }
+            Op::GetOrInsertMutWithPriorKey(key, value) => {
+                // The prior key is the key itself on a hit, a resident evicted to make room,
+                // or nothing when the key took unused capacity.
+                let present = cache.contains(&key);
+                let len = cache.len();
+                let (slot, stored, prior) = cache.get_or_insert_mut_with_prior_key(key, || value);
+                *stored = value;
+                assert_eq!(cache.key_at(slot), Some(&key));
+                if present {
+                    assert_eq!(prior, Some(key));
+                } else if let Some(evicted) = prior {
+                    assert_eq!(cache.len(), len);
+                    assert!(evicted != key && !cache.contains(&evicted));
+                    assert!(model.remove(&evicted).is_some());
+                } else {
+                    assert_eq!(cache.len(), len + 1);
+                }
+                model.insert(key, value);
+                assert_eq!(cache.peek(&key).copied(), Some(value));
+            }
             Op::GetMut(key, value) => {
                 if let Some(stored) = cache.get_mut(&key) {
                     *stored = value;
@@ -110,6 +136,26 @@ fn exercise_cache(capacity: usize, keys: u8, prefill: bool, ops: Vec<Op>) {
                 assert_eq!(cache.remove(&key), present);
                 model.remove(&key);
                 assert!(!cache.contains(&key));
+            }
+            Op::RemoveReturningSlot(key) => {
+                let held = (0..capacity).find(|&slot| cache.key_at(slot) == Some(&key));
+                assert_eq!(cache.remove_returning_slot(&key), held);
+                model.remove(&key);
+                assert!(!cache.contains(&key));
+                if let Some(slot) = held {
+                    assert_eq!(cache.key_at(slot), None);
+                }
+            }
+            Op::RemoveAt(slot) => {
+                // Slot numbers range past small capacities, covering out-of-range slots.
+                let slot = usize::from(slot);
+                let key = cache.key_at(slot).copied();
+                assert_eq!(cache.remove_at(slot), key.is_some());
+                assert_eq!(cache.key_at(slot), None);
+                if let Some(key) = key {
+                    model.remove(&key);
+                    assert!(!cache.contains(&key));
+                }
             }
             Op::Retain(key) => {
                 cache.retain(|resident, _| *resident < key);

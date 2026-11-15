@@ -219,7 +219,7 @@ impl<K: Hash + Eq, V> Cache<K, V> {
             slot.state.record_hit_mut();
             return Some(core::mem::replace(&mut slot.value, value));
         }
-        self.insert(key, hash, Some(value), || unreachable!());
+        self.insert(key, hash, Some(value), || unreachable!(), |_| ());
         None
     }
 
@@ -236,7 +236,10 @@ impl<K: Hash + Eq, V> Cache<K, V> {
                 self.slots[slot].state.record_hit_mut();
                 slot
             }
-            None => self.insert(key, hash, Some(f()), || unreachable!()),
+            None => {
+                self.insert(key, hash, Some(f()), || unreachable!(), |_| ())
+                    .0
+            }
         };
         &self.slots[slot].value
     }
@@ -258,7 +261,10 @@ impl<K: Hash + Eq, V> Cache<K, V> {
                 self.slots[slot].state.record_hit_mut();
                 slot
             }
-            None => self.insert(key, hash, Some(f()?), || unreachable!()),
+            None => {
+                self.insert(key, hash, Some(f()?), || unreachable!(), |_| ())
+                    .0
+            }
         };
         Ok(&self.slots[slot].value)
     }
@@ -283,9 +289,36 @@ impl<K: Hash + Eq, V> Cache<K, V> {
                 self.slots[slot].state.record_hit_mut();
                 slot
             }
-            None => self.insert(key, hash, None, make),
+            None => self.insert(key, hash, None, make, |_| ()).0,
         };
         (slot, &mut self.slots[slot].value)
+    }
+
+    /// Like [Self::get_or_insert_mut], and also returns the key that held the
+    /// returned slot before this call, if one was live. That is `key` itself on
+    /// a hit and the resident evicted to make room for `key` on a miss. A miss
+    /// into vacant or freed capacity returns `None`.
+    ///
+    /// Callers that track entries by slot use the returned key to retire what
+    /// they recorded for the slot's previous entry. An evicted key is cloned,
+    /// since the cache may keep it as history.
+    pub fn get_or_insert_mut_with_prior_key<F: FnOnce() -> V>(
+        &mut self,
+        key: K,
+        make: F,
+    ) -> (usize, &mut V, Option<K>)
+    where
+        K: Clone,
+    {
+        let hash = self.hasher.hash_one(&key);
+        let (slot, prior) = match self.find_slot_hashed(&key, hash) {
+            Some(slot) => {
+                self.slots[slot].state.record_hit_mut();
+                (slot, Some(key))
+            }
+            None => self.insert(key, hash, None, make, K::clone),
+        };
+        (slot, &mut self.slots[slot].value, prior)
     }
 
     /// Removes `key`, returning whether it was present.
@@ -293,6 +326,15 @@ impl<K: Hash + Eq, V> Cache<K, V> {
     /// The slot and its allocation are retained for reuse, so the value is not
     /// returned.
     pub fn remove(&mut self, key: &K) -> bool {
+        self.remove_returning_slot(key).is_some()
+    }
+
+    /// Removes `key`, returning the slot it held if it was present.
+    ///
+    /// Callers that track entries by slot use the slot to retire what they
+    /// recorded for it. The slot and its allocation are retained for reuse,
+    /// like [Self::remove].
+    pub fn remove_returning_slot(&mut self, key: &K) -> Option<usize> {
         let hash = self.hasher.hash_one(key);
         match self
             .index
@@ -300,16 +342,47 @@ impl<K: Hash + Eq, V> Cache<K, V> {
         {
             Ok(entry) => {
                 let slot = entry.remove().0;
-                self.unlink_resident(slot);
-                self.slots[slot].live = false;
-                self.free.push(slot);
-                true
+                self.release(slot);
+                Some(slot)
             }
             Err(_) => {
                 self.ghost.discard(key, hash);
-                false
+                None
             }
         }
+    }
+
+    /// Returns the key live in `slot`, if any.
+    #[inline]
+    pub fn key_at(&self, slot: usize) -> Option<&K> {
+        self.slots
+            .get(slot)
+            .filter(|entry| entry.live)
+            .map(|entry| &entry.key)
+    }
+
+    /// Removes the entry live in `slot`, returning whether there was one.
+    ///
+    /// The slot and its allocation are retained for reuse, like [Self::remove].
+    pub fn remove_at(&mut self, slot: usize) -> bool {
+        let Some(entry) = self.slots.get(slot).filter(|entry| entry.live) else {
+            return false;
+        };
+        let hash = self.hasher.hash_one(&entry.key);
+        self.index
+            .find_entry(hash, |&indexed| indexed == slot)
+            .expect("a live slot must be indexed")
+            .remove();
+        self.release(slot);
+        true
+    }
+
+    /// Unlinks `slot` from its queue and frees it, keeping its allocation for reuse. Its index
+    /// entry must already be gone.
+    fn release(&mut self, slot: Slot) {
+        self.unlink_resident(slot);
+        self.slots[slot].live = false;
+        self.free.push(slot);
     }
 
     /// Retains only the entries for which `keep` returns `true`.
@@ -378,7 +451,20 @@ impl<K: Hash + Eq, V> Cache<K, V> {
 
     /// Installs an absent key, replacing a supplied value or reusing storage.
     /// `make` supplies a value only when a reusable value is unavailable.
-    fn insert<F: FnOnce() -> V>(&mut self, key: K, hash: u64, value: Option<V>, make: F) -> Slot {
+    /// Returns the key's slot and, if a resident was evicted to make room,
+    /// `evicted` applied to its key.
+    fn insert<F, E, R>(
+        &mut self,
+        key: K,
+        hash: u64,
+        value: Option<V>,
+        make: F,
+        evicted: E,
+    ) -> (Slot, Option<R>)
+    where
+        F: FnOnce() -> V,
+        E: FnOnce(&K) -> R,
+    {
         let ghost_hit = self.ghost.discard(&key, hash);
         let has_vacancy = !self.free.is_empty() || self.slots.len() < self.capacity;
         let admission = self.admission(ghost_hit, has_vacancy);
@@ -428,8 +514,15 @@ impl<K: Hash + Eq, V> Cache<K, V> {
         }
         self.index_slot(slot, hash);
 
-        // Bookkeeping is complete before destructors can run. Small victims
-        // transfer their owned key. Main and free-slot keys have no history.
+        // Bookkeeping is complete before `evicted` or destructors can run. A
+        // freed slot's stale key belongs to no resident, so only a victim's key
+        // reaches `evicted`.
+        let evicted = plan
+            .victim()
+            .map(|_| evicted(displaced_key.as_ref().expect("victim must own a key")));
+
+        // Small victims transfer their owned key. Main and free-slot keys have
+        // no history.
         if let Some(victim_hash) = historical_hash {
             self.ghost.push(
                 displaced_key.expect("victim must own a key"),
@@ -440,7 +533,7 @@ impl<K: Hash + Eq, V> Cache<K, V> {
             drop(displaced_key);
         }
         drop(displaced_value);
-        slot
+        (slot, evicted)
     }
 
     /// Chooses the resident partition for an incoming key.
@@ -1490,6 +1583,25 @@ mod tests {
     }
 
     #[test]
+    fn test_key_at_reports_live_slots_only() {
+        let mut cache = Cache::new(NZUsize!(2));
+        let (slot, _) = cache.get_or_insert_mut(1u64, || 0u64);
+        assert_eq!(cache.key_at(slot), Some(&1));
+
+        // Slots never allocated or past capacity hold nothing.
+        assert_eq!(cache.key_at(slot + 1), None);
+        assert_eq!(cache.key_at(cache.capacity()), None);
+        assert!(!cache.remove_at(cache.capacity()));
+
+        // A freed slot keeps its stale key for reuse but reports nothing.
+        assert!(cache.remove_at(slot));
+        assert_eq!(cache.key_at(slot), None);
+        assert!(!cache.contains(&1));
+        assert!(!cache.remove_at(slot));
+        cache.check_invariants();
+    }
+
+    #[test]
     fn test_get_or_insert_mut_slot_is_stable_on_hit() {
         let mut cache = Cache::new(NZUsize!(2));
         let (slot, value) = cache.get_or_insert_mut(1u64, || 0u64);
@@ -1507,6 +1619,44 @@ mod tests {
         assert_eq!(cache.get_mut(&2), None);
         *cache.get_mut(&1).unwrap() = 11;
         assert_eq!(cache.get(&1).copied(), Some(11));
+        cache.check_invariants();
+    }
+
+    #[test]
+    fn test_get_or_insert_mut_with_prior_key_reports_slot_owner() {
+        // Capacity two splits into one Small and one Main slot. Misses into vacant capacity report
+        // nothing, and a hit reports the key itself.
+        let mut cache = Cache::new(NZUsize!(2));
+        let (small, _, prior) = cache.get_or_insert_mut_with_prior_key(1u64, || 0u64);
+        assert_eq!(prior, None);
+        let (main, _, prior) = cache.get_or_insert_mut_with_prior_key(2, || 0);
+        assert_eq!(prior, None);
+        let (slot, _, prior) = cache.get_or_insert_mut_with_prior_key(1, || unreachable!());
+        assert_eq!((slot, prior), (small, Some(1)));
+
+        // The young hit earned no promotion, so a new key evicts the Small resident, and the
+        // evicted key enters Ghost.
+        let (slot, _, prior) = cache.get_or_insert_mut_with_prior_key(3, || unreachable!());
+        assert_eq!((slot, prior), (small, Some(1)));
+
+        // The Ghost hit admits the key to Main, evicting the Main resident.
+        let (slot, _, prior) = cache.get_or_insert_mut_with_prior_key(1, || unreachable!());
+        assert_eq!((slot, prior), (main, Some(2)));
+        assert!(!cache.contains(&2) && cache.contains(&1) && cache.contains(&3));
+
+        // A freed slot keeps a stale key that belongs to no resident, so reusing it reports
+        // nothing.
+        assert!(cache.remove(&3));
+        let (slot, _, prior) = cache.get_or_insert_mut_with_prior_key(4, || unreachable!());
+        assert_eq!((slot, prior), (small, None));
+        cache.check_invariants();
+
+        // Prefilled slots hold placeholder keys that belong to no resident, so a miss into one
+        // reports nothing, even for a key equal to the placeholder.
+        let mut cache = Cache::new(NZUsize!(2));
+        cache.prefill(|| 0u64);
+        let (_, _, prior) = cache.get_or_insert_mut_with_prior_key(0u64, || unreachable!());
+        assert_eq!(prior, None);
         cache.check_invariants();
     }
 
