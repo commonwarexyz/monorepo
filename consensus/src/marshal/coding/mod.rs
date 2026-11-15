@@ -748,6 +748,8 @@ mod tests {
     fn test_coding_block_provider_parent_fetches_by_commitment() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
+            // Start one validator's marshal with a buffer and a resolver that record what marshal
+            // asks of them.
             let Fixture {
                 participants,
                 schemes,
@@ -755,7 +757,7 @@ mod tests {
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let provider = ConstantProvider::new(schemes[0].clone());
             let buffer = RecordingCodingBuffer::default();
-            let (marshal, _resolver, _actor_handle) = start_coding_actor_with_recording(
+            let (marshal, resolver, _actor_handle) = start_coding_actor_with_recording(
                 context.child("actor_stack"),
                 "coding-provider-parent-commitment",
                 provider,
@@ -763,9 +765,11 @@ mod tests {
             )
             .await;
 
+            // Ask the provider for the parent of a child in epoch 1. The validator does not hold
+            // the parent.
             let (parent_ctx, parent) = missing_candidate(participants[0].clone());
             let child_ctx = CodingCtx {
-                round: Round::new(Epoch::zero(), View::new(2)),
+                round: Round::new(Epoch::new(1), View::new(2)),
                 leader: participants[0].clone(),
                 parent: (parent_ctx.round.view(), parent.commitment()),
             };
@@ -773,11 +777,29 @@ mod tests {
             let child = Digested::precomputed(child.clone(), child.digest());
             let subscription = marshal.subscribe_parent(&child, None);
 
+            // The provider subscribes to the parent by the commitment in the child's context.
             context.sleep(Duration::from_millis(100)).await;
             assert_eq!(
                 buffer.commitment_subscription_count(),
                 1,
                 "parent walkback should use the coding parent commitment"
+            );
+
+            // The provider bounds the request by the parent's view in the child's epoch. The child
+            // is in epoch 1 and the parent in epoch 0, so the bound shows which epoch the provider
+            // read.
+            let requested: Vec<_> = resolver
+                .fetches()
+                .into_iter()
+                .map(|fetch| fetch.subscriber)
+                .collect();
+            assert_eq!(
+                requested,
+                [handler::Annotation::Untrusted {
+                    height: Height::new(1),
+                    round: Some(Round::new(Epoch::new(1), parent_ctx.round.view())),
+                }],
+                "the request must carry the parent's view in the child's epoch"
             );
             drop(subscription);
         });

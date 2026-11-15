@@ -427,6 +427,8 @@ where
         digest: <V::Block as Digestible>::Digest,
         block: &V::Block,
     ) -> Self {
+        // Startup checks each epoch from the floor to the ceiling for persisted archives, so an
+        // epoch derived from a possibly unchecked height must not raise the ceiling.
         let (_, ceiling) = self.get_metadata();
         if epoch > ceiling {
             return self;
