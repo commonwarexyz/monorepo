@@ -204,6 +204,7 @@ where
     let ancestry_stream = marshal.ancestor_stream(
         Arc::new(runtime_context.child("ancestor_stream")),
         [block.clone(), parent],
+        Some(context.round),
         ancestor_fetch_duration,
     );
     let validity_request = application
