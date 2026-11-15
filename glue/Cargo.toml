@@ -13,6 +13,7 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/glue"
 workspace = true
 
 [dependencies]
+ahash = { workspace = true, features = ["std", "runtime-rng"] }
 arbitrary = { workspace = true, optional = true, features = ["derive"] }
 bytes.workspace = true
 commonware-actor.workspace = true
@@ -36,6 +37,7 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+commonware-allocator = { workspace = true, features = ["mimalloc"] }
 commonware-broadcast.workspace = true
 commonware-codec.workspace = true
 commonware-coding.workspace = true
@@ -44,11 +46,12 @@ commonware-consensus = { workspace = true, features = ["mocks"] }
 commonware-cryptography = { workspace = true, features = ["mocks"] }
 commonware-formatting.workspace = true
 commonware-p2p.workspace = true
-commonware-parallel.workspace = true
+commonware-parallel = { workspace = true, features = ["test-utils"] }
 commonware-resolver.workspace = true
 commonware-runtime = { workspace = true, features = ["test-utils"] }
-commonware-storage.workspace = true
+commonware-storage = { workspace = true, features = ["test-traits"] }
 commonware-stream.workspace = true
+criterion.workspace = true
 rand = { workspace = true, features = ["alloc"] }
 rstest.workspace = true
 tracing-subscriber.workspace = true
@@ -67,3 +70,11 @@ arbitrary = [
 	"commonware-utils/arbitrary",
 	"dep:arbitrary",
 ]
+
+[lib]
+bench = false
+
+[[bench]]
+name = "transfers"
+harness = false
+path = "src/transfers/benches/bench.rs"

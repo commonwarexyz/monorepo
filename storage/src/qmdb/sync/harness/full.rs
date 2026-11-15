@@ -9,16 +9,17 @@ use crate::{
     qmdb::{
         self,
         sync::{
-            self, Engine, Target,
-            engine::{Config, NextStep},
-            source::tests::FailSource,
+            self, Config, Engine, Journal as _, Target, engine::NextStep, source::tests::FailSource,
         },
     },
 };
 use commonware_cryptography::sha256;
 use commonware_macros::boxed;
+use commonware_parallel::Sequential;
 use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
-use commonware_utils::{NZU16, NZU64, NZUsize, channel::ring, non_empty_range, sync::AsyncRwLock};
+use commonware_utils::{
+    NZU16, NZU64, NZUsize, channel::ring, non_empty_range, probability, sync::AsyncRwLock,
+};
 use rand::Rng as _;
 use std::{
     fmt::Debug,
@@ -75,6 +76,13 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
     ) -> impl Future<Output = Self::Db> + Send;
     /// Removes all persisted state of `db`.
     fn destroy(db: Self::Db) -> impl Future<Output = ()> + Send;
+    /// Removes the persisted state of `db`, stopping at the first failure and returning it.
+    fn try_destroy(
+        db: Self::Db,
+    ) -> impl Future<Output = Result<(), qmdb::Error<Self::Family>>> + Send;
+    /// Returns the configuration of the Merkle structure persisted by the database that `config`
+    /// names.
+    fn merkle_config(config: &ConfigOf<Self>) -> merkle::full::Config<Sequential>;
     /// Makes every applied operation of `db` durable.
     fn db_sync(db: Self::Db) -> impl Future<Output = Self::Db> + Send;
 
@@ -99,17 +107,17 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
     fn sync_boundary(db: &Self::Db) -> Location<Self::Family>;
 
     /// Returns the location before which every operation in `db` is inactive.
-    fn inactivity_floor_loc(db: &Self::Db) -> Location<Self::Family>;
+    fn inactivity_floor(db: &Self::Db) -> Location<Self::Family>;
 
     /// Returns the root that sync verifies operations against.
-    fn db_root(db: &Self::Db) -> sha256::Digest;
+    fn ops_root(db: &Self::Db) -> sha256::Digest;
 
     /// Returns the root that commits to the full state of `db`.
     ///
-    /// It differs from [`Self::db_root`] only for databases that authenticate more than their
+    /// It differs from [`Self::ops_root`] only for databases that authenticate more than their
     /// operations.
     fn canonical_root(db: &Self::Db) -> sha256::Digest {
-        Self::db_root(db)
+        Self::ops_root(db)
     }
 
     /// Returns the metadata carried by the last commit in `db`.
@@ -153,8 +161,8 @@ where
         let lower_bound = H::sync_boundary(&target_db);
         let target_db = H::prune(target_db, lower_bound).await;
         let target_op_count = H::bounds(&target_db).end;
-        let target_floor = H::inactivity_floor_loc(&target_db);
-        let target_root = H::db_root(&target_db);
+        let target_floor = H::inactivity_floor(&target_db);
+        let target_root = H::ops_root(&target_db);
         let target_canonical_root = H::canonical_root(&target_db);
 
         let db_config = H::config(&format!("sync_client_{}", context.next_u64()));
@@ -180,8 +188,8 @@ where
         let bounds = H::bounds(&got_db);
         assert_eq!(bounds.end, target_op_count);
         assert_eq!(bounds.start, lower_bound);
-        assert_eq!(H::inactivity_floor_loc(&got_db), target_floor);
-        assert_eq!(H::db_root(&got_db), target_root);
+        assert_eq!(H::inactivity_floor(&got_db), target_floor);
+        assert_eq!(H::ops_root(&got_db), target_root);
         assert_eq!(H::canonical_root(&got_db), target_canonical_root);
 
         H::assert_ops_applied(&got_db, target_start, &target_ops).await;
@@ -195,7 +203,7 @@ where
             .unwrap_or_else(|_| panic!("target_db should have no other references"));
         let target_db = H::apply_ops(target_db, new_ops.clone(), None).await;
 
-        assert_eq!(H::db_root(&got_db), H::db_root(&target_db));
+        assert_eq!(H::ops_root(&got_db), H::ops_root(&target_db));
         H::assert_ops_applied(&got_db, target_start, &target_ops).await;
         H::assert_ops_applied(&got_db, new_start, &new_ops).await;
 
@@ -205,8 +213,8 @@ where
         let got_db = H::init_db_with_config(client_context.child("reopened"), db_config).await;
         assert_eq!(H::bounds(&got_db).end, H::bounds(&target_db).end);
         assert_eq!(
-            H::inactivity_floor_loc(&got_db),
-            H::inactivity_floor_loc(&target_db)
+            H::inactivity_floor(&got_db),
+            H::inactivity_floor(&target_db)
         );
         assert_eq!(H::canonical_root(&got_db), H::canonical_root(&target_db));
         H::assert_ops_applied(&got_db, target_start, &target_ops).await;
@@ -234,7 +242,7 @@ where
         let bounds = H::bounds(&target_db);
         let target_op_count = bounds.end;
         let target_oldest_retained_loc = bounds.start;
-        let target_root = H::db_root(&target_db);
+        let target_root = H::ops_root(&target_db);
 
         let db_config = H::config(&format!("empty_sync_{}", context.next_u64()));
         let target_db = Arc::new(target_db);
@@ -258,7 +266,7 @@ where
         let bounds = H::bounds(&got_db);
         assert_eq!(bounds.end, target_op_count);
         assert_eq!(bounds.start, target_oldest_retained_loc);
-        assert_eq!(H::db_root(&got_db), target_root);
+        assert_eq!(H::ops_root(&got_db), target_root);
         assert_eq!(H::get_metadata(&got_db).await, Some(H::sample_metadata()));
 
         H::destroy(got_db).await;
@@ -284,7 +292,7 @@ where
         let target_db =
             H::apply_ops(target_db, target_ops.clone(), Some(H::sample_metadata())).await;
 
-        let target_root = H::db_root(&target_db);
+        let target_root = H::ops_root(&target_db);
         let bounds = H::bounds(&target_db);
         let lower_bound = bounds.start;
         let op_count = bounds.end;
@@ -309,8 +317,8 @@ where
         };
         let synced_db: DbOf<H> = sync::sync(config).await.unwrap();
 
-        assert_eq!(H::db_root(&synced_db), target_root);
-        let expected_root = H::db_root(&synced_db);
+        assert_eq!(H::ops_root(&synced_db), target_root);
+        let expected_root = H::ops_root(&synced_db);
         let bounds = H::bounds(&synced_db);
         let expected_op_count = bounds.end;
         let expected_oldest_retained_loc = bounds.start;
@@ -319,7 +327,7 @@ where
         H::db_sync(synced_db).await;
         let reopened_db = H::init_db_with_config(context.child("reopened"), db_config).await;
 
-        assert_eq!(H::db_root(&reopened_db), expected_root);
+        assert_eq!(H::ops_root(&reopened_db), expected_root);
         let bounds = H::bounds(&reopened_db);
         assert_eq!(bounds.end, expected_op_count);
         assert_eq!(bounds.start, expected_oldest_retained_loc);
@@ -349,7 +357,7 @@ where
             H::init_db_with_config(context.child("older_source"), older_source_config).await;
         let older_source = H::apply_ops(older_source, base_ops.clone(), None).await;
         let older_target = Target {
-            root: H::db_root(&older_source),
+            root: H::ops_root(&older_source),
             range: non_empty_range!(
                 H::sync_boundary(&older_source),
                 H::bounds(&older_source).end
@@ -364,7 +372,7 @@ where
         let newer_source = H::apply_ops(newer_source, base_ops, None).await;
         let newer_source = H::apply_ops(newer_source, H::create_ops_seeded(5, 1), None).await;
         let newer_target = Target {
-            root: H::db_root(&newer_source),
+            root: H::ops_root(&newer_source),
             range: non_empty_range!(
                 H::sync_boundary(&newer_source),
                 H::bounds(&newer_source).end
@@ -455,7 +463,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
 
         let initial_lower_bound = H::sync_boundary(&target_db);
         let initial_upper_bound = H::bounds(&target_db).end;
-        let initial_root = H::db_root(&target_db);
+        let initial_root = H::ops_root(&target_db);
 
         // The source is shared so the target can advance while the client syncs.
         let target_db = Arc::new(AsyncRwLock::new(Some(target_db)));
@@ -500,7 +508,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
             let additional_start = H::bounds(&db).end;
             let db = H::apply_ops(db, additional_ops.clone(), None).await;
             let final_target = Target {
-                root: H::db_root(&db),
+                root: H::ops_root(&db),
                 range: non_empty_range!(H::sync_boundary(&db), H::bounds(&db).end),
             };
             *db_guard = Some(db);
@@ -509,7 +517,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
         assert!(update_sender.send_lossy(final_target.clone()));
 
         let synced_db = client.sync().await.unwrap();
-        assert_eq!(H::db_root(&synced_db), final_target.root);
+        assert_eq!(H::ops_root(&synced_db), final_target.root);
 
         let target_db = Arc::try_unwrap(target_db).map_or_else(
             |_| panic!("Failed to unwrap Arc"),
@@ -520,10 +528,10 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
             assert_eq!(bounds.end, H::bounds(&target_db).end);
             assert_eq!(bounds.start, final_target.range.start());
             assert_eq!(
-                H::inactivity_floor_loc(&synced_db),
-                H::inactivity_floor_loc(&target_db)
+                H::inactivity_floor(&synced_db),
+                H::inactivity_floor(&target_db)
             );
-            assert_eq!(H::db_root(&synced_db), H::db_root(&target_db));
+            assert_eq!(H::ops_root(&synced_db), H::ops_root(&target_db));
             assert_eq!(H::canonical_root(&synced_db), H::canonical_root(&target_db));
         }
 
@@ -551,7 +559,7 @@ where
         let (synced_ops, later_ops) = target_ops.split_at(target_ops.len() - 1);
         let target_db = H::apply_ops(target_db, synced_ops.to_vec(), None).await;
 
-        let target_root = H::db_root(&target_db);
+        let target_root = H::ops_root(&target_db);
         let target_canonical_root = H::canonical_root(&target_db);
         let lower_bound = H::sync_boundary(&target_db);
         let op_count = H::bounds(&target_db).end;
@@ -578,7 +586,7 @@ where
         let synced_db: DbOf<H> = sync::sync(config).await.unwrap();
 
         // The later operation lies past the target and must be absent from the client.
-        assert_eq!(H::db_root(&synced_db), target_root);
+        assert_eq!(H::ops_root(&synced_db), target_root);
         assert_eq!(H::canonical_root(&synced_db), target_canonical_root);
         assert_eq!(H::bounds(&synced_db).end, op_count);
         assert_eq!(H::sync_boundary(&synced_db), lower_bound);
@@ -617,9 +625,9 @@ where
         let last_op = H::create_ops_seeded(1, 1);
         let last_start = H::bounds(&target_db).end;
         let target_db = H::apply_ops(target_db, last_op.clone(), None).await;
-        let root = H::db_root(&target_db);
+        let root = H::ops_root(&target_db);
         let canonical_root = H::canonical_root(&target_db);
-        let floor = H::inactivity_floor_loc(&target_db);
+        let floor = H::inactivity_floor(&target_db);
         let lower_bound = H::sync_boundary(&target_db);
         let upper_bound = H::bounds(&target_db).end;
 
@@ -642,8 +650,8 @@ where
         let sync_db: DbOf<H> = sync::sync(config).await.unwrap();
 
         assert_eq!(H::bounds(&sync_db).end, upper_bound);
-        assert_eq!(H::inactivity_floor_loc(&sync_db), floor);
-        assert_eq!(H::db_root(&sync_db), root);
+        assert_eq!(H::inactivity_floor(&sync_db), floor);
+        assert_eq!(H::ops_root(&sync_db), root);
         assert_eq!(H::canonical_root(&sync_db), canonical_root);
         H::assert_ops_applied(&sync_db, original_start, &original_ops).await;
         H::assert_ops_applied(&sync_db, last_start, &last_op).await;
@@ -682,7 +690,7 @@ where
         let sync_db = H::prune(sync_db, boundary).await;
         drop(H::db_sync(sync_db).await);
 
-        let root = H::db_root(&target_db);
+        let root = H::ops_root(&target_db);
         let canonical_root = H::canonical_root(&target_db);
         let lower_bound = H::sync_boundary(&target_db);
         let upper_bound = H::bounds(&target_db).end;
@@ -707,7 +715,7 @@ where
 
         assert_eq!(H::bounds(&sync_db).end, upper_bound);
         assert_eq!(H::sync_boundary(&sync_db), lower_bound);
-        assert_eq!(H::db_root(&sync_db), root);
+        assert_eq!(H::ops_root(&sync_db), root);
         assert_eq!(H::canonical_root(&sync_db), canonical_root);
         H::assert_ops_applied(&sync_db, target_start, &target_ops).await;
 
@@ -734,13 +742,13 @@ where
         // Start at the inactivity floor, which is positive on every database, so the updates
         // below can decrease it. The engine requires only that the lower bound never decreases,
         // not that it equals the sync boundary.
-        let initial_lower_bound = H::inactivity_floor_loc(&target_db);
+        let initial_lower_bound = H::inactivity_floor(&target_db);
         assert!(
             *initial_lower_bound > 0,
             "test setup requires non-zero inactivity floor"
         );
         let initial_upper_bound = H::bounds(&target_db).end;
-        let initial_root = H::db_root(&target_db);
+        let initial_root = H::ops_root(&target_db);
 
         let (update_sender, update_receiver) = ring::channel(NZUsize!(2));
         let target_db = Arc::new(target_db);
@@ -776,7 +784,7 @@ where
 
         // The non-advancing updates are discarded and the sync completes at the original target.
         let synced_db = client.sync().await.unwrap();
-        assert_eq!(H::db_root(&synced_db), initial_root);
+        assert_eq!(H::ops_root(&synced_db), initial_root);
         assert_eq!(H::canonical_root(&synced_db), H::canonical_root(&target_db));
         H::destroy(synced_db).await;
 
@@ -800,7 +808,7 @@ where
 
         let initial_lower_bound = H::sync_boundary(&target_db);
         let initial_upper_bound = H::bounds(&target_db).end;
-        let initial_root = H::db_root(&target_db);
+        let initial_root = H::ops_root(&target_db);
 
         let (update_sender, update_receiver) = ring::channel(NZUsize!(1));
         let target_db = Arc::new(target_db);
@@ -829,7 +837,7 @@ where
 
         // The non-advancing update is discarded and the sync completes at the original target.
         let synced_db = client.sync().await.unwrap();
-        assert_eq!(H::db_root(&synced_db), initial_root);
+        assert_eq!(H::ops_root(&synced_db), initial_root);
         assert_eq!(H::canonical_root(&synced_db), H::canonical_root(&target_db));
         H::destroy(synced_db).await;
 
@@ -854,9 +862,9 @@ where
 
         // The lower bounds are inactivity floors, which advance with the target on every
         // database.
-        let initial_lower_bound = H::inactivity_floor_loc(&target_db);
+        let initial_lower_bound = H::inactivity_floor(&target_db);
         let initial_upper_bound = H::bounds(&target_db).end;
-        let initial_root = H::db_root(&target_db);
+        let initial_root = H::ops_root(&target_db);
 
         // More operations move the target's upper bound.
         let more_ops = H::create_ops_seeded(5, 1);
@@ -866,9 +874,9 @@ where
         let target_db = H::prune(target_db, Location::new(10)).await;
         let target_db = H::apply_ops(target_db, vec![], None).await;
 
-        let final_lower_bound = H::inactivity_floor_loc(&target_db);
+        let final_lower_bound = H::inactivity_floor(&target_db);
         let final_upper_bound = H::bounds(&target_db).end;
-        let final_root = H::db_root(&target_db);
+        let final_root = H::ops_root(&target_db);
         let final_canonical_root = H::canonical_root(&target_db);
         let final_boundary = H::sync_boundary(&target_db);
 
@@ -901,12 +909,12 @@ where
 
         let synced_db: DbOf<H> = sync::sync(config).await.unwrap();
 
-        assert_eq!(H::db_root(&synced_db), final_root);
+        assert_eq!(H::ops_root(&synced_db), final_root);
         assert_eq!(H::canonical_root(&synced_db), final_canonical_root);
         let bounds = H::bounds(&synced_db);
         assert_eq!(bounds.end, final_upper_bound);
         assert_eq!(bounds.start, final_lower_bound);
-        assert_eq!(H::inactivity_floor_loc(&synced_db), final_lower_bound);
+        assert_eq!(H::inactivity_floor(&synced_db), final_lower_bound);
         assert_eq!(H::sync_boundary(&synced_db), final_boundary);
 
         H::destroy(synced_db).await;
@@ -930,7 +938,7 @@ where
 
         let lower_bound = H::sync_boundary(&target_db);
         let upper_bound = H::bounds(&target_db).end;
-        let root = H::db_root(&target_db);
+        let root = H::ops_root(&target_db);
         let canonical_root = H::canonical_root(&target_db);
 
         let (update_sender, update_receiver) = ring::channel(NZUsize!(1));
@@ -959,7 +967,7 @@ where
             range: non_empty_range!(lower_bound + 1, upper_bound + 1),
         });
 
-        assert_eq!(H::db_root(&synced_db), root);
+        assert_eq!(H::ops_root(&synced_db), root);
         assert_eq!(H::canonical_root(&synced_db), canonical_root);
         let bounds = H::bounds(&synced_db);
         assert_eq!(bounds.end, upper_bound);
@@ -998,18 +1006,203 @@ pub(crate) fn test_sync_source_fails<H: SyncTestHarness>() {
     });
 }
 
+/// Operations in each batch that the interrupted-destroy tests apply.
+pub(crate) const INTERRUPTED_DESTROY_OPS: usize = 300;
+
+/// Minimum sync boundary of a database that [`prune_to_sync_boundary`] returns.
+const PRUNED_SYNC_BOUNDARY: u64 = 64;
+
+/// Raises the sync boundary of `db` to at least [`PRUNED_SYNC_BOUNDARY`], applying the operations
+/// of `seed` again until it does, and prunes `db` to that boundary.
+pub(crate) async fn prune_to_sync_boundary<H: SyncTestHarness>(
+    mut db: DbOf<H>,
+    seed: u64,
+) -> DbOf<H> {
+    loop {
+        db = H::prune(db, Location::new(PRUNED_SYNC_BOUNDARY)).await;
+        let boundary = H::sync_boundary(&db);
+        if *boundary >= PRUNED_SYNC_BOUNDARY {
+            return H::prune(db, boundary).await;
+        }
+
+        // A database that derives its inactivity floor raises it once the same keys are
+        // rewritten.
+        let ops = H::create_ops_seeded(INTERRUPTED_DESTROY_OPS, seed);
+        db = H::apply_ops(db, ops, None).await;
+    }
+}
+
+/// Destroys the durable database `db` that `config` names with every removal failing, so the
+/// destroy stops once the clear of its log is durable.
+pub(crate) async fn interrupt_destroy<H: SyncTestHarness>(
+    context: &deterministic::Context,
+    db: DbOf<H>,
+    config: &ConfigOf<H>,
+) {
+    let end = H::bounds(&db).end;
+
+    // The first removal of a destroy follows the durable clear of its log.
+    context.storage_fault_config().write().remove_rate = Some(probability!(1.0));
+    let result = H::try_destroy(db).await;
+    context.storage_fault_config().write().remove_rate = None;
+    assert!(result.is_err(), "destroy must stop at its first removal");
+
+    // The log reopens empty at zero beside the whole Merkle structure of the destroyed database.
+    let log = <JournalOf<H> as sync::Journal<H::Family>>::new(
+        context.child("emptied_log"),
+        sync::DatabaseConfig::journal_config(config),
+        non_empty_range!(Location::new(0), end),
+    )
+    .await
+    .unwrap();
+    assert_eq!(log.size(), Location::new(0));
+    drop(log);
+    let hasher = qmdb::hasher::<<DbOf<H> as sync::Database>::Hasher>();
+    let merkle = merkle::full::Merkle::<H::Family, _, sha256::Digest, Sequential>::init(
+        context.child("stale_merkle"),
+        &hasher,
+        H::merkle_config(config),
+    )
+    .await
+    .unwrap();
+    assert_eq!(merkle.leaves(), end);
+}
+
+/// Client storage that an interrupted destroy left behind, beside a target whose operations that
+/// storage never held.
+pub(crate) struct InterruptedDestroy<H: SyncTestHarness> {
+    /// Source of the target's operations.
+    pub(crate) target_db: Arc<DbOf<H>>,
+    /// Target to sync the client storage to.
+    pub(crate) target: Target<H::Family, sha256::Digest>,
+    /// Canonical root of the target.
+    pub(crate) canonical_root: sha256::Digest,
+    /// Configuration naming the client storage.
+    pub(crate) db_config: ConfigOf<H>,
+}
+
+impl<H: SyncTestHarness> InterruptedDestroy<H> {
+    /// Builds a target and a client database that holds other operations, then interrupts the
+    /// destroy of the client database.
+    ///
+    /// The target's range starts at its sync boundary when `pruned` and at zero otherwise. The
+    /// client's Merkle structure extends past the start of that range, and past its end when
+    /// `ahead`.
+    pub(crate) async fn new(
+        context: &mut deterministic::Context,
+        pruned: bool,
+        ahead: bool,
+    ) -> Self {
+        let ops = H::create_ops(INTERRUPTED_DESTROY_OPS);
+        let mut target_db = H::init_db(context.child("target")).await;
+        target_db = H::apply_ops(target_db, ops, Some(H::sample_metadata())).await;
+        let mut start = Location::new(0);
+        if pruned {
+            target_db = prune_to_sync_boundary::<H>(target_db, 0).await;
+            start = H::sync_boundary(&target_db);
+        }
+        let end = H::bounds(&target_db).end;
+        let target = Target {
+            root: H::ops_root(&target_db),
+            range: non_empty_range!(start, end),
+        };
+        let canonical_root = H::canonical_root(&target_db);
+
+        // The client holds a different history whose Merkle structure extends past the target's
+        // lower bound.
+        let local_ops = if ahead {
+            2 * *end
+        } else {
+            (*start + 3 * *end) / 4
+        };
+        let local_ops = usize::try_from(local_ops).expect("operation count fits in usize");
+        let db_config = H::config(&context.next_u64().to_string());
+        let local_db = H::init_db_with_config(context.child("local"), db_config.clone()).await;
+        let local_db = H::apply_ops(local_db, H::create_ops_seeded(local_ops, 1), None).await;
+        let local_db = H::db_sync(local_db).await;
+        let local_end = H::bounds(&local_db).end;
+        assert!(
+            local_end > start,
+            "test setup requires nodes past the bound"
+        );
+        assert_eq!(
+            local_end > end,
+            ahead,
+            "test setup misplaced the client's end"
+        );
+        interrupt_destroy::<H>(context, local_db, &db_config).await;
+
+        Self {
+            target_db: Arc::new(target_db),
+            target,
+            canonical_root,
+            db_config,
+        }
+    }
+}
+
+/// Regression test for https://github.com/commonwarexyz/monorepo/issues/5669.
+///
+/// A sync into storage whose destroy stopped after emptying the log completes with the target's
+/// roots, and the synced state survives a reopen. The cases vary whether the target's range
+/// starts at zero and whether the Merkle structure left behind ends before or after the target.
+pub(crate) fn issue_5669_regression_sync_after_interrupted_destroy<H: SyncTestHarness>(
+    pruned: bool,
+    ahead: bool,
+) where
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
+{
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        let InterruptedDestroy {
+            target_db,
+            target,
+            canonical_root,
+            db_config,
+        } = InterruptedDestroy::<H>::new(&mut context, pruned, ahead).await;
+
+        let config = Config {
+            db_config: db_config.clone(),
+            fetch_batch_size: NZU64!(10),
+            target: target.clone(),
+            context: context.child("client"),
+            source: target_db.clone(),
+            apply_batch_size: NZU64!(1024),
+            max_outstanding_requests: NZUsize!(1),
+            update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
+        };
+        let synced_db: DbOf<H> = sync::sync(config).await.unwrap();
+        assert_eq!(H::ops_root(&synced_db), target.root);
+        assert_eq!(H::canonical_root(&synced_db), canonical_root);
+        assert_eq!(H::bounds(&synced_db).end, target.range.end());
+        drop(synced_db);
+
+        // A reopen recovers the target's state from storage alone.
+        let reopened_db = H::init_db_with_config(context.child("reopened"), db_config).await;
+        assert_eq!(H::ops_root(&reopened_db), target.root);
+        assert_eq!(H::canonical_root(&reopened_db), canonical_root);
+        assert_eq!(H::bounds(&reopened_db).end, target.range.end());
+
+        H::destroy(reopened_db).await;
+        H::destroy(Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc")))
+            .await;
+    });
+}
+
 /// Engine configuration for a compact sync over the one-operation range ending at the target.
 pub(crate) fn compact_engine_config<DB, S>(
     context: DB::Context,
     source: S,
     target: sync::CompactTarget<DB::Family, DB::Digest>,
     db_config: DB::Config,
-) -> sync::engine::Config<DB, S>
+) -> sync::Config<DB, S>
 where
     DB: sync::Database,
     S: sync::SourceFor<DB>,
 {
-    sync::engine::Config {
+    sync::Config {
         context,
         db_config,
         fetch_batch_size: NZU64!(1),
@@ -1161,6 +1354,44 @@ macro_rules! sync_tests {
             #[test_traced("WARN")]
             fn test_sync_source_fails() {
                 crate::qmdb::sync::harness::test_sync_source_fails::<$harness>();
+            }
+
+            /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5669.
+            #[rstest]
+            #[case::genesis_merkle_behind(false, false)]
+            #[case::genesis_merkle_ahead(false, true)]
+            #[case::pruned_merkle_behind(true, false)]
+            #[case::pruned_merkle_ahead(true, true)]
+            fn issue_5669_regression_sync_after_interrupted_destroy(
+                #[case] pruned: bool,
+                #[case] ahead: bool,
+            ) {
+                crate::qmdb::sync::harness::issue_5669_regression_sync_after_interrupted_destroy::<
+                    $harness,
+                >(pruned, ahead);
+            }
+
+            /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5669.
+            #[rstest]
+            #[case::genesis_partial(false, false)]
+            #[case::genesis_fetched(false, true)]
+            #[case::pruned_partial(true, false)]
+            #[case::pruned_fetched(true, true)]
+            fn issue_5669_regression_sync_restart_after_destroy(
+                #[case] pruned: bool,
+                #[case] fetched: bool,
+            ) {
+                crate::qmdb::sync::engine::tests::issue_5669_regression_sync_restart_after_destroy::<
+                    $harness,
+                >(pruned, fetched);
+            }
+
+            /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5669.
+            #[test_traced("WARN")]
+            fn issue_5669_regression_open_after_stopped_sync() {
+                crate::qmdb::sync::engine::tests::issue_5669_regression_open_after_stopped_sync::<
+                    $harness,
+                >();
             }
 
             $( $extra!($harness); )?

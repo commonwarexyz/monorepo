@@ -446,7 +446,6 @@ where
 macro_rules! impl_certificate_mock {
     ($subject:ty, $namespace:ty, $faults:ty) => {
         /// Generates a test fixture with Ed25519 identities and a mock scheme.
-        #[cfg(feature = "mocks")]
         pub fn fixture<R>(
             rng: &mut R,
             namespace: &[u8],
@@ -459,7 +458,6 @@ macro_rules! impl_certificate_mock {
         }
 
         /// Generates a test fixture with explicit mock certificate behavior flags.
-        #[cfg(feature = "mocks")]
         pub fn fixture_with<
             const ATTRIBUTABLE: bool,
             const BATCHABLE: bool,
@@ -633,6 +631,10 @@ macro_rules! impl_certificate_mock {
                     BATCHABLE,
                     ALLOW_INVALID,
                 >::is_batchable()
+            }
+
+            fn max_certificate_size(_participants: u32) -> usize {
+                <Self::Certificate as commonware_codec::FixedSize>::SIZE
             }
 
             fn certificate_codec_config(
@@ -1156,6 +1158,12 @@ mod tests {
             .unwrap();
         let encoded = certificate.encode();
 
+        assert_eq!(
+            encoded.len(),
+            Scheme::<Ed25519PublicKey>::max_certificate_size(
+                u32::try_from(fixture.schemes.len()).unwrap()
+            )
+        );
         assert_eq!(
             U64::decode_cfg(encoded, &fixture.verifier.certificate_codec_config()).unwrap(),
             certificate

@@ -1,3 +1,4 @@
+use commonware_allocator::mimalloc;
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{
     Metrics, Name, Supervisor,
@@ -13,6 +14,9 @@ mod insert;
 mod insert_and_retain;
 mod lookup;
 mod lookup_miss;
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 pub(crate) type Digest = <Sha256 as Hasher>::Digest;
 

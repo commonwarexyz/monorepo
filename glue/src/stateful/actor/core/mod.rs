@@ -33,7 +33,7 @@ use std::num::NonZeroUsize;
 
 mod mailbox;
 pub use mailbox::Mailbox;
-pub(super) use mailbox::{Proposal, Verification};
+pub(super) use mailbox::Proposal;
 
 mod processing;
 mod syncing;

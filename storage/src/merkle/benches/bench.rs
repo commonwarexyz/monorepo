@@ -1,5 +1,7 @@
+use commonware_allocator::mimalloc;
 use criterion::criterion_main;
 
+mod add_many;
 mod append;
 mod append_additional;
 mod common;
@@ -13,7 +15,12 @@ mod verify_many_elements;
 mod verify_multi;
 mod verify_single_element;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
+
 criterion_main!(
+    add_many::benches,
+    add_many::skewed,
     append::benches,
     append_additional::benches,
     flush::benches,

@@ -4,7 +4,7 @@ use crate::{
         ancestry::BlockProvider,
         coding::{
             shards,
-            types::{CodedBlock, StoredCodedBlock, coding_config_for_participants},
+            types::{CodedBlock, Shard, StoredCodedBlock, coding_config_for_participants},
         },
         core::{Buffer, CommitmentFallback, ExpectedCommitment, Mailbox, Variant},
     },
@@ -134,9 +134,36 @@ where
     ) -> Self::Block {
         Arc::new(CodedBlock::precomputed(block, payload))
     }
+
+    fn max_backfill_block_size(application: usize) -> usize {
+        CodedBlock::<B, C, H>::max_encode_size(application)
+    }
+
+    /// Returns an upper bound on the encoded size of any shard a committee of 4 to `participants`
+    /// members codes from a block of at most `application` bytes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `participants` is below 4 or above `u16::MAX`.
+    fn max_buffer_payload_size(participants: u32, application: usize) -> usize {
+        // The shards engine sends shards coded from the block with its coding configuration.
+        let block = CodedBlock::<B, C, H>::max_encode_size(application);
+
+        // A larger committee can split a block into more data shards or prove each shard with a
+        // deeper tree, so shard width can shrink or grow with the committee. Coding supports
+        // committees of at least 4, so take the widest over every size from 4 to `participants`.
+        let participants =
+            u16::try_from(participants).expect("committee must have at most u16::MAX members");
+        let widest = (4..=participants)
+            .map(|n| C::max_shard_size(&coding_config_for_participants(n), block))
+            .max()
+            .expect("committee must have at least 4 members");
+
+        Shard::<B, C, H>::max_encode_size(widest)
+    }
 }
 
-impl<B, C, H, P> Buffer<Coding<B, C, H, P>> for shards::Mailbox<B, C, H, P>
+impl<B, C, H, P> Buffer<Coding<B, C, H, P>> for shards::Mailbox<B, C, H>
 where
     B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>> + Codec,
     C: CodingScheme,
@@ -175,7 +202,7 @@ where
 
     fn send(&self, round: Round, block: Arc<CodedBlock<B, C, H>>, _recipients: Recipients<P>) {
         // Targeted forwarding is not supported by the coding variant.
-        self.proposed_shared(round, block);
+        self.disperse_shared(round, block);
     }
 }
 
@@ -226,7 +253,6 @@ mod tests {
     use commonware_math::algebra::Random;
     use commonware_parallel::{Sequential, mocks::explore};
     use commonware_utils::{NZU16, test_rng};
-    use futures::executor::block_on;
 
     type TestCommitment = Commitment<NoCloneBlock, ReedSolomon<Sha256>, Sha256>;
     type TestContext = Context<TestCommitment, PublicKey>;
@@ -324,6 +350,19 @@ mod tests {
     }
 
     #[test]
+    fn max_backfill_block_size_matches_encoding() {
+        // Encoding the block with its coding configuration yields what `max_backfill_block_size`
+        // reports.
+        let block = no_clone_block(CONFIG);
+        let size = block.encode_size();
+        let coded = encode_block::<NoCloneBlock, TestScheme, Sha256>(block, CONFIG);
+        assert_eq!(
+            TestVariant::max_backfill_block_size(size),
+            coded.encode().len()
+        );
+    }
+
+    #[test]
     fn storage_conversion_shares_coding_block() {
         let block = no_clone_block(CONFIG);
         let coded = Arc::new(encode_block::<NoCloneBlock, TestScheme, Sha256>(
@@ -351,13 +390,14 @@ mod tests {
         let encoded = coded.encode();
         explore(|strategy| {
             // An untrusted commitment is recomputed, so the decoded block already holds its shards.
-            let decoded = block_on(TestVariant::decode_block(
-                encoded.clone(),
-                &(),
-                ExpectedCommitment::Untrusted(expected),
-                strategy,
-            ))
-            .unwrap();
+            let decoded = strategy
+                .block_on(TestVariant::decode_block(
+                    encoded.clone(),
+                    &(),
+                    ExpectedCommitment::Untrusted(expected),
+                    strategy,
+                ))
+                .unwrap();
             assert_eq!(TestVariant::commitment(&decoded), expected);
             assert!(decoded.shard(0).is_some());
 
@@ -369,21 +409,23 @@ mod tests {
                 CONFIG,
             ));
             assert!(
-                block_on(TestVariant::decode_block(
+                strategy
+                    .block_on(TestVariant::decode_block(
+                        encoded.clone(),
+                        &(),
+                        ExpectedCommitment::Untrusted(other),
+                        strategy,
+                    ))
+                    .is_err()
+            );
+            let trusted = strategy
+                .block_on(TestVariant::decode_block(
                     encoded.clone(),
                     &(),
-                    ExpectedCommitment::Untrusted(other),
+                    ExpectedCommitment::Trusted(other),
                     strategy,
                 ))
-                .is_err()
-            );
-            let trusted = block_on(TestVariant::decode_block(
-                encoded.clone(),
-                &(),
-                ExpectedCommitment::Trusted(other),
-                strategy,
-            ))
-            .unwrap();
+                .unwrap();
             assert_eq!(TestVariant::commitment(&trusted), other);
             assert!(trusted.shard(0).is_none());
 
@@ -391,13 +433,14 @@ mod tests {
             let mut extended = encoded.to_vec();
             extended.push(0);
             assert!(
-                block_on(TestVariant::decode_block(
-                    extended,
-                    &(),
-                    ExpectedCommitment::Untrusted(expected),
-                    strategy,
-                ))
-                .is_err()
+                strategy
+                    .block_on(TestVariant::decode_block(
+                        extended,
+                        &(),
+                        ExpectedCommitment::Untrusted(expected),
+                        strategy,
+                    ))
+                    .is_err()
             );
 
             // Every shape must decode to the same commitments.
@@ -427,13 +470,14 @@ mod tests {
             ExpectedCommitment::Untrusted(other),
         ] {
             assert!(
-                block_on(TestVariant::decode_block(
-                    encoded.clone(),
-                    &(),
-                    expected,
-                    &Sequential
-                ))
-                .is_err()
+                Sequential
+                    .block_on(TestVariant::decode_block(
+                        encoded.clone(),
+                        &(),
+                        expected,
+                        &Sequential
+                    ))
+                    .is_err()
             );
         }
     }

@@ -53,10 +53,6 @@
 //! Buffers and file descriptors are owned by the active request state machine inside the io_uring
 //! loop, ensuring that the memory location is valid for the duration of the operation.
 //!
-//! ## Feature Flag
-//!
-//! This implementation is enabled by using the `iouring` feature.
-//!
 //! ## Linux Only
 //!
 //! This implementation is only available on Linux systems that support io_uring.
@@ -2356,6 +2352,16 @@ mod tests {
         iouring::Runner::default().start(|_| async {
             let (storage, storage_directory) = create_test_storage();
             shared::check_failed_creation(&storage, &storage.pending).await;
+            drop(storage);
+            let _ = std::fs::remove_dir_all(storage_directory);
+        });
+    }
+
+    #[test]
+    fn test_failed_creation_over_torn_header_recreates() {
+        iouring::Runner::default().start(|_| async {
+            let (storage, storage_directory) = create_test_storage();
+            shared::check_failed_creation_over_torn_header(&storage, &storage.pending).await;
             drop(storage);
             let _ = std::fs::remove_dir_all(storage_directory);
         });

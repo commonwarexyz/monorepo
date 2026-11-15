@@ -179,8 +179,8 @@ pub trait NetworkScheme: Send + 'static {
     ///
     /// # Parameters
     ///
-    /// * `context` - The deterministic runtime context for this peer
-    /// * `peer` - Per-peer view including ID, info, and shared topology
+    /// * `context`: The deterministic runtime context for this peer
+    /// * `peer`: Per-peer view including ID, info, and shared topology
     ///
     /// # Returns
     ///
@@ -194,10 +194,10 @@ pub trait NetworkScheme: Send + 'static {
     ///
     /// # Parameters
     ///
-    /// * `oracle` - The network oracle to register peers with
-    /// * `index` - The index to register this peer set under
-    /// * `topo` - The shared topology
-    /// * `peer_ids` - The peer IDs to register
+    /// * `oracle`: The network oracle to register peers with
+    /// * `index`: The index to register this peer set under
+    /// * `topo`: The shared topology
+    /// * `peer_ids`: The peer IDs to register
     fn register_peers<'a>(
         oracle: &'a mut Self::Oracle,
         index: u64,
@@ -257,9 +257,9 @@ impl NetworkScheme for Discovery {
                 .try_into()
                 .expect("topology must contain at least one peer"),
             MAX_MSG_SIZE,
+            NZUsize!(100), // Small mailbox to encourage backpressure
         );
         // Override some settings for fuzzing environment
-        config.mailbox_size = NZUsize!(100); // Small mailbox to encourage backpressure
         config.allow_private_ips = true; // Required for localhost testing
         config.tracked_peer_sets = peer.topo.tracked_peer_sets;
 
@@ -322,7 +322,7 @@ impl NetworkScheme for Lookup {
         mut context: Context,
         peer: &PeerCtx,
     ) -> PeerNetwork<Self::Sender, Self::Receiver, Self::Oracle> {
-        // Create lookup config - no bootstrappers needed since we register addresses directly
+        // Create the lookup config without bootstrappers, since addresses are registered directly
         let mut config = lookup::Config::recommended(
             Cups::<_, ChaCha20Poly1305>::new(
                 Sake {
@@ -341,6 +341,7 @@ impl NetworkScheme for Lookup {
                 .try_into()
                 .expect("topology must contain at least one peer"),
             MAX_MSG_SIZE,
+            NZUsize!(1_000),
         );
         config.allow_private_ips = true; // Required for localhost testing
         config.tracked_peer_sets = NZUsize!(2 * peer.topo.tracked_peer_sets.get());
@@ -419,11 +420,11 @@ impl NetworkScheme for Lookup {
 ///
 /// # Type Parameters
 ///
-/// * `N` - The network scheme to test ([Discovery] or [Lookup])
+/// * `N`: The network scheme to test ([Discovery] or [Lookup])
 ///
 /// # Parameters
 ///
-/// * `input` - The fuzz input containing the seed, number of peers, and operations to execute
+/// * `input`: The fuzz input containing the seed, number of peers, and operations to execute
 ///
 /// # Behavior
 ///
@@ -618,7 +619,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                                 }
                             },
                             _ = context.sleep(Duration::from_millis(MAX_SLEEP_DURATION_MS)) => {
-                                continue; // Timeout - message may not have arrived yet
+                                continue; // The message may not have arrived yet
                             },
                         }
                     }

@@ -1,13 +1,10 @@
 use crate::qmdb::{
-    any::{
-        FixedValue, VariableValue,
-        operation::{
-            Update as UpdateTrait,
-            update::{Parts, sealed::Sealed},
-        },
-        value::{FixedEncoding, ValueEncoding, VariableEncoding},
+    any::operation::{
+        Update as UpdateTrait,
+        update::{Parts, sealed::Sealed},
     },
     operation::Key,
+    value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
 };
 use commonware_codec::{
     Buf, Encode as _, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
@@ -47,10 +44,6 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
     type ValueEncoding = V;
     type Cached = K;
 
-    /// A staged read caches the resolved update's `next_key`, which an ancestor's diff entry does
-    /// not store.
-    const STAGES_ANCESTORS: Option<K> = None;
-
     fn key(&self) -> &K {
         &self.key
     }
@@ -67,8 +60,11 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
         self.value
     }
 
-    fn cached(&self) -> K {
-        self.next_key.clone()
+    fn cached<'a>(update: impl FnOnce() -> &'a Self) -> K
+    where
+        Self: 'a,
+    {
+        update().next_key.clone()
     }
 
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

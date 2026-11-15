@@ -1,6 +1,6 @@
 //! This module exports the [`Lazy`] type.
 
-use crate::{Buf, BufsMut, Decode, Encode, EncodeSize, FixedSize, Read, Write};
+use crate::{Buf, BufsMut, Decode, Encode, EncodeSize, FixedSize, Read, Viewing, Write};
 use bytes::{Buf as _, Bytes};
 use core::hash::Hash;
 #[cfg(feature = "std")]
@@ -62,7 +62,12 @@ use std::sync::OnceLock;
 /// and [`EncodeSize`], based on the underlying implementation of `T`.
 ///
 /// Furthermore, we implement [`Eq`], [`Ord`], [`Hash`] based on the implementation
-/// of `T` as well. These methods will force deserialization of the value.
+/// of `T` as well. These methods will force deserialization of the value, except that
+/// two deferred values with identical bytes are equal without decoding (so compare only
+/// values deferred with the same [`Read::Cfg`]).
+///
+/// A deferred value must not be changed through interior mutability in a way that
+/// affects its equality, ordering, or hash.
 #[derive(Clone)]
 pub struct Lazy<T: Read> {
     /// This should only be `None` if `value` is initialized.
@@ -79,43 +84,6 @@ struct Pending<T: Read> {
     #[cfg_attr(not(feature = "std"), allow(dead_code))]
     cfg: T::Cfg,
 }
-
-/// Reads borrowed [Bytes] without cloning the handle, slicing it only for retained fields.
-///
-/// Cloning the handle on every decode makes threads decoding slices of one allocation contend
-/// on its reference count.
-struct View<'a> {
-    bytes: &'a Bytes,
-    pos: usize,
-}
-
-impl bytes::Buf for View<'_> {
-    #[inline]
-    fn remaining(&self) -> usize {
-        self.bytes.len() - self.pos
-    }
-
-    #[inline]
-    fn chunk(&self) -> &[u8] {
-        &self.bytes[self.pos..]
-    }
-
-    #[inline]
-    fn advance(&mut self, cnt: usize) {
-        assert!(cnt <= self.remaining(), "advance past end of buffer");
-        self.pos += cnt;
-    }
-
-    #[inline]
-    fn copy_to_bytes(&mut self, len: usize) -> Bytes {
-        assert!(len <= self.remaining(), "copy_to_bytes past end of buffer");
-        let bytes = self.bytes.slice(self.pos..self.pos + len);
-        self.pos += len;
-        bytes
-    }
-}
-
-impl Buf for View<'_> {}
 
 impl<T: Read> Lazy<T> {
     // I considered calling this "now", but this was too close to "new".
@@ -153,7 +121,7 @@ impl<T: Read> Lazy<T> {
                 }
             } else {
                 Self {
-                    value: T::decode_cfg(View { bytes: &bytes, pos: 0 }, &cfg).ok(),
+                    value: T::decode_cfg(Viewing::new(&bytes), &cfg).ok(),
                     pending: Some(Pending { bytes, cfg }),
                 }
             }
@@ -174,7 +142,7 @@ impl<T: Read> Lazy<T> {
                     .pending
                     .as_ref()
                     .expect("Lazy should have pending if value is not initialized");
-                T::decode_cfg(View { bytes, pos: 0 }, cfg).ok()
+                T::decode_cfg(Viewing::new(bytes), cfg).ok()
             })
             .as_ref()
     }
@@ -259,15 +227,21 @@ impl<T: Read + FixedSize> Read for Lazy<T> {
 // We want to provide some convenience functions which might exist on the underlying
 // value in a Lazy. To do so, we really on `get` to access that value.
 
-impl<T: Read + PartialEq> PartialEq for Lazy<T> {
+impl<T: Read + Eq> PartialEq for Lazy<T> {
     fn eq(&self, other: &Self) -> bool {
+        // Eq makes every value equal to itself, so identical bytes decode to equal values.
+        if let (Some(a), Some(b)) = (&self.pending, &other.pending)
+            && a.bytes == b.bytes
+        {
+            return true;
+        }
         self.get() == other.get()
     }
 }
 
 impl<T: Read + Eq> Eq for Lazy<T> {}
 
-impl<T: Read + PartialOrd> PartialOrd for Lazy<T> {
+impl<T: Read + PartialOrd + Eq> PartialOrd for Lazy<T> {
     fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
         self.get().partial_cmp(&other.get())
     }
@@ -375,6 +349,30 @@ mod test {
             prop_assert_eq!(a < b, la < lb);
             prop_assert_eq!(a >= b, la >= lb);
         }
+
+        #[test]
+        fn test_lazy_deferred_eq_direct(a: u8, b: u8) {
+            let direct = Small::decode(a.encode()).ok() == Small::decode(b.encode()).ok();
+            let la = Lazy::<Small>::deferred(&mut a.encode(), ());
+            let lb = Lazy::<Small>::deferred(&mut b.encode(), ());
+            prop_assert_eq!(direct, la == lb);
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_lazy_eq_equal_bytes_skips_decode() {
+        let a = Lazy::<Small>::deferred(&mut Small(7).encode(), ());
+        let b = Lazy::<Small>::deferred(&mut Small(7).encode(), ());
+        assert!(a == b);
+        assert!(a.value.get().is_none());
+        assert!(b.value.get().is_none());
+
+        // Differing bytes fall back to comparing decoded values.
+        let c = Lazy::<Small>::deferred(&mut Small(8).encode(), ());
+        assert!(a != c);
+        assert!(a.value.get().is_some());
+        assert!(c.value.get().is_some());
     }
 
     #[test]

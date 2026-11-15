@@ -1106,10 +1106,7 @@ mod tests {
 
     #[rstest]
     #[case::tokio(crate::tokio::Runner::default())]
-    #[cfg_attr(
-        all(target_os = "linux", feature = "iouring"),
-        case::iouring(crate::iouring::Runner::default())
-    )]
+    #[cfg_attr(target_os = "linux", case::iouring(crate::iouring::Runner::default()))]
     fn test_start_sync_returns_before_backing_completion<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner,
@@ -1820,10 +1817,7 @@ mod tests {
 
     #[rstest]
     #[case::tokio(crate::tokio::Runner::default())]
-    #[cfg_attr(
-        all(target_os = "linux", feature = "iouring"),
-        case::iouring(crate::iouring::Runner::default())
-    )]
+    #[cfg_attr(target_os = "linux", case::iouring(crate::iouring::Runner::default()))]
     fn test_full_sync_epoch_is_linearized_with_overlapping_write<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner,
@@ -1835,10 +1829,7 @@ mod tests {
 
     #[rstest]
     #[case::tokio(crate::tokio::Runner::default())]
-    #[cfg_attr(
-        all(target_os = "linux", feature = "iouring"),
-        case::iouring(crate::iouring::Runner::default())
-    )]
+    #[cfg_attr(target_os = "linux", case::iouring(crate::iouring::Runner::default()))]
     fn test_dropped_start_sync_epoch_is_linearized_with_overlapping_write<R: Runner>(
         #[case] runner: R,
     ) where
@@ -1851,10 +1842,7 @@ mod tests {
 
     #[rstest]
     #[case::tokio(crate::tokio::Runner::default())]
-    #[cfg_attr(
-        all(target_os = "linux", feature = "iouring"),
-        case::iouring(crate::iouring::Runner::default())
-    )]
+    #[cfg_attr(target_os = "linux", case::iouring(crate::iouring::Runner::default()))]
     fn test_faulty_storage_no_faults<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner,

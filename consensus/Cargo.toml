@@ -41,7 +41,6 @@ commonware-runtime.workspace = true
 commonware-storage = { workspace = true, features = ["std"] }
 pin-project.workspace = true
 rand_distr = { workspace = true, optional = true }
-rayon.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

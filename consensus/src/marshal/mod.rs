@@ -42,6 +42,123 @@
 //! knowledge of finalized blocks, it will request the missing blocks from its peers. This ensures
 //! that the actor can catch up to the rest of the network if it falls behind.
 //!
+//! ## Message Sizes
+//!
+//! Marshal sends requests, responses, and errors through its resolver on the backfill network, and
+//! its buffer ([`commonware_broadcast::buffered`] or [`coding::shards::Engine`]) disseminates
+//! blocks or their shards. `V` and `S` are the variant and certificate scheme given to
+//! [`max_payload_size`]:
+//!
+//! ```text
+//! Any payload on a muxer subchannel:
+//!
+//! +---------------------------+---------+
+//! | subchannel (varint, 1-10) | payload |
+//! +---------------------------+---------+
+//!
+//! Request for Key::Block (tag 0, subject 0):
+//!
+//! +--------+---------+-------------+----------------------------------+
+//! | id (8) | tag (1) | subject (1) | commitment (V::Commitment::SIZE) |
+//! +--------+---------+-------------+----------------------------------+
+//!
+//! Request for Key::Finalized (tag 0, subject 1):
+//!
+//! +--------+---------+-------------+-----------------------+
+//! | id (8) | tag (1) | subject (1) | height (varint, 1-10) |
+//! +--------+---------+-------------+-----------------------+
+//!
+//! Request for Key::Notarized (tag 0, subject 2):
+//!
+//! +--------+---------+-------------+----------------------+---------------------+
+//! | id (8) | tag (1) | subject (1) | epoch (varint, 1-10) | view (varint, 1-10) |
+//! +--------+---------+-------------+----------------------+---------------------+
+//!
+//! Response for Key::Block (tag 1):
+//!
+//! +--------+---------+----------------------+----------------+
+//! | id (8) | tag (1) | length (varint, 1-5) | backfill block |
+//! +--------+---------+----------------------+----------------+
+//!
+//! Response for Key::Finalized (tag 1):
+//!
+//! +--------+---------+----------------------+--------------+-------------------+
+//! | id (8) | tag (1) | length (varint, 1-5) | finalization | application block |
+//! +--------+---------+----------------------+--------------+-------------------+
+//!
+//! Response for Key::Notarized (tag 1):
+//!
+//! +--------+---------+----------------------+--------------+----------------+
+//! | id (8) | tag (1) | length (varint, 1-5) | notarization | backfill block |
+//! +--------+---------+----------------------+--------------+----------------+
+//!
+//! Error (tag 2):
+//!
+//! +--------+---------+
+//! | id (8) | tag (1) |
+//! +--------+---------+
+//!
+//! Notarization or finalization:
+//!
+//! +----------------------+---------------------+-----------------------------------+
+//! | epoch (varint, 1-10) | view (varint, 1-10) | parent (varint, 1-10)             |
+//! +----------------------+-----------+---------+-----------------------------------+
+//! | commitment (V::Commitment::SIZE) | certificate (up to S::max_certificate_size) |
+//! +----------------------------------+---------------------------------------------+
+//!
+//! Backfill block under standard, and each buffered broadcast message:
+//!
+//! +---------------------------------------------------------+
+//! | application block (up to the application block bound)   |
+//! +---------------------------------------------------------+
+//!
+//! Backfill block under coding:
+//!
+//! +---------------------------------------------------------+-------------------+
+//! | application block (up to the application block bound)   | coding config (4) |
+//! +---------------------------------------------------------+-------------------+
+//!
+//! Shard:
+//!
+//! +------------------+-----------+-------+
+//! | commitment (100) | index (2) | chunk |
+//! +------------------+-----------+-------+
+//!
+//! Chunk (Reed-Solomon):
+//!
+//! +----------------------------+---------------------+-----------------------+
+//! | shard length (varint, 1-5) | shard (shard width) | index (2)             |
+//! +----------------+-----------+---------------------+-----------------------+
+//! | leaf count (4) | sibling count (varint, 1-5)     | siblings (n x digest) |
+//! +----------------+---------------------------------+-----------------------+
+//! ```
+//!
+//! [`max_payload_size`] sizes every varint at its widest, every certificate at
+//! `S::max_certificate_size` for committees of at most the given size, and every backfill block at
+//! its bound. It returns the larger of the backfill and buffer bounds.
+//!
+//! The buffer bound is the application block bound under [`standard`]. Under [`coding`], it is
+//! the largest shard bound for the backfill block bound across committees of 4 to the given size.
+//!
+//! The application block bound is what
+//! [`BoundedBlock::max_encode_size`](crate::BoundedBlock::max_encode_size) reports for
+//! [`Config::block_codec_config`]. Every application block marshal holds must fit within it: the
+//! blocks [`Application::prepare`](crate::Application::prepare) and
+//! [`Application::propose`](crate::Application::propose) return, the genesis anchor, and every
+//! block passed to [`core::Mailbox`].
+//!
+//! Every network that carries backfill or the buffer must admit [`max_payload_size`], or its
+//! [`prefixed`] size when marshal runs on a muxer subchannel. [`coding::shards::Engine`] also
+//! relays the shards it receives, so its receiver must yield no payload larger than its sender's
+//! network admits.
+//!
+//! Every node that runs marshal on one network must give marshal and its buffer the same block
+//! codec configuration and limits. Across restarts, neither the application block bound nor the
+//! `max_message_size` of a network that carries backfill or the buffer may decrease while stored
+//! blocks remain.
+//!
+//! [`prefixed`]: commonware_p2p::utils::mux::prefixed
+//!
 //! ## Storage
 //!
 //! The actor uses a combination of internal and external ([`store::Certificates`], [`store::Blocks`]) storage
@@ -77,6 +194,8 @@ use commonware_utils::{Acknowledgement, acknowledgement::Exact};
 
 mod config;
 pub use config::{Config, Start};
+mod limits;
+pub use limits::max_payload_size;
 
 pub mod ancestry;
 pub mod core;

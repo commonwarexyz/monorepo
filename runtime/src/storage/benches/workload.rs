@@ -10,8 +10,7 @@ use crate::{
         warm_read_loop,
     },
 };
-use cfg_if::cfg_if;
-use commonware_runtime::{AbortOnDrop, Blob as _, Spawner as _, Storage as _, Supervisor as _};
+use commonware_runtime::{AbortOnDrop, Blob, Spawner, Storage};
 use commonware_utils::TestRng;
 use futures::{TryStreamExt, stream::FuturesUnordered};
 use rand::{RngExt as _, SeedableRng, rngs::SmallRng};
@@ -25,23 +24,13 @@ use std::{
     time::Instant,
 };
 
-cfg_if! {
-    if #[cfg(all(target_os = "linux", feature = "iouring"))] {
-        use commonware_runtime::iouring::Context;
-    } else {
-        use commonware_runtime::tokio::Context;
-    }
-}
-
 /// Storage partition used for all benchmark blobs.
 const PARTITION: &str = "storage-bench";
 /// Key for the single blob within the partition.
 const BLOB_NAME: &[u8] = b"blob";
 
-type RuntimeBlob = <Context as commonware_runtime::Storage>::Blob;
-
 /// Run the configured benchmark workload and return the results.
-pub async fn run_benchmark(cfg: &Config, context: Context) -> Result<Report> {
+pub async fn run_benchmark<E: Spawner + Storage>(cfg: &Config, context: E) -> Result<Report> {
     let result = match cfg.workload {
         Workload::ReadSeq | Workload::ReadRand => run_read(cfg, &context).await,
         Workload::WriteSeq | Workload::WriteRand => run_overwrite(cfg, &context).await,
@@ -54,7 +43,7 @@ pub async fn run_benchmark(cfg: &Config, context: Context) -> Result<Report> {
 }
 
 /// Run a read-only workload (sequential or random).
-async fn run_read(cfg: &Config, context: &Context) -> Result<Report> {
+async fn run_read<E: Spawner + Storage>(cfg: &Config, context: &E) -> Result<Report> {
     let sequential = cfg.workload == Workload::ReadSeq;
     let file_size = cfg.file_size();
     let total_blocks = file_size / cfg.io_size as u64;
@@ -106,7 +95,7 @@ async fn run_read(cfg: &Config, context: &Context) -> Result<Report> {
 }
 
 /// Run a sequential or random overwrite workload on a fixed-size file.
-async fn run_overwrite(cfg: &Config, context: &Context) -> Result<Report> {
+async fn run_overwrite<E: Spawner + Storage>(cfg: &Config, context: &E) -> Result<Report> {
     let file_size = cfg.file_size();
     let total_blocks = file_size / cfg.io_size as u64;
     let inflight = cfg.inflight as u64;
@@ -166,7 +155,7 @@ async fn run_overwrite(cfg: &Config, context: &Context) -> Result<Report> {
 }
 
 /// Run a single-writer append workload on a growing file.
-async fn run_write_append(cfg: &Config, context: &Context) -> Result<Report> {
+async fn run_write_append<E: Spawner + Storage>(cfg: &Config, context: &E) -> Result<Report> {
     // Start from an empty blob.
     let blob = prepare_blob(context, &cfg.root, PARTITION, BLOB_NAME, 0).await?;
     let blob = Arc::new(blob);
@@ -212,7 +201,7 @@ async fn run_write_append(cfg: &Config, context: &Context) -> Result<Report> {
 }
 
 /// Run sequential durable positioned writes on a fixed-size file.
-async fn run_write_sync(cfg: &Config, context: &Context) -> Result<Report> {
+async fn run_write_sync<E: Spawner + Storage>(cfg: &Config, context: &E) -> Result<Report> {
     let file_size = cfg.file_size();
     let total_blocks = file_size / cfg.io_size as u64;
     let inflight = cfg.inflight as u64;
@@ -254,7 +243,7 @@ async fn run_write_sync(cfg: &Config, context: &Context) -> Result<Report> {
 ///
 /// Readers sample uniformly from the visible prefix, which grows as the
 /// writer appends blocks.
-async fn run_read_write_append(cfg: &Config, context: &Context) -> Result<Report> {
+async fn run_read_write_append<E: Spawner + Storage>(cfg: &Config, context: &E) -> Result<Report> {
     let initial_size = cfg.file_size();
     let total_blocks = initial_size / cfg.io_size as u64;
     let io_size = cfg.io_size as u64;
@@ -340,7 +329,7 @@ async fn run_read_write_append(cfg: &Config, context: &Context) -> Result<Report
 /// Run one timed I/O stream as its own task. Dropping the returned guard cancels
 /// the task.
 fn spawn_stream<T: Send + 'static>(
-    context: &Context,
+    context: &impl Spawner,
     future: impl Future<Output = Result<T>> + Send + 'static,
 ) -> AbortOnDrop<Result<T>> {
     context
@@ -353,7 +342,7 @@ fn spawn_stream<T: Send + 'static>(
 ///
 /// In `Warm` mode, workers read through the file to pull pages into cache.
 /// In `Cold` mode, `posix_fadvise(DONTNEED)` evicts cached pages.
-async fn prepare_cache(cfg: &Config, blob: &Arc<RuntimeBlob>, total_blocks: u64) -> Result<()> {
+async fn prepare_cache(cfg: &Config, blob: &Arc<impl Blob>, total_blocks: u64) -> Result<()> {
     let cache = cfg.cache.expect("validated");
 
     // Evict cached pages so the timed phase starts from disk.

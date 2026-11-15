@@ -113,6 +113,10 @@ int mi_version(void) {
 #define MI_DEFAULT_COLLECT_MERGES_STATS  1
 #endif
 
+#ifndef MI_DEFAULT_STATS_MERGE_THRESHOLD
+#define MI_DEFAULT_STATS_MERGE_THRESHOLD  (4*1024*1024)  // 4 MiB
+#endif
+
 // Static options
 static mi_option_desc_t mi_options[_mi_option_last] =
 {
@@ -182,6 +186,8 @@ static mi_option_desc_t mi_options[_mi_option_last] =
   { 0,   MI_OPTION_UNINIT, MI_OPTION(arena_is_numa_local) },      // associate local numa node with an initial arena allocation
   { MI_DEFAULT_COLLECT_MERGES_STATS,
          MI_OPTION_UNINIT, MI_OPTION(collect_merges_stats) },     // on each theap collect, stats are merged with the parent heap
+  { MI_DEFAULT_STATS_MERGE_THRESHOLD,
+         MI_OPTION_UNINIT, MI_OPTION(stats_merge_threshold) },    // on a page stats update, merge theap stats into the heap if N bytes were freed/allocated; 0 disables (=4 MiB)
 };
 
 static void mi_option_init(mi_option_desc_t* desc);

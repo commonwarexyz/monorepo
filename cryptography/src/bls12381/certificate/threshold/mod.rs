@@ -94,6 +94,11 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     /// The polynomial can be evaluated to obtain public verification keys for partial
     /// signatures produced by committee members.
     ///
+    /// * `namespace`: base namespace for domain separation
+    /// * `participants`: ordered set of participant identity keys
+    /// * `polynomial`: public polynomial for threshold verification
+    /// * `share`: local threshold share for signing
+    ///
     /// Returns `None` if the share's public key does not match any participant.
     ///
     /// # Panics
@@ -101,11 +106,6 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     /// Panics if the polynomial's participant count or degree does not match the
     /// committee and fault model, or if the share index does not identify a committee
     /// participant.
-    ///
-    /// * `namespace` - base namespace for domain separation
-    /// * `participants` - ordered set of participant identity keys
-    /// * `polynomial` - public polynomial for threshold verification
-    /// * `share` - local threshold share for signing
     pub fn signer<M: Faults>(
         namespace: &[u8],
         participants: Set<P>,
@@ -146,14 +146,14 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     /// The polynomial can be evaluated to obtain public verification keys for partial
     /// signatures produced by committee members.
     ///
+    /// * `namespace`: base namespace for domain separation
+    /// * `participants`: ordered set of participant identity keys
+    /// * `polynomial`: public polynomial for threshold verification
+    ///
     /// # Panics
     ///
     /// Panics if the polynomial's participant count or degree does not match the committee
     /// and fault model.
-    ///
-    /// * `namespace` - base namespace for domain separation
-    /// * `participants` - ordered set of participant identity keys
-    /// * `polynomial` - public polynomial for threshold verification
     pub fn verifier<M: Faults>(
         namespace: &[u8],
         participants: Set<P>,
@@ -184,8 +184,8 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     /// This lightweight verifier can authenticate recovered threshold certificates but cannot
     /// verify individual signatures or partial signatures.
     ///
-    /// * `namespace` - base namespace for domain separation
-    /// * `identity` - public identity of the committee (constant across reshares)
+    /// * `namespace`: base namespace for domain separation
+    /// * `identity`: public identity of the committee (constant across reshares)
     pub fn certificate_verifier(namespace: &[u8], identity: V::Public) -> Self {
         Self::CertificateVerifier {
             identity,
@@ -504,7 +504,8 @@ where
 /// Generates a BLS12-381 threshold signing scheme wrapper for a specific protocol.
 ///
 /// This macro creates a complete wrapper struct with constructors, `Scheme` trait
-/// implementation, and a `fixture` function for testing.
+/// implementation, and a `fixture` function for testing when this crate's `mocks` feature is
+/// enabled.
 ///
 /// # Parameters
 ///
@@ -535,28 +536,28 @@ where
 #[macro_export]
 macro_rules! impl_certificate_bls12381_threshold {
     ($subject:ty, $namespace:ty, $faults:ty) => {
-        /// Generates a test fixture with Ed25519 identities and BLS12-381 threshold schemes.
-        ///
-        /// Returns a [`commonware_cryptography::certificate::mocks::Fixture`] whose keys and
-        /// scheme instances share a consistent ordering.
-        #[cfg(feature = "mocks")]
-        #[allow(dead_code)]
-        pub fn fixture<V, R>(
-            rng: &mut R,
-            namespace: &[u8],
-            n: u32,
-        ) -> $crate::certificate::mocks::Fixture<Scheme<$crate::ed25519::PublicKey, V>>
-        where
-            V: $crate::bls12381::primitives::variant::Variant,
-            R: rand_core::CryptoRng,
-        {
-            $crate::bls12381::certificate::threshold::mocks::fixture::<_, V, _>(
-                rng,
-                namespace,
-                n,
-                Scheme::signer,
-                Scheme::verifier,
-            )
+        $crate::cfg_mocks! {
+            /// Generates a test fixture with Ed25519 identities and BLS12-381 threshold schemes.
+            ///
+            /// Returns a [`commonware_cryptography::certificate::mocks::Fixture`] whose keys and
+            /// scheme instances share a consistent ordering.
+            pub fn fixture<V, R>(
+                rng: &mut R,
+                namespace: &[u8],
+                n: u32,
+            ) -> $crate::certificate::mocks::Fixture<Scheme<$crate::ed25519::PublicKey, V>>
+            where
+                V: $crate::bls12381::primitives::variant::Variant,
+                R: rand_core::CryptoRng,
+            {
+                $crate::bls12381::certificate::threshold::mocks::fixture::<_, V, _>(
+                    rng,
+                    namespace,
+                    n,
+                    Scheme::signer,
+                    Scheme::verifier,
+                )
+            }
         }
 
         /// BLS12-381 threshold signature scheme wrapper.
@@ -710,6 +711,10 @@ macro_rules! impl_certificate_bls12381_threshold {
                 $crate::bls12381::certificate::threshold::Generic::<P, V, $namespace>::is_batchable()
             }
 
+            fn max_certificate_size(_participants: u32) -> usize {
+                <Self::Certificate as commonware_codec::FixedSize>::SIZE
+            }
+
             fn certificate_codec_config(
                 &self,
             ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
@@ -841,6 +846,7 @@ mod tests {
     use commonware_utils::{
         Faults, N3f1, N5f1, NZU32, Participant, TryCollect, Widen, ordered::Set, test_rng,
     };
+    use scheme::Scheme;
 
     const NAMESPACE: &[u8] = b"test-bls12381-threshold";
     const MESSAGE: &[u8] = b"test message";
@@ -863,8 +869,15 @@ mod tests {
         }
     }
 
-    // Use the macro to generate the test scheme
-    impl_certificate_bls12381_threshold!(TestSubject, Vec<u8>, N3f1);
+    // Use the macro to generate the test scheme. The tests build schemes from keys of their own, so
+    // its fixture goes unused.
+    #[allow(dead_code)]
+    mod scheme {
+        use super::TestSubject;
+        use commonware_utils::N3f1;
+
+        impl_certificate_bls12381_threshold!(TestSubject, Vec<u8>, N3f1);
+    }
 
     #[allow(clippy::type_complexity)]
     fn setup_signers<V: Variant>(
@@ -1213,6 +1226,12 @@ mod tests {
             .assemble(non_empty![@attestations], &Sequential)
             .unwrap();
         let encoded = certificate.encode();
+        assert_eq!(
+            encoded.len(),
+            Scheme::<ed25519::PublicKey, V>::max_certificate_size(
+                u32::try_from(schemes.len()).unwrap()
+            )
+        );
         let decoded = Certificate::<V>::decode(encoded).expect("decode certificate");
         assert_eq!(decoded, certificate);
     }

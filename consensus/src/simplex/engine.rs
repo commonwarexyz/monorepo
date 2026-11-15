@@ -125,6 +125,7 @@ impl<
                 mailbox_size: cfg.mailbox_size,
                 epoch: cfg.epoch,
                 fetch_timeout: cfg.fetch_timeout,
+                fetch_retry_delay: cfg.fetch_retry_delay,
                 term_length,
             },
         );

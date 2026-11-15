@@ -7,7 +7,7 @@ use commonware_cryptography::{
     fuzz::{BatchPlan, Plan},
     sha256::Digest,
 };
-use commonware_parallel::{Rayon, mocks::Explorer};
+use commonware_parallel::{Rayon, mocks::Explorer, rayon::ThreadPoolBuilder};
 use commonware_utils::NZUsize;
 use libfuzzer_sys::fuzz_target;
 use sha2::{Digest as RefSha2Digest, Sha256 as RefSha256};
@@ -17,7 +17,7 @@ use zeroize::Zeroize;
 /// A four-worker explorer that takes every split a hasher offers it. It is built once and reused
 /// across invocations because starting a thread pool is expensive.
 static STRATEGY: LazyLock<Explorer> =
-    LazyLock::new(|| Explorer::parallel(&Rayon::new(NZUsize!(4)).unwrap()));
+    LazyLock::new(|| Explorer::parallel(&Rayon::new(ThreadPoolBuilder::new(NZUsize!(4))).unwrap()));
 
 #[derive(Debug, Arbitrary)]
 enum Operation {

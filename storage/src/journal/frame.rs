@@ -6,7 +6,7 @@
 use super::Error;
 use bytes::{BufMut, Bytes, TryGetError, buf::Take};
 use commonware_codec::{
-    Buf, Decode, Encode, EncodeSize, OwnedBytes, ReadExt as _, Write,
+    Buf, Copying, Decode, Encode, EncodeSize, OwnedBytes, ReadExt as _, Write,
     varint::{MAX_U32_VARINT_SIZE, UInt},
 };
 use commonware_runtime::{Blob, Buf as _, IoBufMut, IoBufs, buffer::paged::Writer};
@@ -22,13 +22,13 @@ commonware_utils::thread_local_cache!(static DECOMPRESSOR: Decompressor<'static>
 
 /// Read access needed to decode a frame at a known offset.
 pub(super) trait FrameReader {
-    /// Read up to `len` bytes at `offset`.
+    /// Read up to `len` bytes at `offset`, returning the buffer truncated to the bytes read.
     fn read_up_to(
         &self,
         offset: u64,
         len: usize,
         buf: impl Into<IoBufMut> + Send,
-    ) -> impl Future<Output = Result<(IoBufMut, usize), Error>> + Send;
+    ) -> impl Future<Output = Result<IoBufMut, Error>> + Send;
 
     /// Read exactly `len` bytes at `offset`.
     fn read_at(
@@ -44,9 +44,10 @@ impl<B: Blob, Phase: Send + Sync> FrameReader for Writer<B, Phase> {
         offset: u64,
         len: usize,
         buf: impl Into<IoBufMut> + Send,
-    ) -> Result<(IoBufMut, usize), Error> {
+    ) -> Result<IoBufMut, Error> {
         Self::read_up_to(self, offset, len, buf)
             .await
+            .map(|(buf, _)| buf)
             .map_err(Error::Runtime)
     }
 
@@ -87,18 +88,17 @@ pub(super) enum FrameInfo {
     },
 }
 
-/// Find the frame at `offset` in a buffer by decoding its length prefix.
+/// Find the frame at `offset` in the buffered bytes by decoding its length prefix.
 ///
-/// Returns (next_offset, frame_info). The buffer is advanced past the varint.
-pub(super) fn find_frame(buf: &mut impl Buf, offset: u64) -> Result<(u64, FrameInfo), Error> {
-    let available = buf.remaining();
-    let (size, varint_len) = decode_length_prefix(buf)?;
+/// Returns (next_offset, frame_info).
+pub(super) fn find_frame(buf: &[u8], offset: u64) -> Result<(u64, FrameInfo), Error> {
+    let (size, varint_len) = decode_length_prefix(&mut Copying(buf))?;
     let next_offset = offset
         .checked_add(varint_len as u64)
         .ok_or(Error::OffsetOverflow)?
         .checked_add(size as u64)
         .ok_or(Error::OffsetOverflow)?;
-    let buffered = available.saturating_sub(varint_len);
+    let buffered = buf.len().saturating_sub(varint_len);
 
     let item = if buffered >= size {
         FrameInfo::Complete {
@@ -229,27 +229,24 @@ pub(super) async fn read_frame_at<V: Decode>(
     cfg: &V::Cfg,
     compressed: bool,
 ) -> Result<(u64, u32, V), Error> {
-    let (buf, available) = reader
+    let mut buf = reader
         .read_up_to(
             offset,
             MAX_U32_VARINT_SIZE,
             IoBufMut::with_capacity(MAX_U32_VARINT_SIZE),
         )
-        .await?;
-    let buf = buf.freeze();
-    let mut cursor = buf.slice(..available);
-    let (next_offset, item_info) = find_frame(&mut cursor, offset)?;
+        .await?
+        .freeze();
+    let (next_offset, item_info) = find_frame(buf.as_ref(), offset)?;
 
     let (item_size, decoded) = match item_info {
         FrameInfo::Complete {
             varint_len,
             data_len,
         } => {
-            let decoded = decode_item::<V>(
-                buf.slice(varint_len..varint_len + data_len),
-                cfg,
-                compressed,
-            )?;
+            // A header read of a tiny frame can run into the next frame.
+            buf.advance(varint_len);
+            let decoded = decode_item::<V>(Limited::new(&mut buf, data_len), cfg, compressed)?;
             (data_len as u32, decoded)
         }
         FrameInfo::Incomplete {
@@ -270,13 +267,14 @@ pub(super) async fn read_frame_at<V: Decode>(
             prefix_len,
             total_len,
         } => {
-            let prefix = buf.slice(varint_len..varint_len + prefix_len);
+            // Past the varint, the buffer holds the first `prefix_len` payload bytes.
+            buf.advance(varint_len);
             let read_offset = offset
                 .checked_add(varint_len as u64)
                 .and_then(|offset| offset.checked_add(prefix_len as u64))
                 .ok_or(Error::OffsetOverflow)?;
             let remainder = reader.read_at(read_offset, total_len - prefix_len).await?;
-            let decoded = decode_item::<V>(prefix.chain(remainder), cfg, compressed)?;
+            let decoded = decode_item::<V>(buf.chain(remainder), cfg, compressed)?;
             (total_len as u32, decoded)
         }
     };
@@ -565,8 +563,7 @@ mod tests {
     #[test]
     fn test_roundtrip_uncompressed() {
         let buf = frame(None, &42u64);
-        let mut cursor = Copying(&buf);
-        let (next_offset, info) = find_frame(&mut cursor, 0).unwrap();
+        let (next_offset, info) = find_frame(&buf, 0).unwrap();
         let FrameInfo::Complete {
             varint_len,
             data_len,
@@ -585,8 +582,7 @@ mod tests {
     #[test]
     fn test_roundtrip_compressed() {
         let buf = frame(Some(3), &42u64);
-        let mut cursor = Copying(&buf);
-        let (_, info) = find_frame(&mut cursor, 0).unwrap();
+        let (_, info) = find_frame(&buf, 0).unwrap();
         let FrameInfo::Complete {
             varint_len,
             data_len,
@@ -675,14 +671,12 @@ mod tests {
         encode_frame_into(None, &2u64, &mut buf).unwrap();
 
         // Walk both frames out of the accumulated buffer.
-        let mut cursor = Copying(&buf);
-        let (first_end, _) = find_frame(&mut cursor, 0).unwrap();
+        let (first_end, _) = find_frame(&buf, 0).unwrap();
         assert_eq!(first_end as usize, first_frame_len);
         let first: u64 = decode_item(Copying(&buf[1..9]), &(), false).unwrap();
         assert_eq!(first, 1);
 
-        let mut cursor = Copying(&buf[first_frame_len..]);
-        let (second_end, _) = find_frame(&mut cursor, first_end).unwrap();
+        let (second_end, _) = find_frame(&buf[first_frame_len..], first_end).unwrap();
         assert_eq!(second_end as usize, buf.len());
         let second: u64 = decode_item(Copying(&buf[first_frame_len + 1..]), &(), false).unwrap();
         assert_eq!(second, 2);
@@ -732,8 +726,7 @@ mod tests {
     #[test]
     fn test_find_frame_zero_length_payload() {
         let buf = [0x00u8];
-        let mut cursor = Copying(&buf);
-        let (next_offset, info) = find_frame(&mut cursor, 7).unwrap();
+        let (next_offset, info) = find_frame(&buf, 7).unwrap();
         let FrameInfo::Complete {
             varint_len,
             data_len,
@@ -749,8 +742,7 @@ mod tests {
     fn test_find_frame_incomplete_payload() {
         // Prefix declares 5 payload bytes; only 3 are buffered.
         let buf = [0x05u8, 1, 2, 3];
-        let mut cursor = Copying(&buf);
-        let (next_offset, info) = find_frame(&mut cursor, 100).unwrap();
+        let (next_offset, info) = find_frame(&buf, 100).unwrap();
         let FrameInfo::Incomplete {
             varint_len,
             prefix_len,
@@ -761,24 +753,20 @@ mod tests {
         };
         assert_eq!((varint_len, prefix_len, total_len), (1, 3, 5));
         assert_eq!(next_offset, 106);
-        // The buffer is advanced past the varint only.
-        assert_eq!(cursor.remaining(), 3);
     }
 
     #[test]
     fn test_find_frame_payload_boundary() {
         // Exactly filling the buffer is complete; one byte short is incomplete.
         let buf = [0x03u8, 1, 2, 3];
-        let mut cursor = Copying(&buf);
         assert!(matches!(
-            find_frame(&mut cursor, 0).unwrap().1,
+            find_frame(&buf, 0).unwrap().1,
             FrameInfo::Complete { data_len: 3, .. }
         ));
 
         let buf = [0x03u8, 1, 2];
-        let mut cursor = Copying(&buf);
         assert!(matches!(
-            find_frame(&mut cursor, 0).unwrap().1,
+            find_frame(&buf, 0).unwrap().1,
             FrameInfo::Incomplete {
                 prefix_len: 2,
                 total_len: 3,
@@ -789,32 +777,28 @@ mod tests {
 
     #[test]
     fn test_find_frame_empty_buffer() {
-        let mut cursor = Copying(&[]);
-        assert!(matches!(find_frame(&mut cursor, 0), Err(Error::Codec(_))));
+        assert!(matches!(find_frame(&[], 0), Err(Error::Codec(_))));
     }
 
     #[test]
     fn test_find_frame_truncated_varint() {
         // A lone continuation byte is an incomplete varint, not a frame.
         let buf = [0x80u8];
-        let mut cursor = Copying(&buf);
-        assert!(matches!(find_frame(&mut cursor, 0), Err(Error::Codec(_))));
+        assert!(matches!(find_frame(&buf, 0), Err(Error::Codec(_))));
     }
 
     #[test]
     fn test_find_frame_varint_exceeds_u32() {
         // 5-byte varint encoding a value larger than u32::MAX.
         let buf = [0xFFu8, 0xFF, 0xFF, 0xFF, 0x7F];
-        let mut cursor = Copying(&buf);
-        assert!(matches!(find_frame(&mut cursor, 0), Err(Error::Codec(_))));
+        assert!(matches!(find_frame(&buf, 0), Err(Error::Codec(_))));
     }
 
     #[test]
     fn test_find_frame_offset_overflow() {
         let buf = frame(None, &42u64);
-        let mut cursor = Copying(&buf);
         assert!(matches!(
-            find_frame(&mut cursor, u64::MAX),
+            find_frame(&buf, u64::MAX),
             Err(Error::OffsetOverflow)
         ));
     }

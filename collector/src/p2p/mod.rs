@@ -1,4 +1,23 @@
 //! Implementation of a [commonware_p2p]-optimized `collector`.
+//!
+//! # Message Sizes
+//!
+//! ```text
+//! Request, sent on the requests channel:
+//! +------------------------+
+//! | request (encoded size) |
+//! +------------------------+
+//!
+//! Response, sent on the responses channel:
+//! +-------------------------+
+//! | response (encoded size) |
+//! +-------------------------+
+//! ```
+//!
+//! Each payload the engine sends is the encoding of one request from its [Mailbox] or one response
+//! from its [Handler]. The engine adds no framing, so each request and each response must fit the
+//! configured `max_message_size` of the network that carries its channel, less the subchannel
+//! prefix on a [Muxer](commonware_p2p::utils::mux::Muxer) subchannel.
 
 use crate::{Handler, Monitor};
 
@@ -941,7 +960,7 @@ mod tests {
                 "at least one peer engine task should be running"
             );
 
-            // Verify network is functional - send a request and expect a response
+            // Verify the network is functional by sending a request and expecting a response
             let request = Request { id: 1, data: 1 };
             assert_eq!(
                 mailboxes[0].send(Recipients::One(peers[1].clone()), request.clone()),

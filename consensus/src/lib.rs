@@ -12,7 +12,7 @@
 use commonware_macros::stability_scope;
 
 stability_scope!(BETA {
-    use commonware_codec::Encode;
+    use commonware_codec::{Encode, Read};
     use commonware_cryptography::{Digestible, Digested};
     use std::sync::Arc;
 
@@ -113,6 +113,13 @@ stability_scope!(BETA {
             self.inner().context()
         }
     }
+
+    /// A block that bounds its encoded size under a codec configuration.
+    pub trait BoundedBlock: Block + Read {
+        /// Returns an upper bound on the encoded size of any block [`Read::read_cfg`] admits under
+        /// `cfg`, using each encoded type's maximum width.
+        fn max_encode_size(cfg: &Self::Cfg) -> usize;
+    }
 });
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     use commonware_actor::Feedback;
@@ -171,6 +178,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 
         /// Verify the payload is valid.
         ///
+        /// Honest participants must agree on validity for the same `(context, payload)`.
+        ///
         /// This request is single-shot for the given `(context, payload)`. Once the returned
         /// channel resolves or closes, consensus treats verification as concluded and will not
         /// retry the same request. After a restart, however, consensus may request verification
@@ -185,6 +194,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Closing the channel is also terminal for this request and should be reserved for cases
         /// where verification cannot ever produce a verdict anymore (for example, shutdown), not
         /// for temporary inability to decide.
+        ///
+        /// Consensus may drop the receiver before a verdict arrives, once it has no use for one.
         ///
         /// The future-context requirement on [`Self::propose`] applies here
         /// too: the context's dependencies may not be resolvable locally yet.
@@ -301,12 +312,18 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             }
         }
 
-        /// Determine whether a verified payload is safe to commit.
+        /// Determine whether a notarized payload is safe to commit.
         ///
         /// The round parameter identifies which consensus round is being certified, allowing
         /// applications to associate certification with the correct verification context. The
-        /// same payload may appear in multiple rounds, so implementations must key any state
-        /// on `(round, payload)` rather than `payload` alone.
+        /// same payload may appear in multiple rounds, and a round may carry conflicting
+        /// payloads, so implementations must key any state on `(round, payload)` rather than on
+        /// either alone.
+        ///
+        /// Certification can be requested while [`Automaton::verify`] for the same payload is
+        /// still outstanding, after consensus has dropped that request's receiver, or for a
+        /// payload this participant was never asked to verify. Once certification is requested
+        /// for a round, [`Automaton::verify`] is not requested for that round until a restart.
         ///
         /// Like [`Automaton::verify`], payloads produced by [`Automaton::propose`] are certifiable-by-construction.
         /// Also like [`Automaton::verify`], certification is single-shot for the given
@@ -513,6 +530,10 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// pending until the implementation can either prove the block valid, prove it invalid,
         /// or the consensus engine cancels the request. Abstaining is not represented by a
         /// special return value.
+        ///
+        /// The consensus engine may have several calls outstanding, including calls for
+        /// conflicting blocks that an equivocating proposer built for the same context. Each call
+        /// gets its own verdict and must not cancel or replace an earlier one.
         ///
         /// This future may be cancelled before it completes. Implementations must be
         /// cancellation-safe.

@@ -288,7 +288,7 @@ pub enum CommitmentFallback {
     /// certification of a notarized candidate. The round might not be notarized yet, as with
     /// an uncertified parent. Peers serve the request only once they hold its notarization, so
     /// until then only local availability completes it. An unresolved request remains eligible
-    /// until the processed finalized-round floor reaches its round. Do not infer height from the
+    /// until the processed round floor covers its round. Do not infer height from the
     /// finalized tip or another block: proposals may build on a parent that is not finalized
     /// locally yet, and an unverified child may lie about its height.
     ///
@@ -788,7 +788,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     ///
     /// The height must be covered by both the epocher and the provider. If the
     /// epocher cannot map the height to an epoch, or the provider cannot supply
-    /// a scheme for that epoch, the hint is silently dropped.
+    /// a scheme for that epoch, any response to the hinted fetch is ignored.
     pub fn hint_finalized(&self, height: Height, targets: NonEmptyVec<S::PublicKey>) {
         let _ = self.sender.enqueue(Message::HintFinalized {
             span: info_span!("marshal.mailbox.hint_finalized", height = height.traced()),

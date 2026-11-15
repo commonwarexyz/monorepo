@@ -2,8 +2,8 @@ use super::{COMMIT_CONTEXT, Operation, SET_CONTEXT};
 use crate::{
     merkle::Family,
     qmdb::{
-        any::{FixedValue, value::FixedEncoding},
         operation::{commit_fixed_operation_size, read_commit_fixed, write_commit_fixed},
+        value::{FixedEncoding, FixedValue},
     },
 };
 use commonware_codec::{

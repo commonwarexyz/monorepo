@@ -7,10 +7,10 @@
 //!
 //! `usize` is the lone exception: since most values refer to a length or size
 //! of an object in memory, values are biased towards smaller values. Therefore,
-//! it uses variable-length (varint) encoding to save space.  This means that
-//! it **does not implement [FixedSize]**.  When decoding a `usize`, callers
-//! must supply a [RangeCfg] to bound the allowable value — this protects
-//! against denial-of-service attacks that would allocate oversized buffers.
+//! it uses variable-length (varint) encoding to save space. This means that it
+//! **does not implement [FixedSize]**. When decoding a `usize`, callers must
+//! supply a [RangeCfg] to bound the allowable value. This protects against
+//! denial-of-service attacks that would allocate oversized buffers.
 //!
 //! ## Safety & portability
 //! * `usize` is restricted to values that fit in a `u32` to keep the on-wire
@@ -19,7 +19,7 @@
 //!   endian ambiguity.
 
 use crate::{
-    Buf, BufsMut, EncodeSize, Error, FixedSize, RangeCfg, Read, ReadExt, Write,
+    Buf, BufsMut, EncodeSize, Error, FixedSize, MaxEncodeSize, RangeCfg, Read, ReadExt, Write,
     util::{at_least, at_least_items, read_fixed_vec},
     varint::UInt,
 };
@@ -280,6 +280,10 @@ impl<T: EncodeSize> EncodeSize for Option<T> {
         self.as_ref()
             .map_or(1, |inner| 1 + inner.encode_inline_size())
     }
+}
+
+impl<T: MaxEncodeSize> MaxEncodeSize for Option<T> {
+    const MAX_ENCODE_SIZE: usize = bool::SIZE + T::MAX_ENCODE_SIZE;
 }
 
 impl<T: Read> Read for Option<T> {
@@ -623,6 +627,7 @@ mod tests {
         let some = Some(42u32);
         assert_eq!(some.encode_size(), 1 + 4);
         assert_eq!(some.encode().len(), 1 + 4);
+        assert_eq!(Option::<u32>::MAX_ENCODE_SIZE, 1 + 4);
         let none: Option<u32> = None;
         assert_eq!(none.encode_size(), 1);
         assert_eq!(none.encode().len(), 1);

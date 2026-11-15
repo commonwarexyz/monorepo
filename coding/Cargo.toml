@@ -29,6 +29,7 @@ bench = false
 
 [dev-dependencies]
 arbitrary.workspace = true
+commonware-allocator = { workspace = true, features = ["mimalloc"] }
 commonware-conformance.workspace = true
 commonware-invariants.workspace = true
 commonware-parallel = { workspace = true, features = ["test-utils"] }

@@ -3,6 +3,23 @@ description: Enable swap so memory pressure can spill to disk.
 runs:
   using: composite
   steps:
+    # Cache the swapspace package per Ubuntu release and architecture. Once a run on main saves the
+    # entry, pull requests and the merge queue restore it and install the package without a package
+    # mirror.
+    - name: Identify swapspace package (Linux)
+      if: runner.os == 'Linux'
+      id: swapspace
+      shell: bash
+      run: |
+        . /etc/os-release
+        echo "key=swapspace-${VERSION_ID}-$(dpkg --print-architecture)" >> "$GITHUB_OUTPUT"
+    - name: Restore swapspace package (Linux)
+      if: runner.os == 'Linux'
+      uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+      with:
+        path: ${{ runner.temp }}/swapspace
+        key: ${{ steps.swapspace.outputs.key }}
+
     # Grow swap on demand on the same volume used for Cargo builds.
     - name: Configure swap (Linux)
       if: runner.os == 'Linux'
@@ -10,12 +27,26 @@ runs:
       run: |
         echo 1 | sudo tee /sys/module/zswap/parameters/enabled
         cat /sys/module/zswap/parameters/enabled
-        sudo apt-get update
-        sudo apt-get install --yes --no-install-recommends swapspace
-        sudo install -d -m 700 /mnt/swapspace
-        echo 'swappath="/mnt/swapspace"' | sudo tee /etc/swapspace.conf
-        sudo systemctl restart swapspace
-        sudo systemctl is-active swapspace
+        # Download the package only when the cache did not restore it. The cache saves whatever the
+        # directory holds, so the step creates it only by moving a complete download into place.
+        package="$RUNNER_TEMP/swapspace"
+        if [ ! -d "$package" ]; then
+          download="$(mktemp -d)"
+          if sudo timeout 60 apt-get update &&
+            (cd "$download" && timeout 60 apt-get download swapspace); then
+            mv "$download" "$package"
+          fi
+        fi
+        # A job needs dynamic swap only under memory pressure, so it continues without swapspace
+        # when the package cannot be restored, downloaded, or installed.
+        if [ -d "$package" ] && sudo dpkg --install "$package"/swapspace_*.deb; then
+          sudo install -d -m 700 /mnt/swapspace
+          echo 'swappath="/mnt/swapspace"' | sudo tee /etc/swapspace.conf
+          sudo systemctl restart swapspace
+          sudo systemctl is-active swapspace
+        else
+          echo "::warning::Could not install swapspace. Continuing without dynamic swap."
+        fi
         sudo sysctl -w vm.swappiness=60
         sudo swapon --show
         free -h

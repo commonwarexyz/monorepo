@@ -78,9 +78,12 @@ use commonware_codec::Encode;
 use commonware_cryptography::{Crc32, Hasher};
 use commonware_formatting::hex;
 use commonware_macros::select;
-use commonware_parallel::{Rayon, ThreadPool};
+use commonware_parallel::{
+    Rayon, ThreadPool,
+    rayon::{ThreadPoolBuildError, ThreadPoolBuilder},
+};
 use commonware_utils::{
-    Cached, SystemTimeExt,
+    Cached, NZUsize, SystemTimeExt,
     sync::{Mutex, RwLock},
     time::SYSTEM_TIME_PRECISION,
 };
@@ -94,7 +97,6 @@ use governor::clock::{Clock as GClock, ReasonablyRealtime};
 #[cfg(feature = "external")]
 use pin_project::pin_project;
 use rand::{CryptoRng, Rng, SeedableRng, TryCryptoRng, TryRng, prelude::SliceRandom, rngs::StdRng};
-use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use std::{
     collections::{BTreeMap, BinaryHeap, HashMap},
     convert::Infallible,
@@ -1208,8 +1210,7 @@ fn shared_thread_pool() -> Result<ThreadPool, ThreadPoolBuildError> {
     let pool = Cached::take(
         &THREAD_POOL,
         || {
-            ThreadPoolBuilder::new()
-                .num_threads(1)
+            ThreadPoolBuilder::new(NZUsize!(1))
                 .use_current_thread()
                 .build()
                 .map(Arc::new)
