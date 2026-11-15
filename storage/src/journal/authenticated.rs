@@ -1206,7 +1206,10 @@ where
     /// History starts at the first item only while the frontier lies inside the first operation
     /// blob. Operations in a blob wholly below the frontier are pruned history whether or not
     /// storage has deleted that blob, so the open selects and rejects as it does once the blob is
-    /// deleted.
+    /// deleted. One store is the exception: a full first blob with no successor in storage and the
+    /// frontier at its end, which a prune leaves when it fails to create that successor. History
+    /// then still starts at the first item, so an open capped below the frontier that matches
+    /// nothing empties the journal.
     #[boxed]
     pub async fn init_at_most(
         context: E,
@@ -1422,6 +1425,10 @@ pub trait BackingRecovery: Send + Sync + Sized {
     /// `position`, the newest blob excepted. It is the first position of the blob that holds
     /// `position`, or of the newest blob in storage when `position` lies past it, and at least
     /// the start of [Self::bounds]. Blobs the opening cap excludes count as stored.
+    ///
+    /// The newest blob is excepted even when it is full and storage holds no successor, as after a
+    /// prune that wrote its frontier at that blob's end and then failed to create the successor.
+    /// A position at that end then maps to the blob's first position.
     fn retained_start_at(&self, position: u64) -> u64;
 
     /// Read a retained item for initialization validation.
@@ -6591,5 +6598,414 @@ mod tests {
     #[test_traced]
     fn test_destroy_reports_pending_removal_failure_mmb() {
         destroy_reports_pending_removal_failure::<mmb::Family>();
+    }
+
+    /// Storage that parks the blob opens of the partitions it defers, so a blob's creation can stay
+    /// in flight.
+    type OpenParkedContext = commonware_runtime::mocks::DeferredOpenContext<Context>;
+
+    /// The sorted indices of the blobs in `partition`.
+    async fn blob_indices(context: &Context, partition: &str) -> Vec<u64> {
+        let mut blobs: Vec<u64> = context
+            .scan(partition)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|name| u64::from_be_bytes(name.try_into().unwrap()))
+            .collect();
+        blobs.sort_unstable();
+        blobs
+    }
+
+    /// A crash can leave the operation journal with a sealed blob and no successor, since a
+    /// rollover seals the full blob before its successor is created. Whether or not the successor
+    /// exists at the crash, the reopened journal holds every synced operation and the same root
+    /// beside a frontier still at genesis.
+    #[test_traced]
+    fn test_crash_before_successor_exists() {
+        type Ops = ContiguousJournal<OpenParkedContext, TestOp<mmr::Family>>;
+        let suffix = "pending_successor";
+        let partition = format!("journal-{suffix}-blobs");
+        for created in [false, true] {
+            let executor = deterministic::Runner::default();
+            let (root, checkpoint) = executor.start_and_recover({
+                let partition = partition.clone();
+                move |context| async move {
+                    let (opening, opens) = OpenParkedContext::new(context.child("first"));
+                    let mut journal = Journal::<mmr::Family, _, Ops, Sha256, Sequential>::new(
+                        opening,
+                        merkle_config(suffix),
+                        journal_config(suffix),
+                        |op: &TestOp<mmr::Family>| op.is_commit(),
+                        ForwardFold,
+                    )
+                    .await
+                    .unwrap();
+
+                    // Seven operations fill the first blob. Polling the sync handle makes them
+                    // durable and starts the successor's creation, which stays parked.
+                    opens.defer(&partition);
+                    for i in 0..6 {
+                        (journal, _) = journal.append(&create_operation(i)).await.unwrap();
+                    }
+                    (journal, _) = journal
+                        .append(&TestOp::Commit(None, Location::new(0)))
+                        .await
+                        .unwrap();
+                    let mut handle;
+                    (journal, handle) = journal.start_sync().await.unwrap();
+                    assert!((&mut handle).now_or_never().is_none());
+                    assert_eq!(opens.parked(&partition), 1);
+                    let root = journal.root(0).unwrap();
+
+                    // The successor exists at the crash only when `created` is set.
+                    if created {
+                        drop(context.open(&partition, &1u64.to_be_bytes()).await.unwrap());
+                    }
+                    let expected: &[u64] = if created { &[0, 1] } else { &[0] };
+                    assert_eq!(blob_indices(&context, &partition).await, expected);
+                    drop(journal);
+                    root
+                }
+            });
+
+            deterministic::Runner::from(checkpoint).start(|context| async move {
+                let mut journal =
+                    create_empty_journal::<mmr::Family>(context.child("second"), suffix).await;
+                assert_eq!(journal.bounds(), 0..7, "created={created}");
+                assert_eq!(journal.root(0).unwrap(), root, "created={created}");
+                assert_eq!(journal.frontier.location(), Location::new(0));
+                for i in 0..6 {
+                    assert_eq!(journal.read(i.into()).await.unwrap(), create_operation(i));
+                }
+
+                // The reopened journal appends into the successor and stays durable.
+                let location;
+                (journal, location) = journal.append(&create_operation(7)).await.unwrap();
+                assert_eq!(location, Location::new(7));
+                journal = journal.sync().await.unwrap();
+                journal.destroy().await.unwrap();
+            });
+        }
+    }
+
+    /// How a store of seven operations in one full blob ends.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum FullBlob {
+        /// A sync made the blob durable, and the successor's creation failed. No prune ran.
+        Synced,
+        /// A prune to 7 then wrote the frontier at the blob's end, found the successor's creation
+        /// failed, and stopped before releasing the blob.
+        PrunedWithoutSuccessor,
+        /// A prune to 7 then wrote the frontier, created the successor and released the blob,
+        /// whose deletion never ran.
+        PrunedWithSuccessor,
+    }
+
+    /// Store seven operations, the last a commit, in the first blob of a journal over
+    /// `journal_cfg` and leave the store as `image` describes. Returns the root.
+    async fn store_full_blob<F, C>(
+        context: &Context,
+        suffix: &str,
+        journal_cfg: C::Config,
+        partitions: &[String],
+        image: FullBlob,
+    ) -> Digest
+    where
+        F: Family + PartialEq,
+        C: Backing<ParkedContext, Item = TestOp<F>>,
+    {
+        let (parked, _) = ParkedContext::new(context.child("first"));
+        let mut journal = ParkedJournal::<F, C>::new(
+            parked,
+            merkle_config(suffix),
+            journal_cfg,
+            |op: &TestOp<F>| op.is_commit(),
+            ForwardFold,
+        )
+        .await
+        .unwrap();
+        for op in tagged_ops::<F>(7, &[(6, 0)]) {
+            (journal, _) = journal.append(&op).await.unwrap();
+        }
+        let root = journal.root(0).unwrap();
+
+        // Storage fails every creation unless the prune is to create the successor. The sync does
+        // not report a failed creation.
+        if image != FullBlob::PrunedWithSuccessor {
+            context.storage_fault_config().write().open_rate = Some(probability!(1.0));
+        }
+        journal = journal.sync().await.unwrap();
+        let successor = match image {
+            FullBlob::Synced => false,
+            FullBlob::PrunedWithoutSuccessor => {
+                let result = journal.prune(Location::new(7)).await;
+                assert!(
+                    matches!(result, Err(Error::Journal(JournalError::Runtime(_)))),
+                    "{result:?}"
+                );
+                false
+            }
+            FullBlob::PrunedWithSuccessor => {
+                let (_, boundary) = journal.prune(Location::new(7)).await.unwrap();
+                assert_eq!(boundary, Location::new(7));
+                true
+            }
+        };
+        *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+        let expected: &[u64] = if successor { &[0, 1] } else { &[0] };
+        for partition in partitions {
+            assert_eq!(
+                blob_indices(context, partition).await,
+                expected,
+                "{partition}"
+            );
+        }
+        root
+    }
+
+    /// An append that fills a blob leaves the blob's successor to be created later, so the newest
+    /// stored blob can be full with no successor. Storage fails every creation here, so a sync
+    /// makes the seven operations of the first blob durable and leaves that state. When `pruned`
+    /// is set, a prune to 7 then writes the frontier at the blob's end and fails before it
+    /// releases the blob.
+    ///
+    /// The full newest blob is never released history: recovery's retained start stays at its
+    /// first operation. The reopen creates the successor. Without the frontier the journal
+    /// reopens with every operation and the same root, and the next prune releases the blob. With
+    /// it the reopen is fully pruned at 7, as after a prune interrupted before its release, and
+    /// releases the blob itself.
+    fn full_newest_blob_without_successor_is_retained<F, C>(
+        journal_cfg: C::Config,
+        partitions: Vec<String>,
+    ) where
+        F: Family + PartialEq,
+        C: Backing<ParkedContext, Item = TestOp<F>>,
+    {
+        let suffix = "full-newest-blob";
+        let commit: fn(&TestOp<F>) -> bool = |op| op.is_commit();
+        let ops = tagged_ops::<F>(7, &[(6, 0)]);
+        for pruned in [false, true] {
+            let image = if pruned {
+                FullBlob::PrunedWithoutSuccessor
+            } else {
+                FullBlob::Synced
+            };
+            let executor = deterministic::Runner::default();
+            let (root, checkpoint) = executor.start_and_recover({
+                let (journal_cfg, partitions) = (journal_cfg.clone(), partitions.clone());
+                move |context| async move {
+                    store_full_blob::<F, C>(&context, suffix, journal_cfg, &partitions, image).await
+                }
+            });
+
+            let (journal_cfg, partitions, ops) =
+                (journal_cfg.clone(), partitions.clone(), ops.clone());
+            deterministic::Runner::from(checkpoint).start(move |context| async move {
+                let (recovering, _) = ParkedContext::new(context.child("recover"));
+                let recovery = C::recover(recovering, journal_cfg.clone(), None)
+                    .await
+                    .unwrap();
+                assert_eq!(recovery.bounds(), 0..7, "pruned={pruned}");
+                assert_eq!(recovery.retained_start_at(7), 0, "pruned={pruned}");
+                drop(recovery);
+
+                // An open bounded at the frontier is rejected, as after any prune to 7.
+                if pruned {
+                    let (opening, _) = ParkedContext::new(context.child("bounded"));
+                    let opened =
+                        open_outcome::<F, C>(opening, suffix, journal_cfg.clone(), Some(7), commit)
+                            .await;
+                    assert!(Expected::ItemPruned.matches(&opened), "{opened:?}");
+                }
+
+                // The reopen creates the successor and keeps the root.
+                let (parked, removes) = ParkedContext::new(context.child("open"));
+                let mut journal = ParkedJournal::<F, C>::new(
+                    parked,
+                    merkle_config(suffix),
+                    journal_cfg,
+                    commit,
+                    ForwardFold,
+                )
+                .await
+                .unwrap();
+                assert_eq!(journal.root(0).unwrap(), root, "pruned={pruned}");
+                for partition in &partitions {
+                    assert_eq!(
+                        blob_indices(&context, partition).await,
+                        [0, 1],
+                        "{partition}"
+                    );
+                }
+                if !pruned {
+                    assert_eq!(journal.bounds(), 0..7);
+                    for (position, op) in ops.iter().enumerate() {
+                        assert_eq!(journal.read(position as u64).await.unwrap(), *op);
+                    }
+                    assert!(removes.is_empty());
+                    let boundary;
+                    (journal, boundary) = journal.prune(Location::new(7)).await.unwrap();
+                    assert_eq!(boundary, Location::new(7));
+                }
+
+                // The full blob is released, and the journal appends into its successor.
+                assert_eq!(journal.bounds(), 7..7, "pruned={pruned}");
+                assert_eq!(journal.frontier.location(), Location::new(7));
+                assert_eq!(removes.len(), 1, "pruned={pruned}");
+                removes.release(&context).await;
+                journal.wait_for_removals().await.unwrap();
+                for partition in &partitions {
+                    assert_eq!(blob_indices(&context, partition).await, [1], "{partition}");
+                }
+                let (journal, location) = journal.append(&create_operation(7)).await.unwrap();
+                assert_eq!(location, Location::new(7));
+                journal.destroy().await.unwrap();
+            });
+        }
+    }
+
+    #[test_traced]
+    fn test_full_newest_blob_without_successor_is_retained_fixed_mmr() {
+        full_newest_blob_without_successor_is_retained::<
+            mmr::Family,
+            ContiguousJournal<ParkedContext, TestOp<mmr::Family>>,
+        >(
+            journal_config("full-newest-blob"),
+            vec!["journal-full-newest-blob-blobs".into()],
+        );
+    }
+
+    #[test_traced]
+    fn test_full_newest_blob_without_successor_is_retained_fixed_mmb() {
+        full_newest_blob_without_successor_is_retained::<
+            mmb::Family,
+            ContiguousJournal<ParkedContext, TestOp<mmb::Family>>,
+        >(
+            journal_config("full-newest-blob"),
+            vec!["journal-full-newest-blob-blobs".into()],
+        );
+    }
+
+    #[test_traced]
+    fn test_full_newest_blob_without_successor_is_retained_variable_mmr() {
+        full_newest_blob_without_successor_is_retained::<
+            mmr::Family,
+            VariableJournal<ParkedContext, TestOp<mmr::Family>>,
+        >(
+            variable_journal_config("full-newest-blob"),
+            vec![
+                "journal-full-newest-blob_data".into(),
+                "journal-full-newest-blob_offsets-blobs".into(),
+            ],
+        );
+    }
+
+    #[test_traced]
+    fn test_full_newest_blob_without_successor_is_retained_variable_mmb() {
+        full_newest_blob_without_successor_is_retained::<
+            mmb::Family,
+            VariableJournal<ParkedContext, TestOp<mmb::Family>>,
+        >(
+            variable_journal_config("full-newest-blob"),
+            vec![
+                "journal-full-newest-blob_data".into(),
+                "journal-full-newest-blob_offsets-blobs".into(),
+            ],
+        );
+    }
+
+    /// A frontier at the end of a full first blob, written by a prune to 7. Once storage holds the
+    /// blob's successor, the blob's operations are pruned history: an open capped below the
+    /// frontier that matches no operation is rejected as pruned and leaves the store to reopen
+    /// unchanged. While storage holds the full blob without its successor, history still starts
+    /// at the first operation (see [BackingRecovery::retained_start_at]), so the same open
+    /// empties the journal and discards the frontier.
+    fn capped_open_below_full_blob_frontier_depends_on_successor<C>(
+        journal_cfg: C::Config,
+        partitions: Vec<String>,
+    ) where
+        C: Backing<ParkedContext, Item = TestOp<mmr::Family>>,
+    {
+        let suffix = "full-blob-frontier";
+        let commit: fn(&TestOp<mmr::Family>) -> bool = |op| op.is_commit();
+        let images = [
+            FullBlob::PrunedWithoutSuccessor,
+            FullBlob::PrunedWithSuccessor,
+        ];
+        for (image, cap) in images
+            .into_iter()
+            .flat_map(|image| [(image, 0), (image, 3)])
+        {
+            let executor = deterministic::Runner::default();
+            let (root, checkpoint) = executor.start_and_recover({
+                let (journal_cfg, partitions) = (journal_cfg.clone(), partitions.clone());
+                move |context| async move {
+                    store_full_blob::<mmr::Family, C>(
+                        &context,
+                        suffix,
+                        journal_cfg,
+                        &partitions,
+                        image,
+                    )
+                    .await
+                }
+            });
+
+            let journal_cfg = journal_cfg.clone();
+            deterministic::Runner::from(checkpoint).start(move |context| async move {
+                let (opening, _) = ParkedContext::new(context.child("capped"));
+                let capped = open_outcome::<mmr::Family, C>(
+                    opening,
+                    suffix,
+                    journal_cfg.clone(),
+                    Some(cap),
+                    no_op::<mmr::Family>,
+                )
+                .await;
+                let (opening, _) = ParkedContext::new(context.child("unbounded"));
+                let reopened =
+                    open_outcome::<mmr::Family, C>(opening, suffix, journal_cfg, None, commit)
+                        .await
+                        .unwrap();
+                if image == FullBlob::PrunedWithSuccessor {
+                    assert!(
+                        Expected::ItemPruned.matches(&capped),
+                        "{image:?}, cap {cap}: {capped:?}"
+                    );
+                    assert_eq!((reopened.0, reopened.1), (7, root), "{image:?}, cap {cap}");
+                } else {
+                    assert!(
+                        Expected::End(0).matches(&capped),
+                        "{image:?}, cap {cap}: {capped:?}"
+                    );
+                    assert_eq!(reopened.0, 0, "{image:?}, cap {cap}");
+                    assert_ne!(reopened.1, root, "{image:?}, cap {cap}");
+                }
+            });
+        }
+    }
+
+    #[test_traced]
+    fn test_capped_open_below_full_blob_frontier_depends_on_successor_fixed() {
+        capped_open_below_full_blob_frontier_depends_on_successor::<
+            ContiguousJournal<ParkedContext, TestOp<mmr::Family>>,
+        >(
+            journal_config("full-blob-frontier"),
+            vec!["journal-full-blob-frontier-blobs".into()],
+        );
+    }
+
+    #[test_traced]
+    fn test_capped_open_below_full_blob_frontier_depends_on_successor_variable() {
+        capped_open_below_full_blob_frontier_depends_on_successor::<
+            VariableJournal<ParkedContext, TestOp<mmr::Family>>,
+        >(
+            variable_journal_config("full-blob-frontier"),
+            vec![
+                "journal-full-blob-frontier_data".into(),
+                "journal-full-blob-frontier_offsets-blobs".into(),
+            ],
+        );
     }
 }

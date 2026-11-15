@@ -1089,9 +1089,10 @@ mod tests {
                 NZU64!(7),
             );
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
-            // Each batch's floor is the previous append, so the prune below crosses a blob.
+            // Each batch's floor is the previous append, so the prune below crosses a blob. Nine
+            // batches leave the tail blob partly full, so start_sync has a tail to sync.
             let mut floor = Location::new(0);
-            for i in 0..10 {
+            for i in 0..9 {
                 (db, floor) =
                     drive_pending_syncs(&pending, apply_append(db, U64::new(i), floor)).await;
             }

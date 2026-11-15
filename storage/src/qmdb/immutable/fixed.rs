@@ -683,8 +683,9 @@ mod tests {
                 NZU64!(7),
             );
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
-            // Each batch raises the floor to its own key, so the prune below crosses a blob.
-            for i in 0..10u8 {
+            // Each batch raises the floor to its own key, so the prune below crosses a blob. Nine
+            // batches leave the tail blob partly full, so start_sync has a tail to sync.
+            for i in 0..9u8 {
                 let floor = db.bounds().end;
                 let set = apply_set(db, Sha256::fill(i), Sha256::fill(i + 100), floor);
                 db = drive_pending_syncs(&pending, set).await;
