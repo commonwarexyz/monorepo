@@ -554,6 +554,18 @@ fn fuzz(input: FuzzInput) {
                         };
                         let result = drive_pending_syncs(&pending, archive.prune(min)).await;
                         *fault_config.write() = deterministic::FaultConfig::default();
+
+                        // The deterministic storage deletes inline, so the released sections'
+                        // deletion has settled when `prune` returns. A deletion failure is fatal
+                        // to the archive and leaves the same image as a prune interrupted
+                        // between section removals, so it takes the failed-prune arm.
+                        let result = match result {
+                            Ok(next) => {
+                                let settled = next.wait_for_removals().await;
+                                settled.map(|()| next)
+                            }
+                            Err(err) => Err(err),
+                        };
                         match result {
                             Ok(next) => archive = next,
                             Err(_) => {
