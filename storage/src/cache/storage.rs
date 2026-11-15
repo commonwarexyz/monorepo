@@ -8,7 +8,7 @@ use crate::{
 };
 use commonware_codec::{Buf, CodecShared, EncodeSize, Read, ReadExt, Write, varint::UInt};
 use commonware_runtime::{
-    BufMut, Metrics, ReadOptions, Storage,
+    BufMut, Metrics, ReadOptions, Removal, Storage,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -192,7 +192,9 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
             && min <= oldest_allowed
         {
             // We don't return an error in this case because the caller
-            // shouldn't be burdened with converting `min` to some section.
+            // shouldn't be burdened with converting `min` to some section. A deletion failure
+            // still surfaces.
+            self.journal.check_removals()?;
             return Ok(self);
         }
         debug!(min, "pruning cache");
@@ -333,10 +335,24 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
     /// Prune [Cache] to the provided `min`.
     ///
     /// If this is called with a min lower than the last pruned, nothing
-    /// will happen.
+    /// will happen. Deletion of the pruned sections may continue after this call returns, on the
+    /// terms of [Mutable::prune](crate::journal::contiguous::Mutable::prune). A deletion
+    /// failure surfaces from [Self::removals] and from the next prune (including one that changes
+    /// nothing), [Self::sync], or [Self::destroy].
     pub async fn prune(mut self, min: u64) -> Result<Self, Error> {
         self.0 = self.0.prune(min).await?;
         Ok(self)
+    }
+
+    /// A [Removal] that completes once every section released by an earlier prune is deleted.
+    pub fn removals(&self) -> Removal {
+        self.0.journal.removals()
+    }
+
+    /// Wait until every section released by an earlier prune is deleted, surfacing a deletion
+    /// failure.
+    pub async fn wait_for_removals(&self) -> Result<(), Error> {
+        self.0.journal.wait_for_removals().await
     }
 
     /// Store an item in the [Cache].

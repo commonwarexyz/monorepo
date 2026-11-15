@@ -59,7 +59,7 @@ use crate::{
     metadata::{Config as MetadataConfig, Metadata},
 };
 use commonware_codec::{Codec, CodecFixedShared, CodecShared};
-use commonware_runtime::{Handle, ReadOptions};
+use commonware_runtime::{Handle, ReadOptions, Removal};
 use commonware_utils::sequence::U64 as SectionKey;
 use futures::{FutureExt as _, future::try_join};
 use std::{
@@ -745,12 +745,19 @@ impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
         Ok(self)
     }
 
-    /// Prune both journals. Returns true if any sections were pruned.
+    /// Prune both journals. Returns true if any sections were pruned. Deletion of the pruned
+    /// sections may continue after this call returns, on the terms of
+    /// [Mutable::prune](crate::journal::contiguous::Mutable::prune). A deletion failure
+    /// surfaces from [Self::removals] and from the next prune, [Self::sync], [Self::start_sync],
+    /// [Self::sync_all], or [Self::destroy].
     ///
-    /// Prunes index first, then glob. This order ensures crash safety:
-    /// - If crash after index prune but before glob: orphan data in glob (acceptable)
-    /// - If crash before index prune: no change, retry works
+    /// Index sections are deleted before glob sections, in one submission that a failure stops.
+    /// This order ensures crash safety:
+    /// - If crash after index deletion but before glob: orphan data in glob (acceptable)
+    /// - If crash before index deletion: no change, retry works
     pub async fn prune(mut self, min: u64) -> Result<(Self, bool), Error> {
+        self.index.check_removals()?;
+
         // Remove and durably sync tracked floors before their section names can be deleted and
         // later reused.
         if let Some(mut tracking) = self.tracking.take() {
@@ -768,11 +775,41 @@ impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
             self.tracking = Some(tracking);
         }
 
-        let index_pruned;
-        (self.index, index_pruned) = self.index.prune(min).await?;
-        let value_pruned;
-        (self.values, value_pruned) = self.values.prune(min).await?;
-        Ok((self, index_pruned || value_pruned))
+        // Submit both halves in one batch. The index journal records its completion, which every
+        // removal check and wait of this journal reads.
+        let (mut removals, value_removals);
+        (self.index, removals) = self.index.release(min).await?;
+        (self.values, value_removals) = self.values.release(min).await?;
+        removals.extend(value_removals);
+        let pruned = !removals.is_empty();
+        if pruned {
+            self.index.submit_removals(removals).await?;
+        }
+        Ok((self, pruned))
+    }
+
+    /// Like [Self::prune], also returning a [Removal] that completes once the released sections
+    /// are deleted.
+    pub async fn start_prune(self, min: u64) -> Result<(Self, bool, Removal), Error> {
+        let (journal, pruned) = self.prune(min).await?;
+        let removals = journal.removals();
+        Ok((journal, pruned, removals))
+    }
+
+    /// A [Removal] that completes once every section released by an earlier prune is deleted.
+    pub fn removals(&self) -> Removal {
+        self.index.removals()
+    }
+
+    /// Wait until every section released by an earlier prune is deleted, surfacing a deletion
+    /// failure.
+    pub async fn wait_for_removals(&self) -> Result<(), Error> {
+        self.index.wait_for_removals().await
+    }
+
+    /// Return the failure of a submitted deletion that already finished, without waiting.
+    pub(crate) fn check_removals(&self) -> Result<(), Error> {
+        self.index.check_removals()
     }
 
     /// Get index size for checkpoint.
@@ -816,8 +853,10 @@ impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
 
     /// Destroy all underlying storage.
     pub async fn destroy(mut self) -> Result<(), Error> {
-        // Remove tracked floors first so an interrupted destroy can only force conservative
-        // recovery of any pair data left behind.
+        // Report a failed deletion before changing anything. Then remove tracked floors first so
+        // an interrupted destroy can only force conservative recovery of any pair data left
+        // behind.
+        self.wait_for_removals().await?;
         if let Some(tracking) = self.tracking.take() {
             tracking.metadata.destroy().await?;
         }
@@ -963,13 +1002,14 @@ mod tests {
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        Blob as _, BufMut, Clock as _, Error as RError, Runner, Storage as _, Supervisor as _,
-        WriteOptions,
+        Blob as _, BufMut, Clock as _, Error as RError, Runner, Spawner as _, Storage as _,
+        Supervisor as _, WriteOptions,
         buffer::paged::{CacheRef, corrupt_page},
         deterministic,
         mocks::{
-            DeferredSync, DelayedSyncContext, MutationFaultContext, MutationFaults, PendingSyncs,
-            ReadGateContext, SyncFaultContext, drive_pending_syncs, next_pending_sync,
+            DeferredRemoveContext, DeferredSync, DelayedSyncContext, MutationFaultContext,
+            MutationFaults, PendingSyncs, ReadGateContext, SyncFaultContext, drive_pending_syncs,
+            next_pending_sync,
         },
     };
     use commonware_utils::{NZU16, NZUsize, Widen, probability};
@@ -3289,6 +3329,92 @@ mod tests {
         });
     }
 
+    /// Each prune deletes its index sections before its glob sections, after every earlier
+    /// prune's deletions.
+    #[test_traced]
+    fn test_value_removals_follow_index_removals() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (context, recordings) = commonware_runtime::mocks::RecordingContext::new(context);
+            let cfg = test_cfg();
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init_with_checkpoint(context.child("oversized"), cfg.clone(), (0, 0))
+                    .await
+                    .expect("Failed to init");
+            for section in 1u64..=3 {
+                let entry = TestEntry::new(section, 0, 0);
+                (oversized, _, _, _) = oversized
+                    .append(section, entry, &[section as u8; 16])
+                    .await
+                    .expect("Failed to append");
+                oversized = oversized.sync(section).await.expect("Failed to sync");
+            }
+            recordings.clear();
+            let (oversized, _) = oversized.prune(2).await.expect("Failed to prune");
+            let (oversized, _, removals) = oversized.start_prune(3).await.expect("Failed to prune");
+            removals.await.unwrap();
+
+            let removed = |partition: &String, section: u64| {
+                (partition.clone(), Some(section.to_be_bytes().to_vec()))
+            };
+            assert_eq!(
+                recordings.snapshot().removes,
+                vec![
+                    removed(&cfg.index_partition, 1),
+                    removed(&cfg.value_partition, 1),
+                    removed(&cfg.index_partition, 2),
+                    removed(&cfg.value_partition, 2),
+                ]
+            );
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    /// A destroy waiting on a combined deletion that fails reports it before removing anything.
+    #[test_traced]
+    fn test_destroy_reports_pending_removal_failure() {
+        deterministic::Runner::default().start(|context| async move {
+            let (context, removes) = DeferredRemoveContext::new(context);
+            let cfg = test_cfg();
+            let mut oversized = open_tracked(context.child("oversized"), cfg.clone())
+                .await
+                .unwrap();
+            for section in 1u64..=3 {
+                let entry = TestEntry::new(section, 0, 0);
+                (oversized, _, _, _) = oversized
+                    .append(section, entry, &[section as u8; 16])
+                    .await
+                    .unwrap();
+            }
+            let oversized = oversized.sync_all().await.unwrap();
+            let (oversized, pruned) = oversized.prune(3).await.unwrap();
+            assert!(pruned);
+            assert_eq!(removes.len(), 1);
+            let destroy = context.child("destroy").spawn(move |_| oversized.destroy());
+
+            // Fail the deletion once the destroy waits on it.
+            context.sleep(Duration::from_millis(10)).await;
+            context.inner.storage_fault_config().write().remove_rate = Some(probability!(1.0));
+            removes.release(&context.inner).await;
+            *context.inner.storage_fault_config().write() = deterministic::FaultConfig::default();
+            assert!(destroy.await.unwrap().is_err());
+
+            // Every section and the tracked floors survive.
+            let sections: Vec<_> = (1u64..=3)
+                .map(|section| section.to_be_bytes().to_vec())
+                .collect();
+            assert_eq!(
+                context.inner.scan(&cfg.index_partition).await.unwrap(),
+                sections
+            );
+            assert_eq!(
+                context.inner.scan(&cfg.value_partition).await.unwrap(),
+                sections
+            );
+            assert!(!context.inner.scan(MARKERS).await.unwrap().is_empty());
+        });
+    }
+
     /// Tracked recovery drops the entries of a section whose value section is gone while its index
     /// remains.
     #[test_traced]
@@ -5348,8 +5474,13 @@ mod tests {
                     journal = journal.sync_all().await.unwrap();
                     journal = journal.sync(Vec::<u64>::new()).await.unwrap();
 
+                    // Deletion of the pruned sections may continue after the prune returns, so
+                    // a refused removal surfaces from the wait.
                     faults.allow(interrupted);
-                    journal.prune(FLOOR).await.is_ok()
+                    match journal.prune(FLOOR).await {
+                        Ok((journal, _)) => journal.wait_for_removals().await.is_ok(),
+                        Err(_) => false,
+                    }
                 }
             });
             let stopped = faults.failed();
@@ -5452,8 +5583,13 @@ mod tests {
                     }
                     journal = journal.sync_all().await.unwrap();
 
+                    // Deletion of the pruned sections may continue after the prune returns, so
+                    // a refused removal surfaces from the wait.
                     faults.allow(interrupted);
-                    journal.prune(FLOOR).await.is_ok()
+                    match journal.prune(FLOOR).await {
+                        Ok((journal, _)) => journal.wait_for_removals().await.is_ok(),
+                        Err(_) => false,
+                    }
                 }
             });
             let stopped = faults.failed();
