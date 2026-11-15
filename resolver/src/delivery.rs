@@ -11,7 +11,12 @@ use ahash::AHashMap;
 use commonware_macros::select;
 use commonware_utils::{channel::oneshot, futures::Pool, sync::Mutex};
 use futures::{FutureExt as _, future::Aborted};
-use std::{collections::hash_map::Entry as HashMapEntry, future::poll_fn, sync::Arc, task::Poll};
+use std::{
+    collections::hash_map::Entry as HashMapEntry,
+    future::poll_fn,
+    sync::Arc,
+    task::{Poll, ready},
+};
 use tracing::debug;
 
 /// Completed consumer validation for a delivery.
@@ -46,15 +51,37 @@ struct Response<Context, V> {
     accepted: bool,
 }
 
-// Delivery awaiting its verdict, with the completion fields it reports.
-struct Active<Con: Consumer, Context> {
-    // Dropping the handle cancels the pooled wait.
-    _cancel: oneshot::Sender<()>,
-    // Shared with the pooled wait so a sent verdict can be read without polling.
-    verdict: Arc<Mutex<oneshot::Receiver<Con::Outcome>>>,
+// Verdict a delivery awaits, with the completion fields it reports.
+struct Pending<Con: Consumer, Context> {
+    verdict: oneshot::Receiver<Con::Outcome>,
     context: Context,
     delivery: Delivery<Con::Key, Con::Subscriber>,
     previously_accepted: bool,
+}
+
+impl<Con: Consumer, Context> Pending<Con, Context> {
+    fn complete(
+        self,
+        outcome: Option<Outcome>,
+        canceled: bool,
+    ) -> Completion<Con::Key, Con::Subscriber, Context> {
+        Completion {
+            context: self.context,
+            delivery: self.delivery,
+            outcome,
+            canceled,
+            previously_accepted: self.previously_accepted,
+        }
+    }
+}
+
+// Delivery awaiting its verdict.
+struct Active<Con: Consumer, Context> {
+    // Dropping the handle cancels the pooled wait.
+    _cancel: oneshot::Sender<()>,
+    // Shared with the pooled wait so a sent verdict can be read without polling. The first
+    // side to finish the delivery takes the `Pending`, and the other then finds `None`.
+    pending: Arc<Mutex<Option<Pending<Con, Context>>>>,
 }
 
 // Per-key delivery state retained while a resolver fetch is active.
@@ -277,31 +304,23 @@ where
         key: &Con::Key,
     ) -> Option<Completion<Con::Key, Con::Subscriber, Context>> {
         let entry = self.entries.get_mut(key)?;
-        let verdict = entry.delivery.as_ref()?.verdict.lock().try_recv();
-        let outcome = match verdict {
-            Ok(outcome) => Some(outcome.into()),
-            Err(oneshot::error::TryRecvError::Closed) => {
-                debug!(?key, "consumer dropped delivery without a verdict");
-                None
-            }
-            Err(oneshot::error::TryRecvError::Empty) => return None,
+        let completed = {
+            let mut pending = entry.delivery.as_ref()?.pending.lock();
+            let outcome = match pending.as_mut()?.verdict.try_recv() {
+                Ok(outcome) => Some(outcome.into()),
+                Err(oneshot::error::TryRecvError::Closed) => {
+                    debug!(?key, "consumer dropped delivery without a verdict");
+                    None
+                }
+                Err(oneshot::error::TryRecvError::Empty) => return None,
+            };
+            pending.take()?.complete(outcome, false)
         };
 
-        // Dropping the delivery cancels its pooled wait. The wait finds no verdict
-        // left to report and aborts.
-        let Active {
-            context,
-            delivery,
-            previously_accepted,
-            ..
-        } = entry.delivery.take().expect("delivery must be in progress");
-        Some(Completion {
-            context,
-            delivery,
-            outcome,
-            canceled: false,
-            previously_accepted,
-        })
+        // Dropping the delivery cancels its pooled wait. The wait finds nothing left
+        // to report and aborts.
+        entry.delivery = None;
+        Some(completed)
     }
 
     // Start a consumer validation attempt whose cancellation is owned by its entry.
@@ -313,58 +332,46 @@ where
     ) {
         let entry = self.entries.get_mut(&delivery.key).expect("delivery entry");
         let previously_accepted = entry.response.as_ref().expect("response").accepted;
-        let completed = delivery.clone();
         let mut consumer = self.consumer.clone();
-        let verdict = Arc::new(Mutex::new(consumer.deliver(delivery, value)));
+        let pending = Arc::new(Mutex::new(Some(Pending::<Con, Context> {
+            verdict: consumer.deliver(delivery.clone(), value),
+            context,
+            delivery,
+            previously_accepted,
+        })));
         let (cancel, canceled) = oneshot::channel::<()>();
         let active = Active {
             _cancel: cancel,
-            verdict: verdict.clone(),
-            context: context.clone(),
-            delivery: completed.clone(),
-            previously_accepted,
+            pending: pending.clone(),
         };
         self.deliveries.push(async move {
             // Cancellation takes precedence over a ready verdict so feedback from a
             // removed entry can never complete a replacement. Closing before reading
             // preserves successful sends without waiting for an unfinished verdict.
-            let (outcome, canceled) = select! {
-                _ = canceled => {
-                    let mut verdict = verdict.lock();
-                    verdict.close();
-                    (verdict.try_recv().ok().map(Into::into), true)
-                },
-                outcome = poll_fn(|cx| {
-                    // Polling a receiver again after `try_completion` took its verdict
-                    // panics. This branch can still be polled then, because the cancel
-                    // branch reports `Pending` while tokio captures a task dump. The
-                    // wait stays pending here and ends through cancellation.
-                    let mut verdict = verdict.lock();
-                    if verdict.is_terminated() {
-                        return Poll::Pending;
-                    }
-                    verdict.poll_unpin(cx)
-                }) => {
-                    let outcome = match outcome {
+            // Once `try_completion` has taken the `Pending`, either branch finds
+            // `None` and the wait aborts.
+            let completed = select! {
+                _ = canceled => pending.lock().take().and_then(|mut pending| {
+                    pending.verdict.close();
+                    let outcome = pending.verdict.try_recv().ok()?;
+                    Some(pending.complete(Some(outcome.into()), true))
+                }),
+                completed = poll_fn(|cx| {
+                    let mut pending = pending.lock();
+                    let Some(Pending { verdict, delivery, .. }) = pending.as_mut() else {
+                        return Poll::Ready(None);
+                    };
+                    let outcome = match ready!(verdict.poll_unpin(cx)) {
                         Ok(outcome) => Some(outcome.into()),
                         Err(_) => {
-                            debug!(key = ?completed.key, "consumer dropped delivery without a verdict");
+                            debug!(key = ?delivery.key, "consumer dropped delivery without a verdict");
                             None
                         }
                     };
-                    (outcome, false)
-                },
+                    Poll::Ready(pending.take().map(|pending| pending.complete(outcome, false)))
+                }) => completed,
             };
-            if canceled && outcome.is_none() {
-                return Err(Aborted);
-            }
-            Ok(Completion {
-                context,
-                delivery: completed,
-                outcome,
-                canceled,
-                previously_accepted,
-            })
+            completed.ok_or(Aborted)
         });
         assert!(entry.delivery.replace(active).is_none());
     }
