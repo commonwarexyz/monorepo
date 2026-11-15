@@ -1231,6 +1231,9 @@ mod tests {
     ) {
         let secrets = secrets.clone();
         let ((restored, ack), checkpoint) = runner.start_and_recover(|context| async move {
+            // Start the player from the journal and secret store as earlier runs left them, and
+            // record the dealings that replay restored. The journal's faults are armed only after
+            // startup, so replay is never interrupted.
             let faults = MutationFaults::default();
             let context = MutationFaultContext {
                 inner: context,
@@ -1274,6 +1277,9 @@ mod tests {
                 }
                 context.sleep(Duration::from_millis(1)).await;
             }
+
+            // A dealing is acknowledged exactly when none of its writes was parked. A journal
+            // interruption past the dealing's last mutation parks nothing.
             match interruption {
                 Some(Interruption::Journal(_)) => assert_eq!(ack.is_some(), !faults.parked()),
                 Some(Interruption::SecretStore) => assert!(ack.is_none()),
