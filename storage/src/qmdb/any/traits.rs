@@ -10,7 +10,7 @@ use crate::{
 };
 use commonware_codec::CodecShared;
 use commonware_cryptography::Digest;
-use commonware_runtime::Handle;
+use commonware_runtime::{Handle, Removal};
 use core::{borrow::Borrow, num::NonZeroU64};
 use std::{future::Future, ops::Range};
 
@@ -125,11 +125,19 @@ pub trait DbAny: BatchableDb<Key: Key, Value: CodecShared + Clone> + Send + Sync
     /// Prune historical operations prior to `prune_loc`.
     ///
     /// Afterwards [`Self::bounds`] starts at `prune_loc`, unless it already started higher. A
-    /// reopened database may start below `prune_loc`.
+    /// reopened database may start below `prune_loc`. Deletion of the released storage may
+    /// continue after this call returns (see [Self::removals]).
     fn prune(
         self,
         prune_loc: Location<Self::Family>,
     ) -> impl Future<Output = Result<Self, Error<Self::Family>>> + Send;
+
+    /// A [Removal] that completes once the storage released by every earlier prune is deleted.
+    fn removals(&self) -> Removal;
+
+    /// Wait until the storage released by every earlier prune is deleted, surfacing a deletion
+    /// failure.
+    fn wait_for_removals(&self) -> impl Future<Output = Result<(), Error<Self::Family>>> + Send;
 
     /// Begin durably persisting the database.
     ///

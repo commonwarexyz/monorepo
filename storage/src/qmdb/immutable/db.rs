@@ -20,7 +20,7 @@ use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Handle, ReadOptions, Spawner};
+use commonware_runtime::{Handle, ReadOptions, Removal, Spawner};
 use core::{
     borrow::Borrow,
     num::{NonZeroU64, NonZeroUsize},
@@ -488,6 +488,18 @@ where
         self.index.prune(*self.bounds().start);
         self.update_metrics();
         Ok(self)
+    }
+
+    /// A [Removal] that completes once the storage released by every earlier prune is deleted.
+    /// Deletion may continue after a prune returns.
+    pub fn removals(&self) -> Removal {
+        self.journal.removals()
+    }
+
+    /// Wait until the storage released by every earlier prune is deleted, surfacing a deletion
+    /// failure.
+    pub async fn wait_for_removals(&self) -> Result<(), Error<F>> {
+        Ok(self.journal.wait_for_removals().await?)
     }
 
     /// Return the canonical QMDB root of the db.
