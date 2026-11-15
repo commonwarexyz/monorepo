@@ -6,7 +6,7 @@ use commonware_consensus::{
 use commonware_cryptography::{bls12381::primitives::sharing::Mode, ed25519};
 use commonware_macros::{test_group, test_traced};
 use commonware_p2p::simulated::Link;
-use commonware_utils::probability;
+use commonware_utils::{probability, vec::NonEmptyVec};
 use rstest::rstest;
 use std::time::Duration;
 
@@ -473,20 +473,43 @@ fn reshare_e2e_multiple_epochs_with_total_shutdown(
     #[case] network: Network,
     #[values(RoundRobin::default(), stable_leaders())] elector: RoundRobin,
 ) {
-    crash_storm_plan(
-        ReshareEngine::new(network).with_elector(elector),
-        3,
-        Crash::Random {
-            // Leave more uninterrupted uptime than `certification_timeout` so recovery can make
-            // progress before the next total shutdown.
-            frequency: Duration::from_secs(4),
-            downtime: Duration::from_secs(1),
-            count: 5,
-        },
-    )
-    .timeout(Duration::from_secs(180))
-    .run()
-    .unwrap();
+    let engine = ReshareEngine::new(network).with_elector(elector);
+    let participants =
+        NonEmptyVec::try_from(engine.participants.clone()).expect("engine must have participants");
+    let epocher = FixedEpocher::new(EPOCH_LENGTH);
+    let midpoint = |epoch| {
+        epocher
+            .midpoint(Epoch::new(epoch))
+            .expect("test epoch must be supported")
+            .get()
+    };
+    let quarter = EPOCH_LENGTH.get() / 4;
+    let shutdown = |heights| Crash::ProcessedHeight {
+        participants: participants.clone(),
+        heights,
+        downtime: Duration::from_secs(1),
+    };
+
+    // Every validator stops at the same moment, twice. The first shutdown comes in the second
+    // half of the dealing window of epoch 1 and the second in the second half of the inclusion
+    // window of epoch 2. Each crash window ends at the last processed height from which a
+    // restarted validator resumes inside the same DKG window. Processed heights trigger the
+    // shutdowns, so neither depends on how fast blocks finalize, and the second cannot begin
+    // until every validator has recovered from the first.
+    let dealing = midpoint(1) - quarter..=midpoint(1) - 2;
+    let inclusion = midpoint(2) + quarter..=final_height(2).get() - 1;
+    let result = crash_storm_plan(engine, 3, shutdown(dealing))
+        .crash(shutdown(inclusion))
+        .timeout(Duration::from_secs(180))
+        .run()
+        .unwrap()
+        .pop()
+        .expect("one seed must produce one result");
+    assert_eq!(
+        result.crashes,
+        2 * participants.len().get() as u64,
+        "both shutdowns must stop every validator"
+    );
 }
 
 #[rstest]
@@ -559,7 +582,7 @@ fn reshare_e2e_state_sync_restart_before_epoch_boundary(
         success_rate: probability!(1.0),
     })
     .crash(Crash::ProcessedHeight {
-        participant: delayed.clone(),
+        participants: NonEmptyVec::new(delayed.clone()),
         heights: crash_window_start..=crash_window_end.get(),
         downtime: Duration::from_millis(250),
     })
@@ -610,7 +633,7 @@ fn reshare_e2e_state_sync_restart_with_stale_bootstrap(
             round: height_round(start_height),
         })
         .crash(Crash::ProcessedHeight {
-            participant: delayed.clone(),
+            participants: NonEmptyVec::new(delayed.clone()),
             heights: 0..=0,
             downtime: Duration::from_millis(250),
         })
@@ -669,7 +692,7 @@ fn reshare_e2e_state_sync_active_player_late_restart(
         round: height_round(state_sync_floor),
     })
     .crash(Crash::ProcessedHeight {
-        participant: delayed.clone(),
+        participants: NonEmptyVec::new(delayed.clone()),
         heights: late_height.get()..=final_height(epoch.get()).get(),
         downtime: Duration::from_millis(250),
     })
@@ -943,12 +966,12 @@ fn reshare_e2e_boundary_lagging_validator(#[case] network: Network) {
         PlanBuilder::new(engine)
             .seed(seed)
             .crash(Crash::ProcessedHeight {
-                participant: lagging,
+                participants: NonEmptyVec::new(lagging),
                 heights: first.next().get()..=midpoint.get() - 8,
                 downtime: Duration::from_secs(10),
             })
             .crash(Crash::ProcessedHeight {
-                participant: stopped,
+                participants: NonEmptyVec::new(stopped),
                 heights: stopped_at.get()..=stopped_at.get(),
                 downtime: Duration::from_secs(3600),
             })
@@ -996,13 +1019,13 @@ fn reshare_e2e_full_rotation_departed_committee_catch_up(
         let mut plan = PlanBuilder::new(engine)
             .seed(seed)
             .crash(Crash::ProcessedHeight {
-                participant: lagging,
+                participants: NonEmptyVec::new(lagging),
                 heights: midpoint.get() + 2..=midpoint.get() + 6,
                 downtime: Duration::from_secs(3),
             });
         for participant in departed {
             plan = plan.crash(Crash::ProcessedHeight {
-                participant,
+                participants: NonEmptyVec::new(participant),
                 heights: boundary.get() + 1..=boundary.get() + 4 * EPOCH_LENGTH.get(),
                 downtime: Duration::from_secs(3600),
             });
@@ -1072,7 +1095,7 @@ fn reshare_e2e_boundary_participating_synced_validator(
                 round: start,
             })
             .crash(Crash::ProcessedHeight {
-                participant: stopped,
+                participants: NonEmptyVec::new(stopped),
                 heights: stopped_at.get()..=stopped_at.get(),
                 downtime: Duration::from_secs(3600),
             })
