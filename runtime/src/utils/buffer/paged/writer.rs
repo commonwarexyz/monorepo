@@ -2176,7 +2176,7 @@ mod tests {
     #[test_traced("DEBUG")]
     fn test_cached_pages_drop_with_last_handle() {
         // A blob's cached pages outlive the writer while a snapshot or a sealed handle shares its
-        // lease, and drop with the last of them.
+        // lease, and are retired with the last of them.
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
@@ -2195,34 +2195,71 @@ mod tests {
             let snapshot = append.try_snapshot().unwrap();
             drop(append);
             assert!((0..3).all(|page| cache_ref.is_cached(id, page)));
+            assert_eq!(cache_ref.retired_pages(), 0);
             assert_eq!(
                 snapshot.read_at(0, data.len()).await.unwrap().coalesce(),
                 &data[..]
             );
             drop(snapshot);
-            assert!((0..3).all(|page| !cache_ref.is_cached(id, page)));
+            assert_eq!(cache_ref.retired_pages(), 3);
 
-            // Sealing keeps the pages until every clone of the sealed handle is gone.
+            // The pages the next blob caches take the place of the retired ones. Sealing keeps
+            // the pages until every clone of the sealed handle is gone.
             let (blob, blob_size) = context.open("test_partition", b"seal").await.unwrap();
             let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             (append, _) = append.append(&data).await.unwrap();
+            let retired = id;
             let id = append.lease.id();
             let (sealed, sync) = append.seal().await.unwrap();
             sync.await.unwrap();
             assert!((0..3).all(|page| cache_ref.is_cached(id, page)));
+            assert!((0..3).all(|page| !cache_ref.is_cached(retired, page)));
             let reader = sealed.clone();
             drop(sealed);
             assert!((0..3).all(|page| cache_ref.is_cached(id, page)));
+            assert_eq!(cache_ref.retired_pages(), 0);
             drop(reader);
-            assert!((0..3).all(|page| !cache_ref.is_cached(id, page)));
+            assert_eq!(cache_ref.retired_pages(), 3);
+        });
+    }
+
+    #[test]
+    fn test_reopened_blob_does_not_reach_retired_pages() {
+        // A blob reopened after its last handle dropped leases a new id, so it reads from
+        // storage and caches its own pages while the pages cached under the old id await
+        // removal.
+        deterministic::Runner::default().start(|context| async move {
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let page_size: u64 = PAGE_SIZE.widen();
+            let data: Vec<u8> = (0..page_size * 3).map(|i| (i % 251) as u8).collect();
+            let (blob, size) = context.open("test_partition", b"reopen").await.unwrap();
+            let mut append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+            (append, _) = append.append(&data).await.unwrap();
+            append = append.sync().await.unwrap();
+            let retired = append.cache_id();
+            drop(append);
+            assert_eq!(cache_ref.retired_pages(), 3);
+
+            let (blob, size) = context.open("test_partition", b"reopen").await.unwrap();
+            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+            assert_ne!(append.cache_id(), retired);
+            assert!((0..3).all(|page| !append.is_cached(page)));
+            let read = append.read_at(0, data.len()).await.unwrap().coalesce();
+            assert_eq!(read, &data[..]);
+            assert!((0..3).all(|page| append.is_cached(page)));
+            assert_eq!(cache_ref.retired_pages(), 0);
         });
     }
 
     #[test]
     fn test_truncated_cached_suffix_drops_with_handle() {
-        // Pages cached above a later truncation still leave the cache with the handle.
+        // Pages cached above a later truncation are still retired with the handle.
         deterministic::Runner::default().start(|context| async move {
             let cache = CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let (blob, size) = context.open("recovery-cache", b"drop").await.unwrap();
@@ -2241,8 +2278,9 @@ mod tests {
             // unreachable, until the handle drops.
             let recovery = recovery.truncate(Widen::widen(page)).await.unwrap();
             assert!((0..3).all(&cached));
+            assert_eq!(cache.retired_pages(), 0);
             drop(recovery);
-            assert!((0..3).all(|page_num| !cached(page_num)));
+            assert_eq!(cache.retired_pages(), 3);
         });
     }
 
