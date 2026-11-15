@@ -8,9 +8,10 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     use commonware_formatting::hex;
     use commonware_utils::Widen;
     use std::{
-        fs::File,
+        fs::{self, File},
         io::{self, Read as _, Seek as _, SeekFrom, Write as _},
         ops::RangeInclusive,
+        os::unix::fs::MetadataExt as _,
         path::Path,
     };
 
@@ -92,6 +93,24 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                 e.into(),
             )
         })
+    }
+
+    /// Unlink the file at `path`, returning it open when closing it is what frees its storage.
+    ///
+    /// A file system frees an unlinked file's blocks once nothing holds the file open, and that
+    /// takes time in proportion to the file's size. Holding the file open across the unlink
+    /// leaves the work to the close of the returned descriptor, so the caller chooses where it
+    /// runs. Closing the descriptor makes nothing durable and cannot fail the removal.
+    ///
+    /// Returns `None` when the file cannot be opened, in which case the unlink frees its blocks.
+    /// Also returns `None` when the file still has a name after the unlink, as with a second
+    /// hard link or on a file system that unlinks an open file by renaming it. That file is
+    /// closed before returning, so a renamed entry leaves the directory ahead of the caller's
+    /// directory sync.
+    pub(crate) fn unlink(path: &Path) -> io::Result<Option<File>> {
+        let file = File::open(path).ok();
+        fs::remove_file(path)?;
+        Ok(file.filter(|file| file.metadata().is_ok_and(|metadata| metadata.nlink() == 0)))
     }
 
     /// Reads a blob's leading bytes and resolves its header (see [header::resolve]).
